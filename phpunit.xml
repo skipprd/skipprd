@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit backupGlobals="false"
+         backupStaticAttributes="false"
+         bootstrap="vendor/autoload.php"
+         colors="true"
+         convertErrorsToExceptions="true"
+         convertNoticesToExceptions="true"
+         convertWarningsToExceptions="true"
+         processIsolation="false"
+         stopOnFailure="false">
+    <testsuites>
+        <testsuite name="Feature Tests">
+            <directory suffix="Test.php">./tests/Feature</directory>
+        </testsuite>
+
+        <testsuite name="Unit Tests">
+            <directory suffix="Test.php">./tests/Unit</directory>
+        </testsuite>
+    </testsuites>
+    <filter>
+        <whitelist processUncoveredFilesFromWhitelist="true">
+            <directory suffix=".php">./app/*/</directory>
+            <directory suffix=".php">./modules/</directory>
+            <exclude>
+                <directory>./app/Providers</directory>
+            </exclude>
+        </whitelist>
+    </filter>
+    <php>
+        <env name="APP_ENV" value="testing"/>
+        <env name="CACHE_DRIVER" value="array"/>
+        <env name="SESSION_DRIVER" value="array"/>
+        <env name="QUEUE_DRIVER" value="sync"/>
+        <env name="DB_DEFAULT" value="sqlite_testing" />
+        <env name="DB_CONNECTION" value="sqlite_testing"/>
+<!--        <env name="DB_DATABASE" value=":memory:"/>-->
+        <env name="AWS_DEFAULT_REGION" value="eu-west-2"/>
+        <env name="AWS_REGION" value="eu-west-2"/>
+        <env name="AWS_ACCESS_KEY_ID" value="testing"/>
+        <env name="AWS_SECRET_ACCESS_KEY" value="testing"/>
+        <env name="PIPELINE_ID" value="1"/>
+        <env name="SCHEMA_REGISTRY" value="127.0.0.1:8080"/>
+        <env name="APP_URL" value="http://127.0.0.1:8080"/>
+
+    </php>
+    <logging>
+        <log type="coverage-text" target="php://stdout" showUncoveredFiles="false"/>
+    </logging>
+</phpunit>
+
+<!--<env name="SQS_QUEUE_SERVER_URL" value="https://sqs.eu-west-1.amazonaws.com/536671797322/insights-dev-server.fifo"/>-->
+<!--<env name="SQS_QUEUE_CLIENT_URL" value="https://sqs.eu-west-1.amazonaws.com/536671797322/insights-dev-client.fifo"/>-->
