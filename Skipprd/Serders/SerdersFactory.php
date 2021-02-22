@@ -8,8 +8,7 @@
 
 namespace Skipprd\Serders;
 
-use Illuminate\Support\Str;
-
+use Skipprd\Str;
 
 class SerdersFactory
 {

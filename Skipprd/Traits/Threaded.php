@@ -13,7 +13,7 @@ trait Threaded
     public function __construct()
     {
 
-        if ($this->mode == 'async') {
+        if (Config::$mode == 'async') {
 
             $offsetsChannel = \parallel\Channel::make("input.offset", 100);
 //            $this->offsetChannel = $offsetsChannel;
@@ -27,7 +27,7 @@ trait Threaded
 //                $app = require_once __DIR__.'/../../../bootstrap/app.php';
 //                $app->make(Kernel::class)->bootstrap();
 //
-//                $this->log->info("Initialising input threads");
+//                Registry::skipprd()->info("Initialising input threads");
 //
 //                $pipeline = new PipelineCommand();
 //
@@ -45,7 +45,7 @@ trait Threaded
 //
 ////                while (true) {
 //
-////                    $this->log->debug("Starting threaded input worker");
+////                    Registry::skipprd()->debug("Starting threaded input worker");
 //
 //                    $pipeline->inputPlugin->sync($pipeline);
 //
@@ -57,7 +57,7 @@ trait Threaded
 //
 ////                    if ($pipeline->analysing) { // in case we didn't see enough messages
 //
-//                        $this->log->info('Finished syncing data from input');
+//                        Registry::skipprd()->info('Finished syncing data from input');
 //
 ////                        $pipeline->shutdown();
 ////                        exit(0);
@@ -68,7 +68,7 @@ trait Threaded
 
             $ncpu = 4;
 //
-            if (Config::$analysing || $this->mode == 'sync') {
+            if (Config::$analysing || Config::$mode == 'sync') {
 
                 $ncpu = 1;
 
@@ -95,7 +95,7 @@ trait Threaded
                     $app = require_once __DIR__ . '/../../../bootstrap/app.php';
                     $app->make(Kernel::class)->bootstrap();
 
-                    $this->log->info("Initialising ingest threads");
+                    Registry::skipprd()->info("Initialising ingest threads");
 
                     $pipeline = new PipelineCommand();
 
@@ -124,7 +124,7 @@ trait Threaded
 
                         try {
 
-//                            $this->log->debug("Starting threaded ingest worker $i");
+//                            Registry::skipprd()->debug("Starting threaded ingest worker $i");
 
                             $pipeline->inputBuffer->finalise();
 
@@ -132,8 +132,8 @@ trait Threaded
 
                         } catch (\Exception $e) {
 
-                            $this->log->error($e->getMessage());
-                            $this->log->error($e->getTraceAsString());
+                            Registry::skipprd()->error($e->getMessage());
+                            Registry::skipprd()->error($e->getTraceAsString());
 
                         }
                     }
@@ -150,7 +150,7 @@ trait Threaded
                 $app = require_once __DIR__ . '/../../../bootstrap/app.php';
                 $app->make(Kernel::class)->bootstrap();
 
-                $this->log->info("Initialising output threads");
+                Registry::skipprd()->info("Initialising output threads");
 
                 $pipeline = new PipelineCommand();
 
@@ -165,7 +165,7 @@ trait Threaded
 
                     try {
 
-                        Registry::applog()
+                        Registry::skipprd()
                             ->debug("Starting threaded output worker");
 
                         $pipeline->outputBuffer->finalise();
@@ -179,8 +179,8 @@ trait Threaded
 
                     } catch (\Exception $e) {
 
-                        $this->log->error($e->getMessage());
-                        $this->log->error($e->getTraceAsString());
+                        Registry::skipprd()->error($e->getMessage());
+                        Registry::skipprd()->error($e->getTraceAsString());
 
                     }
                 }
@@ -205,8 +205,8 @@ trait Threaded
 //
 //                if (($event = $events->poll()) != null) {
 //
-//                    $this->log->info("EVENT");
-//                    $this->log->info(var_dump($event));
+//                    Registry::skipprd()->info("EVENT");
+//                    Registry::skipprd()->info(var_dump($event));
 //
 //                    // something happened, let's figure out what it was. First, we check the source.
 //                    if ($event->object == $offsetsChannel) {
@@ -217,7 +217,7 @@ trait Threaded
 //
 //                            $offset = $event->value;
 //
-//                            $this->log->info("Consumer received offset $offset");
+//                            Registry::skipprd()->info("Consumer received offset $offset");
 //
 //                            if ($this->inputPlugin->validateOffset($offset)) {
 //
@@ -226,7 +226,7 @@ trait Threaded
 ////                                $this->pipelineModel->offset = $offset;
 ////                                $this->pipelineModel->save();
 //
-////                                $this->log->info("Committed offset $offset");
+////                                Registry::skipprd()->info("Committed offset $offset");
 //                            }
 //                        }
 //
@@ -238,7 +238,7 @@ trait Threaded
 //
 //                            if ($event->type == \Parallel\Events\Event\Type::Read) { // our task finished!
 //
-//                                $this->log->info("Thread finished");
+//                                Registry::skipprd()->info("Thread finished");
 //
 //                                $lastEvent = time();
 //
@@ -249,11 +249,11 @@ trait Threaded
 //
 ////                $elapsedTime = time() - $lastEvent;
 ////
-////                $this->log->info("Checking elapsed time since last offsets: $elapsedTime");
+////                Registry::skipprd()->info("Checking elapsed time since last offsets: $elapsedTime");
 ////
 ////                if ($elapsedTime > self::$flushTimeout) {
 ////
-////                    $this->log->info("Timeout reached waiting for new events");
+////                    Registry::skipprd()->info("Timeout reached waiting for new events");
 ////
 ////                    $offsetsChannel->close();
 ////                    $this->shutdown();

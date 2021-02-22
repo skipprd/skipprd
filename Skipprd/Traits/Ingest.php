@@ -53,7 +53,9 @@ trait Ingest
             //                            $this->entries[$key] = $record;
 
 
-            if (!$this->flagMsgDeadLetter && $this->avroEncodeTest($message)) {
+            if (!$this->flagMsgDeadLetter
+                && $this->avroEncodeTest($message)
+            ) {
 
                 $this->entries++;
 
@@ -81,8 +83,8 @@ trait Ingest
             return false;
 //            $this->deadLetterMessage($message);
 
-//                                $this->log->info("Message empty or could not parse, sending to dead letter queue.");
-//                                $this->log->debug($message);
+//                                Registry::skipprd()->info("Message empty or could not parse, sending to dead letter queue.");
+//                                Registry::skipprd()->debug($message);
 //                        $this->deadLetters[] = $payload;
         }
     }
@@ -91,8 +93,8 @@ trait Ingest
     {
         $field = Helpers::cleanFieldName($field);
 
-//        $this->log->debug($field);
-//        $this->log->debug($fieldOccurrence[$field]);
+//        Registry::skipprd()->debug($field);
+//        Registry::skipprd()->debug($fieldOccurrence[$field]);
 //        exit(0);
 
         if (isset(Config::$specialFields[$field])) {
@@ -152,7 +154,7 @@ trait Ingest
 
             $this->flagMsgDeadLetter = true;
 
-//            $this->log->debug("dead letter");
+//            Registry::skipprd()->debug("dead letter");
         }
 
         if (is_array($value) && !empty($value) && $dataType != 'array') {
@@ -233,7 +235,7 @@ trait Ingest
     {
 
         try {
-            $valid = \AvroSchema::is_valid_datum(Config::$schema, $record);
+            $valid = \AvroSchema::is_valid_datum(Config::$avroSchema, $record);
 
         } catch (\AvroSchemaParseException $e) {
             $valid = false;

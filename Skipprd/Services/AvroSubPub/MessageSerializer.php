@@ -9,7 +9,7 @@ use AvroIODatumReader;
 use AvroStringIO;
 use AvroIOBinaryEncoder;
 use AvroIOBinaryDecoder;
-use Illuminate\Support\Str;
+use Skipprd\Str;
 
 class MessageSerializer
 {

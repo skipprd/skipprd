@@ -9,7 +9,7 @@
 namespace Skipprd\Traits;
 
 use Carbon\Carbon;
-use Illuminate\Support\Str;
+use Skipprd\Str;
 use Skipprd\Helpers;
 
 trait AnalyseSchema
@@ -21,8 +21,6 @@ trait AnalyseSchema
     public $i = 0;
 
 //    protected $discoveredFieldOccurrence = [];
-
-    public $dateFieldCandidates = [];
 
     public $dateFieldvalidationMminSample = 100;
 
@@ -296,7 +294,7 @@ trait AnalyseSchema
         if ($dataType == 'string' && $allowDate) {
 
             // Limit number of check type attempts for data as expensive operation.
-            if (empty($this->dateFieldCandidates[$field]['check_count']) || $this->dateFieldCandidates[$field]['check_count'] < $this->dateFieldvalidationMminSample) {
+            if (empty(Config::$dateFieldCandidates[$field]['check_count']) || Config::$dateFieldCandidates[$field]['check_count'] < $this->dateFieldvalidationMminSample) {
 
 
                 if ($format = AnalyseSchema::isValidDate($value)) {
@@ -307,8 +305,8 @@ trait AnalyseSchema
                 $this->incrementDateFieldCandidateCount($field);
 
                 // Already hit date field check limit. Force set type if valid date field.
-            } elseif (!empty($this->dateFieldCandidates[$field]['valid_count'])
-                && $this->dateFieldCandidates[$field]['valid_count'] >= $this->dateFieldvalidationMminSample) {
+            } elseif (!empty(Config::$dateFieldCandidates[$field]['valid_count'])
+                && Config::$dateFieldCandidates[$field]['valid_count'] >= $this->dateFieldvalidationMminSample) {
                 $dataType = 'date';
 
             }
@@ -355,10 +353,10 @@ trait AnalyseSchema
     function incrementDateFieldCandidateCount(string $field)
     {
 
-        if (empty($this->dateFieldCandidates[$field]['check_count'])) {
-            $this->dateFieldCandidates[$field]['check_count'] = 1;
+        if (empty(Config::$dateFieldCandidates[$field]['check_count'])) {
+            Config::$dateFieldCandidates[$field]['check_count'] = 1;
         } else {
-            $this->dateFieldCandidates[$field]['check_count']++;
+            Config::$dateFieldCandidates[$field]['check_count']++;
         }
 
     }
@@ -366,19 +364,19 @@ trait AnalyseSchema
     function setDateFieldCandidate(string $field, string $format = '')
     {
 
-        if (empty($this->dateFieldCandidates[$field]['valid_count'])) {
-            $this->dateFieldCandidates[$field]['valid_count'] = 1;
+        if (empty(Config::$dateFieldCandidates[$field]['valid_count'])) {
+            Config::$dateFieldCandidates[$field]['valid_count'] = 1;
         } else {
-            $this->dateFieldCandidates[$field]['valid_count']++;
+            Config::$dateFieldCandidates[$field]['valid_count']++;
         }
 
-        if ($this->dateFieldCandidates[$field]['valid_count'] >= $this->dateFieldvalidationMminSample) {
+        if (Config::$dateFieldCandidates[$field]['valid_count'] >= $this->dateFieldvalidationMminSample) {
 
-            $this->dateFieldCandidates[$field]['field'] = $field;
+            Config::$dateFieldCandidates[$field]['field'] = $field;
 
             // save the format, else calls to setValue() often hit Carbon::createFromFormat causing memory explosion
             if ($format != '') {
-                $this->dateFieldCandidates[$field]['format'] = $format;
+                Config::$dateFieldCandidates[$field]['format'] = $format;
             }
         }
 
@@ -400,7 +398,7 @@ trait AnalyseSchema
 
     static function is32bitSignedInt($value)
     {
-        $value += 0; // handle leading zero
+        @$value += 0; // handle leading zero
 
         $options = ['min_range' => -2147483647, 'max_range' => 2147483647];
 
@@ -537,14 +535,14 @@ trait AnalyseSchema
         $dataType = $this->getLogicalType($field, $value, false);
 
 
-//        $this->log->debug("Resolving type: $dataType for field: $field value: $value");
+//        Registry::skipprd()->debug("Resolving type: $dataType for field: $field value: $value");
 
 //        // Evolution
         if ( !empty($fieldOccurrence[$field]['evolution'][$dataType]['new_value']) ) {
             $evolution = $fieldOccurrence[$field]['evolution'][$dataType]['type'];
             $newValue = $fieldOccurrence[$field]['evolution'][$dataType]['new_value'];
 
-//            $this->log->debug("Resolving with: $evolution to $newValue");
+//            Registry::skipprd()->debug("Resolving with: $evolution to $newValue");
 
             $this->applyEvolutionFactory($field, $value, $evolution, $dataType, $newValue);
 

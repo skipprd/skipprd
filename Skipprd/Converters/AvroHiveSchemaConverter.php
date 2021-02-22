@@ -7,7 +7,7 @@ namespace Skipprd\Converters;
 class AvroHiveSchemaConverter implements SchemaConverterInterface
 {
 
-    public function convert($schema)
+    public function convert($schema) : array
     {
         $columns = [];
 

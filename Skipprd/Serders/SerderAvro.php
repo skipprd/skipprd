@@ -4,6 +4,7 @@ namespace Skipprd\Serders;
 
 use Skipprd\Services\AvroSubPub\CachedSchemaRegistryClient;
 use Skipprd\Services\AvroSubPub\MessageSerializer;
+use Skipprd\Traits\Config;
 
 class SerderAvro implements SerderInterface
 {
@@ -20,12 +21,12 @@ class SerderAvro implements SerderInterface
     public function __construct(\AvroSchema $schema = null)
     {
 
-        $this->tenantId = env('TENANT_ID');
+        $this->tenantId = getenv('TENANT_ID');
         
-        Config::$pipelineName = env('PIPELINE_NAME');
+        Config::$pipelineName = getenv('PIPELINE_NAME');
 
         $registryUrl = [
-            'base_uri' => 'http://' . env("SCHEMA_REGISTRY"),
+            'base_uri' => 'http://' . getenv("SCHEMA_REGISTRY"),
             'timeout' => 0,
             'allow_redirects' => false,
             'headers' => ['Authorization' => "Bearer " . '0om47nyAr5YklzUdioGg21NTdgy56LPd'],

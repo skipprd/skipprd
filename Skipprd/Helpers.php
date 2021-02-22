@@ -3,9 +3,6 @@
 
 namespace Skipprd;
 
-
-use Illuminate\Support\Str;
-
 class Helpers
 {
 

@@ -2,12 +2,12 @@
 
 namespace Skipprd\Plugins\DataOutputs;
 
-use Skipprd\BufferAdaptors\Buffer;
+use Skipprd\Buffers\FileBuffer;
 
 Interface DataOutputPluginInterface
 {
 
-    public function __construct(array $config, Buffer $buffer);
+    public function __construct(array $config, FileBuffer $buffer);
 
     public function doValidateConnection(array $config);
 

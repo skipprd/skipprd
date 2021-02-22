@@ -1,13 +1,11 @@
 <?php
 
 
-namespace Skipprd\BufferAdaptors;
+namespace Skipprd\Buffers;
 
-
-use App\Helpers\BytesToHuman;
+use Monolog\Registry;
 use Carbon\Carbon;
-use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Str;
+use Skipprd\Str;
 
 class ChunkedBuffer extends FileBuffer
 {
@@ -19,7 +17,7 @@ class ChunkedBuffer extends FileBuffer
 //    protected static $eventTimeBucketDurationSeconds = 86400;
 
 
-    public function append(string $payload, bool $flush = false, int $eventTime = 0, string $partition = null) : void {
+    public function append(array $payload, bool $flush = false, int $eventTime = 0, string $partition = null) : void {
 
         $timeBucket = $this->eventTimeBucket($eventTime);
 
@@ -34,16 +32,20 @@ class ChunkedBuffer extends FileBuffer
 
         if (empty($this->memBuffs[$name])) {
 
-            $this->memBuffs[$name]['size'] = mb_strlen($payload) * 8;
+//            $this->memBuffs[$name]['size'] = mb_strlen($payload) * 8;
+            $this->memBuffs[$name]['size'] = mb_strlen(serialize((array)$payload), '8bit');
             $this->memBuffs[$name]['time'] = time();
-            $this->memBuffs[$name]['buffer'] = "$payload";
+//            $this->memBuffs[$name]['buffer'] = "$payload";
 
         } else {
-            $this->memBuffs[$name]['size'] += mb_strlen($payload) * 8;
+//            $this->memBuffs[$name]['size'] += mb_strlen($payload) * 8;
+            $this->memBuffs[$name]['size'] += mb_strlen(serialize((array)$payload), '8bit');
             $this->memBuffs[$name]['time'] = time();
-            $this->memBuffs[$name]['buffer'] .= "$payload";
+//            $this->memBuffs[$name]['buffer'] .= "$payload";
 
         }
+
+        $this->memBuffs[$name]['buffer'][] = $payload;
 
         if ($flush
             || $this->memBuffs[$name]['size'] > $this->flushMemBytes
@@ -84,11 +86,17 @@ class ChunkedBuffer extends FileBuffer
 
         $parts = $this->getChunkName($filename);
 
-        $timestamp = array_shift($parts);
+        if ($parts[0] < 0) {
 
-        $date_string = Carbon::createFromTimestamp($timestamp)->format('Y-m-d');
+            $timestamp = array_shift($parts);
 
-        return 'dt=' . $date_string;
+            $date_string = Carbon::createFromTimestamp($timestamp)->format('Y-m-d');
+
+            return 'dt=' . $date_string;
+
+        }
+
+        return '';
 
     }
 
@@ -103,7 +111,7 @@ class ChunkedBuffer extends FileBuffer
         return trim(implode('/', $parts), '/');
     }
 
-    public function lockedRead()
+    public function nextFile()
     {
 
         $filenames = glob($this->tempdir . '/' . "$this->name*-finalised-*", GLOB_NOSORT);
@@ -130,7 +138,7 @@ class ChunkedBuffer extends FileBuffer
             } catch (\Exception $e) {
 
                 // Still possible the file has been deleted just before with stat the size
-                $this->log->debug($e->getMessage());
+                Registry::skipprd()->debug($e->getMessage());
 
             }
 

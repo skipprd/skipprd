@@ -35,7 +35,7 @@ class AvroParquetSchemaConverter implements SchemaConverterInterface
     private const BYTE_ARRAY = 'string';
     private const FIXED_LEN_BYTE_ARRAY = 'string';
 
-    public function convert($avroSchema) {
+    public function convert($avroSchema) : array {
 //        if (get_class($avroSchema) != \AvroSchema::class
 //            || !$avroSchema->type() == \AvroSchema::RECORD_SCHEMA
 //        ) {

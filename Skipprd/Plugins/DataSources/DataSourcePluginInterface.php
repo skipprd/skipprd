@@ -2,12 +2,12 @@
 
 namespace Skipprd\Plugins\DataSources;
 
-use Skipprd\BufferAdaptors\Buffer;
+use Skipprd\Buffers\FileBuffer;
 
 Interface DataSourcePluginInterface
 {
 
-    public function __construct(array $config, Buffer $buffer);
+    public function __construct(array $config, FileBuffer $buffer);
 
     public function connect();
 

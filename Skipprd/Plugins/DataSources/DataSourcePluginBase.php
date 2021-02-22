@@ -2,7 +2,7 @@
 
 namespace Skipprd\Plugins\DataSources;
 
-use Skipprd\BufferAdaptors\Buffer;
+use Skipprd\Buffers\FileBuffer;
 
 class DataSourcePluginBase implements DataSourcePluginInterface
 {
@@ -11,11 +11,11 @@ class DataSourcePluginBase implements DataSourcePluginInterface
 
     protected $pipelineName = '';
 
-    public function __construct(array $config, Buffer $buffer)
+    public function __construct(array $config, FileBuffer $buffer)
     {
         $this->tenantId = getenv('TENANT_ID');
         $this->pipelineName = getenv('PIPELINE_NAME');
-
+        
     }
 
     public function connect() { }

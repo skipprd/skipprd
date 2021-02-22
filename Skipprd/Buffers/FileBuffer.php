@@ -1,13 +1,19 @@
 <?php
 
-namespace Skipprd\BufferAdaptors;
+namespace Skipprd\Buffers;
 
-use Illuminate\Support\Facades\Log;
+use Monolog\Registry;
+use Skipprd\Converters\AvroParquetSchemaConverter;
+use Skipprd\Converters\SkipprAvroSchemaConverter;
 use Skipprd\Helpers;
 use Skipprd\MachineToHuman\BytesToHuman;
+use Skipprd\Serders\SerdersFactory;
+use Skipprd\Traits\Config;
 
-class FileBuffer implements Buffer
+class FileBuffer implements BufferInterface
 {
+
+    public $rows = 0;
 
     protected $name;
 
@@ -16,7 +22,7 @@ class FileBuffer implements Buffer
     protected $cpFp = null;
 
     protected $cpLine = null;
-
+    
     protected $memBuffs = [];
 
     public $tempdir = '/tmp';
@@ -63,15 +69,64 @@ class FileBuffer implements Buffer
 
             if (FileBuffer::lock($filename)) { // acquire an exclusive lock
 
-                $fp = fopen($filename, 'a+');
+                //////////////
+                $converter = new AvroParquetSchemaConverter();
+                $parquetSchema = $converter->convert(Config::$avroSchema);
 
-                fputs($fp, $this->memBuffs[$name]['buffer']);
+                try {
+                    $writer = new \Parquet();
 
-                fflush($fp);            // flush output before releasing the lock
+                    $writer->create_writer($filename, $parquetSchema);
+
+                    foreach ($this->memBuffs[$name]['buffer'] as $line) {
+
+                        $arr[] = $line;
+
+                        $reslt = $writer->write($arr);
+
+                        $arr = [];
+
+                    }
+
+                    $writer->close_writer();
+                    
+                } catch (\Exception $exception) {
+                    
+                    var_export($parquetSchema);
+                    print("\n");
+
+                    var_export($arr);
+                    print("\n");
+
+                    print($exception->getMessage());
+
+                    exit(1);
+                }
+
+
+                //////////////
+
+//                $fp = fopen($filename, 'a+');
+//
+//                $serde = SerdersFactory::factory('json');
+//
+//                foreach ($this->memBuffs[$name]['buffer'] as $line) {
+//
+//                    fputs($fp, $serde->serialize($line));
+//
+//                }
+
+                //////////////
+
+//                $fp = fopen($filename, 'a+');
+//
+//                fputs($fp, $this->memBuffs[$name]['buffer']);
+//
+//                fflush($fp);            // flush output before releasing the lock
 
                 FileBuffer::unlock($filename);
 
-                FileBuffer::close($fp);
+//                FileBuffer::close($fp);
 
                 unset($this->memBuffs[$name]);
             }
@@ -80,20 +135,24 @@ class FileBuffer implements Buffer
         $this->finalise();
     }
 
-    public function append(string $message, bool $flush = false) : void {
+    public function append(array $message, bool $flush = false) : void {
 
         if (empty($this->memBuffs[$this->name])) {
 
-            $this->memBuffs[$this->name]['size'] = mb_strlen($message) * 8;
+//            $this->memBuffs[$this->name]['size'] = mb_strlen($message) * 8;
+            $this->memBuffs[$this->name]['size'] = mb_strlen(serialize((array)$message), '8bit');
             $this->memBuffs[$this->name]['time'] = time();
-            $this->memBuffs[$this->name]['buffer'] = "$message";
+//            $this->memBuffs[$this->name]['buffer'] = "$message";
 
         } else {
-            $this->memBuffs[$this->name]['size'] += mb_strlen($message) * 8;
+//            $this->memBuffs[$this->name]['size'] += mb_strlen($message) * 8;
+            $this->memBuffs[$this->name]['size'] += mb_strlen(serialize((array)$message), '8bit');;
             $this->memBuffs[$this->name]['time'] = time();
-            $this->memBuffs[$this->name]['buffer'] .= "$message";
+//            $this->memBuffs[$this->name]['buffer'] .= "$message";
 
         }
+
+        $this->memBuffs[$this->name]['buffer'][] = $message;
 
         if ($flush
             || $this->memBuffs[$this->name]['size'] > $this->flushMemBytes
@@ -122,7 +181,7 @@ class FileBuffer implements Buffer
         // stream
         if ($this->dataFp == null) {
 
-            $filename = $this->lockedRead();
+            $filename = $this->nextFile();
 
             if ($filename) {
 
@@ -132,7 +191,7 @@ class FileBuffer implements Buffer
                 $this->cpFp = new \SplFileObject($checkpoint_filename, "a+");
                 $this->cpLine = (int) $this->cpFp->fgets();
 
-                $this->log->info("Streaming file $filename from line $this->cpLine");
+                Registry::skipprd()->info("Streaming file $filename from line $this->cpLine");
 
                 $this->dataFp = new \SplFileObject($filename, "a+");
 
@@ -161,7 +220,7 @@ class FileBuffer implements Buffer
 
                 } catch (\Exception $e) {
 
-                    $this->log->error($e->getMessage());
+                    Registry::skipprd()->error($e->getMessage());
 
                     return false; // exit to prevent buffer destroy
                 }
@@ -179,7 +238,7 @@ class FileBuffer implements Buffer
         
     }
 
-    public function lockedRead()
+    public function nextFile()
     {
 
         $filenames = glob($this->tempdir . '/' . "$this->name*-finalised-*", GLOB_NOSORT);
@@ -206,7 +265,7 @@ class FileBuffer implements Buffer
             } catch (\Exception $e) {
 
                 // Still possible the file has been deleted just before with stat the size
-                $this->log->debug($e->getMessage());
+                Registry::skipprd()->debug($e->getMessage());
 
             }
 
@@ -253,7 +312,7 @@ class FileBuffer implements Buffer
                 } catch (\Exception $e) {
 
                     // Still possible the file has been deleted just before with stat the size
-                    $this->log->debug($e->getMessage());
+                    Registry::skipprd()->debug($e->getMessage());
 
                 }
 
@@ -282,7 +341,7 @@ class FileBuffer implements Buffer
 
         try {
 
-            $this->log->debug("Destroying finished buffer file: " . $filename);
+            Registry::skipprd()->debug("Destroying finished buffer file: " . $filename);
 
             unlink($filename);
             @unlink($filename . '.checkpoint');
@@ -291,8 +350,8 @@ class FileBuffer implements Buffer
             return true;
 
         } catch (\Exception $e) {
-            $this->log->error("Failed to destroy buffer");
-            $this->log->error($e->getMessage());
+            Registry::skipprd()->error("Failed to destroy buffer");
+            Registry::skipprd()->error($e->getMessage());
 
             return false;
         }
@@ -332,7 +391,7 @@ class FileBuffer implements Buffer
                            if (!$force) {
 
                                $humanSize = BytesToHuman::toHuman($bytes);
-                               $this->log->debug("Buffer file $filename rotated at $humanSize and change time delta $updatedDelta");
+                               Registry::skipprd()->debug("Buffer file $filename rotated at $humanSize and change time delta $updatedDelta");
                            }
                        }
 
@@ -342,7 +401,7 @@ class FileBuffer implements Buffer
                } catch (\Exception $e) {
 
                    // Still possible the file has been deleted just before with stat the size
-                   $this->log->debug($e->getMessage());
+                   Registry::skipprd()->debug($e->getMessage());
 
                }
            }
@@ -398,7 +457,7 @@ class FileBuffer implements Buffer
                 } catch (\Exception $e) {
 
                     // Still possible the file has been deleted just before with stat the size
-                    $this->log->debug($e->getMessage());
+                    Registry::skipprd()->debug($e->getMessage());
 
                 }
             }
@@ -436,7 +495,7 @@ class FileBuffer implements Buffer
                 } catch (\Exception $e) {
 
                     // Still possible the file has been deleted just before with stat the size
-                    $this->log->debug($e->getMessage());
+                    Registry::skipprd()->debug($e->getMessage());
 
                 }
             }

@@ -2,7 +2,7 @@
 
 namespace Skipprd\Plugins\DataOutputs;
 
-use Skipprd\BufferAdaptors\Buffer;
+use Skipprd\Buffers\FileBuffer;
 
 class DataOutputPluginBase implements DataOutputPluginInterface
 {
@@ -12,7 +12,9 @@ class DataOutputPluginBase implements DataOutputPluginInterface
 
     public $flushBytes = 10000000;
 
-    public function __construct(array $config, Buffer $buffer)
+    public $buffer = null;
+
+    public function __construct(array $config, FileBuffer $buffer)
     {
         $this->tenantId = getenv('TENANT_ID');
         $this->pipelineName = getenv('PIPELINE_NAME');

@@ -1,21 +1,18 @@
 <?php
 
 
-namespace Skipprd\BufferAdaptors;
+namespace Skipprd\Buffers;
 
-
-use App\Helpers\BytesToHuman;
-
-interface Buffer
+interface BufferInterface
 {
 
     public function __construct(string $name, int $flushBytes);
 
     public function flush(string $name) : void;
 
-    public function append(string $message, bool $flush = false) : void;
+    public function append(array $message, bool $flush = false) : void;
 
-    public function lockedRead();
+    public function nextFile();
     
     public function lock(string $name) : bool;
 

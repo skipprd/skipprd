@@ -24,6 +24,34 @@
     {
       "type": "git",
       "url": "git@gitlab.com:paulhudson/data-source-kafka.git"
+    },
+    {
+      "type": "git",
+      "url": "git@gitlab.com:paulhudson/data-source-mqtt-subscriber.git"
+    },
+    {
+      "type": "git",
+      "url": "git@gitlab.com:paulhudson/data-source-s3.git"
+    },
+    {
+      "type": "git",
+      "url": "git@gitlab.com:paulhudson/data-source-s3-demo.git"
+    },
+    {
+      "type": "git",
+      "url": "git@gitlab.com:paulhudson/data-source-salesforce.git"
+    },
+    {
+      "type": "git",
+      "url": "git@gitlab.com:paulhudson/data-output-aws-athena.git"
+    },
+    {
+      "type": "git",
+      "url": "git@gitlab.com:paulhudson/data-output-kafka.git"
+    },
+    {
+      "type": "git",
+      "url": "git@gitlab.com:paulhudson/data-output-s3-bucket.git"
     }
   ],
   "autoload": {
@@ -42,6 +70,13 @@
     "nesbot/carbon": "^1.26.3",
     "skipprd/machine-to-human": "^1.0.0",
     "paulhudson/data-source-kafka": "dev-develop",
+    "paulhudson/data-source-mqtt-subscriber": "dev-develop",
+    "paulhudson/data-source-s3": "dev-develop",
+    "paulhudson/data-source-s3-demo": "dev-develop",
+    "paulhudson/data-source-salesforce": "dev-develop",
+    "paulhudson/data-output-aws-athena": "dev-develop",
+    "paulhudson/data-output-kafka": "dev-develop",
+    "paulhudson/data-output-s3-bucket": "dev-develop",
     "wikimedia/avro": "^1.9",
     "league/statsd": "^1.5",
     "monolog/monolog": "^1.12",
