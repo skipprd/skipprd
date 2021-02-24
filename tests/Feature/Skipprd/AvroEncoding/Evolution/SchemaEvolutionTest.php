@@ -12,6 +12,7 @@ use Illuminate\Support\Facades\DB;
 use Skipprd\Commands\PipelineCommand;
 use Skipprd\Services\AvroSubPub\CachedSchemaRegistryClient;
 use Skipprd\Services\AvroSubPub\MessageSerializer;
+use Skipprd\Traits\Config;
 use Symfony\Component\Yaml\Yaml;
 use Tests\TestCase;
 use Mockery;
@@ -70,9 +71,9 @@ class SchemaEvolutionTest extends TestCase
 
         // Discover Schema
 //        $json = json_encode($record);
-        $container->analysePayload($record);
+        $container->analysePayload($record, Config::$discoveredFieldOccurrence);
 
-        $container->determineFieldTypes($container->discoveredFieldOccurrence);
+        $container->determineFieldTypes(Config::$discoveredFieldOccurrence);
     }
 
     public function buildAndSaveSchema($container, array $record)
@@ -84,12 +85,12 @@ class SchemaEvolutionTest extends TestCase
 
         foreach ($record as $field => $value) {
 
-            $avroType = $container->discoveredFieldOccurrence[$field]['determined_type'];
+            $avroType = Config::$discoveredFieldOccurrence[$field]['determined_type'];
 
 //            IngestJob::buildAvroFields($avroFieldSchema, $field, $avroType,
-//                $container->discoveredFieldOccurrence);
+//                Config::$discoveredFieldOccurrence);
 
-            IngestJob::buildAvroFields($avroFieldSchema, $field, $avroType, $container->discoveredFieldOccurrence, [], $sub_field_count);
+            IngestJob::buildAvroFields($avroFieldSchema, $field, $avroType, Config::$discoveredFieldOccurrence, [], $sub_field_count);
         }
 
 
@@ -134,7 +135,7 @@ class SchemaEvolutionTest extends TestCase
         $message = $container->defaultMsg;
 
         foreach ($record as $field => $value) {
-            $container->ingestField($field, $value, $container->discoveredFieldOccurrence, $message);
+            $container->ingestField($field, $value, Config::$discoveredFieldOccurrence, $message);
         }
 
         $recordsWithSchema = $this->encodeAvro($avroFieldSchema, $message);
@@ -202,9 +203,9 @@ class SchemaEvolutionTest extends TestCase
         $this->discoverSchema($container, $fields);
 
         // Set schema evolution
-        $container->discoveredFieldOccurrence['name_id']['evolution']['string']['type'] = 'merge';
-        $container->discoveredFieldOccurrence['name_id']['evolution']['string']['new_value'] = 'first_name';
-        $container->discoveredFieldOccurrence['name_id']['evolution']['string']['solved'] = true;
+        Config::$discoveredFieldOccurrence['name_id']['evolution']['string']['type'] = 'merge';
+        Config::$discoveredFieldOccurrence['name_id']['evolution']['string']['new_value'] = 'first_name';
+        Config::$discoveredFieldOccurrence['name_id']['evolution']['string']['solved'] = true;
 
         $avroFieldSchema = $this->buildAndSaveSchema($container, $fields);
 
@@ -246,9 +247,9 @@ class SchemaEvolutionTest extends TestCase
         $this->discoverSchema($container, $fields);
 
         // Set schema evolution
-        $container->discoveredFieldOccurrence['account']['fields']['class']['evolution']['string']['type'] = 'merge';
-        $container->discoveredFieldOccurrence['account']['fields']['class']['evolution']['string']['new_value'] = 'status';
-        $container->discoveredFieldOccurrence['account']['fields']['class']['evolution']['string']['solved'] = true;
+        Config::$discoveredFieldOccurrence['account']['fields']['class']['evolution']['string']['type'] = 'merge';
+        Config::$discoveredFieldOccurrence['account']['fields']['class']['evolution']['string']['new_value'] = 'status';
+        Config::$discoveredFieldOccurrence['account']['fields']['class']['evolution']['string']['solved'] = true;
 
         $avroFieldSchema = $this->buildAndSaveSchema($container, $fields);
 
@@ -291,9 +292,9 @@ class SchemaEvolutionTest extends TestCase
         $this->discoverSchema($container, $fieldsOrg);
 
         // Set schema evolution
-        $container->discoveredFieldOccurrence['status']['evolution']['string']['type'] = 'cast';
-        $container->discoveredFieldOccurrence['status']['evolution']['string']['new_value'] = 'string';
-        $container->discoveredFieldOccurrence['status']['evolution']['string']['solved'] = true;
+        Config::$discoveredFieldOccurrence['status']['evolution']['string']['type'] = 'cast';
+        Config::$discoveredFieldOccurrence['status']['evolution']['string']['new_value'] = 'string';
+        Config::$discoveredFieldOccurrence['status']['evolution']['string']['solved'] = true;
 
         $avroFieldSchema = $this->buildAndSaveSchema($container, $fieldsOrg);
 
@@ -334,9 +335,9 @@ class SchemaEvolutionTest extends TestCase
         $this->discoverSchema($container, $fieldsOrig);
 
         // Set schema evolution
-        $container->discoveredFieldOccurrence['account']['fields']['status']['evolution']['integer']['type'] = 'cast';
-        $container->discoveredFieldOccurrence['account']['fields']['status']['evolution']['integer']['new_value'] = 'string';
-        $container->discoveredFieldOccurrence['account']['fields']['status']['evolution']['integer']['solved'] = true;
+        Config::$discoveredFieldOccurrence['account']['fields']['status']['evolution']['integer']['type'] = 'cast';
+        Config::$discoveredFieldOccurrence['account']['fields']['status']['evolution']['integer']['new_value'] = 'string';
+        Config::$discoveredFieldOccurrence['account']['fields']['status']['evolution']['integer']['solved'] = true;
 
         $avroFieldSchema = $this->buildAndSaveSchema($container, $fieldsOrig);
 
@@ -378,9 +379,9 @@ class SchemaEvolutionTest extends TestCase
         $this->discoverSchema($container, $fieldsOrig);
 
         // Set schema evolution
-        $container->discoveredFieldOccurrence['status']['evolution']['string']['type'] = 'new';
-        $container->discoveredFieldOccurrence['status']['evolution']['string']['new_value'] = 'status_str';
-        $container->discoveredFieldOccurrence['status']['evolution']['string']['solved'] = true;
+        Config::$discoveredFieldOccurrence['status']['evolution']['string']['type'] = 'new';
+        Config::$discoveredFieldOccurrence['status']['evolution']['string']['new_value'] = 'status_str';
+        Config::$discoveredFieldOccurrence['status']['evolution']['string']['solved'] = true;
 
         $avroFieldSchema = $this->buildAndSaveSchema($container, $fieldsOrig);
 
@@ -423,9 +424,9 @@ class SchemaEvolutionTest extends TestCase
         $this->discoverSchema($container, $fieldsOrig);
 
         // Set schema evolution
-        $container->discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['type'] = 'new';
-        $container->discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['new_value'] = 'status_str';
-        $container->discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['solved'] = true;
+        Config::$discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['type'] = 'new';
+        Config::$discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['new_value'] = 'status_str';
+        Config::$discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['solved'] = true;
 
         $avroFieldSchema = $this->buildAndSaveSchema($container, $fieldsOrig);
 
@@ -468,9 +469,9 @@ class SchemaEvolutionTest extends TestCase
 //        $this->discoverSchema($container, $fields);
 //
 //        // Set schema evolution
-//        $container->discoveredFieldOccurrence['account']['fields']['status']['evolution']['integer']['type'] = 'new';
-//        $container->discoveredFieldOccurrence['account']['fields']['status']['evolution']['integer']['new_value'] = 'status_int';
-//        $container->discoveredFieldOccurrence['account']['fields']['status']['evolution']['integer']['solved'] = true;
+//        Config::$discoveredFieldOccurrence['account']['fields']['status']['evolution']['integer']['type'] = 'new';
+//        Config::$discoveredFieldOccurrence['account']['fields']['status']['evolution']['integer']['new_value'] = 'status_int';
+//        Config::$discoveredFieldOccurrence['account']['fields']['status']['evolution']['integer']['solved'] = true;
 //
 //        $avroFieldSchema = $this->buildAndSaveSchema($container, $fields);
 //
@@ -511,9 +512,9 @@ class SchemaEvolutionTest extends TestCase
 //        $this->discoverSchema($container, $fields);
 //
 //        // Set schema evolution
-//        $container->discoveredFieldOccurrence['status']['evolution']['string']['type'] = 'rename';
-//        $container->discoveredFieldOccurrence['status']['evolution']['string']['new_value'] = 'status_bar';
-//        $container->discoveredFieldOccurrence['status']['evolution']['string']['solved'] = true;
+//        Config::$discoveredFieldOccurrence['status']['evolution']['string']['type'] = 'rename';
+//        Config::$discoveredFieldOccurrence['status']['evolution']['string']['new_value'] = 'status_bar';
+//        Config::$discoveredFieldOccurrence['status']['evolution']['string']['solved'] = true;
 //
 //        $fields = [
 //            'first_name' => 'paul',
@@ -563,9 +564,9 @@ class SchemaEvolutionTest extends TestCase
 //        $this->discoverSchema($container, $fields);
 //
 //        // Set schema evolution
-//        $container->discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['type'] = 'rename';
-//        $container->discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['new_value'] = 'status_bar';
-//        $container->discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['solved'] = true;
+//        Config::$discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['type'] = 'rename';
+//        Config::$discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['new_value'] = 'status_bar';
+//        Config::$discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['solved'] = true;
 //
 //        // @note - maps only support one type, so we still use string
 //        $fields = [
@@ -620,9 +621,9 @@ class SchemaEvolutionTest extends TestCase
 //        $this->discoverSchema($container, $fields);
 //
 //        // Set schema evolution
-//        $container->discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['type'] = 'rename';
-//        $container->discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['new_value'] = 'status_bar';
-//        $container->discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['solved'] = true;
+//        Config::$discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['type'] = 'rename';
+//        Config::$discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['new_value'] = 'status_bar';
+//        Config::$discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['solved'] = true;
 //
 //        // @note - maps only support one type, so we still use string
 //        $fields = [

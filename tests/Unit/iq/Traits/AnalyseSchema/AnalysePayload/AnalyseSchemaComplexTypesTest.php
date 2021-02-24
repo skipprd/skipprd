@@ -11,6 +11,7 @@ namespace Unit\Skipprd\Traits\AnalyseSchema\AnalysePayload;
 use Illuminate\Contracts\Container\Container;
 use Skipprd\Commands\PipelineCommand;
 use Skipprd\Traits\AnalyseSchema;
+use Skipprd\Traits\Config;
 use Superbalist\LaravelPubSub\PubSubConnectionFactory;
 use Tests\TestCase;
 use Illuminate\Foundation\Testing\DatabaseMigrations;
@@ -36,47 +37,73 @@ class AnalyseSchemaComplexTypesTestComplexTypesTest extends TestCase
 
         $field = [
             'foo' => [
-                'sheep' => 'dog',
-                'arable' => false,
-                'crank' => [
-                    'voltage' => [2, 3, 4, 6, 7, 4, 3, 6, 7, 9],
-                    'start_temprature' => 5,
-                    'end_temprature' => 7,
-                    'engine' => [
-                        'manufacturer' => 'General Electric',
-                        'model' => 'PZ - 09 - 126178',
-                        'rebuild_dates' => [
-                            0 => '01/02/19/85',
-                            1 => '15/06/19/2005',
-                        ],
-                    ]
-                ],
-                'history' => [
-                    'crank' => [
-                        'voltage' => [2, 3, 4, 6, 7, 4, 3, 6, 7, 9],
-                        'start_temprature' => 5,
-                    ]
-                ],
-                'neighbours' => [
-                    0 => 'Westfields Farm',
-                    1 => 'Leeway Holdings',
-                    2 => 'Jolly Rodgers Hoedown',
+//                'sheep' => 'dog',
+//                'arable' => false,
+//                'crank' => [
+//                    'voltage' => [2, 3, 4, 6, 7, 4, 3, 6, 7, 9],
+//                    'start_temprature' => 5,
+//                    'end_temprature' => 7,
+//                    'engine' => [
+//                        'manufacturer' => 'General Electric',
+//                        'model' => 'PZ - 09 - 126178',
+//                        'rebuild_dates' => [
+//                            0 => '01/02/19/85',
+//                            1 => '15/06/19/2005',
+//                        ],
+//                    ]
+//                ],
+//                'history' => [
+//                    'crank' => [
+//                        'voltage' => [2, 3, 4, 6, 7, 4, 3, 6, 7, 9],
+//                        'start_temprature' => 5,
+//                    ]
+//                ],
+//                'neighbours' => [
+//                    0 => 'Westfields Farm',
+//                    1 => 'Leeway Holdings',
+//                    2 => 'Jolly Rodgers Hoedown',
+//                ],
+                'crank_torques' => [ # list of lists
+                    [2, 15, 33, 45, 56, 57, 47, 36, 19, 5],
+                    [1, 13, 33, 48, 56, 58, 45, 35, 15, 6],
                 ],
             ],
         ];
+        
+        $container->analysePayload($field, Config::$discoveredFieldOccurrence);
+        
+//        $this->assertEquals(1, Config::$discoveredFieldOccurrence['foo']['type']['record']);
+//        $this->assertEquals(1, Config::$discoveredFieldOccurrence['foo']['fields']['sheep']['type']['string']);
+//
+//        $this->assertEquals(1, Config::$discoveredFieldOccurrence['foo']['fields']['sheep']['type']['string']);
+//
+//        $this->assertEquals(1, Config::$discoveredFieldOccurrence['foo']['fields']['crank']['fields']['voltage']['type']['array']);
+//
+//        $this->assertEquals(1, Config::$discoveredFieldOccurrence['foo']['fields']['crank']['fields']['engine']['type']['record']);
+//        $this->assertEquals(1, Config::$discoveredFieldOccurrence['foo']['fields']['crank']['fields']['engine']['fields']['rebuild_dates']['type']['array']);
 
-//        $json = json_encode($field);
+        ///////////////////////////
 
-        $container->analysePayload($field);
-         
-        $this->assertEquals(1, $container->discoveredFieldOccurrence['foo']['type']['record']);
-        $this->assertEquals(1, $container->discoveredFieldOccurrence['foo']['fields']['sheep']['type']['string']);
+//        $this->assertEquals(1, Config::$discoveredFieldOccurrence['foo']['fields']['crank_torques']['type']['array']);
+//
+//        $this->assertEquals(1, Config::$discoveredFieldOccurrence['foo']['fields']['crank_torques']['fields'][0]['type']['array']);
+//
+//        $this->assertEquals(1, Config::$discoveredFieldOccurrence['foo']['fields']['crank_torques']['fields'][0]['fields'][0]['type']['integer']);
 
-        $this->assertEquals(1, $container->discoveredFieldOccurrence['foo']['fields']['sheep']['type']['string']);
 
-        $this->assertEquals(1, $container->discoveredFieldOccurrence['foo']['fields']['crank']['fields']['voltage']['type']['array']);
+        $container->determineFieldTypes(Config::$discoveredFieldOccurrence);
 
-        $this->assertEquals(1, $container->discoveredFieldOccurrence['foo']['fields']['crank']['fields']['engine']['type']['record']);
-        $this->assertEquals(1, $container->discoveredFieldOccurrence['foo']['fields']['crank']['fields']['engine']['fields']['rebuild_dates']['type']['array']);
+        $foo = Config::$discoveredFieldOccurrence;
+
+        $this->assertEquals('record', Config::$discoveredFieldOccurrence["foo"]["fields"]["crank_torques"]["parent_type"]);
+
+        $this->assertEquals('record', Config::$discoveredFieldOccurrence["foo"]["fields"]["crank_torques"]["determined_type"]);
+
+        $this->assertEquals('array', Config::$discoveredFieldOccurrence["foo"]["fields"]["crank_torques"]["fields"]['a0']["determined_type"]);
+        $this->assertEquals('array', Config::$discoveredFieldOccurrence["foo"]["fields"]["crank_torques"]["fields"]['a1']["determined_type"]);
+
+        $this->assertEmpty(Config::$discoveredFieldOccurrence["foo"]["fields"]["crank_torques"]["fields"]['a1']["fields"]);
+
+
     }
 }

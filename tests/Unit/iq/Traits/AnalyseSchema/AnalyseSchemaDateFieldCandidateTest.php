@@ -6,6 +6,7 @@ use Illuminate\Contracts\Container\Container;
 use Skipprd\Commands\PipelineCommand;
 use Skipprd\Services\MessageSerializer;
 use Skipprd\Traits\AnalyseSchema;
+use Skipprd\Traits\Config;
 use Superbalist\LaravelPubSub\PubSubConnectionFactory;
 use Tests\TestCase;
 use Illuminate\Foundation\Testing\DatabaseMigrations;
@@ -32,10 +33,10 @@ class AnalyseSchemaDateFieldCandidateTest extends TestCase
         $field = 'foo';
         $dataType = $container->getLogicalType($field, $value);
 
-        $this->assertArrayHasKey($field, $container->dateFieldCandidates);
-        $this->assertArrayHasKey('valid_count', $container->dateFieldCandidates[$field]);
-        $this->assertEquals(1, $container->dateFieldCandidates[$field]['valid_count']);
-        $this->assertEquals(1, $container->dateFieldCandidates[$field]['check_count']);
+        $this->assertArrayHasKey($field, Config::$dateFieldCandidates);
+        $this->assertArrayHasKey('valid_count', Config::$dateFieldCandidates[$field]);
+        $this->assertEquals(1, Config::$dateFieldCandidates[$field]['valid_count']);
+        $this->assertEquals(1, Config::$dateFieldCandidates[$field]['check_count']);
 
     }
 
@@ -50,8 +51,8 @@ class AnalyseSchemaDateFieldCandidateTest extends TestCase
 
         $dataType = $container->getLogicalType($field, $value);
 
-        $this->assertArrayNotHasKey('valid_count', $container->dateFieldCandidates[$field]);
-        $this->assertEquals(1, $container->dateFieldCandidates[$field]['check_count']);
+        $this->assertArrayNotHasKey('valid_count', Config::$dateFieldCandidates[$field]);
+        $this->assertEquals(1, Config::$dateFieldCandidates[$field]['check_count']);
 
     }
 
@@ -66,10 +67,10 @@ class AnalyseSchemaDateFieldCandidateTest extends TestCase
         $dataType = $container->getLogicalType($field, $value);
         
         $this->assertEquals(1567174191, $value);
-        $this->assertArrayHasKey($field, $container->dateFieldCandidates);
-        $this->assertArrayHasKey('valid_count', $container->dateFieldCandidates[$field]);
-        $this->assertEquals(1, $container->dateFieldCandidates[$field]['valid_count']);
-        $this->assertEquals(1, $container->dateFieldCandidates[$field]['check_count']);
+        $this->assertArrayHasKey($field, Config::$dateFieldCandidates);
+        $this->assertArrayHasKey('valid_count', Config::$dateFieldCandidates[$field]);
+        $this->assertEquals(1, Config::$dateFieldCandidates[$field]['valid_count']);
+        $this->assertEquals(1, Config::$dateFieldCandidates[$field]['check_count']);
 
     }
 
@@ -84,10 +85,10 @@ class AnalyseSchemaDateFieldCandidateTest extends TestCase
         $dataType = $container->getLogicalType($field, $value);
 
         $this->assertEquals(1567174191, $value);
-        $this->assertArrayHasKey($field, $container->dateFieldCandidates);
-        $this->assertArrayHasKey('valid_count', $container->dateFieldCandidates[$field]);
-        $this->assertEquals(1, $container->dateFieldCandidates[$field]['valid_count']);
-        $this->assertEquals(1, $container->dateFieldCandidates[$field]['check_count']);
+        $this->assertArrayHasKey($field, Config::$dateFieldCandidates);
+        $this->assertArrayHasKey('valid_count', Config::$dateFieldCandidates[$field]);
+        $this->assertEquals(1, Config::$dateFieldCandidates[$field]['valid_count']);
+        $this->assertEquals(1, Config::$dateFieldCandidates[$field]['check_count']);
 
     }
 
@@ -102,10 +103,10 @@ class AnalyseSchemaDateFieldCandidateTest extends TestCase
         $dataType = $container->getLogicalType($field, $value);
 
         $this->assertEquals(1567174191000, $value);
-        $this->assertArrayHasKey($field, $container->dateFieldCandidates);
-        $this->assertArrayHasKey('valid_count', $container->dateFieldCandidates[$field]);
-        $this->assertEquals(1, $container->dateFieldCandidates[$field]['valid_count']);
-        $this->assertEquals(1, $container->dateFieldCandidates[$field]['check_count']);
+        $this->assertArrayHasKey($field, Config::$dateFieldCandidates);
+        $this->assertArrayHasKey('valid_count', Config::$dateFieldCandidates[$field]);
+        $this->assertEquals(1, Config::$dateFieldCandidates[$field]['valid_count']);
+        $this->assertEquals(1, Config::$dateFieldCandidates[$field]['check_count']);
 
     }
 
@@ -120,10 +121,10 @@ class AnalyseSchemaDateFieldCandidateTest extends TestCase
         $dataType = $container->getLogicalType($field, $value);
 
         $this->assertEquals(1567174191000, $value);
-        $this->assertArrayHasKey($field, $container->dateFieldCandidates);
-        $this->assertArrayHasKey('valid_count', $container->dateFieldCandidates[$field]);
-        $this->assertEquals(1, $container->dateFieldCandidates[$field]['valid_count']);
-        $this->assertEquals(1, $container->dateFieldCandidates[$field]['check_count']);
+        $this->assertArrayHasKey($field, Config::$dateFieldCandidates);
+        $this->assertArrayHasKey('valid_count', Config::$dateFieldCandidates[$field]);
+        $this->assertEquals(1, Config::$dateFieldCandidates[$field]['valid_count']);
+        $this->assertEquals(1, Config::$dateFieldCandidates[$field]['check_count']);
 
     }
     

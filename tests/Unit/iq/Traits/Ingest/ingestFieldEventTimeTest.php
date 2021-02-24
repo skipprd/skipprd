@@ -11,6 +11,7 @@ namespace Unit\Skipprd\Traits\Ingest;
 use Illuminate\Contracts\Container\Container;
 use Skipprd\Commands\PipelineCommand;
 use Skipprd\Traits\AnalyseSchema;
+use Skipprd\Traits\Config;
 use Superbalist\LaravelPubSub\PubSubConnectionFactory;
 use Symfony\Component\Yaml\Yaml;
 use Tests\TestCase;
@@ -51,7 +52,7 @@ class ingestFieldEventtimeTest extends TestCase
             'event_time' => 0001,
         ];
 
-        $container->timeFields[] = 'event_time';
+        Config::$timeFields[] = 'event_time';
 
         $container->parseTimeField($message);
          
@@ -87,7 +88,7 @@ class ingestFieldEventtimeTest extends TestCase
             ],
         ];
 
-        $container->timeFields[] = 'customer.metadata.event_time';
+        Config::$timeFields[] = 'customer.metadata.event_time';
 
         $container->parseTimeField($message);
 
@@ -123,8 +124,8 @@ class ingestFieldEventtimeTest extends TestCase
             ],
         ];
 
-        $container->timeFields[] = 'customer.other.foo_time';
-//        $container->timeFields[] = 'customer.metadata.event_time';
+        Config::$timeFields[] = 'customer.other.foo_time';
+//        Config::$timeFields[] = 'customer.metadata.event_time';
 
         $container->parseTimeField($message);
 

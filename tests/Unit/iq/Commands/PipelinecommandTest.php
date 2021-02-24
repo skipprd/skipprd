@@ -12,6 +12,7 @@ use Illuminate\Contracts\Container\Container;
 use Skipprd\Commands\PipelineCommand;
 use Skipprd\Traits\AnalyseSchema;
 use Skipprd\Serders\SerdersFactory;
+use Skipprd\Traits\Config;
 use Superbalist\LaravelPubSub\PubSubConnectionFactory;
 use Symfony\Component\Yaml\Yaml;
 use Tests\TestCase;
@@ -75,7 +76,7 @@ class PipelineCommandTest extends TestCase
             ]
         ];
 
-        $container->eventPath = 'messages.user_data.events';
+        Config::$eventPath = 'messages.user_data.events';
 
         // parse via serder as it adds an outer array itself which unwrap() handles.
         $payload = json_encode($message);

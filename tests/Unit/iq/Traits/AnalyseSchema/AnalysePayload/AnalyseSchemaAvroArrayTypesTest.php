@@ -11,6 +11,7 @@ namespace Unit\Skipprd\Traits\AnalyseSchema\AnalysePayload;
 use Illuminate\Contracts\Container\Container;
 use Skipprd\Commands\PipelineCommand;
 use Skipprd\Traits\AnalyseSchema;
+use Skipprd\Traits\Config;
 use Superbalist\LaravelPubSub\PubSubConnectionFactory;
 use Tests\TestCase;
 use Illuminate\Foundation\Testing\DatabaseMigrations;
@@ -45,11 +46,13 @@ class AnalyseSchemaAvroArrayTypesTest extends TestCase
             ]
         ];
 
-        $container->analysePayload($field);
+        $container->analysePayload($field, Config::$discoveredFieldOccurrence);
 
-        $this->assertEquals(1, $container->discoveredFieldOccurrence['foo']['type']['record']);
+        $container->determineFieldTypes(Config::$discoveredFieldOccurrence);
+        
+        $this->assertEquals(1, Config::$discoveredFieldOccurrence['foo']['type']['record']);
 
-        $fieldYml = $container->discoveredFieldOccurrence['foo']['fields'];
+        $fieldYml = Config::$discoveredFieldOccurrence['foo']['fields'];
 
         $this->assertEquals('array', array_key_first($fieldYml['abc1']['type']));
         $this->assertEquals('array', array_key_first($fieldYml['abc2']['type']));

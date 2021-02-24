@@ -68,9 +68,9 @@ class ingestFieldEvolutionTest extends TestCase
                             'foo' => $typeValue,
                         ];
 
-                        $dataType = $container->resolveFieldType( $container->discoveredFieldOccurrence, 'foo', $typeValue);
+                        $dataType = $container->resolveFieldType( Config::$discoveredFieldOccurrence, 'foo', $typeValue);
 
-                        $container->discoveredFieldOccurrence = [
+                        Config::$discoveredFieldOccurrence = [
                             'foo' => [
                                 'count' => 2,
                                 'type' => [
@@ -91,7 +91,7 @@ class ingestFieldEvolutionTest extends TestCase
 
                         foreach ($message as $field => $value) {
                             $container->ingestField($field, $value,
-                                $container->discoveredFieldOccurrence,
+                                Config::$discoveredFieldOccurrence,
                                 $message);
                         }
 
@@ -109,7 +109,7 @@ class ingestFieldEvolutionTest extends TestCase
 
 //                            $castType = ($castType == 'long') ? 'integer' : $castType;
 
-//                            $newDataType = $container->resolveFieldType( $container->discoveredFieldOccurrence, 'foo', $message['foo']);
+//                            $newDataType = $container->resolveFieldType( Config::$discoveredFieldOccurrence, 'foo', $message['foo']);
                             $newDataType = gettype($message['foo']);
 
                             try {

@@ -16,6 +16,7 @@ use Skipprd\Listeners\ValidateSchemaKafka;
 use Skipprd\Services\AvroSubPub\CachedSchemaRegistryClient;
 use Skipprd\Services\AvroSubPub\MessageSerializer;
 use Skipprd\Traits\AnalyseSchema;
+use Skipprd\Traits\Config;
 use Symfony\Component\Yaml\Yaml;
 use Tests\TestCase;
 use Mockery;
@@ -74,9 +75,9 @@ class SchemaEvolutionValidationTest extends TestCase
 
         // Discover Schema
 //        $json = json_encode($record);
-        $container->analysePayload($record);
+        $container->analysePayload($record, Config::$discoveredFieldOccurrence);
 
-        $container::determineFieldTypes($container->discoveredFieldOccurrence);
+        $container::determineFieldTypes(Config::$discoveredFieldOccurrence);
     }
 
     public function buildAndSaveSchema($container, array $record)
@@ -88,12 +89,12 @@ class SchemaEvolutionValidationTest extends TestCase
 
         foreach ($record as $field => $value) {
 
-            $avroType = $container->discoveredFieldOccurrence[$field]['determined_type'];
+            $avroType = Config::$discoveredFieldOccurrence[$field]['determined_type'];
 
 //            IngestJob::buildAvroFields($avroFieldSchema, $field, $avroType,
-//                $container->discoveredFieldOccurrence);
+//                Config::$discoveredFieldOccurrence);
 
-            IngestJob::buildAvroFields($avroFieldSchema, $field, $avroType, $container->discoveredFieldOccurrence, [], $sub_field_count);
+            IngestJob::buildAvroFields($avroFieldSchema, $field, $avroType, Config::$discoveredFieldOccurrence, [], $sub_field_count);
         }
 
 
@@ -138,7 +139,7 @@ class SchemaEvolutionValidationTest extends TestCase
         $container->ingest($json);
 
 //        foreach ($record as $field => $value) {
-//            $container->ingestField($field, $value, $container->discoveredFieldOccurrence, $record);
+//            $container->ingestField($field, $value, Config::$discoveredFieldOccurrence, $record);
 //        }
 
         $message = $container->entries[0];
@@ -210,15 +211,15 @@ class SchemaEvolutionValidationTest extends TestCase
         $this->discoverSchema($container, $fields);
 
         // Set schema evolution
-        $container->discoveredFieldOccurrence['name_id']['evolution']['string']['type'] = 'merge';
-        $container->discoveredFieldOccurrence['name_id']['evolution']['string']['new_value'] = 'first_name';
-        $container->discoveredFieldOccurrence['name_id']['evolution']['string']['solved'] = true;
+        Config::$discoveredFieldOccurrence['name_id']['evolution']['string']['type'] = 'merge';
+        Config::$discoveredFieldOccurrence['name_id']['evolution']['string']['new_value'] = 'first_name';
+        Config::$discoveredFieldOccurrence['name_id']['evolution']['string']['solved'] = true;
 
         $fields['name_id'] = 'dave';
 
         $validator = new ValidateSchemaFile();
 
-        $validator->ingestRecord($fields, $container->discoveredFieldOccurrence);
+        $validator->ingestRecord($fields, Config::$discoveredFieldOccurrence);
         $isValid = $validator->isValid();
 
 //        $this->assertEquals(true, $isValid);
@@ -246,15 +247,15 @@ class SchemaEvolutionValidationTest extends TestCase
         $this->discoverSchema($container, $fields);
 
         // Set schema evolution
-        $container->discoveredFieldOccurrence['account']['fields']['class']['evolution']['string']['type'] = 'merge';
-        $container->discoveredFieldOccurrence['account']['fields']['class']['evolution']['string']['new_value'] = 'status';
-        $container->discoveredFieldOccurrence['account']['fields']['class']['evolution']['string']['solved'] = true;
+        Config::$discoveredFieldOccurrence['account']['fields']['class']['evolution']['string']['type'] = 'merge';
+        Config::$discoveredFieldOccurrence['account']['fields']['class']['evolution']['string']['new_value'] = 'status';
+        Config::$discoveredFieldOccurrence['account']['fields']['class']['evolution']['string']['solved'] = true;
 
         $fields['account']['class'] = 'paused';
 
         $validator = new ValidateSchemaFile();
 
-        $validator->ingestRecord($fields, $container->discoveredFieldOccurrence);
+        $validator->ingestRecord($fields, Config::$discoveredFieldOccurrence);
         $isValid = $validator->isValid();
 
 //        $this->assertEquals(true, $isValid);
@@ -283,15 +284,15 @@ class SchemaEvolutionValidationTest extends TestCase
         $this->discoverSchema($container, $fields);
 
         // Set schema evolution
-        $container->discoveredFieldOccurrence['account']['fields']['class']['evolution']['string']['type'] = 'merge';
-        $container->discoveredFieldOccurrence['account']['fields']['class']['evolution']['string']['new_value'] = 'status';
-        $container->discoveredFieldOccurrence['account']['fields']['class']['evolution']['string']['solved'] = true;
+        Config::$discoveredFieldOccurrence['account']['fields']['class']['evolution']['string']['type'] = 'merge';
+        Config::$discoveredFieldOccurrence['account']['fields']['class']['evolution']['string']['new_value'] = 'status';
+        Config::$discoveredFieldOccurrence['account']['fields']['class']['evolution']['string']['solved'] = true;
 
         $fields['account']['class'] = 'paused';
 
         $validator = new ValidateSchemaFile();
 
-        $validator->ingestRecord($fields, $container->discoveredFieldOccurrence);
+        $validator->ingestRecord($fields, Config::$discoveredFieldOccurrence);
         $isValid = $validator->isValid();
 
         // should fail
@@ -320,9 +321,9 @@ class SchemaEvolutionValidationTest extends TestCase
 //        $this->discoverSchema($container, $fields);
 //
 //        // Set schema evolution
-//        $container->discoveredFieldOccurrence['status']['evolution']['double']['type'] = 'cast';
-//        $container->discoveredFieldOccurrence['status']['evolution']['double']['new_value'] = 'string';
-//        $container->discoveredFieldOccurrence['status']['evolution']['double']['solved'] = true;
+//        Config::$discoveredFieldOccurrence['status']['evolution']['double']['type'] = 'cast';
+//        Config::$discoveredFieldOccurrence['status']['evolution']['double']['new_value'] = 'string';
+//        Config::$discoveredFieldOccurrence['status']['evolution']['double']['solved'] = true;
 //
 //        $fields = [
 //            'first_name' => 'paul',
@@ -331,7 +332,7 @@ class SchemaEvolutionValidationTest extends TestCase
 //            'status' => 1.123,
 //        ];
 //
-//        $configRequest = new ValidateSchemaRequested($ingestJobContainer,  $container->discoveredFieldOccurrence);
+//        $configRequest = new ValidateSchemaRequested($ingestJobContainer,  Config::$discoveredFieldOccurrence);
 //
 //        $validator = new ValidateSchema();
 //        $isValid = $validator->handle($configRequest);
@@ -358,9 +359,9 @@ class SchemaEvolutionValidationTest extends TestCase
 //        $this->discoverSchema($container, $fields);
 //
 //        // Set schema evolution
-//        $container->discoveredFieldOccurrence['status']['evolution']['string']['type'] = 'cast';
-//        $container->discoveredFieldOccurrence['status']['evolution']['string']['new_value'] = 'integer';
-//        $container->discoveredFieldOccurrence['status']['evolution']['string']['solved'] = true;
+//        Config::$discoveredFieldOccurrence['status']['evolution']['string']['type'] = 'cast';
+//        Config::$discoveredFieldOccurrence['status']['evolution']['string']['new_value'] = 'integer';
+//        Config::$discoveredFieldOccurrence['status']['evolution']['string']['solved'] = true;
 //
 //        $fields = [
 //            'first_name' => 'paul',
@@ -369,7 +370,7 @@ class SchemaEvolutionValidationTest extends TestCase
 //            'status' => 'foo',
 //        ];
 //
-//        $configRequest = new ValidateSchemaRequested($ingestJobContainer,  $container->discoveredFieldOccurrence);
+//        $configRequest = new ValidateSchemaRequested($ingestJobContainer,  Config::$discoveredFieldOccurrence);
 //
 //        $validator = new ValidateSchema();
 //        $isValid = $validator->handle($configRequest);
@@ -397,9 +398,9 @@ class SchemaEvolutionValidationTest extends TestCase
 //        $this->discoverSchema($container, $fields);
 //
 //        // Set schema evolution
-//        $container->discoveredFieldOccurrence['account']['fields']['status']['evolution']['integer']['type'] = 'cast';
-//        $container->discoveredFieldOccurrence['account']['fields']['status']['evolution']['integer']['new_value'] = 'string';
-//        $container->discoveredFieldOccurrence['account']['fields']['status']['evolution']['integer']['solved'] = true;
+//        Config::$discoveredFieldOccurrence['account']['fields']['status']['evolution']['integer']['type'] = 'cast';
+//        Config::$discoveredFieldOccurrence['account']['fields']['status']['evolution']['integer']['new_value'] = 'string';
+//        Config::$discoveredFieldOccurrence['account']['fields']['status']['evolution']['integer']['solved'] = true;
 //
 //        $fields = [
 //            'first_name' => 'paul',
@@ -409,7 +410,7 @@ class SchemaEvolutionValidationTest extends TestCase
 //            ]
 //        ];
 //
-//        $configRequest = new ValidateSchemaRequested($ingestJobContainer,  $container->discoveredFieldOccurrence);
+//        $configRequest = new ValidateSchemaRequested($ingestJobContainer,  Config::$discoveredFieldOccurrence);
 //
 //        $validator = new ValidateSchema();
 //        $isValid = $validator->handle($configRequest);
@@ -437,15 +438,15 @@ class SchemaEvolutionValidationTest extends TestCase
         $this->discoverSchema($container, $fields);
 
         // Set schema evolution
-        $container->discoveredFieldOccurrence['status']['evolution']['string']['type'] = 'new';
-        $container->discoveredFieldOccurrence['status']['evolution']['string']['new_value'] = 'status_str';
-        $container->discoveredFieldOccurrence['status']['evolution']['string']['solved'] = true;
+        Config::$discoveredFieldOccurrence['status']['evolution']['string']['type'] = 'new';
+        Config::$discoveredFieldOccurrence['status']['evolution']['string']['new_value'] = 'status_str';
+        Config::$discoveredFieldOccurrence['status']['evolution']['string']['solved'] = true;
 
         $fields['status'] = 'dave';
 
         $validator = new ValidateSchemaFile();
 
-        $validator->ingestRecord($fields, $container->discoveredFieldOccurrence);
+        $validator->ingestRecord($fields, Config::$discoveredFieldOccurrence);
         $isValid = $validator->isValid();
 
 
@@ -475,15 +476,15 @@ class SchemaEvolutionValidationTest extends TestCase
         $this->discoverSchema($container, $fields);
 
         // Set schema evolution
-        $container->discoveredFieldOccurrence['account']['fields']['id']['evolution']['string']['type'] = 'new';
-        $container->discoveredFieldOccurrence['account']['fields']['id']['evolution']['string']['new_value'] = 'id_str';
-        $container->discoveredFieldOccurrence['account']['fields']['id']['evolution']['string']['solved'] = true;
+        Config::$discoveredFieldOccurrence['account']['fields']['id']['evolution']['string']['type'] = 'new';
+        Config::$discoveredFieldOccurrence['account']['fields']['id']['evolution']['string']['new_value'] = 'id_str';
+        Config::$discoveredFieldOccurrence['account']['fields']['id']['evolution']['string']['solved'] = true;
 
         $fields['account']['id'] = 'dave';
 
         $validator = new ValidateSchemaFile();
 
-        $validator->ingestRecord($fields, $container->discoveredFieldOccurrence);
+        $validator->ingestRecord($fields, Config::$discoveredFieldOccurrence);
         $isValid = $validator->isValid();
 
 //        $this->assertEquals(true, $isValid);
@@ -512,15 +513,15 @@ class SchemaEvolutionValidationTest extends TestCase
         $this->discoverSchema($container, $fields);
 
         // Set schema evolution
-        $container->discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['type'] = 'new';
-        $container->discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['new_value'] = 'status_str';
-        $container->discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['solved'] = true;
+        Config::$discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['type'] = 'new';
+        Config::$discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['new_value'] = 'status_str';
+        Config::$discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['solved'] = true;
 
         $fields['account']['status'] = 'dave';
 
         $validator = new ValidateSchemaFile();
 
-        $validator->ingestRecord($fields, $container->discoveredFieldOccurrence);
+        $validator->ingestRecord($fields, Config::$discoveredFieldOccurrence);
         $isValid = $validator->isValid();
 
         // should fail
@@ -545,9 +546,9 @@ class SchemaEvolutionValidationTest extends TestCase
 //        $this->discoverSchema($container, $fields);
 //
 //        // Set schema evolution
-//        $container->discoveredFieldOccurrence['status']['evolution']['string']['type'] = 'rename';
-//        $container->discoveredFieldOccurrence['status']['evolution']['string']['new_value'] = 'status_bar';
-//        $container->discoveredFieldOccurrence['status']['evolution']['string']['solved'] = true;
+//        Config::$discoveredFieldOccurrence['status']['evolution']['string']['type'] = 'rename';
+//        Config::$discoveredFieldOccurrence['status']['evolution']['string']['new_value'] = 'status_bar';
+//        Config::$discoveredFieldOccurrence['status']['evolution']['string']['solved'] = true;
 //
 //        $fields = [
 //            'first_name' => 'paul',
@@ -555,7 +556,7 @@ class SchemaEvolutionValidationTest extends TestCase
 //            'status' => 'bar',
 //        ];
 //
-//        $configRequest = new ValidateSchemaRequested($ingestJobContainer,  $container->discoveredFieldOccurrence);
+//        $configRequest = new ValidateSchemaRequested($ingestJobContainer,  Config::$discoveredFieldOccurrence);
 //
 //        $validator = new ValidateSchema();
 //        $isValid = $validator->handle($configRequest);
@@ -585,9 +586,9 @@ class SchemaEvolutionValidationTest extends TestCase
 //        $this->discoverSchema($container, $fields);
 //
 //        // Set schema evolution
-//        $container->discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['type'] = 'rename';
-//        $container->discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['new_value'] = 'status_bar';
-//        $container->discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['solved'] = true;
+//        Config::$discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['type'] = 'rename';
+//        Config::$discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['new_value'] = 'status_bar';
+//        Config::$discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['solved'] = true;
 //
 //        // @note - maps only support one type, so we still use string
 //        $fields = [
@@ -599,7 +600,7 @@ class SchemaEvolutionValidationTest extends TestCase
 //            ]
 //        ];
 //
-//        $configRequest = new ValidateSchemaRequested($ingestJobContainer,  $container->discoveredFieldOccurrence);
+//        $configRequest = new ValidateSchemaRequested($ingestJobContainer,  Config::$discoveredFieldOccurrence);
 //
 //        $validator = new ValidateSchema();
 //        $isValid = $validator->handle($configRequest);
@@ -629,9 +630,9 @@ class SchemaEvolutionValidationTest extends TestCase
 //        $this->discoverSchema($container, $fields);
 //
 //        // Set schema evolution
-//        $container->discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['type'] = 'rename';
-//        $container->discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['new_value'] = 'status_bar';
-//        $container->discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['solved'] = true;
+//        Config::$discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['type'] = 'rename';
+//        Config::$discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['new_value'] = 'status_bar';
+//        Config::$discoveredFieldOccurrence['account']['fields']['status']['evolution']['string']['solved'] = true;
 //
 //        // @note - maps only support one type, so we still use string
 //        $fields = [
@@ -642,7 +643,7 @@ class SchemaEvolutionValidationTest extends TestCase
 //            ]
 //        ];
 //
-//        $configRequest = new ValidateSchemaRequested($ingestJobContainer,  $container->discoveredFieldOccurrence);
+//        $configRequest = new ValidateSchemaRequested($ingestJobContainer,  Config::$discoveredFieldOccurrence);
 //
 //        $validator = new ValidateSchema();
 //        $isValid = $validator->handle($configRequest);

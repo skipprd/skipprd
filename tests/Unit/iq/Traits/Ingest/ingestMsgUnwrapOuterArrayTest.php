@@ -12,6 +12,7 @@ use Illuminate\Contracts\Container\Container;
 use Skipprd\Commands\PipelineCommand;
 use Skipprd\Traits\AnalyseSchema;
 use Skipprd\Serders\SerdersFactory;
+use Skipprd\Traits\Config;
 use Superbalist\LaravelPubSub\PubSubConnectionFactory;
 use Symfony\Component\Yaml\Yaml;
 use Tests\TestCase;
@@ -34,9 +35,9 @@ class ingestMsgUnwrapOuterArrayTest extends TestCase
 
         // Discover Schema
 //        $json = json_encode($record);
-        $container->analysePayload($record);
+        $container->analysePayload($record, Config::$discoveredFieldOccurrence);
 
-        $container->determineFieldTypes($container->discoveredFieldOccurrence);
+        $container->determineFieldTypes(Config::$discoveredFieldOccurrence);
     }
 
     public function testUnwrapOuterArray()
@@ -74,9 +75,9 @@ class ingestMsgUnwrapOuterArrayTest extends TestCase
             ]
         ];
 
-        $container->eventPath = 'metrics';
+        Config::$eventPath = 'metrics';
 
-        $container->analysing = false;
+        Config::$analysing = false;
 
         $this->discoverSchema($container, $message['metrics'][0]);
 
@@ -145,9 +146,9 @@ class ingestMsgUnwrapOuterArrayTest extends TestCase
         ];
 
 
-        $container->eventPath = 'messages.user_data.events';
+        Config::$eventPath = 'messages.user_data.events';
 
-        $container->analysing = false;
+        Config::$analysing = false;
 
         $this->discoverSchema($container, $message['messages']['user_data']['events'][0]);
 

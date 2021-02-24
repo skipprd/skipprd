@@ -16,6 +16,7 @@ use Skipprd\Commands\PipelineCommand;
 use Skipprd\Services\AvroSubPub\CachedSchemaRegistryClient;
 use Skipprd\Services\AvroSubPub\MessageSerializer;
 use Skipprd\Traits\AnalyseSchema;
+use Skipprd\Traits\Config;
 use Superbalist\LaravelPubSub\PubSubConnectionFactory;
 use Tests\TestCase;
 use Illuminate\Foundation\Testing\DatabaseMigrations;
@@ -59,16 +60,16 @@ class AvroTypesEncodingTest extends TestCase
 
         // Discover Schema
 //        $json = json_encode([$field => $value]);
-        $container->analysePayload([$field => $value]);
+        $container->analysePayload([$field => $value], Config::$discoveredFieldOccurrence);
 
-        $container->determineFieldTypes($container->discoveredFieldOccurrence);
+        $container->determineFieldTypes(Config::$discoveredFieldOccurrence);
 
-        $avroType = $container->discoveredFieldOccurrence[$field]['determined_type'];
+        $avroType = Config::$discoveredFieldOccurrence[$field]['determined_type'];
 
         $avroFieldSchema = [];
 
         IngestJob::buildAvroFields($avroFieldSchema, $field, $avroType,
-            $container->discoveredFieldOccurrence);
+            Config::$discoveredFieldOccurrence);
 
         // now save schema to DB so it's avalibe to scheam API
         $ingestId = random_int(100, 1000);
@@ -106,7 +107,7 @@ class AvroTypesEncodingTest extends TestCase
         // Ingest Record
         $record = [$field => $value];
 
-        $container->ingestField($field, $value, $container->discoveredFieldOccurrence, $record);
+        $container->ingestField($field, $value, Config::$discoveredFieldOccurrence, $record);
 
         $recordsWithSchema = $this->encodeAvro($avroFieldSchema, $field, $record);
 

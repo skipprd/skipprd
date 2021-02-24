@@ -6,6 +6,7 @@ use Illuminate\Contracts\Container\Container;
 use Skipprd\Commands\PipelineCommand;
 use Skipprd\Services\MessageSerializer;
 use Skipprd\Traits\AnalyseSchema;
+use Skipprd\Traits\Config;
 use Superbalist\LaravelPubSub\PubSubConnectionFactory;
 use Tests\TestCase;
 use Illuminate\Foundation\Testing\DatabaseMigrations;
@@ -34,7 +35,7 @@ class AnalyseSchemaDateTest extends TestCase
 
         $value = $container->setValue($dataType,  $field, $value);
 
-        $dateCandidates = $container->dateFieldCandidates;
+        $dateCandidates = Config::$dateFieldCandidates;
 
         $this->assertArrayHasKey($field, $dateCandidates);
         
@@ -51,17 +52,17 @@ class AnalyseSchemaDateTest extends TestCase
 
         $value = "2019-08-30T14:09:51.807Z";
         $field = 'foo';
-        $container->dateFieldCandidates[$field]['check_count'] = 100;
-        $container->dateFieldCandidates[$field]['valid_count'] = 100;
+        Config::$dateFieldCandidates[$field]['check_count'] = 100;
+        Config::$dateFieldCandidates[$field]['valid_count'] = 100;
 
         $dataType = $container->getLogicalType($field, $value);
 
-        $dateCandidates = $container->dateFieldCandidates;
+        $dateCandidates = Config::$dateFieldCandidates;
 
         $this->assertArrayHasKey($field, $dateCandidates);
 
         $this->assertEquals('date', $dataType);
-        $this->assertEquals(100, $container->dateFieldCandidates[$field]['check_count']);
+        $this->assertEquals(100, Config::$dateFieldCandidates[$field]['check_count']);
 
     }
 
@@ -73,16 +74,16 @@ class AnalyseSchemaDateTest extends TestCase
 
         $value = "2019-08-30T14:09:51.807Z";
         $field = 'foo';
-        $container->dateFieldCandidates[$field]['check_count'] = 99;
+        Config::$dateFieldCandidates[$field]['check_count'] = 99;
 
         $dataType = $container->getLogicalType($field, $value);
 
-        $dateCandidates = $container->dateFieldCandidates;
+        $dateCandidates = Config::$dateFieldCandidates;
 
         $this->assertArrayHasKey($field, $dateCandidates);
 
         $this->assertEquals('date', $dataType);
-        $this->assertEquals(100, $container->dateFieldCandidates[$field]['check_count']);
+        $this->assertEquals(100, Config::$dateFieldCandidates[$field]['check_count']);
 
     }
 
@@ -94,19 +95,19 @@ class AnalyseSchemaDateTest extends TestCase
 
         $value = "notadate-dont-endlessly-check-this-field";
         $field = 'foo';
-        $container->dateFieldCandidates[$field]['check_count'] = 99;
+        Config::$dateFieldCandidates[$field]['check_count'] = 99;
 
         $dataType = $container->getLogicalType($field, $value);
 
         // Second check (101) should skip
         $dataType = $container->getLogicalType($field, $value);
 
-        $dateCandidates = $container->dateFieldCandidates;
+        $dateCandidates = Config::$dateFieldCandidates;
 
         $this->assertArrayHasKey($field, $dateCandidates);
 
         $this->assertNotEquals('date', $dataType);
-        $this->assertEquals(100, $container->dateFieldCandidates[$field]['check_count']);
+        $this->assertEquals(100, Config::$dateFieldCandidates[$field]['check_count']);
 
     }
 
@@ -139,7 +140,7 @@ class AnalyseSchemaDateTest extends TestCase
 
         $value = $container->setValue($dataType,  $field, $value);
 
-        $dateCandidates = $container->dateFieldCandidates;
+        $dateCandidates = Config::$dateFieldCandidates;
 
         $this->assertArrayHasKey($field, $dateCandidates);
 
@@ -160,7 +161,7 @@ class AnalyseSchemaDateTest extends TestCase
 
         $value = $container->setValue($dataType,  $field, $value);
 
-        $dateCandidates = $container->dateFieldCandidates;
+        $dateCandidates = Config::$dateFieldCandidates;
 
         $this->assertArrayHasKey($field, $dateCandidates);
 
@@ -181,7 +182,7 @@ class AnalyseSchemaDateTest extends TestCase
 
         $value = $container->setValue($dataType,  $field, $value);
 
-        $dateCandidates = $container->dateFieldCandidates;
+        $dateCandidates = Config::$dateFieldCandidates;
 
         $this->assertArrayHasKey($field, $dateCandidates);
 

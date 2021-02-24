@@ -11,6 +11,7 @@ namespace Unit\Skipprd\Traits\Ingest;
 use Illuminate\Contracts\Container\Container;
 use Skipprd\Commands\PipelineCommand;
 use Skipprd\Traits\AnalyseSchema;
+use Skipprd\Traits\Config;
 use Superbalist\LaravelPubSub\PubSubConnectionFactory;
 use Symfony\Component\Yaml\Yaml;
 use Tests\TestCase;
@@ -33,9 +34,9 @@ class ingestFieldTransformTest extends TestCase
 
         // Discover Schema
 //        $json = json_encode($record);
-        $container->analysePayload($record);
+        $container->analysePayload($record, Config::$discoveredFieldOccurrence);
 
-        $container->determineFieldTypes($container->discoveredFieldOccurrence);
+        $container->determineFieldTypes(Config::$discoveredFieldOccurrence);
     }
 
 
@@ -62,16 +63,16 @@ class ingestFieldTransformTest extends TestCase
 
         $this->discoverSchema($container, $origMessage);
 
-        $container->discoveredFieldOccurrence['customer']['fields']['phone']['transform'] = 'drop';
-        $container->discoveredFieldOccurrence['customer']['fields']['email']['transform'] = 'drop';
-        $container->discoveredFieldOccurrence['customer']['fields']['name']['fields']['first']['transform'] = 'drop';
-        $container->discoveredFieldOccurrence['customer']['fields']['name']['fields']['last']['transform'] = 'drop';
+        Config::$discoveredFieldOccurrence['customer']['fields']['phone']['transform'] = 'drop';
+        Config::$discoveredFieldOccurrence['customer']['fields']['email']['transform'] = 'drop';
+        Config::$discoveredFieldOccurrence['customer']['fields']['name']['fields']['first']['transform'] = 'drop';
+        Config::$discoveredFieldOccurrence['customer']['fields']['name']['fields']['last']['transform'] = 'drop';
 
 
         $message = $origMessage;
 
         foreach ($message as $field => $value) {
-            $container->ingestField($field, $value, $container->discoveredFieldOccurrence, $message);
+            $container->ingestField($field, $value, Config::$discoveredFieldOccurrence, $message);
         }
          
         $this->assertIsArray($message);
@@ -110,16 +111,16 @@ class ingestFieldTransformTest extends TestCase
         
         $this->discoverSchema($container, $origMessage);
 
-        $container->discoveredFieldOccurrence['customer']['fields']['phone']['transform'] = 'mask';
-        $container->discoveredFieldOccurrence['customer']['fields']['email']['transform'] = 'mask';
-        $container->discoveredFieldOccurrence['customer']['fields']['name']['fields']['first']['transform'] = 'mask';
-        $container->discoveredFieldOccurrence['customer']['fields']['name']['fields']['last']['transform'] = 'mask';
+        Config::$discoveredFieldOccurrence['customer']['fields']['phone']['transform'] = 'mask';
+        Config::$discoveredFieldOccurrence['customer']['fields']['email']['transform'] = 'mask';
+        Config::$discoveredFieldOccurrence['customer']['fields']['name']['fields']['first']['transform'] = 'mask';
+        Config::$discoveredFieldOccurrence['customer']['fields']['name']['fields']['last']['transform'] = 'mask';
 
 
         $message = $origMessage;
 
         foreach ($message as $field => $value) {
-            $container->ingestField($field, $value, $container->discoveredFieldOccurrence, $message);
+            $container->ingestField($field, $value, Config::$discoveredFieldOccurrence, $message);
         }
 
         $this->assertIsArray($message);
