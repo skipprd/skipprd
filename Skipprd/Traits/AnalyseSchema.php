@@ -198,7 +198,8 @@ trait AnalyseSchema
                 // Multiple type within array values?
                 // Must be a record then.
                 if (count($typeCount) > 1) {
-//                if (count($array[$sub_field]['type']) > 1) {
+
+                    // @todo - check if types is castable, then could be array
                     $dataType = 'record';
 
                     // Array of Arrays? Use a Record for the parent.
@@ -398,7 +399,7 @@ trait AnalyseSchema
 
     static function is32bitSignedInt($value)
     {
-        @$value += 0; // handle leading zero
+        (int) @$value += 0; // handle leading zero
 
         $options = ['min_range' => -2147483647, 'max_range' => 2147483647];
 
@@ -409,7 +410,7 @@ trait AnalyseSchema
     static function is64bitSignedInt($value)
     {
 
-        $value += 0; // handle leading zero
+        (int) @$value += 0; // handle leading zero
 
         $options = [
             'min_range' => -9223372036854775807,

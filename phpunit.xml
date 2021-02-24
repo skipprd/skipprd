@@ -19,10 +19,10 @@
     </testsuites>
     <filter>
         <whitelist processUncoveredFilesFromWhitelist="true">
-            <directory suffix=".php">./app/*/</directory>
-            <directory suffix=".php">./modules/</directory>
+            <directory suffix=".php">./Skipprd/*</directory>
+<!--            <directory suffix=".php">./modules/</directory>-->
             <exclude>
-                <directory>./app/Providers</directory>
+                <directory>./vendor/*</directory>
             </exclude>
         </whitelist>
     </filter>

@@ -162,7 +162,7 @@ class MessageSerializer
 //        $schemaName = $schema->name;
 //        $subject = $schemaName.$suffix;
 
-        $schemaName = str_after($topic, '.');
+        $schemaName = Str::after($topic, '.');
         $subject = $schemaName;
 
         $subject = $topic.$suffix;

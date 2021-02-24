@@ -37,6 +37,7 @@ class Helpers
     {
         if (is_numeric($field)) {
             $field = 'A' . $field;
+//            return $field;
         }
 
         $field = strtolower($field);
@@ -76,3 +77,5 @@ class Helpers
         return implode($pass); //turn the array into a string
     }
 }
+
+

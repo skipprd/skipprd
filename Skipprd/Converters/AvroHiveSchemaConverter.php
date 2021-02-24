@@ -13,6 +13,7 @@ class AvroHiveSchemaConverter implements SchemaConverterInterface
 
         $mappings = [
             'map' => 'map',
+            'array' => 'array',
             'record' => 'struct',
             'long' => 'bigint',
             'string' => 'string' // parquet is binary but athena fails with binary and works with string?
@@ -52,6 +53,19 @@ class AvroHiveSchemaConverter implements SchemaConverterInterface
                     $valueType = isset($mappings[$field['type'][1]['values']]) ? $mappings[$field['type'][1]['values']] : $field['type'][1]['values'];
 
                     $typeStr = $fieldType . '<string,' . $valueType . '>';
+
+                    $columns[] = [
+                        'Name' => $field['name'],
+                        'Type' => $typeStr,
+                    ];
+                }
+
+                if ($field['type'][1]['type'] == 'array') {
+
+                    $fieldType = $mappings[$field['type'][1]['type']] ? $mappings[$field['type'][1]['type']] : $field['type'][1]['type'];
+                    $valueType = isset($mappings[$field['type'][1]['items']]) ? $mappings[$field['type'][1]['items']] : $field['type'][1]['items'];
+
+                    $typeStr = $fieldType . '<' . $valueType . '>';
 
                     $columns[] = [
                         'Name' => $field['name'],

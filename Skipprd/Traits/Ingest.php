@@ -310,7 +310,7 @@ trait Ingest
                     $resp = null;
 
                     if (AnalyseSchema::is64bitSignedInt($value)) {
-                        return $value + 0; // force strings to long
+                        return (int) $value + 0; // force strings to long
 
                     } else {
                         throw new \Exception();

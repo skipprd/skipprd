@@ -9,6 +9,7 @@
 namespace Skipprd\Traits;
 
 use App\Schema;
+use http\Client;
 use Skipprd\Converters\SkipprAvroSchemaConverter;
 use Skipprd\Helpers;
 
@@ -21,7 +22,9 @@ class Config
 
     public static $mode = 'sync';
 
-    public static $serder = null;
+    public static $sourceFormat = null;
+
+    public static $outputFormat = null;
 
     public static $analysing = true;
 
@@ -91,7 +94,10 @@ class Config
         self::$avroSchema = self::buildAvroSchema();
 
         self::$eventPath = getenv('EVENT_PATH');
-        self::$serder = getenv('SERDE');
+
+        self::$sourceFormat = getenv('DATA_SOURCE_FORMAT');
+        self::$outputFormat = getenv('DATA_OUTPUT_FORMAT');
+
         self::$entityNames = [];
         self::$timeFields = [];
 
@@ -210,6 +216,29 @@ class Config
 
 
         yaml_emit_file('/tmp/mapping.yaml', Config::$discoveredFieldOccurrence);
+
+        $yml = yaml_emit(Config::$discoveredFieldOccurrence);
+        $url = 'http://localhost:8081/';
+        $path = 'ingest-job/update-mapping';
+
+        $client = new \GuzzleHttp\Client([
+            'base_uri' => $url,
+            'headers' => [
+                'Authorization' => "Bearer " . getenv('API_TOKEN')
+            ]
+        ]);
+
+        $json = json_encode([
+            'id' => getenv('PIPELINE_ID'),
+            'mapping' => $yml,
+        ]);
+
+        $foo = json_decode($json, true);
+        $foo = yaml_parse($foo['mapping']);
+
+        $response = $client->post($path, [
+            'json' => $json
+        ]);
 
         return $configYml;
     }

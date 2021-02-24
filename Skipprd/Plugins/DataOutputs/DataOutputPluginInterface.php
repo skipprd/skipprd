@@ -17,7 +17,7 @@ Interface DataOutputPluginInterface
 
     public function createOrUpdateSchema(array $schema);
 
-    public function sync(string $serde = '', \AvroSchema $schema = null);
+    public function sync(string $format = '', \AvroSchema $schema = null);
     
     public function execQuery(array $config);
 

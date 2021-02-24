@@ -19,6 +19,8 @@ class DataOutputPluginBase implements DataOutputPluginInterface
         $this->tenantId = getenv('TENANT_ID');
         $this->pipelineName = getenv('PIPELINE_NAME');
         $this->buffer = $buffer;
+        $this->buffer->flushBytes = $this->flushBytes;
+        $this->buffer->flushMemBytes = $this->flushBytes;
     }
 
     public function doValidateConnection(array $config) {}
@@ -29,7 +31,7 @@ class DataOutputPluginBase implements DataOutputPluginInterface
 
     public function createOrUpdateSchema(array $schema) {}
 
-    public function sync(string $serde = '', \AvroSchema $schema = null) {}
+    public function sync(string $format = '', \AvroSchema $schema = null) {}
 
     public function execQuery(array $config) {}
 

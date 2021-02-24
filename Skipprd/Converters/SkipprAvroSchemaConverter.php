@@ -2,6 +2,8 @@
 
 namespace Skipprd\Converters;
 
+use Skipprd\Helpers;
+
 class SkipprAvroSchemaConverter implements SchemaConverterInterface
 {
 
@@ -68,33 +70,13 @@ class SkipprAvroSchemaConverter implements SchemaConverterInterface
         return $avroSchema;
     }
 
-    /**
-     * Clean field name string to alpha numeric and underscores
-     *
-     * @param $field
-     * @return string field
-     */
-    static function cleanFieldName($field)
-    {
-        if (is_numeric($field)) {
-            $field = 'A' . $field;
-        }
-
-        $field = strtolower($field);
-
-        $pattern = "/[^" . preg_quote('0123456789_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ',
-                "/") . "]/";
-
-        return preg_replace($pattern, "", $field);
-    }
-
     static function buildAvroFields(array &$avroSchema, string $field, string $determined_type, array $skipprSchema, array $parent = [], &$fieldNamesCount = [])
     {
 
         // Build Sechema
         $type = self::$avroTypeMappings[$determined_type];
 
-        $fieldCleanName = self::cleanFieldName($field);
+        $fieldCleanName = Helpers::cleanFieldName($field);
 
         if (in_array($determined_type, ['map', 'array', 'record']) > 0) {
 
@@ -223,7 +205,7 @@ class SkipprAvroSchemaConverter implements SchemaConverterInterface
 
                 if (in_array($evolution['type'], ['new', 'rename']) )  {
 
-                    $new_field = self::cleanFieldName($evolution['new_value']);
+                    $new_field = Helpers::cleanFieldName($evolution['new_value']);
 
                     // de-duplicate
                     if (isset($fieldNamesCount[$new_field])) {

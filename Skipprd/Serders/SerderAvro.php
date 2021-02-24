@@ -56,6 +56,8 @@ class SerderAvro implements SerderInterface
     public function serialize(array $record) : string
     {
 
+        $recordsWithSchema = false;
+        
         try {
 
             $subject = $this->tenantId . '_' . Config::$pipelineName;

@@ -2,6 +2,7 @@
 
 namespace Skipprd\Buffers;
 
+use Carbon\Carbon;
 use Monolog\Registry;
 use Skipprd\Converters\AvroParquetSchemaConverter;
 use Skipprd\Converters\SkipprAvroSchemaConverter;
@@ -69,64 +70,61 @@ class FileBuffer implements BufferInterface
 
             if (FileBuffer::lock($filename)) { // acquire an exclusive lock
 
-                //////////////
-                $converter = new AvroParquetSchemaConverter();
-                $parquetSchema = $converter->convert(Config::$avroSchema);
+                if (Config::$outputFormat == 'parquet') {
 
-                try {
-                    $writer = new \Parquet();
+                    $converter = new AvroParquetSchemaConverter();
+                    $parquetSchema = $converter->convert(Config::$avroSchema);
 
-                    $writer->create_writer($filename, $parquetSchema);
+                    try {
+                        $writer = new \Parquet();
+
+                        $writer->create_writer($filename, $parquetSchema);
+
+                        foreach ($this->memBuffs[$name]['buffer'] as $line) {
+
+                            $arr[] = $line;
+
+                            $reslt = $writer->write($arr);
+
+                            $arr = [];
+
+                        }
+
+                        $writer->close_writer();
+
+                    } catch (\Exception $exception) {
+
+                        var_export($parquetSchema);
+                        print("\n");
+
+                        var_export($arr);
+                        print("\n");
+
+                        print($exception->getMessage());
+
+                        exit(1);
+                    }
+
+                    FileBuffer::unlock($filename);
+
+                } else {
+
+                    $fp = fopen($filename, 'a+');
+
+                    $serde = SerdersFactory::factory(Config::$outputFormat, Config::$avroSchema);
 
                     foreach ($this->memBuffs[$name]['buffer'] as $line) {
 
-                        $arr[] = $line;
-
-                        $reslt = $writer->write($arr);
-
-                        $arr = [];
+                        fputs($fp, $serde->serialize($line));
 
                     }
 
-                    $writer->close_writer();
-                    
-                } catch (\Exception $exception) {
-                    
-                    var_export($parquetSchema);
-                    print("\n");
+                    fflush($fp);            // flush output before releasing the lock
 
-                    var_export($arr);
-                    print("\n");
+                    FileBuffer::unlock($filename);
 
-                    print($exception->getMessage());
-
-                    exit(1);
+                    FileBuffer::close($fp);
                 }
-
-
-                //////////////
-
-//                $fp = fopen($filename, 'a+');
-//
-//                $serde = SerdersFactory::factory('json');
-//
-//                foreach ($this->memBuffs[$name]['buffer'] as $line) {
-//
-//                    fputs($fp, $serde->serialize($line));
-//
-//                }
-
-                //////////////
-
-//                $fp = fopen($filename, 'a+');
-//
-//                fputs($fp, $this->memBuffs[$name]['buffer']);
-//
-//                fflush($fp);            // flush output before releasing the lock
-
-                FileBuffer::unlock($filename);
-
-//                FileBuffer::close($fp);
 
                 unset($this->memBuffs[$name]);
             }
@@ -236,6 +234,29 @@ class FileBuffer implements BufferInterface
 
         return $this->stream();
         
+    }
+
+    /**
+     * stub, no partitioning on plain file buffer
+     * 
+     * @param $filename
+     * @return string
+     */
+    public function decodeChunkTime($filename) : string {
+
+        return '';
+
+    }
+
+    /**
+     * stub, no partitioning on plain file buffer
+     *
+     * @param $filename
+     * @return string
+     */
+    public function decodeChunkPartition($filename) : string {
+
+        return '';
     }
 
     public function nextFile()
