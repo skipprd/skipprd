@@ -36,6 +36,8 @@ class FileBuffer implements BufferInterface
 
     public $flushMemSeconds = 30; # seconds
 
+    private $serde;
+
     public function __construct(string $name, int $flushBytes = null)
     {
 
@@ -43,6 +45,12 @@ class FileBuffer implements BufferInterface
 
         if (!empty($flushBytes)) {
             $this->flushBytes = $flushBytes;
+        }
+
+        if (Config::$outputFormat != 'parquet') {
+            
+            $this->serde = SerdersFactory::factory(Config::$outputFormat,
+                Config::$avroSchema);
         }
 
     }
@@ -78,16 +86,33 @@ class FileBuffer implements BufferInterface
                     try {
                         $writer = new \Parquet();
 
-                        $writer->create_writer($filename, $parquetSchema);
+                        $writer->create_writer($filename, $parquetSchema, 'snappy');
 
-                        foreach ($this->memBuffs[$name]['buffer'] as $line) {
+                        if (!empty($this->memBuffs[$name]) && !empty($this->memBuffs[$name]['buffer'])) {
 
-                            $arr[] = $line;
+//                            foreach ($this->memBuffs[$name]['buffer'] as $line) {
 
-                            $reslt = $writer->write($arr);
+                                // deserailise intermediate serialisation from buffer
 
-                            $arr = [];
+                            $separator = "\r\n";
+                            $line = strtok($this->memBuffs[$name]['buffer'], $separator);
 
+                            while ($line !== false) {
+                                
+                                $arr[] = json_decode($line, true);
+
+                                $reslt = $writer->write($arr);
+
+                                $arr = [];
+
+                                $line = strtok($separator);
+
+
+                            }
+
+
+
+//                            }
                         }
 
                         $writer->close_writer();
@@ -111,13 +136,20 @@ class FileBuffer implements BufferInterface
 
                     $fp = fopen($filename, 'a+');
 
-                    $serde = SerdersFactory::factory(Config::$outputFormat, Config::$avroSchema);
+                    fputs($fp, $this->memBuffs[$name]['buffer']);
 
-                    foreach ($this->memBuffs[$name]['buffer'] as $line) {
 
-                        fputs($fp, $serde->serialize($line));
+//                    $serde = SerdersFactory::factory('json', Config::$avroSchema);
 
-                    }
+//                    foreach ($this->memBuffs[$name]['buffer'] as $line) {
+
+//                        if (!empty($line)) {
+
+//                        fputs($fp, $serde->serialize($line) . "\n");
+//                        fputs($fp, json_encode($line) . "\n");
+//                        }
+
+//                    }
 
                     fflush($fp);            // flush output before releasing the lock
 
@@ -135,26 +167,33 @@ class FileBuffer implements BufferInterface
 
     public function append(array $message, bool $flush = false) : void {
 
+//        if (Config::$outputFormat == 'parquet') {
+            // must serialise parquet directly to file
+            // so need intermediate serialisation (json) for buffer
+            $message = json_encode((array)$message);
+            $size = strlen($message) * 8;
+
+//        } else {
+//            $message = $this->serde->serialize($message);
+//            $size = mb_strlen($message, '8bit');
+//        }
+
         if (empty($this->memBuffs[$this->name])) {
 
-//            $this->memBuffs[$this->name]['size'] = mb_strlen($message) * 8;
-            $this->memBuffs[$this->name]['size'] = mb_strlen(serialize((array)$message), '8bit');
+            $this->memBuffs[$this->name]['size'] = $size;
             $this->memBuffs[$this->name]['time'] = time();
-//            $this->memBuffs[$this->name]['buffer'] = "$message";
+            $this->memBuffs[$this->name]['buffer'] = "$message" . "\n";
 
         } else {
-//            $this->memBuffs[$this->name]['size'] += mb_strlen($message) * 8;
-            $this->memBuffs[$this->name]['size'] += mb_strlen(serialize((array)$message), '8bit');;
+            $this->memBuffs[$this->name]['size'] += $size;
             $this->memBuffs[$this->name]['time'] = time();
-//            $this->memBuffs[$this->name]['buffer'] .= "$message";
+            $this->memBuffs[$this->name]['buffer'] .= "$message" . "\n";
 
         }
 
-        $this->memBuffs[$this->name]['buffer'][] = $message;
-
         if ($flush
             || $this->memBuffs[$this->name]['size'] > $this->flushMemBytes
-//            || $this->memBuffs[$this->name]['time'] < time() - 30
+            || $this->memBuffs[$this->name]['time'] < time() - 30
         ) {
 
             $this->flush($this->name);
@@ -173,7 +212,7 @@ class FileBuffer implements BufferInterface
 
     }
 
-    public function stream()
+    public function stream() : string
     {
         
         // stream
@@ -213,7 +252,10 @@ class FileBuffer implements BufferInterface
 
                         $this->cpLine++;
 
-                        return $payload;
+                        $payload = json_decode($payload, true);
+
+                        return $this->serde->serialize($payload);
+                        
                     }
 
                 } catch (\Exception $e) {
@@ -285,7 +327,7 @@ class FileBuffer implements BufferInterface
 
             } catch (\Exception $e) {
 
-                // Still possible the file has been deleted just before with stat the size
+                // Still possible the file has been deleted just after the file_exists check
                 Registry::skipprd()->debug($e->getMessage());
 
             }
@@ -401,6 +443,9 @@ class FileBuffer implements BufferInterface
                    $bytes = filesize($filename);
 
                    if (FileBuffer::lock($filename)) { // acquire an exclusive lock
+
+//                       Registry::skipprd()->debug("bytes: " . $bytes);
+//                       Registry::skipprd()->debug("flushBytes: " . $this->flushBytes);
 
                        if ($bytes >= $this->flushBytes || $updatedDelta > $this->flushFileSeconds || $force) {
 

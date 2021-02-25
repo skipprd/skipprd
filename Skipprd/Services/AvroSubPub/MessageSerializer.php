@@ -9,6 +9,7 @@ use AvroIODatumReader;
 use AvroStringIO;
 use AvroIOBinaryEncoder;
 use AvroIOBinaryDecoder;
+use Monolog\Logger;
 use Skipprd\Str;
 
 class MessageSerializer
@@ -79,7 +80,7 @@ class MessageSerializer
 
         // write the object in 'obj' as Avro to the fake file...
         $writer->write($record, $encoder);
-
+        
         return $io->string();
     }
 

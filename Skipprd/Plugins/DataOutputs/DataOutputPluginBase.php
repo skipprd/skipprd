@@ -3,6 +3,7 @@
 namespace Skipprd\Plugins\DataOutputs;
 
 use Skipprd\Buffers\FileBuffer;
+use Skipprd\Traits\Config;
 
 class DataOutputPluginBase implements DataOutputPluginInterface
 {
@@ -20,7 +21,10 @@ class DataOutputPluginBase implements DataOutputPluginInterface
         $this->pipelineName = getenv('PIPELINE_NAME');
         $this->buffer = $buffer;
         $this->buffer->flushBytes = $this->flushBytes;
-        $this->buffer->flushMemBytes = $this->flushBytes;
+
+        if (Config::$outputFormat == 'parquet') {
+            $this->buffer->flushMemBytes = $this->flushBytes;
+        }
     }
 
     public function doValidateConnection(array $config) {}
