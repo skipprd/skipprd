@@ -20,6 +20,7 @@ use Skipprd\Buffers\FileBuffer;
 use Skipprd\Helpers;
 use Skipprd\Jobs\PodsStatus;
 use Skipprd\SkipprPack;
+use Skipprd\Str;
 use Skipprd\Traits\AnalyseSchema;
 use Skipprd\Traits\Ingest;
 use Skipprd\Serders\SerdersFactory;
@@ -178,31 +179,38 @@ class PipelineCommand
         $this->outputBuffer = BufferAdaptorsFactory::getAdaptor('output', $bufferType);
         $this->deadletterBuffer = BufferAdaptorsFactory::getAdaptor('deadletter', $bufferType);
 
-//        $path = 'raw_' . Config::$tenantId . '_' . Config::$pipelineName .'_deadletter';
-//
-//        $config = [];
-//        $config['data_source_s3_bucket'] = 'skpr-deadletters';
-//        $config['data_source_s3_region'] = getenv('AWS_REGION');
-//        $config['data_source_aws_access_id'] = getenv('AWS_ACCESS_KEY_ID');
-//        $config['data_source_aws_secret_key'] = getenv('AWS_SECRET_ACCESS_KEY');
-//        $config['data_source_s3_prefix'] = $path;
+        /**
+         * Dead Letter Plugin
+         */
+        $config = [];
+        $envs = getenv();
 
+        foreach ($envs as $key => $value) {
+            if (strpos($key, 'DEAD_LETTER') > -1) {
+                $config[strtolower(substr($key, strlen('DEAD_LETTER_')))] = $value;
+            }
+        }
 
-        $this->deadletterPlugin = PluginFactory::factory('data_output', 's3_bucket', $this->deadletterBuffer);
+        $pluginName = getenv('DEAD_LETTER_PLUGIN_NAME');
+        $pluginName = Str::studly(ucwords(strtolower($pluginName)));
+
+        $deadLetterPluginClass = "Skipprd\\DataOutput" . "$pluginName" . "\\DataOutput" . "$pluginName" . "Plugin";
+
+        $this->deadletterPlugin = new $deadLetterPluginClass($config, $this->deadletterBuffer);
+
+        $this->deadletterPlugin->buffer->setSerde('json');
+
 
         if (getenv('JOB_NAME') == 'deadletters') {
-
-            $this->inputPlugin = PluginFactory::factory('data_source', 's3', $this->inputBuffer);
 
             Config::$enableDeadLetters = false;
 
         }
-        else {
 
-            $pluginName = getenv('DATA_SOURCE_PLUGIN_NAME');
+        $pluginName = getenv('DATA_SOURCE_PLUGIN_NAME');
 
-            $this->inputPlugin = PluginFactory::factory('data_source', $pluginName, $this->outputBuffer);
-        }
+        $this->inputPlugin = PluginFactory::factory('data_source', $pluginName, $this->outputBuffer);
+
 
         $pluginName = getenv('DATA_OUTPUT_PLUGIN_NAME');
 
