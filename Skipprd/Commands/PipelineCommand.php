@@ -62,9 +62,8 @@ class PipelineCommand
     /**
      * @var int - don't set below 20
      *    A. because that's too low for throughput
-     *    B. because it won't allow time for new topic creation before flush, so we loose first messages
+     *    B. because it won't allow time for new kafka topic creation before flush, so we loose first messages
      */
-    // @todo - find where performance drops of for number of cached entries
     public $flushInterval = 300;
 
 //    public static $flushMaxMsg = 100000;
@@ -454,6 +453,7 @@ class PipelineCommand
         $flushBytes = $this->outputPlugin->buffer->flushBytes;
 
         $timeFlush = (Carbon::now()->timestamp - $this->lastFlushtimesamp) > $this->flushInterval ? true : false;
+//        $timeFlush = false;
         $byteFlush = $this->currentBytes >= $flushBytes ? true : false;
 //        $msgCountFlush = $this->entries >= self::$flushMaxMsg ? true : false;
         $msgCountFlush = false;
@@ -664,13 +664,10 @@ class PipelineCommand
 
         if (!Config::$analysing) {
 
-//            $this->statsd->increment("ingest.msgs.current.{Config::$tenantId }.{Config::$pipelineName}", $i);
 
-//            $this->outputPlugin->buffer->flush('out');
             $this->outputPlugin->buffer->flushAll();
             $this->deadletterPlugin->buffer->flushAll();
 
-//            $this->updateDeadLetterQueueSize();
         }
 
     }
