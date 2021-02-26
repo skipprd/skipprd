@@ -49,10 +49,14 @@ class FileBuffer implements BufferInterface
 
         if (Config::$outputFormat != 'parquet') {
             
-            $this->serde = SerdersFactory::factory(Config::$outputFormat,
-                Config::$avroSchema);
+            $this->setSerde(Config::$outputFormat);
         }
 
+    }
+
+    public function setSerde(string $serde)
+    {
+        $this->serde = SerdersFactory::factory($serde, Config::$avroSchema);
     }
 
     public function flushAll(bool $force = false) {
