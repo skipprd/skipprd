@@ -1,4 +1,3 @@
-src/composer.lock
 vendor
 /ioncube/
 docker-compose.yml
