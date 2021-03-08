@@ -13,7 +13,14 @@ ADD https://github.com/mlocati/docker-php-extension-installer/releases/latest/do
 
 RUN chmod +x /usr/local/bin/install-php-extensions && sync && \
     install-php-extensions gd xdebug
-    
+
+ARG SSH_PRIVATE_KEY
+RUN mkdir -p ~/.ssh
+RUN echo "${SSH_PRIVATE_KEY}" > /root/.ssh/id_rsa
+RUN chmod 700 ~/.ssh && chmod -R 600 ~/.ssh/*
+RUN ssh-keyscan github.com >> ~/.ssh/known_hosts && chmod 644 ~/.ssh/known_hosts
+RUN ssh-keyscan gitlab.com >> ~/.ssh/known_hosts && chmod 644 ~/.ssh/known_hosts
+
 RUN install-php-extensions @composer
 
 WORKDIR /usr/src/app

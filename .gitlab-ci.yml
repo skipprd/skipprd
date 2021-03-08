@@ -137,7 +137,7 @@ before_script:
 
     - ls -la
     
-    - docker build -f ${DOCKERFILE_LOCATION} -t ${PROJECT_NAME}:${CURR_BUILD_TAG} .
+    - docker build --build-arg SSH_PRIVATE_KEY="${SSH_PRIVATE_KEY}" -f ${DOCKERFILE_LOCATION} -t ${PROJECT_NAME}:${CURR_BUILD_TAG} .
 
     # Set image to push
     - export IMAGE_TO_PUSH=${ECR_URL}:${CURR_BUILD_TAG}
