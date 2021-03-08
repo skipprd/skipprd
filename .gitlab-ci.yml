@@ -135,7 +135,7 @@ before_script:
     - tar -xvf ioncube_encoder5_10.2.tar.gz
     - mv ioncube_encoder5_10.2 ioncube
 
-    - docker build --build-arg BUILD_TAG=${CURR_BUILD_TAG} --build-arg SSH_PRIVATE_KEY="${SSH_PRIVATE_KEY}" -f ${DOCKERFILE_LOCATION} -t ${PROJECT_NAME}:${CURR_BUILD_TAG} .
+    - docker build -f ${DOCKERFILE_LOCATION} -t ${PROJECT_NAME}:${CURR_BUILD_TAG} .
 
     # Set image to push
     - export IMAGE_TO_PUSH=${ECR_URL}:${CURR_BUILD_TAG}
@@ -202,5 +202,5 @@ skippr-base component test:
   variables:
     COMPONENT_NAME: skippr-base
     BUILD_VARIANT: nzt
-    DOCKERFILE_LOCATION: app/DockerfileTest
+    DOCKERFILE_LOCATION: DockerfileTest
   extends: .component-test
