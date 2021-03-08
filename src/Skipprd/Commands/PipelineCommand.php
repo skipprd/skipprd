@@ -181,24 +181,36 @@ class PipelineCommand
         /**
          * Dead Letter Plugin
          */
-        $config = [];
-        $envs = getenv();
+        $deadLetterPluginName = getenv('DEAD_LETTER_PLUGIN_NAME');
 
-        foreach ($envs as $key => $value) {
-            if (strpos($key, 'DEAD_LETTER') > -1) {
-                $config[strtolower(substr($key, strlen('DEAD_LETTER_')))] = $value;
+        if (!empty($deadLetterPluginName)) {
+
+            $config = [];
+            $envs = getenv();
+
+            foreach ($envs as $key => $value) {
+                if (strpos($key, 'DEAD_LETTER') > -1) {
+                    $config[strtolower(substr($key,
+                        strlen('DEAD_LETTER_')))] = $value;
+                }
             }
+
+            $deadLetterPluginName = Str::studly(ucwords(strtolower($deadLetterPluginName)));
+
+        } else {
+
+                $deadLetterPluginName = 'File';
+
+                $config['path'] = '/tmp/dead-letters';
+
         }
 
-        $pluginName = getenv('DEAD_LETTER_PLUGIN_NAME');
-        $pluginName = Str::studly(ucwords(strtolower($pluginName)));
-
-        $deadLetterPluginClass = "Skipprd\\DataOutput" . "$pluginName" . "\\DataOutput" . "$pluginName" . "Plugin";
+        $deadLetterPluginClass = "Skipprd\\DataOutput" . "$deadLetterPluginName" . "\\DataOutput" . "$deadLetterPluginName" . "Plugin";
 
         $this->deadletterPlugin = new $deadLetterPluginClass($config, $this->deadletterBuffer);
 
         $this->deadletterPlugin->buffer->setSerde('json');
-
+        
 
         if (getenv('JOB_NAME') == 'deadletters') {
 
@@ -452,8 +464,8 @@ class PipelineCommand
 
         $flushBytes = $this->outputPlugin->buffer->flushBytes;
 
-        $timeFlush = (Carbon::now()->timestamp - $this->lastFlushtimesamp) > $this->flushInterval ? true : false;
-//        $timeFlush = false;
+//        $timeFlush = (Carbon::now()->timestamp - $this->lastFlushtimesamp) > $this->flushInterval ? true : false;
+        $timeFlush = false;
         $byteFlush = $this->currentBytes >= $flushBytes ? true : false;
 //        $msgCountFlush = $this->entries >= self::$flushMaxMsg ? true : false;
         $msgCountFlush = false;

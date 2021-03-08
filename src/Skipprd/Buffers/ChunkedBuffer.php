@@ -49,7 +49,7 @@ class ChunkedBuffer extends FileBuffer
 
         if ($flush
             || $this->memBuffs[$name]['size'] > $this->flushMemBytes
-//            || $this->memBuffs[$name]['time'] < time() - 30
+//            || $this->memBuffs[$name]['time'] < time() - $this->flushMemSeconds
         ) {
 
             $this->flush($name);

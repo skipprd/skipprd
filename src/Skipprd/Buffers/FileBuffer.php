@@ -34,7 +34,7 @@ class FileBuffer implements BufferInterface
 
     public $flushMemBytes = 1000000; # 1MB
 
-    public $flushMemSeconds = 30; # seconds
+    public $flushMemSeconds = 300; # seconds
 
     private $serde;
 
@@ -65,7 +65,7 @@ class FileBuffer implements BufferInterface
 
             if ($force
                 || $buffer['size'] > $this->flushMemBytes
-                || $buffer['time'] < time() - $this->flushMemSeconds
+//                || $buffer['time'] < time() - $this->flushMemSeconds
             ) {
 
                 $this->flush($name);
@@ -82,65 +82,65 @@ class FileBuffer implements BufferInterface
 
             if (FileBuffer::lock($filename)) { // acquire an exclusive lock
 
-//                if (Config::$outputFormat == 'parquet') {
-//
-//                    $converter = new AvroParquetSchemaConverter();
-//                    $parquetSchema = $converter->convert(Config::$avroSchema);
-//
-//                    try {
-//
-//                        Registry::skipprd()->info("create parquet instance");
-//                        $writer = new \Parquet();
-//
-//                        Registry::skipprd()->info("create parquet writer");
-//                        $writer->create_writer($filename, $parquetSchema, 'snappy');
-//
-//                        if (!empty($this->memBuffs[$name]) && !empty($this->memBuffs[$name]['buffer'])) {
-//
-//                            Registry::skipprd()->info("writing parquet data");
-//                            $separator = "\r\n";
-//                            $line = strtok($this->memBuffs[$name]['buffer'], $separator);
-//
-//                            while ($line !== false) {
-//
-//                                $arr[] = json_decode($line, true);
-//
-//                                $writer->write($arr);
-//
-//                                $arr = [];
-//
-//                                $line = strtok($separator);
-//
-//
-//                            }
-//
-//                        }
-//
-//                        Registry::skipprd()->info("closing");
-//                        $writer->close_writer();
-//                        Registry::skipprd()->info("closed");
-//
-//
-//                    } catch (\Exception $exception) {
-//
-//                        var_export($parquetSchema);
-//                        print("\n");
-//
-//                        var_export($arr);
-//                        print("\n");
-//
-//                        print($exception->getMessage());
-//
-//                        exit(1);
-//                    }
-//
-//                    FileBuffer::unlock($filename);
-//
-//                    Registry::skipprd()->info("finalising");
-//                    $this->finalise(true);
-//                    Registry::skipprd()->info("finalised");
-//
-//                } else {
+                if (Config::$outputFormat == 'parquet') {
+
+                    $converter = new AvroParquetSchemaConverter();
+                    $parquetSchema = $converter->convert(Config::$avroSchema);
+
+                    try {
+
+                        Registry::skipprd()->info("create parquet instance");
+                        $writer = new \Parquet();
+
+                        Registry::skipprd()->info("create parquet writer");
+                        $writer->create_writer($filename, $parquetSchema, 'snappy');
+
+                        if (!empty($this->memBuffs[$name]) && !empty($this->memBuffs[$name]['buffer'])) {
+
+                            Registry::skipprd()->info("writing parquet data");
+                            $separator = "\r\n";
+                            $line = strtok($this->memBuffs[$name]['buffer'], $separator);
+
+                            while ($line !== false) {
+
+                                $arr[] = json_decode($line, true);
+
+                                $writer->write($arr);
+
+                                $arr = [];
+
+                                $line = strtok($separator);
+
+
+                            }
+
+                        }
+
+                        Registry::skipprd()->info("closing");
+                        $writer->close_writer();
+                        Registry::skipprd()->info("closed");
+
+
+                    } catch (\Exception $exception) {
+
+                        var_export($parquetSchema);
+                        print("\n");
+
+                        var_export($arr);
+                        print("\n");
+
+                        print($exception->getMessage());
+
+                        exit(1);
+                    }
+
+                    FileBuffer::unlock($filename);
+
+                    Registry::skipprd()->info("finalising");
+                    $this->finalise(true);
+                    Registry::skipprd()->info("finalised");
+
+                } else {
 
                     $fp = fopen($filename, 'a+');
 
@@ -151,7 +151,7 @@ class FileBuffer implements BufferInterface
                     FileBuffer::unlock($filename);
 
                     FileBuffer::close($fp);
-//                }
+                }
 
                 unset($this->memBuffs[$name]);
             }
@@ -188,7 +188,7 @@ class FileBuffer implements BufferInterface
 
         if ($flush
             || $this->memBuffs[$this->name]['size'] > $this->flushMemBytes
-//            || $this->memBuffs[$this->name]['time'] < time() - 30
+//            || $this->memBuffs[$this->name]['time'] < time() - $this->flushMemSeconds
         ) {
 
             $this->flush($this->name);

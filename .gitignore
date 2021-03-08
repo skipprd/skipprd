@@ -1,2 +1,6 @@
-composer.lock
+src/composer.lock
 vendor
+/ioncube/
+docker-compose.yml
+debug.php
+test.sh

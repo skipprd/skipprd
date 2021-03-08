@@ -52,6 +52,10 @@
     {
       "type": "git",
       "url": "git@gitlab.com:paulhudson/data-output-s3-bucket.git"
+    },
+    {
+      "type": "git",
+      "url": "git@gitlab.com:paulhudson/data-output-file.git"
     }
   ],
   "autoload": {
@@ -77,6 +81,7 @@
     "skipprd/data-output-aws-athena": "dev-develop",
     "skipprd/data-output-kafka": "dev-develop",
     "skipprd/data-output-s3-bucket": "dev-develop",
+    "skipprd/data-output-file": "dev-develop",
     "wikimedia/avro": "^1.9",
     "league/statsd": "^1.5",
     "monolog/monolog": "^1.12",
