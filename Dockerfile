@@ -11,8 +11,10 @@ FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-12af2d1f as 
 
 ADD https://github.com/mlocati/docker-php-extension-installer/releases/latest/download/install-php-extensions /usr/local/bin/
 
+RUN apt-get install unzip
+
 RUN chmod +x /usr/local/bin/install-php-extensions && sync && \
-    install-php-extensions gd xdebug
+    install-php-extensions gd xdebug zip
 
 ARG SSH_PRIVATE_KEY
 RUN mkdir -p ~/.ssh
