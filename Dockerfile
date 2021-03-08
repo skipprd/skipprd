@@ -120,7 +120,7 @@ RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/Skipprd/Sk
 #RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/Skipprd/Services/AvroSubPub/MessageSerializer.php
 
 #FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:nzt-v2.2.1
-FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-12af2d1f as builder
+FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-12af2d1f
 #FROM skipprd:build
 
 WORKDIR /usr/src/app
