@@ -135,6 +135,8 @@ before_script:
     - tar -xvf ioncube_encoder5_10.2.tar.gz
     - mv ioncube_encoder5_10.2 ioncube
 
+    - ls -la
+    
     - docker build -f ${DOCKERFILE_LOCATION} -t ${PROJECT_NAME}:${CURR_BUILD_TAG} .
 
     # Set image to push
