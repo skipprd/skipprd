@@ -52,7 +52,7 @@ before_script:
     # prepare awscli
 #    - apk add --update --no-cache bash curl wget unzip python3 docker py3-pip ansible git openssh-client jq
     - apt-get update -y
-    - apt-get install -y bash curl wget unzip python3 docker ansible git openssh-client jq gnupg
+    - apt-get install -y bash curl wget unzip python3 docker ansible git openssh-client jq gnupg apt-transport-https ca-certificates
 
     - curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
     - echo \
