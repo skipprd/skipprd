@@ -54,7 +54,11 @@ before_script:
 #    - lsb_release -cs
 
     - apt-get update -y
-    - apt-get install -y bash curl wget unzip python3 docker ansible git openssh-client jq gnupg apt-transport-https ca-certificates
+    - apt-get install -y bash curl wget unzip python3 docker ansible git openssh-client jq gnupg
+
+    - curl -fsSL https://download.docker.com/linux/debian/gpg | apt-key add -
+    - . /etc/lsb-release && echo "deb https://download.docker.com/linux/ubuntu $DISTRIB_CODENAME stable" > /etc/apt/sources.list.d/docker.list
+    - apt-get update -y && apt-get install -y docker-ce-cli
 
 #    - curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
 #    - echo \
