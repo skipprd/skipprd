@@ -6,10 +6,11 @@
 FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-8966a3ba as builder
 #FROM skipprd:build as builder
 
+RUN df -h
+
 ##
 # docker-php-extension-installer
 ##
-
 ADD https://github.com/mlocati/docker-php-extension-installer/releases/latest/download/install-php-extensions /usr/local/bin/
 
 RUN df -h

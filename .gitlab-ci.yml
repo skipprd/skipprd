@@ -53,10 +53,6 @@ before_script:
 #    - apk add --update --no-cache bash curl wget unzip python3 docker py3-pip ansible git openssh-client jq
 #    - lsb_release -cs
 
-    - set -x
-
-    - df -h
-
     - apt-get update -y
     - apt-get install -y bash curl wget unzip python3 docker git openssh-client jq gnupg
 
@@ -172,8 +168,6 @@ before_script:
     - tar -xvf ioncube_encoder5_10.2.tar.gz
     - mv ioncube_encoder5_10.2 ioncube
     - rm -rf ioncube_encoder5_10.2.tar.gz
-
-    - df -h
 
     - docker build --build-arg SSH_PRIVATE_KEY="${SSH_PRIVATE_KEY}" -f ${DOCKERFILE_LOCATION} -t ${PROJECT_NAME}:${CURR_BUILD_TAG} .
 
