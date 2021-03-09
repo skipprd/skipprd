@@ -85,10 +85,10 @@ before_script:
     - export CURR_BUILD_TAG="${CI_COMMIT_TAG:-dev}"
 #    - $(aws ecr-public get-login --no-include-email --region $AWS_REGION)
 
-    - aws ecr-public get-login-password --region us-east-1
-    - docker login --username AWS --password-stdin public.ecr.aws
+#    - aws ecr-public get-login-password --region us-east-1
+#    - docker login --username AWS --password-stdin public.ecr.aws
     
-    - $(aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws)
+    - aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws
 #    - $(docker run --rm -it amazon/aws-cli ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws)
 
 # |===============================|
