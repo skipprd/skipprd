@@ -12,7 +12,7 @@ FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:latest as builder
 
 ADD https://github.com/mlocati/docker-php-extension-installer/releases/latest/download/install-php-extensions /usr/local/bin/
 
-RUN apt-get install unzip
+RUN apt-get install -y unzip
 
 RUN chmod +x /usr/local/bin/install-php-extensions && sync && \
     install-php-extensions gd xdebug zip
@@ -27,9 +27,9 @@ RUN ssh-keyscan gitlab.com >> ~/.ssh/known_hosts && chmod 644 ~/.ssh/known_hosts
 RUN install-php-extensions @composer
 
 WORKDIR /usr/src/app
-COPY ./src .
+COPY ./src ./source
 #COPY --from=encoder /usr/src/encoded-app ./
-WORKDIR /usr/src/app/src
+WORKDIR /usr/src/app/source
 
 # parallel download and install of dependencies
 #RUN composer global require hirak/prestissimo
@@ -45,12 +45,12 @@ RUN rm composer.*
 ##
 # encoder
 ##
-FROM php:7.4-cli as encoder
+#FROM php:7.4-cli as encoder
 
-WORKDIR /usr/src
+#WORKDIR /usr/src
 
-COPY /ioncube ./ioncube
-COPY --from=builder /usr/src/app/src ./source/
+COPY ./ioncube ./ioncube
+#COPY --from=builder /usr/src/app/src ./source/
 
 # NOTE: don't encode blade files, encrypt and replace
 # See: https://blog.ioncube.com/2016/12/19/ioncube-encoding-laravel-project-controllers-models-templates/
@@ -136,7 +136,7 @@ FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:latest
 
 WORKDIR /usr/src/app
 
-COPY --from=encoder /usr/src/encoded-app ./src
+COPY --from=builder /usr/src/encoded-app ./src
 
 CMD ["php", "src/run.php"]
                   
