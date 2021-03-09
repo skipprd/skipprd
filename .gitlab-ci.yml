@@ -51,6 +51,8 @@ before_script:
   before_script:
     # prepare awscli
 #    - apk add --update --no-cache bash curl wget unzip python3 docker py3-pip ansible git openssh-client jq
+    - apt-get update -y
+    - apt-get install -y bash curl wget unzip python3 docker ansible git openssh-client jq gnupg
 
     - curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
     - echo \
@@ -58,7 +60,6 @@ before_script:
       $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
     
     - apt-get update -y
-    - apt-get install -y bash curl wget unzip python3 docker ansible git openssh-client jq
     - apt-get install -y docker-ce docker-ce-cli containerd.io
 #    - pip3 install awscli
 
