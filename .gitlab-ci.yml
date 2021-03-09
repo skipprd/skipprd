@@ -62,6 +62,8 @@ before_script:
     - . /etc/lsb-release && echo "deb https://download.docker.com/linux/ubuntu $DISTRIB_CODENAME stable" > /etc/apt/sources.list.d/docker.list
     - apt-get update -y && apt-get install -y docker-ce docker-ce-cli containerd.io
 
+    - service docker start
+      
 #    - curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
 #    - echo \
 #      "deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu \
