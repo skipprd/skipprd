@@ -27,7 +27,7 @@ variables:
   COMPONENT_NAME: set-me
   PROJECT_NAME: $CI_PROJECT_NAME
 #  ECR_HOST: 536671797322.dkr.ecr.eu-west-2.amazonaws.com
-  ECR_HOST: public.ecr.aws/b0z2w1a5/skipprd
+  ECR_HOST: public.ecr.aws/b0z2w1a5
   ECR_URL: $ECR_HOST/$COMPONENT_NAME
   DOCKERFILE_LOCATION: Dockerfile${COMPONENT_NAME}
   LATEST_DEV_TAG: latest-dev
@@ -62,6 +62,7 @@ before_script:
     - export CI_COMMIT_SHA_SHORT=${CI_COMMIT_SHA::8}
     - export CURR_BUILD_TAG="${BUILD_VARIANT}-${CI_COMMIT_TAG:-dev}"
     - $(aws ecr get-login --no-include-email --region $AWS_REGION)
+#    - $(aws ecr-public get-login-password --region eu-east-2 | docker login --username AWS --password-stdin public.ecr.aws/b0z2w1a5)
 
 # |===============================|
 # |------ Deploy script ----------|
