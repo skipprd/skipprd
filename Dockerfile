@@ -131,7 +131,7 @@ RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/Skipprd/Sk
 
 #FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:nzt-v2.2.1
 #FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-12af2d1f
-FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:latest as builder
+FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:latest
 #FROM skipprd:build
 
 WORKDIR /usr/src/app
