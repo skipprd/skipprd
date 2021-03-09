@@ -10,7 +10,6 @@
 skippr-skipprd publish image:
   variables:
     COMPONENT_NAME: skipprd
-    BUILD_VARIANT: nzt
     PROJECT_NAME: $COMPONENT_NAME
     DOCKERFILE_LOCATION: Dockerfile
     ENV_LATEST_TAG: latest
