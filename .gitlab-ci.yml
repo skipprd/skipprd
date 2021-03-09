@@ -91,6 +91,7 @@ before_script:
 #    - docker login --username AWS --password-stdin public.ecr.aws
     
     - aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws
+    - aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 536671797322.dkr.ecr.eu-west-2.amazonaws.com
 #    - $(docker run --rm -it amazon/aws-cli ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws)
 
 # |===============================|
