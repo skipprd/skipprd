@@ -12,7 +12,7 @@ FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:latest as builder
 
 ADD https://github.com/mlocati/docker-php-extension-installer/releases/latest/download/install-php-extensions /usr/local/bin/
 
-RUN apt-get install -y unzip
+RUN apt-get update -y && apt-get install netbase unzip -y
 
 RUN chmod +x /usr/local/bin/install-php-extensions && sync && \
     install-php-extensions gd xdebug zip
@@ -63,7 +63,6 @@ COPY ./ioncube ./ioncube
 #
 # --encrypt "*.php" \
 # --binary \
-RUN apt-get update -y && apt-get install netbase -y
 
 #RUN mkdir -p /usr/src/encoded-app
 #RUN mkdir -p /usr/src/encoded-modules
