@@ -27,7 +27,7 @@ variables:
   COMPONENT_NAME: set-me
   PROJECT_NAME: $CI_PROJECT_NAME
 #  ECR_HOST: 536671797322.dkr.ecr.eu-west-2.amazonaws.com
-  ECR_HOST: public.ecr.aws/skippr
+  ECR_HOST: public.ecr.aws/b0z2w1a5
   ECR_URL: $ECR_HOST/$COMPONENT_NAME
   DOCKERFILE_LOCATION: Dockerfile${COMPONENT_NAME}
   LATEST_DEV_TAG: latest-dev
