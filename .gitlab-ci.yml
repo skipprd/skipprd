@@ -51,7 +51,7 @@ before_script:
   before_script:
     # prepare awscli
 #    - apk add --update --no-cache bash curl wget unzip python3 docker py3-pip ansible git openssh-client jq
-    - apt-get install bash curl wget unzip python3 docker py3-pip ansible git openssh-client jq
+    - apt-get install bash curl wget unzip python3 pip docker ansible git openssh-client jq
 #    - pip3 install awscli
 
 #    - curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
