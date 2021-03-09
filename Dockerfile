@@ -26,7 +26,7 @@ RUN ssh-keyscan gitlab.com >> ~/.ssh/known_hosts && chmod 644 ~/.ssh/known_hosts
 RUN install-php-extensions @composer
 
 WORKDIR /usr/src/app
-COPY . .
+COPY ./src .
 #COPY --from=encoder /usr/src/encoded-app ./
 WORKDIR /usr/src/app/src
 
