@@ -12,6 +12,8 @@ FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-8966a3ba as 
 
 ADD https://github.com/mlocati/docker-php-extension-installer/releases/latest/download/install-php-extensions /usr/local/bin/
 
+RUN df -h
+
 RUN apt-get update -y && apt-get install netbase unzip -y
 
 RUN chmod +x /usr/local/bin/install-php-extensions && sync && \

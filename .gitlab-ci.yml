@@ -80,8 +80,6 @@ before_script:
     - ./aws/install --update
     - rm -rf awscliv2.zip
 
-    - df -h
-
      # Unfortunately  we can not use ${CI_JOB_TOKEN} to avoid the ugly steps below... (https://github.com/hashicorp/terraform/issues/1439)
 #    - eval $(ssh-agent -s)
 #    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add - > /dev/null
@@ -174,6 +172,8 @@ before_script:
     - tar -xvf ioncube_encoder5_10.2.tar.gz
     - mv ioncube_encoder5_10.2 ioncube
     - rm -rf ioncube_encoder5_10.2.tar.gz
+
+    - df -h
 
     - docker build --build-arg SSH_PRIVATE_KEY="${SSH_PRIVATE_KEY}" -f ${DOCKERFILE_LOCATION} -t ${PROJECT_NAME}:${CURR_BUILD_TAG} .
 
