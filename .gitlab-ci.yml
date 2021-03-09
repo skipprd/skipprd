@@ -51,7 +51,7 @@ before_script:
   before_script:
     # prepare awscli
 #    - apk add --update --no-cache bash curl wget unzip python3 docker py3-pip ansible git openssh-client jq
-    - apt-get update
+    - apt-get update -y
     - apt-get install -y bash docker curl wget unzip python3 docker ansible git openssh-client jq
 #    - pip3 install awscli
 
@@ -68,8 +68,8 @@ before_script:
     - export CI_COMMIT_SHA_SHORT=${CI_COMMIT_SHA::8}
     - export CURR_BUILD_TAG="${CI_COMMIT_TAG:-dev}"
 #    - $(aws ecr-public get-login --no-include-email --region $AWS_REGION)
-#    - $(aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws)
-    - $(docker run --rm -it -e  amazon/aws-cli ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws)
+    - $(aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws)
+#    - $(docker run --rm -it amazon/aws-cli ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws)
 
 # |===============================|
 # |------ Deploy script ----------|
@@ -140,13 +140,11 @@ before_script:
   extends: .build
   script:
     - echo "Get ioncube encoder"
-#    - aws s3 cp s3://skpr-ioncube/ioncube_encoder5_10.2.tar.gz ./
-    - docker run --rm -it amazon/aws-cli s3 cp s3://skpr-ioncube/ioncube_encoder5_10.2.tar.gz ./
+    - aws s3 cp s3://skpr-ioncube/ioncube_encoder5_10.2.tar.gz ./
+#    - docker run --rm -it amazon/aws-cli s3 cp s3://skpr-ioncube/ioncube_encoder5_10.2.tar.gz ./
     - tar -xvf ioncube_encoder5_10.2.tar.gz
     - mv ioncube_encoder5_10.2 ioncube
 
-    - ls -la
-    
     - docker build --build-arg SSH_PRIVATE_KEY="${SSH_PRIVATE_KEY}" -f ${DOCKERFILE_LOCATION} -t ${PROJECT_NAME}:${CURR_BUILD_TAG} .
 
     # Set image to push
@@ -165,8 +163,8 @@ before_script:
 
     # Make current tag latest
 #    - aws ecr put-image --repository-name ${PROJECT_NAME} --image-tag ${ENV_LATEST_TAG} --image-manifest "$MANIFEST"
-#    - if [ -z ${CI_COMMIT_TAG+x} ]; then echo "Commit did not have a git tag."; else aws ecr put-image --repository-name ${PROJECT_NAME} --image-tag ${ENV_LATEST_TAG} --image-manifest "$MANIFEST"; fi
-    - if [ -z ${CI_COMMIT_TAG+x} ]; then echo "Commit did not have a git tag."; else docker run --rm -it amazon/aws-cli ecr put-image --repository-name ${PROJECT_NAME} --image-tag ${ENV_LATEST_TAG} --image-manifest "$MANIFEST"; fi
+    - if [ -z ${CI_COMMIT_TAG+x} ]; then echo "Commit did not have a git tag."; else aws ecr put-image --repository-name ${PROJECT_NAME} --image-tag ${ENV_LATEST_TAG} --image-manifest "$MANIFEST"; fi
+#    - if [ -z ${CI_COMMIT_TAG+x} ]; then echo "Commit did not have a git tag."; else docker run --rm -it amazon/aws-cli ecr put-image --repository-name ${PROJECT_NAME} --image-tag ${ENV_LATEST_TAG} --image-manifest "$MANIFEST"; fi
   only:
     - develop
     - tags
