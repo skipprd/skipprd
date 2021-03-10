@@ -49,18 +49,20 @@ before_script:
 
 .build:
   before_script:
+    - alias aws='docker run --rm -it -e AWS_REGION -e AWS_SECRET_ACCESS_KEY -e AWS_SECRET_ACCESS_KEY amazon/aws-cli'
+
     # prepare awscli
 #    - apk add --update --no-cache bash curl wget unzip python3 docker py3-pip ansible git openssh-client jq
 #    - lsb_release -cs
 
-    - apt-get update -y
-    - apt-get install -y bash curl wget unzip python3 docker git openssh-client jq gnupg
-
-    - curl -fsSL https://download.docker.com/linux/debian/gpg | apt-key add -
-    - . /etc/lsb-release && echo "deb https://download.docker.com/linux/ubuntu $DISTRIB_CODENAME stable" > /etc/apt/sources.list.d/docker.list
-    - apt-get update -y && apt-get install -y docker-ce docker-ce-cli containerd.io
-
-    - service docker start
+#    - apt-get update -y
+#    - apt-get install -y bash curl wget unzip python3 docker git openssh-client jq gnupg
+#
+#    - curl -fsSL https://download.docker.com/linux/debian/gpg | apt-key add -
+#    - . /etc/lsb-release && echo "deb https://download.docker.com/linux/ubuntu $DISTRIB_CODENAME stable" > /etc/apt/sources.list.d/docker.list
+#    - apt-get update -y && apt-get install -y docker-ce docker-ce-cli containerd.io
+#
+#    - service docker start
       
 #    - curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
 #    - echo \
@@ -71,10 +73,10 @@ before_script:
 #    - apt-get install -y docker-ce docker-ce-cli containerd.io
 #    - pip3 install awscli
 
-    - curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-    - unzip awscliv2.zip
-    - ./aws/install --update
-    - rm -rf awscliv2.zip
+#    - curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+#    - unzip awscliv2.zip
+#    - ./aws/install --update
+#    - rm -rf awscliv2.zip
 
      # Unfortunately  we can not use ${CI_JOB_TOKEN} to avoid the ugly steps below... (https://github.com/hashicorp/terraform/issues/1439)
 #    - eval $(ssh-agent -s)
@@ -157,9 +159,9 @@ before_script:
 # |===============================|
 
 .publish-image:
-#  image: docker:latest
+  image: docker:latest
 #  image: ubuntu:18.04
-  image: 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-99a9b37b
+#  image: 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-99a9b37b
 #  image: registry.gitlab.com/gitlab-org/cloud-deploy/aws-base:latest
   extends: .build
   script:
