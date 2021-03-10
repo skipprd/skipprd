@@ -158,7 +158,8 @@ before_script:
 
 .publish-image:
 #  image: docker:latest
-  image: ubuntu:18.04
+#  image: ubuntu:18.04
+  image: 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-99a9b37b
 #  image: registry.gitlab.com/gitlab-org/cloud-deploy/aws-base:latest
   extends: .build
   script:
