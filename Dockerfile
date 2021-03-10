@@ -1,24 +1,21 @@
 ###
 ## Builder
 ###
-#FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:nzt-v2.2.1 as builder
-#FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-12af2d1f as builder
-FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-8966a3ba as builder
-#FROM skipprd:build as builder
+
+FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-99a9b37b as builder
+#FROM skippr-php:ubuntu as builder
 
 RUN df -h
 
 ##
 # docker-php-extension-installer
 ##
-ADD https://github.com/mlocati/docker-php-extension-installer/releases/latest/download/install-php-extensions /usr/local/bin/
+#ADD https://github.com/mlocati/docker-php-extension-installer/releases/latest/download/install-php-extensions /usr/local/bin/
 
-RUN df -h
+RUN apt-get update -y && apt-get install -y netbase unzip openssh-client
 
-RUN apt-get update -y && apt-get install netbase unzip -y
-
-RUN chmod +x /usr/local/bin/install-php-extensions && sync && \
-    install-php-extensions gd xdebug zip
+#RUN chmod +x /usr/local/bin/install-php-extensions && sync && \
+#    install-php-extensions gd xdebug zip
 
 ARG SSH_PRIVATE_KEY
 RUN mkdir -p ~/.ssh
@@ -50,7 +47,7 @@ RUN rm composer.*
 ##
 #FROM php:7.4-cli as encoder
 
-#WORKDIR /usr/src
+WORKDIR /usr/src/app
 
 COPY ./ioncube ./ioncube
 #COPY --from=builder /usr/src/app/src ./source/
@@ -131,10 +128,10 @@ RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/Skipprd/Sk
 #RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/Skipprd/Services/AvroSubPub/CachedSchemaRegistryClient.php
 #RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/Skipprd/Services/AvroSubPub/MessageSerializer.php
 
-#FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:nzt-v2.2.1
-#FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-12af2d1f
-FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-8966a3ba
-#FROM skipprd:build
+RUN df -h
+
+FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-99a9b37b
+#FROM skippr-php:ubuntu
 
 WORKDIR /usr/src/app
 
