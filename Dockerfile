@@ -12,7 +12,7 @@ RUN df -h
 ##
 #ADD https://github.com/mlocati/docker-php-extension-installer/releases/latest/download/install-php-extensions /usr/local/bin/
 
-RUN apt-get update -y && apt-get install -y netbase unzip openssh-client
+RUN apt-get update -y && apt-get install -y netbase git unzip openssh-client
 
 #RUN chmod +x /usr/local/bin/install-php-extensions && sync && \
 #    install-php-extensions gd xdebug zip

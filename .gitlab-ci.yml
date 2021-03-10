@@ -49,9 +49,6 @@ before_script:
 
 .build:
   before_script:
-    - echo ${AWS_REGION}
-    - echo ${AWS_ACCESS_KEY_ID}
-    - echo ${AWS_SECRET_ACCESS_KEY}
     - alias aws='docker run --rm -v $(pwd):/aws -e AWS_REGION -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY amazon/aws-cli'
 
     # prepare awscli
