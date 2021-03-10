@@ -201,7 +201,7 @@ class PipelineCommand
 
                 $deadLetterPluginName = 'File';
 
-                $config['path'] = '/tmp/dead-letters';
+                $config['path'] = '/dead-letters';
 
         }
 

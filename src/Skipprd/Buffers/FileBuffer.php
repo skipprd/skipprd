@@ -26,7 +26,7 @@ class FileBuffer implements BufferInterface
     
     protected $memBuffs = [];
 
-    public $tempdir = '/tmp';
+    public $dataDir = '/data';
 
     public $flushBytes = 1000000; # 1MB
 
@@ -78,7 +78,7 @@ class FileBuffer implements BufferInterface
 
         if (!empty($this->memBuffs[$name]['buffer'])) {
 
-            $filename = $this->tempdir . '/' . $name . '-buffer';
+            $filename = $this->dataDir . '/' . $name . '-buffer';
 
             if (FileBuffer::lock($filename)) { // acquire an exclusive lock
 
@@ -299,7 +299,7 @@ class FileBuffer implements BufferInterface
     public function nextFile()
     {
 
-        $filenames = glob($this->tempdir . '/' . "$this->name*-finalised-*", GLOB_NOSORT);
+        $filenames = glob($this->dataDir . '/' . "$this->name*-finalised-*", GLOB_NOSORT);
 
         usort( $filenames, function( $a, $b ) { return filemtime($a) - filemtime($b); } );
 
@@ -357,7 +357,7 @@ class FileBuffer implements BufferInterface
 
     public function unlockAll() : void
     {
-        $file_list = glob($this->tempdir . '/' . $this->name . '*lock');
+        $file_list = glob($this->dataDir . '/' . $this->name . '*lock');
 
         if (!empty($file_list)) {
 
@@ -419,7 +419,7 @@ class FileBuffer implements BufferInterface
 
     public function finalise($force = false) :void {
 
-        $file_list = glob($this->tempdir . '/*' . $this->name . '*-buffer*');
+        $file_list = glob($this->dataDir . '/*' . $this->name . '*-buffer*');
 
         if (!empty($file_list)) {
 
@@ -472,7 +472,7 @@ class FileBuffer implements BufferInterface
     public function bufferGetNoFiles() : int
     {
 
-        $file_list = glob($this->tempdir . '/' . "$this->name*");
+        $file_list = glob($this->dataDir . '/' . "$this->name*");
 
         $i = 0;
 
@@ -499,7 +499,7 @@ class FileBuffer implements BufferInterface
 
         $bytes = 0;
 
-        $file_list = glob($this->tempdir . '/' . "$this->name*");
+        $file_list = glob($this->dataDir . '/' . "$this->name*");
 
         if (!empty($file_list)) {
 
@@ -530,7 +530,7 @@ class FileBuffer implements BufferInterface
     public function bufferGetNoLines() : int
     {
 
-        $file_list = glob($this->tempdir . '/' . "$this->name*");
+        $file_list = glob($this->dataDir . '/' . "$this->name*");
 
         $lines = 0;
 

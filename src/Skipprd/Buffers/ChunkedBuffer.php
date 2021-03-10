@@ -114,7 +114,7 @@ class ChunkedBuffer extends FileBuffer
     public function nextFile()
     {
 
-        $filenames = glob($this->tempdir . '/' . "$this->name*-finalised-*", GLOB_NOSORT);
+        $filenames = glob($this->dataDir . '/' . "$this->name*-finalised-*", GLOB_NOSORT);
 
         asort($filenames);
 

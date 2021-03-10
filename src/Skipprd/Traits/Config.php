@@ -13,6 +13,8 @@ use Skipprd\Converters\SkipprAvroSchemaConverter;
 class Config
 {
 
+    public static $dataDir = '/data';
+
     public static $pipelineName = '';
 
     public static $tenantId = '';
@@ -73,10 +75,12 @@ class Config
         $avroArr = [];
 //        self::$mapping = [];
         self::$discoveredFieldOccurrence = [];
-        
-        if (file_exists('/tmp/mapping.json')) {
 
-            self::$discoveredFieldOccurrence = json_decode(file_get_contents('/tmp/mapping.json'), true);
+        mkdir(self::$dataDir);
+
+        if (file_exists(self::$dataDir . '/skippr-state.json')) {
+
+            self::$discoveredFieldOccurrence = json_decode(file_get_contents(self::$dataDir . '/skippr-state.json'), true);
 
 //        Config::$discoveredFieldOccurrence = (empty($configYml['field_yml'])) ? [] : $configYml['field_yml'];
 
@@ -216,7 +220,7 @@ class Config
 //        ];
 
 
-        file_put_contents('/tmp/mapping.json', json_encode(Config::$discoveredFieldOccurrence));
+        file_put_contents(self::$dataDir . '/skippr-state.json', json_encode(Config::$discoveredFieldOccurrence));
 
         $uri = getenv('SCHEMA_REGISTRY');
         $url = "http://$uri/";
