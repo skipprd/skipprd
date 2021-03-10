@@ -49,7 +49,10 @@ before_script:
 
 .build:
   before_script:
-    - alias aws='docker run --rm -e AWS_REGION -e AWS_ACCESS_KEY_ID=${AWS_SECRET_ACCESS_KEY} -e AWS_SECRET_ACCESS_KEY amazon/aws-cli'
+    - echo ${AWS_REGION}
+    - echo ${AWS_ACCESS_KEY_ID}
+    - echo ${AWS_SECRET_ACCESS_KEY}
+    - alias aws='docker run --rm -e AWS_REGION -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY amazon/aws-cli'
 
     # prepare awscli
 #    - apk add --update --no-cache bash curl wget unzip python3 docker py3-pip ansible git openssh-client jq
@@ -88,7 +91,7 @@ before_script:
     - export CURR_BUILD_TAG="${CI_COMMIT_TAG:-dev}"
 #    - $(aws ecr-public get-login --no-include-email --region $AWS_REGION)
 
-#    - aws ecr-public get-login-password --region us-east-1
+    - aws ecr-public get-login-password --region us-east-1
 #    - docker login --username AWS --password-stdin public.ecr.aws
     
     - docker login --username AWS --password $(aws ecr-public get-login-password --region us-east-1) public.ecr.aws
