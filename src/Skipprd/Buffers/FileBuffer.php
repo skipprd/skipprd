@@ -89,15 +89,12 @@ class FileBuffer implements BufferInterface
 
                     try {
 
-                        Registry::skipprd()->info("create parquet instance");
                         $writer = new \Parquet();
 
-                        Registry::skipprd()->info("create parquet writer");
                         $writer->create_writer($filename, $parquetSchema, 'snappy');
 
                         if (!empty($this->memBuffs[$name]) && !empty($this->memBuffs[$name]['buffer'])) {
 
-                            Registry::skipprd()->info("writing parquet data");
                             $separator = "\r\n";
                             $line = strtok($this->memBuffs[$name]['buffer'], $separator);
 
@@ -116,9 +113,7 @@ class FileBuffer implements BufferInterface
 
                         }
 
-                        Registry::skipprd()->info("closing");
                         $writer->close_writer();
-                        Registry::skipprd()->info("closed");
 
 
                     } catch (\Exception $exception) {
@@ -136,9 +131,7 @@ class FileBuffer implements BufferInterface
 
                     FileBuffer::unlock($filename);
 
-                    Registry::skipprd()->info("finalising");
                     $this->finalise(true);
-                    Registry::skipprd()->info("finalised");
 
                 } else {
 

@@ -2,7 +2,7 @@
 ## Builder
 ###
 
-FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-99a9b37b as builder
+FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-f9b2b780 as builder
 #FROM skippr-php:ubuntu as builder
 
 RUN df -h
@@ -10,12 +10,13 @@ RUN df -h
 ##
 # docker-php-extension-installer
 ##
-#ADD https://github.com/mlocati/docker-php-extension-installer/releases/latest/download/install-php-extensions /usr/local/bin/
+ADD https://github.com/mlocati/docker-php-extension-installer/releases/latest/download/install-php-extensions /usr/local/bin/
 
-RUN apt-get update -y && apt-get install -y netbase git unzip openssh-client
+RUN apt-get update -y && apt-get install -y netbase git openssh-client
 
-#RUN chmod +x /usr/local/bin/install-php-extensions && sync && \
-#    install-php-extensions gd xdebug zip
+RUN chmod +x /usr/local/bin/install-php-extensions \
+    && sync
+#    && install-php-extensions gd xdebug zip
 
 ARG SSH_PRIVATE_KEY
 RUN mkdir -p ~/.ssh
@@ -130,7 +131,7 @@ RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/Skipprd/Sk
 
 RUN df -h
 
-FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-99a9b37b
+FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-f9b2b780
 #FROM skippr-php:ubuntu
 
 WORKDIR /usr/src/app
