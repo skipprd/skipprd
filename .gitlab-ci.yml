@@ -55,7 +55,7 @@ before_script:
     - alias aws='docker run --rm -v $(pwd):/aws -e AWS_REGION -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY amazon/aws-cli'
 
     # prepare awscli
-#    - apk add --update --no-cache bash curl wget unzip python3 docker py3-pip ansible git openssh-client jq
+    - apk add --update --no-cache bash curl wget unzip git jq
 #    - lsb_release -cs
 
 #    - apt-get update -y
