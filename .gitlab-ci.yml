@@ -49,7 +49,7 @@ before_script:
 
 .build:
   before_script:
-    - alias aws='docker run --rm -it -e AWS_REGION -e AWS_SECRET_ACCESS_KEY -e AWS_SECRET_ACCESS_KEY amazon/aws-cli'
+    - alias aws='docker run --rm -e AWS_REGION -e AWS_SECRET_ACCESS_KEY -e AWS_SECRET_ACCESS_KEY amazon/aws-cli'
 
     # prepare awscli
 #    - apk add --update --no-cache bash curl wget unzip python3 docker py3-pip ansible git openssh-client jq
