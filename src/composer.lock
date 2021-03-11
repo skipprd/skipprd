@@ -1049,7 +1049,7 @@
             "source": {
                 "type": "git",
                 "url": "git@gitlab.com:paulhudson/data-source-file.git",
-                "reference": "2548ca9bfda449091c909b5b8fb095f382d13bfb"
+                "reference": "b9ad67b441657dc241ba5747933b9134f2a2afd7"
             },
             "require": {
                 "monolog/monolog": "^1.12"
@@ -1073,7 +1073,7 @@
                 }
             ],
             "description": "File data source for skippr.io",
-            "time": "2021-03-11T14:56:36+00:00"
+            "time": "2021-03-11T15:05:33+00:00"
         },
         {
             "name": "skipprd/data-source-kafka",
