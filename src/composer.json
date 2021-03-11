@@ -1,0 +1,101 @@
+{
+  "name": "paulhudson/skipprd",
+  "description": "Any data source to any destination",
+  "type": "project",
+  "authors": [
+    {
+      "name": "Paul Hudson",
+      "email": "paul@skippr.io"
+    }
+  ],
+  "repositories": [
+    {
+      "type": "git",
+      "url": "https://github.com/paulhudson/laravel-pubsub.git"
+    },
+    {
+      "type": "git",
+      "url": "git@gitlab.com:paulhudson/php-pubsub-kafka.git"
+    },
+    {
+      "type": "git",
+      "url": "git@github.com:skipprd/machine-to-human.git"
+    },
+    {
+      "type": "git",
+      "url": "git@gitlab.com:paulhudson/data-source-kafka.git"
+    },
+    {
+      "type": "git",
+      "url": "git@gitlab.com:paulhudson/data-source-mqtt-subscriber.git"
+    },
+    {
+      "type": "git",
+      "url": "git@gitlab.com:paulhudson/data-source-s3.git"
+    },
+    {
+      "type": "git",
+      "url": "git@gitlab.com:paulhudson/data-source-s3-demo.git"
+    },
+    {
+      "type": "git",
+      "url": "git@gitlab.com:paulhudson/data-source-salesforce.git"
+    },
+    {
+      "type": "git",
+      "url": "git@gitlab.com:paulhudson/data-output-aws-athena.git"
+    },
+    {
+      "type": "git",
+      "url": "git@gitlab.com:paulhudson/data-output-kafka.git"
+    },
+    {
+      "type": "git",
+      "url": "git@gitlab.com:paulhudson/data-output-s3-bucket.git"
+    },
+    {
+      "type": "git",
+      "url": "git@gitlab.com:paulhudson/data-output-file.git"
+    },
+    {
+      "type": "git",
+      "url": "git@gitlab.com:paulhudson/data-source-file.git"
+    }
+  ],
+  "autoload": {
+    "psr-4": {
+      "Skipprd\\": "Skipprd/",
+      "Tests\\": "tests/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "Tests\\": "tests/"
+    }
+  },
+  "require": {
+    "php": "7.4.*",
+    "nesbot/carbon": "^1.26.3",
+    "skipprd/machine-to-human": "^1.0.0",
+    "skipprd/data-source-kafka": "dev-develop",
+    "skipprd/data-source-mqtt-subscriber": "dev-develop",
+    "skipprd/data-source-s3": "dev-develop",
+    "skipprd/data-source-s3-demo": "dev-develop",
+    "skipprd/data-source-salesforce": "dev-develop",
+    "skipprd/data-output-aws-athena": "dev-develop",
+    "skipprd/data-output-kafka": "dev-develop",
+    "skipprd/data-output-s3-bucket": "dev-develop",
+    "skipprd/data-output-file": "dev-develop",
+    "skipprd/data-source-file": "dev-develop",
+    "wikimedia/avro": "^1.9",
+    "league/statsd": "^1.5",
+    "monolog/monolog": "^1.12",
+    "aws/aws-sdk-php": "^3.173",
+    "guzzlehttp/guzzle": "^7.2"
+  },
+  "require-dev": {
+    "fzaninotto/faker": "~1.4",
+    "mockery/mockery": "1.3.1",
+    "phpunit/phpunit": "~7.0"
+  }
+}

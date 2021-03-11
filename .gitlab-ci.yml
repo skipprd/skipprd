@@ -1,0 +1,243 @@
+# Include specifics for the various components.
+# Refer to these files for overrides.
+include:
+#  - local: '/ci-templates/.gitlab-ci-skippr-base-nzt.yml'
+#  - local: '/ci-templates/.gitlab-ci-skippr-base-zt.yml'
+#  - local: '/ci-templates/.gitlab-ci-skippr-app.yml'
+  - local: '/ci-templates/.gitlab-ci-skipprd.yml'
+#  - local: '/ci-templates/.gitlab-ci-skippr-queue.yml'
+
+
+services:
+  - docker:dind
+
+stages:
+  - component-test
+  - publish-image-base
+  - publish
+  - build-ami
+#  - build-test
+  - deploy
+  - infra
+
+variables:
+  AWS_REGION: eu-west-2
+  AWS_DEFAULT_REGION: $AWS_REGION
+  AWS_PROFILE_LOCATION: /root/.aws/credentials
+  COMPONENT_NAME: set-me
+  PROJECT_NAME: $CI_PROJECT_NAME
+#  ECR_HOST: 536671797322.dkr.ecr.eu-west-2.amazonaws.com
+  ECR_HOST: public.ecr.aws/b0z2w1a5
+  ECR_URL: $ECR_HOST/$COMPONENT_NAME
+  DOCKERFILE_LOCATION: Dockerfile${COMPONENT_NAME}
+  LATEST_DEV_TAG: latest-dev
+#  LATEST_PREPROD_TAG: latest-preprod
+#  LATEST_UAT_TAG: latest-uat
+  LATEST_PROD_TAG: latest
+  DOCKER_BUILDKIT: 1
+
+before_script:
+  - set -x
+
+# ============================================|
+# ---------------- SCRIPTS -------------------|
+# ============================================|
+
+# |===============================|
+# |------ Build script -----------|
+# |===============================|
+
+.build:
+  before_script:
+    - alias aws='docker run --rm -v $(pwd):/aws -e AWS_REGION -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY amazon/aws-cli'
+
+    # prepare awscli
+    - apk add --update --no-cache bash curl wget unzip git jq
+#    - lsb_release -cs
+
+#    - apt-get update -y
+#    - apt-get install -y bash curl wget unzip python3 docker git openssh-client jq gnupg
+#
+#    - curl -fsSL https://download.docker.com/linux/debian/gpg | apt-key add -
+#    - . /etc/lsb-release && echo "deb https://download.docker.com/linux/ubuntu $DISTRIB_CODENAME stable" > /etc/apt/sources.list.d/docker.list
+#    - apt-get update -y && apt-get install -y docker-ce docker-ce-cli containerd.io
+#
+#    - service docker start
+      
+#    - curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+#    - echo \
+#      "deb [arch=amd64 signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu \
+#      $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+#
+#    - apt-get update -y
+#    - apt-get install -y docker-ce docker-ce-cli containerd.io
+#    - pip3 install awscli
+
+#    - curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+#    - unzip awscliv2.zip
+#    - ./aws/install --update
+#    - rm -rf awscliv2.zip
+
+     # Unfortunately  we can not use ${CI_JOB_TOKEN} to avoid the ugly steps below... (https://github.com/hashicorp/terraform/issues/1439)
+#    - eval $(ssh-agent -s)
+#    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add - > /dev/null
+#    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
+#    - ssh-keyscan gitlab.com >> ~/.ssh/known_hosts && chmod 644 ~/.ssh/known_hosts
+
+    - export CI_COMMIT_SHA_SHORT=${CI_COMMIT_SHA::8}
+    - export CURR_BUILD_TAG="${CI_COMMIT_TAG:-dev}"
+#    - $(aws ecr-public get-login --no-include-email --region $AWS_REGION)
+
+    - aws ecr-public get-login-password --region us-east-1
+#    - docker login --username AWS --password-stdin public.ecr.aws
+    
+    - docker login --username AWS --password $(aws ecr-public get-login-password --region us-east-1) public.ecr.aws
+    - docker login --username AWS --password $(aws ecr get-login-password --region $AWS_REGION) 536671797322.dkr.ecr.eu-west-2.amazonaws.com
+#    - $(docker run --rm -it amazon/aws-cli ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws)
+
+# |===============================|
+# |------ Deploy script ----------|
+# |===============================|
+
+# Input variables:
+# ${TARGET_ENV}      -  Target environment    - <dev/preprod/uat/prod>
+# ${DEPLOY_TAG}      -  Tag to deploy         - <git commit id (for dev) or git tag (for uat & prod)>
+# ${ENV_LATEST_TAG}  -  For e2e test purpose  - <latest-dev / latest-uat / latest>
+
+.infra:
+  stage: infra
+  image:
+    name: hashicorp/terraform:0.11.14
+    entrypoint:
+      - '/usr/bin/env'
+  script:
+    - export CI_COMMIT_SHA_SHORT=${CI_COMMIT_SHA::8}
+    # Unfortunately  we can not use ${CI_JOB_TOKEN} to avoid the ugly steps below... (https://github.com/hashicorp/terraform/issues/1439)
+#    - 'which ssh-agent || ( apt-get update -y && apt-get install openssh-client git -y )'
+#    - eval $(ssh-agent -s)
+#    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add - > /dev/null
+#    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
+#    - ssh-keyscan gitlab.com >> ~/.ssh/known_hosts && chmod 644 ~/.ssh/known_hosts
+
+    # DEPLOY
+    - terraform init -force-copy ${CI_PROJECT_DIR}/terraform/global
+    - terraform apply -auto-approve ${CI_PROJECT_DIR}/terraform/global
+    - rm -rf .terraform
+    - terraform init -force-copy ${CI_PROJECT_DIR}/terraform/services
+    - terraform workspace select ${TARGET_ENV} ${CI_PROJECT_DIR}/terraform/services
+    - echo "About to deploy tag ${DEPLOY_TAG}"
+    - terraform apply -auto-approve -var docker_image_tag=${DEPLOY_TAG} ${CI_PROJECT_DIR}/terraform/services
+
+    # Make current image latest
+    # - aws ecr put-image --repository-name ${PROJECT_NAME} --image-tag ${ENV_LATEST_TAG} --image-manifest "$MANIFEST"
+
+
+# |===============================|
+# |------ Component test ---------|
+# |===============================|
+
+# -- Run component tests (All pushes except for master and tags)
+# This is just a template, you must extend it in the ci-templates directories.
+.component-test:
+  stage: component-test
+  image: docker:latest
+  extends: .build
+  script:
+    # - docker run ${PROJECT_NAME}:${CURR_BUILD_TAG} /bin/bash -c "cd tests && ../vendor/phpunit/phpunit/phpunit --configuration ../phpunit.xml --coverage-text ."
+    - docker build --build-arg SSH_PRIVATE_KEY="${SSH_PRIVATE_KEY}" --target test -f ${DOCKERFILE_LOCATION} -t ${PROJECT_NAME}:${CURR_BUILD_TAG} .
+    - echo "end of component test"
+  coverage: '/^\s*Lines:\s*\d+.\d+\%/'
+#  only:
+#    - branches
+  except:
+#    - tags
+    - master
+
+
+# |===============================|
+# |------ Publish image ----------|
+# |===============================|
+
+.publish-image:
+  image: docker:latest
+#  image: ubuntu:18.04
+#  image: 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-99a9b37b
+#  image: registry.gitlab.com/gitlab-org/cloud-deploy/aws-base:latest
+  extends: .build
+  script:
+    - echo "Get ioncube encoder"
+    - aws s3 cp s3://skpr-ioncube/ioncube_encoder5_10.2.tar.gz ./
+#    - docker run --rm -it amazon/aws-cli s3 cp s3://skpr-ioncube/ioncube_encoder5_10.2.tar.gz ./
+    - tar -xvf ioncube_encoder5_10.2.tar.gz
+    - mv ioncube_encoder5_10.2 ioncube
+    - rm -rf ioncube_encoder5_10.2.tar.gz
+
+    - docker build --build-arg SSH_PRIVATE_KEY="${SSH_PRIVATE_KEY}" -f ${DOCKERFILE_LOCATION} -t ${PROJECT_NAME}:${CURR_BUILD_TAG} .
+
+    # Set image to push
+    - export IMAGE_TO_PUSH=${ECR_URL}:${CURR_BUILD_TAG}
+    # tag image with ${CI_COMMIT_SHA_SHORT}
+    - echo "docker tag ${PROJECT_NAME}:${CURR_BUILD_TAG} ${IMAGE_TO_PUSH}"
+    - docker tag ${PROJECT_NAME}:${CURR_BUILD_TAG} ${IMAGE_TO_PUSH}
+    # push image with tag ${CI_COMMIT_SHA_SHORT}
+    - docker push ${IMAGE_TO_PUSH}
+
+    # Tag with git tag if set
+#    - MANIFEST=$(aws ecr batch-get-image --repository-name ${PROJECT_NAME} --image-ids imageTag=${CURR_BUILD_TAG} --query 'images[].imageManifest' --output text)
+#    - if [ -z ${CI_COMMIT_TAG+x} ]; then echo "Commit did not have a git tag."; else aws ecr put-image --repository-name ${PROJECT_NAME} --image-tag ${CI_COMMIT_TAG} --image-manifest "$MANIFEST"; fi
+    # Describe pushed image
+#    - aws ecr describe-images --repository-name ${PROJECT_NAME} --query 'sort_by(imageDetails,& imagePushedAt)[-1]'
+
+    # Make current tag latest
+#    - aws ecr put-image --repository-name ${PROJECT_NAME} --image-tag ${ENV_LATEST_TAG} --image-manifest "$MANIFEST"
+    - if [ -z ${CI_COMMIT_TAG+x} ]; then echo "Commit did not have a git tag."; else aws ecr put-image --repository-name ${PROJECT_NAME} --image-tag ${ENV_LATEST_TAG} --image-manifest "$MANIFEST"; fi
+#    - if [ -z ${CI_COMMIT_TAG+x} ]; then echo "Commit did not have a git tag."; else docker run --rm -it amazon/aws-cli ecr put-image --repository-name ${PROJECT_NAME} --image-tag ${ENV_LATEST_TAG} --image-manifest "$MANIFEST"; fi
+  only:
+    - develop
+    - tags
+
+
+## |===============================|
+## |------ Deploy image -----------|
+## |===============================|
+
+# -- Deploy to DEV (Pushes to dev - Manual option)
+
+.infra-dev:
+  extends: .infra
+  environment:
+    name: dev
+  variables:
+    TARGET_ENV: dev
+    ENV_LATEST_TAG: ${LATEST_DEV_TAG}
+  before_script:
+    - export CI_COMMIT_SHA_SHORT=${CI_COMMIT_SHA::8}
+    - export DEPLOY_TAG=${CI_COMMIT_SHA_SHORT}
+#  when: manual
+  only:
+    - develop
+
+# -- Deploy to PROD (All tags - Manual option)
+
+.infra-prod:
+  extends: .infra
+  environment:
+    name: prod
+  variables:
+    TARGET_ENV: prod
+    ENV_LATEST_TAG: ${LATEST_PROD_TAG}
+    DEPLOY_TAG: ${CI_COMMIT_TAG}
+#  when: manual
+  only:
+    - tags
+
+
+# |============================================|
+# |-------------- CI/CD PIPELINE --------------|
+# |============================================|
+
+skippr-base component test:
+  variables:
+    COMPONENT_NAME: skippr-base
+    DOCKERFILE_LOCATION: DockerfileTest
+  extends: .component-test

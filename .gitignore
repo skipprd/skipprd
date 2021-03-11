@@ -1,0 +1,5 @@
+vendor
+/ioncube/
+docker-compose.yml
+debug.php
+test.sh
