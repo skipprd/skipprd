@@ -180,7 +180,8 @@ before_script:
 
     - echo "docker tag ${PROJECT_NAME}:${CURR_BUILD_TAG} ${IMAGE_TO_PUSH}"
     - docker tag ${PROJECT_NAME}:${CURR_BUILD_TAG} ${IMAGE_TO_PUSH}
-    - docker tag ${PROJECT_NAME}:${CURR_BUILD_TAG} ${ECR_URL}:latest
+
+    - if [ -z ${CI_COMMIT_TAG+x} ]; then echo "Commit did not have a git tag."; else docker tag ${PROJECT_NAME}:${CURR_BUILD_TAG} ${ECR_URL}:latest; fi
 
     # push image with tag ${CI_COMMIT_SHA_SHORT}
     - docker push ${IMAGE_TO_PUSH}
