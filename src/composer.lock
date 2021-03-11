@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "879d37f1bca4e045973cc269c614fc8b",
+    "content-hash": "af40baec5726019e63b0360d96d99219",
     "packages": [
         {
             "name": "aws/aws-sdk-php",
@@ -1042,6 +1042,38 @@
             ],
             "description": "S3 bucket data output for skippr.io",
             "time": "2021-03-11T14:23:14+00:00"
+        },
+        {
+            "name": "skipprd/data-source-file",
+            "version": "dev-develop",
+            "source": {
+                "type": "git",
+                "url": "git@gitlab.com:paulhudson/data-source-file.git",
+                "reference": "2548ca9bfda449091c909b5b8fb095f382d13bfb"
+            },
+            "require": {
+                "monolog/monolog": "^1.12"
+            },
+            "type": "project",
+            "autoload": {
+                "psr-4": {
+                    "Skipprd\\DataSourceFile\\": "src/",
+                    "Tests\\": "tests/"
+                }
+            },
+            "autoload-dev": {
+                "psr-4": {
+                    "Tests\\": "tests/"
+                }
+            },
+            "authors": [
+                {
+                    "name": "Paul Hudson",
+                    "email": "oss@skippr.io"
+                }
+            ],
+            "description": "File data source for skippr.io",
+            "time": "2021-03-11T14:56:36+00:00"
         },
         {
             "name": "skipprd/data-source-kafka",
@@ -3519,7 +3551,8 @@
         "skipprd/data-output-aws-athena": 20,
         "skipprd/data-output-kafka": 20,
         "skipprd/data-output-s3-bucket": 20,
-        "skipprd/data-output-file": 20
+        "skipprd/data-output-file": 20,
+        "skipprd/data-source-file": 20
     },
     "prefer-stable": false,
     "prefer-lowest": false,
