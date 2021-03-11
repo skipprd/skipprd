@@ -304,12 +304,16 @@ class PipelineCommand
         Config::getConfig();
 
         $this->statsd = new Statsd();
-        $this->statsd->configure([
-            'host' => getenv('STATSD_HOST'),
-            'port' => getenv('STATSD_PORT'),
-//            'namespace' => 'skippr'
-        ]);
 
+        if (getenv('STATSD_HOST') && getenv('STATSD_PORT')) {
+
+            $this->statsd->configure([
+                'host' => getenv('STATSD_HOST'),
+                'port' => getenv('STATSD_PORT'),
+//            'namespace' => 'skippr'
+            ]);
+        }
+        
         // setup global monolog
 //        $application = new Logger('skipprd');
 //        Registry::addLogger($application);

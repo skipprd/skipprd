@@ -15,9 +15,9 @@ class Config
 
     public static $dataDir = '/data';
 
-    public static $pipelineName = '';
+    public static $pipelineName = 'pipeline';
 
-    public static $tenantId = '';
+    public static $tenantId = 'skippr';
 
     public static $mode = 'sync';
 
@@ -64,12 +64,17 @@ class Config
         ['name' => 'skpr_partition', 'default' => null, 'type' => ['null', 'string']],
     ];
 
+    public static function getenv(string $name, string $default = '') : string {
+
+        return (!empty(getenv($name))) ? getenv($name) : $default;
+
+    }
 
     public static function getConfig()
     {
 //        self::$pipelineId = getenv('PIPELINE_ID');
-        self::$pipelineName = getenv('PIPELINE_NAME');
-        self::$tenantId = getenv('TENANT_ID');
+        self::$pipelineName = self::getenv('PIPELINE_NAME', self::$pipelineName);
+        self::$tenantId = self::getenv('TENANT_ID', self::$tenantId);
 
 
         $avroArr = [];
@@ -225,24 +230,28 @@ class Config
         file_put_contents(self::$dataDir . '/skippr-state.json', json_encode(Config::$discoveredFieldOccurrence));
 
         $uri = getenv('SCHEMA_REGISTRY');
-        $url = "http://$uri/";
-        $path = 'ingest-job/update-mapping';
 
-        $client = new \GuzzleHttp\Client([
-            'base_uri' => $url,
-            'headers' => [
-                'Authorization' => "Bearer " . getenv('API_TOKEN')
-            ]
-        ]);
+        if (!empty($uri)) {
 
-        $json = json_encode([
-            'id' => getenv('PIPELINE_ID'),
-            'mapping' => Config::$discoveredFieldOccurrence,
-        ]);
+            $url = "http://$uri/";
+            $path = 'ingest-job/update-mapping';
 
-        $response = $client->post($path, [
-            'json' => $json
-        ]);
+            $client = new \GuzzleHttp\Client([
+                'base_uri' => $url,
+                'headers' => [
+                    'Authorization' => "Bearer " . getenv('API_TOKEN')
+                ]
+            ]);
+
+            $json = json_encode([
+                'id' => getenv('PIPELINE_ID'),
+                'mapping' => Config::$discoveredFieldOccurrence,
+            ]);
+
+            $response = $client->post($path, [
+                'json' => $json
+            ]);
+        }
 
         return $configYml;
     }
