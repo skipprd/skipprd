@@ -183,7 +183,7 @@ before_script:
     - docker push ${IMAGE_TO_PUSH}
 
     # Tag with git tag if set
-    - MANIFEST=$(aws ecr-public batch-get-image --repository-name ${PROJECT_NAME} --image-ids imageTag=${CURR_BUILD_TAG} --query 'images[].imageManifest' --output text)
+    - MANIFEST=$(aws ecr batch-get-image --repository-name ${PROJECT_NAME} --image-ids imageTag=${CURR_BUILD_TAG} --query 'images[].imageManifest' --output text)
 #    - if [ -z ${CI_COMMIT_TAG+x} ]; then echo "Commit did not have a git tag."; else aws ecr put-image --repository-name ${PROJECT_NAME} --image-tag ${CI_COMMIT_TAG} --image-manifest "$MANIFEST"; fi
     # Describe pushed image
 #    - aws ecr describe-images --repository-name ${PROJECT_NAME} --query 'sort_by(imageDetails,& imagePushedAt)[-1]'
@@ -191,7 +191,7 @@ before_script:
     # Make current tag latest
 #    - aws ecr put-image --repository-name ${PROJECT_NAME} --image-tag ${ENV_LATEST_TAG} --image-manifest "$MANIFEST"
 #    - if [ -z ${CI_COMMIT_TAG+x} ]; then echo "Commit did not have a git tag."; else aws ecr-public put-image --repository-name ${PROJECT_NAME} --image-tag ${ENV_LATEST_TAG} --image-manifest "$MANIFEST"; fi
-    - aws ecr-public put-image --repository-name ${PROJECT_NAME} --image-tag ${ENV_LATEST_TAG} --image-manifest "$MANIFEST"
+    - aws ecr put-image --repository-name ${PROJECT_NAME} --image-tag ${ENV_LATEST_TAG} --image-manifest "$MANIFEST"
       -
 #    - if [ -z ${CI_COMMIT_TAG+x} ]; then echo "Commit did not have a git tag."; else docker run --rm -it amazon/aws-cli ecr put-image --repository-name ${PROJECT_NAME} --image-tag ${ENV_LATEST_TAG} --image-manifest "$MANIFEST"; fi
   only:
