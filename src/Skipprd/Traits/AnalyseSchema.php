@@ -399,6 +399,9 @@ trait AnalyseSchema
 
     static function is32bitSignedInt($value)
     {
+
+        $value = intval($value);
+        
         (int) @$value += 0; // handle leading zero
 
         $options = ['min_range' => -2147483647, 'max_range' => 2147483647];
@@ -409,6 +412,8 @@ trait AnalyseSchema
 
     static function is64bitSignedInt($value)
     {
+
+        $value = intval($value);
 
         (int) @$value += 0; // handle leading zero
 
