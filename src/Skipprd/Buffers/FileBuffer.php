@@ -26,7 +26,7 @@ class FileBuffer implements BufferInterface
     
     protected $memBuffs = [];
 
-    public $dataDir = '/data';
+    public $bufferDir = '';
 
     public $flushBytes = 1000000; # 1MB
 
@@ -42,6 +42,10 @@ class FileBuffer implements BufferInterface
     {
 
         $this->name = $name;
+
+        $this->bufferDir = Config::$dataDir . '/buffer';
+
+        @mkdir($this->bufferDir,0777, true);
 
         if (!empty($flushBytes)) {
             $this->flushBytes = $flushBytes;
@@ -78,7 +82,7 @@ class FileBuffer implements BufferInterface
 
         if (!empty($this->memBuffs[$name]['buffer'])) {
 
-            $filename = $this->dataDir . '/' . $name . '-buffer';
+            $filename = $this->bufferDir . '/' . $name . '-part';
 
             if (FileBuffer::lock($filename)) { // acquire an exclusive lock
 
@@ -292,7 +296,7 @@ class FileBuffer implements BufferInterface
     public function nextFile()
     {
 
-        $filenames = glob($this->dataDir . '/' . "$this->name*-finalised-*", GLOB_NOSORT);
+        $filenames = glob($this->bufferDir . '/' . "$this->name*-finalised-*", GLOB_NOSORT);
 
         usort( $filenames, function( $a, $b ) { return filemtime($a) - filemtime($b); } );
 
@@ -331,13 +335,13 @@ class FileBuffer implements BufferInterface
         $locked = false;
 
         // dir is more reliable than waiting for fstat on a file
-        if (@mkdir($name . '.lock',0777)) {
+        if (@mkdir($name . '.lock',0777, true)) {
             $locked = true;
         }
 
         while (!$locked && $block) {
 
-            if (@mkdir($name . '.lock',0777)) {
+            if (@mkdir($name . '.lock',0777, true)) {
                 $locked = true;
             } else {
 
@@ -350,7 +354,7 @@ class FileBuffer implements BufferInterface
 
     public function unlockAll() : void
     {
-        $file_list = glob($this->dataDir . '/' . $this->name . '*lock');
+        $file_list = glob($this->bufferDir . '/' . $this->name . '*lock');
 
         if (!empty($file_list)) {
 
@@ -412,7 +416,7 @@ class FileBuffer implements BufferInterface
 
     public function finalise($force = false) :void {
 
-        $file_list = glob($this->dataDir . '/*' . $this->name . '*-buffer*');
+        $file_list = glob($this->bufferDir . '/*' . $this->name . '*-part*');
 
         if (!empty($file_list)) {
 
@@ -437,7 +441,7 @@ class FileBuffer implements BufferInterface
 
                        if ($bytes >= $this->flushBytes || $updatedDelta > $this->flushFileSeconds || $force) {
 
-                           $newFilename = str_replace('buffer', 'finalised',
+                           $newFilename = str_replace('part', 'finalised',
                                $filename);
 
                            rename($filename, $newFilename . '-' . Helpers::randomPassword(32));
@@ -465,7 +469,7 @@ class FileBuffer implements BufferInterface
     public function bufferGetNoFiles() : int
     {
 
-        $file_list = glob($this->dataDir . '/' . "$this->name*");
+        $file_list = glob($this->bufferDir . '/' . "$this->name*");
 
         $i = 0;
 
@@ -492,7 +496,7 @@ class FileBuffer implements BufferInterface
 
         $bytes = 0;
 
-        $file_list = glob($this->dataDir . '/' . "$this->name*");
+        $file_list = glob($this->bufferDir . '/' . "$this->name*");
 
         if (!empty($file_list)) {
 
@@ -523,7 +527,7 @@ class FileBuffer implements BufferInterface
     public function bufferGetNoLines() : int
     {
 
-        $file_list = glob($this->dataDir . '/' . "$this->name*");
+        $file_list = glob($this->bufferDir . '/' . "$this->name*");
 
         $lines = 0;
 

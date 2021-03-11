@@ -76,7 +76,9 @@ class Config
 //        self::$mapping = [];
         self::$discoveredFieldOccurrence = [];
 
-        mkdir(self::$dataDir);
+        $dataDir = getenv('DATA_DIR');
+        self::$dataDir = (empty($dataDir)) ? self::$dataDir : $dataDir;
+        @mkdir(self::$dataDir);
 
         if (file_exists(self::$dataDir . '/skippr-state.json')) {
 
