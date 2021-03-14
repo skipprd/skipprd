@@ -139,7 +139,7 @@ FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-f9b2b780
 
 WORKDIR /usr/src/app
 
-COPY --from=builder /usr/src/encoded-app ./src
+COPY --from=builder /usr/src/encoded-app .
 
 CMD ["php", "src/run.php"]
                   
