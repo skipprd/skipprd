@@ -15,17 +15,6 @@ Interface DataSourcePluginInterface
 
     public function sync($pipelineJob);
 
-    public function doValidateConnection(array $config);
-
-    public function doValidateConfig(array $config);
-
-    public function doSave(array $config);
-
-    public function resetSourceOffsets();
-
     public function shutdown();
-
-    public function deletePlugin();
-
 
 }
