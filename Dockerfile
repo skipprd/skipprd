@@ -28,9 +28,12 @@ RUN ssh-keyscan gitlab.com >> ~/.ssh/known_hosts && chmod 644 ~/.ssh/known_hosts
 RUN install-php-extensions @composer
 
 WORKDIR /usr/src/app
-COPY ./src ./source
+COPY ./src ./src
+COPY ./composer.json ./
+COPY ./composer.lock ./
+
 #COPY --from=encoder /usr/src/encoded-app ./
-WORKDIR /usr/src/app/source
+#WORKDIR /usr/src/app
 
 # parallel download and install of dependencies
 #RUN composer global require hirak/prestissimo
@@ -48,7 +51,7 @@ RUN rm composer.*
 ##
 #FROM php:7.4-cli as encoder
 
-WORKDIR /usr/src/app
+#WORKDIR /usr/src/app
 
 COPY ./ioncube ./ioncube
 #COPY --from=builder /usr/src/app/src ./source/
@@ -88,46 +91,46 @@ RUN ioncube/ioncube_encoder.sh --activate && \
       --obfuscation-key "5L5GRWyUcVRljrWGJhSj4SJI3Uxb9Emx" \
       # copy by default, then only encode specific dirs
       --copy "@/*/" \
-      --encode "Skipprd/Buffers/" \
-      --encode "Skipprd/Commands/" \
-      --encode "Skipprd/Converters/" \
-      --encode "Skipprd/Serders/SerdersFactory.php" \
-      --encode "Skipprd/Serders/SerderAvro.php" \
-      --encode "Skipprd/Serders/SerderJson.php" \
-      --encode "Skipprd/Serders/SerderCsv.php" \
-      --encode "Skipprd/Traits/Config.php" \
-      --encode "Skipprd/Traits/Ingest.php" \
-      --encode "Skipprd/Traits/AnalyseSchema.php" \
-      --encode "Skipprd/SkipprPack.php" \
+      --encode "src/Skipprd/Buffers/" \
+      --encode "src/Skipprd/Commands/" \
+      --encode "src/Skipprd/Converters/" \
+      --encode "src/Skipprd/Serders/SerdersFactory.php" \
+      --encode "src/Skipprd/Serders/SerderAvro.php" \
+      --encode "src/Skipprd/Serders/SerderJson.php" \
+      --encode "src/Skipprd/Serders/SerderCsv.php" \
+      --encode "src/Skipprd/Traits/Config.php" \
+      --encode "src/Skipprd/Traits/Ingest.php" \
+      --encode "src/Skipprd/Traits/AnalyseSchema.php" \
+      --encode "src/Skipprd/SkipprPack.php" \
 #      --expire-in 180d \
-      ./source/ \
+      ./ \
       -o /usr/src/encoded-app/
 #      --deactivate
 
 
-RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/Skipprd/Buffers/FileBuffer.php
-RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/Skipprd/Buffers/ChunkedBuffer.php
+RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Buffers/FileBuffer.php
+RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Buffers/ChunkedBuffer.php
 
-RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/Skipprd/Commands/PipelineCommand.php
+RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Commands/PipelineCommand.php
 
-RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/Skipprd/Converters/AvroHiveSchemaConverter.php
-RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/Skipprd/Converters/AvroParquetSchemaConverter.php
-RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/Skipprd/Converters/SkipprAvroSchemaConverter.php
+RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Converters/AvroHiveSchemaConverter.php
+RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Converters/AvroParquetSchemaConverter.php
+RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Converters/SkipprAvroSchemaConverter.php
 
-RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/Skipprd/Serders/SerdersFactory.php
-RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/Skipprd/Serders/SerderAvro.php
-RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/Skipprd/Serders/SerderJson.php
-RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/Skipprd/Serders/SerderCsv.php
+RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Serders/SerdersFactory.php
+RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Serders/SerderAvro.php
+RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Serders/SerderJson.php
+RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Serders/SerderCsv.php
 
-RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/Skipprd/Traits/Ingest.php
-RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/Skipprd/Traits/AnalyseSchema.php
-RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/Skipprd/Traits/Config.php
+RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Traits/Ingest.php
+RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Traits/AnalyseSchema.php
+RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Traits/Config.php
 
-RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/Skipprd/SkipprPack.php
+RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/SkipprPack.php
 
-#RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/Skipprd/Services/AvroSubPub/AvroProducer.php
-#RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/Skipprd/Services/AvroSubPub/CachedSchemaRegistryClient.php
-#RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/Skipprd/Services/AvroSubPub/MessageSerializer.php
+#RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Services/AvroSubPub/AvroProducer.php
+#RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Services/AvroSubPub/CachedSchemaRegistryClient.php
+#RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Services/AvroSubPub/MessageSerializer.php
 
 RUN df -h
 

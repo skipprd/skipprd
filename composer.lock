@@ -4,20 +4,20 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "af40baec5726019e63b0360d96d99219",
+    "content-hash": "860307e42e097f3ff65f1709e5211301",
     "packages": [
         {
             "name": "aws/aws-sdk-php",
-            "version": "3.173.26",
+            "version": "3.173.28",
             "source": {
                 "type": "git",
                 "url": "https://github.com/aws/aws-sdk-php.git",
-                "reference": "cba5301aabe7f8bfac60a1ac2710b3fb25512d6c"
+                "reference": "593baa5930896bb443c437032daf4016e1e3878d"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/aws/aws-sdk-php/zipball/cba5301aabe7f8bfac60a1ac2710b3fb25512d6c",
-                "reference": "cba5301aabe7f8bfac60a1ac2710b3fb25512d6c",
+                "url": "https://api.github.com/repos/aws/aws-sdk-php/zipball/593baa5930896bb443c437032daf4016e1e3878d",
+                "reference": "593baa5930896bb443c437032daf4016e1e3878d",
                 "shasum": ""
             },
             "require": {
@@ -92,9 +92,9 @@
             "support": {
                 "forum": "https://forums.aws.amazon.com/forum.jspa?forumID=80",
                 "issues": "https://github.com/aws/aws-sdk-php/issues",
-                "source": "https://github.com/aws/aws-sdk-php/tree/3.173.26"
+                "source": "https://github.com/aws/aws-sdk-php/tree/3.173.28"
             },
-            "time": "2021-03-10T19:18:24+00:00"
+            "time": "2021-03-12T19:29:55+00:00"
         },
         {
             "name": "guzzlehttp/guzzle",
@@ -919,7 +919,7 @@
             "source": {
                 "type": "git",
                 "url": "git@gitlab.com:paulhudson/data-output-aws-athena.git",
-                "reference": "3ebf78787f48e17b4521121e0ee82c27be435b7d"
+                "reference": "3ef25c769f9ddbf9855bb83844a97a49e981b7fe"
             },
             "require": {
                 "aws/aws-sdk-php": "^3.173"
@@ -943,7 +943,7 @@
                 }
             ],
             "description": "AWS Athena data output for skippr.io",
-            "time": "2021-03-11T14:24:52+00:00"
+            "time": "2021-03-12T22:20:42+00:00"
         },
         {
             "name": "skipprd/data-output-file",
@@ -951,7 +951,7 @@
             "source": {
                 "type": "git",
                 "url": "git@gitlab.com:paulhudson/data-output-file.git",
-                "reference": "c000b3bf76ad7661033425b36291f9e2a5a566cd"
+                "reference": "a980ef3dc21fd692a3549408ac8342bc6db97eb3"
             },
             "type": "project",
             "autoload": {
@@ -972,7 +972,7 @@
                 }
             ],
             "description": "File data output for skippr.io",
-            "time": "2021-03-11T14:21:27+00:00"
+            "time": "2021-03-12T22:31:42+00:00"
         },
         {
             "name": "skipprd/data-output-kafka",
@@ -980,7 +980,7 @@
             "source": {
                 "type": "git",
                 "url": "git@gitlab.com:paulhudson/data-output-kafka.git",
-                "reference": "5ce3977533347bf483fdfa8247afe31a1e8f1b74"
+                "reference": "4a2ba3308b1496ebb69ca891fdc41eb2b108002f"
             },
             "require": {
                 "superbalist/php-pubsub-kafka": "v3.1.0",
@@ -1008,7 +1008,7 @@
                 }
             ],
             "description": "Kafka data output for skippr.io",
-            "time": "2021-02-25T15:04:49+00:00"
+            "time": "2021-03-12T22:25:49+00:00"
         },
         {
             "name": "skipprd/data-output-s3-bucket",
@@ -1016,7 +1016,7 @@
             "source": {
                 "type": "git",
                 "url": "git@gitlab.com:paulhudson/data-output-s3-bucket.git",
-                "reference": "be46f037ae60089b6167dc7b20610a297dcb1290"
+                "reference": "f6585dadd3b919fd89a7584e9e2c91ec59e4be37"
             },
             "require-dev": {
                 "aws/aws-sdk-php": "^3.173",
@@ -1041,7 +1041,7 @@
                 }
             ],
             "description": "S3 bucket data output for skippr.io",
-            "time": "2021-03-11T14:23:14+00:00"
+            "time": "2021-03-12T22:28:20+00:00"
         },
         {
             "name": "skipprd/data-source-file",
@@ -1081,7 +1081,7 @@
             "source": {
                 "type": "git",
                 "url": "git@gitlab.com:paulhudson/data-source-kafka.git",
-                "reference": "6ecd1e691e04ac165794b50527277ecf601aa348"
+                "reference": "cc31453a97a7a81fa9dbccd4ff5df76866861f2c"
             },
             "require-dev": {
                 "kwn/php-rdkafka-stubs": "^2.0.4"
@@ -1105,7 +1105,7 @@
                 }
             ],
             "description": "Kafka data source for skippr.io",
-            "time": "2021-02-24T14:51:38+00:00"
+            "time": "2021-03-12T22:59:50+00:00"
         },
         {
             "name": "skipprd/data-source-mqtt-subscriber",
@@ -1146,7 +1146,7 @@
             "source": {
                 "type": "git",
                 "url": "git@gitlab.com:paulhudson/data-source-s3.git",
-                "reference": "3797032dd5d6f26fa94528fec5a5cfe984eea80d"
+                "reference": "6c18c3ae71e061738c43e85300a777a33026d8b4"
             },
             "require": {
                 "aws/aws-sdk-php": "^3.173",
@@ -1171,7 +1171,7 @@
                 }
             ],
             "description": "S3 data source for skippr.io",
-            "time": "2021-02-26T14:30:48+00:00"
+            "time": "2021-03-12T23:04:55+00:00"
         },
         {
             "name": "skipprd/data-source-s3-demo",
@@ -1179,7 +1179,7 @@
             "source": {
                 "type": "git",
                 "url": "git@gitlab.com:paulhudson/data-source-s3-demo.git",
-                "reference": "4d69c52ea5681198a308c5f9061c37d13b7e6311"
+                "reference": "9c2d6a2f80ce569d372a7f8c5afa7deb8fb692d5"
             },
             "type": "project",
             "autoload": {
@@ -1200,7 +1200,7 @@
                 }
             ],
             "description": "S3 Demo data source for skippr.io",
-            "time": "2021-02-24T14:54:07+00:00"
+            "time": "2021-03-12T23:07:19+00:00"
         },
         {
             "name": "skipprd/data-source-salesforce",
