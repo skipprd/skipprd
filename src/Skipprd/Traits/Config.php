@@ -8,6 +8,7 @@
 
 namespace Skipprd\Traits;
 
+
 use Skipprd\Converters\SkipprAvroSchemaConverter;
 
 class Config
@@ -105,7 +106,7 @@ class Config
 
         self::$avroSchema = self::buildAvroSchema();
 
-        self::$eventPath = getenv('EVENT_PATH');
+        self::$eventPath = getenv('DATA_SOURCE_EVENT_PATH');
 
         self::$sourceFormat = getenv('DATA_SOURCE_FORMAT');
         self::$outputFormat = getenv('DATA_OUTPUT_FORMAT');
@@ -116,7 +117,7 @@ class Config
 //        self::$analysing = (bool) getenv('ANALYSING');
         self::$analysing = (empty($avroArr)) ? true : false;
 
-        self::$systemUserApiToken = getenv('SYSTEM_USER_API_TOKEN');
+        self::$systemUserApiToken = getenv('SCHEMA_API_TOKEN');
 
         // Although we may be done analysing, we don't want to override candidate.
         // They should remain in the option list even if the user has rejected them.
@@ -230,7 +231,7 @@ class Config
         file_put_contents(self::$dataDir . '/skippr-state.json', json_encode(Config::$discoveredFieldOccurrence));
 
         $uri = getenv('SCHEMA_REGISTRY');
-
+        
         if (!empty($uri)) {
 
             $url = "http://$uri/";
@@ -239,7 +240,7 @@ class Config
             $client = new \GuzzleHttp\Client([
                 'base_uri' => $url,
                 'headers' => [
-                    'Authorization' => "Bearer " . getenv('API_TOKEN')
+                    'Authorization' => "Bearer " . getenv('SCHEMA_API_TOKEN')
                 ]
             ]);
 
