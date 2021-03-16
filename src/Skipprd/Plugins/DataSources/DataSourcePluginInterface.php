@@ -15,6 +15,10 @@ Interface DataSourcePluginInterface
 
     public function sync($pipelineJob);
 
+    public function doValidateConnection();
+
+    public function doValidateConfig();
+
     public function shutdown();
 
 }
