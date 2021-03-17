@@ -181,12 +181,12 @@ class PipelineCommand
         /**
          * Dead Letter Plugin
          */
-        $deadLetterPluginName = self::getenv('DEAD_LETTER_PLUGIN_NAME');
+        $deadLetterPluginName = Config::getenv('DEAD_LETTER_PLUGIN_NAME');
 
         if (!empty($deadLetterPluginName)) {
 
             $config = [];
-            $envs = self::getenv();
+            $envs = Config::getenv();
 
             foreach ($envs as $key => $value) {
                 if (strpos($key, 'DEAD_LETTER') > -1) {
@@ -212,18 +212,18 @@ class PipelineCommand
         $this->deadletterPlugin->buffer->setSerde('json');
         
 
-        if (self::getenv('JOB_NAME') == 'deadletters') {
+        if (Config::getenv('JOB_NAME') == 'deadletters') {
 
             Config::$enableDeadLetters = false;
 
         }
 
-        $pluginName = self::getenv('DATA_SOURCE_PLUGIN_NAME');
+        $pluginName = Config::getenv('DATA_SOURCE_PLUGIN_NAME');
 
         $this->inputPlugin = PluginFactory::factory('data_source', $pluginName, $this->outputBuffer);
 
 
-        $pluginName = self::getenv('DATA_OUTPUT_PLUGIN_NAME');
+        $pluginName = Config::getenv('DATA_OUTPUT_PLUGIN_NAME');
 
         if (!empty($pluginName)) {
 
@@ -305,11 +305,11 @@ class PipelineCommand
 
         $this->statsd = new Statsd();
 
-        if (self::getenv('STATSD_HOST') && self::getenv('STATSD_PORT')) {
+        if (Config::getenv('STATSD_HOST') && Config::getenv('STATSD_PORT')) {
 
             $this->statsd->configure([
-                'host' => self::getenv('STATSD_HOST'),
-                'port' => self::getenv('STATSD_PORT'),
+                'host' => Config::getenv('STATSD_HOST'),
+                'port' => Config::getenv('STATSD_PORT'),
 //            'namespace' => 'skippr'
             ]);
         }
