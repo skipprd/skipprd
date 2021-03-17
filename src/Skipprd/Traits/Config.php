@@ -108,8 +108,8 @@ class Config
 
         self::$eventPath = getenv('DATA_SOURCE_EVENT_PATH');
 
-        self::$sourceFormat = getenv('DATA_SOURCE_FORMAT');
-        self::$outputFormat = getenv('DATA_OUTPUT_FORMAT');
+        self::$sourceFormat = self::getenv('DATA_SOURCE_FORMAT', '');
+        self::$outputFormat = self::getenv('DATA_OUTPUT_FORMAT', 'json');
 
         self::$entityNames = [];
         self::$timeFields = [];
