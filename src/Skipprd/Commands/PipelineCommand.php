@@ -186,7 +186,7 @@ class PipelineCommand
         if (!empty($deadLetterPluginName)) {
 
             $config = [];
-            $envs = Config::getenv();
+            $envs = getenv();
 
             foreach ($envs as $key => $value) {
                 if (strpos($key, 'DEAD_LETTER') > -1) {
