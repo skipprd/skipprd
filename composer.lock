@@ -836,7 +836,7 @@
             "source": {
                 "type": "git",
                 "url": "git@gitlab.com:paulhudson/data-output-aws-athena.git",
-                "reference": "a136245c0224ffbddbb2542f7c6008611a095859"
+                "reference": "113fcdd33c9abf85d81653e77e2293a8136861bd"
             },
             "require": {
                 "aws/aws-sdk-php": "^3.173"
@@ -860,7 +860,7 @@
                 }
             ],
             "description": "AWS Athena data output for skippr.io",
-            "time": "2021-03-16T15:15:02+00:00"
+            "time": "2021-03-17T13:57:41+00:00"
         },
         {
             "name": "skipprd/data-output-file",
@@ -933,7 +933,7 @@
             "source": {
                 "type": "git",
                 "url": "git@gitlab.com:paulhudson/data-output-s3-bucket.git",
-                "reference": "f7340aa84019a79518658c1478e84284e2566c28"
+                "reference": "cf319177c84515b97f00bf66ec723b232bda3f7f"
             },
             "require-dev": {
                 "aws/aws-sdk-php": "^3.173",
@@ -958,7 +958,7 @@
                 }
             ],
             "description": "S3 bucket data output for skippr.io",
-            "time": "2021-03-16T15:17:45+00:00"
+            "time": "2021-03-17T13:58:13+00:00"
         },
         {
             "name": "skipprd/data-source-file",
@@ -2411,16 +2411,16 @@
         },
         {
             "name": "phpspec/prophecy",
-            "version": "1.12.2",
+            "version": "1.13.0",
             "source": {
                 "type": "git",
                 "url": "https://github.com/phpspec/prophecy.git",
-                "reference": "245710e971a030f42e08f4912863805570f23d39"
+                "reference": "be1996ed8adc35c3fd795488a653f4b518be70ea"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/phpspec/prophecy/zipball/245710e971a030f42e08f4912863805570f23d39",
-                "reference": "245710e971a030f42e08f4912863805570f23d39",
+                "url": "https://api.github.com/repos/phpspec/prophecy/zipball/be1996ed8adc35c3fd795488a653f4b518be70ea",
+                "reference": "be1996ed8adc35c3fd795488a653f4b518be70ea",
                 "shasum": ""
             },
             "require": {
@@ -2472,9 +2472,9 @@
             ],
             "support": {
                 "issues": "https://github.com/phpspec/prophecy/issues",
-                "source": "https://github.com/phpspec/prophecy/tree/1.12.2"
+                "source": "https://github.com/phpspec/prophecy/tree/1.13.0"
             },
-            "time": "2020-12-19T10:15:11+00:00"
+            "time": "2021-03-17T13:42:18+00:00"
         },
         {
             "name": "phpunit/php-code-coverage",
