@@ -228,6 +228,11 @@ class PipelineCommand
         if (!empty($pluginName)) {
 
             $this->outputPlugin = PluginFactory::factory('data_output', $pluginName, $this->outputBuffer);
+
+        } else {
+
+            $this->outputPlugin = PluginFactory::factory('data_output', 'file', $this->outputBuffer);
+
         }
 
     }
