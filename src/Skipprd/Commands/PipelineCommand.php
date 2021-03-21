@@ -308,6 +308,7 @@ class PipelineCommand
 
         Config::getConfig();
 
+        // @todo - factory stats interface (statsd + skippr enterpise http endpoint)
         $this->statsd = new Statsd();
 
         if (Config::getenv('STATSD_HOST') && Config::getenv('STATSD_PORT')) {
@@ -325,7 +326,7 @@ class PipelineCommand
 
 //        $this->pipelineModel = IngestJob::where('id', $this->pipelineId)->get()->first();
 
-        // Update Job Status
+        // Update job status in Skippr Enterprise
         if (class_exists(PodsStatus::class)) {
             PodsStatus::dispatch();
         }
@@ -351,6 +352,7 @@ class PipelineCommand
     }
 
     /**
+     * @deprecated - @todo - we'll always pass the expected input format
      * Detect serialisation
      * Might be multiline json, or CSV. Pick enough rows to analyse/
      * Too any lines will cause delay and possibly OOM
@@ -551,6 +553,7 @@ class PipelineCommand
     {
 
         // Don't dead letter message, if running the dead letter job
+        // it will be skipped and so just remain in the queue
         if (Config::$enableDeadLetters) {
 
             $deadLetterTopic = 'raw_' . Config::$tenantId  . '_' . Config::$pipelineName .'_deadletter';
@@ -597,6 +600,7 @@ class PipelineCommand
 
                 if (!Config::$enableDeadLetters) {
 
+                    // @todo - deprecate SkipprPack for Apache Arrow
                     $sp = new SkipprPack($payload);
                     $payload = $sp->decodeRecord();
 //                $offset = $sp->decodeOffset();
@@ -643,7 +647,7 @@ class PipelineCommand
                 $this->j = 0;
 
 //                $this->pipelineModel->save();
-                // @todo - implement state storage
+                // @todo - implement state/mapping storage
                 
             }
         }
@@ -654,6 +658,8 @@ class PipelineCommand
     public function process() : void
     {
 
+        // @todo - decide if we'll support multi-threading and if so for which plugins???
+        
         $offset = '';
 
         $bufferName = Config::$enableDeadLetters ? 'input' : 'deadletter';
@@ -709,6 +715,7 @@ class PipelineCommand
 //
 //        } else {
 
+        // @todo - initialise in class global scope
             $serder = SerdersFactory::factory(Config::$sourceFormat);
             $sourceMessages = $serder->deserialize($payload);
 
@@ -724,7 +731,7 @@ class PipelineCommand
 
     public function parse(array $payload, string $offset) {
 
-        $unwrappedMessages = $this->unwrap($payload); //
+        $unwrappedMessages = $this->unwrap($payload);
 
         foreach ($unwrappedMessages as $unwrappedMessage) {  // outer array
 
