@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "eeb57fde456fe8eaf9f7f756a2cfa882",
+    "content-hash": "d8b30b9b39b887ecd65f6322db2b5168",
     "packages": [
         {
             "name": "aws/aws-sdk-php",
@@ -829,6 +829,61 @@
                 "source": "https://github.com/ralouphie/getallheaders/tree/develop"
             },
             "time": "2019-03-08T08:55:37+00:00"
+        },
+        {
+            "name": "segmentio/analytics-php",
+            "version": "1.7.0",
+            "source": {
+                "type": "git",
+                "url": "https://github.com/segmentio/analytics-php.git",
+                "reference": "e0aef0001b6d3a375341888b7bb98e34de62ecae"
+            },
+            "dist": {
+                "type": "zip",
+                "url": "https://api.github.com/repos/segmentio/analytics-php/zipball/e0aef0001b6d3a375341888b7bb98e34de62ecae",
+                "reference": "e0aef0001b6d3a375341888b7bb98e34de62ecae",
+                "shasum": ""
+            },
+            "require": {
+                "php": ">=5.3.3"
+            },
+            "require-dev": {
+                "overtrue/phplint": "^1.1",
+                "phpunit/phpunit": "~4.0",
+                "squizlabs/php_codesniffer": "^3.3"
+            },
+            "bin": [
+                "bin/analytics"
+            ],
+            "type": "library",
+            "autoload": {
+                "files": [
+                    "lib/Segment.php"
+                ]
+            },
+            "notification-url": "https://packagist.org/downloads/",
+            "license": [
+                "MIT"
+            ],
+            "authors": [
+                {
+                    "name": "Segment.io <friends@segment.com>",
+                    "homepage": "https://segment.com/"
+                }
+            ],
+            "description": "Segment Analytics PHP Library",
+            "homepage": "https://segment.com/libraries/php",
+            "keywords": [
+                "analytics",
+                "analytics.js",
+                "segment",
+                "segmentio"
+            ],
+            "support": {
+                "issues": "https://github.com/segmentio/analytics-php/issues",
+                "source": "https://github.com/segmentio/analytics-php/tree/1.7.0"
+            },
+            "time": "2021-03-11T21:29:11+00:00"
         },
         {
             "name": "skipprd/data-output-aws-athena",

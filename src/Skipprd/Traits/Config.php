@@ -10,15 +10,18 @@ namespace Skipprd\Traits;
 
 
 use Skipprd\Converters\SkipprAvroSchemaConverter;
+use Skipprd\Helpers;
 
 class Config
 {
 
+    public static $segmentKey = 'RnewwWgZXQjl9xofcjGJkirCH0VswBPd';
+
     public static $dataDir = '/data';
 
-    public static $pipelineName = 'pipeline';
+    public static $pipelineName = '';
 
-    public static $tenantId = 'skippr';
+    public static $tenantId = '';
 
     public static $mode = 'sync';
 
@@ -74,13 +77,13 @@ class Config
     public static function getConfig()
     {
 //        self::$pipelineId = self::getenv('PIPELINE_ID');
-        self::$pipelineName = self::getenv('PIPELINE_NAME', self::$pipelineName);
-        self::$tenantId = self::getenv('TENANT_ID', self::$tenantId);
-
 
         $avroArr = [];
 //        self::$mapping = [];
         self::$discoveredFieldOccurrence = [];
+
+        $state['pipeline_name'] = Helpers::randomPassword(16);
+        $state['tenant_id'] = Helpers::randomPassword(16);
 
         $dataDir = self::getenv('DATA_DIR');
         self::$dataDir = (empty($dataDir)) ? self::$dataDir : $dataDir;
@@ -88,7 +91,9 @@ class Config
 
         if (file_exists(self::$dataDir . '/skippr-state.json')) {
 
-            self::$discoveredFieldOccurrence = json_decode(file_get_contents(self::$dataDir . '/skippr-state.json'), true);
+            $state = json_decode(file_get_contents(self::$dataDir . '/skippr-state.json'), true);
+
+            self::$discoveredFieldOccurrence = $state['mapping'];
 
 //        Config::$discoveredFieldOccurrence = (empty($configYml['field_yml'])) ? [] : $configYml['field_yml'];
 
@@ -97,8 +102,9 @@ class Config
 
             $avroArr = self::schemaMerge(self::$specialFieldsMapping, $avroArr);
         }
-        
 
+        self::$pipelineName = self::getenv('PIPELINE_NAME', $state['pipeline_name']);
+        self::$tenantId = self::getenv('TENANT_ID', $state['tenant_id']);
 
         self::$schema['fields'] = [];
 
@@ -227,8 +233,12 @@ class Config
 //            'analysing' => Config::$analysing,
 //        ];
 
+        $state['mapping'] = Config::$discoveredFieldOccurrence;
+        $state['pipeline_name'] = Config::$pipelineName;
+        $state['tenant_id'] = Config::$tenantId;
 
-        file_put_contents(self::$dataDir . '/skippr-state.json', json_encode(Config::$discoveredFieldOccurrence));
+
+        file_put_contents(self::$dataDir . '/skippr-state.json', json_encode($state));
 
         $uri = self::getenv('SCHEMA_REGISTRY');
         

@@ -26,6 +26,7 @@ use Skipprd\Traits\Ingest;
 use Skipprd\Serders\SerdersFactory;
 use Skipprd\Traits\Config;
 use League\StatsD\Client as Statsd;
+use Segment;
 
 class PipelineCommand
 {
@@ -308,6 +309,15 @@ class PipelineCommand
 
         Config::getConfig();
 
+        Segment::init(Config::$segmentKey);
+
+        Segment::identify([
+            "userId" => hash('sha256', Config::$tenantId),
+            "traits" => [
+                "pipeline_name" => hash('sha256', Config::$pipelineName),
+            ]
+        ]);
+
         // @todo - factory stats interface (statsd + skippr enterpise http endpoint)
         $this->statsd = new Statsd();
 
@@ -439,7 +449,6 @@ class PipelineCommand
             $pipelineName = Config::$pipelineName;
 
             $this->statsd->increment("ingest.msgs.current.$tenantId.$pipelineName", 1);
-
 
 //            $this->statsd->increment("ingest.msgs.current.{Config::$tenantId }.{Config::$pipelineName}", 1);
 
@@ -1018,8 +1027,8 @@ class PipelineCommand
           // @todo - implement state storage
 
         Registry::skipprd()->info("Ingested " . $this->entries . " messages");
-        Registry::skipprd()->info("Queued " . $this->deadLetters . " dead letters");
-        
+        Registry::skipprd()->info("Dead Letters " . $this->deadLetters . " dead letters");
+
 //        $this->updateDeadLetterQueueSize();
 
         if (!empty(Config::$discoveredFieldOccurrence)) {
@@ -1046,10 +1055,24 @@ class PipelineCommand
             PodsStatus::dispatch();
         }
 
-        Registry::skipprd()->info("Graceful shutdown complete, bye");
+        $inputName = Config::getenv('DATA_SOURCE_PLUGIN_NAME');
+        $outputName = Config::getenv('DATA_OUTPUT_PLUGIN_NAME');
 
-        Registry::skipprd()->info("totals: " . $this->outputPlugin->buffer->rows);
-        Registry::skipprd()->info("totals: " . $this->entries);
+        Segment::track(array(
+            "userId" => hash('sha256', Config::$tenantId),
+            'event' => 'shutdown',
+            "properties" => [
+                "msgs_total" => $this->entries,
+                "deadletters_total" => $this->deadLetters,
+                "input_plugin" => $inputName,
+                "output_plugin" => $outputName,
+                "input_format" => Config::getenv('DATA_SOURCE_FORMAT'),
+                "output_format" => Config::getenv('DATA_OUTPUT_FORMAT'),
+                "skippr_version" => Config::getenv('SKIPPR_BUILD_VERSION'),
+            ]
+        ));
+
+        Registry::skipprd()->info("Graceful shutdown complete, bye");
 
 //        $this->delete();
         exit(0);
