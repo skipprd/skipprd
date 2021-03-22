@@ -1069,6 +1069,8 @@ class PipelineCommand
                 "input_format" => Config::getenv('DATA_SOURCE_FORMAT'),
                 "output_format" => Config::getenv('DATA_OUTPUT_FORMAT'),
                 "skippr_version" => Config::getenv('SKIPPR_BUILD_VERSION'),
+                "tenant_id" => hash('sha256', Config::$tenantId),
+                "pipeline_name" => hash('sha256', Config::$pipelineName),
             ]
         ));
 
