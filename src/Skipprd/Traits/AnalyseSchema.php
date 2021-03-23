@@ -191,6 +191,12 @@ trait AnalyseSchema
                 $logicalType = $this->getLogicalType($sub_field, $sub_value);
 
                 $typeCount[$logicalType] = 'hit';
+
+                // @todo - check if types are castable to same primitive, then could be array
+                // e.g. [1,2,3] may discover as schema [bool, int, int] and therefore
+                // parent field resolve type as `record`.
+                // When in fact we'd want to discover schema as [int, int int] and
+                // parent field resolve as `array`.
             }
 
             foreach ($value as $sub_field => $sub_value) {
@@ -199,7 +205,6 @@ trait AnalyseSchema
                 // Must be a record then.
                 if (count($typeCount) > 1) {
 
-                    // @todo - check if types is castable, then could be array
                     $dataType = 'record';
 
                     // Array of Arrays? Use a Record for the parent.

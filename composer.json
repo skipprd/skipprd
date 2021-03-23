@@ -91,7 +91,8 @@
     "league/statsd": "^1.5",
     "monolog/monolog": "^1.12",
     "aws/aws-sdk-php": "^3.173",
-    "guzzlehttp/guzzle": "^6.3"
+    "guzzlehttp/guzzle": "^6.3",
+    "segmentio/analytics-php": "^1.7"
   },
   "require-dev": {
     "fzaninotto/faker": "~1.4",

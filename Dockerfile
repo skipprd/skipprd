@@ -137,6 +137,9 @@ RUN df -h
 FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-f9b2b780
 #FROM skippr-php:ubuntu
 
+ARG SKIPPR_BUILD_VERSION
+RUN echo "export SKIPPR_BUILD_VERSION=${SKIPPR_BUILD_VERSION}" > /etc/profile.d/skpr_version.sh
+
 WORKDIR /usr/src/app
 
 COPY --from=builder /usr/src/encoded-app .

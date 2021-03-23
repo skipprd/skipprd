@@ -26,6 +26,7 @@ use Skipprd\Traits\Ingest;
 use Skipprd\Serders\SerdersFactory;
 use Skipprd\Traits\Config;
 use League\StatsD\Client as Statsd;
+use Segment;
 
 class PipelineCommand
 {
@@ -181,7 +182,7 @@ class PipelineCommand
         /**
          * Dead Letter Plugin
          */
-        $deadLetterPluginName = getenv('DEAD_LETTER_PLUGIN_NAME');
+        $deadLetterPluginName = Config::getenv('DEAD_LETTER_PLUGIN_NAME');
 
         if (!empty($deadLetterPluginName)) {
 
@@ -212,22 +213,27 @@ class PipelineCommand
         $this->deadletterPlugin->buffer->setSerde('json');
         
 
-        if (getenv('JOB_NAME') == 'deadletters') {
+        if (Config::getenv('JOB_NAME') == 'deadletters') {
 
             Config::$enableDeadLetters = false;
 
         }
 
-        $pluginName = getenv('DATA_SOURCE_PLUGIN_NAME');
+        $pluginName = Config::getenv('DATA_SOURCE_PLUGIN_NAME');
 
         $this->inputPlugin = PluginFactory::factory('data_source', $pluginName, $this->outputBuffer);
 
 
-        $pluginName = getenv('DATA_OUTPUT_PLUGIN_NAME');
+        $pluginName = Config::getenv('DATA_OUTPUT_PLUGIN_NAME');
 
         if (!empty($pluginName)) {
 
             $this->outputPlugin = PluginFactory::factory('data_output', $pluginName, $this->outputBuffer);
+
+        } else {
+
+            $this->outputPlugin = PluginFactory::factory('data_output', 'file', $this->outputBuffer);
+
         }
 
     }
@@ -303,13 +309,23 @@ class PipelineCommand
 
         Config::getConfig();
 
+        Segment::init(Config::$segmentKey);
+
+        Segment::identify([
+            "userId" => hash('sha256', Config::$tenantId),
+            "traits" => [
+                "pipeline_name" => hash('sha256', Config::$pipelineName),
+            ]
+        ]);
+
+        // @todo - factory stats interface (statsd + skippr enterpise http endpoint)
         $this->statsd = new Statsd();
 
-        if (getenv('STATSD_HOST') && getenv('STATSD_PORT')) {
+        if (Config::getenv('STATSD_HOST') && Config::getenv('STATSD_PORT')) {
 
             $this->statsd->configure([
-                'host' => getenv('STATSD_HOST'),
-                'port' => getenv('STATSD_PORT'),
+                'host' => Config::getenv('STATSD_HOST'),
+                'port' => Config::getenv('STATSD_PORT'),
 //            'namespace' => 'skippr'
             ]);
         }
@@ -320,7 +336,7 @@ class PipelineCommand
 
 //        $this->pipelineModel = IngestJob::where('id', $this->pipelineId)->get()->first();
 
-        // Update Job Status
+        // Update job status in Skippr Enterprise
         if (class_exists(PodsStatus::class)) {
             PodsStatus::dispatch();
         }
@@ -346,6 +362,7 @@ class PipelineCommand
     }
 
     /**
+     * @deprecated - @todo - we'll always pass the expected input format
      * Detect serialisation
      * Might be multiline json, or CSV. Pick enough rows to analyse/
      * Too any lines will cause delay and possibly OOM
@@ -432,7 +449,6 @@ class PipelineCommand
             $pipelineName = Config::$pipelineName;
 
             $this->statsd->increment("ingest.msgs.current.$tenantId.$pipelineName", 1);
-
 
 //            $this->statsd->increment("ingest.msgs.current.{Config::$tenantId }.{Config::$pipelineName}", 1);
 
@@ -546,6 +562,7 @@ class PipelineCommand
     {
 
         // Don't dead letter message, if running the dead letter job
+        // it will be skipped and so just remain in the queue
         if (Config::$enableDeadLetters) {
 
             $deadLetterTopic = 'raw_' . Config::$tenantId  . '_' . Config::$pipelineName .'_deadletter';
@@ -592,6 +609,7 @@ class PipelineCommand
 
                 if (!Config::$enableDeadLetters) {
 
+                    // @todo - deprecate SkipprPack for Apache Arrow
                     $sp = new SkipprPack($payload);
                     $payload = $sp->decodeRecord();
 //                $offset = $sp->decodeOffset();
@@ -638,7 +656,7 @@ class PipelineCommand
                 $this->j = 0;
 
 //                $this->pipelineModel->save();
-                // @todo - implement state storage
+                // @todo - implement state/mapping storage
                 
             }
         }
@@ -649,6 +667,8 @@ class PipelineCommand
     public function process() : void
     {
 
+        // @todo - decide if we'll support multi-threading and if so for which plugins???
+        
         $offset = '';
 
         $bufferName = Config::$enableDeadLetters ? 'input' : 'deadletter';
@@ -704,6 +724,7 @@ class PipelineCommand
 //
 //        } else {
 
+        // @todo - initialise in class global scope
             $serder = SerdersFactory::factory(Config::$sourceFormat);
             $sourceMessages = $serder->deserialize($payload);
 
@@ -719,7 +740,7 @@ class PipelineCommand
 
     public function parse(array $payload, string $offset) {
 
-        $unwrappedMessages = $this->unwrap($payload); //
+        $unwrappedMessages = $this->unwrap($payload);
 
         foreach ($unwrappedMessages as $unwrappedMessage) {  // outer array
 
@@ -1006,8 +1027,8 @@ class PipelineCommand
           // @todo - implement state storage
 
         Registry::skipprd()->info("Ingested " . $this->entries . " messages");
-        Registry::skipprd()->info("Queued " . $this->deadLetters . " dead letters");
-        
+        Registry::skipprd()->info("Dead Letters " . $this->deadLetters . " dead letters");
+
 //        $this->updateDeadLetterQueueSize();
 
         if (!empty(Config::$discoveredFieldOccurrence)) {
@@ -1034,10 +1055,26 @@ class PipelineCommand
             PodsStatus::dispatch();
         }
 
-        Registry::skipprd()->info("Graceful shutdown complete, bye");
+        $inputName = Config::getenv('DATA_SOURCE_PLUGIN_NAME');
+        $outputName = Config::getenv('DATA_OUTPUT_PLUGIN_NAME');
 
-        Registry::skipprd()->info("totals: " . $this->outputPlugin->buffer->rows);
-        Registry::skipprd()->info("totals: " . $this->entries);
+        Segment::track(array(
+            "userId" => hash('sha256', Config::$tenantId),
+            'event' => 'shutdown',
+            "properties" => [
+                "msgs_total" => $this->entries,
+                "deadletters_total" => $this->deadLetters,
+                "input_plugin" => $inputName,
+                "output_plugin" => $outputName,
+                "input_format" => Config::getenv('DATA_SOURCE_FORMAT'),
+                "output_format" => Config::getenv('DATA_OUTPUT_FORMAT'),
+                "skippr_version" => Config::getenv('SKIPPR_BUILD_VERSION'),
+                "tenant_id" => hash('sha256', Config::$tenantId),
+                "pipeline_name" => hash('sha256', Config::$pipelineName),
+            ]
+        ));
+
+        Registry::skipprd()->info("Graceful shutdown complete, bye");
 
 //        $this->delete();
         exit(0);
