@@ -91,7 +91,7 @@ before_script:
 #    - docker login --username AWS --password $(aws ecr-public get-login-password --region us-east-1) public.ecr.aws
     - docker login --username AWS --password $(aws ecr get-login-password --region $AWS_REGION) 536671797322.dkr.ecr.eu-west-2.amazonaws.com
 
-    - docker login --username AWS --password ${DOCKER_HUB_PASS} docker.io
+    - docker login --username skippr --password ${DOCKER_HUB_PASS} docker.io
 
 
 # |===============================|
