@@ -21,7 +21,8 @@ class DataOutputPluginBase implements DataOutputPluginInterface
         $this->pipelineName = getenv('PIPELINE_NAME');
         $this->buffer = $buffer;
         $this->buffer->flushBytes = $this->flushBytes;
-
+        $this->config = $config;
+        
         if (Config::$outputFormat == 'parquet') {
             $this->buffer->flushMemBytes = $this->flushBytes;
         }

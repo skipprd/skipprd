@@ -10,6 +10,7 @@ namespace Skipprd\Traits;
 
 
 use Skipprd\Converters\SkipprAvroSchemaConverter;
+use Skipprd\Helpers;
 
 class Config
 {
