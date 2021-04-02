@@ -15,12 +15,15 @@ class DataSourcePluginBase implements DataSourcePluginInterface
     
     public $buffer = null;
 
+    public $offsets;
+
     protected $config = [];
 
     public function __construct(array $config, FileBuffer $buffer)
     {
         $this->tenantId = getenv('TENANT_ID');
         $this->pipelineName = getenv('PIPELINE_NAME');
+        $this->offsets = new Offsets();
         $this->buffer = $buffer;
         $this->buffer->flushBytes = $this->flushBytes;
         $this->config = $config;
@@ -28,8 +31,11 @@ class DataSourcePluginBase implements DataSourcePluginInterface
 
     public function connect() { }
 
-    public function commit(string $offset) {}
-
+    public function commit(string $offset = '')
+    {
+        $this->offsets->setOffsets($offset);
+    }
+    
     public function sync($pipelineJob) {}
 
     public function doValidateConnection() {}

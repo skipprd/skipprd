@@ -20,7 +20,7 @@ trait Ingest
 
     public $avroSchema = null;
 
-    public function ingestPayload(array $sourceMessage, string $offset, array &$metadata)
+    public function ingestPayload(array $sourceMessage, array &$metadata)
     {
 
         $this->i++;

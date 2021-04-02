@@ -23,7 +23,11 @@ class Config
 
     public static $tenantId = '';
 
+    public static $state = [];
+
     public static $mode = 'sync';
+
+    public static $offsets = '';
 
     public static $sourceFormat = null;
 
@@ -82,8 +86,12 @@ class Config
 //        self::$mapping = [];
         self::$discoveredFieldOccurrence = [];
 
-        $state['pipeline_name'] = Helpers::randomPassword(16);
-        $state['tenant_id'] = Helpers::randomPassword(16);
+//        $state['pipeline_name'] = Helpers::randomPassword(16);
+        $inputPluginName = Config::getenv('DATA_SOURCE_PLUGIN_NAME');
+        $outputPluginName = Config::getenv('DATA_OUTPUT_PLUGIN_NAME');
+        $defaultPipelineName = $inputPluginName . '_' . $outputPluginName;
+
+        Config::$state['tenant_id'] = Helpers::randomPassword(16);
 
         $dataDir = self::getenv('DATA_DIR');
         self::$dataDir = (empty($dataDir)) ? self::$dataDir : $dataDir;
@@ -91,20 +99,25 @@ class Config
 
         if (file_exists(self::$dataDir . '/skippr-state.json')) {
 
-            $state = json_decode(file_get_contents(self::$dataDir . '/skippr-state.json'), true);
+            Config::$state = json_decode(file_get_contents(self::$dataDir . '/skippr-state.json'), true);
 
-            self::$discoveredFieldOccurrence = $state['mapping'];
+            if (!empty(Config::$state[$defaultPipelineName])) {
+
+                self::$discoveredFieldOccurrence = Config::$state[$defaultPipelineName]['mapping'];
 
 //        Config::$discoveredFieldOccurrence = (empty($configYml['field_yml'])) ? [] : $configYml['field_yml'];
 
-            $converter = new SkipprAvroSchemaConverter();
-            $avroArr = $converter->convert(self::$discoveredFieldOccurrence);
+                $converter = new SkipprAvroSchemaConverter();
+                $avroArr = $converter->convert(self::$discoveredFieldOccurrence);
 
-            $avroArr = self::schemaMerge(self::$specialFieldsMapping, $avroArr);
+                $avroArr = self::schemaMerge(self::$specialFieldsMapping, $avroArr);
+            }
+
         }
 
-        self::$pipelineName = self::getenv('PIPELINE_NAME', $state['pipeline_name']);
-        self::$tenantId = self::getenv('TENANT_ID', $state['tenant_id']);
+        self::$pipelineName = self::getenv('PIPELINE_NAME', $defaultPipelineName);
+        self::$tenantId = self::getenv('TENANT_ID', Config::$state['tenant_id']);
+        self::$offsets = (!empty(Config::$state[$defaultPipelineName]['offsets']) ? Config::$state[$defaultPipelineName]['offsets'] : '');
 
         self::$schema['fields'] = [];
 
@@ -233,12 +246,13 @@ class Config
 //            'analysing' => Config::$analysing,
 //        ];
 
-        $state['mapping'] = Config::$discoveredFieldOccurrence;
-        $state['pipeline_name'] = Config::$pipelineName;
-        $state['tenant_id'] = Config::$tenantId;
+        Config::$state[Config::$pipelineName]['mapping'] = Config::$discoveredFieldOccurrence;
+        Config::$state[Config::$pipelineName]['pipeline_name'] = Config::$pipelineName;
+        Config::$state['tenant_id'] = Config::$tenantId;
+        Config::$state[Config::$pipelineName]['offsets'] = Config::$offsets;
 
 
-        file_put_contents(self::$dataDir . '/skippr-state.json', json_encode($state));
+        file_put_contents(self::$dataDir . '/skippr-state.json', json_encode(Config::$state));
 
         $uri = self::getenv('SCHEMA_REGISTRY');
         
