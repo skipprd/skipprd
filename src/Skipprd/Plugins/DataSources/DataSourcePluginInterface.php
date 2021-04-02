@@ -11,8 +11,8 @@ Interface DataSourcePluginInterface
 
     public function connect();
 
-    public function commit(string $offset);
-
+    public function commit(string $offset = '');
+    
     public function sync($pipelineJob);
 
     public function doValidateConnection();
