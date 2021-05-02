@@ -188,15 +188,20 @@ trait AnalyseSchema
 
             foreach ($value as $sub_field => $sub_value) {
 
-                $logicalType = $this->getLogicalType($sub_field, $sub_value);
+                $logicalType = $this->getLogicalType($sub_field, $sub_value, false);
 
                 $typeCount[$logicalType] = 'hit';
 
-                // @todo - check if types are castable to same primitive, then could be array
-                // e.g. [1,2,3] may discover as schema [bool, int, int] and therefore
+                // Special handling of bools in array/map of ints
+                // [1,2,3] may discover as schema [bool, int, int] and therefore
                 // parent field resolve type as `record`.
                 // When in fact we'd want to discover schema as [int, int int] and
                 // parent field resolve as `array`.
+                if (count($typeCount) === 2) {
+                    if (array_key_exists('integer', $typeCount) && array_key_exists('boolean', $typeCount)) {
+                        unset($typeCount['boolean']);
+                    }
+                }
             }
 
             // Multiple type within array values?
