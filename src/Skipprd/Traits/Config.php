@@ -11,6 +11,7 @@ namespace Skipprd\Traits;
 
 use Skipprd\Converters\SkipprAvroSchemaConverter;
 use Skipprd\Helpers;
+use Monolog\Registry;
 
 class Config
 {
@@ -87,11 +88,11 @@ class Config
         self::$discoveredFieldOccurrence = [];
 
 //        $state['pipeline_name'] = Helpers::randomPassword(16);
-        $inputPluginName = Config::getenv('DATA_SOURCE_PLUGIN_NAME');
-        $outputPluginName = Config::getenv('DATA_OUTPUT_PLUGIN_NAME');
-        $defaultPipelineName = $inputPluginName . '_' . $outputPluginName;
+        $inputPluginName = Helpers::cleanFieldName(Config::getenv('DATA_SOURCE_PLUGIN_NAME'));
+        $outputPluginName = Helpers::cleanFieldName(Config::getenv('DATA_OUTPUT_PLUGIN_NAME'));
+        $defaultPipelineName = $inputPluginName . 'to' . $outputPluginName;
 
-        Config::$state['tenant_id'] = Helpers::randomPassword(16);
+        Config::$state['tenant_id'] = Helpers::randomStr(16);
 
         $dataDir = self::getenv('DATA_DIR');
         self::$dataDir = (empty($dataDir)) ? self::$dataDir : $dataDir;
@@ -123,8 +124,6 @@ class Config
 
         self::$schema['fields'] = (empty($avroArr)) ? [] : $avroArr;
 
-        self::$avroSchema = self::buildAvroSchema();
-
         self::$eventPath = self::getenv('DATA_SOURCE_EVENT_PATH');
 
         self::$sourceFormat = self::getenv('DATA_SOURCE_FORMAT', '');
@@ -138,6 +137,10 @@ class Config
 
         self::$systemUserApiToken = self::getenv('SCHEMA_API_TOKEN');
 
+        if (!empty(self::$schema['fields'])) {
+            self::$avroSchema = self::buildAvroSchema();
+        }
+        
         // Although we may be done analysing, we don't want to override candidate.
         // They should remain in the option list even if the user has rejected them.
 //        if (!empty($configYml['field_yml']['date_field_candidates'])) {
@@ -253,6 +256,8 @@ class Config
 
 
         file_put_contents(self::$dataDir . '/skippr-state.json', json_encode(Config::$state));
+
+        Registry::skipprd()->info('Written state to ' . self::$dataDir . '/skippr-state.json');
 
         $uri = self::getenv('SCHEMA_REGISTRY');
         
