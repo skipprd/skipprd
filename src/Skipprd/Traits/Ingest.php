@@ -10,6 +10,8 @@ namespace Skipprd\Traits;
 
 
 use Carbon\Carbon;
+use \Exception;
+use Monolog\Registry;
 use Skipprd\Helpers;
 
 
@@ -106,7 +108,8 @@ trait Ingest
             $dataType = $fieldOccurrence[$field]['determined_type'];
 
             // No need to process the actual parent field, just its values
-            if ( !in_array($dataType, ['record', 'map']) ) {
+//            if ( !in_array($dataType, ['record', 'map']) ) {
+            if ( !in_array($dataType, ['record']) ) {
 
                 // @todo - getLogicalType performance is slow, avoid calling.
 
@@ -157,7 +160,8 @@ trait Ingest
 //            Registry::skipprd()->debug("dead letter");
         }
 
-        if (is_array($value) && !empty($value) && $dataType != 'array') {
+//        if (is_array($value) && !empty($value) && $dataType != 'array') {
+        if (is_array($value) && !empty($value) && !in_array($dataType, ['array', 'map'])) {
             foreach ($value as $sub_field => $sub_value) {
 
                 $this->ingestField($sub_field, $sub_value,$fieldOccurrence[$field]['fields'],$message[$field]);
@@ -284,16 +288,27 @@ trait Ingest
 
                 case 'array':
 
-                    return is_array($value) && Helpers::isSequentialArrayKeys($value) ? $value : null;
+                    if (is_array($value) && Helpers::isSequentialArrayKeys($value)) {
+
+                        return $value;
+
+                    } else {
+                        throw new \Exception();
+                    }
 
                     break;
 
-                case 'map':
                 case 'record':
-
+                case 'map':
                     Helpers::cleanArrayFieldNames($value);
 
-                    return is_array($value) ? $value : null;
+                    if (is_array($value)) {
+
+                        return $value;
+
+                    } else {
+                        throw new \Exception();
+                    }
 
                     break;
 
