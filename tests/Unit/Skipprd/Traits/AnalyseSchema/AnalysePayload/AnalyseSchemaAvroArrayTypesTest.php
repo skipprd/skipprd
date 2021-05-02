@@ -57,7 +57,7 @@ class AnalyseSchemaAvroArrayTypesTest extends TestCase
         $this->assertEquals('array', array_key_first($fieldYml['abc1']['type']));
         $this->assertEquals('array', array_key_first($fieldYml['abc2']['type']));
         $this->assertEquals('array', array_key_first($fieldYml['abc3']['type']));
-        $this->assertEquals('map', array_key_first($fieldYml['abc4']['type']));
+        $this->assertEquals('array', array_key_first($fieldYml['abc4']['type']));
         $this->assertEquals('map', array_key_first($fieldYml['abc5']['type']));
         $this->assertEquals('record', array_key_first($fieldYml['abc6']['type']));
 
