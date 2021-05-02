@@ -9,10 +9,11 @@
 namespace Unit\Skipprd\Traits\Ingest;
 
 use Illuminate\Contracts\Container\Container;
-use Illuminate\Support\Facades\Log;
+//use Illuminate\Support\Facades\Log;
 use Skipprd\Commands\PipelineCommand;
 use Skipprd\Traits\AnalyseSchema;
 use PHPUnit\Framework\ExpectationFailedException;
+use Skipprd\Traits\Config;
 use Superbalist\LaravelPubSub\PubSubConnectionFactory;
 use Symfony\Component\Yaml\Yaml;
 use Tests\TestCase;
@@ -117,7 +118,8 @@ class ingestFieldEvolutionTest extends TestCase
 
                             } catch (ExpectationFailedException $e) {
 
-                                    Log::info("Expecting ($type) $typeValue, cast: ($fromType) $from to $castType: ($toType) $to");
+                                    $this->addWarning("Expecting ($type) $typeValue, cast: ($fromType) $from to $castType: ($toType) $to");
+
                                     throw new ExpectationFailedException($e);
 
                             }
