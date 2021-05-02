@@ -199,28 +199,25 @@ trait AnalyseSchema
                 // parent field resolve as `array`.
             }
 
-            foreach ($value as $sub_field => $sub_value) {
+            // Multiple type within array values?
+            // Must be a record then.
+            if (count($typeCount) > 1) {
 
-                // Multiple type within array values?
-                // Must be a record then.
-                if (count($typeCount) > 1) {
+                $dataType = 'record';
 
-                    $dataType = 'record';
-
-                    // Array of Arrays? Use a Record for the parent.
-                } elseif (array_key_exists('array', $typeCount)) {
+                // Array of Arrays? Use a Record for the parent.
+            } elseif (array_key_exists('array', $typeCount)) {
 //                } elseif (array_key_exists('array', $array[$sub_field]['type'])) {
-                    $dataType = 'record';
+                $dataType = 'record';
 //                    $dataType = 'map';
 
-                } elseif ($isSequential) {
-                     // array of sequential int keys is an avro array
-                    $dataType = 'array';
+            } elseif ($isSequential) {
+                 // array of sequential int keys is an avro array
+                $dataType = 'array';
 
-                } elseif (!$isSequential) {
-                    // associative array is an avro map
-                    $dataType = 'map';
-                }
+            } elseif (!$isSequential) {
+                // associative array is an avro map
+                $dataType = 'map';
             }
         }
 
