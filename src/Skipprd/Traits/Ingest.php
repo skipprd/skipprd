@@ -167,7 +167,8 @@ trait Ingest
     }
 
     /**
-     * Message must contain ALL Avro fields, which are null by default
+     * Message must contain ALL fields,
+     * which are null by default to support serialisation to parquet and avro, etc
      * 
      * @param array $message
      * @return array
@@ -175,22 +176,46 @@ trait Ingest
     public function defaultMessage(array $schema = [])
     {
 
-        // Init with internal special fields
-        if (empty($schema)) {
-            $message = Config::$specialFields;
-        }
+        try {
 
-        if (empty($schema)) {
-            $schema = Config::$schema['fields'];
-        }
-
-        foreach ($schema as $i => $field) {
-
-            if (!empty($field['type']) && !empty($field['type'][1]['fields'])) {
-                $message[$field['name']] = $this->defaultMessage($field['type'][1]['fields']);
-            } else {
-                $message[$field['name']] = null;
+            // Init with internal special fields
+            if (empty($schema)) {
+                $message = Config::$specialFields;
             }
+
+            if (empty($schema)) {
+                $schema = Config::$schema['fields'];
+            }
+
+            foreach ($schema as $i => $field) {
+
+                if (!empty($field['type'][1]['fields'])) {
+                    $message[$field['name']] = $this->defaultMessage($field['type'][1]['fields']);
+                } else {
+                    if (!empty($field['type'][1]['type'])) {
+
+                        if ($field['type'][1] == 'record') {
+                            $message[$field['name']] = ['' => null];
+
+                        } elseif ($field['type'][1]['type'] == 'array') {
+
+                            $message[$field['name']] = [];
+
+                        } elseif ($field['type'][1]['type'] == 'map') {
+
+                            $message[$field['name']] = ['' => ''];
+
+                        }
+
+                    } else {
+                        $message[$field['name']] = null;
+                    }
+                }
+            }
+
+        } catch (Exception $e) {
+            Registry::skipprd()->error('Unable to build default message.');
+            throw $e;
         }
 
         return $message;
