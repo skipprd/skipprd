@@ -23,6 +23,7 @@ class Helpers
 
     public static function isSequentialArrayKeys(array $arr)
     {
+        ksort($arr);
         if (array_key_first($arr) !== 0 && array() === $arr) return false;
         return array_keys($arr) === range(0, count($arr) - 1);
     }
