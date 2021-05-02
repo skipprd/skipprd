@@ -86,18 +86,19 @@ class FileBuffer implements BufferInterface
 
             if (FileBuffer::lock($filename)) { // acquire an exclusive lock
 
-                if (Config::$outputFormat == 'parquet') {
+                if (Config::$outputFormat == 'parquet'
+                    && Config::$enableDeadLetters) {
 
                     $converter = new AvroParquetSchemaConverter();
                     $parquetSchema = $converter->convert(Config::$avroSchema);
 
                     try {
 
-                        $writer = new \Parquet();
-
-                        $writer->create_writer($filename, $parquetSchema, 'snappy');
-
                         if (!empty($this->memBuffs[$name]) && !empty($this->memBuffs[$name]['buffer'])) {
+
+                            $writer = new \Parquet();
+
+                            $writer->create_writer($filename, $parquetSchema, 'snappy');
 
                             $separator = "\r\n";
                             $line = strtok($this->memBuffs[$name]['buffer'], $separator);
@@ -115,20 +116,21 @@ class FileBuffer implements BufferInterface
 
                             }
 
-                        }
+                            $writer->close_writer();
 
-                        $writer->close_writer();
+                        }
 
 
                     } catch (\Exception $exception) {
 
-                        var_export($parquetSchema);
-                        print("\n");
-
-                        var_export($arr);
-                        print("\n");
-
-                        print($exception->getMessage());
+//                        var_export($parquetSchema);
+//                        print("\n");
+//
+//                        var_export($arr);
+//                        print("\n");
+//
+//                        print($exception->getMessage());
+//                        print($exception->getTraceAsString());
 
                         exit(1);
                     }
