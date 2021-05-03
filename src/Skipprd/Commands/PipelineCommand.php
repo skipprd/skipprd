@@ -1005,30 +1005,32 @@ class PipelineCommand
             $this->totalEntries += $this->entries;
             
             Config::$offsets = $this->inputPlugin->offsets->getOffsets();
-        }
-        
-        if (Config::$mode == 'sync') {
 
-            if (!empty($this->outputPlugin)) {
-                
-                Registry::skipprd()->info("Syncing remaining output buffers to destination.");
+            if (Config::$mode == 'sync') {
 
-                if (!Config::$analysing) {
+                if (!empty($this->outputPlugin)) {
 
-                    $this->outputPlugin->sync(Config::$outputFormat, Config::$avroSchema);
+                    Registry::skipprd()->info("Syncing remaining output buffers to destination.");
 
-                    $this->deadletterPlugin->sync(Config::$outputFormat, Config::$avroSchema);
+                    if (!Config::$analysing) {
+
+                        $this->outputPlugin->sync(Config::$outputFormat, Config::$avroSchema);
+
+                        $this->deadletterPlugin->sync(Config::$outputFormat, Config::$avroSchema);
+                    }
+                    $this->outputPlugin->shutdown();
+                    $this->deadletterPlugin->shutdown();
                 }
-                $this->outputPlugin->shutdown();
-                $this->deadletterPlugin->shutdown();
             }
+
+            Registry::skipprd()->info("Ingested " . $this->totalEntries . " messages");
+            Registry::skipprd()->info("Dead Letters " . $this->deadLetters . " dead letters");
         }
 
 //        $this->pipelineModel->save(); // commit offsets
           // @todo - implement state storage
 
-        Registry::skipprd()->info("Ingested " . $this->totalEntries . " messages");
-        Registry::skipprd()->info("Dead Letters " . $this->deadLetters . " dead letters");
+
 
 //        $this->updateDeadLetterQueueSize();
 
