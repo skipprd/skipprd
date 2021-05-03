@@ -14,6 +14,8 @@ ADD https://github.com/mlocati/docker-php-extension-installer/releases/latest/do
 
 RUN apt-get update -y && apt-get install -y netbase git openssh-client
 
+RUN apt-get install -y php7.0-intl
+
 RUN chmod +x /usr/local/bin/install-php-extensions \
     && sync
 #    && install-php-extensions gd xdebug zip
@@ -136,6 +138,8 @@ RUN df -h
 
 FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-f9b2b780
 #FROM skippr-php:ubuntu
+
+RUN apt-get install -y php7.0-intl
 
 ARG SKIPPR_BUILD_VERSION
 RUN echo "export SKIPPR_BUILD_VERSION=${SKIPPR_BUILD_VERSION}" > /etc/profile.d/skpr_version.sh
