@@ -133,8 +133,8 @@ class Config
         self::$entityNames = [];
         self::$timeFields = [];
 
-//        self::$analysing = (bool) self::getenv('ANALYSING');
         self::$analysing = (empty($avroArr)) ? true : false;
+        self::$analysing = (bool) self::getenv('ANALYSING', self::$analysing);
 
         self::$systemUserApiToken = self::getenv('SCHEMA_API_TOKEN');
 
