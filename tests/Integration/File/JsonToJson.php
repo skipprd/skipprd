@@ -126,6 +126,9 @@ class JsonToJson extends TestCase
         $this->assertStringNotContainsStringIgnoringCase('error', $logs);
         $this->assertStringNotContainsStringIgnoringCase('fatal', $logs);
 
+        $this->assertStringContainsStringIgnoringCase('Ingested 100000 messages', $logs);
+        $this->assertStringContainsStringIgnoringCase('Dead Letters 0 dead letters', $logs);
+
     }
 }
 
