@@ -91,6 +91,7 @@ class Config
         $inputPluginName = Helpers::cleanFieldName(Config::getenv('DATA_SOURCE_PLUGIN_NAME'));
         $outputPluginName = Helpers::cleanFieldName(Config::getenv('DATA_OUTPUT_PLUGIN_NAME'));
         $defaultPipelineName = $inputPluginName . 'to' . $outputPluginName;
+        $defaultPipelineName = Config::getenv('PIPELINE_NAME', $defaultPipelineName);
 
         Config::$state['tenant_id'] = Helpers::randomStr(16);
 
