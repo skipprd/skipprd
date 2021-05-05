@@ -101,9 +101,13 @@ class Config
 
         if (file_exists(self::$dataDir . '/skippr-state.json')) {
 
+            Registry::skipprd()->info('Found existing ' . self::$dataDir . '/skippr-state.json');
+
             Config::$state = json_decode(file_get_contents(self::$dataDir . '/skippr-state.json'), true);
 
             if (!empty(Config::$state[$defaultPipelineName])) {
+
+                Registry::skipprd()->info('Loading state for job ' . $defaultPipelineName);
 
                 self::$discoveredFieldOccurrence = Config::$state[$defaultPipelineName]['mapping'];
 
@@ -113,6 +117,7 @@ class Config
                 $avroArr = $converter->convert(self::$discoveredFieldOccurrence);
 
                 $avroArr = self::schemaMerge(self::$specialFieldsMapping, $avroArr);
+
             }
 
         }
@@ -135,7 +140,7 @@ class Config
 
         self::$analysing = (empty($avroArr)) ? true : false;
         self::$analysing = (bool) self::getenv('ANALYSING', self::$analysing);
-
+        
         self::$systemUserApiToken = self::getenv('SCHEMA_API_TOKEN');
 
         if (!empty(self::$schema['fields'])) {
