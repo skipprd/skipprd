@@ -40,6 +40,9 @@ class JsonToParquetTest extends DockerRun
 
         $this->docker->containerStart($containerCreateResult->getId());
         $this->docker->containerWait($containerCreateResult->getId());
+
+        $containerCreateResult = $this->docker->containerCreate($this->containerConfig);
+
         $this->docker->containerStart($containerCreateResult->getId());
         $this->docker->containerWait($containerCreateResult->getId());
 

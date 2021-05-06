@@ -2,11 +2,12 @@
 
 namespace Skipprd\Serders;
 
+use Skipprd\Serders\Interfaces\SerderStreamInterface;
 use Skipprd\Services\AvroSubPub\CachedSchemaRegistryClient;
 use Skipprd\Services\AvroSubPub\MessageSerializer;
 use Skipprd\Traits\Config;
 
-class SerderAvro implements SerderInterface
+class SerderAvro implements SerderStreamInterface
 {
 
     protected $serializer;

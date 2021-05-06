@@ -16,7 +16,7 @@ class SerdersFactory
     /**
      * @param string $record - string representing one or more rows
      *                         (e.g. single json, multiline json, CSV, etc)
-     * @return \Skipprd\Serders\SerderInterface
+     * @return \Skipprd\Serders\SerderStreamInterface
      */
     public static function factory(string $serder, \AvroSchema $schema = null)
     {

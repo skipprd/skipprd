@@ -3,9 +3,10 @@
 
 namespace Skipprd\Serders;
 
+use Skipprd\Serders\Interfaces\SerderStreamInterface;
 use Skipprd\Traits\AnalyseSchema;
 
-class SerderJson implements SerderInterface
+class SerderJson implements SerderStreamInterface
 {
 
     public function __construct(\AvroSchema $schema = null) {
