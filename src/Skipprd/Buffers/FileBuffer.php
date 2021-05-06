@@ -36,7 +36,7 @@ class FileBuffer implements BufferInterface
 
     public $flushMemSeconds = 300; # seconds
 
-    private $serde;
+    public $serde;
 
     public function __construct(string $name, int $flushBytes = null)
     {
@@ -51,10 +51,7 @@ class FileBuffer implements BufferInterface
             $this->flushBytes = $flushBytes;
         }
 
-        if (Config::$outputFormat != 'parquet') {
-            
-            $this->setSerde(Config::$outputFormat);
-        }
+        $this->setSerde(Config::$outputFormat);
 
     }
 
@@ -86,51 +83,12 @@ class FileBuffer implements BufferInterface
 
             if (FileBuffer::lock($filename)) { // acquire an exclusive lock
 
-                if (Config::$outputFormat == 'parquet') {
+                if (in_array(Config::$outputFormat, ['parquet', 'csv'])
+                    && Config::$enableDeadLetters) {
 
-                    $converter = new AvroParquetSchemaConverter();
-                    $parquetSchema = $converter->convert(Config::$avroSchema);
+                    if (!empty($this->memBuffs[$name]) && !empty($this->memBuffs[$name]['buffer'])) {
 
-                    try {
-
-                        $writer = new \Parquet();
-
-                        $writer->create_writer($filename, $parquetSchema, 'snappy');
-
-                        if (!empty($this->memBuffs[$name]) && !empty($this->memBuffs[$name]['buffer'])) {
-
-                            $separator = "\r\n";
-                            $line = strtok($this->memBuffs[$name]['buffer'], $separator);
-
-                            while ($line !== false) {
-
-                                $arr[] = json_decode($line, true);
-
-                                $writer->write($arr);
-
-                                $arr = [];
-
-                                $line = strtok($separator);
-
-
-                            }
-
-                        }
-
-                        $writer->close_writer();
-
-
-                    } catch (\Exception $exception) {
-
-                        var_export($parquetSchema);
-                        print("\n");
-
-                        var_export($arr);
-                        print("\n");
-
-                        print($exception->getMessage());
-
-                        exit(1);
+                        $this->serde->serialize($this->memBuffs[$name]['buffer'], $filename);
                     }
 
                     FileBuffer::unlock($filename);
@@ -141,7 +99,14 @@ class FileBuffer implements BufferInterface
 
                     $fp = fopen($filename, 'a+');
 
-                    fputs($fp, $this->memBuffs[$name]['buffer']);
+                    if (!empty($this->memBuffs[$name]) && !empty($this->memBuffs[$name]['buffer'])) {
+
+                        foreach ($this->memBuffs[$name]['buffer'] as $buf) {
+                            
+                            fputs($fp, $this->serde->serialize($buf) . "\n");
+                        }
+
+                    }
 
                     fflush($fp);            // flush output before releasing the lock
 
@@ -162,8 +127,8 @@ class FileBuffer implements BufferInterface
 //        if (Config::$outputFormat == 'parquet') {
             // must serialise parquet directly to file
             // so need intermediate serialisation (json) for buffer
-            $message = json_encode((array)$message);
-            $size = strlen($message) * 8;
+            $messageStr = json_encode((array)$message);
+            $size = strlen($messageStr) * 8;
 
 //        } else {
 //            $message = $this->serde->serialize($message);
@@ -174,12 +139,14 @@ class FileBuffer implements BufferInterface
 
             $this->memBuffs[$this->name]['size'] = $size;
             $this->memBuffs[$this->name]['time'] = time();
-            $this->memBuffs[$this->name]['buffer'] = "$message" . "\n";
+//            $this->memBuffs[$this->name]['buffer'] = "$message" . "\n";
+            $this->memBuffs[$this->name]['buffer'][] = $message;
 
         } else {
             $this->memBuffs[$this->name]['size'] += $size;
             $this->memBuffs[$this->name]['time'] = time();
-            $this->memBuffs[$this->name]['buffer'] .= "$message" . "\n";
+//            $this->memBuffs[$this->name]['buffer'] .= "$message" . "\n";
+            $this->memBuffs[$this->name]['buffer'][] = $message;
 
         }
 
@@ -204,7 +171,7 @@ class FileBuffer implements BufferInterface
 
     }
 
-    public function stream() : string
+    public function stream()
     {
         
         // stream
@@ -244,9 +211,11 @@ class FileBuffer implements BufferInterface
 
                         $this->cpLine++;
 
-                        $payload = json_decode($payload, true);
+//                        $payload = json_decode($payload, true);
+//
+//                        return $this->serde->serialize($payload);
 
-                        return $this->serde->serialize($payload);
+                        return $this->serde->deserialize($payload);
                         
                     }
 

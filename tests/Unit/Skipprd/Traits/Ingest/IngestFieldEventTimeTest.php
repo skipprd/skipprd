@@ -20,7 +20,7 @@ use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Mockery;
 use AvroSchema;
 
-class ingestFieldEventtimeTest extends TestCase
+class IngestFieldEventTimeTest extends TestCase
 {
 
     protected function setUp()

@@ -3,9 +3,10 @@
 
 namespace Skipprd\Serders;
 
+use Skipprd\Serders\Interfaces\SerderBatchInterface;
 use Skipprd\Traits\AnalyseSchema;
 
-class SerderCsv implements SerderInterface
+class SerderCsv implements SerderBatchInterface
 {
 
     private static $csvHeaders = [];
@@ -111,9 +112,43 @@ class SerderCsv implements SerderInterface
         return $messages;
     }
 
-    public function serialize(array $record): string
+    public function serialize(array $record, string $filename): void
     {
 
-        return 'TODO';
+        $fh = fopen($filename, 'a+');
+
+        $i = 0;
+
+        # write out the data
+        foreach ( $record as $row ) {
+
+            if ($i === 0) {
+
+                # write out the headers
+                fputcsv($fh, array_keys(current($record)));
+
+                $i++;
+            }
+
+            foreach ($row as $field => $item) {
+
+                if (is_array($item)) {
+
+                    $data[$field] = json_encode($item);
+
+                } else {
+
+                    $data[$field] = $item;
+                }
+
+            }
+
+//            $data = json_encode($row, 0, 2);
+
+            fputcsv($fh, $data);
+        }
+
+        fclose($fh);
+
     }
 }

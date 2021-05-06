@@ -37,7 +37,7 @@ COPY ./composer.lock ./
 
 # parallel download and install of dependencies
 #RUN composer global require hirak/prestissimo
-RUN composer check-platform-reqs
+RUN composer check-platform-reqs --no-dev --lock --no-interaction --no-ansi --no-cache
 
 RUN composer install --no-dev --no-interaction --no-ansi --prefer-dist --no-progress --optimize-autoloader
 
@@ -136,6 +136,10 @@ RUN df -h
 
 FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-f9b2b780
 #FROM skippr-php:ubuntu
+
+RUN echo $PHP_INI_DIR
+RUN touch $PHP_INI_DIR/conf.d/05-custom.ini
+RUN echo 'memory_limit=1024M' >> $PHP_INI_DIR/conf.d/05-custom.ini
 
 ARG SKIPPR_BUILD_VERSION
 RUN echo "export SKIPPR_BUILD_VERSION=${SKIPPR_BUILD_VERSION}" > /etc/profile.d/skpr_version.sh

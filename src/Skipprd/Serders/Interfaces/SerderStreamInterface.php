@@ -1,8 +1,8 @@
 <?php
 
-namespace Skipprd\Serders;
+namespace Skipprd\Serders\Interfaces;
 
-interface SerderInterface
+interface SerderStreamInterface
 {
 
     public function __construct(\AvroSchema $schema = null);

@@ -3,9 +3,10 @@
 
 namespace Skipprd\Serders;
 
+use Skipprd\Serders\Interfaces\SerderStreamInterface;
 use Skipprd\Traits\AnalyseSchema;
 
-class SerderJson implements SerderInterface
+class SerderJson implements SerderStreamInterface
 {
 
     public function __construct(\AvroSchema $schema = null) {
@@ -26,7 +27,7 @@ class SerderJson implements SerderInterface
         // deserialise handling multiline json
         while ( ($data = fgets($fp) ) !== FALSE ) {
 
-            $line = json_decode($data, true);
+            $line = self::jsonDecode($data);
 
             $records = [];
 

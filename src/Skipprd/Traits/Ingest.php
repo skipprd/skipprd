@@ -10,6 +10,8 @@ namespace Skipprd\Traits;
 
 
 use Carbon\Carbon;
+use \Exception;
+use Monolog\Registry;
 use Skipprd\Helpers;
 
 
@@ -106,7 +108,8 @@ trait Ingest
             $dataType = $fieldOccurrence[$field]['determined_type'];
 
             // No need to process the actual parent field, just its values
-            if ( !in_array($dataType, ['record', 'map']) ) {
+//            if ( !in_array($dataType, ['record', 'map']) ) {
+            if ( !in_array($dataType, ['record']) ) {
 
                 // @todo - getLogicalType performance is slow, avoid calling.
 
@@ -157,7 +160,8 @@ trait Ingest
 //            Registry::skipprd()->debug("dead letter");
         }
 
-        if (is_array($value) && !empty($value) && $dataType != 'array') {
+//        if (is_array($value) && !empty($value) && $dataType != 'array') {
+        if (is_array($value) && !empty($value) && !in_array($dataType, ['array', 'map'])) {
             foreach ($value as $sub_field => $sub_value) {
 
                 $this->ingestField($sub_field, $sub_value,$fieldOccurrence[$field]['fields'],$message[$field]);
@@ -167,7 +171,8 @@ trait Ingest
     }
 
     /**
-     * Message must contain ALL Avro fields, which are null by default
+     * Message must contain ALL fields,
+     * which are null by default to support serialisation to parquet and avro, etc
      * 
      * @param array $message
      * @return array
@@ -175,22 +180,46 @@ trait Ingest
     public function defaultMessage(array $schema = [])
     {
 
-        // Init with internal special fields
-        if (empty($schema)) {
-            $message = Config::$specialFields;
-        }
+        try {
 
-        if (empty($schema)) {
-            $schema = Config::$schema['fields'];
-        }
-
-        foreach ($schema as $i => $field) {
-
-            if (!empty($field['type']) && !empty($field['type'][1]['fields'])) {
-                $message[$field['name']] = $this->defaultMessage($field['type'][1]['fields']);
-            } else {
-                $message[$field['name']] = null;
+            // Init with internal special fields
+            if (empty($schema)) {
+                $message = Config::$specialFields;
             }
+
+            if (empty($schema)) {
+                $schema = Config::$schema['fields'];
+            }
+
+            foreach ($schema as $i => $field) {
+
+                if (!empty($field['type'][1]['fields'])) {
+                    $message[$field['name']] = $this->defaultMessage($field['type'][1]['fields']);
+                } else {
+                    if (!empty($field['type'][1]['type'])) {
+
+                        if ($field['type'][1] == 'record') {
+                            $message[$field['name']] = ['' => null];
+
+                        } elseif ($field['type'][1]['type'] == 'array') {
+
+                            $message[$field['name']] = [];
+
+                        } elseif ($field['type'][1]['type'] == 'map') {
+
+                            $message[$field['name']] = ['' => ''];
+
+                        }
+
+                    } else {
+                        $message[$field['name']] = null;
+                    }
+                }
+            }
+
+        } catch (Exception $e) {
+            Registry::skipprd()->error('Unable to build default message.');
+            throw $e;
         }
 
         return $message;
@@ -259,16 +288,27 @@ trait Ingest
 
                 case 'array':
 
-                    return is_array($value) && Helpers::isSequentialArrayKeys($value) ? $value : null;
+                    if (is_array($value) && Helpers::isSequentialArrayKeys($value)) {
+
+                        return $value;
+
+                    } else {
+                        throw new \Exception();
+                    }
 
                     break;
 
-                case 'map':
                 case 'record':
-
+                case 'map':
                     Helpers::cleanArrayFieldNames($value);
 
-                    return is_array($value) ? $value : null;
+                    if (is_array($value)) {
+
+                        return $value;
+
+                    } else {
+                        throw new \Exception();
+                    }
 
                     break;
 

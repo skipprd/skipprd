@@ -11,6 +11,7 @@ namespace Skipprd\Traits;
 
 use Skipprd\Converters\SkipprAvroSchemaConverter;
 use Skipprd\Helpers;
+use Monolog\Registry;
 
 class Config
 {
@@ -87,11 +88,12 @@ class Config
         self::$discoveredFieldOccurrence = [];
 
 //        $state['pipeline_name'] = Helpers::randomPassword(16);
-        $inputPluginName = Config::getenv('DATA_SOURCE_PLUGIN_NAME');
-        $outputPluginName = Config::getenv('DATA_OUTPUT_PLUGIN_NAME');
-        $defaultPipelineName = $inputPluginName . '_' . $outputPluginName;
+        $inputPluginName = Helpers::cleanFieldName(Config::getenv('DATA_SOURCE_PLUGIN_NAME'));
+        $outputPluginName = Helpers::cleanFieldName(Config::getenv('DATA_OUTPUT_PLUGIN_NAME'));
+        $defaultPipelineName = $inputPluginName . 'to' . $outputPluginName;
+        $defaultPipelineName = Config::getenv('PIPELINE_NAME', $defaultPipelineName);
 
-        Config::$state['tenant_id'] = Helpers::randomPassword(16);
+        Config::$state['tenant_id'] = Helpers::randomStr(16);
 
         $dataDir = self::getenv('DATA_DIR');
         self::$dataDir = (empty($dataDir)) ? self::$dataDir : $dataDir;
@@ -99,9 +101,13 @@ class Config
 
         if (file_exists(self::$dataDir . '/skippr-state.json')) {
 
+            Registry::skipprd()->info('Found existing ' . self::$dataDir . '/skippr-state.json');
+
             Config::$state = json_decode(file_get_contents(self::$dataDir . '/skippr-state.json'), true);
 
             if (!empty(Config::$state[$defaultPipelineName])) {
+
+                Registry::skipprd()->info('Loading state for job ' . $defaultPipelineName);
 
                 self::$discoveredFieldOccurrence = Config::$state[$defaultPipelineName]['mapping'];
 
@@ -111,6 +117,7 @@ class Config
                 $avroArr = $converter->convert(self::$discoveredFieldOccurrence);
 
                 $avroArr = self::schemaMerge(self::$specialFieldsMapping, $avroArr);
+
             }
 
         }
@@ -123,8 +130,6 @@ class Config
 
         self::$schema['fields'] = (empty($avroArr)) ? [] : $avroArr;
 
-        self::$avroSchema = self::buildAvroSchema();
-
         self::$eventPath = self::getenv('DATA_SOURCE_EVENT_PATH');
 
         self::$sourceFormat = self::getenv('DATA_SOURCE_FORMAT', '');
@@ -133,11 +138,15 @@ class Config
         self::$entityNames = [];
         self::$timeFields = [];
 
-//        self::$analysing = (bool) self::getenv('ANALYSING');
         self::$analysing = (empty($avroArr)) ? true : false;
-
+        self::$analysing = (bool) self::getenv('ANALYSING', self::$analysing);
+        
         self::$systemUserApiToken = self::getenv('SCHEMA_API_TOKEN');
 
+        if (!empty(self::$schema['fields'])) {
+            self::$avroSchema = self::buildAvroSchema();
+        }
+        
         // Although we may be done analysing, we don't want to override candidate.
         // They should remain in the option list even if the user has rejected them.
 //        if (!empty($configYml['field_yml']['date_field_candidates'])) {
@@ -253,6 +262,8 @@ class Config
 
 
         file_put_contents(self::$dataDir . '/skippr-state.json', json_encode(Config::$state));
+
+        Registry::skipprd()->info('Written state to ' . self::$dataDir . '/skippr-state.json');
 
         $uri = self::getenv('SCHEMA_REGISTRY');
         
