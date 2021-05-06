@@ -5,6 +5,8 @@ namespace Skipprd\Serders;
 
 use Skipprd\Serders\Interfaces\SerderBatchInterface;
 use Skipprd\Traits\AnalyseSchema;
+use Skipprd\Traits\Config;
+use Skipprd\Traits\Ingest;
 
 class SerderCsv implements SerderBatchInterface
 {
@@ -25,7 +27,6 @@ class SerderCsv implements SerderBatchInterface
     public function deserialize(string $record): array
     {
 
-        self::$csvHeaders = [];
         $messages = [];
 
         // fix newline encodings
