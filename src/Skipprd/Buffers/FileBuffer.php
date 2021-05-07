@@ -83,7 +83,7 @@ class FileBuffer implements BufferInterface
 
             if (FileBuffer::lock($filename)) { // acquire an exclusive lock
 
-                if (in_array(Config::$outputFormat, ['parquet', 'csv'])
+                if (in_array(Config::$outputFormat, Config::$batchFormats)
                     && Config::$enableDeadLetters) {
 
                     if (!empty($this->memBuffs[$name]) && !empty($this->memBuffs[$name]['buffer'])) {

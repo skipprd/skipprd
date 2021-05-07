@@ -13,12 +13,12 @@ use Docker\API\Model\ContainersCreatePostBody;
 use Docker\Docker;
 use Skipprd\Helpers;
 
-class JsonToAvroTest extends DockerRun
+class CsvToParquetTest extends DockerRun
 {
 
     public function setUp()
     {
-        $this->testFile = '100.json.gz';
+        $this->testFile = '100.csv.gz';
 
         parent::setUp();
     }
@@ -28,13 +28,13 @@ class JsonToAvroTest extends DockerRun
         $envs = [
             'DATA_SOURCE_PLUGIN_NAME=file',
             'DATA_SOURCE_PATH=/data',
-            'DATA_SOURCE_FORMAT=json',
+            'DATA_SOURCE_FORMAT=csv',
             'DEAD_LETTER_PLUGIN_NAME=file',
             'DEAD_LETTER_PATH=/data/deadletters',
             'DEAD_LETTER_FORMAT=json',
             'DATA_OUTPUT_PLUGIN_NAME=file',
             'DATA_OUTPUT_PATH=/data/output',
-            'DATA_OUTPUT_FORMAT=avro',
+            'DATA_OUTPUT_FORMAT=parquet',
             'DATA_DIR=/data',
             'TENANT_ID=skippr',
             'PIPELINE_NAME=uattest',
@@ -42,9 +42,9 @@ class JsonToAvroTest extends DockerRun
 
         $this->containerConfig->setEnv($envs);
 
-//        $this->dockerRun();
+        $this->dockerRun();
 
-//        $this->assertParquetOutput();
+        $this->assertParquetOutput();
 
     }
 

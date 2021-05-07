@@ -23,7 +23,7 @@ class DataOutputPluginBase implements DataOutputPluginInterface
         $this->buffer->flushBytes = $this->flushBytes;
         $this->config = $config;
         
-        if (in_array(Config::$outputFormat, ['parquet', 'csv'])) {
+        if (in_array(Config::$outputFormat, Config::$batchFormats)) {
             $this->buffer->flushMemBytes = $this->flushBytes;
         }
     }

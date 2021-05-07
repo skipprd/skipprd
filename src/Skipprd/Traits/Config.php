@@ -73,6 +73,12 @@ class Config
         ['name' => 'skpr_partition', 'default' => null, 'type' => ['null', 'string']],
     ];
 
+    public static $batchFormats = [
+        'parquet',
+        'csv',
+        'xml'
+    ];
+
     public static function getenv(string $name, string $default = '') : string {
 
         return (!empty(getenv($name))) ? getenv($name) : $default;

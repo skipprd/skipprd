@@ -24,6 +24,8 @@ use AvroSchema;
 class AnalyseSchemaParseRecordCsvTest extends TestCase
 {
 
+    protected $serde;
+
     protected function setUp()
     {
         parent::setUp();
@@ -32,11 +34,9 @@ class AnalyseSchemaParseRecordCsvTest extends TestCase
 
     public function serderParse($record)
     {
-
         $serder = 'csv';
-
-        $serder = SerdersFactory::factory($serder);
-        $msgs = $serder->deserialize($record);
+        $this->serder = SerdersFactory::factory($serder);
+        $msgs = $this->serder->deserialize($record);
 
         return $msgs;
 

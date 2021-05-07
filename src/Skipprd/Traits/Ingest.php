@@ -146,8 +146,11 @@ trait Ingest
                 //   - possible that we rename the field or merge it with an existing field
                 $resolvedValue = $this->setValue($dataType, $field, $value, $fieldOccurrence);
 
-                $message[$field] = $resolvedValue;
-                
+                // ignore if null, use default message which has correct null for data type
+                if (!empty($resolvedValue)) {
+                    $message[$field] = $resolvedValue;
+                }
+
             }
 
 
@@ -207,7 +210,13 @@ trait Ingest
 
                         } elseif ($field['type'][1]['type'] == 'map') {
 
-                            $message[$field['name']] = ['' => ''];
+                            if ($field['type'][1]['values'] == 'string') {
+                                $message[$field['name']] = ['' => ''];
+                            }
+                            if ($field['type'][1]['values'] == 'int') {
+                                $message[$field['name']] = ['' => 0];
+                            }
+
 
                         }
 
@@ -290,6 +299,9 @@ trait Ingest
 
                     if (is_array($value) && Helpers::isSequentialArrayKeys($value)) {
 
+                        foreach ($value as $key => $val) {
+                            $value[$key] = $this->setValue($fieldOccurrence[$field]['determined_type_values'], $key, $val);
+                        }
                         return $value;
 
                     } else {
@@ -303,6 +315,10 @@ trait Ingest
                     Helpers::cleanArrayFieldNames($value);
 
                     if (is_array($value)) {
+
+                        foreach ($value as $key => $val) {
+                            $value[$key] = $this->setValue($fieldOccurrence[$field]['determined_type_values'], $key, $val);
+                        }
 
                         return $value;
 
