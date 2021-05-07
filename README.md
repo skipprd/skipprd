@@ -1,10 +1,31 @@
 ### Hi from Skippr 👋
 
-Skippr solves the EL in ELT with full support for nested schema discovery and evolution
+Skippr is a universal data integration and format converter.
+
+#### The Goal
+
+Any data source to any destination in any format. 
+
+Skippr solves the EL in ELT, increasing time-to-value and reducing ingestion pipeline failures.
+
+#### Why?
+
+Engineers intend to spend 80% of their time deriving value from data. Instead we spend 80% of our time integrating and fixing pipelines.
+
+
+#### Core Featues
+
+* very simple input/output plugins
+* schema discovery and evolution
+* full support for nested data
+* convert data formats between destinations
+
+#### Open Core
 
 We're working to open source the core skipprd service.
 
 For now, please checkout:
 
+* Skippr Docker [skippr/skipprd](https://hub.docker.com/r/skippr/skipprd)
 * The enterprise ready [Skippr.io plaform](https://skippr.io/)
 * [Engineering Docs](https://docs.skippr.io/)
