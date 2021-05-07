@@ -18,7 +18,7 @@ class JsonToCsvTest extends DockerRun
 
     public function setUp()
     {
-        $this->testFile = '0.json.gz';
+        $this->testFile = '100.json.gz';
 
         parent::setUp();
     }

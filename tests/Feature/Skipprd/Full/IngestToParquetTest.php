@@ -97,6 +97,19 @@ class IngestToParquetTest extends TestCase
         $this->assertParquetOutput($this->buffer->bufferDir . '/*');
     }
 
+    public function testParquetToParquet()
+    {
+
+        Config::$sourceFormat = 'parquet';
+        Config::$outputFormat = 'parquet';
+
+        Config::$dataDir = '/tmp';
+
+        $this->fullRun();
+
+        $this->assertParquetOutput($this->buffer->bufferDir . '/*');
+    }
+
     public function fullRun()
     {
 

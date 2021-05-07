@@ -18,7 +18,7 @@ class CsvToParquetTest extends DockerRun
 
     public function setUp()
     {
-        $this->testFile = '0.csv.gz';
+        $this->testFile = '100.csv.gz';
 
         parent::setUp();
     }

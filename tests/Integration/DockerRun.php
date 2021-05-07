@@ -274,7 +274,7 @@ class DockerRun extends TestCase
         $this->assertNotContains('error', $logs);
         $this->assertNotContains('fatal', $logs);
 
-        $this->assertContains('Ingested 100000 messages', $logs);
+        $this->assertContains('Ingested 100 messages', $logs);
         $this->assertContains('Dead Letters 0 dead letters', $logs);
 
     }
