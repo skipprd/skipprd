@@ -11,7 +11,7 @@ use Skipprd\Traits\Ingest;
 class SerderCsv implements SerderBatchInterface
 {
 
-    private static $csvHeaders = [];
+    private $csvHeaders = [];
 
     public function __construct(\AvroSchema $schema = null) {
 
@@ -58,7 +58,7 @@ class SerderCsv implements SerderBatchInterface
         while ( ($data = fgetcsv($fp, null, $delimiter) ) !== FALSE ) {
 
             $is_header_row = false;
-            $headers = self::$csvHeaders;
+            $headers = $this->csvHeaders;
 
             // track fields in a CSV row
             // Used to remove rows with too few fields, typically indicates
@@ -78,7 +78,7 @@ class SerderCsv implements SerderBatchInterface
 
                 if ($is_header_row) {
                     $headers = $data;
-                    self::$csvHeaders = $headers;
+                    $this->csvHeaders = $headers;
                 }
             }
 
@@ -89,12 +89,12 @@ class SerderCsv implements SerderBatchInterface
 
                 // has header column names
                 // field count is greater than 1
-                if (!empty(self::$csvHeaders)) {
+                if (!empty($this->csvHeaders)) {
 
                     $keyedRow = [];
 
                     foreach ($data as $key => $item) {
-                        $keyedRow[self::$csvHeaders[$key]] = trim($item);
+                        $keyedRow[$this->csvHeaders[$key]] = trim($item);
                     }
                     $messages[] = $keyedRow;
 
