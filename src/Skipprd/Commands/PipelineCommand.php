@@ -1145,7 +1145,7 @@ class PipelineCommand
 
     public static function determineFieldTypes(&$array, $parent_type = null) {
 
-        $dateTypes = ['date', 'timestamp', 'timestamp_milli'];
+        $demotedTypes = ['boolean', 'date', 'timestamp', 'timestamp_milli'];
 
         foreach ($array as $fieldName => $field) {
 
@@ -1161,22 +1161,32 @@ class PipelineCommand
 
                 if (!empty($field['type'])) {
 
-                    foreach ($field['type'] as $dataType => $dataTypeCount) {
+                    // force to record type over map or array if ever present
+                    if (key_exists('record', $field['type'])) {
+                        $array[$fieldName]['determined_type'] = 'record';
 
-                        if ($highestCount < $dataTypeCount) {
+                    } else {
+                        
+                        foreach ($field['type'] as $dataType => $dataTypeCount) {
 
-                            // Prefer primitive type to date type
-                            // - if there's multiple discovered types
-                            // - and the most common type is a date type
-                            // - select the next most common, non-date type
-                            if (count($field['type']) == 1 || (count($field['type']) > 1 && !in_array($dataType, $dateTypes))) {
-                                $highestType = $dataType;
-                                $highestCount = $dataTypeCount;
+                            if ($highestCount < $dataTypeCount) {
+
+                                // Prefer primitive types to logical types or types
+                                // that cause frequent false positives (demoted types).
+                                // - if there's multiple discovered types
+                                // - and the most common type is a demoted type
+                                // - select the next most common, non-date type
+                                if (count($field['type']) == 1 || (count($field['type']) > 1 && !in_array($dataType, $demotedTypes))) {
+                                    $highestType = $dataType;
+                                    $highestCount = $dataTypeCount;
+                                }
                             }
                         }
+
+                        $array[$fieldName]['determined_type'] = $highestType;
                     }
 
-                    $array[$fieldName]['determined_type'] = $highestType;
+
 
                 }
             }
@@ -1210,7 +1220,7 @@ class PipelineCommand
 
                                 foreach ($sub_field['type'] as $dataType => $dataTypeCount) {
 
-                                    if (!in_array($dataType, $dateTypes)) {
+                                    if (!in_array($dataType, $demotedTypes)) {
 
                                         if (empty($typeCount[$dataType])) {
                                             $typeCount[$dataType] = $dataTypeCount;
