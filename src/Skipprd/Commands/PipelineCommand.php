@@ -1186,7 +1186,9 @@ class PipelineCommand
 
                 if (!empty($field['fields'])) {
 
-                    if ($array[$fieldName]['determined_type'] == 'array') {
+                    if ($array[$fieldName]['determined_type'] == 'array'
+                        || $array[$fieldName]['determined_type'] == 'map'
+                    ) {
 
 //                        && (!empty($array[$fieldName]['fields'][0]['determined_type'])
 //                            && in_array($array[$fieldName]['fields'][0], ['map', 'array', 'record'])) ) {
@@ -1236,11 +1238,14 @@ class PipelineCommand
 
                                 $array[$fieldName]['determined_type_values'] = $valueTypes;
 
-                                $array[$fieldName]['fields'] = [];
+                                if ($array[$fieldName]['determined_type'] == 'array') {
+                                    $array[$fieldName]['fields'] = [];
+                                }
+
 //                            }
 
 
-                    } else {
+                    } if ($array[$fieldName]['determined_type'] != 'array') {
 
                         self::determineFieldTypes($array[$fieldName]['fields'],
                             $array[$fieldName]['determined_type']);
