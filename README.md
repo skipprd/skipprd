@@ -2,6 +2,12 @@
 
 Skippr is a universal data integration and format converter.
 
+#### Getting Started
+
+Docker example, converting a json file to parquet
+
+https://docs.skippr.io/getting-started/docker/
+
 #### The Goal
 
 Any data source to any destination in any format. 
