@@ -130,12 +130,6 @@ trait AnalyseSchema
     {
         $field = Helpers::cleanFieldName($field);
 
-        if (isset(Config::$specialFields[$field])) {
-            // we've already declared this in our default mapping.
-//            continue;
-            return;
-        }
-
         $this->initDiscoveredType($fieldOccurrence, $field);
 
         // Build mapping/Schema
