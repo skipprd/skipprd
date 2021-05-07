@@ -16,6 +16,13 @@ use Skipprd\Helpers;
 class JsonToJsonTest extends DockerRun
 {
 
+    public function setUp()
+    {
+        $this->testFile = '0.json.gz';
+
+        parent::setUp();
+    }
+
     public function testIsSequentialArrayKeys() {
 
         $envs = [

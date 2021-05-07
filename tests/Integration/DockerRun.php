@@ -12,7 +12,9 @@ use Docker\API\Model\NetworkContainer;
 use Docker\API\Model\NetworkSettings;
 use Docker\Docker;
 use PHPUnit\Framework\TestCase;
+use Skipprd\Converters\AvroParquetSchemaConverter;
 use Skipprd\Helpers;
+use Skipprd\Traits\Config;
 
 class DockerRun extends TestCase
 {
@@ -22,6 +24,8 @@ class DockerRun extends TestCase
     protected $containerConfig;
 
     public $dataPath;
+
+    public $testFile;
 
     protected $csvSchema = [
         'skpr_event_ts' => false,
@@ -194,10 +198,10 @@ class DockerRun extends TestCase
         $tempPath = Helpers::randomStr(16);
 
         $basePath = realpath(__DIR__ . '/../../');
-        $src = $basePath. '/test-data/0.json.gz';
+        $src = $basePath. '/test-data/' . $this->testFile;
         $this->dataPath = $basePath . '/' . $tempPath;
         mkdir($this->dataPath, 0777, true);
-        copy($src, $this->dataPath . '/0.json.gz');
+        copy($src, $this->dataPath . '/' . $this->testFile);
 
 
 //        \putenv('DOCKER_HOST=127.0.0.1:2375');
@@ -288,16 +292,7 @@ class DockerRun extends TestCase
             exec('parquet-tools schema ' . $file, $output, $return);
 
             $this->assertEquals(0, $return);
-
-//            $parquet = new \Parquet();
-//            $parquet->create_reader($file, 0);
-//            $info = $parquet->getInfo();
-//            $strInfo = json_encode($info);
-//            $jsonInfo = json_decode($strInfo);
-//            $output = json_encode($jsonInfo->schema);
             
-
-
             foreach ($parquetSchema as $key => $line) {
                 $this->assertContains($line, $output[$key]);
             }
