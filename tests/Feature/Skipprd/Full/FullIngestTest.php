@@ -9,16 +9,13 @@ use Mockery;
 use Skipprd\Converters\AvroParquetSchemaConverter;
 use Skipprd\Converters\SkipprAvroSchemaConverter;
 use Skipprd\Helpers;
-use Skipprd\Serders\SerderCsv;
 use Skipprd\Serders\SerdersFactory;
 use Skipprd\Serders\SerderXml;
-use Skipprd\Traits\AnalyseSchema;
 use Skipprd\Traits\Config;
 use Skipprd\Traits\Ingest;
-use Tests\Integration\DockerRun;
 
 
-class IngestToParquetTest extends TestCase
+class FullIngestTest extends TestCase
 {
 
     use Ingest;
@@ -171,25 +168,7 @@ class IngestToParquetTest extends TestCase
 
         Config::$analysing = false;
 
-        // Test default message values (empty array, maps and records
-        // Particularly relevant for serder to parquet
         $container->defaultMsg = $this->defaultMessage(Config::$schema['fields']);
-
-//        $this->assertArrayHasKey('foo', $container->defaultMsg);
-//
-//        $this->assertequals([], $container->defaultMsg['foo']['abc1']);
-//        $this->assertequals([], $container->defaultMsg['foo']['abc2']);
-//        $this->assertequals([], $container->defaultMsg['foo']['abc3']);
-//        $this->assertequals([], $container->defaultMsg['foo']['abc4']);
-//        $this->assertequals(['' => null], $container->defaultMsg['foo']['abc5']);
-//
-//        $recordDefault = [
-//            'a0' => NULL,
-//            'a1' => NULL,
-//            'a2' => NULL,
-//            'a3' => NULL,
-//        ];
-//        $this->assertequals($recordDefault, $container->defaultMsg['foo']['abc6']);
 
         // Ingest messages
         $this->buffer = BufferAdaptorsFactory::getAdaptor('output', 'file');
@@ -205,11 +184,6 @@ class IngestToParquetTest extends TestCase
         $this->buffer->flush('output');
 
         $this->buffer->finalise(true);
-
-//        $dockerrun = new DockerRun();
-//
-//        $path = Config::$dataDir . '/buffer';
-//        $dockerrun->assertParquetOutput($this->buffer->serde->parquetSchema, $path);
 
     }
 

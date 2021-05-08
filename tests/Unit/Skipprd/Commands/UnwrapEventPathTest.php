@@ -8,20 +8,13 @@
 
 namespace Unit\Skipprd\Commands;
 
-use Illuminate\Contracts\Container\Container;
 use Skipprd\Commands\PipelineCommand;
-use Skipprd\Traits\AnalyseSchema;
 use Skipprd\Serders\SerdersFactory;
 use Skipprd\Traits\Config;
-use Superbalist\LaravelPubSub\PubSubConnectionFactory;
-use Symfony\Component\Yaml\Yaml;
 use Tests\TestCase;
-use Illuminate\Foundation\Testing\DatabaseMigrations;
-use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Mockery;
-use AvroSchema;
 
-class PipelineCommandTest extends TestCase
+class UnwrapEventPathTest extends TestCase
 {
 
     protected function setUp()
