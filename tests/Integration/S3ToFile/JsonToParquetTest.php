@@ -42,6 +42,7 @@ class JsonToParquetTest extends DockerRun
             'DATA_DIR=/data',
             'TENANT_ID=skippr',
             'PIPELINE_NAME=uattest',
+            'ANONYMOUS_METRICS=false',
         ];
 
         $this->containerConfig->setEnv($envs);

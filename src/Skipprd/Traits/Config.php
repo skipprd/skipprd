@@ -18,6 +18,8 @@ class Config
 
     public static $segmentKey = 'RnewwWgZXQjl9xofcjGJkirCH0VswBPd';
 
+    public static $anonymousMetrics = true;
+
     public static $dataDir = '/data';
 
     public static $pipelineName = '';
@@ -92,6 +94,8 @@ class Config
         $avroArr = [];
 //        self::$mapping = [];
         self::$discoveredFieldOccurrence = [];
+
+        self::$anonymousMetrics =  Config::getenv('ANONYMOUS_METRICS', true);
 
 //        $state['pipeline_name'] = Helpers::randomPassword(16);
         $inputPluginName = Helpers::cleanFieldName(Config::getenv('DATA_SOURCE_PLUGIN_NAME'));
