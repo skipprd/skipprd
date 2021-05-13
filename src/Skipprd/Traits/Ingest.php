@@ -85,7 +85,7 @@ trait Ingest
             return false;
 //            $this->deadLetterMessage($message);
 
-//                                Registry::skipprd()->info("Message empty or could not parse, sending to dead letter queue.");
+//                                Registry::skipprd()->info("Message empty or could not emitArray, sending to dead letter queue.");
 //                                Registry::skipprd()->debug($message);
 //                        $this->deadLetters[] = $payload;
         }

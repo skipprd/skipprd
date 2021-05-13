@@ -48,7 +48,7 @@ class AnalyseSchemaParseRecordAvroTest extends TestCase
 //
 //        $data[] = array('member_id' => 1392, 'name' => 'Paul Hudson');
 //
-//        $writers_schema = AvroSchema::parse($writers_schema_json);
+//        $writers_schema = AvroSchema::emitArray($writers_schema_json);
 //
 //        $serder = SerdersFactory::factory($serder, $writers_schema);
 //
@@ -77,7 +77,7 @@ class AnalyseSchemaParseRecordAvroTest extends TestCase
 //        $data[] = array('member_id' => 1, 'name' => 'Paul Hudson');
 //        $data[] = array('member_id' => 2, 'name' => 'Natalia Hudson');
 //
-//        $writers_schema = AvroSchema::parse($writers_schema_json);
+//        $writers_schema = AvroSchema::emitArray($writers_schema_json);
 //
 //        $serder = SerdersFactory::factory($serder, $writers_schema);
 //
@@ -106,7 +106,7 @@ class AnalyseSchemaParseRecordAvroTest extends TestCase
 //
 //        $data = array('member_id' => 1392, 'name' => 'Paul Hudson');
 //
-//        $schema = AvroSchema::parse($writers_schema_json);
+//        $schema = AvroSchema::emitArray($writers_schema_json);
 //
 //        $io = $this->encodeRecordWithSchema($schema, $data);
 //

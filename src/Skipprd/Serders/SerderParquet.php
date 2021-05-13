@@ -29,18 +29,7 @@ class SerderParquet implements SerderBatchInterface
     public function deserialize(string $payload): array
     {
 
-        $this->parquet = new \Parquet();
-
-        $this->parquet->create_reader("test.parquet", 0);
-
-        $json = "";
-        $this->parquet->get_file_json($json, 0);
-
-        $this->parquet->close_reader();
-
-        $data = json_decode($json, true);
-
-        return $data;
+        throw new \Exception("Method not implemented");
 
     }
 

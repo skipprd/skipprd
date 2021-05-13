@@ -617,7 +617,7 @@ class PipelineCommand
 //                $offset = $sp->decodeOffset();
                 }
 
-                $this->parseLine($payload);
+                $this->emitString($payload);
 
 
             } elseif (Config::$mode == 'async') {
@@ -641,8 +641,10 @@ class PipelineCommand
 
         }
 
+    }
 
-
+    public function offsetCommitRoutine(): void
+    {
         if (!Config::$analysing) {
 
 //            $this->inputPlugin->commit($offset);
@@ -659,88 +661,137 @@ class PipelineCommand
 
 //                $this->pipelineModel->save();
                 // @todo - implement state/mapping storage
-                
+
+            }
+        }
+    }
+
+    public function readFile($filename, callable $callback)
+    {
+
+        if (preg_match("/\.gz(ip)?$|.zip/", $filename) == true) {
+
+            // open gz file for reading
+            $sfp = gzopen($filename, 'rb');
+
+            // read and decode chunks into string stream
+            while (!gzeof($sfp)) {
+
+                $string = gzgets($sfp);
+
+                call_user_func($callback, $string);
+
+            }
+
+            gzclose($sfp);
+
+        } elseif (Config::$sourceFormat == 'parquet') {
+
+            $parquet = new \Parquet();
+
+            $parquet->create_reader($filename, 0);
+
+            $jsonString = '';
+
+            $parquet->json_file($jsonString, 0);
+
+            // @todo - implemente Parquet row reader
+
+            $parquet->close_reader();
+
+            $data = json_decode($jsonString, true);
+
+            call_user_func($callback, $data);
+//            foreach ($data as $item) {
+//
+//                call_user_func($callback, $item);
+//            }
+
+        } else {
+
+            $sfp = fopen($filename, 'rb');
+
+            // read and decode chunks into string stream
+            while (!feof($sfp)) {
+
+                $string = fgets($sfp);
+
+                call_user_func($callback, $string);
+
+            }
+
+            // remove temp file
+            fclose($sfp);
+
+        }
+
+    }
+
+    public function emitFile(string $filename) : void {
+
+        $fields = [];
+        $payloadString = '';
+
+        $serde = SerdersFactory::factory(Config::$sourceFormat);
+
+        $this->readFile($filename, function ($string) use ($serde, &$fields, &$payloadString) {
+
+            if (in_array(Config::$sourceFormat, Config::$batchFormats)) {
+
+                $payloadString .= $string;
+
+            } else {
+
+                $msgs = $serde->deserialize($string);
+
+                foreach ($msgs as $msg) {
+
+                    array_push($fields, $msg);
+                }
+            }
+
+        });
+
+        if (in_array(Config::$sourceFormat, Config::$batchFormats)) {
+
+            $msgs = $serde->deserialize($payloadString);
+
+            foreach ($msgs as $msg) {
+
+                array_push($fields, $msg);
             }
         }
 
+        $this->emitArray($fields);
 
     }
 
-    public function process() : void
-    {
+    public function emitString(string $payload) : void {
 
-        // @todo - decide if we'll support multi-threading and if so for which plugins???
-        
-        $offset = '';
+        if ($payload != '') {
 
-        $bufferName = Config::$enableDeadLetters ? 'input' : 'deadletter';
+            if (Config::$mode == 'sync') {
 
-//        while ($line = $this->inputPlugin->buffer->nextFile($bufferName)) {
+                if (!Config::$enableDeadLetters) {
 
-        $i = 0;
+                    // @todo - deprecate SkipprPack for Apache Arrow
+                    $sp = new SkipprPack($payload);
+                    $payload = $sp->decodeRecord();
+//                $offset = $sp->decodeOffset();
+                }
 
-        if (empty(Config::$sourceFormat)) {
-            Config::$sourceFormat = $this->detectSerialisation();
+                $this->currentBytes += strlen($payload);
+
+                $serder = SerdersFactory::factory(Config::$sourceFormat);
+                $sourceMessages = $serder->deserialize($payload);
+
+                $this->emitArray($sourceMessages);
+
+            }
         }
-
-        while ($line = $this->inputPlugin->buffer->stream()) {
-
-            $sp = new SkipprPack($line);
-            $payload = $sp->decodeRecord();
-            $offset = $sp->decodeOffset();
-
-            $this->parseLine($payload, $offset);
-
-            $this->inputPlugin->buffer->commit();
-
-//            $sourceMessages['skpr_event_ts'] = 0;
-//            $sourceMessages['skpr_partition'] = '';
-//            $this->serialiseOutput($sourceMessages, $offset);
-
-            $i++;
-        }
-
-        if (!Config::$analysing) {
-
-
-            $this->outputPlugin->buffer->flushAll();
-            $this->deadletterPlugin->buffer->flushAll();
-
-        }
-
     }
 
-    public function parseLine(string $payload) {
-
-
-//                    $payload = $record;
-
-        $this->currentBytes += strlen($payload);
-//
-//        if (empty(Config::$sourceFormat)) {
-//
-//            $this->inputPlugin->buffer->append($payload, true);
-//            $this->inputPlugin->buffer->finalise(true);
-//
-//            Config::$sourceFormat = $this->detectSerialisation();
-//
-//        } else {
-
-        // @todo - initialise in class global scope
-            $serder = SerdersFactory::factory(Config::$sourceFormat);
-            $sourceMessages = $serder->deserialize($payload);
-
-            $this->parse($sourceMessages);
-
-//        if (Config::$mode == 'sync' && !Config::$analysing) {
-//            $this->statsd->increment("ingest.msgs.current.{Config::$tenantId }.{Config::$pipelineName}", 1);
-//        }
-//        }
-
-
-    }
-
-    public function parse(array $payload) {
+    public function emitArray(array $payload) : void {
 
         $unwrappedMessages = $this->unwrap($payload);
 
@@ -791,6 +842,7 @@ class PipelineCommand
                     Registry::skipprd()->info($unwrappedMessage);
                 }
 
+                $this->offsetCommitRoutine();
             }
         }
 
