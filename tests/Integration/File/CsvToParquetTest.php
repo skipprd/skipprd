@@ -27,7 +27,7 @@ class CsvToParquetTest extends DockerRun
 
         $envs = [
             'DATA_SOURCE_PLUGIN_NAME=file',
-            'DATA_SOURCE_PATH=/data',
+            'DATA_SOURCE_PATH=/data/input',
             'DATA_SOURCE_FORMAT=csv',
             'DEAD_LETTER_PLUGIN_NAME=file',
             'DEAD_LETTER_PATH=/data/deadletters',

@@ -184,6 +184,7 @@ class DockerRun extends TestCase
 
 //        $path = realpath(__DIR__ . '/../../' . $this->tempPath);
         array_map('unlink', glob("$this->dataPath/output/*"));
+        array_map('unlink', glob("$this->dataPath/input/*"));
         array_map('unlink', glob("$this->dataPath/*.*"));
         array_map('rmdir', glob("$this->dataPath/*"));
         rmdir($this->dataPath);
@@ -200,8 +201,8 @@ class DockerRun extends TestCase
         $basePath = realpath(__DIR__ . '/../../');
         $src = $basePath. '/test-data/' . $this->testFile;
         $this->dataPath = $basePath . '/' . $tempPath;
-        mkdir($this->dataPath, 0777, true);
-        copy($src, $this->dataPath . '/' . $this->testFile);
+        mkdir($this->dataPath . '/input', 0777, true);
+        copy($src, $this->dataPath . '/input/' . $this->testFile);
 
 
 //        \putenv('DOCKER_HOST=127.0.0.1:2375');
