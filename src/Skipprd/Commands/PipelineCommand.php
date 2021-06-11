@@ -1208,6 +1208,12 @@ class PipelineCommand
 
             if (empty($array[$fieldName]['determined_type'])) {
 
+
+                // Don't allow NULL type if we discovered any other types
+                if (count($field['type']) > 1 ) {
+                    unset($field['type']['NULL']);
+                }
+
                 $highestType = '';
                 $highestCount = 0;
 
@@ -1228,7 +1234,8 @@ class PipelineCommand
                                 // - if there's multiple discovered types
                                 // - and the most common type is a demoted type
                                 // - select the next most common, non-date type
-                                if (count($field['type']) == 1 || (count($field['type']) > 1 && !in_array($dataType, $demotedTypes))) {
+                                if (count($field['type']) == 1
+                                    || (count($field['type']) > 1 && !in_array($dataType, $demotedTypes))) {
                                     $highestType = $dataType;
                                     $highestCount = $dataTypeCount;
                                 }

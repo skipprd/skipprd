@@ -78,7 +78,8 @@ class Config
     public static $batchFormats = [
         'parquet',
         'csv',
-        'xml'
+        'xml',
+        'avro_file'
     ];
 
     public static function getenv(string $name, string $default = '') : string {

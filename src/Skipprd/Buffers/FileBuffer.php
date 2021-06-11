@@ -81,41 +81,56 @@ class FileBuffer implements BufferInterface
 
             $filename = $this->bufferDir . '/' . $name . '-part';
 
-            if (FileBuffer::lock($filename)) { // acquire an exclusive lock
+            try {
 
-                if (in_array(Config::$outputFormat, Config::$batchFormats)
-                    && Config::$enableDeadLetters) {
+                if (FileBuffer::lock($filename)) { // acquire an exclusive lock
 
-                    if (!empty($this->memBuffs[$name]) && !empty($this->memBuffs[$name]['buffer'])) {
+                    if (in_array(Config::$outputFormat, Config::$batchFormats)
+                        && Config::$enableDeadLetters) {
 
-                        $this->serde->serialize($this->memBuffs[$name]['buffer'], $filename);
-                    }
+                        if (!empty($this->memBuffs[$name]) && !empty($this->memBuffs[$name]['buffer'])) {
 
-                    FileBuffer::unlock($filename);
-
-                    $this->finalise(true);
-
-                } else {
-
-                    $fp = fopen($filename, 'a+');
-
-                    if (!empty($this->memBuffs[$name]) && !empty($this->memBuffs[$name]['buffer'])) {
-
-                        foreach ($this->memBuffs[$name]['buffer'] as $buf) {
-                            
-                            fputs($fp, $this->serde->serialize($buf) . "\n");
+                            $this->serde->serialize($this->memBuffs[$name]['buffer'], $filename);
                         }
 
+                        FileBuffer::unlock($filename);
+
+                        $this->finalise(true);
+
+                    } else {
+
+                        $fp = fopen($filename, 'a+');
+
+                        if (!empty($this->memBuffs[$name]) && !empty($this->memBuffs[$name]['buffer'])) {
+
+                            foreach ($this->memBuffs[$name]['buffer'] as $buf) {
+
+                                fputs($fp, $this->serde->serialize($buf) . "\n");
+                            }
+
+                        }
+
+                        fflush($fp);            // flush output before releasing the lock
+
+                        FileBuffer::unlock($filename);
+
+                        FileBuffer::close($fp);
+
                     }
 
-                    fflush($fp);            // flush output before releasing the lock
-
-                    FileBuffer::unlock($filename);
-
-                    FileBuffer::close($fp);
+                    unset($this->memBuffs[$name]);
                 }
 
-                unset($this->memBuffs[$name]);
+            } catch (\Exception $e) {
+
+                fflush($fp);            // flush output before releasing the lock
+
+                FileBuffer::unlock($filename);
+
+                FileBuffer::close($fp);
+
+                throw $e;
+
             }
         }
 

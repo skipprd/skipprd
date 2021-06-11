@@ -216,8 +216,12 @@ class AvroParquetSchemaConverter implements SchemaConverterInterface
 
         switch (count($nonNullSchemas)) {
             case 0:
-                throw new \UnexpectedValueException("Cannot convert Avro union of only nulls");
-
+                // @todo - skippr internal fields can always be null, as may others
+                //         consider if casting to string is a good idea?
+//                throw new \UnexpectedValueException("Cannot convert Avro union of only nulls");
+                $parquetField['type'] = self::BYTE_ARRAY;
+                $parquetField['repeat'] = $repetition;
+                return $parquetField;
             case 1:
                 if ($foundNullSchema) {
                     return $this->convertField($fieldName, $nonNullSchemas[0],

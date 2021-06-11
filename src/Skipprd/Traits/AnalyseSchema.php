@@ -265,32 +265,6 @@ trait AnalyseSchema
                     $dataType = 'double';
                 }
             }
-
-//            // seconds?
-//            // @todo - configurable delimiter
-//            $fieldHaystack = $this->explodeField($field);
-//            $haystack = [
-//                'idle',
-//                'session',
-//                'duration',
-//                'time',
-//                'second',
-//                'seconds'
-//            ];
-//            $matches = array_intersect($fieldHaystack, $haystack);
-//
-//            if (!empty($matches)) {
-//                $dataType = 'seconds';
-//            }
-//
-//            // category
-//            $fieldHaystack = $this->explodeField($field);
-//            $haystack = ['status', 'code', 'tag'];
-//            $matches = array_intersect($fieldHaystack, $haystack);
-//
-//            if (!empty($matches)) {
-//                $dataType = 'keyword';
-//            }
         }
 
         if ($dataType == 'string' && $allowDate) {

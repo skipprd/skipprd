@@ -34,7 +34,7 @@ class JsonToAvroTest extends DockerRun
             'DEAD_LETTER_FORMAT=json',
             'DATA_OUTPUT_PLUGIN_NAME=file',
             'DATA_OUTPUT_PATH=/data/output',
-            'DATA_OUTPUT_FORMAT=avro',
+            'DATA_OUTPUT_FORMAT=avro_file',
             'DATA_DIR=/data',
             'TENANT_ID=skippr',
             'PIPELINE_NAME=uattest',
@@ -43,9 +43,9 @@ class JsonToAvroTest extends DockerRun
 
         $this->containerConfig->setEnv($envs);
 
-//        $this->dockerRun();
+        $this->dockerRun();
 
-//        $this->assertParquetOutput();
+        $this->assertAvroFileOutput();
 
     }
 

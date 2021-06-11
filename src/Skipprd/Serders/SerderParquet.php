@@ -5,7 +5,6 @@ namespace Skipprd\Serders;
 
 use Skipprd\Converters\AvroParquetSchemaConverter;
 use Skipprd\Serders\Interfaces\SerderBatchInterface;
-use Skipprd\Traits\AnalyseSchema;
 use Skipprd\Traits\Config;
 
 class SerderParquet implements SerderBatchInterface
