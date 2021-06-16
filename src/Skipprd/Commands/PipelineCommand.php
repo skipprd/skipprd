@@ -1062,10 +1062,11 @@ class PipelineCommand
 
                 if (!empty($this->outputPlugin)) {
 
-                    Registry::skipprd()->info("Syncing remaining output buffers to destination.");
-
                     if (!Config::$analysing) {
 
+                        $pluginName = Config::getenv('DATA_OUTPUT_PLUGIN_NAME');
+                        Registry::skipprd()->info("Syncing remaining output buffers to destination $pluginName.");
+                        
                         $this->outputPlugin->sync(Config::$outputFormat, Config::$avroSchema);
 
                         $this->deadletterPlugin->sync(Config::$outputFormat, Config::$avroSchema);
