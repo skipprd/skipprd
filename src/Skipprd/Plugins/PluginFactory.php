@@ -2,10 +2,9 @@
 
 namespace Skipprd\Plugins;
 
-use Skipprd\DataOutputKafka\DataOutputKafkaPlugin;
+use Monolog\Registry;
 use Skipprd\Plugins\DataOutputs\DataOutputPluginBase;
 use Skipprd\Plugins\DataSources\DataSourcePluginBase;
-use Skipprd\Buffers\BufferInterface;
 use Skipprd\Buffers\FileBuffer;
 use Skipprd\Str;
 
@@ -29,20 +28,16 @@ class PluginFactory
             }
         }
 
+        Registry::skipprd()->info("Loading $type plugin $name");
+
         $type = Str::studly(ucwords(strtolower($type)));
         $name = Str::studly(ucwords(strtolower($name)));
 
         $buffer = ($buffer == null) ? new FileBuffer('temp', null) : $buffer;
-        
-        $factoryClass = "Skipprd\\$type" . "$name" . "\\$type" . "$name" . "Plugin";
-//        $factoryClass = "SkipprdPlugins\\$type" . "s\\$type" . "$name" . "\\$type" . "$name" . "Plugin";
-//        $factoryClass = "$type" . "$name" . "Plugin";
-//        $factoryClass = "Skipprd\DataSources\DataSourceS3Demo\DataSourceS3DemoPlugin";
-//                           Skipprd\DataSources\DataSourceS3Demo\DataSourceS3DemoPlugin
+
+        $factoryClass = "\Skipprd\\$type" . "$name" . "\\$type" . "$name" . "Plugin";
 
         $factoryModel = new $factoryClass($config, $buffer);
-
-//        $factoryModel = new DataOutputKafkaPlugin($config, $buffer);
 
         return $factoryModel;
     }
