@@ -1178,21 +1178,27 @@ class PipelineCommand
 
         $enitityFieldCandidates = [];
 
-        foreach (Config::$idFields as $fieldName => $ids) {
+        if (!empty(Config::$idFields)) {
 
-            // 95% of this fields ID's are unique, it's probably a message ID field
-            if (count(Config::$idFields[$fieldName]) / $this->minSample * 100 >= 70) {
-                unset(Config::$idFields[$fieldName]);
+            foreach (Config::$idFields as $fieldName => $ids) {
 
-            } else {
-                $enitityFieldCandidates[$fieldName] = [];
+                // 95% of this fields ID's are unique, it's probably a message ID field
+                if (count(Config::$idFields[$fieldName]) / $this->minSample * 100 >= 70) {
+                    unset(Config::$idFields[$fieldName]);
+
+                } else {
+                    $enitityFieldCandidates[$fieldName] = [];
+                }
             }
+
+            $numCandidates = count(Config::$idFields);
+            Registry::skipprd()->info("Found $numCandidates ID fields");
+
         }
 
         Config::$idFields = $enitityFieldCandidates;
 
-        $numCandidates = count(Config::$idFields);
-        Registry::skipprd()->info("Found $numCandidates ID fields");
+
     }
 
     public static function determineFieldTypes(&$array, $parent_type = null) {
@@ -1208,14 +1214,13 @@ class PipelineCommand
 
             if (empty($array[$fieldName]['determined_type'])) {
 
+                $highestType = '';
+                $highestCount = 0;
 
                 // Don't allow NULL type if we discovered any other types
                 if (count($field['type']) > 1 ) {
                     unset($field['type']['NULL']);
                 }
-
-                $highestType = '';
-                $highestCount = 0;
 
                 if (!empty($field['type'])) {
 
@@ -1244,8 +1249,6 @@ class PipelineCommand
 
                         $array[$fieldName]['determined_type'] = $highestType;
                     }
-
-
 
                 }
             }
