@@ -8,6 +8,9 @@
 
 namespace Skipprd\Commands;
 
+use Monolog\Formatter\LineFormatter;
+use Monolog\Handler\StreamHandler;
+use Monolog\Handler\SyslogHandler;
 use Monolog\Logger;
 use Monolog\Registry;
 use Skipprd\Arr;
@@ -158,9 +161,23 @@ class PipelineCommand
      */
     public function __construct()
     {
+
+        // the default date format is "Y-m-d\TH:i:sP"
+        $dateFormat = "Y-m-d\TH:i:sP";
+        // the default output format is "[%datetime%] %channel%.%level_name%: %message% %context% %extra%\n"
+        $output = "[%datetime%] %channel%.%level_name%: %message%\n";
+
+        $formatter = new LineFormatter($output, $dateFormat);
+
+        // Create a handler
+
+        $stream = new StreamHandler('php://stderr', Logger::DEBUG);
+        $stream->setFormatter($formatter);
+        
         $application = new Logger('skipprd');
+        $application->pushHandler($stream);
+        
         Registry::addLogger($application);
-//        Registry::skipprd()-> = new Logger(new \Monolog\Logger('Skippr Logger'));
 
     }
 
