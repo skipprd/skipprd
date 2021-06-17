@@ -1210,6 +1210,7 @@ class PipelineCommand
             }
 
             $numCandidates = count(Config::$idFields);
+
             Registry::skipprd()->info("Found $numCandidates ID fields");
 
         }
@@ -1235,12 +1236,12 @@ class PipelineCommand
                 $highestType = '';
                 $highestCount = 0;
 
-                // Don't allow NULL type if we discovered any other types
-                if (count($field['type']) > 1 ) {
-                    unset($field['type']['NULL']);
-                }
-
                 if (!empty($field['type'])) {
+
+                    // Don't allow NULL type if we discovered any other types
+                    if (count($field['type']) > 1 ) {
+                        unset($field['type']['NULL']);
+                    }
 
                     // force to record type over map or array if ever present
                     if (key_exists('record', $field['type'])) {
