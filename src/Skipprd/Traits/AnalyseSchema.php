@@ -542,6 +542,7 @@ trait AnalyseSchema
             $array[$field]['parent_type'] = '';
             $array[$field]['fields'] = [];
             $array[$field]['evolution'] = [];
+            $array[$field]['enabled'] = true;
         }
     }
 

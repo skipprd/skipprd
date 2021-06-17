@@ -35,9 +35,15 @@ trait Ingest
             /*
              * Transformations and schema evolution
              */
-            foreach ($sourceMessage as $field => $value) {
+            foreach ($sourceMessage as $field => $value) { // only ingest fields enabled to sync to output
 
-                $this->ingestField($field, $value, $metadata, $message);
+                if (!empty($metadata[$field]['enabled'])) { // only ingest fields enabled to sync to output
+
+                    if ($this->i == 1) {
+                        Registry::skipprd()->info("Ingesting field: $field");
+                    }
+                    $this->ingestField($field, $value, $metadata, $message);
+                }
 
             }
 
@@ -91,21 +97,21 @@ trait Ingest
         }
     }
 
-    public function ingestField($field, $value, &$fieldOccurrence, &$message)
+    public function ingestField($field, $value, &$metadata, &$message)
     {
         $field = Helpers::cleanFieldName($field);
 
 //        Registry::skipprd()->debug($field);
-//        Registry::skipprd()->debug($fieldOccurrence[$field]);
+//        Registry::skipprd()->debug($metadata[$field]);
 //        exit(0);
 
         if (isset(Config::$specialFields[$field])) {
             $message[$field] = $value;
             
         }
-        elseif (!empty($fieldOccurrence[$field]['determined_type'])) {
+        elseif (!empty($metadata[$field]['determined_type'])) {
 
-            $dataType = $fieldOccurrence[$field]['determined_type'];
+            $dataType = $metadata[$field]['determined_type'];
 
             // No need to process the actual parent field, just its values
 //            if ( !in_array($dataType, ['record', 'map']) ) {
@@ -115,15 +121,15 @@ trait Ingest
 
                 //       - So only handle schema evolution on setValue failure
                 //       - rather than proactively here.
-//                if (count($fieldOccurrence[$field]['evolution']) > 0) {
+//                if (count($metadata[$field]['evolution']) > 0) {
 //
 //                    $actualDataType = $this->getLogicalType($field, $value);
 //
 //                    // Evolution
-//                    if (!empty($fieldOccurrence[$field]['evolution'][$actualDataType]['new_value'])) {
+//                    if (!empty($metadata[$field]['evolution'][$actualDataType]['new_value'])) {
 //
-//                        $evolution = $fieldOccurrence[$field]['evolution'][$actualDataType]['type'];
-//                        $newValue = $fieldOccurrence[$field]['evolution'][$actualDataType]['new_value'] ?: '';
+//                        $evolution = $metadata[$field]['evolution'][$actualDataType]['type'];
+//                        $newValue = $metadata[$field]['evolution'][$actualDataType]['new_value'] ?: '';
 //                        $this->applyEvolutionFactory($field, $value, $evolution, $actualDataType, $newValue);
 //                        // set actual datatype
 //                        $dataType = $actualDataType;
@@ -134,8 +140,8 @@ trait Ingest
 
 
                 // Transformation
-                if (!empty($fieldOccurrence[$field]['transform'])) {
-                    $transformation = $fieldOccurrence[$field]['transform'];
+                if (!empty($metadata[$field]['transform'])) {
+                    $transformation = $metadata[$field]['transform'];
 
                     $this->applyTransformationFactory($field,
                         $value, $transformation, $dataType);
@@ -144,7 +150,7 @@ trait Ingest
                 // $value will be cast or resolved by schema evolution
                 // $field may be resolved by schema evolution rules to handle breaking changes
                 //   - possible that we rename the field or merge it with an existing field
-                $resolvedValue = $this->setValue($dataType, $field, $value, $fieldOccurrence);
+                $resolvedValue = $this->setValue($dataType, $field, $value, $metadata);
 
                 // ignore if null, use default message which has correct null for data type
                 if (!empty($resolvedValue)) {
@@ -156,7 +162,7 @@ trait Ingest
 
         } else {
             // discover schema for new fields
-            $dataType = $this->resolveFieldType($fieldOccurrence, $field, $value);
+            $dataType = $this->resolveFieldType($metadata, $field, $value);
 
             $this->flagMsgDeadLetter = true;
 
@@ -167,7 +173,17 @@ trait Ingest
         if (is_array($value) && !empty($value) && !in_array($dataType, ['array', 'map'])) {
             foreach ($value as $sub_field => $sub_value) {
 
-                $this->ingestField($sub_field, $sub_value,$fieldOccurrence[$field]['fields'],$message[$field]);
+                $sub_field = Helpers::cleanFieldName($sub_field);
+
+                if (!empty($metadata[$field]['fields'][$sub_field]['enabled'])) { // only ingest fields enabled to sync to output
+
+                    if ($this->i == 1) {
+                        Registry::skipprd()->info("Ingesting field: $sub_field");
+                    }
+
+                    $this->ingestField($sub_field, $sub_value,$metadata[$field]['fields'],$message[$field]);
+                }
+
             }
         }
 

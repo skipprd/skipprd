@@ -116,7 +116,11 @@ class Config
         if (!empty($uri)) {
 
 
+            // Get Mapping
             try {
+
+                Registry::skipprd()
+                    ->info('Looking up config for pipeline ' . $defaultPipelineName);
 
                 $url = "http://$uri/";
                 $path = 'ingest-job/get-mapping/'. $defaultPipelineName;
@@ -128,10 +132,39 @@ class Config
                     ]
                 ]);
 
-                self::$discoveredFieldOccurrence = json_decode($client->get($path)->getBody(), true);
+                $body = $client->get($path)->getBody();
+
+                $mapping = json_decode($body, true);
+
+                self::$discoveredFieldOccurrence = $mapping;
+
+
+            } catch (\Exception $e) {
+                Registry::skipprd()
+                    ->error($e->getMessage());
+            }
+
+            // Get Schema
+            try {
 
                 Registry::skipprd()
-                    ->info('Looking up config for pipeine ' . $defaultPipelineName);
+                    ->info('Looking up schema for pipeline ' . $defaultPipelineName);
+
+                $schemaName = self::$tenantId . '_' . $defaultPipelineName . '-value';
+                $url = "http://$uri/";
+                $path = 'subjects/'. $schemaName . '/versions/latest';
+
+                $client = new \GuzzleHttp\Client([
+                    'base_uri' => $url,
+                    'headers' => [
+                        'Authorization' => "Bearer " . self::getenv('SCHEMA_API_TOKEN')
+                    ]
+                ]);
+
+                $resp = json_decode($client->get($path)->getBody()->getContents(), true);
+
+                $avroArr = json_decode($resp['schema'], true);
+                
 
             } catch (\Exception $e) {
                 Registry::skipprd()
@@ -163,22 +196,22 @@ class Config
 
                     }
 
+                    if (!empty(self::$discoveredFieldOccurrence)) {
+
+                        $converter = new SkipprAvroSchemaConverter();
+                        $avroArr = $converter->convert(self::$discoveredFieldOccurrence);
+
+                        $avroArr = self::schemaMerge(self::$specialFieldsMapping, $avroArr);
+
+                    }
 
                 } catch (\Exception $e) {
                     Registry::skipprd()
                         ->error($e->getMessage());
                 }
 
-
             }
 
-        }
-
-        if (!empty(self::$discoveredFieldOccurrence)) {
-            $converter = new SkipprAvroSchemaConverter();
-            $avroArr = $converter->convert(self::$discoveredFieldOccurrence);
-
-            $avroArr = self::schemaMerge(self::$specialFieldsMapping, $avroArr);
         }
 
 
