@@ -1,12 +1,7 @@
 
-## Build
-
-export SSH_PRIVATE_KEY=`cat ~/.ssh/skippr/id_rsa_deployer`
- 
-docker build --build-arg SSH_PRIVATE_KEY="${SSH_PRIVATE_KEY}" -f ./Dockerfile -t skippr/skipprd:latest .
 
  
-## Local Testing
+## Local Build and Testing
 
 1. Docker Login to pull base image
 
@@ -14,7 +9,12 @@ docker build --build-arg SSH_PRIVATE_KEY="${SSH_PRIVATE_KEY}" -f ./Dockerfile -t
  AWS_PROFILE=skippr docker login --username AWS --password $(AWS_PROFILE=skippr aws ecr get-login-password --region eu-west-2) 536671797322.dkr.ecr.eu-west-2.amazonaws.com
 ```
  
-2. build with local tag
+2. export ssh key to authenticate with gitlab for php composer
+```
+export SSH_PRIVATE_KEY=`cat ~/.ssh/skippr/id_rsa_deployer`
+```
+
+3. build with local tag
 
 ```
 docker build --build-arg SSH_PRIVATE_KEY="${SSH_PRIVATE_KEY}" -f ./Dockerfile -t skipprd:build .
