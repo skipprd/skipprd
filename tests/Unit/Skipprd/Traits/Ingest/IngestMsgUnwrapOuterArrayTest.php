@@ -34,10 +34,11 @@ class ingestMsgUnwrapOuterArrayTest extends TestCase
     {
 
         // Discover Schema
-//        $json = json_encode($record);
-        $container->analysePayload($record, Config::$discoveredFieldOccurrence);
+        Config::$discoveredFieldOccurrence['foo_partition'] = [];
+        
+        $container->analysePayload($record, Config::$discoveredFieldOccurrence['foo_partition']);
 
-        $container->determineFieldTypes(Config::$discoveredFieldOccurrence);
+        $container->determineFieldTypes(Config::$discoveredFieldOccurrence['foo_partition']);
     }
 
     public function testUnwrapOuterArray()

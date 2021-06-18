@@ -82,7 +82,7 @@ class SkipprAvroSchemaConverter implements SchemaConverterInterface
 
             if ($determined_type == 'array'
                 && !empty($skipprSchema[$field]['determined_type_values']) // ignore empty arrays
-                && !empty($field_yml[$field]['enabled'])) {
+                && !empty($skipprSchema[$field]['enabled'])) {
 
                 $valuesType = self::$avroTypeMappings[$skipprSchema[$field]['determined_type_values']];
 
@@ -99,7 +99,7 @@ class SkipprAvroSchemaConverter implements SchemaConverterInterface
                 if (!empty($sub_type)) { // not empty array in source data
 
                     if (!empty($skipprSchema[$field]['fields'])
-                        && !empty($field_yml[$field]['enabled'])
+                        && !empty($skipprSchema[$field]['enabled'])
                         && !empty($sub_type['type'][1]['type'])
                         && in_array($sub_type['type'][1]['type'],
                             ['map', 'array', 'record'])) {
@@ -124,7 +124,7 @@ class SkipprAvroSchemaConverter implements SchemaConverterInterface
                             $type);
 //                    $newSchema = $type;
 
-                    } elseif (!empty($field_yml[$field]['enabled'])) {
+                    } elseif (!empty($skipprSchema[$field]['enabled'])) {
 
                         //////
 //                    $sub_type = self::getComplexTypeScheme($skipprSchema, $field);
@@ -183,7 +183,7 @@ class SkipprAvroSchemaConverter implements SchemaConverterInterface
 
             }
 
-        } elseif (!empty($field_yml[$field]['enabled'])) {
+        } elseif (!empty($skipprSchema[$field]['enabled'])) {
 
             // Add field to schema
 

@@ -402,7 +402,7 @@ class IngestTest extends TestCase
         Config::$avroSchema = [];
 
         Config::$analysing = true;
-        Config::$discoveredFieldOccurrence = [];
+        Config::$discoveredFieldOccurrence['foo_partition'] = [];
         
         $container = Mockery::mock(PipelineCommand::class)->makePartial();
 //        $container->shouldReceive('AnalyseSchema');
@@ -425,7 +425,7 @@ class IngestTest extends TestCase
 
         $serde = SerdersFactory::factory(Config::$sourceFormat);
 
-        $container->readFile($filename, function ($payload) use ($serde, &$fields, &$payloadString) {
+        $container->readFile($filename, 'foo_partition', function ($payload) use ($serde, &$fields, &$payloadString) {
 
             if (Config::$sourceFormat == 'parquet') {
 
@@ -461,10 +461,10 @@ class IngestTest extends TestCase
         }
 
         foreach ($fields as $field) {
-            $container->analysePayload($field, Config::$discoveredFieldOccurrence);
+            $container->analysePayload($field, Config::$discoveredFieldOccurrence['foo_partition']);
         }
 
-        $container->determineFieldTypes(Config::$discoveredFieldOccurrence);
+        $container->determineFieldTypes(Config::$discoveredFieldOccurrence['foo_partition']);
 
         $avroFieldSchema = $this->buildSchema($fields[0]);
         Config::$schema['fields'] = Config::schemaMerge(Config::$specialFieldsMapping, $avroFieldSchema);
@@ -483,7 +483,7 @@ class IngestTest extends TestCase
         
         foreach ($fields as $field) {
 
-            $message = $container->ingestPayload($field, Config::$discoveredFieldOccurrence);
+            $message = $container->ingestPayload($field, Config::$discoveredFieldOccurrence['foo_partition']);
 
 //            if (!empty($message)) {
                 $this->buffer->append($message, false);
@@ -511,9 +511,9 @@ class IngestTest extends TestCase
 
 //            if (!array_key_exists($field, Config::$specialFields)) {
 
-                $avroType = Config::$discoveredFieldOccurrence[$field]['determined_type'];
+                $avroType = Config::$discoveredFieldOccurrence['foo_partition'][$field]['determined_type'];
 
-                SkipprAvroSchemaConverter::buildAvroFields($avroFieldSchema, $field, $avroType, Config::$discoveredFieldOccurrence, [], $sub_field_count);
+                SkipprAvroSchemaConverter::buildAvroFields($avroFieldSchema, $field, $avroType, Config::$discoveredFieldOccurrence['foo_partition'], [], $sub_field_count);
 
 //            }
 

@@ -29,6 +29,12 @@ class DataSourcePluginBase implements DataSourcePluginInterface
         $this->config = $config;
     }
 
+
+    public function splitPartitions(string $partitionField) : array
+    {
+        return explode($partitionField,  ',');
+    }
+
     public function connect() { }
 
     public function commit(string $offset = '')

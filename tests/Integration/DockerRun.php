@@ -291,7 +291,7 @@ class DockerRun extends TestCase
 //        );
 
         $this->containerConfig = new ContainersCreatePostBody();
-        $this->containerConfig->setImage('skippr/skipprd:latest');
+        $this->containerConfig->setImage('skipprd:build');
 
         $hostConfig = new HostConfig();
 

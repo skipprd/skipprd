@@ -20,3 +20,9 @@ export SSH_PRIVATE_KEY=`cat ~/.ssh/skippr/id_rsa_deployer`
 docker build --build-arg SSH_PRIVATE_KEY="${SSH_PRIVATE_KEY}" -f ./Dockerfile -t skipprd:build .
 ```
 
+
+## Integration Testing
+
+The integration tests run against a container image. Expect a docker image named 'skippr/skipprd:build'.
+
+Build as above in local build and then run integration tests 

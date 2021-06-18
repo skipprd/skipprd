@@ -162,6 +162,11 @@ class PipelineCommand
     public function __construct()
     {
 
+        $this->createLogger();
+    }
+
+    public function createLogger() {
+
         // the default date format is "Y-m-d\TH:i:sP"
         $dateFormat = "Y-m-d\TH:i:sP";
         // the default output format is "[%datetime%] %channel%.%level_name%: %message% %context% %extra%\n"
@@ -173,24 +178,28 @@ class PipelineCommand
 
         $stream = new StreamHandler('php://stderr', Logger::DEBUG);
         $stream->setFormatter($formatter);
-        
+
         $application = new Logger('skipprd');
         $application->pushHandler($stream);
-        
-        Registry::addLogger($application);
 
+        Registry::addLogger($application);
+        
     }
 
     protected function setPlugin() {
 
-        $bufferType = 'file';
+//        $bufferType = 'file';
+//
+//        if (!empty(Config::$timeFields) || !empty(Config::$entityNames)) {
+//            $bufferType = 'chunked';
+//        }
 
-        if (!empty(Config::$timeFields) || !empty(Config::$entityNames)) {
-            $bufferType = 'chunked';
-        }
+        // always used chunked buffer as we partition by data source partition
+        // (table, topic, etc)
+        $bufferType = 'chunked';
 
         //@todo - set $this->buffer->flushBytes in the output plugin
-        $this->inputBuffer = BufferAdaptorsFactory::getAdaptor('input', 'file');
+        $this->inputBuffer = BufferAdaptorsFactory::getAdaptor('input', $bufferType);
         $this->outputBuffer = BufferAdaptorsFactory::getAdaptor('output', $bufferType);
         $this->deadletterBuffer = BufferAdaptorsFactory::getAdaptor('deadletter', $bufferType);
 
@@ -580,6 +589,8 @@ class PipelineCommand
         // it will be skipped and so just remain in the queue
         if (Config::$enableDeadLetters) {
 
+            $partition = $message['skpr_partition'];
+
             $deadLetterTopic = 'raw_' . Config::$tenantId  . '_' . Config::$pipelineName .'_deadletter';
 
 //            $serialised = json_encode($message);
@@ -589,7 +600,7 @@ class PipelineCommand
 //            $payload = $sp->string() . "\n";
 
 //            $this->deadletterPlugin->buffer->append($payload);
-            $this->deadletterPlugin->buffer->append($message);
+            $this->deadletterPlugin->buffer->append($message, false, 0, $partition);
 
             $tenantId = Config::$tenantId;
             $pipelineName = Config::$pipelineName;
@@ -619,7 +630,7 @@ class PipelineCommand
 
     }
 
-    public function emit(string $payload) : void
+    public function emit(string $payload, $partition) : void
     {
 
         if ($payload != '') {
@@ -634,7 +645,7 @@ class PipelineCommand
 //                $offset = $sp->decodeOffset();
                 }
 
-                $this->emitString($payload);
+                $this->emitString($payload, $partition);
 
 
             } elseif (Config::$mode == 'async') {
@@ -652,7 +663,7 @@ class PipelineCommand
 //                sleep(1);
 //            }
 
-                $this->inputPlugin->buffer->append($payload);
+                $this->inputPlugin->buffer->append($payload, false, 0, $partition);
 
             }
 
@@ -683,7 +694,7 @@ class PipelineCommand
         }
     }
 
-    public function readFile($filename, callable $callback)
+    public function readFile(string $filename, string $partition, callable $callback)
     {
 
         if (preg_match("/\.gz(ip)?$|.zip/", $filename) == true) {
@@ -696,7 +707,7 @@ class PipelineCommand
 
                 $string = gzgets($sfp);
 
-                call_user_func($callback, $string);
+                call_user_func($callback, $string, $partition);
 
             }
 
@@ -718,7 +729,7 @@ class PipelineCommand
 
             $data = json_decode($jsonString, true);
 
-            call_user_func($callback, $data);
+            call_user_func($callback, $data, $partition);
 //            foreach ($data as $item) {
 //
 //                call_user_func($callback, $item);
@@ -733,7 +744,7 @@ class PipelineCommand
 
                 $string = fgets($sfp);
 
-                call_user_func($callback, $string);
+                call_user_func($callback, $string, $partition);
 
             }
 
@@ -744,14 +755,14 @@ class PipelineCommand
 
     }
 
-    public function emitFile(string $filename) : void {
+    public function emitFile(string $filename, $partition) : void {
 
         $fields = [];
         $payloadString = '';
 
         $serde = SerdersFactory::factory(Config::$sourceFormat);
 
-        $this->readFile($filename, function ($string) use ($serde, &$fields, &$payloadString) {
+        $this->readFile($filename, $partition, function ($string) use ($serde, &$fields, &$payloadString) {
 
             if (in_array(Config::$sourceFormat, Config::$batchFormats)) {
 
@@ -779,11 +790,11 @@ class PipelineCommand
             }
         }
 
-        $this->emitArray($fields);
+        $this->emitArray($fields, $partition);
 
     }
 
-    public function emitString(string $payload) : void {
+    public function emitString(string $payload, string $partition) : void {
 
         if ($payload != '') {
 
@@ -802,13 +813,13 @@ class PipelineCommand
                 $serder = SerdersFactory::factory(Config::$sourceFormat);
                 $sourceMessages = $serder->deserialize($payload);
 
-                $this->emitArray($sourceMessages);
+                $this->emitArray($sourceMessages, $partition);
 
             }
         }
     }
 
-    public function emitArray(array $payload) : void {
+    public function emitArray(array $payload, string $partition) : void {
 
         $unwrappedMessages = $this->unwrap($payload);
 
@@ -819,8 +830,10 @@ class PipelineCommand
                 if (is_array($unwrappedMessage)) {
 
                     $this->getIdFields($unwrappedMessage);
-                    
-                    $this->analysePayload($unwrappedMessage, Config::$discoveredFieldOccurrence);
+
+                    $this->parsePartitionField($unwrappedMessage, $partition);
+
+                    $this->analysePayload($unwrappedMessage, Config::$discoveredFieldOccurrence[$partition]);
                 }
 
                 if ($this->i > $this->minSample
@@ -845,9 +858,9 @@ class PipelineCommand
                 if (is_array($unwrappedMessage)) {
 
                     $this->parseTimeField($unwrappedMessage);
-                    $this->parsePartitionField($unwrappedMessage);
+                    $this->parsePartitionField($unwrappedMessage, $partition);
 
-                    $message = $this->ingestPayload($unwrappedMessage, Config::$discoveredFieldOccurrence);
+                    $message = $this->ingestPayload($unwrappedMessage, Config::$discoveredFieldOccurrence[$partition]);
 
                     if ($message) {
                         $this->serialiseOutput($message);
@@ -865,10 +878,14 @@ class PipelineCommand
 
     }
 
-    public function parsePartitionField(&$message)
+    public function parsePartitionField(array &$message, string $partition)
     {
 
-        $shardFieldEntityValue = '';
+
+        // default to data source partition (table, topic, queue, file dir, etc)
+        $shardFieldEntityValue = $partition;
+
+        // optional: partition by composite key
         if (!empty(Config::$entityNames)) {
             foreach (Config::$entityNames as $entityField) {
 
@@ -1161,19 +1178,24 @@ class PipelineCommand
 
 //        $configYml['config_updated'] = microtime(true);
 
-        $validDateFieldCandidates = [];
-        foreach (Config::$dateFieldCandidates as $field => $candidateField) {
-            if (!empty($candidateField['field'])) {
-                $validDateFieldCandidates[$candidateField['field']] = $candidateField;
+
+        foreach (Config::$dateFieldCandidates as $partition => $mapping) {
+
+            $validDateFieldCandidates = [];
+
+            foreach ($mapping as $field => $candidateField) {
+                if (!empty($candidateField['field'])) {
+                    $validDateFieldCandidates[$candidateField['field']] = $candidateField;
+                }
             }
-        }
 
-        Config::$discoveredFieldOccurrence['date_field_candidates'] = $validDateFieldCandidates;
+            Config::$discoveredFieldOccurrence[$partition]['date_field_candidates'] = $validDateFieldCandidates;
 
-        Config::$discoveredFieldOccurrence['enitity_field_candidates'] = Config::$idFields;
+            Config::$discoveredFieldOccurrence[$partition]['enitity_field_candidates'] = Config::$idFields;
 
 //        event(new WorkerConfigRequested($configYml));
 
+        }
         $configYml = Config::setConfig();
 
         Registry::skipprd()->info("Updated analysed field schema");
@@ -1183,7 +1205,10 @@ class PipelineCommand
     public function finaliseFieldMapping()
     {
 
-        self::determineFieldTypes(Config::$discoveredFieldOccurrence);
+        foreach (Config::$discoveredFieldOccurrence as $partition => $metadata) {
+
+            self::determineFieldTypes(Config::$discoveredFieldOccurrence[$partition]);
+        }
 
         $this->findMessageIdField();
 
@@ -1220,18 +1245,19 @@ class PipelineCommand
 
     }
 
-    public static function determineFieldTypes(&$array, $parent_type = null) {
+    public static function determineFieldTypes(&$metadata, $parent_type = null) {
 
         $demotedTypes = ['boolean', 'date', 'timestamp', 'timestamp_milli'];
 
-        foreach ($array as $fieldName => $field) {
+
+        foreach ($metadata as $fieldName => $field) {
 
             // Useful for field evolution logic for maps, which only support one sub-field type
             if ($parent_type !== null) {
-                $array[$fieldName]['parent_type'] = $parent_type;
+                $metadata[$fieldName]['parent_type'] = $parent_type;
             }
 
-            if (empty($array[$fieldName]['determined_type'])) {
+            if (empty($metadata[$fieldName]['determined_type'])) {
 
                 $highestType = '';
                 $highestCount = 0;
@@ -1245,10 +1271,10 @@ class PipelineCommand
 
                     // force to record type over map or array if ever present
                     if (key_exists('record', $field['type'])) {
-                        $array[$fieldName]['determined_type'] = 'record';
+                        $metadata[$fieldName]['determined_type'] = 'record';
 
                     } else {
-                        
+
                         foreach ($field['type'] as $dataType => $dataTypeCount) {
 
                             if ($highestCount < $dataTypeCount) {
@@ -1266,25 +1292,25 @@ class PipelineCommand
                             }
                         }
 
-                        $array[$fieldName]['determined_type'] = $highestType;
+                        $metadata[$fieldName]['determined_type'] = $highestType;
                     }
 
                 }
             }
 
-            if (!empty($array[$fieldName]['determined_type'])
-                && in_array($array[$fieldName]['determined_type'], ['map', 'array', 'record'])) {
+            if (!empty($metadata[$fieldName]['determined_type'])
+                && in_array($metadata[$fieldName]['determined_type'], ['map', 'array', 'record'])) {
 
                 if (!empty($field['fields'])) {
 
-                    if ($array[$fieldName]['determined_type'] == 'array'
-                        || $array[$fieldName]['determined_type'] == 'map'
+                    if ($metadata[$fieldName]['determined_type'] == 'array'
+                        || $metadata[$fieldName]['determined_type'] == 'map'
                     ) {
 
-//                        && (!empty($array[$fieldName]['fields'][0]['determined_type'])
-//                            && in_array($array[$fieldName]['fields'][0], ['map', 'array', 'record'])) ) {
+//                        && (!empty($metadata[$fieldName]['fields'][0]['determined_type'])
+//                            && in_array($metadata[$fieldName]['fields'][0], ['map', 'array', 'record'])) ) {
 
-                            $array[$fieldName]['determined_type_values'] = null;
+                        $metadata[$fieldName]['determined_type_values'] = null;
 
                             // Ignore sub-fields for Avro array, the values are just enumerated, their not fields themselves.
                             // Else we'd create a field list with string keys for each array value
@@ -1297,7 +1323,7 @@ class PipelineCommand
                             //         however, 'array' type is a special case... how to handle?
 
                             // Get avro arrays items primitive data type
-                            foreach ($array[$fieldName]['fields'] as $sub_field) {
+                            foreach ($metadata[$fieldName]['fields'] as $sub_field) {
 
                                 foreach ($sub_field['type'] as $dataType => $dataTypeCount) {
 
@@ -1319,37 +1345,36 @@ class PipelineCommand
 
                             $valueTypes = array_key_first($typeCount);
 
-//                            if (!empty($array[$fieldName]['determined_type_values'])
-//                                && in_array($array[$fieldName]['determined_type_values'], ['map', 'array', 'record']) ) {
+//                            if (!empty($metadata[$fieldName]['determined_type_values'])
+//                                && in_array($metadata[$fieldName]['determined_type_values'], ['map', 'array', 'record']) ) {
 //
-//                                self::determineFieldTypes($array[$fieldName]['fields'],
-//                                    $array[$fieldName]['determined_type']);
+//                                self::determineFieldTypes($metadata[$fieldName]['fields'],
+//                                    $metadata[$fieldName]['determined_type']);
 //
 //                            } else {
 
-                                $array[$fieldName]['determined_type_values'] = $valueTypes;
+                        $metadata[$fieldName]['determined_type_values'] = $valueTypes;
 
-                                if ($array[$fieldName]['determined_type'] == 'array') {
-                                    $array[$fieldName]['fields'] = [];
+                                if ($metadata[$fieldName]['determined_type'] == 'array') {
+                                    $metadata[$fieldName]['fields'] = [];
                                 }
 
 //                            }
 
 
-                    } if ($array[$fieldName]['determined_type'] != 'array') {
+                    } if ($metadata[$fieldName]['determined_type'] != 'array') {
 
-                        self::determineFieldTypes($array[$fieldName]['fields'],
-                            $array[$fieldName]['determined_type']);
+                        self::determineFieldTypes($metadata[$fieldName]['fields'],
+                            $metadata[$fieldName]['determined_type']);
 
                     }
                 }
 //                else {
 //
-//                    unset($array[$fieldName]);
+//                    unset($metadata[$fieldName]);
 //                }
             }
         }
-
     }
 
     public function getIdFields($message)
