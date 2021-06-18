@@ -30,7 +30,7 @@ class DataSourcePluginBase implements DataSourcePluginInterface
     }
 
 
-    public function splitPartitions(string $partitionField) : array
+    public function splitPartitions(string $partitionField = '') : array
     {
         return explode($partitionField,  ',');
     }
