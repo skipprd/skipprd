@@ -21,6 +21,7 @@ class AnalyseSchemaDateTest extends TestCase
     {
         parent::setUp();
 
+        Config::$discoveredFieldOccurrence['foo']['fields'] = [];
     }
 
     public function testSetValueDate()
@@ -28,14 +29,16 @@ class AnalyseSchemaDateTest extends TestCase
 
         $container = Mockery::mock(PipelineCommand::class)->makePartial();
         $container->shouldReceive('AnalyseSchema');
+        $container->dateFieldvalidationMminSample = 1;
 
         $value = "2019-08-30T14:09:51.807Z";
         $field = 'foo';
-        $dataType = $container->getLogicalType($field, $value);
+        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence['foo']['fields']);
 
         $value = $container->setValue($dataType,  $field, $value);
 
-        $dateCandidates = Config::$dateFieldCandidates;
+        $container->finaliseFieldCandidates();
+        $dateCandidates = Config::$discoveredFieldOccurrence['foo']['date_field_candidates'];
 
         $this->assertArrayHasKey($field, $dateCandidates);
         
@@ -52,17 +55,15 @@ class AnalyseSchemaDateTest extends TestCase
 
         $value = "2019-08-30T14:09:51.807Z";
         $field = 'foo';
-        Config::$dateFieldCandidates[$field]['check_count'] = 100;
-        Config::$dateFieldCandidates[$field]['valid_count'] = 100;
+        Config::$discoveredFieldOccurrence[$field]['date_candidate']['check_count'] = 100;
+        Config::$discoveredFieldOccurrence[$field]['date_candidate']['valid_count'] = 100;
 
-        $dataType = $container->getLogicalType($field, $value);
-
-        $dateCandidates = Config::$dateFieldCandidates;
-
-        $this->assertArrayHasKey($field, $dateCandidates);
+        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
+        
+        $this->assertArrayHasKey('date_candidate', Config::$discoveredFieldOccurrence[$field]);
 
         $this->assertEquals('date', $dataType);
-        $this->assertEquals(100, Config::$dateFieldCandidates[$field]['check_count']);
+        $this->assertEquals(100, Config::$discoveredFieldOccurrence[$field]['date_candidate']['check_count']);
 
     }
 
@@ -74,16 +75,14 @@ class AnalyseSchemaDateTest extends TestCase
 
         $value = "2019-08-30T14:09:51.807Z";
         $field = 'foo';
-        Config::$dateFieldCandidates[$field]['check_count'] = 99;
+        Config::$discoveredFieldOccurrence[$field]['date_candidate']['check_count'] = 99;
 
-        $dataType = $container->getLogicalType($field, $value);
-
-        $dateCandidates = Config::$dateFieldCandidates;
-
-        $this->assertArrayHasKey($field, $dateCandidates);
+        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
+        
+        $this->assertArrayHasKey('date_candidate', Config::$discoveredFieldOccurrence[$field]);
 
         $this->assertEquals('date', $dataType);
-        $this->assertEquals(100, Config::$dateFieldCandidates[$field]['check_count']);
+        $this->assertEquals(100, Config::$discoveredFieldOccurrence[$field]['date_candidate']['check_count']);
 
     }
 
@@ -95,19 +94,17 @@ class AnalyseSchemaDateTest extends TestCase
 
         $value = "notadate-dont-endlessly-check-this-field";
         $field = 'foo';
-        Config::$dateFieldCandidates[$field]['check_count'] = 99;
+        Config::$discoveredFieldOccurrence[$field]['date_candidate']['check_count'] = 99;
 
-        $dataType = $container->getLogicalType($field, $value);
+        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         // Second check (101) should skip
-        $dataType = $container->getLogicalType($field, $value);
-
-        $dateCandidates = Config::$dateFieldCandidates;
-
-        $this->assertArrayHasKey($field, $dateCandidates);
+        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
+        
+        $this->assertArrayHasKey('date_candidate', Config::$discoveredFieldOccurrence[$field]);
 
         $this->assertNotEquals('date', $dataType);
-        $this->assertEquals(100, Config::$dateFieldCandidates[$field]['check_count']);
+        $this->assertEquals(100, Config::$discoveredFieldOccurrence[$field]['date_candidate']['check_count']);
 
     }
 
@@ -136,13 +133,11 @@ class AnalyseSchemaDateTest extends TestCase
 
         $value = "2015-03-23";
         $field = 'foo';
-        $dataType = $container->getLogicalType($field, $value);
+        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         $value = $container->setValue($dataType,  $field, $value);
-
-        $dateCandidates = Config::$dateFieldCandidates;
-
-        $this->assertArrayHasKey($field, $dateCandidates);
+        
+        $this->assertArrayHasKey('date_candidate', Config::$discoveredFieldOccurrence[$field]);
 
         $this->assertEquals('date', $dataType);
         $this->assertEquals(1427068800, $value);
@@ -157,13 +152,11 @@ class AnalyseSchemaDateTest extends TestCase
 
         $value = 1567174191;
         $field = 'foo';
-        $dataType = $container->getLogicalType($field, $value);
+        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         $value = $container->setValue($dataType,  $field, $value);
 
-        $dateCandidates = Config::$dateFieldCandidates;
-
-        $this->assertArrayHasKey($field, $dateCandidates);
+        $this->assertArrayHasKey('date_candidate', Config::$discoveredFieldOccurrence[$field]);
 
         $this->assertEquals('integer', $dataType);
         $this->assertEquals(1567174191, $value);
@@ -178,13 +171,11 @@ class AnalyseSchemaDateTest extends TestCase
 
         $value = 1567174191000;
         $field = 'foo';
-        $dataType = $container->getLogicalType($field, $value);
+        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         $value = $container->setValue($dataType,  $field, $value);
 
-        $dateCandidates = Config::$dateFieldCandidates;
-
-        $this->assertArrayHasKey($field, $dateCandidates);
+        $this->assertArrayHasKey('date_candidate', Config::$discoveredFieldOccurrence[$field]);
 
         $this->assertEquals('long', $dataType);
         $this->assertEquals(1567174191000, $value);

@@ -26,7 +26,7 @@ class AnalyseSchemaAvroArrayTypesTest extends TestCase
     {
         parent::setUp();
 
-        Config::$discoveredFieldOccurrence['foo_partition'] = [];
+        Config::$discoveredFieldOccurrence['foo_partition']['fields'] = [];
         
     }
 
@@ -47,14 +47,14 @@ class AnalyseSchemaAvroArrayTypesTest extends TestCase
                 'abc6' => ["abc", 123, null, 123.456],
             ]
         ];
-
-        $container->analysePayload($field, Config::$discoveredFieldOccurrence['foo_partition']);
-
-        $container->determineFieldTypes(Config::$discoveredFieldOccurrence['foo_partition']);
         
-        $this->assertEquals(1, Config::$discoveredFieldOccurrence['foo_partition']['foo']['type']['record']);
+        $container->analysePayload($field, Config::$discoveredFieldOccurrence['foo_partition']['fields']);
 
-        $fieldYml = Config::$discoveredFieldOccurrence['foo_partition']['foo']['fields'];
+        $container->determineFieldTypes(Config::$discoveredFieldOccurrence['foo_partition']['fields']);
+        
+        $this->assertEquals(1, Config::$discoveredFieldOccurrence['foo_partition']['fields']['foo']['type']['record']);
+
+        $fieldYml = Config::$discoveredFieldOccurrence['foo_partition']['fields']['foo']['fields'];
 
         $this->assertEquals('array', array_key_first($fieldYml['abc1']['type']));
         $this->assertEquals('array', array_key_first($fieldYml['abc2']['type']));

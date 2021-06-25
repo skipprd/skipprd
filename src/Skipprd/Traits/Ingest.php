@@ -22,7 +22,7 @@ trait Ingest
 
     public $avroSchema = null;
 
-    public function ingestPayload(array $sourceMessage, array &$metadata)
+    public function ingestPayload(array $sourceMessage, array &$metadata, string $partition)
     {
 
         $this->i++;
@@ -30,7 +30,7 @@ trait Ingest
         // @todo - configurable timefields
         if (!empty($sourceMessage)) {
 
-            $message = $this->defaultMsg;
+            $message = $this->defaultMsgs[$partition];
 
             /*
              * Transformations and schema evolution
@@ -43,6 +43,10 @@ trait Ingest
                         Registry::skipprd()->info("Ingesting field: $field");
                     }
                     $this->ingestField($field, $value, $metadata, $message);
+
+                } elseif (isset(Config::$specialFields[$field])) {
+                    $message[$field] = $value;
+
                 }
 
             }
@@ -62,7 +66,7 @@ trait Ingest
 
 
             if (!$this->flagMsgDeadLetter
-                && $this->avroEncodeTest($message)
+                && $this->avroEncodeTest($message, $partition)
             ) {
 
                 $this->entries++;
@@ -206,10 +210,6 @@ trait Ingest
                 $message = Config::$specialFields;
             }
 
-            if (empty($schema)) {
-                $schema = Config::$schema['fields'];
-            }
-
             foreach ($schema as $i => $field) {
 
                 if (!empty($field['type'][1]['fields'])) {
@@ -285,11 +285,11 @@ trait Ingest
 
     }
 
-    public function avroEncodeTest(array $record)
+    public function avroEncodeTest(array $record, string $partition)
     {
 
         try {
-            $valid = \AvroSchema::is_valid_datum(Config::$avroSchema, $record);
+            $valid = \AvroSchema::is_valid_datum(Config::$avroSchemas[$partition], $record);
 
         } catch (\AvroSchemaParseException $e) {
             $valid = false;

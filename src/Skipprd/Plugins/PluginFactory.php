@@ -5,7 +5,7 @@ namespace Skipprd\Plugins;
 use Monolog\Registry;
 use Skipprd\Plugins\DataOutputs\DataOutputPluginBase;
 use Skipprd\Plugins\DataSources\DataSourcePluginBase;
-use Skipprd\Buffers\FileBuffer;
+use Skipprd\Buffers\ChunkedBuffer;
 use Skipprd\Str;
 
 
@@ -17,7 +17,7 @@ class PluginFactory
      * @param String $name
      * @return DataSourcePluginBase|DataOutputPluginBase
      */
-    static function factory(string $type, string $name, FileBuffer $buffer = null) {
+    static function factory(string $type, string $name, ChunkedBuffer $buffer = null) {
 
         $config = [];
         $envs = getenv();
@@ -33,7 +33,7 @@ class PluginFactory
         $type = Str::studly(ucwords(strtolower($type)));
         $name = Str::studly(ucwords(strtolower($name)));
 
-        $buffer = ($buffer == null) ? new FileBuffer('temp', null) : $buffer;
+        $buffer = ($buffer == null) ? new ChunkedBuffer('temp', null) : $buffer;
 
         $factoryClass = "\Skipprd\\$type" . "$name" . "\\$type" . "$name" . "Plugin";
 

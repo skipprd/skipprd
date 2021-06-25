@@ -6,7 +6,7 @@
 1. Docker Login to pull base image
 
 ```
- AWS_PROFILE=skippr docker login --username AWS --password $(AWS_PROFILE=skippr aws ecr get-login-password --region eu-west-2) 536671797322.dkr.ecr.eu-west-2.amazonaws.com
+AWS_PROFILE=skippr docker login --username AWS --password $(AWS_PROFILE=skippr aws ecr get-login-password --region eu-west-2) 536671797322.dkr.ecr.eu-west-2.amazonaws.com
 ```
  
 2. export ssh key to authenticate with gitlab for php composer

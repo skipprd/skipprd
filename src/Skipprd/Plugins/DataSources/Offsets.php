@@ -28,7 +28,13 @@ class Offsets
     public function parseOffsets(string $partition)
     {
 
-        $offsets = explode(' ', $this->offsets[$partition]);
+        $offsets = [];
+        
+        if (!empty($this->offsets[$partition])) {
+
+            $offsets = explode(' ', $this->offsets[$partition]);
+        }
+
 
         if (empty($offsets[0])) {
             $offsets[0] = 0;

@@ -9,7 +9,7 @@ use Skipprd\Traits\AnalyseSchema;
 class SerderJson implements SerderStreamInterface
 {
 
-    public function __construct(\AvroSchema $schema = null) {
+    public function __construct() {
 
     }
     
@@ -64,7 +64,7 @@ class SerderJson implements SerderStreamInterface
         return $messages;
     }
 
-    public function serialize(array $record): string
+    public function serialize(array $record, $schema = null): string
     {
         return json_encode($record);
     }

@@ -65,11 +65,11 @@ class DefaultMessageTest extends TestCase
         $container->determineFieldTypes(Config::$discoveredFieldOccurrence['foo_partition']);
 
         $avroFieldSchema = $this->buildSchema($field);
-        Config::$schema['fields'] = Config::schemaMerge(Config::$specialFieldsMapping, $avroFieldSchema);
+        Config::$schema['foo_partition'] = Config::schemaMerge(Config::$specialFieldsMapping, $avroFieldSchema);
 
         // Test default message values (empty array, maps and records
         // Particularly relevant for serder to parquet
-        $container->defaultMsg = $this->defaultMessage(Config::$schema['fields']);
+        $container->defaultMsg = $this->defaultMessage(Config::$schema['foo_partition']);
 
         $this->assertArrayHasKey('foo', $container->defaultMsg);
 

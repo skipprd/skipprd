@@ -12,6 +12,7 @@ use Illuminate\Contracts\Container\Container;
 use Skipprd\Commands\PipelineCommand;
 use Skipprd\Services\MessageSerializer;
 use Skipprd\Traits\AnalyseSchema;
+use Skipprd\Traits\Config;
 use Superbalist\LaravelPubSub\PubSubConnectionFactory;
 use Tests\TestCase;
 use Illuminate\Foundation\Testing\DatabaseMigrations;
@@ -37,7 +38,7 @@ class AnalyseSchemaNumberTest extends TestCase
         $value = 2147483647;
         $field = 'foo';
 
-        $dataType = $container->getLogicalType($field, $value);
+        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         $value = $container->setValue($dataType,  $field, $value);
 
@@ -55,7 +56,7 @@ class AnalyseSchemaNumberTest extends TestCase
         $value = '8598265768';
         $field = 'foo';
 
-        $dataType = $container->getLogicalType($field, $value);
+        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         $value = $container->setValue($dataType,  $field, $value);
 
@@ -72,7 +73,7 @@ class AnalyseSchemaNumberTest extends TestCase
         $value = 123456;
         $field = 'foo';
 
-        $dataType = $container->getLogicalType($field, $value);
+        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         $value = $container->setValue($dataType,  $field, $value);
         
@@ -90,7 +91,7 @@ class AnalyseSchemaNumberTest extends TestCase
         $value = '123456';
         $field = 'foo';
 
-        $dataType = $container->getLogicalType($field, $value);
+        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         $value = $container->setValue($dataType,  $field, $value);
 
@@ -108,7 +109,7 @@ class AnalyseSchemaNumberTest extends TestCase
         $value = 853386065604908;
         $field = 'foo';
 
-        $dataType = $container->getLogicalType($field, $value);
+        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         $value = $container->setValue($dataType,  $field, $value);
 
@@ -126,7 +127,7 @@ class AnalyseSchemaNumberTest extends TestCase
         $value = '853386065604908';
         $field = 'foo';
 
-        $dataType = $container->getLogicalType($field, $value);
+        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         $value = $container->setValue($dataType,  $field, $value);
 
@@ -144,7 +145,7 @@ class AnalyseSchemaNumberTest extends TestCase
         $value = 2147483647000;
         $field = 'foo';
 
-        $dataType = $container->getLogicalType($field, $value);
+        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         $value = $container->setValue($dataType,  $field, $value);
         
@@ -162,7 +163,7 @@ class AnalyseSchemaNumberTest extends TestCase
         $value = '2147483647000';
         $field = 'foo';
 
-        $dataType = $container->getLogicalType($field, $value);
+        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         $value = $container->setValue($dataType,  $field, $value);
         

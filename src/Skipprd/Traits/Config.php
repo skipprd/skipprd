@@ -9,6 +9,7 @@
 namespace Skipprd\Traits;
 
 
+use Skipprd\Converters\AvroParquetSchemaConverter;
 use Skipprd\Converters\SkipprAvroSchemaConverter;
 use Skipprd\Helpers;
 use Monolog\Registry;
@@ -30,7 +31,7 @@ class Config
 
     public static $mode = 'sync';
 
-    public static $offsets = '';
+    public static $offsets = [];
 
     public static $sourceFormat = null;
 
@@ -49,9 +50,11 @@ class Config
     public static $mapping = [];
 
     /**
-     * @var \AvroSchema $avroSchema
+     * @var \AvroSchema $avroSchemas
      */
-    public static $avroSchema;
+    public static $avroSchemas;
+
+    public static $outputSchemas = [];
 
     public static $entityNames = [];
 
@@ -157,7 +160,7 @@ class Config
                 $client = new \GuzzleHttp\Client([
                     'base_uri' => $url,
                     'headers' => [
-                        'Authorization' => "Bearer " . self::getenv('SCHEMA_API_TOKEN')
+                        'Authorization' => "Bearer " . Config::getenv('SCHEMA_API_TOKEN')
                     ]
                 ]);
 
@@ -182,7 +185,7 @@ class Config
                     Registry::skipprd()
                         ->info('Found existing ' . self::$dataDir . '/skippr-state.json');
 
-                    Config::$state = json_decode(file_get_contents(self::$dataDir . '/skippr-state.json'),
+                    self::$state = json_decode(file_get_contents(self::$dataDir . '/skippr-state.json'),
                         true);
 
                     if (!empty(Config::$state[$defaultPipelineName])) {
@@ -196,15 +199,6 @@ class Config
 
                     }
 
-                    if (!empty(self::$discoveredFieldOccurrence)) {
-
-                        $converter = new SkipprAvroSchemaConverter();
-                        $avroArr = $converter->convert(self::$discoveredFieldOccurrence);
-
-                        $avroArr = self::schemaMerge(self::$specialFieldsMapping, $avroArr);
-
-                    }
-
                 } catch (\Exception $e) {
                     Registry::skipprd()
                         ->error($e->getMessage());
@@ -215,13 +209,13 @@ class Config
         }
 
 
-        self::$pipelineName = self::getenv('PIPELINE_NAME', $defaultPipelineName);
+        self::$pipelineName = Config::getenv('PIPELINE_NAME', $defaultPipelineName);
 
-        self::$offsets = (!empty(Config::$state[$defaultPipelineName]['offsets']) ? Config::$state[$defaultPipelineName]['offsets'] : '');
+        self::$offsets = (!empty(self::$state[$defaultPipelineName]['offsets']) ? self::$state[$defaultPipelineName]['offsets'] : '');
 
-        self::$schema['fields'] = [];
-
-        self::$schema['fields'] = (empty($avroArr)) ? [] : $avroArr;
+//        self::$schema['fields'] = [];
+//
+//        self::$schema['fields'] = (empty($avroArr)) ? [] : $avroArr;
 
         self::$eventPath = self::getenv('DATA_SOURCE_EVENT_PATH');
 
@@ -231,15 +225,48 @@ class Config
         self::$entityNames = [];
         self::$timeFields = [];
 
-        self::$analysing = (empty($avroArr)) ? true : false;
+        self::$analysing = (empty(self::$discoveredFieldOccurrence)) ? true : false;
         self::$analysing = (bool) self::getenv('ANALYSING', self::$analysing);
         
         self::$systemUserApiToken = self::getenv('SCHEMA_API_TOKEN');
 
-        if (!empty(self::$schema['fields'])) {
-            self::$avroSchema = self::buildAvroSchema();
+        if (!empty(self::$discoveredFieldOccurrence)) {
+
+            foreach (self::$discoveredFieldOccurrence as $partition => $mapping) {
+
+                Registry::skipprd()->info("Building $partition schema");
+
+                $converter = new SkipprAvroSchemaConverter();
+                self::$schema[$partition] = $converter->convert(self::$discoveredFieldOccurrence);
+
+                self::$schema[$partition] = self::schemaMerge(self::$specialFieldsMapping, self::$schema[$partition]);
+
+                self::$avroSchemas[$partition] = self::buildAvroSchema(self::$schema[$partition]);
+
+//                $converter = new AvroParquetSchemaConverter();
+//                self::$outputSchemas[$partition] = $converter->convert(Config::$avroSchemas[$partition]);
+
+                $outputFormat = ucfirst(self::$outputFormat);
+                $converterClass = 'Skipprd\Converters\Avro' . $outputFormat . 'SchemaConverter';
+
+                if (class_exists($converterClass)) {
+
+                    Registry::skipprd()->info("Converting $partition schema to $outputFormat");
+
+                    $converter = new $converterClass();
+
+                    self::$outputSchemas[$partition] = $converter->convert(self::$avroSchemas[$partition]);
+
+                } else {
+
+                    self::$outputSchemas[$partition] = self::$avroSchemas[$partition];
+                }
+
+            }
+
         }
-        
+
+
         // Although we may be done analysing, we don't want to override candidate.
         // They should remain in the option list even if the user has rejected them.
 //        if (!empty($configYml['field_yml']['date_field_candidates'])) {
@@ -252,7 +279,7 @@ class Config
 
     }
 
-    public static function buildAvroSchema()
+    public static function buildAvroSchema($schema)
     {
 
         $schemaName = self::$tenantId . '_' . self::$pipelineName;
@@ -263,7 +290,7 @@ class Config
         $valueAvroSchema['name'] = $schemaName;
         $valueAvroSchema['type'] = 'record';
 
-        $valueAvroSchema['fields'] = self::$schema['fields'];
+        $valueAvroSchema['fields'] = $schema;
 
         $valueSchemaJson = json_encode($valueAvroSchema);
         $valueSchema = \AvroSchema::parse($valueSchemaJson);

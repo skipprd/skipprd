@@ -8,11 +8,9 @@ use Skipprd\Traits\Config;
 class SerderAvroFile implements SerderBatchInterface
 {
 
-    protected $avroSchema = [];
-
-    public function __construct(\AvroSchema $schema = null)
+    public function __construct()
     {
-        $this->avroSchema = $schema;
+
     }
 
     public function deserialize(string $payload): array
@@ -36,14 +34,14 @@ class SerderAvroFile implements SerderBatchInterface
         return $data;
     }
 
-    public function serialize(array $records, string $filename): void
+    public function serialize(array $records, string $filename, $schema = null): void
     {
         
         try {
 
             if (!empty($records)) {
 
-                $data_writer = \AvroDataIO::open_file($filename, 'w', $this->avroSchema);
+                $data_writer = \AvroDataIO::open_file($filename, 'w', $schema);
 
                 foreach ($records as $datum) {
 

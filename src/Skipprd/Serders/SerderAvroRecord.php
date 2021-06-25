@@ -7,11 +7,8 @@ use Skipprd\Serders\Interfaces\SerderStreamInterface;
 class SerderAvroRecord implements SerderStreamInterface
 {
 
-    protected $avroSchema = [];
-
-    public function __construct(\AvroSchema $schema = null)
+    public function __construct()
     {
-        $this->avroSchema = $schema;
     }
 
     public function deserialize(string $record) : array
@@ -33,15 +30,15 @@ class SerderAvroRecord implements SerderStreamInterface
         return $data;
     }
 
-    public function serialize(array $record) : string
+    public function serialize(array $record, $schema = null) : string
     {
 
         try {
 
             $io = new \AvroStringIO();
 
-            $writer = new \AvroIODatumWriter($this->avroSchema);
-            $data_writer = new \AvroDataIOWriter($io, $writer, $this->avroSchema);
+            $writer = new \AvroIODatumWriter($schema);
+            $data_writer = new \AvroDataIOWriter($io, $writer, $schema);
 
             $data_writer->append($record);
 

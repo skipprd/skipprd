@@ -2,7 +2,7 @@
 
 namespace Skipprd\Plugins\DataSources;
 
-use Skipprd\Buffers\FileBuffer;
+use Skipprd\Buffers\ChunkedBuffer;
 
 class DataSourcePluginBase implements DataSourcePluginInterface
 {
@@ -19,7 +19,7 @@ class DataSourcePluginBase implements DataSourcePluginInterface
 
     protected $config = [];
 
-    public function __construct(array $config, FileBuffer $buffer)
+    public function __construct(array $config, ChunkedBuffer $buffer)
     {
         $this->tenantId = getenv('TENANT_ID');
         $this->pipelineName = getenv('PIPELINE_NAME');
@@ -32,7 +32,7 @@ class DataSourcePluginBase implements DataSourcePluginInterface
 
     public function splitPartitions(string $partitionField = '') : array
     {
-        return explode($partitionField,  ',');
+        return explode(',', $partitionField);
     }
 
     public function connect() { }

@@ -26,7 +26,7 @@ class AnalyseSchemaComplexTypesTestComplexTypesTest extends TestCase
     {
         parent::setUp();
 
-        Config::$discoveredFieldOccurrence['foo_partition'] = [];
+        Config::$discoveredFieldOccurrence['foo_partition']['fields'] = [];
 
     }
 
@@ -72,7 +72,7 @@ class AnalyseSchemaComplexTypesTestComplexTypesTest extends TestCase
             ],
         ];
         
-        $container->analysePayload($field, Config::$discoveredFieldOccurrence['foo_partition']);
+        $container->analysePayload($field, Config::$discoveredFieldOccurrence['foo_partition']['fields']);
         
 //        $this->assertEquals(1, Config::$discoveredFieldOccurrence['foo']['type']['record']);
 //        $this->assertEquals(1, Config::$discoveredFieldOccurrence['foo']['fields']['sheep']['type']['string']);
@@ -93,9 +93,9 @@ class AnalyseSchemaComplexTypesTestComplexTypesTest extends TestCase
 //        $this->assertEquals(1, Config::$discoveredFieldOccurrence['foo']['fields']['crank_torques']['fields'][0]['fields'][0]['type']['integer']);
 
 
-        $container->determineFieldTypes(Config::$discoveredFieldOccurrence['foo_partition']);
+        $container->determineFieldTypes(Config::$discoveredFieldOccurrence['foo_partition']['fields']);
 
-        $foo = Config::$discoveredFieldOccurrence['foo_partition'];
+        $foo = Config::$discoveredFieldOccurrence['foo_partition']['fields'];
 
         $this->assertEquals('record', $foo["foo"]["fields"]["crank_torques"]["parent_type"]);
 

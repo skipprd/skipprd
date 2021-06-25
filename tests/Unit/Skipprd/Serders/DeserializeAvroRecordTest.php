@@ -25,7 +25,7 @@ class DeserializeAvroRecordTest extends TestCase
 
         $avroSchema = \AvroSchema::parse($writers_schema_json);
 
-        $this->serder = SerdersFactory::factory($this->format, $avroSchema);
+        $this->serder = SerdersFactory::factory($this->format);
 
         $io = new \AvroStringIO();
 
@@ -59,9 +59,9 @@ _JSON;
 
         $avroSchema = \AvroSchema::parse($writers_schema_json);
 
-        $this->serder = SerdersFactory::factory($this->format, $avroSchema);
+        $this->serder = SerdersFactory::factory($this->format);
 
-        $record = $this->serder->serialize($data);
+        $record = $this->serder->serialize($data, $avroSchema);
         $msg = $this->serder->deserialize($record);
 
         $this->assertEquals('Paul Hudson', $msg[0]['name']);

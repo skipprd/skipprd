@@ -170,7 +170,7 @@ trait AnalyseSchema
 
     public function resolveFieldType(&$array, $field, $value, $parentType = null)
     {
-        $dataType = $this->getLogicalType($field, $value);
+        $dataType = $this->getLogicalType($field, $value, $array);
 
         $this->initDiscoveredType($array, $field);
 
@@ -182,7 +182,7 @@ trait AnalyseSchema
 
             foreach ($value as $sub_field => $sub_value) {
 
-                $logicalType = $this->getLogicalType($sub_field, $sub_value, false);
+                $logicalType = $this->getLogicalType($sub_field, $sub_value, $array, false);
 
                 $typeCount[$logicalType] = 'hit';
 
@@ -225,7 +225,7 @@ trait AnalyseSchema
         return $dataType;
     }
 
-    public function getLogicalType(string $field, $value, bool $allowDate = true)
+    public function getLogicalType(string $field, $value, array &$metadata, bool $allowDate = true)
     {
 
         $dataType = gettype($value);
@@ -251,9 +251,9 @@ trait AnalyseSchema
 
                 if ($validTimestamp) {
 
-                    $this->setDateFieldCandidate($field);
+                    $this->setDateFieldCandidate($field, $metadata);
 
-                    $this->incrementDateFieldCandidateCount($field);
+                    $this->incrementDateFieldCandidateCount($field, $metadata);
 
                 }
 
@@ -270,19 +270,19 @@ trait AnalyseSchema
         if ($dataType == 'string' && $allowDate) {
 
             // Limit number of check type attempts for data as expensive operation.
-            if (empty(Config::$dateFieldCandidates[$field]['check_count']) || Config::$dateFieldCandidates[$field]['check_count'] < $this->dateFieldvalidationMminSample) {
+            if (empty($metadata[$field]['date_candidate']['check_count']) || $metadata[$field]['date_candidate']['check_count'] < $this->dateFieldvalidationMminSample) {
 
 
                 if ($format = AnalyseSchema::isValidDate($value)) {
                     $dataType = 'date';
-                    $this->setDateFieldCandidate($field, $format);
+                    $this->setDateFieldCandidate($field, $metadata, $format);
                 }
 
-                $this->incrementDateFieldCandidateCount($field);
+                $this->incrementDateFieldCandidateCount($field, $metadata);
 
                 // Already hit date field check limit. Force set type if valid date field.
-            } elseif (!empty(Config::$dateFieldCandidates[$field]['valid_count'])
-                && Config::$dateFieldCandidates[$field]['valid_count'] >= $this->dateFieldvalidationMminSample) {
+            } elseif (!empty($metadata[$field]['date_candidate']['valid_count'])
+                && $metadata[$field]['date_candidate']['valid_count'] >= $this->dateFieldvalidationMminSample) {
                 $dataType = 'date';
 
             }
@@ -326,33 +326,33 @@ trait AnalyseSchema
         return $dataType;
     }
 
-    function incrementDateFieldCandidateCount(string $field)
+    function incrementDateFieldCandidateCount(string $field, array &$metadata)
     {
 
-        if (empty(Config::$dateFieldCandidates[$field]['check_count'])) {
-            Config::$dateFieldCandidates[$field]['check_count'] = 1;
+        if (empty($metadata[$field]['date_candidate']['check_count'])) {
+            $metadata[$field]['date_candidate']['check_count'] = 1;
         } else {
-            Config::$dateFieldCandidates[$field]['check_count']++;
+            $metadata[$field]['date_candidate']['check_count']++;
         }
 
     }
 
-    function setDateFieldCandidate(string $field, string $format = '')
+    function setDateFieldCandidate(string $field, array &$metadata, string $format = '')
     {
 
-        if (empty(Config::$dateFieldCandidates[$field]['valid_count'])) {
-            Config::$dateFieldCandidates[$field]['valid_count'] = 1;
+        if (empty($metadata[$field]['date_candidate']['valid_count'])) {
+            $metadata[$field]['date_candidate']['valid_count'] = 1;
         } else {
-            Config::$dateFieldCandidates[$field]['valid_count']++;
+            $metadata[$field]['date_candidate']['valid_count']++;
         }
 
-        if (Config::$dateFieldCandidates[$field]['valid_count'] >= $this->dateFieldvalidationMminSample) {
+        if ($metadata[$field]['date_candidate']['valid_count'] >= $this->dateFieldvalidationMminSample) {
 
-            Config::$dateFieldCandidates[$field]['field'] = $field;
+            $metadata[$field]['date_candidate']['field'] = $field;
 
             // save the format, else calls to setValue() often hit Carbon::createFromFormat causing memory explosion
             if ($format != '') {
-                Config::$dateFieldCandidates[$field]['format'] = $format;
+                $metadata[$field]['date_candidate']['format'] = $format;
             }
         }
 
@@ -513,7 +513,7 @@ trait AnalyseSchema
     public function handleValueError(&$field, $value, $fieldOccurrence)
     {
 
-        $dataType = $this->getLogicalType($field, $value, false);
+        $dataType = $this->getLogicalType($field, $value, $fieldOccurrence, false);
 
 
 //        Registry::skipprd()->debug("Resolving type: $dataType for field: $field value: $value");

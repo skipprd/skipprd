@@ -7,14 +7,17 @@ namespace Skipprd\Buffers;
 trait BufferAdaptorsFactory
 {
 
-    static function getAdaptor(string $name, string $type, int $bytes = null) : BufferInterface
+    static function getAdaptor(string $bufferName, string $driverType, int $flushBytes = null) : BufferInterface
     {
 
-        $adaptorName = ucfirst($type) . 'Buffer';
+        $driverName = ucfirst($driverType) . 'BufferDriver';
+        $driverClassName = "Skipprd\\Buffers\\BufferDrivers\\$driverName";
 
-        $adaptorName = "Skipprd\\Buffers\\" . $adaptorName;
+        $driver = new $driverClassName($bufferName);
 
-        $adaptor = new $adaptorName($name, $bytes);
+        $adaptorClassName = "Skipprd\\Buffers\\ChunkedBuffer";
+
+        $adaptor = new $adaptorClassName($bufferName, $driver, $flushBytes);
 
         return $adaptor;
     }

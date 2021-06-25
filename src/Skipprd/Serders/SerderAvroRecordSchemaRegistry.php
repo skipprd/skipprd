@@ -11,21 +11,17 @@ use Skipprd\Traits\Config;
 class SerderAvroRecord implements SerderStreamInterface
 {
 
-    protected $defaultSchema = [];
-
     protected $tenantId = '';
 
     protected $pipelineName = '';
 
 
-    public function __construct(\AvroSchema $schema = null)
+    public function __construct()
     {
 
         $this->tenantId = getenv('TENANT_ID');
         
         Config::$pipelineName = getenv('PIPELINE_NAME');
-
-        $this->defaultSchema = $schema;
 
     }
 
@@ -44,16 +40,16 @@ class SerderAvroRecord implements SerderStreamInterface
         return $datum;
     }
 
-    public function serialize(array $record) : string
+    public function serialize(array $record, array $schema) : string
     {
 
         $recordsWithSchema = false;
         
         try {
 
-            if ($record && $this->defaultSchema) {
+            if ($record && $schema) {
 
-                $recordsWithSchema = $this->encodeRecordWithSchema($this->defaultSchema, $record);
+                $recordsWithSchema = $this->encodeRecordWithSchema($schema, $record);
             }
 
 

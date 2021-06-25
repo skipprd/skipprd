@@ -25,7 +25,7 @@ class DeserializeAvroFileTest extends TestCase
 
         $avroSchema = \AvroSchema::parse($writers_schema_json);
 
-        $this->serder = SerdersFactory::factory($this->format, $avroSchema);
+        $this->serder = SerdersFactory::factory($this->format);
 
         $io = new \AvroStringIO();
 

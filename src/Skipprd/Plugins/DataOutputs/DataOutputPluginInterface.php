@@ -2,14 +2,14 @@
 
 namespace Skipprd\Plugins\DataOutputs;
 
-use Skipprd\Buffers\FileBuffer;
+use Skipprd\Buffers\ChunkedBuffer;
 
 Interface DataOutputPluginInterface
 {
 
-    public function __construct(array $config, FileBuffer $buffer);
+    public function __construct(array $config, ChunkedBuffer $buffer);
 
-    public function sync(string $format = '', \AvroSchema $schema = null);
+    public function sync(string $format = '');
 
     public function shutdown();
 

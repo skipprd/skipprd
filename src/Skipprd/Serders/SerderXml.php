@@ -28,7 +28,7 @@ class SerderXml implements SerderBatchInterface
 
     }
 
-    public function serialize(array $records, string $filename): void
+    public function serialize(array $records, string $filename, $schema = null): void
     {
 
         $xml_data = new \SimpleXMLElement('<?xml version="1.0"?><data></data>');

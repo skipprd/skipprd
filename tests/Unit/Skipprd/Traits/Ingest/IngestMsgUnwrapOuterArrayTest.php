@@ -36,9 +36,9 @@ class ingestMsgUnwrapOuterArrayTest extends TestCase
         // Discover Schema
         Config::$discoveredFieldOccurrence['foo_partition'] = [];
         
-        $container->analysePayload($record, Config::$discoveredFieldOccurrence['foo_partition']);
+        $container->analysePayload($record, Config::$discoveredFieldOccurrence['foo_partition']['fields']);
 
-        $container->determineFieldTypes(Config::$discoveredFieldOccurrence['foo_partition']);
+        $container->determineFieldTypes(Config::$discoveredFieldOccurrence['foo_partition']['fields']);
     }
 
     public function testUnwrapOuterArray()

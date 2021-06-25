@@ -105,7 +105,7 @@ RUN ioncube/ioncube_encoder.sh --activate && \
 #      --deactivate
 
 
-RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Buffers/FileBuffer.php
+RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Buffers/BufferDrivers/FileBufferDriver.php
 RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Buffers/ChunkedBuffer.php
 
 RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Commands/PipelineCommand.php
@@ -126,6 +126,7 @@ RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skippr
 RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Traits/Ingest.php
 RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Traits/AnalyseSchema.php
 RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Traits/Config.php
+RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Traits/LicenseChecker.php
 
 RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/SkipprPack.php
 
