@@ -7,13 +7,13 @@ use Monolog\Registry;
 trait LicenseChecker
 {
 
-    public bool $licenseIsValid = false;
+    public $licenseIsValid = false;
 
-    public array $license = [];
+    public $license = [];
 
-    protected string $licenseKey = 'none';
+    protected $licenseKey = 'none';
 
-    protected string $licenseApiKey = 'nFCBbKgf72pXNcKS9wKFA7n419Y9ql0J';
+    protected $licenseApiKey = 'nFCBbKgf72pXNcKS9wKFA7n419Y9ql0J';
 
     public function getLicense()
     {
