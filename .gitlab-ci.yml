@@ -183,9 +183,9 @@ before_script:
     - if [ -z ${CI_COMMIT_TAG+x} ]; then echo "Commit did not have a git tag."; else docker tag ${PROJECT_NAME}:${CURR_BUILD_TAG} ${ECR_URL}:latest; fi
 
     # push image with tag ${CI_COMMIT_SHA_SHORT}
-#    - docker push ${IMAGE_TO_PUSH}
+    - docker push ${IMAGE_TO_PUSH}
 
-#    - if [ -z ${CI_COMMIT_TAG+x} ]; then echo "Not pushing latest tag, as not buildig tag"; else docker push ${ECR_URL}:latest; fi
+    - if [ -z ${CI_COMMIT_TAG+x} ]; then echo "Not pushing latest tag, as not buildig tag"; else docker push ${ECR_URL}:latest; fi
 
     # Tag with git tag if set
 #    - MANIFEST=$(aws ecr batch-get-image --repository-name ${PROJECT_NAME} --image-ids imageTag=${CURR_BUILD_TAG} --query 'images[].imageManifest' --output text)
