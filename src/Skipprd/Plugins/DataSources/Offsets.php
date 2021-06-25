@@ -7,17 +7,17 @@ namespace Skipprd\Plugins\DataSources;
 class Offsets
 {
 
-    protected string $offsets = '';
+    protected array $offsets = [];
 
     public function __construct()
     {
 
     }
 
-    public function setOffsets(string $offsets = '')
+    public function setOffsets(string $partition, string $offsets = '')
     {
 
-        $this->offsets = $offsets;
+        $this->offsets[$partition] = $offsets;
     }
 
     public function getOffsets() {
@@ -25,10 +25,16 @@ class Offsets
         return $this->offsets;
     }
 
-    public function parseOffsets()
+    public function parseOffsets(string $partition)
     {
 
-        $offsets = explode(' ', $this->offsets);
+        $offsets = [];
+        
+        if (!empty($this->offsets[$partition])) {
+
+            $offsets = explode(' ', $this->offsets[$partition]);
+        }
+
 
         if (empty($offsets[0])) {
             $offsets[0] = 0;
@@ -38,14 +44,14 @@ class Offsets
 
     }
 
-    public function validateOffset(string $args) : bool
+    public function validateOffset(string $partition, string $args) : bool
     {
 
 //        $offsets = $this->getOffsets();
 //        return bccomp($args, $offsets, 5) == 1;
 
 
-        $offsets = $this->parseOffsets();
+        $offsets = $this->parseOffsets($partition);
 
         $args = explode(' ', $args);
 
@@ -63,7 +69,7 @@ class Offsets
                     if ($total > $next) {
                         $subArgs = array_slice($args, $next);
                         $subArgs = implode(' ', $subArgs);
-                        $this->validateOffset($subArgs);
+                        $this->validateOffset($partition, $subArgs);
                     }
 
                 } else {

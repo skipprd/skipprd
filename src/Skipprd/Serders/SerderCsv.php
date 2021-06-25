@@ -11,9 +11,9 @@ use Skipprd\Traits\Ingest;
 class SerderCsv implements SerderBatchInterface
 {
 
-    private $csvHeaders = [];
-
-    public function __construct(\AvroSchema $schema = null) {
+    public $csvHeaders = [];
+    
+    public function __construct() {
 
     }
     
@@ -113,7 +113,7 @@ class SerderCsv implements SerderBatchInterface
         return $messages;
     }
 
-    public function serialize(array $record, string $filename): void
+    public function serialize(array $record, string $filename, $schema = null): void
     {
 
         $fh = fopen($filename, 'a+');

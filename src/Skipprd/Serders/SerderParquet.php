@@ -5,46 +5,25 @@ namespace Skipprd\Serders;
 
 use Skipprd\Converters\AvroParquetSchemaConverter;
 use Skipprd\Serders\Interfaces\SerderBatchInterface;
-use Skipprd\Traits\AnalyseSchema;
 use Skipprd\Traits\Config;
 
 class SerderParquet implements SerderBatchInterface
 {
 
     private $parquet;
-    
-    private $converter;
 
-    public $parquetSchema;
-
-    public function __construct(\AvroSchema $schema = null) {
-
-        if (!empty($schema)) {
-            $this->converter = new AvroParquetSchemaConverter();
-            $this->parquetSchema = $this->converter->convert(Config::$avroSchema);
-        }
+    public function __construct() {
 
     }
 
     public function deserialize(string $payload): array
     {
 
-        $this->parquet = new \Parquet();
-
-        $this->parquet->create_reader("test.parquet", 0);
-
-        $json = "";
-        $this->parquet->get_file_json($json, 0);
-
-        $this->parquet->close_reader();
-
-        $data = json_decode($json, true);
-
-        return $data;
+        throw new \Exception("Method not implemented");
 
     }
 
-    public function serialize(array $records, string $filename): void
+    public function serialize(array $records, string $filename, $schema = null): void
     {
 
         $this->parquet = new \Parquet();
@@ -53,7 +32,7 @@ class SerderParquet implements SerderBatchInterface
 
             if (!empty($records)) {
                 
-                $this->parquet->create_writer($filename, $this->parquetSchema, 'snappy');
+                $this->parquet->create_writer($filename, $schema, 'snappy');
 
                 foreach ($records as $record) {
 
@@ -67,7 +46,7 @@ class SerderParquet implements SerderBatchInterface
 
         } catch (\Exception $exception) {
 
-                        var_export($this->parquetSchema);
+                        var_export($schema);
                         print("\n");
 
 //                        var_export($records);

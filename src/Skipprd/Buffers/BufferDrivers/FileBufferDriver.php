@@ -1,6 +1,6 @@
 <?php
 
-namespace Skipprd\Buffers;
+namespace Skipprd\Buffers\BufferDrivers;
 
 use Carbon\Carbon;
 use Monolog\Registry;
@@ -11,20 +11,18 @@ use Skipprd\MachineToHuman\BytesToHuman;
 use Skipprd\Serders\SerdersFactory;
 use Skipprd\Traits\Config;
 
-class FileBuffer implements BufferInterface
+class FileBufferDriver implements BufferDriver
 {
 
     public $rows = 0;
 
-    protected $name;
+    protected $bufferName;
 
     protected $dataFp = null;
 
     protected $cpFp = null;
 
     protected $cpLine = null;
-    
-    protected $memBuffs = [];
 
     public $bufferDir = '';
 
@@ -32,24 +30,18 @@ class FileBuffer implements BufferInterface
 
     public $flushFileSeconds = 600;
 
-    public $flushMemBytes = 1000000; # 1MB
-
     public $flushMemSeconds = 300; # seconds
 
     public $serde;
 
-    public function __construct(string $name, int $flushBytes = null)
+    public function __construct(string $bufferName)
     {
 
-        $this->name = $name;
+        $this->bufferName = $bufferName;
 
         $this->bufferDir = Config::$dataDir . '/buffer';
 
         @mkdir($this->bufferDir,0777, true);
-
-        if (!empty($flushBytes)) {
-            $this->flushBytes = $flushBytes;
-        }
 
         $this->setSerde(Config::$outputFormat);
 
@@ -57,41 +49,25 @@ class FileBuffer implements BufferInterface
 
     public function setSerde(string $serde)
     {
-        $this->serde = SerdersFactory::factory($serde, Config::$avroSchema);
+        $this->serde = SerdersFactory::factory($serde);
     }
 
-    public function flushAll(bool $force = false) {
+    public function flush(array $memBuff, string $chunkName, string $partition) : void {
 
-        foreach ($this->memBuffs as $name => $buffer) {
+        $schema = Config::$outputSchemas[$partition];
 
-            if ($force
-                || $buffer['size'] > $this->flushMemBytes
-//                || $buffer['time'] < time() - $this->flushMemSeconds
-            ) {
+        $filename = $this->bufferDir . '/' . $chunkName . '_part';
 
-                $this->flush($name);
-            }
+        try {
 
-        }
-    }
-
-    public function flush(string $name) : void {
-
-        if (!empty($this->memBuffs[$name]['buffer'])) {
-
-            $filename = $this->bufferDir . '/' . $name . '-part';
-
-            if (FileBuffer::lock($filename)) { // acquire an exclusive lock
+            if (FileBufferDriver::lock($filename)) { // acquire an exclusive lock
 
                 if (in_array(Config::$outputFormat, Config::$batchFormats)
                     && Config::$enableDeadLetters) {
 
-                    if (!empty($this->memBuffs[$name]) && !empty($this->memBuffs[$name]['buffer'])) {
+                    $this->serde->serialize($memBuff, $filename, $schema);
 
-                        $this->serde->serialize($this->memBuffs[$name]['buffer'], $filename);
-                    }
-
-                    FileBuffer::unlock($filename);
+                    FileBufferDriver::unlock($filename);
 
                     $this->finalise(true);
 
@@ -99,77 +75,86 @@ class FileBuffer implements BufferInterface
 
                     $fp = fopen($filename, 'a+');
 
-                    if (!empty($this->memBuffs[$name]) && !empty($this->memBuffs[$name]['buffer'])) {
+                    foreach ($memBuff as $buf) {
 
-                        foreach ($this->memBuffs[$name]['buffer'] as $buf) {
-                            
-                            fputs($fp, $this->serde->serialize($buf) . "\n");
-                        }
-
+                        fputs($fp, $this->serde->serialize($buf, $schema) . "\n");
                     }
 
                     fflush($fp);            // flush output before releasing the lock
 
-                    FileBuffer::unlock($filename);
+                    FileBufferDriver::unlock($filename);
 
-                    FileBuffer::close($fp);
+                    FileBufferDriver::close($fp);
+
                 }
-
-                unset($this->memBuffs[$name]);
             }
+
+        } catch (\Exception $e) {
+
+            echo $e->getMessage();
+
+            echo $e->getTraceAsString();
+            fflush($fp);            // flush output before releasing the lock
+
+            FileBufferDriver::unlock($filename);
+
+            FileBufferDriver::close($fp);
+
+            throw $e;
+
         }
 
         $this->finalise();
     }
 
-    public function append(array $message, bool $flush = false) : void {
-
-//        if (Config::$outputFormat == 'parquet') {
-            // must serialise parquet directly to file
-            // so need intermediate serialisation (json) for buffer
-            $messageStr = json_encode((array)$message);
-            $size = strlen($messageStr) * 8;
-
+//    public function append(array $message, bool $flush = false) : void {
+//
+////        if (Config::$outputFormat == 'parquet') {
+//            // must serialise parquet directly to file
+//            // so need intermediate serialisation (json) for buffer
+//            $messageStr = json_encode((array)$message);
+//            $size = strlen($messageStr) * 8;
+//
+////        } else {
+////            $message = $this->serde->serialize($message);
+////            $size = mb_strlen($message, '8bit');
+////        }
+//
+//        if (empty($this->memBuffs[$this->name])) {
+//
+//            $this->memBuffs[$this->name]['size'] = $size;
+//            $this->memBuffs[$this->name]['time'] = time();
+////            $this->memBuffs[$this->name]['buffer'] = "$message" . "\n";
+//            $this->memBuffs[$this->name]['buffer'][] = $message;
+//
 //        } else {
-//            $message = $this->serde->serialize($message);
-//            $size = mb_strlen($message, '8bit');
+//            $this->memBuffs[$this->name]['size'] += $size;
+//            $this->memBuffs[$this->name]['time'] = time();
+////            $this->memBuffs[$this->name]['buffer'] .= "$message" . "\n";
+//            $this->memBuffs[$this->name]['buffer'][] = $message;
+//
 //        }
+//
+//        if ($flush
+//            || $this->memBuffs[$this->name]['size'] > $this->flushMemBytes
+////            || $this->memBuffs[$this->name]['time'] < time() - $this->flushMemSeconds
+//        ) {
+//
+//            $this->flush($this->name);
+////            $this->flushAll();
+//        }
+//    }
 
-        if (empty($this->memBuffs[$this->name])) {
-
-            $this->memBuffs[$this->name]['size'] = $size;
-            $this->memBuffs[$this->name]['time'] = time();
-//            $this->memBuffs[$this->name]['buffer'] = "$message" . "\n";
-            $this->memBuffs[$this->name]['buffer'][] = $message;
-
-        } else {
-            $this->memBuffs[$this->name]['size'] += $size;
-            $this->memBuffs[$this->name]['time'] = time();
-//            $this->memBuffs[$this->name]['buffer'] .= "$message" . "\n";
-            $this->memBuffs[$this->name]['buffer'][] = $message;
-
-        }
-
-        if ($flush
-            || $this->memBuffs[$this->name]['size'] > $this->flushMemBytes
-//            || $this->memBuffs[$this->name]['time'] < time() - $this->flushMemSeconds
-        ) {
-
-            $this->flush($this->name);
-//            $this->flushAll();
-        }
-    }
-
-    public function commit()
-    {
-
-        if ($this->cpFp) { // may be at end of file and already closed handle
-
-            $this->cpFp->ftruncate(0);
-            $this->cpFp->fwrite($this->cpLine);
-        }
-
-    }
+//    public function commit()
+//    {
+//
+//        if ($this->cpFp) { // may be at end of file and already closed handle
+//
+//            $this->cpFp->ftruncate(0);
+//            $this->cpFp->fwrite($this->cpLine);
+//        }
+//
+//    }
 
     public function stream()
     {
@@ -239,33 +224,33 @@ class FileBuffer implements BufferInterface
         
     }
 
-    /**
-     * stub, no partitioning on plain file buffer
-     * 
-     * @param $filename
-     * @return string
-     */
-    public function decodeChunkTime($filename) : string {
-
-        return '';
-
-    }
-
-    /**
-     * stub, no partitioning on plain file buffer
-     *
-     * @param $filename
-     * @return string
-     */
-    public function decodeChunkPartition($filename) : string {
-
-        return '';
-    }
+//    /**
+//     * stub, no partitioning on plain file buffer
+//     *
+//     * @param $filename
+//     * @return string
+//     */
+//    public function decodeChunkTime($filename) : string {
+//
+//        return '';
+//
+//    }
+//
+//    /**
+//     * stub, no partitioning on plain file buffer
+//     *
+//     * @param $filename
+//     * @return string
+//     */
+//    public function decodeChunkPartition($filename) : string {
+//
+//        return '';
+//    }
 
     public function nextFile()
     {
 
-        $filenames = glob($this->bufferDir . '/' . "$this->name*-finalised-*", GLOB_NOSORT);
+        $filenames = glob($this->bufferDir . '/' . "$this->bufferName*_finalised-*", GLOB_NOSORT);
 
         usort( $filenames, function( $a, $b ) { return filemtime($a) - filemtime($b); } );
 
@@ -280,7 +265,7 @@ class FileBuffer implements BufferInterface
                 if (strpos($filename, '.lock')) continue;
                 if (strpos($filename, '.checkpoint')) continue;
 
-                if (FileBuffer::lock($filename, false)) {
+                if (FileBufferDriver::lock($filename, false)) {
 
                     return $filename;
 
@@ -299,18 +284,18 @@ class FileBuffer implements BufferInterface
     }
 
 
-    public function lock(string $name, $block = true) : bool {
+    public function lock(string $chunkName, $block = true) : bool {
         
         $locked = false;
 
         // dir is more reliable than waiting for fstat on a file
-        if (@mkdir($name . '.lock',0777, true)) {
+        if (@mkdir($chunkName . '.lock',0777, true)) {
             $locked = true;
         }
 
         while (!$locked && $block) {
 
-            if (@mkdir($name . '.lock',0777, true)) {
+            if (@mkdir($chunkName . '.lock',0777, true)) {
                 $locked = true;
             } else {
 
@@ -323,7 +308,7 @@ class FileBuffer implements BufferInterface
 
     public function unlockAll() : void
     {
-        $file_list = glob($this->bufferDir . '/' . $this->name . '*lock');
+        $file_list = glob($this->bufferDir . '/' . $this->bufferName . '*lock');
 
         if (!empty($file_list)) {
 
@@ -344,9 +329,9 @@ class FileBuffer implements BufferInterface
         }
     }
 
-    public function unlock(string $name) : bool {
+    public function unlock(string $chunkName) : bool {
 
-        rmdir($name . '.lock');
+        rmdir($chunkName . '.lock');
 
         return true;
     }
@@ -385,7 +370,7 @@ class FileBuffer implements BufferInterface
 
     public function finalise($force = false) :void {
 
-        $file_list = glob($this->bufferDir . '/*' . $this->name . '*-part*');
+        $file_list = glob($this->bufferDir . '/*' . $this->bufferName . '*_part*');
 
         if (!empty($file_list)) {
 
@@ -403,7 +388,7 @@ class FileBuffer implements BufferInterface
 
                    $bytes = filesize($filename);
 
-                   if (FileBuffer::lock($filename)) { // acquire an exclusive lock
+                   if (FileBufferDriver::lock($filename)) { // acquire an exclusive lock
 
 //                       Registry::skipprd()->debug("bytes: " . $bytes);
 //                       Registry::skipprd()->debug("flushBytes: " . $this->flushBytes);
@@ -413,7 +398,7 @@ class FileBuffer implements BufferInterface
                            $newFilename = str_replace('part', 'finalised',
                                $filename);
 
-                           rename($filename, $newFilename . '-' . Helpers::randomPassword(32));
+                           rename($filename, $newFilename . '_' . Helpers::randomPassword(32));
 
                            if (!$force) {
 
@@ -422,7 +407,7 @@ class FileBuffer implements BufferInterface
                            }
                        }
 
-                       FileBuffer::unlock($filename);
+                       FileBufferDriver::unlock($filename);
                     }
 
                } catch (\Exception $e) {
@@ -438,7 +423,7 @@ class FileBuffer implements BufferInterface
     public function bufferGetNoFiles() : int
     {
 
-        $file_list = glob($this->bufferDir . '/' . "$this->name*");
+        $file_list = glob($this->bufferDir . '/' . "$this->bufferName*");
 
         $i = 0;
 
@@ -465,7 +450,7 @@ class FileBuffer implements BufferInterface
 
         $bytes = 0;
 
-        $file_list = glob($this->bufferDir . '/' . "$this->name*");
+        $file_list = glob($this->bufferDir . '/' . "$this->bufferName*");
 
         if (!empty($file_list)) {
 
@@ -496,7 +481,7 @@ class FileBuffer implements BufferInterface
     public function bufferGetNoLines() : int
     {
 
-        $file_list = glob($this->bufferDir . '/' . "$this->name*");
+        $file_list = glob($this->bufferDir . '/' . "$this->bufferName*");
 
         $lines = 0;
 

@@ -8,6 +8,10 @@
 
 namespace Skipprd\Commands;
 
+use Skipprd\Traits\LicenseChecker;
+use Monolog\Formatter\LineFormatter;
+use Monolog\Handler\StreamHandler;
+use Monolog\Handler\SyslogHandler;
 use Monolog\Logger;
 use Monolog\Registry;
 use Skipprd\Arr;
@@ -16,7 +20,6 @@ use Skipprd\Plugins\PluginFactory;
 use Aws\Exception\AwsException;
 use Aws\Sqs\SqsClient;
 use Carbon\Carbon;
-use Skipprd\Buffers\FileBuffer;
 use Skipprd\Helpers;
 use Skipprd\Jobs\PodsStatus;
 use Skipprd\SkipprPack;
@@ -37,6 +40,7 @@ class PipelineCommand
     use AnalyseSchema;
     use Ingest;
     use BufferAdaptorsFactory;
+    use LicenseChecker;
     
     protected $statsd = null;
 
@@ -52,7 +56,7 @@ class PipelineCommand
 
     public $offsetChannel = null;
 
-    public $defaultMsg = [];
+    public $defaultMsgs = [];
 
     public $log = null;
 
@@ -158,24 +162,46 @@ class PipelineCommand
      */
     public function __construct()
     {
-        $application = new Logger('skipprd');
-        Registry::addLogger($application);
-//        Registry::skipprd()-> = new Logger(new \Monolog\Logger('Skippr Logger'));
+        $this->createLogger();
+    }
 
+    public function createLogger() {
+
+        // the default date format is "Y-m-d\TH:i:sP"
+        $dateFormat = "Y-m-d\TH:i:sP";
+        // the default output format is "[%datetime%] %channel%.%level_name%: %message% %context% %extra%\n"
+        $output = "[%datetime%] %channel%.%level_name%: %message%\n";
+
+        $formatter = new LineFormatter($output, $dateFormat);
+
+        // Create a handler
+
+        $stream = new StreamHandler('php://stderr', Logger::DEBUG);
+        $stream->setFormatter($formatter);
+
+        $application = new Logger('skipprd');
+        $application->pushHandler($stream);
+
+        Registry::addLogger($application);
+        
     }
 
     protected function setPlugin() {
 
-        $bufferType = 'file';
+//        $bufferDriver = 'file';
+//
+//        if (!empty(Config::$timeFields) || !empty(Config::$entityNames)) {
+//            $bufferDriver = 'chunked';
+//        }
 
-        if (!empty(Config::$timeFields) || !empty(Config::$entityNames)) {
-            $bufferType = 'chunked';
-        }
+        // always used chunked buffer as we partition by data source partition
+        // (table, topic, etc)
+        $bufferDriver = 'file';
 
         //@todo - set $this->buffer->flushBytes in the output plugin
-        $this->inputBuffer = BufferAdaptorsFactory::getAdaptor('input', 'file');
-        $this->outputBuffer = BufferAdaptorsFactory::getAdaptor('output', $bufferType);
-        $this->deadletterBuffer = BufferAdaptorsFactory::getAdaptor('deadletter', $bufferType);
+        $this->inputBuffer = BufferAdaptorsFactory::getAdaptor('input', $bufferDriver);
+        $this->outputBuffer = BufferAdaptorsFactory::getAdaptor('output', $bufferDriver);
+        $this->deadletterBuffer = BufferAdaptorsFactory::getAdaptor('deadletter', $bufferDriver);
 
         /**
          * Dead Letter Plugin
@@ -208,7 +234,7 @@ class PipelineCommand
 
         $this->deadletterPlugin = new $deadLetterPluginClass($config, $this->deadletterBuffer);
 
-        $this->deadletterPlugin->buffer->setSerde('json');
+        $this->deadletterPlugin->buffer->driver->setSerde('json');
         
 
         if (Config::getenv('JOB_NAME') == 'deadletters') {
@@ -241,11 +267,11 @@ class PipelineCommand
      */
     public function handle()
     {
-        
-        Registry::skipprd()->info("Syncing");
 
         $this->init();
 
+        Registry::skipprd()->info("Syncing");
+        
 //        set_exception_handler([$this, 'exceptionHandler']);
 
         // handle sigs
@@ -309,14 +335,6 @@ class PipelineCommand
 
         Segment::init(Config::$segmentKey);
 
-        Segment::identify([
-            "userId" => hash('sha256', Config::$tenantId),
-            "traits" => [
-                "pipeline_name" => hash('sha256', Config::$pipelineName),
-            ]
-        ]);
-
-
         if (Config::getenv('STATSD_HOST') && Config::getenv('STATSD_PORT')) {
 
             // @todo - factory stats interface (statsd + skippr enterpise http endpoint)
@@ -350,9 +368,30 @@ class PipelineCommand
 
         $this->setPlugin();
 
-        $this->defaultMsg = $this->defaultMessage();
+        foreach (Config::$schema as $partition => $schema) {
+
+            $this->defaultMsgs[$partition] = $this->defaultMessage($schema);
+        }
 
         $this->startTimestamp = Carbon::now()->timestamp;
+
+        $this->getLicense();
+
+        if (!$this->licenseIsValid) {
+
+            Registry::skipprd()->info('Please validate license to continue using Skippr');
+
+            $this->shutdown();
+        }
+
+        Segment::identify([
+            "userId" => hash('sha256', Config::$tenantId),
+            "licenseKey" => $this->licenseKey,
+            "traits" => [
+                "pipeline_name" => hash('sha256', Config::$pipelineName),
+            ]
+        ]);
+
 
         $this->connect();
 
@@ -502,20 +541,20 @@ class PipelineCommand
 //            Registry::skipprd()->debug("Msg Bytes Current: " . BytesToHuman::toHuman($this->currentBytes, true, 'MB'));
 //            Registry::skipprd()->debug("Msg Bytes Limit: " . BytesToHuman::toHuman($this->flushBytes, true, 'MB'));
 
-            $this->outputPlugin->buffer->unlockAll();
+            $this->outputPlugin->buffer->driver->unlockAll();
 //            $this->outputPlugin->buffer->flush("out");
             $this->outputPlugin->buffer->flushAll();
-            $this->outputPlugin->buffer->finalise();
+            $this->outputPlugin->buffer->driver->finalise();
 
 
-            $this->deadletterPlugin->buffer->unlockAll();
+            $this->deadletterPlugin->buffer->driver->unlockAll();
 //            $this->deadletterPlugin->buffer->flush("deadletter");
             $this->deadletterPlugin->buffer->flushAll();
-            $this->deadletterPlugin->buffer->finalise();
+            $this->deadletterPlugin->buffer->driver->finalise();
 
-            $this->deadletterPlugin->sync(Config::$outputFormat, Config::$avroSchema);
+            $this->deadletterPlugin->sync(Config::$outputFormat);
 
-            $this->outputPlugin->sync(Config::$outputFormat, Config::$avroSchema);
+            $this->outputPlugin->sync(Config::$outputFormat);
 
             $tenantId = Config::$tenantId;
             $pipelineName = Config::$pipelineName;
@@ -563,6 +602,8 @@ class PipelineCommand
         // it will be skipped and so just remain in the queue
         if (Config::$enableDeadLetters) {
 
+            $partition = $message['skpr_partition'];
+
             $deadLetterTopic = 'raw_' . Config::$tenantId  . '_' . Config::$pipelineName .'_deadletter';
 
 //            $serialised = json_encode($message);
@@ -572,7 +613,7 @@ class PipelineCommand
 //            $payload = $sp->string() . "\n";
 
 //            $this->deadletterPlugin->buffer->append($payload);
-            $this->deadletterPlugin->buffer->append($message);
+            $this->deadletterPlugin->buffer->append($message, false, 0, $partition);
 
             $tenantId = Config::$tenantId;
             $pipelineName = Config::$pipelineName;
@@ -602,7 +643,7 @@ class PipelineCommand
 
     }
 
-    public function emit(string $payload) : void
+    public function emit(string $payload, $partition) : void
     {
 
         if ($payload != '') {
@@ -617,7 +658,7 @@ class PipelineCommand
 //                $offset = $sp->decodeOffset();
                 }
 
-                $this->parseLine($payload);
+                $this->emitString($payload, $partition);
 
 
             } elseif (Config::$mode == 'async') {
@@ -635,14 +676,16 @@ class PipelineCommand
 //                sleep(1);
 //            }
 
-                $this->inputPlugin->buffer->append($payload);
+                $this->inputPlugin->buffer->append($payload, false, 0, $partition);
 
             }
 
         }
 
+    }
 
-
+    public function offsetCommitRoutine(): void
+    {
         if (!Config::$analysing) {
 
 //            $this->inputPlugin->commit($offset);
@@ -659,91 +702,147 @@ class PipelineCommand
 
 //                $this->pipelineModel->save();
                 // @todo - implement state/mapping storage
-                
+
+            }
+        }
+    }
+
+    public function readFile(string $filename, string $partition, callable $callback)
+    {
+
+        if (preg_match("/\.gz(ip)?$|.zip/", $filename) == true) {
+
+            // open gz file for reading
+            $sfp = gzopen($filename, 'rb');
+
+            // read and decode chunks into string stream
+            while (!gzeof($sfp)) {
+
+                $string = gzgets($sfp);
+
+                call_user_func($callback, $string, $partition);
+
+            }
+
+            gzclose($sfp);
+
+        } elseif (Config::$sourceFormat == 'parquet') {
+
+            $parquet = new \Parquet();
+
+            $parquet->create_reader($filename, 0);
+
+            $jsonString = '';
+
+            $parquet->json_file($jsonString, 0);
+
+            // @todo - implemente Parquet row reader
+
+            $parquet->close_reader();
+
+            $data = json_decode($jsonString, true);
+
+            call_user_func($callback, $data, $partition);
+//            foreach ($data as $item) {
+//
+//                call_user_func($callback, $item);
+//            }
+
+        } else {
+
+            $sfp = fopen($filename, 'rb');
+
+            // read and decode chunks into string stream
+            while (!feof($sfp)) {
+
+                $string = fgets($sfp);
+
+                call_user_func($callback, $string, $partition);
+
+            }
+
+            // remove temp file
+            fclose($sfp);
+
+        }
+
+    }
+
+    public function emitFile(string $filename, $partition) : void {
+
+        $fields = [];
+        $payloadString = '';
+
+        $serde = SerdersFactory::factory(Config::$sourceFormat);
+
+        $this->readFile($filename, $partition, function ($string) use ($serde, &$fields, &$payloadString) {
+
+            if (in_array(Config::$sourceFormat, Config::$batchFormats)) {
+
+                $payloadString .= $string;
+
+            } else {
+
+                $msgs = $serde->deserialize($string);
+
+                foreach ($msgs as $msg) {
+
+                    array_push($fields, $msg);
+                }
+            }
+
+        });
+
+        if (in_array(Config::$sourceFormat, Config::$batchFormats)) {
+
+            $msgs = $serde->deserialize($payloadString);
+
+            foreach ($msgs as $msg) {
+
+                array_push($fields, $msg);
             }
         }
 
+        $this->emitArray($fields, $partition);
 
     }
 
-    public function process() : void
-    {
+    public function emitString(string $payload, string $partition) : void {
 
-        // @todo - decide if we'll support multi-threading and if so for which plugins???
-        
-        $offset = '';
+        if ($payload != '') {
 
-        $bufferName = Config::$enableDeadLetters ? 'input' : 'deadletter';
+            if (Config::$mode == 'sync') {
 
-//        while ($line = $this->inputPlugin->buffer->nextFile($bufferName)) {
+                if (!Config::$enableDeadLetters) {
 
-        $i = 0;
+                    // @todo - deprecate SkipprPack for Apache Arrow
+                    $sp = new SkipprPack($payload);
+                    $payload = $sp->decodeRecord();
+//                $offset = $sp->decodeOffset();
+                }
 
-        if (empty(Config::$sourceFormat)) {
-            Config::$sourceFormat = $this->detectSerialisation();
+                $this->currentBytes += strlen($payload);
+
+                $serder = SerdersFactory::factory(Config::$sourceFormat);
+                $sourceMessages = $serder->deserialize($payload);
+
+                $this->emitArray($sourceMessages, $partition);
+
+            }
         }
-
-        while ($line = $this->inputPlugin->buffer->stream()) {
-
-            $sp = new SkipprPack($line);
-            $payload = $sp->decodeRecord();
-            $offset = $sp->decodeOffset();
-
-            $this->parseLine($payload, $offset);
-
-            $this->inputPlugin->buffer->commit();
-
-//            $sourceMessages['skpr_event_ts'] = 0;
-//            $sourceMessages['skpr_partition'] = '';
-//            $this->serialiseOutput($sourceMessages, $offset);
-
-            $i++;
-        }
-
-        if (!Config::$analysing) {
-
-
-            $this->outputPlugin->buffer->flushAll();
-            $this->deadletterPlugin->buffer->flushAll();
-
-        }
-
     }
 
-    public function parseLine(string $payload) {
-
-
-//                    $payload = $record;
-
-        $this->currentBytes += strlen($payload);
-//
-//        if (empty(Config::$sourceFormat)) {
-//
-//            $this->inputPlugin->buffer->append($payload, true);
-//            $this->inputPlugin->buffer->finalise(true);
-//
-//            Config::$sourceFormat = $this->detectSerialisation();
-//
-//        } else {
-
-        // @todo - initialise in class global scope
-            $serder = SerdersFactory::factory(Config::$sourceFormat);
-            $sourceMessages = $serder->deserialize($payload);
-
-            $this->parse($sourceMessages);
-
-//        if (Config::$mode == 'sync' && !Config::$analysing) {
-//            $this->statsd->increment("ingest.msgs.current.{Config::$tenantId }.{Config::$pipelineName}", 1);
-//        }
-//        }
-
-
-    }
-
-    public function parse(array $payload) {
+    public function emitArray(array $payload, string $partition) : void {
 
         $unwrappedMessages = $this->unwrap($payload);
 
+        if (empty(Config::$discoveredFieldOccurrence[$partition])) {
+            Config::$discoveredFieldOccurrence[$partition] = [
+                'enabled' => true,
+                'fields' => [],
+            ];
+        }
+        
         foreach ($unwrappedMessages as $unwrappedMessage) {  // outer array
 
             if (Config::$analysing) {
@@ -751,19 +850,21 @@ class PipelineCommand
                 if (is_array($unwrappedMessage)) {
 
                     $this->getIdFields($unwrappedMessage);
-                    
-                    $this->analysePayload($unwrappedMessage, Config::$discoveredFieldOccurrence);
+
+                    $this->parsePartitionField($unwrappedMessage, $partition);
+
+                    $this->analysePayload($unwrappedMessage, Config::$discoveredFieldOccurrence[$partition]['fields']);
                 }
 
-                if ($this->i > $this->minSample
-                    || Carbon::now()->timestamp - $this->startTimestamp > $this->maxTime) {
-
-                    Registry::skipprd()->info('Finished analysing data');
+//                if ($this->i > $this->minSample
+//                    || Carbon::now()->timestamp - $this->startTimestamp > $this->maxTime) {
+//
+//                    Registry::skipprd()->info('Finished analysing data');
 
 //                    unlink("buffer.ready"); // clean up ready buffer - as we force exit here
 
-                    $this->shutdown();
-                }
+//                    $this->shutdown();
+//                }
             }
 
 
@@ -777,9 +878,9 @@ class PipelineCommand
                 if (is_array($unwrappedMessage)) {
 
                     $this->parseTimeField($unwrappedMessage);
-                    $this->parsePartitionField($unwrappedMessage);
+                    $this->parsePartitionField($unwrappedMessage, $partition);
 
-                    $message = $this->ingestPayload($unwrappedMessage, Config::$discoveredFieldOccurrence);
+                    $message = $this->ingestPayload($unwrappedMessage, Config::$discoveredFieldOccurrence[$partition]['fields'], $partition);
 
                     if ($message) {
                         $this->serialiseOutput($message);
@@ -791,15 +892,20 @@ class PipelineCommand
                     Registry::skipprd()->info($unwrappedMessage);
                 }
 
+                $this->offsetCommitRoutine();
             }
         }
 
     }
 
-    public function parsePartitionField(&$message)
+    public function parsePartitionField(array &$message, string $partition)
     {
 
-        $shardFieldEntityValue = '';
+
+        // default to data source partition (table, topic, queue, file dir, etc)
+        $shardFieldEntityValue = $partition;
+
+        // optional: partition by composite key
         if (!empty(Config::$entityNames)) {
             foreach (Config::$entityNames as $entityField) {
 
@@ -899,7 +1005,14 @@ class PipelineCommand
         // @todo - implement state storage
 
 //        $this->inputPlugin->commit(Config::$offsets);
-        $this->inputPlugin->offsets->setOffsets(Config::$offsets);
+        if (!empty(Config::$offsets)) {
+            
+            foreach (Config::$offsets as $partition => $offsets) {
+
+                $this->inputPlugin->offsets->setOffsets($partition, $offsets);
+            }
+        }
+
 
         $this->inputPlugin->connect();
     }
@@ -975,10 +1088,10 @@ class PipelineCommand
 
         if (Config::$mode == 'async') {
 
-            $this->inputPlugin->buffer->unlockAll();
+            $this->inputPlugin->buffer->driver->unlockAll();
 //            $this->inputPlugin->buffer->flush("input");
             $this->inputPlugin->buffer->flushAll(true);
-            $this->inputPlugin->buffer->finalise(true);
+            $this->inputPlugin->buffer->driver->finalise(true);
 
             if ($this->threadPool !== null) {
 
@@ -993,14 +1106,14 @@ class PipelineCommand
         }
 
         if (!Config::$analysing) {
-            $this->outputPlugin->buffer->unlockAll();
+            $this->outputPlugin->buffer->driver->unlockAll();
 //            $this->outputPlugin->buffer->flush("out");
             $this->outputPlugin->buffer->flushAll(true);
-            $this->outputPlugin->buffer->finalise(true);
+            $this->outputPlugin->buffer->driver->finalise(true);
 
-            $this->deadletterPlugin->buffer->unlockAll();
+            $this->deadletterPlugin->buffer->driver->unlockAll();
             $this->deadletterPlugin->buffer->flushAll(true);
-            $this->deadletterPlugin->buffer->finalise(true);
+            $this->deadletterPlugin->buffer->driver->finalise(true);
 
             $this->totalEntries += $this->entries;
             
@@ -1010,13 +1123,14 @@ class PipelineCommand
 
                 if (!empty($this->outputPlugin)) {
 
-                    Registry::skipprd()->info("Syncing remaining output buffers to destination.");
-
                     if (!Config::$analysing) {
 
-                        $this->outputPlugin->sync(Config::$outputFormat, Config::$avroSchema);
+                        $pluginName = Config::getenv('DATA_OUTPUT_PLUGIN_NAME');
+                        Registry::skipprd()->info("Syncing remaining output buffers to destination $pluginName.");
+                        
+                        $this->outputPlugin->sync(Config::$outputFormat);
 
-                        $this->deadletterPlugin->sync(Config::$outputFormat, Config::$avroSchema);
+                        $this->deadletterPlugin->sync(Config::$outputFormat);
                     }
                     $this->outputPlugin->shutdown();
                     $this->deadletterPlugin->shutdown();
@@ -1063,6 +1177,9 @@ class PipelineCommand
 
         Segment::track(array(
             "userId" => hash('sha256', Config::$tenantId),
+            "licenseKey" => $this->licenseKey,
+            "tenant_id" => hash('sha256', Config::$tenantId),
+            "pipeline_name" => hash('sha256', Config::$pipelineName),
             'event' => 'shutdown',
             "properties" => [
                 "msgs_total" => $this->totalEntries,
@@ -1072,8 +1189,6 @@ class PipelineCommand
                 "input_format" => Config::getenv('DATA_SOURCE_FORMAT'),
                 "output_format" => Config::getenv('DATA_OUTPUT_FORMAT'),
                 "skippr_version" => Config::getenv('SKIPPR_BUILD_VERSION'),
-                "tenant_id" => hash('sha256', Config::$tenantId),
-                "pipeline_name" => hash('sha256', Config::$pipelineName),
             ]
         ));
 
@@ -1087,22 +1202,7 @@ class PipelineCommand
     public function writeMapping()
     {
 
-//        $configYml = Config::setConfig();
-
-//        $configYml['config_updated'] = microtime(true);
-
-        $validDateFieldCandidates = [];
-        foreach (Config::$dateFieldCandidates as $field => $candidateField) {
-            if (!empty($candidateField['field'])) {
-                $validDateFieldCandidates[$candidateField['field']] = $candidateField;
-            }
-        }
-
-        Config::$discoveredFieldOccurrence['date_field_candidates'] = $validDateFieldCandidates;
-
-        Config::$discoveredFieldOccurrence['enitity_field_candidates'] = Config::$idFields;
-
-//        event(new WorkerConfigRequested($configYml));
+        $this->finaliseFieldCandidates();
 
         $configYml = Config::setConfig();
 
@@ -1110,10 +1210,37 @@ class PipelineCommand
 
     }
 
+    public function finaliseFieldCandidates()
+    {
+
+        foreach (Config::$discoveredFieldOccurrence as $partition => $metadata) {
+
+            Config::$discoveredFieldOccurrence[$partition]['date_field_candidates'] = [];
+            Config::$discoveredFieldOccurrence[$partition]['enitity_field_candidates'] = [];
+            
+            $validDateFieldCandidates = [];
+
+            foreach ($metadata['fields'] as $field => $candidateField) {
+                if (!empty($candidateField['date_candidate']['field'])) {
+                    $validDateFieldCandidates[$field] = $candidateField['date_candidate']['field'];
+                }
+            }
+
+            Config::$discoveredFieldOccurrence[$partition]['date_field_candidates'] = $validDateFieldCandidates;
+
+            Config::$discoveredFieldOccurrence[$partition]['enitity_field_candidates'] = Config::$idFields;
+
+
+        }
+    }
+
     public function finaliseFieldMapping()
     {
 
-        self::determineFieldTypes(Config::$discoveredFieldOccurrence);
+        foreach (Config::$discoveredFieldOccurrence as $partition => $metadata) {
+
+            self::determineFieldTypes(Config::$discoveredFieldOccurrence[$partition]['fields']);
+        }
 
         $this->findMessageIdField();
 
@@ -1126,47 +1253,60 @@ class PipelineCommand
 
         $enitityFieldCandidates = [];
 
-        foreach (Config::$idFields as $fieldName => $ids) {
+        if (!empty(Config::$idFields)) {
 
-            // 95% of this fields ID's are unique, it's probably a message ID field
-            if (count(Config::$idFields[$fieldName]) / $this->minSample * 100 >= 70) {
-                unset(Config::$idFields[$fieldName]);
+            foreach (Config::$idFields as $fieldName => $ids) {
 
-            } else {
-                $enitityFieldCandidates[$fieldName] = [];
+                // 95% of this fields ID's are unique, it's probably a message ID field
+                if (count(Config::$idFields[$fieldName]) / $this->minSample * 100 >= 70) {
+                    unset(Config::$idFields[$fieldName]);
+
+                } else {
+                    $enitityFieldCandidates[$fieldName] = [];
+                }
             }
+
+            $numCandidates = count(Config::$idFields);
+
+            Registry::skipprd()->info("Found $numCandidates ID fields");
+
         }
 
         Config::$idFields = $enitityFieldCandidates;
 
-        $numCandidates = count(Config::$idFields);
-        Registry::skipprd()->info("Found $numCandidates ID fields");
+
     }
 
-    public static function determineFieldTypes(&$array, $parent_type = null) {
+    public static function determineFieldTypes(&$metadata, $parent_type = null) {
 
         $demotedTypes = ['boolean', 'date', 'timestamp', 'timestamp_milli'];
 
-        foreach ($array as $fieldName => $field) {
+
+        foreach ($metadata as $fieldName => $field) {
 
             // Useful for field evolution logic for maps, which only support one sub-field type
             if ($parent_type !== null) {
-                $array[$fieldName]['parent_type'] = $parent_type;
+                $metadata[$fieldName]['parent_type'] = $parent_type;
             }
 
-            if (empty($array[$fieldName]['determined_type'])) {
+            if (empty($metadata[$fieldName]['determined_type'])) {
 
                 $highestType = '';
                 $highestCount = 0;
 
                 if (!empty($field['type'])) {
 
+                    // Don't allow NULL type if we discovered any other types
+                    if (count($field['type']) > 1 ) {
+                        unset($field['type']['NULL']);
+                    }
+
                     // force to record type over map or array if ever present
                     if (key_exists('record', $field['type'])) {
-                        $array[$fieldName]['determined_type'] = 'record';
+                        $metadata[$fieldName]['determined_type'] = 'record';
 
                     } else {
-                        
+
                         foreach ($field['type'] as $dataType => $dataTypeCount) {
 
                             if ($highestCount < $dataTypeCount) {
@@ -1176,34 +1316,33 @@ class PipelineCommand
                                 // - if there's multiple discovered types
                                 // - and the most common type is a demoted type
                                 // - select the next most common, non-date type
-                                if (count($field['type']) == 1 || (count($field['type']) > 1 && !in_array($dataType, $demotedTypes))) {
+                                if (count($field['type']) == 1
+                                    || (count($field['type']) > 1 && !in_array($dataType, $demotedTypes))) {
                                     $highestType = $dataType;
                                     $highestCount = $dataTypeCount;
                                 }
                             }
                         }
 
-                        $array[$fieldName]['determined_type'] = $highestType;
+                        $metadata[$fieldName]['determined_type'] = $highestType;
                     }
-
-
 
                 }
             }
 
-            if (!empty($array[$fieldName]['determined_type'])
-                && in_array($array[$fieldName]['determined_type'], ['map', 'array', 'record'])) {
+            if (!empty($metadata[$fieldName]['determined_type'])
+                && in_array($metadata[$fieldName]['determined_type'], ['map', 'array', 'record'])) {
 
                 if (!empty($field['fields'])) {
 
-                    if ($array[$fieldName]['determined_type'] == 'array'
-                        || $array[$fieldName]['determined_type'] == 'map'
+                    if ($metadata[$fieldName]['determined_type'] == 'array'
+                        || $metadata[$fieldName]['determined_type'] == 'map'
                     ) {
 
-//                        && (!empty($array[$fieldName]['fields'][0]['determined_type'])
-//                            && in_array($array[$fieldName]['fields'][0], ['map', 'array', 'record'])) ) {
+//                        && (!empty($metadata[$fieldName]['fields'][0]['determined_type'])
+//                            && in_array($metadata[$fieldName]['fields'][0], ['map', 'array', 'record'])) ) {
 
-                            $array[$fieldName]['determined_type_values'] = null;
+                        $metadata[$fieldName]['determined_type_values'] = null;
 
                             // Ignore sub-fields for Avro array, the values are just enumerated, their not fields themselves.
                             // Else we'd create a field list with string keys for each array value
@@ -1216,7 +1355,7 @@ class PipelineCommand
                             //         however, 'array' type is a special case... how to handle?
 
                             // Get avro arrays items primitive data type
-                            foreach ($array[$fieldName]['fields'] as $sub_field) {
+                            foreach ($metadata[$fieldName]['fields'] as $sub_field) {
 
                                 foreach ($sub_field['type'] as $dataType => $dataTypeCount) {
 
@@ -1238,37 +1377,36 @@ class PipelineCommand
 
                             $valueTypes = array_key_first($typeCount);
 
-//                            if (!empty($array[$fieldName]['determined_type_values'])
-//                                && in_array($array[$fieldName]['determined_type_values'], ['map', 'array', 'record']) ) {
+//                            if (!empty($metadata[$fieldName]['determined_type_values'])
+//                                && in_array($metadata[$fieldName]['determined_type_values'], ['map', 'array', 'record']) ) {
 //
-//                                self::determineFieldTypes($array[$fieldName]['fields'],
-//                                    $array[$fieldName]['determined_type']);
+//                                self::determineFieldTypes($metadata[$fieldName]['fields'],
+//                                    $metadata[$fieldName]['determined_type']);
 //
 //                            } else {
 
-                                $array[$fieldName]['determined_type_values'] = $valueTypes;
+                        $metadata[$fieldName]['determined_type_values'] = $valueTypes;
 
-                                if ($array[$fieldName]['determined_type'] == 'array') {
-                                    $array[$fieldName]['fields'] = [];
+                                if ($metadata[$fieldName]['determined_type'] == 'array') {
+                                    $metadata[$fieldName]['fields'] = [];
                                 }
 
 //                            }
 
 
-                    } if ($array[$fieldName]['determined_type'] != 'array') {
+                    } if ($metadata[$fieldName]['determined_type'] != 'array') {
 
-                        self::determineFieldTypes($array[$fieldName]['fields'],
-                            $array[$fieldName]['determined_type']);
+                        self::determineFieldTypes($metadata[$fieldName]['fields'],
+                            $metadata[$fieldName]['determined_type']);
 
                     }
                 }
 //                else {
 //
-//                    unset($array[$fieldName]);
+//                    unset($metadata[$fieldName]);
 //                }
             }
         }
-
     }
 
     public function getIdFields($message)

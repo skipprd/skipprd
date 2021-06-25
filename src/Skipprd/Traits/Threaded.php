@@ -6,6 +6,7 @@ namespace Skipprd\Traits;
 
 use Monolog\Registry;
 use Skipprd\Commands\PipelineCommand;
+use Skipprd\SkipprPack;
 
 trait Threaded
 {
@@ -263,4 +264,49 @@ trait Threaded
 
         }
     }
+
+    public function process() : void
+    {
+
+        // @todo - decide if we'll support multi-threading and if so for which plugins???
+
+        $offset = '';
+
+        $bufferName = Config::$enableDeadLetters ? 'input' : 'deadletter';
+
+//        while ($line = $this->inputPlugin->buffer->nextFile($bufferName)) {
+
+        $i = 0;
+
+        if (empty(Config::$sourceFormat)) {
+            Config::$sourceFormat = $this->detectSerialisation();
+        }
+
+        while ($line = $this->inputPlugin->buffer->stream()) {
+
+            $sp = new SkipprPack($line);
+            $payload = $sp->decodeRecord();
+            $offset = $sp->decodeOffset();
+
+            $this->emitString($payload, $offset);
+
+            $this->inputPlugin->buffer->commit();
+
+//            $sourceMessages['skpr_event_ts'] = 0;
+//            $sourceMessages['skpr_partition'] = '';
+//            $this->serialiseOutput($sourceMessages, $offset);
+
+            $i++;
+        }
+
+        if (!Config::$analysing) {
+
+
+            $this->outputPlugin->buffer->flushAll();
+            $this->deadletterPlugin->buffer->flushAll();
+
+        }
+
+    }
+
 }

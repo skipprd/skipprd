@@ -23,9 +23,9 @@ class DefaultMessageTest extends TestCase
 
         foreach ($record as $field => $value) {
 
-            $avroType = Config::$discoveredFieldOccurrence[$field]['determined_type'];
+            $avroType = Config::$discoveredFieldOccurrence['foo_partition'][$field]['determined_type'];
 
-            SkipprAvroSchemaConverter::buildAvroFields($avroFieldSchema, $field, $avroType, Config::$discoveredFieldOccurrence, [], $sub_field_count);
+            SkipprAvroSchemaConverter::buildAvroFields($avroFieldSchema, $field, $avroType, Config::$discoveredFieldOccurrence['foo_partition'], [], $sub_field_count);
         }
 
         return $avroFieldSchema;
@@ -37,41 +37,39 @@ class DefaultMessageTest extends TestCase
 //        Config::$tenantId = 'foo';
 //        Config::$pipelineName = 'bar';
 
+        Config::$discoveredFieldOccurrence['foo_partition'] = [];
+
         $container = Mockery::mock(PipelineCommand::class)->makePartial();
         $container->shouldReceive('AnalyseSchema');
         $container->shouldReceive('serder');
 
-        $fields = [
-            [
-                'foo' => [
-                    'abc1' => [2, 3, 4, 6, 7, 4, 3, 6, 7, 9], // array
-                    'abc2' => ['a', 'b', 'c'], // array
-                    'abc3' => ["0" => 'a', "1" => 'b', "2" => 'c'], // array
-                    'abc4' => ["1" => 'a', "0" => 'b', "2" => 'c'], // array - null
-                    'abc5' => ["a" => 123, "b" => 456, "c" => 789], // map - null
-                    'abc6' => ["a" => 'x', "b" => 'y', "c" =>'z'], // map - null
-                    'abc7' => [
-                        'a0' => 'abc',
-                        'a1' => 123,
-                        'a2' => 0,
-                        'a3' => 123.456,
-                    ], // record - record
-                ],
+        $field = [
+            'foo' => [
+                'abc1' => [2, 3, 4, 6, 7, 4, 3, 6, 7, 9], // array
+                'abc2' => ['a', 'b', 'c'], // array
+                'abc3' => ["0" => 'a', "1" => 'b', "2" => 'c'], // array
+                'abc4' => ["1" => 'a', "0" => 'b', "2" => 'c'], // array - null
+                'abc5' => ["a" => 123, "b" => 456, "c" => 789], // map - null
+                'abc6' => ["a" => 'x', "b" => 'y', "c" =>'z'], // map - null
+                'abc7' => [
+                    'a0' => 'abc',
+                    'a1' => 123,
+                    'a2' => 0,
+                    'a3' => 123.456,
+                ], // record - record
             ],
         ];
 
-        foreach ($fields as $field) {
-            $container->analysePayload($field, Config::$discoveredFieldOccurrence);
-        }
+        $container->analysePayload($field, Config::$discoveredFieldOccurrence['foo_partition']);
 
-        $container->determineFieldTypes(Config::$discoveredFieldOccurrence);
+        $container->determineFieldTypes(Config::$discoveredFieldOccurrence['foo_partition']);
 
-        $avroFieldSchema = $this->buildSchema($fields[0]);
-        Config::$schema['fields'] = Config::schemaMerge(Config::$specialFieldsMapping, $avroFieldSchema);
+        $avroFieldSchema = $this->buildSchema($field);
+        Config::$schema['foo_partition'] = Config::schemaMerge(Config::$specialFieldsMapping, $avroFieldSchema);
 
         // Test default message values (empty array, maps and records
         // Particularly relevant for serder to parquet
-        $container->defaultMsg = $this->defaultMessage(Config::$schema['fields']);
+        $container->defaultMsg = $this->defaultMessage(Config::$schema['foo_partition']);
 
         $this->assertArrayHasKey('foo', $container->defaultMsg);
 

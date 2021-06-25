@@ -69,9 +69,9 @@ class ingestFieldEvolutionTest extends TestCase
                             'foo' => $typeValue,
                         ];
 
-                        $dataType = $container->resolveFieldType( Config::$discoveredFieldOccurrence, 'foo', $typeValue);
+                        $dataType = $container->resolveFieldType(Config::$discoveredFieldOccurrence, 'foo', $typeValue);
 
-                        Config::$discoveredFieldOccurrence = [
+                        Config::$discoveredFieldOccurrence['foo_partition'] = [
                             'foo' => [
                                 'count' => 2,
                                 'type' => [
@@ -92,7 +92,7 @@ class ingestFieldEvolutionTest extends TestCase
 
                         foreach ($message as $field => $value) {
                             $container->ingestField($field, $value,
-                                Config::$discoveredFieldOccurrence,
+                                Config::$discoveredFieldOccurrence['foo_partition'],
                                 $message);
                         }
 

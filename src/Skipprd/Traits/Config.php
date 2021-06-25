@@ -9,6 +9,7 @@
 namespace Skipprd\Traits;
 
 
+use Skipprd\Converters\AvroParquetSchemaConverter;
 use Skipprd\Converters\SkipprAvroSchemaConverter;
 use Skipprd\Helpers;
 use Monolog\Registry;
@@ -30,7 +31,7 @@ class Config
 
     public static $mode = 'sync';
 
-    public static $offsets = '';
+    public static $offsets = [];
 
     public static $sourceFormat = null;
 
@@ -49,9 +50,11 @@ class Config
     public static $mapping = [];
 
     /**
-     * @var \AvroSchema $avroSchema
+     * @var \AvroSchema $avroSchemas
      */
-    public static $avroSchema;
+    public static $avroSchemas;
+
+    public static $outputSchemas = [];
 
     public static $entityNames = [];
 
@@ -78,7 +81,8 @@ class Config
     public static $batchFormats = [
         'parquet',
         'csv',
-        'xml'
+        'xml',
+        'avro_file'
     ];
 
     public static function getenv(string $name, string $default = '') : string {
@@ -104,41 +108,114 @@ class Config
         $defaultPipelineName = Config::getenv('PIPELINE_NAME', $defaultPipelineName);
 
         Config::$state['tenant_id'] = Helpers::randomStr(16);
+        self::$tenantId = self::getenv('TENANT_ID', Config::$state['tenant_id']);
 
         $dataDir = self::getenv('DATA_DIR');
         self::$dataDir = (empty($dataDir)) ? self::$dataDir : $dataDir;
         @mkdir(self::$dataDir);
 
-        if (file_exists(self::$dataDir . '/skippr-state.json')) {
+        $uri = self::getenv('SCHEMA_REGISTRY');
 
-            Registry::skipprd()->info('Found existing ' . self::$dataDir . '/skippr-state.json');
+        if (!empty($uri)) {
 
-            Config::$state = json_decode(file_get_contents(self::$dataDir . '/skippr-state.json'), true);
 
-            if (!empty(Config::$state[$defaultPipelineName])) {
+            // Get Mapping
+            try {
 
-                Registry::skipprd()->info('Loading state for job ' . $defaultPipelineName);
+                Registry::skipprd()
+                    ->info('Looking up config for pipeline ' . $defaultPipelineName);
 
-                self::$discoveredFieldOccurrence = Config::$state[$defaultPipelineName]['mapping'];
+                $url = "http://$uri/";
+                $path = 'ingest-job/get-mapping/'. $defaultPipelineName;
+
+                $client = new \GuzzleHttp\Client([
+                    'base_uri' => $url,
+                    'headers' => [
+                        'Authorization' => "Bearer " . self::getenv('SCHEMA_API_TOKEN')
+                    ]
+                ]);
+
+                $body = $client->get($path)->getBody();
+
+                $mapping = json_decode($body, true);
+
+                self::$discoveredFieldOccurrence = $mapping;
+
+
+            } catch (\Exception $e) {
+                Registry::skipprd()
+                    ->error($e->getMessage());
+            }
+
+            // Get Schema
+            try {
+
+                Registry::skipprd()
+                    ->info('Looking up schema for pipeline ' . $defaultPipelineName);
+
+                $schemaName = self::$tenantId . '_' . $defaultPipelineName . '-value';
+                $url = "http://$uri/";
+                $path = 'subjects/'. $schemaName . '/versions/latest';
+
+                $client = new \GuzzleHttp\Client([
+                    'base_uri' => $url,
+                    'headers' => [
+                        'Authorization' => "Bearer " . Config::getenv('SCHEMA_API_TOKEN')
+                    ]
+                ]);
+
+                $resp = json_decode($client->get($path)->getBody()->getContents(), true);
+
+                $avroArr = json_decode($resp['schema'], true);
+                
+
+            } catch (\Exception $e) {
+                Registry::skipprd()
+                    ->error($e->getMessage());
+            }
+
+
+        } else {
+
+
+            if (file_exists(self::$dataDir . '/skippr-state.json')) {
+
+                try {
+
+                    Registry::skipprd()
+                        ->info('Found existing ' . self::$dataDir . '/skippr-state.json');
+
+                    self::$state = json_decode(file_get_contents(self::$dataDir . '/skippr-state.json'),
+                        true);
+
+                    if (!empty(Config::$state[$defaultPipelineName])) {
+
+                        Registry::skipprd()
+                            ->info('Loading state for pipeline ' . $defaultPipelineName);
+
+                        self::$discoveredFieldOccurrence = Config::$state[$defaultPipelineName]['mapping'];
 
 //        Config::$discoveredFieldOccurrence = (empty($configYml['field_yml'])) ? [] : $configYml['field_yml'];
 
-                $converter = new SkipprAvroSchemaConverter();
-                $avroArr = $converter->convert(self::$discoveredFieldOccurrence);
+                    }
 
-                $avroArr = self::schemaMerge(self::$specialFieldsMapping, $avroArr);
+                } catch (\Exception $e) {
+                    Registry::skipprd()
+                        ->error($e->getMessage());
+                }
 
             }
 
         }
 
-        self::$pipelineName = self::getenv('PIPELINE_NAME', $defaultPipelineName);
-        self::$tenantId = self::getenv('TENANT_ID', Config::$state['tenant_id']);
-        self::$offsets = (!empty(Config::$state[$defaultPipelineName]['offsets']) ? Config::$state[$defaultPipelineName]['offsets'] : '');
 
-        self::$schema['fields'] = [];
+        self::$pipelineName = Config::getenv('PIPELINE_NAME', $defaultPipelineName);
 
-        self::$schema['fields'] = (empty($avroArr)) ? [] : $avroArr;
+        self::$offsets = (!empty(self::$state[$defaultPipelineName]['offsets']) ? self::$state[$defaultPipelineName]['offsets'] : '');
+
+//        self::$schema['fields'] = [];
+//
+//        self::$schema['fields'] = (empty($avroArr)) ? [] : $avroArr;
 
         self::$eventPath = self::getenv('DATA_SOURCE_EVENT_PATH');
 
@@ -148,15 +225,48 @@ class Config
         self::$entityNames = [];
         self::$timeFields = [];
 
-        self::$analysing = (empty($avroArr)) ? true : false;
+        self::$analysing = (empty(self::$discoveredFieldOccurrence)) ? true : false;
         self::$analysing = (bool) self::getenv('ANALYSING', self::$analysing);
         
         self::$systemUserApiToken = self::getenv('SCHEMA_API_TOKEN');
 
-        if (!empty(self::$schema['fields'])) {
-            self::$avroSchema = self::buildAvroSchema();
+        if (!empty(self::$discoveredFieldOccurrence)) {
+
+            foreach (self::$discoveredFieldOccurrence as $partition => $mapping) {
+
+                Registry::skipprd()->info("Building $partition schema");
+
+                $converter = new SkipprAvroSchemaConverter();
+                self::$schema[$partition] = $converter->convert(self::$discoveredFieldOccurrence);
+
+                self::$schema[$partition] = self::schemaMerge(self::$specialFieldsMapping, self::$schema[$partition]);
+
+                self::$avroSchemas[$partition] = self::buildAvroSchema(self::$schema[$partition]);
+
+//                $converter = new AvroParquetSchemaConverter();
+//                self::$outputSchemas[$partition] = $converter->convert(Config::$avroSchemas[$partition]);
+
+                $outputFormat = ucfirst(self::$outputFormat);
+                $converterClass = 'Skipprd\Converters\Avro' . $outputFormat . 'SchemaConverter';
+
+                if (class_exists($converterClass)) {
+
+                    Registry::skipprd()->info("Converting $partition schema to $outputFormat");
+
+                    $converter = new $converterClass();
+
+                    self::$outputSchemas[$partition] = $converter->convert(self::$avroSchemas[$partition]);
+
+                } else {
+
+                    self::$outputSchemas[$partition] = self::$avroSchemas[$partition];
+                }
+
+            }
+
         }
-        
+
+
         // Although we may be done analysing, we don't want to override candidate.
         // They should remain in the option list even if the user has rejected them.
 //        if (!empty($configYml['field_yml']['date_field_candidates'])) {
@@ -169,7 +279,7 @@ class Config
 
     }
 
-    public static function buildAvroSchema()
+    public static function buildAvroSchema($schema)
     {
 
         $schemaName = self::$tenantId . '_' . self::$pipelineName;
@@ -180,7 +290,7 @@ class Config
         $valueAvroSchema['name'] = $schemaName;
         $valueAvroSchema['type'] = 'record';
 
-        $valueAvroSchema['fields'] = self::$schema['fields'];
+        $valueAvroSchema['fields'] = $schema;
 
         $valueSchemaJson = json_encode($valueAvroSchema);
         $valueSchema = \AvroSchema::parse($valueSchemaJson);
@@ -233,7 +343,6 @@ class Config
         $configYml = [];
 
 
-
 //        $fieldsYml = Config::$discoveredFieldOccurrence;
 //
 //        $schemaArr = [];
@@ -265,41 +374,65 @@ class Config
 //            'analysing' => Config::$analysing,
 //        ];
 
-        Config::$state[Config::$pipelineName]['mapping'] = Config::$discoveredFieldOccurrence;
-        Config::$state[Config::$pipelineName]['pipeline_name'] = Config::$pipelineName;
-        Config::$state['tenant_id'] = Config::$tenantId;
-        Config::$state[Config::$pipelineName]['offsets'] = Config::$offsets;
-
-
-        file_put_contents(self::$dataDir . '/skippr-state.json', json_encode(Config::$state));
-
-        Registry::skipprd()->info('Written state to ' . self::$dataDir . '/skippr-state.json');
 
         $uri = self::getenv('SCHEMA_REGISTRY');
-        
+
         if (!empty($uri)) {
 
-            $url = "http://$uri/";
-            $path = 'ingest-job/update-mapping';
+            try {
 
-            $client = new \GuzzleHttp\Client([
-                'base_uri' => $url,
-                'headers' => [
-                    'Authorization' => "Bearer " . self::getenv('SCHEMA_API_TOKEN')
-                ]
-            ]);
+                $url = "http://$uri/";
+                $path = 'ingest-job/update-mapping';
 
-            $json = json_encode([
-                'id' => self::getenv('PIPELINE_ID'),
-                'mapping' => Config::$discoveredFieldOccurrence,
-            ]);
+                $client = new \GuzzleHttp\Client([
+                    'base_uri' => $url,
+                    'headers' => [
+                        'Authorization' => "Bearer " . self::getenv('SCHEMA_API_TOKEN')
+                    ]
+                ]);
 
-            $response = $client->post($path, [
-                'json' => $json
-            ]);
+                $json = json_encode([
+                    'id' => self::getenv('PIPELINE_ID'),
+                    'mapping' => Config::$discoveredFieldOccurrence,
+                ]);
+
+                $response = $client->post($path, [
+                    'json' => $json
+                ]);
+
+                Registry::skipprd()->info('Updated config via API');
+
+            } catch (\Exception $e) {
+                Registry::skipprd()
+                    ->error($e->getMessage());
+            }
+
+
+        } else {
+
+            Config::$state[Config::$pipelineName]['mapping'] = Config::$discoveredFieldOccurrence;
+            Config::$state[Config::$pipelineName]['pipeline_name'] = Config::$pipelineName;
+            Config::$state['tenant_id'] = Config::$tenantId;
+            Config::$state[Config::$pipelineName]['offsets'] = Config::$offsets;
+
+            try {
+
+                file_put_contents(self::$dataDir . '/skippr-state.json', json_encode(Config::$state));
+
+                Registry::skipprd()
+                    ->info('Written state to ' . self::$dataDir . '/skippr-state.json');
+
+
+            } catch (\Exception $e) {
+                Registry::skipprd()
+                    ->error($e->getMessage());
+            }
+
+
         }
 
         return $configYml;
+
     }
 
 }

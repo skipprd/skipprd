@@ -6,22 +6,12 @@
  * Time: 12:41
  */
 
-namespace Unit\Skipprd\Traits\Serders;
+namespace Unit\Skipprd\Serders;
 
-use Illuminate\Contracts\Container\Container;
-use Skipprd\Commands\PipelineCommand;
-use Skipprd\Services\MessageSerializer;
-use Skipprd\Traits\AnalyseSchema;
 use Skipprd\Serders\SerdersFactory;
-use Superbalist\LaravelPubSub\PubSubConnectionFactory;
-use Superbalist\PubSub\Utils;
 use Tests\TestCase;
-use Illuminate\Foundation\Testing\DatabaseMigrations;
-use Illuminate\Foundation\Testing\DatabaseTransactions;
-use Mockery;
-use AvroSchema;
 
-class AnalyseSchemaParseRecordJsonTest extends TestCase
+class DeserializeJsonTest extends TestCase
 {
 
     protected $serder = 'json';
@@ -40,9 +30,6 @@ class AnalyseSchemaParseRecordJsonTest extends TestCase
 
         $record = '{"status": "200"}';
 
-        $container = Mockery::mock(PipelineCommand::class)->makePartial();
-        $container->shouldReceive('AnalyseSchema');
-
         $serder = SerdersFactory::factory($this->serder);
         $msg = $serder->deserialize($record);
 
@@ -55,9 +42,6 @@ class AnalyseSchemaParseRecordJsonTest extends TestCase
     {
 
         $record = '{"status": "200", "items": {"foo": "bar"}}';
-
-        $container = Mockery::mock(PipelineCommand::class)->makePartial();
-        $container->shouldReceive('AnalyseSchema');
 
         $serder = SerdersFactory::factory($this->serder);
         $msg = $serder->deserialize($record);
@@ -73,9 +57,6 @@ class AnalyseSchemaParseRecordJsonTest extends TestCase
 
         $record = '{"status": "200", "items": [{"foo": "bar"}]}';
 
-        $container = Mockery::mock(PipelineCommand::class)->makePartial();
-        $container->shouldReceive('AnalyseSchema');
-
         $serder = SerdersFactory::factory($this->serder);
         $msg = $serder->deserialize($record);
 
@@ -90,9 +71,6 @@ class AnalyseSchemaParseRecordJsonTest extends TestCase
 
         $record = '{\"status\": \"200\"}';
 
-        $container = Mockery::mock(PipelineCommand::class)->makePartial();
-        $container->shouldReceive('AnalyseSchema');
-
         $serder = SerdersFactory::factory($this->serder);
         $msg = $serder->deserialize($record);
 
@@ -105,9 +83,6 @@ class AnalyseSchemaParseRecordJsonTest extends TestCase
     {
 
         $record = '{\\\"time\\\":{\\\"start_time\\\":\\\"273.046328210292\\\",\\\"end_time\\\":\\\"16182\\\"},\\\"bike_id\\\":\\\"0.579087190592872\\\",\\\"location\\\":{\\\"start\\\":\\\"0.620131100002421\\\",\\\"end\\\":null}}';
-
-        $container = Mockery::mock(PipelineCommand::class)->makePartial();
-        $container->shouldReceive('AnalyseSchema');
 
         $serder = SerdersFactory::factory($this->serder);
         $msg = $serder->deserialize($record);
@@ -123,9 +98,6 @@ class AnalyseSchemaParseRecordJsonTest extends TestCase
 
         $record = '{"start":"0.620131100002421","end":null}';
 
-        $container = Mockery::mock(PipelineCommand::class)->makePartial();
-        $container->shouldReceive('AnalyseSchema');
-
         $serder = SerdersFactory::factory($this->serder);
         $msg = $serder->deserialize($record);
 
@@ -140,9 +112,6 @@ class AnalyseSchemaParseRecordJsonTest extends TestCase
 
         $record = "{'status': '200'}";
 
-        $container = Mockery::mock(PipelineCommand::class)->makePartial();
-        $container->shouldReceive('AnalyseSchema');
-
         $serder = SerdersFactory::factory($this->serder);
         $msg = $serder->deserialize($record);
 
@@ -155,9 +124,6 @@ class AnalyseSchemaParseRecordJsonTest extends TestCase
     {
 
         $record = 'some, string, that exists)/ 20080808115538 {\"status\":\"200\",\"length\":\"4742\",\"mime\":\"text/html\",\"offset\":\"16518203\"}';
-
-        $container = Mockery::mock(PipelineCommand::class)->makePartial();
-        $container->shouldReceive('AnalyseSchema');
 
         $serder = SerdersFactory::factory($this->serder);
         $msg = $serder->deserialize($record);
@@ -174,9 +140,6 @@ class AnalyseSchemaParseRecordJsonTest extends TestCase
 
         $record = "{u'status': u'200'}";
 
-        $container = Mockery::mock(PipelineCommand::class)->makePartial();
-        $container->shouldReceive('AnalyseSchema');
-
         $serder = SerdersFactory::factory($this->serder);
         $msg = $serder->deserialize($record);
 
@@ -188,9 +151,6 @@ class AnalyseSchemaParseRecordJsonTest extends TestCase
     {
 
         $record = '{"status": "\u0023"}';
-
-        $container = Mockery::mock(PipelineCommand::class)->makePartial();
-        $container->shouldReceive('AnalyseSchema');
 
         $serder = SerdersFactory::factory($this->serder);
         $msg = $serder->deserialize($record);
@@ -208,9 +168,6 @@ class AnalyseSchemaParseRecordJsonTest extends TestCase
 [{"status": "200"},{"status": "500"}]
 EOF;
 
-        $container = Mockery::mock(PipelineCommand::class)->makePartial();
-        $container->shouldReceive('AnalyseSchema');
-
         $serder = SerdersFactory::factory($this->serder);
         $msg = $serder->deserialize($record);
 
@@ -227,9 +184,6 @@ EOF;
 {"status": "200"}\n{"status": "500"}
 EOF;
 
-        $container = Mockery::mock(PipelineCommand::class)->makePartial();
-        $container->shouldReceive('AnalyseSchema');
-
         $serder = SerdersFactory::factory($this->serder);
         $msg = $serder->deserialize($record);
 
@@ -245,9 +199,6 @@ EOF;
         $record = <<<EOF
 [{"status": "200"},{"status": "201"}]\n[{"status": "202"},{"status": "203"}]
 EOF;
-
-        $container = Mockery::mock(PipelineCommand::class)->makePartial();
-        $container->shouldReceive('AnalyseSchema');
 
         $serder = SerdersFactory::factory($this->serder);
         $msg = $serder->deserialize($record);

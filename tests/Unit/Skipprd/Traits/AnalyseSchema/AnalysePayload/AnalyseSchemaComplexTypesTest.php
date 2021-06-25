@@ -26,6 +26,8 @@ class AnalyseSchemaComplexTypesTestComplexTypesTest extends TestCase
     {
         parent::setUp();
 
+        Config::$discoveredFieldOccurrence['foo_partition']['fields'] = [];
+
     }
 
     public function testComplexType()
@@ -37,8 +39,8 @@ class AnalyseSchemaComplexTypesTestComplexTypesTest extends TestCase
 
         $field = [
             'foo' => [
-//                'sheep' => 'dog',
-//                'arable' => false,
+                'sheep' => 'dog',
+                'arable' => false,
 //                'crank' => [
 //                    'voltage' => [2, 3, 4, 6, 7, 4, 3, 6, 7, 9],
 //                    'start_temprature' => 5,
@@ -70,7 +72,7 @@ class AnalyseSchemaComplexTypesTestComplexTypesTest extends TestCase
             ],
         ];
         
-        $container->analysePayload($field, Config::$discoveredFieldOccurrence);
+        $container->analysePayload($field, Config::$discoveredFieldOccurrence['foo_partition']['fields']);
         
 //        $this->assertEquals(1, Config::$discoveredFieldOccurrence['foo']['type']['record']);
 //        $this->assertEquals(1, Config::$discoveredFieldOccurrence['foo']['fields']['sheep']['type']['string']);
@@ -91,18 +93,18 @@ class AnalyseSchemaComplexTypesTestComplexTypesTest extends TestCase
 //        $this->assertEquals(1, Config::$discoveredFieldOccurrence['foo']['fields']['crank_torques']['fields'][0]['fields'][0]['type']['integer']);
 
 
-        $container->determineFieldTypes(Config::$discoveredFieldOccurrence);
+        $container->determineFieldTypes(Config::$discoveredFieldOccurrence['foo_partition']['fields']);
 
-        $foo = Config::$discoveredFieldOccurrence;
+        $foo = Config::$discoveredFieldOccurrence['foo_partition']['fields'];
 
-        $this->assertEquals('record', Config::$discoveredFieldOccurrence["foo"]["fields"]["crank_torques"]["parent_type"]);
+        $this->assertEquals('record', $foo["foo"]["fields"]["crank_torques"]["parent_type"]);
 
-        $this->assertEquals('record', Config::$discoveredFieldOccurrence["foo"]["fields"]["crank_torques"]["determined_type"]);
+        $this->assertEquals('record', $foo["foo"]["fields"]["crank_torques"]["determined_type"]);
 
-        $this->assertEquals('array', Config::$discoveredFieldOccurrence["foo"]["fields"]["crank_torques"]["fields"]['a0']["determined_type"]);
-        $this->assertEquals('array', Config::$discoveredFieldOccurrence["foo"]["fields"]["crank_torques"]["fields"]['a1']["determined_type"]);
+        $this->assertEquals('array', $foo["foo"]["fields"]["crank_torques"]["fields"]['a0']["determined_type"]);
+        $this->assertEquals('array', $foo["foo"]["fields"]["crank_torques"]["fields"]['a1']["determined_type"]);
 
-        $this->assertEmpty(Config::$discoveredFieldOccurrence["foo"]["fields"]["crank_torques"]["fields"]['a1']["fields"]);
+        $this->assertEmpty($foo["foo"]["fields"]["crank_torques"]["fields"]['a1']["fields"]);
 
 
     }

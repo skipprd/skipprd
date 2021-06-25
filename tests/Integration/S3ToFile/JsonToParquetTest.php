@@ -31,7 +31,7 @@ class JsonToParquetTest extends DockerRun
             'DATA_SOURCE_S3_REGION=eu-west-2',
             'DATA_SOURCE_AWS_ACCESS_ID=AKIAXZ5BBYBFKM24LVMM',
             'DATA_SOURCE_AWS_SECRET_KEY=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',
-            'DATA_SOURCE_S3_PREFIX=bike-hire',
+            'DATA_SOURCE_S3_PREFIX=bike-hire-small/' . $this->testFile,
             'DATA_SOURCE_FORMAT=json',
             'DEAD_LETTER_PLUGIN_NAME=file',
             'DEAD_LETTER_PATH=/data/deadletters',

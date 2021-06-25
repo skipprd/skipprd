@@ -6,39 +6,24 @@
  * Time: 12:41
  */
 
-namespace Unit\Skipprd\Traits\Serders;
+namespace Unit\Skipprd\Serders;
 
-use Illuminate\Contracts\Container\Container;
-use Skipprd\Commands\PipelineCommand;
-use Skipprd\Services\MessageSerializer;
-use Skipprd\Traits\AnalyseSchema;
 use Skipprd\Serders\SerdersFactory;
-use Superbalist\LaravelPubSub\PubSubConnectionFactory;
-use Superbalist\PubSub\Utils;
 use Tests\TestCase;
-use Illuminate\Foundation\Testing\DatabaseMigrations;
-use Illuminate\Foundation\Testing\DatabaseTransactions;
-use Mockery;
-use AvroSchema;
 
-class AnalyseSchemaParseRecordCsvTest extends TestCase
+class DeserializeCsvTest extends TestCase
 {
 
-    protected $serde;
+    protected $format;
+
+    protected $serder;
 
     protected function setUp()
     {
         parent::setUp();
 
-    }
-
-    public function serderParse($record)
-    {
-        $serder = 'csv';
-        $this->serder = SerdersFactory::factory($serder);
-        $msgs = $this->serder->deserialize($record);
-
-        return $msgs;
+        $this->format = 'csv';
+        $this->serder = SerdersFactory::factory($this->format);
 
     }
 
@@ -48,11 +33,8 @@ class AnalyseSchemaParseRecordCsvTest extends TestCase
         $record = <<<EOF
 "Name","Age",\n"Paul Hudson","35",
 EOF;
-        
-        $container = Mockery::mock(PipelineCommand::class)->makePartial();
-        $container->shouldReceive('AnalyseSchema');
 
-        $msgs = $this->serderParse($record);
+        $msgs = $this->serder->deserialize($record);
 
         $this->assertEquals('Paul Hudson', $msgs[0]['Name']);
         $this->assertEquals('35', $msgs[0]['Age']);
@@ -67,11 +49,7 @@ EOF;
 "Paul Hudson","35"
 EOF;
 
-
-        $container = Mockery::mock(PipelineCommand::class)->makePartial();
-        $container->shouldReceive('AnalyseSchema');
-
-        $msgs = $this->serderParse($record);
+        $msgs = $this->serder->deserialize($record);
 
         $this->assertEquals('Paul Hudson', $msgs[0]['Name']);
         $this->assertEquals('35', $msgs[0]['Age']);
@@ -88,11 +66,7 @@ EOF;
 "Natalia Hudson","35";
 EOF;
 
-
-        $container = Mockery::mock(PipelineCommand::class)->makePartial();
-        $container->shouldReceive('AnalyseSchema');
-
-        $msgs = $this->serderParse($record);
+        $msgs = $this->serder->deserialize($record);
 
         $this->assertEquals('Paul Hudson', $msgs[0]['Name']);
         $this->assertEquals('Natalia Hudson', $msgs[1]['Name']);
@@ -107,11 +81,7 @@ EOF;
 Paul Hudson,35
 EOF;
 
-
-        $container = Mockery::mock(PipelineCommand::class)->makePartial();
-        $container->shouldReceive('AnalyseSchema');
-
-        $msgs = $this->serderParse($record);
+        $msgs = $this->serder->deserialize($record);
 
         $this->assertEquals('Paul Hudson', $msgs[0][0]);
         $this->assertEquals('35', $msgs[0][1]);
@@ -126,11 +96,7 @@ EOF;
 Paul Hudson|35
 EOF;
 
-
-        $container = Mockery::mock(PipelineCommand::class)->makePartial();
-        $container->shouldReceive('AnalyseSchema');
-
-        $msgs = $this->serderParse($record);
+        $msgs = $this->serder->deserialize($record);
 
         $this->assertEquals('Paul Hudson', $msgs[0][0]);
         $this->assertEquals('35', $msgs[0][1]);
@@ -145,11 +111,7 @@ EOF;
 Paul Hudson\t35
 EOF;
 
-
-        $container = Mockery::mock(PipelineCommand::class)->makePartial();
-        $container->shouldReceive('AnalyseSchema');
-
-        $msgs = $this->serderParse($record);
+        $msgs = $this->serder->deserialize($record);
 
         $this->assertEquals('Paul Hudson', $msgs[0][0]);
         $this->assertEquals('35', $msgs[0][1]);
@@ -174,11 +136,7 @@ EOF;
 "F", 58, 56, 21.88, 21.02
 EOF;
 
-
-        $container = Mockery::mock(PipelineCommand::class)->makePartial();
-        $container->shouldReceive('AnalyseSchema');
-
-        $msgs = $this->serderParse($record);
+        $msgs = $this->serder->deserialize($record);
 
         $this->assertEquals('M', $msgs[0]['Sex']);
         $this->assertEquals('72', $msgs[0]['Weight (Sep)']);
@@ -194,11 +152,7 @@ EOF;
 "M", 72, 59, 22.02, 18.14
 EOF;
 
-
-        $container = Mockery::mock(PipelineCommand::class)->makePartial();
-        $container->shouldReceive('AnalyseSchema');
-
-        $msgs = $this->serderParse($record);
+        $msgs = $this->serder->deserialize($record);
 
         $this->assertEquals('M', $msgs[0]['Sex']);
         $this->assertEquals('72', $msgs[0]['Weight (Sep)']);

@@ -26,9 +26,9 @@ class OffsetsTest extends TestCase
         $partition = 'table_a';
 
         $offsets = new Offsets();
-        $offsets->setOffsets('123 123');
+        $offsets->setOffsets($partition, '123 123');
 
-        $commits = $offsets->parseOffsets();
+        $commits = $offsets->parseOffsets($partition);
 
         self::assertEquals([123, 123], $commits);
 
@@ -44,9 +44,9 @@ class OffsetsTest extends TestCase
         $partition = 'table_a';
 
         $offsets = new Offsets();
-        $offsets->setOffsets( '123 12');
+        $offsets->setOffsets( $partition, ' 123 12');
 
-        $valid = $offsets->validateOffset( '123 4');
+        $valid = $offsets->validateOffset( $partition, ' 123 4');
 
         self::assertEquals(false, $valid);
 
@@ -58,9 +58,9 @@ class OffsetsTest extends TestCase
         $partition = 'table_a';
 
         $offsets = new Offsets();
-        $offsets->setOffsets( '123 4');
+        $offsets->setOffsets( $partition, ' 123 4');
 
-        $valid = $offsets->validateOffset( '123 12');
+        $valid = $offsets->validateOffset( $partition, ' 123 12');
 
         self::assertEquals(true, $valid);
 
@@ -72,9 +72,9 @@ class OffsetsTest extends TestCase
         $partition = 'table_a';
 
         $offsets = new Offsets();
-        $offsets->setOffsets( '123 123');
+        $offsets->setOffsets( $partition, ' 123 123');
 
-        $valid = $offsets->validateOffset( '122 122');
+        $valid = $offsets->validateOffset( $partition, ' 122 122');
 
         self::assertEquals(false, $valid);
 
@@ -86,9 +86,9 @@ class OffsetsTest extends TestCase
         $partition = 'table_a';
 
         $offsets = new Offsets();
-        $offsets->setOffsets('123 123');
+        $offsets->setOffsets($partition, ' 123 123');
 
-        $valid = $offsets->validateOffset('123 122');
+        $valid = $offsets->validateOffset($partition, ' 123 122');
 
         self::assertEquals(false, $valid);
 
@@ -100,9 +100,9 @@ class OffsetsTest extends TestCase
         $partition = 'table_a';
 
         $offsets = new Offsets();
-        $offsets->setOffsets('123 123');
+        $offsets->setOffsets($partition, ' 123 123');
 
-        $valid = $offsets->validateOffset('122 123');
+        $valid = $offsets->validateOffset($partition, ' 122 123');
 
         self::assertEquals(false, $valid);
 
@@ -114,9 +114,9 @@ class OffsetsTest extends TestCase
         $partition = 'table_a';
 
         $offsets = new Offsets();
-        $offsets->setOffsets('123 123');
+        $offsets->setOffsets($partition, ' 123 123');
 
-        $valid = $offsets->validateOffset('123 123');
+        $valid = $offsets->validateOffset($partition, ' 123 123');
 
         self::assertEquals(false, $valid);
 
@@ -128,9 +128,9 @@ class OffsetsTest extends TestCase
         $partition = 'table_a';
 
         $offsets = new Offsets();
-        $offsets->setOffsets('123 123');
+        $offsets->setOffsets($partition, ' 123 123');
 
-        $valid = $offsets->validateOffset('124 124');
+        $valid = $offsets->validateOffset($partition, ' 124 124');
 
         self::assertEquals(true, $valid);
 
@@ -142,9 +142,9 @@ class OffsetsTest extends TestCase
         $partition = 'table_a';
 
         $offsets = new Offsets();
-        $offsets->setOffsets('123 123');
+        $offsets->setOffsets($partition, ' 123 123');
 
-        $valid = $offsets->validateOffset('123 124');
+        $valid = $offsets->validateOffset($partition, ' 123 124');
 
         self::assertEquals(true, $valid);
 
@@ -156,9 +156,9 @@ class OffsetsTest extends TestCase
         $partition = 'table_a';
 
         $offsets = new Offsets();
-        $offsets->setOffsets('123 123');
+        $offsets->setOffsets($partition, ' 123 123');
 
-        $valid = $offsets->validateOffset('124 123');
+        $valid = $offsets->validateOffset($partition, ' 124 123');
 
         self::assertEquals(true, $valid);
 

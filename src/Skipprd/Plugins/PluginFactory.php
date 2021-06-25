@@ -2,11 +2,10 @@
 
 namespace Skipprd\Plugins;
 
-use Skipprd\DataOutputKafka\DataOutputKafkaPlugin;
+use Monolog\Registry;
 use Skipprd\Plugins\DataOutputs\DataOutputPluginBase;
 use Skipprd\Plugins\DataSources\DataSourcePluginBase;
-use Skipprd\Buffers\BufferInterface;
-use Skipprd\Buffers\FileBuffer;
+use Skipprd\Buffers\ChunkedBuffer;
 use Skipprd\Str;
 
 
@@ -18,7 +17,7 @@ class PluginFactory
      * @param String $name
      * @return DataSourcePluginBase|DataOutputPluginBase
      */
-    static function factory(string $type, string $name, FileBuffer $buffer = null) {
+    static function factory(string $type, string $name, ChunkedBuffer $buffer = null) {
 
         $config = [];
         $envs = getenv();
@@ -29,20 +28,16 @@ class PluginFactory
             }
         }
 
+        Registry::skipprd()->info("Loading $type plugin $name");
+
         $type = Str::studly(ucwords(strtolower($type)));
         $name = Str::studly(ucwords(strtolower($name)));
 
-        $buffer = ($buffer == null) ? new FileBuffer('temp', null) : $buffer;
-        
-        $factoryClass = "Skipprd\\$type" . "$name" . "\\$type" . "$name" . "Plugin";
-//        $factoryClass = "SkipprdPlugins\\$type" . "s\\$type" . "$name" . "\\$type" . "$name" . "Plugin";
-//        $factoryClass = "$type" . "$name" . "Plugin";
-//        $factoryClass = "Skipprd\DataSources\DataSourceS3Demo\DataSourceS3DemoPlugin";
-//                           Skipprd\DataSources\DataSourceS3Demo\DataSourceS3DemoPlugin
+        $buffer = ($buffer == null) ? new ChunkedBuffer('temp', null) : $buffer;
+
+        $factoryClass = "\Skipprd\\$type" . "$name" . "\\$type" . "$name" . "Plugin";
 
         $factoryModel = new $factoryClass($config, $buffer);
-
-//        $factoryModel = new DataOutputKafkaPlugin($config, $buffer);
 
         return $factoryModel;
     }

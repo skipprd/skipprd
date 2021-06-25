@@ -33,10 +33,11 @@ class ingestFieldTransformTest extends TestCase
     {
 
         // Discover Schema
-//        $json = json_encode($record);
-        $container->analysePayload($record, Config::$discoveredFieldOccurrence);
+        Config::$discoveredFieldOccurrence['foo_partition'] = [];
 
-        $container->determineFieldTypes(Config::$discoveredFieldOccurrence);
+        $container->analysePayload($record, Config::$discoveredFieldOccurrence['foo_partition']);
+
+        $container->determineFieldTypes(Config::$discoveredFieldOccurrence['foo_partition']);
     }
 
 
@@ -46,6 +47,7 @@ class ingestFieldTransformTest extends TestCase
         $container = Mockery::mock(PipelineCommand::class)->makePartial();
         $container->shouldReceive('AnalyseSchema');
         $container->shouldReceive('serder');
+        $container->createLogger();
 
         $origMessage = [
             'customer' => [
@@ -63,16 +65,16 @@ class ingestFieldTransformTest extends TestCase
 
         $this->discoverSchema($container, $origMessage);
 
-        Config::$discoveredFieldOccurrence['customer']['fields']['phone']['transform'] = 'drop';
-        Config::$discoveredFieldOccurrence['customer']['fields']['email']['transform'] = 'drop';
-        Config::$discoveredFieldOccurrence['customer']['fields']['name']['fields']['first']['transform'] = 'drop';
-        Config::$discoveredFieldOccurrence['customer']['fields']['name']['fields']['last']['transform'] = 'drop';
+        Config::$discoveredFieldOccurrence['foo_partition']['customer']['fields']['phone']['transform'] = 'drop';
+        Config::$discoveredFieldOccurrence['foo_partition']['customer']['fields']['email']['transform'] = 'drop';
+        Config::$discoveredFieldOccurrence['foo_partition']['customer']['fields']['name']['fields']['first']['transform'] = 'drop';
+        Config::$discoveredFieldOccurrence['foo_partition']['customer']['fields']['name']['fields']['last']['transform'] = 'drop';
 
 
         $message = $origMessage;
 
         foreach ($message as $field => $value) {
-            $container->ingestField($field, $value, Config::$discoveredFieldOccurrence, $message);
+            $container->ingestField($field, $value, Config::$discoveredFieldOccurrence['foo_partition'], $message);
         }
          
         $this->assertIsArray($message);
@@ -111,16 +113,16 @@ class ingestFieldTransformTest extends TestCase
         
         $this->discoverSchema($container, $origMessage);
 
-        Config::$discoveredFieldOccurrence['customer']['fields']['phone']['transform'] = 'mask';
-        Config::$discoveredFieldOccurrence['customer']['fields']['email']['transform'] = 'mask';
-        Config::$discoveredFieldOccurrence['customer']['fields']['name']['fields']['first']['transform'] = 'mask';
-        Config::$discoveredFieldOccurrence['customer']['fields']['name']['fields']['last']['transform'] = 'mask';
+        Config::$discoveredFieldOccurrence['foo_partition']['customer']['fields']['phone']['transform'] = 'mask';
+        Config::$discoveredFieldOccurrence['foo_partition']['customer']['fields']['email']['transform'] = 'mask';
+        Config::$discoveredFieldOccurrence['foo_partition']['customer']['fields']['name']['fields']['first']['transform'] = 'mask';
+        Config::$discoveredFieldOccurrence['foo_partition']['customer']['fields']['name']['fields']['last']['transform'] = 'mask';
 
 
         $message = $origMessage;
 
         foreach ($message as $field => $value) {
-            $container->ingestField($field, $value, Config::$discoveredFieldOccurrence, $message);
+            $container->ingestField($field, $value, Config::$discoveredFieldOccurrence['foo_partition'], $message);
         }
 
         $this->assertIsArray($message);

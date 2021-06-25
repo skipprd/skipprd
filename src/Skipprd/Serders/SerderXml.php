@@ -17,6 +17,8 @@ class SerderXml implements SerderBatchInterface
     public function deserialize(string $payload): array
     {
 
+        $array = [];
+        
         $xml = simplexml_load_string($payload, null, LIBXML_NOCDATA);
         foreach ($xml as $xmlItem) {
             $array[] = json_decode(json_encode($xmlItem),TRUE);
@@ -26,7 +28,7 @@ class SerderXml implements SerderBatchInterface
 
     }
 
-    public function serialize(array $records, string $filename): void
+    public function serialize(array $records, string $filename, $schema = null): void
     {
 
         $xml_data = new \SimpleXMLElement('<?xml version="1.0"?><data></data>');
@@ -57,7 +59,7 @@ class SerderXml implements SerderBatchInterface
                     $key = 'item'; //dealing with <0/>..<n/> issues
                 }
                 
-                $xml_data->addChild("$key",htmlspecialchars("$value"));
+                $xml_data->addChild("$key", htmlspecialchars("$value"));
             }
         }
     }

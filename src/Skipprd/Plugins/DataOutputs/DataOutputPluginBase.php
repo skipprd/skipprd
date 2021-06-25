@@ -2,7 +2,7 @@
 
 namespace Skipprd\Plugins\DataOutputs;
 
-use Skipprd\Buffers\FileBuffer;
+use Skipprd\Buffers\ChunkedBuffer;
 use Skipprd\Traits\Config;
 
 class DataOutputPluginBase implements DataOutputPluginInterface
@@ -15,7 +15,7 @@ class DataOutputPluginBase implements DataOutputPluginInterface
 
     public $buffer = null;
 
-    public function __construct(array $config, FileBuffer $buffer)
+    public function __construct(array $config, ChunkedBuffer $buffer)
     {
         $this->tenantId = getenv('TENANT_ID');
         $this->pipelineName = getenv('PIPELINE_NAME');
@@ -28,7 +28,7 @@ class DataOutputPluginBase implements DataOutputPluginInterface
         }
     }
 
-    public function sync(string $format = '', \AvroSchema $schema = null) {}
+    public function sync(string $format = '') {}
 
     public function shutdown() {}
 }
