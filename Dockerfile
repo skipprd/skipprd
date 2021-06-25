@@ -98,6 +98,7 @@ RUN ioncube/ioncube_encoder.sh --activate && \
       --encode "src/Skipprd/Traits/Config.php" \
       --encode "src/Skipprd/Traits/Ingest.php" \
       --encode "src/Skipprd/Traits/AnalyseSchema.php" \
+      --encode "src/Skipprd/Traits/LicenseChecker.php" \
       --encode "src/Skipprd/SkipprPack.php" \
 #      --expire-in 180d \
       ./ \
