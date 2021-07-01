@@ -237,7 +237,7 @@ class Config
                 Registry::skipprd()->info("Building $partition schema");
 
                 $converter = new SkipprAvroSchemaConverter();
-                self::$schema[$partition] = $converter->convert(self::$discoveredFieldOccurrence);
+                self::$schema[$partition] = $converter->convert($mapping['fields']);
 
                 self::$schema[$partition] = self::schemaMerge(self::$specialFieldsMapping, self::$schema[$partition]);
 
