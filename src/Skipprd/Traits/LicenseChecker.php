@@ -25,15 +25,15 @@ trait LicenseChecker
 
             Registry::skipprd()->info('Looking up license');
 
-            $env = getenv('APP_ENV');
+            $env = Config::getenv('APP_ENV', 'prod');
 
-            if ($env == 'prod') {
-
-                $uri = "license.skippr.io/license-api";
+            if ($env != 'prod') {
+                $uri = "license.$env.skippr.io/license-api";
                 
             } else {
 
-                 $uri = "license.$env.skippr.io/license-api";
+                $uri = "license.skippr.io/license-api";
+                
             }
 
 

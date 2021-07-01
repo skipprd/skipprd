@@ -250,7 +250,7 @@ class FileBufferDriver implements BufferDriver
     public function nextFile()
     {
 
-        $filenames = glob($this->bufferDir . '/' . "$this->bufferName*_finalised-*", GLOB_NOSORT);
+        $filenames = glob($this->bufferDir . '/' . $this->bufferName . '*_finalised_*', GLOB_NOSORT);
 
         usort( $filenames, function( $a, $b ) { return filemtime($a) - filemtime($b); } );
 
@@ -370,7 +370,7 @@ class FileBufferDriver implements BufferDriver
 
     public function finalise($force = false) :void {
 
-        $file_list = glob($this->bufferDir . '/*' . $this->bufferName . '*_part*');
+        $file_list = glob($this->bufferDir . '/' . $this->bufferName . '*_part*');
 
         if (!empty($file_list)) {
 
