@@ -88,7 +88,7 @@ class ChunkedBuffer implements BufferInterface
 //                || $buffer['time'] < time() - $this->flushMemSeconds
             ) {
 
-                $partition = $this->decodeChunkName($chunkName);
+                $partition = $this->decodeChunkPartitionName($chunkName);
 
                 if (!empty($this->memBuffs[$chunkName]) && !empty($this->memBuffs[$chunkName]['buffer'])) {
 
@@ -120,8 +120,10 @@ class ChunkedBuffer implements BufferInterface
     private function getChunkName($filename) : array {
 
         $startPos = strpos($filename, $this->bufferName) + strlen($this->bufferName);
-        $endPos = strpos($filename, 'finalised') - strlen('finalised');
-        $encodedName = substr($filename, $startPos, -42);
+//        $endPos = strpos($filename, '_finalised') - strlen('_finalised');
+        $endPos = strrpos($filename, '_finalised', -1);
+//        $encodedName = substr($filename, $startPos, -$endPos);
+        $encodedName = substr($filename, $startPos, -43);
         $encodedName = trim($encodedName, '-');
 
         return explode('-', $encodedName);
@@ -152,18 +154,24 @@ class ChunkedBuffer implements BufferInterface
 
         $parts = $this->getChunkName($filename);
 
+        // strip chunk time
         if (is_numeric($parts[0])) {
             array_shift($parts);
         }
 
-        $partition = trim(implode('/', $parts), '/');
+        // reassemble chunk name
+//        $nameParts = array_pop($parts);
+        $partition_dir = implode('-', $parts);
+//        $parts[] = $partition;
 
-        Registry::skipprd()->debug("decoded partition $partition");
+//        $partition_dir = trim(implode('/', $parts), '/');
 
-        return $partition;
+        Registry::skipprd()->debug("decoded partition dir $partition_dir");
+
+        return $partition_dir;
     }
 
-    public function decodeChunkName(string $chunkName) : string {
+    public function decodeChunkPartitionName(string $chunkName) : string {
 
         $parts = explode('-', $chunkName);
         unset($parts[0]); // buffer name
