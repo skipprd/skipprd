@@ -15,6 +15,9 @@ class DataSourcePluginBase implements DataSourcePluginInterface
     
     public $buffer = null;
 
+    /**
+     * @var \Skipprd\Plugins\DataSources\Offsets
+     */
     public $offsets;
 
     protected $config = [];

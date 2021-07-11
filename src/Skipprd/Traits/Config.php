@@ -91,6 +91,17 @@ class Config
 
     }
 
+    public static function getPipelineName()
+    {
+
+        $inputPluginName = Helpers::cleanFieldName(Config::getenv('DATA_SOURCE_PLUGIN_NAME'));
+        $outputPluginName = Helpers::cleanFieldName(Config::getenv('DATA_OUTPUT_PLUGIN_NAME'));
+        $defaultPipelineName = $inputPluginName . 'to' . $outputPluginName;
+        $defaultPipelineName = Config::getenv('PIPELINE_NAME', $defaultPipelineName);
+
+        return $defaultPipelineName;
+    }
+
     public static function getConfig()
     {
 //        self::$pipelineId = self::getenv('PIPELINE_ID');
@@ -101,11 +112,7 @@ class Config
 
         self::$anonymousMetrics =  Config::getenv('ANONYMOUS_METRICS', true);
 
-//        $state['pipeline_name'] = Helpers::randomPassword(16);
-        $inputPluginName = Helpers::cleanFieldName(Config::getenv('DATA_SOURCE_PLUGIN_NAME'));
-        $outputPluginName = Helpers::cleanFieldName(Config::getenv('DATA_OUTPUT_PLUGIN_NAME'));
-        $defaultPipelineName = $inputPluginName . 'to' . $outputPluginName;
-        $defaultPipelineName = Config::getenv('PIPELINE_NAME', $defaultPipelineName);
+        $defaultPipelineName = Config::getPipelineName();
 
         Config::$state['tenant_id'] = Helpers::randomStr(16);
         self::$tenantId = self::getenv('TENANT_ID', Config::$state['tenant_id']);
@@ -211,7 +218,7 @@ class Config
 
         self::$pipelineName = Config::getenv('PIPELINE_NAME', $defaultPipelineName);
 
-        self::$offsets = (!empty(self::$state[$defaultPipelineName]['offsets']) ? self::$state[$defaultPipelineName]['offsets'] : '');
+//        self::$offsets = (!empty(self::$state[$defaultPipelineName]['offsets']) ? self::$state[$defaultPipelineName]['offsets'] : []);
 
 //        self::$schema['fields'] = [];
 //
@@ -413,7 +420,7 @@ class Config
             Config::$state[Config::$pipelineName]['mapping'] = Config::$discoveredFieldOccurrence;
             Config::$state[Config::$pipelineName]['pipeline_name'] = Config::$pipelineName;
             Config::$state['tenant_id'] = Config::$tenantId;
-            Config::$state[Config::$pipelineName]['offsets'] = Config::$offsets;
+//            Config::$state[Config::$pipelineName]['offsets'] = Config::$offsets;
 
             try {
 

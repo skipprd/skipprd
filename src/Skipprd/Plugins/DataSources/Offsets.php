@@ -9,11 +9,6 @@ class Offsets
 
     protected array $offsets = [];
 
-    public function __construct()
-    {
-
-    }
-
     public function setOffsets(string $partition, string $offsets = '')
     {
 
@@ -23,6 +18,11 @@ class Offsets
     public function getOffsets() {
 
         return $this->offsets;
+    }
+
+    public function getOffset(string $partition) {
+
+        return $this->offsets[$partition];
     }
 
     public function parseOffsets(string $partition)

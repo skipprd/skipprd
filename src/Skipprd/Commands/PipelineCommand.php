@@ -29,6 +29,9 @@ use Skipprd\Traits\Ingest;
 use Skipprd\Serders\SerdersFactory;
 use Skipprd\Traits\Config;
 use League\StatsD\Client as Statsd;
+use Skipprd\Plugins\DataSources\DataSourcePluginInterface;
+use Skipprd\Plugins\DataOutputs\DataOutputPluginInterface;
+use Skipprd\Plugins\DataSources\OffsetDrivers\SkipprApi;
 use Segment;
 
 class PipelineCommand
@@ -121,33 +124,33 @@ class PipelineCommand
     protected $config = [];
 
     /**
-     * @var \App\Plugins\DataSources\DataSourcePluginInterface
+     * @var \Skipprd\Plugins\DataSources\DataSourcePluginInterface
      */
     protected $inputPlugin = null;
 
     /**
-     * @var \App\Plugins\DataOutputs\OutputPluginInterface
+     * @var \Skipprd\Plugins\DataOutputs\DataOutputPluginInterface
      */
     protected $outputPlugin = null;
 
     /**
-     * @var \App\Plugins\DataOutputs\OutputPluginInterface
+     * @var \Skipprd\Plugins\DataOutputs\DataOutputPluginInterface
      */
     protected $deadletterPlugin = null;
 
     public $stream = null;
 
     /**
-     * @var \Skipprd\BufferAdaptors\BufferInterface|null
+     * @var \Skipprd\Buffers\BufferInterface|null
      */
     protected $inputBuffer = null;
 
     /**
-     * @var \Skipprd\BufferAdaptors\BufferInterface|null
+     * @var \Skipprd\Buffers\BufferInterface|null
      */
     protected $outputBuffer = null;
  /**
-     * @var \Skipprd\BufferAdaptors\BufferInterface|null
+     * @var \Skipprd\Buffers\BufferInterface|null
      */
     protected $deadletterBuffer = null;
 
@@ -157,7 +160,7 @@ class PipelineCommand
 
     /**
      * PipelineJob constructor.
-     * @param $pluginModel DataSourcePluginInterface|OutputPluginInterface
+     * @param $pluginModel DataSourcePluginInterface|DataOutputPluginInterface
      * @param array $config
      */
     public function __construct()
@@ -684,11 +687,9 @@ class PipelineCommand
 
     }
 
-    public function offsetCommitRoutine(): void
+    public function offsetCommitRoutine(string $partition, bool $force = false): void
     {
         if (!Config::$analysing) {
-
-//            $this->inputPlugin->commit($offset);
 
             if (!isset($this->j)) {
                 $this->j = 0;
@@ -696,12 +697,14 @@ class PipelineCommand
                 $this->j++;
             }
 
-            if ($this->j > self::$flushMaxMsg) {
+            if ($force || $this->j > self::$flushMaxMsg) {
 
                 $this->j = 0;
 
-//                $this->pipelineModel->save();
-                // @todo - implement state/mapping storage
+                $offset = $this->inputPlugin->offsets->getOffset($partition);
+
+                $offsetClient = new \SkipprApi();
+                $offsetClient->sync($partition, $offset);
 
             }
         }
@@ -892,7 +895,7 @@ class PipelineCommand
                     Registry::skipprd()->info($unwrappedMessage);
                 }
 
-                $this->offsetCommitRoutine();
+                $this->offsetCommitRoutine($partition);
             }
         }
 
@@ -1005,11 +1008,14 @@ class PipelineCommand
         // @todo - implement state storage
 
 //        $this->inputPlugin->commit(Config::$offsets);
-        if (!empty(Config::$offsets)) {
-            
-            foreach (Config::$offsets as $partition => $offsets) {
 
-                $this->inputPlugin->offsets->setOffsets($partition, $offsets);
+        $offsetClient = new SkipprApi();
+        $offsets = $offsetClient->get();
+
+        if (!empty($offsets)) {
+            foreach ($offsets as $partition => $offset) {
+
+                $this->inputPlugin->offsets->setOffsets($partition, $offset);
             }
         }
 
@@ -1116,8 +1122,6 @@ class PipelineCommand
             $this->deadletterPlugin->buffer->driver->finalise(true);
 
             $this->totalEntries += $this->entries;
-            
-            Config::$offsets = $this->inputPlugin->offsets->getOffsets();
 
             if (Config::$mode == 'sync') {
 
@@ -1136,6 +1140,12 @@ class PipelineCommand
                     $this->deadletterPlugin->shutdown();
                 }
             }
+
+            // Sync all offsets having synced to destination
+            $offsets = $this->inputPlugin->offsets->getOffsets();
+
+            $offsetClient = new SkipprApi();
+            $offsetClient->syncAll($offsets);
 
             Registry::skipprd()->info("Ingested " . $this->totalEntries . " messages");
             Registry::skipprd()->info("Dead Letters " . $this->deadLetters . " dead letters");
