@@ -281,8 +281,8 @@ class PipelineCommand
         // PHP 7.1 and later can handle asynchronous signals natively
         pcntl_async_signals(true);
 
-        pcntl_signal(SIGINT, [$this, 'shutdown']); // Call $this->shutdown() on SIGINT
-        pcntl_signal(SIGTERM, [$this, 'shutdown']); // Call $this->shutdown() on SIGTERM
+        pcntl_signal(SIGINT, [$this, 'shutdownSig']); // Call $this->shutdown() on SIGINT
+        pcntl_signal(SIGTERM, [$this, 'shutdownSig']); // Call $this->shutdown() on SIGTERM
 
 
 //        if (Config::$analysing) {
@@ -1075,7 +1075,14 @@ class PipelineCommand
 
     }
 
-    public function shutdown()
+    public function shutdownSig(int $signo, mixed $siginfo): void
+    {
+
+        $this->shutdown($signo);
+
+    }
+
+    public function shutdown($signo = 0)
     {
 
         Registry::skipprd()->info("Gracefully shutting down and flushing buffers");
@@ -1205,7 +1212,7 @@ class PipelineCommand
         Registry::skipprd()->info("Graceful shutdown complete, bye");
 
 //        $this->delete();
-        exit(0);
+        exit($signo);
 //        return;
     }
 
