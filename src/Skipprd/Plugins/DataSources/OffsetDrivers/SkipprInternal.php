@@ -5,7 +5,7 @@ namespace Skipprd\Plugins\DataSources\OffsetDrivers;
 use Monolog\Registry;
 use Skipprd\Traits\Config;
 
-class SkipprApi implements OffsetDriverInterface
+class SkipprInternal implements OffsetDriverInterface
 {
 
     protected $pipelineName = '';

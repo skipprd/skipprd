@@ -31,7 +31,7 @@ use Skipprd\Traits\Config;
 use League\StatsD\Client as Statsd;
 use Skipprd\Plugins\DataSources\DataSourcePluginInterface;
 use Skipprd\Plugins\DataOutputs\DataOutputPluginInterface;
-use Skipprd\Plugins\DataSources\OffsetDrivers\SkipprApi;
+use Skipprd\Plugins\DataSources\OffsetDrivers\SkipprInternal;
 use Segment;
 
 class PipelineCommand
@@ -703,7 +703,7 @@ class PipelineCommand
 
                 $offset = $this->inputPlugin->offsets->getOffset($partition);
 
-                $offsetClient = new \SkipprApi();
+                $offsetClient = new SkipprInternal();
                 $offsetClient->sync($partition, $offset);
 
             }
@@ -1014,7 +1014,7 @@ class PipelineCommand
 
 //        $this->inputPlugin->commit(Config::$offsets);
 
-        $offsetClient = new SkipprApi();
+        $offsetClient = new SkipprInternal();
         $offsets = $offsetClient->get();
 
         if (!empty($offsets)) {
@@ -1156,7 +1156,7 @@ class PipelineCommand
             // Sync all offsets having synced to destination
             $offsets = $this->inputPlugin->offsets->getOffsets();
 
-            $offsetClient = new SkipprApi();
+            $offsetClient = new SkipprInternal();
             $offsetClient->syncAll($offsets);
 
             Registry::skipprd()->info("Ingested " . $this->totalEntries . " messages");
