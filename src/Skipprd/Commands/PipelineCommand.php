@@ -848,7 +848,7 @@ class PipelineCommand
         
         foreach ($unwrappedMessages as $unwrappedMessage) {  // outer array
 
-            if (Config::$analysing) {
+            if (Config::$analysing && $this->inputPlugin->ingestPartition($partition) === true) {
 
                 if (is_array($unwrappedMessage)) {
 
@@ -859,15 +859,20 @@ class PipelineCommand
                     $this->analysePayload($unwrappedMessage, Config::$discoveredFieldOccurrence[$partition]['fields']);
                 }
 
-//                if ($this->i > $this->minSample
-//                    || Carbon::now()->timestamp - $this->startTimestamp > $this->maxTime) {
+                if ($this->i > $this->minSample
+                    || Carbon::now()->timestamp - $this->startTimestamp > $this->maxTime) {
 //
-//                    Registry::skipprd()->info('Finished analysing data');
+                    Registry::skipprd()->info("Finished discovering schema for $partition record type");
+
+                    $this->i = 0;
+                    $this->startTimestamp = Carbon::now()->timestamp;
+
+                    $this->inputPlugin->continue[$partition] = false;
 
 //                    unlink("buffer.ready"); // clean up ready buffer - as we force exit here
 
 //                    $this->shutdown();
-//                }
+                }
             }
 
 

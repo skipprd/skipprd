@@ -8,16 +8,16 @@
     "packages": [
         {
             "name": "aws/aws-sdk-php",
-            "version": "3.185.4",
+            "version": "3.185.10",
             "source": {
                 "type": "git",
                 "url": "https://github.com/aws/aws-sdk-php.git",
-                "reference": "077bf5cf6a0a959ca756729dc49c619c303c6274"
+                "reference": "667a83e4a18cb75db3ce74162efc97123da96261"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/aws/aws-sdk-php/zipball/077bf5cf6a0a959ca756729dc49c619c303c6274",
-                "reference": "077bf5cf6a0a959ca756729dc49c619c303c6274",
+                "url": "https://api.github.com/repos/aws/aws-sdk-php/zipball/667a83e4a18cb75db3ce74162efc97123da96261",
+                "reference": "667a83e4a18cb75db3ce74162efc97123da96261",
                 "shasum": ""
             },
             "require": {
@@ -92,9 +92,9 @@
             "support": {
                 "forum": "https://forums.aws.amazon.com/forum.jspa?forumID=80",
                 "issues": "https://github.com/aws/aws-sdk-php/issues",
-                "source": "https://github.com/aws/aws-sdk-php/tree/3.185.4"
+                "source": "https://github.com/aws/aws-sdk-php/tree/3.185.10"
             },
-            "time": "2021-06-30T18:13:52+00:00"
+            "time": "2021-07-09T19:21:22+00:00"
         },
         {
             "name": "guzzlehttp/guzzle",
@@ -1022,7 +1022,7 @@
             "source": {
                 "type": "git",
                 "url": "git@gitlab.com:paulhudson/data-source-file.git",
-                "reference": "f394d8da69e86e650eb6dc8c6ab649f06c41cb00"
+                "reference": "585d18adb216b68a333d7436715fc13e2ad8d8b8"
             },
             "require": {
                 "monolog/monolog": "^1.12"
@@ -1046,7 +1046,7 @@
                 }
             ],
             "description": "File data source for skippr.io",
-            "time": "2021-06-18T17:52:33+00:00"
+            "time": "2021-07-12T15:17:40+00:00"
         },
         {
             "name": "skipprd/data-source-kafka",
@@ -1054,7 +1054,7 @@
             "source": {
                 "type": "git",
                 "url": "git@gitlab.com:paulhudson/data-source-kafka.git",
-                "reference": "3c33bf089e6bd7034a433e8d13710dc37a356e87"
+                "reference": "c9284a092df31b1f8d5e7f777a231dab783516f6"
             },
             "require-dev": {
                 "kwn/php-rdkafka-stubs": "^2.0.4"
@@ -1078,7 +1078,7 @@
                 }
             ],
             "description": "Kafka data source for skippr.io",
-            "time": "2021-06-18T17:53:54+00:00"
+            "time": "2021-07-12T15:17:31+00:00"
         },
         {
             "name": "skipprd/data-source-mqtt-subscriber",
@@ -1119,7 +1119,7 @@
             "source": {
                 "type": "git",
                 "url": "git@gitlab.com:paulhudson/data-source-s3.git",
-                "reference": "98993bc88c105ec6f198ab51ed1359cc57d64191"
+                "reference": "64f54105ed5c5a503d1bc20221abe548a0f5e683"
             },
             "require": {
                 "aws/aws-sdk-php": "^3.173",
@@ -1144,7 +1144,7 @@
                 }
             ],
             "description": "S3 data source for skippr.io",
-            "time": "2021-06-18T18:27:42+00:00"
+            "time": "2021-07-12T15:17:15+00:00"
         },
         {
             "name": "skipprd/data-source-s3-demo",
@@ -1152,7 +1152,7 @@
             "source": {
                 "type": "git",
                 "url": "git@gitlab.com:paulhudson/data-source-s3-demo.git",
-                "reference": "b10a656c9bb2ef588d1ed9963b55fd8fbe2802db"
+                "reference": "c1416f5bbb09fccc835da6080434f14f31bf242d"
             },
             "require": {
                 "monolog/monolog": "^1.12"
@@ -1176,7 +1176,7 @@
                 }
             ],
             "description": "S3 Demo data source for skippr.io",
-            "time": "2021-06-18T17:53:29+00:00"
+            "time": "2021-07-12T15:17:22+00:00"
         },
         {
             "name": "skipprd/data-source-salesforce",
@@ -3102,16 +3102,16 @@
         },
         {
             "name": "php-http/client-common",
-            "version": "1.10.0",
+            "version": "1.11.0",
             "source": {
                 "type": "git",
                 "url": "https://github.com/php-http/client-common.git",
-                "reference": "c0390ae3c8f2ae9d50901feef0127fb9e396f6b4"
+                "reference": "11d34cad40647848aa98536494f9da63571af9da"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/php-http/client-common/zipball/c0390ae3c8f2ae9d50901feef0127fb9e396f6b4",
-                "reference": "c0390ae3c8f2ae9d50901feef0127fb9e396f6b4",
+                "url": "https://api.github.com/repos/php-http/client-common/zipball/11d34cad40647848aa98536494f9da63571af9da",
+                "reference": "11d34cad40647848aa98536494f9da63571af9da",
                 "shasum": ""
             },
             "require": {
@@ -3161,9 +3161,9 @@
             ],
             "support": {
                 "issues": "https://github.com/php-http/client-common/issues",
-                "source": "https://github.com/php-http/client-common/tree/1.x"
+                "source": "https://github.com/php-http/client-common/tree/1.11.0"
             },
-            "time": "2019-11-18T08:54:36+00:00"
+            "time": "2021-07-11T14:33:59+00:00"
         },
         {
             "name": "php-http/discovery",
