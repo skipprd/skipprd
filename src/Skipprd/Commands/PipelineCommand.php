@@ -778,7 +778,7 @@ class PipelineCommand
 
         $serde = SerdersFactory::factory(Config::$sourceFormat);
 
-        $this->readFile($filename, $partition, function ($string) use ($serde, &$fields, &$payloadString) {
+        $this->readFile($filename, $partition, function ($string, $partition) use ($serde, &$fields, &$payloadString) {
 
             if (in_array(Config::$sourceFormat, Config::$batchFormats)) {
 
@@ -790,7 +790,8 @@ class PipelineCommand
 
                 foreach ($msgs as $msg) {
 
-                    array_push($fields, $msg);
+//                    array_push($fields, $msg);
+                    $this->emitArray($msg, $partition);
                 }
             }
 
@@ -802,11 +803,12 @@ class PipelineCommand
 
             foreach ($msgs as $msg) {
 
-                array_push($fields, $msg);
+//                array_push($fields, $msg);
+                $this->emitArray($msg, $partition);
             }
         }
 
-        $this->emitArray($fields, $partition);
+
 
     }
 
