@@ -13,7 +13,7 @@ trait LicenseChecker
 
     protected $licenseKey = 'none';
 
-    protected $licenseApiKey = 'nFCBbKgf72pXNcKS9wKFA7n419Y9ql0J';
+//    protected $licenseApiKey = 'nFCBbKgf72pXNcKS9wKFA7n419Y9ql0J';
 
     public function getLicense()
     {
@@ -25,26 +25,17 @@ trait LicenseChecker
 
             Registry::skipprd()->info('Looking up license');
 
-            $env = Config::getenv('APP_ENV', 'prod');
+            $uri = Config::getenv('SCHEMA_REGISTRY');
 
-            if ($env != 'prod') {
-                $uri = "license.$env.skippr.io/license-api";
-                
-            } else {
-
-                $uri = "license.skippr.io/license-api";
-                
-            }
-
-
-            $url = "https://$uri/";
+            $url = "http://$uri/";
             $path = 'check/'. $this->licenseKey;
 
             $client = new \GuzzleHttp\Client([
                 'base_uri' => $url,
                 'headers' => [
-                    'x-api-key' => $this->licenseApiKey
+                    'Authorization' => "Bearer " . Config::getenv('SCHEMA_API_TOKEN')
                 ]
+
             ]);
 
             $body = $client->get($path)->getBody();

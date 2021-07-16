@@ -2,6 +2,7 @@
 
 namespace Skipprd\Plugins\DataSources;
 
+use Monolog\Registry;
 use Skipprd\Buffers\ChunkedBuffer;
 
 class DataSourcePluginBase implements DataSourcePluginInterface
@@ -11,10 +12,15 @@ class DataSourcePluginBase implements DataSourcePluginInterface
 
     protected $pipelineName = '';
 
+    public $continue = [];
+
     public $flushBytes = 10000000;
     
     public $buffer = null;
 
+    /**
+     * @var \Skipprd\Plugins\DataSources\Offsets
+     */
     public $offsets;
 
     protected $config = [];
@@ -43,6 +49,18 @@ class DataSourcePluginBase implements DataSourcePluginInterface
     }
     
     public function sync($pipelineJob) {}
+
+    public function ingestPartition($partition)
+    {
+
+        if (!isset($this->continue[$partition])) {
+            $this->continue[$partition] = true;
+        }
+
+//        Registry::skipprd()->info(var_dump($this->continue));
+        
+        return $this->continue[$partition];
+    }
 
     public function doValidateConnection() {}
 

@@ -35,7 +35,7 @@ trait Ingest
             /*
              * Transformations and schema evolution
              */
-            foreach ($sourceMessage as $field => $value) { // only ingest fields enabled to sync to output
+            foreach ($sourceMessage as $field => $value) {
 
                 if (!empty($metadata[$field]['enabled'])) { // only ingest fields enabled to sync to output
 
@@ -194,8 +194,9 @@ trait Ingest
     }
 
     /**
-     * Message must contain ALL fields,
-     * which are null by default to support serialisation to parquet and avro, etc
+     * Message must contain ALL fields described in the schema
+     * (to support some destinations like Parquet and Athena)
+     * Fields are null by default
      * 
      * @param array $message
      * @return array

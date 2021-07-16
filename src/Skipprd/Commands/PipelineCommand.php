@@ -29,6 +29,9 @@ use Skipprd\Traits\Ingest;
 use Skipprd\Serders\SerdersFactory;
 use Skipprd\Traits\Config;
 use League\StatsD\Client as Statsd;
+use Skipprd\Plugins\DataSources\DataSourcePluginInterface;
+use Skipprd\Plugins\DataOutputs\DataOutputPluginInterface;
+use Skipprd\Plugins\DataSources\OffsetDrivers\SkipprInternal;
 use Segment;
 
 class PipelineCommand
@@ -121,33 +124,33 @@ class PipelineCommand
     protected $config = [];
 
     /**
-     * @var \App\Plugins\DataSources\DataSourcePluginInterface
+     * @var \Skipprd\Plugins\DataSources\DataSourcePluginInterface
      */
     protected $inputPlugin = null;
 
     /**
-     * @var \App\Plugins\DataOutputs\OutputPluginInterface
+     * @var \Skipprd\Plugins\DataOutputs\DataOutputPluginInterface
      */
     protected $outputPlugin = null;
 
     /**
-     * @var \App\Plugins\DataOutputs\OutputPluginInterface
+     * @var \Skipprd\Plugins\DataOutputs\DataOutputPluginInterface
      */
     protected $deadletterPlugin = null;
 
     public $stream = null;
 
     /**
-     * @var \Skipprd\BufferAdaptors\BufferInterface|null
+     * @var \Skipprd\Buffers\BufferInterface|null
      */
     protected $inputBuffer = null;
 
     /**
-     * @var \Skipprd\BufferAdaptors\BufferInterface|null
+     * @var \Skipprd\Buffers\BufferInterface|null
      */
     protected $outputBuffer = null;
  /**
-     * @var \Skipprd\BufferAdaptors\BufferInterface|null
+     * @var \Skipprd\Buffers\BufferInterface|null
      */
     protected $deadletterBuffer = null;
 
@@ -157,7 +160,7 @@ class PipelineCommand
 
     /**
      * PipelineJob constructor.
-     * @param $pluginModel DataSourcePluginInterface|OutputPluginInterface
+     * @param $pluginModel DataSourcePluginInterface|DataOutputPluginInterface
      * @param array $config
      */
     public function __construct()
@@ -278,8 +281,8 @@ class PipelineCommand
         // PHP 7.1 and later can handle asynchronous signals natively
         pcntl_async_signals(true);
 
-        pcntl_signal(SIGINT, [$this, 'shutdown']); // Call $this->shutdown() on SIGINT
-        pcntl_signal(SIGTERM, [$this, 'shutdown']); // Call $this->shutdown() on SIGTERM
+        pcntl_signal(SIGINT, [$this, 'shutdownSig']); // Call $this->shutdown() on SIGINT
+        pcntl_signal(SIGTERM, [$this, 'shutdownSig']); // Call $this->shutdown() on SIGTERM
 
 
 //        if (Config::$analysing) {
@@ -684,11 +687,9 @@ class PipelineCommand
 
     }
 
-    public function offsetCommitRoutine(): void
+    public function offsetCommitRoutine(string $partition, bool $force = false): void
     {
         if (!Config::$analysing) {
-
-//            $this->inputPlugin->commit($offset);
 
             if (!isset($this->j)) {
                 $this->j = 0;
@@ -696,12 +697,14 @@ class PipelineCommand
                 $this->j++;
             }
 
-            if ($this->j > self::$flushMaxMsg) {
+            if ($force || $this->j > self::$flushMaxMsg) {
 
                 $this->j = 0;
 
-//                $this->pipelineModel->save();
-                // @todo - implement state/mapping storage
+                $offset = $this->inputPlugin->offsets->getOffset($partition);
+
+                $offsetClient = new SkipprInternal();
+                $offsetClient->sync($partition, $offset);
 
             }
         }
@@ -775,7 +778,7 @@ class PipelineCommand
 
         $serde = SerdersFactory::factory(Config::$sourceFormat);
 
-        $this->readFile($filename, $partition, function ($string) use ($serde, &$fields, &$payloadString) {
+        $this->readFile($filename, $partition, function ($string, $partition) use ($serde, &$fields, &$payloadString) {
 
             if (in_array(Config::$sourceFormat, Config::$batchFormats)) {
 
@@ -787,7 +790,8 @@ class PipelineCommand
 
                 foreach ($msgs as $msg) {
 
-                    array_push($fields, $msg);
+//                    array_push($fields, $msg);
+                    $this->emitArray($msg, $partition);
                 }
             }
 
@@ -799,11 +803,12 @@ class PipelineCommand
 
             foreach ($msgs as $msg) {
 
-                array_push($fields, $msg);
+//                array_push($fields, $msg);
+                $this->emitArray($msg, $partition);
             }
         }
 
-        $this->emitArray($fields, $partition);
+
 
     }
 
@@ -845,7 +850,7 @@ class PipelineCommand
         
         foreach ($unwrappedMessages as $unwrappedMessage) {  // outer array
 
-            if (Config::$analysing) {
+            if (Config::$analysing && $this->inputPlugin->ingestPartition($partition) === true) {
 
                 if (is_array($unwrappedMessage)) {
 
@@ -856,15 +861,20 @@ class PipelineCommand
                     $this->analysePayload($unwrappedMessage, Config::$discoveredFieldOccurrence[$partition]['fields']);
                 }
 
-//                if ($this->i > $this->minSample
-//                    || Carbon::now()->timestamp - $this->startTimestamp > $this->maxTime) {
+                if ($this->i > $this->minSample
+                    || Carbon::now()->timestamp - $this->startTimestamp > $this->maxTime) {
 //
-//                    Registry::skipprd()->info('Finished analysing data');
+                    Registry::skipprd()->info("Finished discovering schema for $partition record type");
+
+                    $this->i = 0;
+                    $this->startTimestamp = Carbon::now()->timestamp;
+
+                    $this->inputPlugin->continue[$partition] = false;
 
 //                    unlink("buffer.ready"); // clean up ready buffer - as we force exit here
 
 //                    $this->shutdown();
-//                }
+                }
             }
 
 
@@ -892,7 +902,7 @@ class PipelineCommand
                     Registry::skipprd()->info($unwrappedMessage);
                 }
 
-                $this->offsetCommitRoutine();
+                $this->offsetCommitRoutine($partition);
             }
         }
 
@@ -1005,11 +1015,14 @@ class PipelineCommand
         // @todo - implement state storage
 
 //        $this->inputPlugin->commit(Config::$offsets);
-        if (!empty(Config::$offsets)) {
-            
-            foreach (Config::$offsets as $partition => $offsets) {
 
-                $this->inputPlugin->offsets->setOffsets($partition, $offsets);
+        $offsetClient = new SkipprInternal();
+        $offsets = $offsetClient->get();
+
+        if (!empty($offsets)) {
+            foreach ($offsets as $partition => $offset) {
+
+                $this->inputPlugin->offsets->setOffsets($partition, $offset);
             }
         }
 
@@ -1069,7 +1082,14 @@ class PipelineCommand
 
     }
 
-    public function shutdown()
+    public function shutdownSig(int $signo, mixed $siginfo): void
+    {
+
+        $this->shutdown($signo);
+
+    }
+
+    public function shutdown($signo = 0)
     {
 
         Registry::skipprd()->info("Gracefully shutting down and flushing buffers");
@@ -1116,8 +1136,6 @@ class PipelineCommand
             $this->deadletterPlugin->buffer->driver->finalise(true);
 
             $this->totalEntries += $this->entries;
-            
-            Config::$offsets = $this->inputPlugin->offsets->getOffsets();
 
             if (Config::$mode == 'sync') {
 
@@ -1136,6 +1154,12 @@ class PipelineCommand
                     $this->deadletterPlugin->shutdown();
                 }
             }
+
+            // Sync all offsets having synced to destination
+            $offsets = $this->inputPlugin->offsets->getOffsets();
+
+            $offsetClient = new SkipprInternal();
+            $offsetClient->syncAll($offsets);
 
             Registry::skipprd()->info("Ingested " . $this->totalEntries . " messages");
             Registry::skipprd()->info("Dead Letters " . $this->deadLetters . " dead letters");
@@ -1195,7 +1219,7 @@ class PipelineCommand
         Registry::skipprd()->info("Graceful shutdown complete, bye");
 
 //        $this->delete();
-        exit(0);
+        exit($signo);
 //        return;
     }
 
