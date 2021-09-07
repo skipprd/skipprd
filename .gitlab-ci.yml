@@ -188,6 +188,7 @@ before_script:
     - docker push ${ECR_URL}:latest
 
     # Push to Docker Hub
+    - docker tag ${PROJECT_NAME}:${CURR_BUILD_TAG} ${DOCKER_HUB_URL}:${CURR_BUILD_TAG}
     - docker push ${DOCKER_HUB_URL}:${CURR_BUILD_TAG}
 
     # Tag with git tag if set
