@@ -262,11 +262,11 @@ class Config
 
                     $converter = new $converterClass();
 
-                    self::$outputSchemas[$partition] = $converter->convert(self::$avroSchemas[$partition]);
+                    self::$outputSchemas[Helpers::cleanFieldName($partition)] = $converter->convert(self::$avroSchemas[$partition]);
 
                 } else {
 
-                    self::$outputSchemas[$partition] = self::$avroSchemas[$partition];
+                    self::$outputSchemas[Helpers::cleanFieldName($partition)] = self::$avroSchemas[$partition];
                 }
 
             }
