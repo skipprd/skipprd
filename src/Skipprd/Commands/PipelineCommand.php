@@ -913,9 +913,8 @@ class PipelineCommand
     public function parsePartitionField(array &$message, string $partition)
     {
 
-
         // default to data source partition (table, topic, queue, file dir, etc)
-        $shardFieldEntityValue = $partition;
+        $shardFieldEntityValue =  Helpers::cleanFieldName($partition);
 
         // optional: partition by composite key
         if (!empty(Config::$entityNames)) {
@@ -925,10 +924,11 @@ class PipelineCommand
                 // @todo - support entity naming
                 $entityName = $entityField;
 
-//                    if (!empty($message[$shardFieldName])) {
-                if ($entityValue = array_get($message, $entityField, false) ) {
+                if (!empty($message[$entityField])) {
+                    if ($entityValue = $message[$entityField]) {
 
-                    $shardFieldEntityValue .= '-' . str_slug($entityName, '_') . '=' . str_slug($entityValue);
+                        $shardFieldEntityValue .= '-' . Helpers::cleanFieldName($entityName) . '=' . Helpers::cleanFieldName($entityValue);
+                    }
                 }
             }
         }
