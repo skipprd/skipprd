@@ -39,6 +39,8 @@ class JsonToAvroTest extends DockerRun
             'TENANT_ID=skippr',
             'PIPELINE_NAME=uattest',
             'ANONYMOUS_METRICS=false',
+            'LICENSE_KEY=94708298-498f-4c74-802c-ff359dd56cdf',
+            'APP_ENV=dev',
         ];
 
         $this->containerConfig->setEnv($envs);
