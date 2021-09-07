@@ -1085,7 +1085,7 @@ class PipelineCommand
 
     }
 
-    public function shutdownSig(int $signo, mixed $siginfo): void
+    public function shutdownSig(int $signo, $siginfo): void
     {
 
         $this->shutdown($signo);
