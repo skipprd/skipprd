@@ -2,7 +2,7 @@
 ## Builder
 ###
 
-FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v2.2.3 as builder
+FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v2.2.4 as builder
 #FROM skippr-php:ubuntu as builder
 
 RUN df -h
@@ -10,12 +10,12 @@ RUN df -h
 ##
 # docker-php-extension-installer
 ##
-ADD https://github.com/mlocati/docker-php-extension-installer/releases/latest/download/install-php-extensions /usr/local/bin/
+#ADD https://github.com/mlocati/docker-php-extension-installer/releases/latest/download/install-php-extensions /usr/local/bin/
 
 RUN apt-get update -y && apt-get install -y netbase git openssh-client
 
-RUN chmod +x /usr/local/bin/install-php-extensions \
-    && sync
+#RUN chmod +x /usr/local/bin/install-php-extensions \
+#    && sync
 #    && install-php-extensions gd xdebug zip
 
 ARG SSH_PRIVATE_KEY
@@ -25,7 +25,9 @@ RUN chmod 700 ~/.ssh && chmod -R 600 ~/.ssh/*
 RUN ssh-keyscan github.com >> ~/.ssh/known_hosts && chmod 644 ~/.ssh/known_hosts
 RUN ssh-keyscan gitlab.com >> ~/.ssh/known_hosts && chmod 644 ~/.ssh/known_hosts
 
-RUN install-php-extensions @composer
+#RUN install-php-extensions @composer
+RUN wget -O composer-setup.php https://getcomposer.org/installer \
+  && sudo php composer-setup.php --install-dir=/usr/local/bin --filename=composer
 
 WORKDIR /usr/src/app
 COPY ./src ./src
@@ -137,9 +139,10 @@ RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skippr
 
 RUN df -h
 
-FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v2.2.3
+FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v2.2.4
 #FROM skippr-php:ubuntu
 
+ENV PHP_INI_DIR=/etc/php/7.4/cli
 RUN echo $PHP_INI_DIR
 RUN touch $PHP_INI_DIR/conf.d/05-custom.ini
 RUN echo 'memory_limit=1024M' >> $PHP_INI_DIR/conf.d/05-custom.ini
