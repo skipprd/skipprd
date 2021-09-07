@@ -13,7 +13,8 @@ trait LicenseChecker
 
     protected $licenseKey = 'none';
 
-//    protected $licenseApiKey = 'nFCBbKgf72pXNcKS9wKFA7n419Y9ql0J';
+    protected $licenseApiKey = 'nFCBbKgf72pXNcKS9wKFA7n419Y9ql0J'; // dev
+//    protected $licenseApiKey = 'QYwmw6noVkPgCc5U3nWzW0e2PV2mP6HS'; // prod
 
     public function getLicense()
     {
@@ -27,14 +28,36 @@ trait LicenseChecker
 
             $uri = Config::getenv('SCHEMA_REGISTRY');
 
-            $url = "http://$uri/";
-            $path = 'check/'. $this->licenseKey;
+            if (!empty($uri)) {
+
+                $authHeader = ['Authorization' => "Bearer " . Config::getenv('SCHEMA_API_TOKEN')];
+
+                $url = "http://$uri/";
+                
+            } elseif (empty($uri)) {
+
+                $authHeader =  ['x-api-key' => $this->licenseApiKey];
+
+                $env = Config::getenv('APP_ENV', 'prod');
+
+                if ($env != 'prod') {
+                    $uri = "license.$env.skippr.io/license-api";
+
+                } else {
+
+                    $uri = "license.skippr.io/license-api";
+
+                }
+
+                $url = "https://$uri/";
+            }
+
+
+            $path = 'check/' . $this->licenseKey;
 
             $client = new \GuzzleHttp\Client([
                 'base_uri' => $url,
-                'headers' => [
-                    'Authorization' => "Bearer " . Config::getenv('SCHEMA_API_TOKEN')
-                ]
+                'headers' => $authHeader
 
             ]);
 
