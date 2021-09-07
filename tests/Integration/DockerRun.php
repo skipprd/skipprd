@@ -236,7 +236,9 @@ class DockerRun extends TestCase
 
     public function cleanupTestDir()
     {
-//        $path = realpath(__DIR__ . '/../../' . $this->tempPath);
+        array_map('unlink', glob("$this->dataPath/buffer/*/*/*"));
+        array_map('rmdir', glob("$this->dataPath/buffer/*/*"));
+        array_map('rmdir', glob("$this->dataPath/buffer/*"));
         array_map('unlink', glob("$this->dataPath/output/*"));
         array_map('unlink', glob("$this->dataPath/input/*"));
         array_map('unlink', glob("$this->dataPath/*.*"));
@@ -423,7 +425,7 @@ class DockerRun extends TestCase
 
         exec('parquet-tools rowcount ' . $path . ' 2>/dev/null', $rowsOutput, $return);
 
-        print "Asseting expected row count of $itemCount equals actual " . $rowsOutput[0];
+        print "Asserting expected row count of $itemCount equals actual " . $rowsOutput[0];
 
         $this->assertContains("Total RowCount: $itemCount", $rowsOutput);
 
