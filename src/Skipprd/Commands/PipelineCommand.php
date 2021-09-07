@@ -8,6 +8,7 @@
 
 namespace Skipprd\Commands;
 
+use Skipprd\Plugins\DataSources\OffsetDrivers\OffsetDriverFactory;
 use Skipprd\Traits\LicenseChecker;
 use Monolog\Formatter\LineFormatter;
 use Monolog\Handler\StreamHandler;
@@ -31,7 +32,7 @@ use Skipprd\Traits\Config;
 use League\StatsD\Client as Statsd;
 use Skipprd\Plugins\DataSources\DataSourcePluginInterface;
 use Skipprd\Plugins\DataOutputs\DataOutputPluginInterface;
-use Skipprd\Plugins\DataSources\OffsetDrivers\SkipprInternal;
+use Skipprd\Plugins\DataSources\OffsetDrivers\SkipprInternalOffsetDriver;
 use Segment;
 
 class PipelineCommand
@@ -703,7 +704,8 @@ class PipelineCommand
 
                 $offset = $this->inputPlugin->offsets->getOffset($partition);
 
-                $offsetClient = new SkipprInternal();
+                $type = Config::getenv('OFFSET_DRIVER', 'skippr_file');
+                $offsetClient = OffsetDriverFactory::factory($type);
                 $offsetClient->sync($partition, $offset);
 
             }
@@ -1016,7 +1018,8 @@ class PipelineCommand
 
 //        $this->inputPlugin->commit(Config::$offsets);
 
-        $offsetClient = new SkipprInternal();
+        $type = Config::getenv('OFFSET_DRIVER', 'skippr_file');
+        $offsetClient = OffsetDriverFactory::factory($type);
         $offsets = $offsetClient->get();
 
         if (!empty($offsets)) {
@@ -1158,7 +1161,8 @@ class PipelineCommand
             // Sync all offsets having synced to destination
             $offsets = $this->inputPlugin->offsets->getOffsets();
 
-            $offsetClient = new SkipprInternal();
+            $type = Config::getenv('OFFSET_DRIVER', 'skippr_file');
+            $offsetClient = OffsetDriverFactory::factory($type);
             $offsetClient->syncAll($offsets);
 
             Registry::skipprd()->info("Ingested " . $this->totalEntries . " messages");
