@@ -32,9 +32,11 @@ class JsonToParquetTest extends DockerRun
             'DATA_OUTPUT_PATH=/data/output',
             'DATA_OUTPUT_FORMAT=parquet',
             'DATA_DIR=/data',
-            'TENANT_ID=skippr',
-            'PIPELINE_NAME=uattest',
+//            'TENANT_ID=skippr',
+//            'PIPELINE_NAME=uattest',
             'ANONYMOUS_METRICS=false',
+            'LICENSE_KEY=94708298-498f-4c74-802c-ff359dd56cdf',
+            'APP_ENV=dev',
         ];
 
         parent::setUp();

@@ -31,7 +31,7 @@ class JsonToParquetTest extends DockerRun
             'DATA_SOURCE_S3_REGION=eu-west-2',
             'DATA_SOURCE_AWS_ACCESS_ID=AKIAXZ5BBYBFKM24LVMM',
             'DATA_SOURCE_AWS_SECRET_KEY=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',
-            'DATA_SOURCE_S3_PREFIX=bike-hire-small/' . $this->testFile,
+            'DATA_SOURCE_S3_PREFIX=bike-hire-100/' . $this->testFile,
             'DATA_SOURCE_FORMAT=json',
             'DEAD_LETTER_PLUGIN_NAME=file',
             'DEAD_LETTER_PATH=/data/deadletters',
@@ -40,9 +40,11 @@ class JsonToParquetTest extends DockerRun
             'DATA_OUTPUT_PATH=/data/output',
             'DATA_OUTPUT_FORMAT=parquet',
             'DATA_DIR=/data',
-            'TENANT_ID=skippr',
-            'PIPELINE_NAME=uattest',
+//            'TENANT_ID=skippr',
+//            'PIPELINE_NAME=uattest',
             'ANONYMOUS_METRICS=false',
+            'LICENSE_KEY=94708298-498f-4c74-802c-ff359dd56cdf',
+            'APP_ENV=dev',
         ];
 
         $this->containerConfig->setEnv($envs);

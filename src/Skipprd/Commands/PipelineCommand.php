@@ -8,6 +8,7 @@
 
 namespace Skipprd\Commands;
 
+use Skipprd\Plugins\DataSources\OffsetDrivers\OffsetDriverFactory;
 use Skipprd\Traits\LicenseChecker;
 use Monolog\Formatter\LineFormatter;
 use Monolog\Handler\StreamHandler;
@@ -31,7 +32,7 @@ use Skipprd\Traits\Config;
 use League\StatsD\Client as Statsd;
 use Skipprd\Plugins\DataSources\DataSourcePluginInterface;
 use Skipprd\Plugins\DataOutputs\DataOutputPluginInterface;
-use Skipprd\Plugins\DataSources\OffsetDrivers\SkipprInternal;
+use Skipprd\Plugins\DataSources\OffsetDrivers\SkipprInternalOffsetDriver;
 use Segment;
 
 class PipelineCommand
@@ -703,7 +704,8 @@ class PipelineCommand
 
                 $offset = $this->inputPlugin->offsets->getOffset($partition);
 
-                $offsetClient = new SkipprInternal();
+                $type = Config::getenv('OFFSET_DRIVER', 'skippr_file');
+                $offsetClient = OffsetDriverFactory::factory($type);
                 $offsetClient->sync($partition, $offset);
 
             }
@@ -911,9 +913,8 @@ class PipelineCommand
     public function parsePartitionField(array &$message, string $partition)
     {
 
-
         // default to data source partition (table, topic, queue, file dir, etc)
-        $shardFieldEntityValue = $partition;
+        $shardFieldEntityValue =  Helpers::cleanFieldName($partition);
 
         // optional: partition by composite key
         if (!empty(Config::$entityNames)) {
@@ -923,10 +924,11 @@ class PipelineCommand
                 // @todo - support entity naming
                 $entityName = $entityField;
 
-//                    if (!empty($message[$shardFieldName])) {
-                if ($entityValue = array_get($message, $entityField, false) ) {
+                if (!empty($message[$entityField])) {
+                    if ($entityValue = $message[$entityField]) {
 
-                    $shardFieldEntityValue .= '-' . str_slug($entityName, '_') . '=' . str_slug($entityValue);
+                        $shardFieldEntityValue .= '-' . Helpers::cleanFieldName($entityName) . '=' . Helpers::cleanFieldName($entityValue);
+                    }
                 }
             }
         }
@@ -1016,7 +1018,8 @@ class PipelineCommand
 
 //        $this->inputPlugin->commit(Config::$offsets);
 
-        $offsetClient = new SkipprInternal();
+        $type = Config::getenv('OFFSET_DRIVER', 'skippr_file');
+        $offsetClient = OffsetDriverFactory::factory($type);
         $offsets = $offsetClient->get();
 
         if (!empty($offsets)) {
@@ -1082,7 +1085,7 @@ class PipelineCommand
 
     }
 
-    public function shutdownSig(int $signo, mixed $siginfo): void
+    public function shutdownSig(int $signo, $siginfo): void
     {
 
         $this->shutdown($signo);
@@ -1158,7 +1161,8 @@ class PipelineCommand
             // Sync all offsets having synced to destination
             $offsets = $this->inputPlugin->offsets->getOffsets();
 
-            $offsetClient = new SkipprInternal();
+            $type = Config::getenv('OFFSET_DRIVER', 'skippr_file');
+            $offsetClient = OffsetDriverFactory::factory($type);
             $offsetClient->syncAll($offsets);
 
             Registry::skipprd()->info("Ingested " . $this->totalEntries . " messages");
