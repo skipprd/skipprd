@@ -239,7 +239,8 @@ class DockerRun extends TestCase
         array_map('unlink', glob("$this->dataPath/buffer/*/*/*"));
         array_map('rmdir', glob("$this->dataPath/buffer/*/*"));
         array_map('rmdir', glob("$this->dataPath/buffer/*"));
-        array_map('unlink', glob("$this->dataPath/output/*"));
+        array_map( 'unlink', glob("$this->dataPath/output/*/*"));
+        array_map('rmdir', glob("$this->dataPath/output/*"));
         array_map('unlink', glob("$this->dataPath/input/*"));
         array_map('unlink', glob("$this->dataPath/*.*"));
         array_map('rmdir', glob("$this->dataPath/*"));
