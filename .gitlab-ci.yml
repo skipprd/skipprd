@@ -26,10 +26,11 @@ variables:
   AWS_PROFILE_LOCATION: /root/.aws/credentials
   COMPONENT_NAME: set-me
   PROJECT_NAME: $CI_PROJECT_NAME
+  #  ECR_HOST: public.ecr.aws/skippr
   ECR_HOST: 536671797322.dkr.ecr.eu-west-2.amazonaws.com
-#  DOCKER_HUB_HOST: skippr
-#  ECR_HOST: public.ecr.aws/skippr
   ECR_URL: $ECR_HOST/$COMPONENT_NAME
+  DOCKER_HUB_HOST: skippr
+  DOCKER_HUB_URL: $DOCKER_HUB_HOST/$COMPONENT_NAME
   DOCKERFILE_LOCATION: Dockerfile${COMPONENT_NAME}
   LATEST_DEV_TAG: latest-dev
 #  LATEST_PREPROD_TAG: latest-preprod
@@ -91,7 +92,7 @@ before_script:
 #    - docker login --username AWS --password $(aws ecr-public get-login-password --region us-east-1) public.ecr.aws
     - docker login --username AWS --password $(aws ecr get-login-password --region $AWS_REGION) 536671797322.dkr.ecr.eu-west-2.amazonaws.com
 
-#    - docker login --username skippr --password ${DOCKER_HUB_PASS} docker.io
+    - docker login --username skippr --password ${DOCKER_HUB_PASS} docker.io
 
 
 # |===============================|
@@ -185,6 +186,9 @@ before_script:
 
     - docker tag ${PROJECT_NAME}:${CURR_BUILD_TAG} ${ECR_URL}:latest
     - docker push ${ECR_URL}:latest
+
+    # Push to Docker Hub
+    - docker push ${DOCKER_HUB_URL}:${CURR_BUILD_TAG}
 
     # Tag with git tag if set
 #    - MANIFEST=$(aws ecr batch-get-image --repository-name ${PROJECT_NAME} --image-ids imageTag=${CURR_BUILD_TAG} --query 'images[].imageManifest' --output text)
