@@ -2,7 +2,7 @@
 ## Builder
 ###
 
-FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v2.2.4 as builder
+FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v2.2.5 as builder
 #FROM skippr-php:ubuntu as builder
 
 RUN df -h
@@ -139,7 +139,7 @@ RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skippr
 
 RUN df -h
 
-FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v2.2.4
+FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v2.2.5
 #FROM skippr-php:ubuntu
 
 ENV PHP_INI_DIR=/etc/php/7.4/cli

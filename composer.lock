@@ -1003,7 +1003,7 @@
             "source": {
                 "type": "git",
                 "url": "git@gitlab.com:paulhudson/data-output-kafka.git",
-                "reference": "4763cba9dd4f6c8fc378387a2f315e694f09c559"
+                "reference": "406f0c2ce9cf12e8736644d5c87e671e69e54aa8"
             },
             "require": {
                 "superbalist/php-pubsub-kafka": "v3.1.0",
@@ -1031,7 +1031,7 @@
                 }
             ],
             "description": "Kafka data output for skippr.io",
-            "time": "2021-06-22T15:48:20+00:00"
+            "time": "2021-09-08T11:24:23+00:00"
         },
         {
             "name": "skipprd/data-output-s3-bucket",
@@ -1105,7 +1105,7 @@
             "source": {
                 "type": "git",
                 "url": "git@gitlab.com:paulhudson/data-source-kafka.git",
-                "reference": "fee0e4a888dfd24462877ca70bfd5c1d7943589f"
+                "reference": "0a062bf42cc510403d8a32071df4ba2cf67a0e5e"
             },
             "require-dev": {
                 "kwn/php-rdkafka-stubs": "^2.0.4"
@@ -1129,7 +1129,7 @@
                 }
             ],
             "description": "Kafka data source for skippr.io",
-            "time": "2021-09-07T20:36:33+00:00"
+            "time": "2021-09-08T11:24:13+00:00"
         },
         {
             "name": "skipprd/data-source-mqtt-subscriber",
