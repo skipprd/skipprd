@@ -34,6 +34,7 @@ class JsonToParquetTest extends DockerRun
 //            'DATA_OUTPUT_PLUGIN_NAME=kafka',
 //            'DATA_OUTPUT_BROKERS=kafka:9092',
 //            'DATA_OUTPUT_TOPIC=skippr_new',
+//            'DATA_OUTPUT_KAFKA_CONFIG=compression.codec=zstd',
 //            'DATA_OUTPUT_FORMAT=json',
 //            'DATA_DIR=/data',
 ////            'TENANT_ID=skippr',
