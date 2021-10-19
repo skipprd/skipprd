@@ -12,7 +12,7 @@ services:
   - docker:dind
 
 stages:
-  - component-test
+  - tests
   - publish-image-base
   - publish
   - build-ami
@@ -138,13 +138,13 @@ before_script:
 
 # -- Run component tests (All pushes except for master and tags)
 # This is just a template, you must extend it in the ci-templates directories.
-.component-test:
-  stage: component-test
+.tests:
+  stage: tests
   image: docker:latest
   extends: .build
   script:
     # - docker run ${PROJECT_NAME}:${CURR_BUILD_TAG} /bin/bash -c "cd tests && ../vendor/phpunit/phpunit/phpunit --configuration ../phpunit.xml --coverage-text ."
-    - docker build --build-arg SSH_PRIVATE_KEY="${SSH_PRIVATE_KEY}" --target test -f ${DOCKERFILE_LOCATION} -t ${PROJECT_NAME}:${CURR_BUILD_TAG} .
+    - docker build --build-arg SSH_PRIVATE_KEY="${SSH_PRIVATE_KEY}" --build-arg TEST_SUITE=${TEST_SUITE} --target test -f ${DOCKERFILE_LOCATION} -t ${PROJECT_NAME}:${CURR_BUILD_TAG} .
     - echo "end of component test"
   coverage: '/^\s*Lines:\s*\d+.\d+\%/'
 #  only:
@@ -245,8 +245,25 @@ before_script:
 # |-------------- CI/CD PIPELINE --------------|
 # |============================================|
 
-skippr-base component test:
+unit:
   variables:
     COMPONENT_NAME: skippr-base
     DOCKERFILE_LOCATION: DockerfileTest
-  extends: .component-test
+    TEST_SUITE: Unit
+  extends: .tests
+
+#feature:
+#  variables:
+#    COMPONENT_NAME: skippr-base
+#    DOCKERFILE_LOCATION: DockerfileTest
+#    TEST_SUITE: Feature
+#  extends: .tests
+#
+#
+#integration:
+#  image: docker:19.03.12
+#  variables:
+#    COMPONENT_NAME: skippr-base
+#    DOCKERFILE_LOCATION: DockerfileTest
+#    TEST_SUITE: Integration
+#  extends: .tests

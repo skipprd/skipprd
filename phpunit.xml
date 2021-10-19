@@ -9,15 +9,15 @@
          processIsolation="false"
          stopOnFailure="false">
     <testsuites>
-        <testsuite name="Unit Tests">
+        <testsuite name="Unit">
             <directory suffix="Test.php">./tests/Unit/Skipprd</directory>
         </testsuite>
         
-        <testsuite name="Feature Tests">
+        <testsuite name="Feature">
             <directory suffix="Test.php">./tests/Feature/Skipprd</directory>
         </testsuite>
 
-        <testsuite name="Integration Tests">
+        <testsuite name="Integration">
             <directory suffix="Test.php">./tests/Integration</directory>
         </testsuite>
     </testsuites>
