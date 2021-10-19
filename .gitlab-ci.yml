@@ -174,15 +174,9 @@ before_script:
 
     - docker build --build-arg SSH_PRIVATE_KEY="${SSH_PRIVATE_KEY}" -f ${DOCKERFILE_LOCATION} -t ${PROJECT_NAME}:${CURR_BUILD_TAG} .
 
-    # Set image to push
-    - export IMAGE_TO_PUSH=${ECR_URL}:${CURR_BUILD_TAG}
-    # tag image with ${CI_COMMIT_SHA_SHORT}
-
-    - echo "docker tag ${PROJECT_NAME}:${CURR_BUILD_TAG} ${IMAGE_TO_PUSH}"
-    - docker tag ${PROJECT_NAME}:${CURR_BUILD_TAG} ${IMAGE_TO_PUSH}
-
-    # push image with tag ${CI_COMMIT_SHA_SHORT}
-    - docker push ${IMAGE_TO_PUSH}
+    # Push to ECR
+    - docker tag ${PROJECT_NAME}:${CURR_BUILD_TAG} ${ECR_URL}:${CURR_BUILD_TAG}
+    - docker push ${ECR_URL}:${CURR_BUILD_TAG}
 
     - docker tag ${PROJECT_NAME}:${CURR_BUILD_TAG} ${ECR_URL}:latest
     - docker push ${ECR_URL}:latest
@@ -190,6 +184,9 @@ before_script:
     # Push to Docker Hub
     - docker tag ${PROJECT_NAME}:${CURR_BUILD_TAG} ${DOCKER_HUB_URL}:${CURR_BUILD_TAG}
     - docker push ${DOCKER_HUB_URL}:${CURR_BUILD_TAG}
+
+    - docker tag ${PROJECT_NAME}:${CURR_BUILD_TAG} ${DOCKER_HUB_URL}:latest
+    - docker push ${DOCKER_HUB_URL}:latest
 
     # Tag with git tag if set
 #    - MANIFEST=$(aws ecr batch-get-image --repository-name ${PROJECT_NAME} --image-ids imageTag=${CURR_BUILD_TAG} --query 'images[].imageManifest' --output text)
