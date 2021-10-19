@@ -7,7 +7,7 @@
 #     DOCKERFILE_LOCATION: app/Dockerfile${COMPONENT_NAME}
 #   extends: .component-test
 
-skippr-skipprd publish image:
+skipprd image:
   variables:
     COMPONENT_NAME: skipprd
     PROJECT_NAME: $COMPONENT_NAME

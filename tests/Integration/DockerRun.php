@@ -236,9 +236,9 @@ class DockerRun extends TestCase
 
     public function cleanupTestDir()
     {
-        array_map('unlink', glob("$this->dataPath/buffer/*/*/*"));
-        array_map('rmdir', glob("$this->dataPath/buffer/*/*"));
-        array_map('rmdir', glob("$this->dataPath/buffer/*"));
+        array_map('unlink', glob("$this->dataPath/buffer/*"));
+        array_map('rmdir', glob("$this->dataPath/buffer"));
+//        array_map('rmdir', glob("$this->dataPath/buffer"));
         array_map( 'unlink', glob("$this->dataPath/output/*/*"));
         array_map('rmdir', glob("$this->dataPath/output/*"));
         array_map('unlink', glob("$this->dataPath/input/*"));
@@ -251,7 +251,7 @@ class DockerRun extends TestCase
     public function createTestDir()
     {
 
-        $tempPath = Helpers::randomStr(16);
+        $tempPath = 'test-tmp/' . Helpers::randomStr(16);
 
         $basePath = realpath(__DIR__ . '/../../');
         $src = $basePath. '/test-data/' . $this->testFile;
@@ -399,7 +399,7 @@ class DockerRun extends TestCase
 
     public function assertParquetOutput($itemCount = '100') {
 
-        $path = "$this->dataPath/output/*";
+        $path = "$this->dataPath/buffer/*";
 
         $parquetSchema = $this->parquetSchema;
 
@@ -422,7 +422,7 @@ class DockerRun extends TestCase
         $this->assertTrue($foundFiles);
 
         // Row count
-        $path = "$this->dataPath/output";
+        $path = "$this->dataPath/buffer";
 
         exec('parquet-tools rowcount ' . $path . ' 2>/dev/null', $rowsOutput, $return);
 
@@ -435,7 +435,7 @@ class DockerRun extends TestCase
     public function assertJsonOutput() {
 
 //        $path = realpath(__DIR__ . '/../../' . $this->dataPath);
-        $path = "$this->dataPath/output/*";
+        $path = "$this->dataPath/buffer/*";
 
         $foundFiles = false;
 
@@ -464,7 +464,7 @@ class DockerRun extends TestCase
     public function assertCsvOutput() {
 
 //        $path = realpath(__DIR__ . '/../../' . $this->dataPath);
-        $path = "$this->dataPath/output/*";
+        $path = "$this->dataPath/buffer/*";
 
         $foundFiles = false;
 
@@ -516,7 +516,7 @@ class DockerRun extends TestCase
 
     public function assertAvroFileOutput() {
 
-        $path = "$this->dataPath/output/*";
+        $path = "$this->dataPath/buffer/*";
 
         $foundFiles = false;
 

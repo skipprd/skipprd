@@ -179,7 +179,6 @@ class PipelineCommand
         $formatter = new LineFormatter($output, $dateFormat);
 
         // Create a handler
-
         $stream = new StreamHandler('php://stderr', Logger::DEBUG);
         $stream->setFormatter($formatter);
 
@@ -234,7 +233,8 @@ class PipelineCommand
 
         }
 
-        $deadLetterPluginClass = "Skipprd\\DataOutput" . "$deadLetterPluginName" . "\\DataOutput" . "$deadLetterPluginName" . "Plugin";
+
+        $deadLetterPluginClass = "Skipprd\\Plugins\\DataOutputs" . "\\$deadLetterPluginName\\DataOutput" . "$deadLetterPluginName" . "Plugin";
 
         $this->deadletterPlugin = new $deadLetterPluginClass($config, $this->deadletterBuffer);
 
@@ -247,11 +247,17 @@ class PipelineCommand
 
         }
 
+        /**
+         * Data Source Plugin
+         */
         $pluginName = Config::getenv('DATA_SOURCE_PLUGIN_NAME');
 
         $this->inputPlugin = PluginFactory::factory('data_source', $pluginName, $this->outputBuffer);
 
 
+        /**
+         * Data Output Plugin
+         */
         $pluginName = Config::getenv('DATA_OUTPUT_PLUGIN_NAME');
 
         if (!empty($pluginName)) {
@@ -260,8 +266,12 @@ class PipelineCommand
 
         } else {
 
-            $this->outputPlugin = PluginFactory::factory('data_output', 'file', $this->outputBuffer);
+//            $this->outputPlugin = PluginFactory::factory('data_output', 'file', $this->outputBuffer);
 
+
+            $outputPluginClass = "Skipprd\\Plugins\\DataOutputs\\" . 'file' . "\\DataOutput" . 'file' . "Plugin";
+
+            $this->outputPlugin = new $outputPluginClass($config, $this->outputBuffer);
         }
 
     }
@@ -296,9 +306,23 @@ class PipelineCommand
             Registry::skipprd()->info('Reprocessing dead letters');
         }
 
-        $this->inputPlugin->sync($this);
+        if (!empty($this->inputPlugin)) {
 
-        $this->inputPlugin->buffer->flushAll();
+            $this->inputPlugin->sync($this);
+
+            $this->inputPlugin->buffer->flushAll();
+
+        } else {
+
+            if (!empty($this->deadletterPlugin)) {
+                $this->deadletterPlugin->sync(Config::$outputFormat);
+            }
+
+            if (!empty($this->outputPlugin)) {
+                $this->outputPlugin->sync(Config::$outputFormat);
+            }
+        }
+
 
         if (Config::$analysing) { // in case we didn't see enough messages
 
@@ -556,9 +580,9 @@ class PipelineCommand
             $this->deadletterPlugin->buffer->flushAll();
             $this->deadletterPlugin->buffer->driver->finalise();
 
-            $this->deadletterPlugin->sync(Config::$outputFormat);
+//            $this->deadletterPlugin->sync(Config::$outputFormat);
 
-            $this->outputPlugin->sync(Config::$outputFormat);
+//            $this->outputPlugin->sync(Config::$outputFormat);
 
             $tenantId = Config::$tenantId;
             $pipelineName = Config::$pipelineName;
@@ -1008,29 +1032,40 @@ class PipelineCommand
 //        rewind($sourceStream);
 //        $bytes = stream_copy_to_stream($sourceStream, $this->stream);
 
-
-        $this->inputPlugin->buffer->flushAll();
-        $this->outputPlugin->buffer->flushAll();
-        $this->deadletterPlugin->buffer->flushAll();
-
 //        $this->pipelineModel->save();
         // @todo - implement state storage
 
 //        $this->inputPlugin->commit(Config::$offsets);
 
-        $type = Config::getenv('OFFSET_DRIVER', 'skippr_file');
-        $offsetClient = OffsetDriverFactory::factory($type);
-        $offsets = $offsetClient->get();
+        if (!empty($this->inputPlugin)) {
 
-        if (!empty($offsets)) {
-            foreach ($offsets as $partition => $offset) {
+            $this->inputPlugin->buffer->flushAll();
 
-                $this->inputPlugin->offsets->setOffsets($partition, $offset);
+            $type = Config::getenv('OFFSET_DRIVER', 'skippr_file');
+            $offsetClient = OffsetDriverFactory::factory($type);
+            $offsets = $offsetClient->get();
+
+            if (!empty($offsets)) {
+                foreach ($offsets as $partition => $offset) {
+
+                    $this->inputPlugin->offsets->setOffsets($partition,
+                        $offset);
+                }
             }
+
+            $this->inputPlugin->connect();
         }
 
+        if (!empty($this->deadletterPlugin)) {
 
-        $this->inputPlugin->connect();
+            $this->deadletterPlugin->buffer->flushAll();
+        }
+
+        if (!empty($this->outputPlugin)) {
+
+            $this->outputPlugin->buffer->flushAll();
+        }
+
     }
 
     public function getUnwrappedMetadata()
@@ -1104,7 +1139,7 @@ class PipelineCommand
             }
         }
 
-        if ($this->inputPlugin !== null) {
+        if (!empty($this->inputPlugin)) {
 
             $this->inputPlugin->shutdown();
         }
@@ -1148,10 +1183,15 @@ class PipelineCommand
 
                         $pluginName = Config::getenv('DATA_OUTPUT_PLUGIN_NAME');
                         Registry::skipprd()->info("Syncing remaining output buffers to destination $pluginName.");
-                        
-                        $this->outputPlugin->sync(Config::$outputFormat);
 
-                        $this->deadletterPlugin->sync(Config::$outputFormat);
+                        // Output job?
+                        if ($pluginName) {
+
+                            $this->outputPlugin->sync(Config::$outputFormat);
+
+                            $this->deadletterPlugin->sync(Config::$outputFormat);
+                        }
+
                     }
                     $this->outputPlugin->shutdown();
                     $this->deadletterPlugin->shutdown();
@@ -1159,7 +1199,10 @@ class PipelineCommand
             }
 
             // Sync all offsets having synced to destination
-            $offsets = $this->inputPlugin->offsets->getOffsets();
+            if (!empty($this->inputPlugin)) {
+                
+                $offsets = $this->inputPlugin->offsets->getOffsets();
+            }
 
             $type = Config::getenv('OFFSET_DRIVER', 'skippr_file');
             $offsetClient = OffsetDriverFactory::factory($type);

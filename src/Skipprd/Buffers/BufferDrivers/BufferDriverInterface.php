@@ -4,7 +4,7 @@
 namespace Skipprd\Buffers\BufferDrivers;
 
 
-interface BufferDriver
+interface BufferDriverInterface
 {
 
 }

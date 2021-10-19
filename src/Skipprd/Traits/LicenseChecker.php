@@ -13,8 +13,10 @@ trait LicenseChecker
 
     protected $licenseKey = 'none';
 
-    protected $licenseApiKey = 'nFCBbKgf72pXNcKS9wKFA7n419Y9ql0J'; // dev
-//    protected $licenseApiKey = 'QYwmw6noVkPgCc5U3nWzW0e2PV2mP6HS'; // prod
+    protected $licenseApiKey = [
+        'dev' => 'nFCBbKgf72pXNcKS9wKFA7n419Y9ql0J',
+        'prod' => 'QYwmw6noVkPgCc5U3nWzW0e2PV2mP6HS',
+        ];
 
     public function getLicense()
     {
@@ -36,9 +38,9 @@ trait LicenseChecker
                 
             } elseif (empty($uri)) {
 
-                $authHeader =  ['x-api-key' => $this->licenseApiKey];
-
                 $env = Config::getenv('APP_ENV', 'prod');
+
+                $authHeader =  ['x-api-key' => $this->licenseApiKey[$env]];
 
                 if ($env != 'prod') {
                     $uri = "license.$env.skippr.io/license-api";
@@ -61,7 +63,7 @@ trait LicenseChecker
 
             ]);
 
-            $body = $client->get($path)->getBody();
+            $body = $client->post($path)->getBody();
 
             $this->license = json_decode($body, true);
 

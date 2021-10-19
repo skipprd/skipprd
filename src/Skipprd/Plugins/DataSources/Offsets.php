@@ -15,12 +15,14 @@ class Offsets
         $this->offsets[$partition] = $offsets;
     }
 
-    public function getOffsets() {
+    public function getOffsets()
+    {
 
         return $this->offsets;
     }
 
-    public function getOffset(string $partition) {
+    public function getOffset(string $partition)
+    {
 
         return $this->offsets[$partition];
     }
@@ -47,8 +49,8 @@ class Offsets
     public function validateOffset(string $partition, string $args) : bool
     {
 
-//        $offsets = $this->getOffsets();
-//        return bccomp($args, $offsets, 5) == 1;
+        //        $offsets = $this->getOffsets();
+        //        return bccomp($args, $offsets, 5) == 1;
 
 
         $offsets = $this->parseOffsets($partition);

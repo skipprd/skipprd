@@ -11,7 +11,7 @@ use Skipprd\MachineToHuman\BytesToHuman;
 use Skipprd\Serders\SerdersFactory;
 use Skipprd\Traits\Config;
 
-class FileBufferDriver implements BufferDriver
+class FileBufferDriver implements BufferDriverInterface
 {
 
     public $rows = 0;

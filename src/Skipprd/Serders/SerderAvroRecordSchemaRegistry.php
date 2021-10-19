@@ -8,7 +8,7 @@ use Skipprd\Services\AvroSubPub\MessageSerializer;
 use Skipprd\Str;
 use Skipprd\Traits\Config;
 
-class SerderAvroRecord implements SerderStreamInterface
+class SerderAvroRecordSchemaRegistry implements SerderStreamInterface
 {
 
     protected $tenantId = '';
@@ -21,7 +21,7 @@ class SerderAvroRecord implements SerderStreamInterface
 
         $this->tenantId = getenv('TENANT_ID');
         
-        Config::$pipelineName = getenv('PIPELINE_NAME');
+        $this->pipelineName = getenv('PIPELINE_NAME');
 
     }
 
@@ -40,7 +40,7 @@ class SerderAvroRecord implements SerderStreamInterface
         return $datum;
     }
 
-    public function serialize(array $record, array $schema) : string
+    public function serialize(array $record, $schema = null) : string
     {
 
         $recordsWithSchema = false;

@@ -1,0 +1,36 @@
+name: File
+description: File Data Source
+type: data_source
+component: logstash
+enabled: true
+tier: standard
+#action_field: ""
+#uuid: false
+#audience: false
+config_fields:
+  run_type: "job" # job or service (combine job+scheduled_job for crinJob)
+  scheduled_job: "@daily"
+  cpu: "1024"
+  mem: "1024"
+connection_fields:
+  path:
+    type: input
+    required: true
+    partition: true
+custom_fields:
+  event_path:
+    type: input
+    required: false
+  format:
+    type: select
+    required: true
+    options:
+      -
+        key: avro
+        value: Avro
+      -
+        key: json
+        value: Json
+      -
+        key: csv
+        value: Delimited

@@ -16,7 +16,8 @@ class SkipprFileOffsetDriver implements OffsetDriverInterface
 
     }
 
-    public function get() : array {
+    public function get() : array
+    {
 
         $offsets = $this->client();
 
@@ -24,71 +25,76 @@ class SkipprFileOffsetDriver implements OffsetDriverInterface
 
     }
 
-    public function sync(string $partition, string $offset) : void {
+    public function sync(string $partition, string $offset) : void
+    {
 
         $this->client('PUT', [$partition => $offset]);
 
     }
 
-    public function syncAll(array $offsets) : void {
+    public function syncAll(array $offsets) : void
+    {
 
         $this->client('PUT', $offsets);
 
     }
 
-    protected function client(string $method = 'GET', array $data = []) {
+    protected function client(string $method = 'GET', array $data = [])
+    {
 
         $state[Config::$pipelineName]['offsets'] = Config::$offsets;
 
         try {
 
             switch ($method) {
-                case 'PUT':
+            case 'PUT':
+
+                try {
+
+                    file_put_contents(Config::$dataDir . '/skippr-offsets.json', json_encode($state));
+
+                    Registry::skipprd()
+                        ->info('Written state to ' . Config::$dataDir . '/skippr-offsets.json');
+
+
+                } catch (\Exception $e) {
+                    Registry::skipprd()
+                        ->error($e->getMessage());
+                }
+
+                break;
+
+            case 'GET':
+
+                $offsets = [];
+
+                if (file_exists(Config::$dataDir . '/skippr-offsets.json')) {
 
                     try {
 
-                        file_put_contents(Config::$dataDir . '/skippr-offsets.json', json_encode($state));
+                        Registry::skipprd()->info('Found existing ' . Config::$dataDir . '/skippr-offsets.json');
 
-                        Registry::skipprd()
-                            ->info('Written state to ' . Config::$dataDir . '/skippr-offsets.json');
+                        $state = json_decode(
+                            file_get_contents(Config::$dataDir . '/skippr-offsets.json'),
+                            true
+                        );
 
+                        if (!empty($state[Config::$pipelineName])) {
+
+                            Registry::skipprd()->info('Loading state for pipeline ' . Config::$pipelineName);
+
+                            $offsets = (!empty($state[Config::$pipelineName]['offsets']) ? $state[Config::$pipelineName]['offsets'] : []);
+
+                        }
 
                     } catch (\Exception $e) {
                         Registry::skipprd()
                             ->error($e->getMessage());
                     }
 
-                    break;
+                }
 
-                case 'GET':
-
-                    $offsets = [];
-
-                    if (file_exists(Config::$dataDir . '/skippr-offsets.json')) {
-
-                        try {
-
-                            Registry::skipprd()->info('Found existing ' . Config::$dataDir . '/skippr-offsets.json');
-
-                            $state = json_decode(file_get_contents(Config::$dataDir . '/skippr-offsets.json'),
-                                true);
-
-                            if (!empty($state[Config::$pipelineName])) {
-
-                                Registry::skipprd()->info('Loading state for pipeline ' . Config::$pipelineName);
-
-                                $offsets = (!empty($state[Config::$pipelineName]['offsets']) ? $state[Config::$pipelineName]['offsets'] : []);
-
-                            }
-
-                        } catch (\Exception $e) {
-                            Registry::skipprd()
-                                ->error($e->getMessage());
-                        }
-
-                    }
-
-                    return $offsets;
+                return $offsets;
             }
 
         } catch (\Exception $e) {

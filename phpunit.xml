@@ -9,17 +9,21 @@
          processIsolation="false"
          stopOnFailure="false">
     <testsuites>
-        <testsuite name="Feature Tests">
-            <directory suffix="Test.php">./tests/Feature</directory>
+        <testsuite name="Unit">
+            <directory suffix="Test.php">./tests/Unit/Skipprd</directory>
+        </testsuite>
+        
+        <testsuite name="Feature">
+            <directory suffix="Test.php">./tests/Feature/Skipprd</directory>
         </testsuite>
 
-        <testsuite name="Unit Tests">
-            <directory suffix="Test.php">./tests/Unit</directory>
+        <testsuite name="Integration">
+            <directory suffix="Test.php">./tests/Integration</directory>
         </testsuite>
     </testsuites>
     <filter>
         <whitelist processUncoveredFilesFromWhitelist="true">
-            <directory suffix=".php">./Skipprd/*</directory>
+            <directory suffix=".php">./src/Skipprd/*</directory>
 <!--            <directory suffix=".php">./modules/</directory>-->
             <exclude>
                 <directory>./vendor/*</directory>

@@ -5,7 +5,7 @@ namespace Skipprd\Buffers;
 
 use Monolog\Registry;
 use Carbon\Carbon;
-use Skipprd\Buffers\BufferDrivers\BufferDriver;
+use Skipprd\Buffers\BufferDrivers\BufferDriverInterface;
 use Skipprd\Str;
 
 class ChunkedBuffer implements BufferInterface
@@ -22,7 +22,7 @@ class ChunkedBuffer implements BufferInterface
 //    protected static $eventTimeBucketDurationSeconds = 3600;
 //    protected static $eventTimeBucketDurationSeconds = 86400;
 
-    public function __construct(string $bufferName, BufferDriver $bufferDriver, string $flushBytes = null)
+    public function __construct(string $bufferName, BufferDriverInterface $bufferDriver, string $flushBytes = null)
     {
         $this->bufferName = $bufferName;
 
@@ -79,7 +79,7 @@ class ChunkedBuffer implements BufferInterface
 
     }
 
-    public function flushAll(bool $force = false) {
+    public function flushAll(bool $force = false): void {
 
         foreach ($this->memBuffs as $chunkName => $buffer) {
 
@@ -109,7 +109,7 @@ class ChunkedBuffer implements BufferInterface
 
     }
 
-    public function encodeChunkName($partition, $timeBucket)
+    public function encodeChunkName($partition, $timeBucket): string
     {
 
         $chunkName = implode('-', [$this->bufferName, $timeBucket, $partition]);
@@ -117,7 +117,7 @@ class ChunkedBuffer implements BufferInterface
         return $chunkName;
     }
 
-    private function getChunkName($filename) : array {
+    public function getChunkName($filename) : array {
 
         $startPos = strpos($filename, $this->bufferName) + strlen($this->bufferName);
 //        $endPos = strpos($filename, '_finalised') - strlen('_finalised');

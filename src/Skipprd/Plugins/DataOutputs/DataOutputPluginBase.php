@@ -2,7 +2,8 @@
 
 namespace Skipprd\Plugins\DataOutputs;
 
-use Skipprd\Buffers\ChunkedBuffer;
+use Skipprd\Buffers\BufferInterface;
+use Skipprd\Plugins\ValidationResponse;
 use Skipprd\Traits\Config;
 
 class DataOutputPluginBase implements DataOutputPluginInterface
@@ -15,7 +16,7 @@ class DataOutputPluginBase implements DataOutputPluginInterface
 
     public $buffer = null;
 
-    public function __construct(array $config, ChunkedBuffer $buffer)
+    public function __construct(array $config, BufferInterface $buffer)
     {
         $this->tenantId = getenv('TENANT_ID');
         $this->pipelineName = getenv('PIPELINE_NAME');
@@ -26,9 +27,28 @@ class DataOutputPluginBase implements DataOutputPluginInterface
         if (in_array(Config::$outputFormat, Config::$batchFormats)) {
             $this->buffer->flushMemBytes = $this->flushBytes;
         }
+        
     }
 
-    public function sync(string $format = '') {}
+    public function sync(string $format = '')
+    {
+    }
 
-    public function shutdown() {}
+    public function doValidateConnection(): ValidationResponse
+    {
+        $validationResp = new ValidationResponse('You must implement doValidateConnection()');
+
+        return $validationResp;
+    }
+
+    public function doValidateConfig(): ValidationResponse
+    {
+        $validationResp = new ValidationResponse('You must implement doValidateConfig()');
+
+        return $validationResp;
+    }
+
+    public function shutdown()
+    {
+    }
 }
