@@ -1,0 +1,44 @@
+name: File
+description: File Data Output
+type: data_output
+component: secor
+enabled: true
+tier: basic
+#action_field: ""
+#uuid: false
+#audience: false
+config_fields:
+  partitioner_finalizer_delay_seconds: "86400"
+  partitioner_granularity_hour: "false"
+  secor_file_age_youngest: "false"
+  zookeeper_path: "/"
+  aws_region: "eu-west-2"
+  message_timestamp_name: "skpr_event_ts"
+  secor_schema_registry: "http://localhost:9999"
+  kafka_offsets_storage: "kafka"
+  secor_messages_per_seconds: "20000"
+  secor_max_file_seconds: "60"
+  secor_message_parser: "com.pinterest.secor.parser.AvroMessageParser"
+#  secor_writer_factory: "com.pinterest.secor.io.impl.AvroParquetFileReaderWriterFactory"
+  jvm_memory: "768M"
+  cpu: "1024"
+  mem: "1024"
+#  scheduled_job: "*/15 * * * *"
+connection_fields:
+  path:
+    type: input
+    required: true
+custom_fields:
+  format:
+    type: select
+    required: true
+    options:
+      -
+        key: parquet
+        value: Parquet
+      -
+        key: avro
+        value: Avro
+      -
+        key: json
+        value: Json

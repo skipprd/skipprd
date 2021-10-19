@@ -2,7 +2,7 @@
 ## Builder
 ###
 
-FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v2.2.5 as builder
+FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v2.2.6 as builder
 #FROM skippr-php:ubuntu as builder
 
 RUN df -h
@@ -30,6 +30,7 @@ RUN wget -O composer-setup.php https://getcomposer.org/installer \
   && sudo php composer-setup.php --install-dir=/usr/local/bin --filename=composer
 
 WORKDIR /usr/src/app
+COPY ./src ./src
 COPY ./src ./src
 COPY ./composer.json ./
 COPY ./composer.lock ./
@@ -139,7 +140,7 @@ RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skippr
 
 RUN df -h
 
-FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v2.2.5
+FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v2.2.6
 #FROM skippr-php:ubuntu
 
 ENV PHP_INI_DIR=/etc/php/7.4/cli
@@ -153,6 +154,9 @@ RUN echo "export SKIPPR_BUILD_VERSION=${SKIPPR_BUILD_VERSION}" > /etc/profile.d/
 WORKDIR /usr/src/app
 
 COPY --from=builder /usr/src/encoded-app .
+
+COPY ./composer.json ./
+COPY ./composer.lock ./
 
 CMD ["php", "src/run.php"]
                   

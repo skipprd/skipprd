@@ -3,7 +3,8 @@
 namespace Skipprd\Plugins\DataSources;
 
 use Monolog\Registry;
-use Skipprd\Buffers\ChunkedBuffer;
+use Skipprd\Buffers\BufferInterface;
+use Skipprd\Plugins\ValidationResponse;
 
 class DataSourcePluginBase implements DataSourcePluginInterface
 {
@@ -25,7 +26,7 @@ class DataSourcePluginBase implements DataSourcePluginInterface
 
     protected $config = [];
 
-    public function __construct(array $config, ChunkedBuffer $buffer)
+    public function __construct(array $config, BufferInterface $buffer)
     {
         $this->tenantId = getenv('TENANT_ID');
         $this->pipelineName = getenv('PIPELINE_NAME');
@@ -41,14 +42,18 @@ class DataSourcePluginBase implements DataSourcePluginInterface
         return explode(',', $partitionField);
     }
 
-    public function connect() { }
+    public function connect()
+    { 
+    }
 
     public function commit(string $offset = '')
     {
         $this->offsets->setOffsets($offset);
     }
     
-    public function sync($pipelineJob) {}
+    public function sync($pipelineJob)
+    {
+    }
 
     public function ingestPartition($partition)
     {
@@ -57,15 +62,27 @@ class DataSourcePluginBase implements DataSourcePluginInterface
             $this->continue[$partition] = true;
         }
 
-//        Registry::skipprd()->info(var_dump($this->continue));
+        //        Registry::skipprd()->info(var_dump($this->continue));
         
         return $this->continue[$partition];
     }
 
-    public function doValidateConnection() {}
+    public function doValidateConnection(): ValidationResponse
+    {
+        $validationResp = new ValidationResponse('You must implement doValidateConnection()');
 
-    public function doValidateConfig() {}
+        return $validationResp;
+    }
 
-    public function shutdown() {}
+    public function doValidateConfig(): ValidationResponse
+    {
+        $validationResp = new ValidationResponse('You must implement doValidateConfig()');
+
+        return $validationResp;
+    }
+
+    public function shutdown()
+    {
+    }
 
 }

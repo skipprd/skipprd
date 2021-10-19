@@ -10,10 +10,11 @@ class OffsetDriverFactory
 {
 
     /**
-     * @param String $type
+     * @param  String $type
      * @return SkipprInternalOffsetDriver|SkipprFileOffsetDriver
      */
-    static function factory(string $type) {
+    static function factory(string $type)
+    {
 
         Registry::skipprd()->info("Loading $type offset driver");
 

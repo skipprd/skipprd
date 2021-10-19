@@ -2,12 +2,13 @@
 
 namespace Skipprd\Plugins\DataSources;
 
-use Skipprd\Buffers\ChunkedBuffer;
+use Skipprd\Buffers\BufferInterface;
+use Skipprd\Plugins\ValidationResponse;
 
 Interface DataSourcePluginInterface
 {
 
-    public function __construct(array $config, ChunkedBuffer $buffer);
+    public function __construct(array $config, BufferInterface $buffer);
 
     public function connect();
 
@@ -15,9 +16,9 @@ Interface DataSourcePluginInterface
     
     public function sync($pipelineJob);
 
-    public function doValidateConnection();
+    public function doValidateConnection(): ValidationResponse;
 
-    public function doValidateConfig();
+    public function doValidateConfig(): ValidationResponse;
 
     public function shutdown();
 
