@@ -5,8 +5,6 @@
 FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v2.2.6 as builder
 #FROM skippr-php:ubuntu as builder
 
-RUN df -h
-
 ##
 # docker-php-extension-installer
 ##
