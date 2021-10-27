@@ -249,18 +249,18 @@ unit:
     TEST_SUITE: Unit
   extends: .tests
 
-#feature:
-#  variables:
-#    COMPONENT_NAME: skippr-base
-#    DOCKERFILE_LOCATION: DockerfileTest
-#    TEST_SUITE: Feature
-#  extends: .tests
-#
-#
-#integration:
-#  image: docker:19.03.12
-#  variables:
-#    COMPONENT_NAME: skippr-base
-#    DOCKERFILE_LOCATION: DockerfileTest
-#    TEST_SUITE: Integration
-#  extends: .tests
+feature:
+  variables:
+    COMPONENT_NAME: skippr-base
+    DOCKERFILE_LOCATION: DockerfileTest
+    TEST_SUITE: Feature
+  extends: .tests
+
+
+integration:
+  image: docker:19.03.12
+  variables:
+    COMPONENT_NAME: skippr-base
+    DOCKERFILE_LOCATION: DockerfileTest
+    TEST_SUITE: Integration
+  extends: .tests

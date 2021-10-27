@@ -28,7 +28,7 @@ trait Threaded
 //                $app = require_once __DIR__.'/../../../bootstrap/app.php';
 //                $app->make(Kernel::class)->bootstrap();
 //
-//                Registry::skipprd()->info("Initialising input threads");
+//                SkipprLogger::info("Initialising input threads");
 //
 //                $pipeline = new PipelineCommand();
 //
@@ -46,7 +46,7 @@ trait Threaded
 //
 ////                while (true) {
 //
-////                    Registry::skipprd()->debug("Starting threaded input worker");
+////                    SkipprLogger::debug("Starting threaded input worker");
 //
 //                    $pipeline->inputPlugin->sync($pipeline);
 //
@@ -58,7 +58,7 @@ trait Threaded
 //
 ////                    if ($pipeline->analysing) { // in case we didn't see enough messages
 //
-//                        Registry::skipprd()->info('Finished syncing data from input');
+//                        SkipprLogger::info('Finished syncing data from input');
 //
 ////                        $pipeline->shutdown();
 ////                        exit(0);
@@ -96,7 +96,7 @@ trait Threaded
                     $app = require_once __DIR__ . '/../../../bootstrap/app.php';
                     $app->make(Kernel::class)->bootstrap();
 
-                    Registry::skipprd()->info("Initialising ingest threads");
+                    SkipprLogger::info("Initialising ingest threads");
 
                     $pipeline = new PipelineCommand();
 
@@ -125,7 +125,7 @@ trait Threaded
 
                         try {
 
-//                            Registry::skipprd()->debug("Starting threaded ingest worker $i");
+//                            SkipprLogger::debug("Starting threaded ingest worker $i");
 
                             $pipeline->inputBuffer->finalise();
 
@@ -133,8 +133,8 @@ trait Threaded
 
                         } catch (\Exception $e) {
 
-                            Registry::skipprd()->error($e->getMessage());
-                            Registry::skipprd()->error($e->getTraceAsString());
+                            SkipprLogger::error($e->getMessage());
+                            SkipprLogger::error($e->getTraceAsString());
 
                         }
                     }
@@ -151,7 +151,7 @@ trait Threaded
                 $app = require_once __DIR__ . '/../../../bootstrap/app.php';
                 $app->make(Kernel::class)->bootstrap();
 
-                Registry::skipprd()->info("Initialising output threads");
+                SkipprLogger::info("Initialising output threads");
 
                 $pipeline = new PipelineCommand();
 
@@ -180,8 +180,8 @@ trait Threaded
 
                     } catch (\Exception $e) {
 
-                        Registry::skipprd()->error($e->getMessage());
-                        Registry::skipprd()->error($e->getTraceAsString());
+                        SkipprLogger::error($e->getMessage());
+                        SkipprLogger::error($e->getTraceAsString());
 
                     }
                 }
@@ -206,8 +206,8 @@ trait Threaded
 //
 //                if (($event = $events->poll()) != null) {
 //
-//                    Registry::skipprd()->info("EVENT");
-//                    Registry::skipprd()->info(var_dump($event));
+//                    SkipprLogger::info("EVENT");
+//                    SkipprLogger::info(var_dump($event));
 //
 //                    // something happened, let's figure out what it was. First, we check the source.
 //                    if ($event->object == $offsetsChannel) {
@@ -218,7 +218,7 @@ trait Threaded
 //
 //                            $offset = $event->value;
 //
-//                            Registry::skipprd()->info("Consumer received offset $offset");
+//                            SkipprLogger::info("Consumer received offset $offset");
 //
 //                            if ($this->inputPlugin->validateOffset($offset)) {
 //
@@ -227,7 +227,7 @@ trait Threaded
 ////                                $this->pipelineModel->offset = $offset;
 ////                                $this->pipelineModel->save();
 //
-////                                Registry::skipprd()->info("Committed offset $offset");
+////                                SkipprLogger::info("Committed offset $offset");
 //                            }
 //                        }
 //
@@ -239,7 +239,7 @@ trait Threaded
 //
 //                            if ($event->type == \Parallel\Events\Event\Type::Read) { // our task finished!
 //
-//                                Registry::skipprd()->info("Thread finished");
+//                                SkipprLogger::info("Thread finished");
 //
 //                                $lastEvent = time();
 //
@@ -250,11 +250,11 @@ trait Threaded
 //
 ////                $elapsedTime = time() - $lastEvent;
 ////
-////                Registry::skipprd()->info("Checking elapsed time since last offsets: $elapsedTime");
+////                SkipprLogger::info("Checking elapsed time since last offsets: $elapsedTime");
 ////
 ////                if ($elapsedTime > self::$flushTimeout) {
 ////
-////                    Registry::skipprd()->info("Timeout reached waiting for new events");
+////                    SkipprLogger::info("Timeout reached waiting for new events");
 ////
 ////                    $offsetsChannel->close();
 ////                    $this->shutdown();

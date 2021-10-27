@@ -2,8 +2,8 @@
 ## Builder
 ###
 
-FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v2.2.6 as builder
-#FROM skippr-php:ubuntu as builder
+#FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v2.2.6 as builder
+FROM skippr-php:ubuntu as builder
 
 ##
 # docker-php-extension-installer
@@ -28,7 +28,6 @@ RUN wget -O composer-setup.php https://getcomposer.org/installer \
   && sudo php composer-setup.php --install-dir=/usr/local/bin --filename=composer
 
 WORKDIR /usr/src/app
-COPY ./src ./src
 COPY ./src ./src
 COPY ./composer.json ./
 COPY ./composer.lock ./
@@ -136,15 +135,14 @@ RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skippr
 #RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Services/AvroSubPub/CachedSchemaRegistryClient.php
 #RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Services/AvroSubPub/MessageSerializer.php
 
-RUN df -h
 
-FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v2.2.6
-#FROM skippr-php:ubuntu
+#FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v2.2.6
+FROM skippr-php:ubuntu
 
 ENV PHP_INI_DIR=/etc/php/7.4/cli
-RUN echo $PHP_INI_DIR
-RUN touch $PHP_INI_DIR/conf.d/05-custom.ini
-RUN echo 'memory_limit=1024M' >> $PHP_INI_DIR/conf.d/05-custom.ini
+RUN echo $PHP_INI_DIR \
+    && touch $PHP_INI_DIR/conf.d/05-custom.ini \
+    && echo 'memory_limit=1024M' >> $PHP_INI_DIR/conf.d/05-custom.ini
 
 ARG SKIPPR_BUILD_VERSION
 RUN echo "export SKIPPR_BUILD_VERSION=${SKIPPR_BUILD_VERSION}" > /etc/profile.d/skpr_version.sh
@@ -157,4 +155,6 @@ COPY ./composer.json ./
 COPY ./composer.lock ./
 
 CMD ["php", "src/run.php"]
-                  
+
+#RUN test -f /usr/lib/php/20190902/parquet_cpp_php.so
+#RUN test -f /usr/lib/libphpcpp.so

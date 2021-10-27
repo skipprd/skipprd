@@ -516,14 +516,14 @@ trait AnalyseSchema
         $dataType = $this->getLogicalType($field, $value, $fieldOccurrence, false);
 
 
-//        Registry::skipprd()->debug("Resolving type: $dataType for field: $field value: $value");
+//        SkipprLogger::debug("Resolving type: $dataType for field: $field value: $value");
 
 //        // Evolution
         if ( !empty($fieldOccurrence[$field]['evolution'][$dataType]['new_value']) ) {
             $evolution = $fieldOccurrence[$field]['evolution'][$dataType]['type'];
             $newValue = $fieldOccurrence[$field]['evolution'][$dataType]['new_value'];
 
-//            Registry::skipprd()->debug("Resolving with: $evolution to $newValue");
+//            SkipprLogger::debug("Resolving with: $evolution to $newValue");
 
             $this->applyEvolutionFactory($field, $value, $evolution, $dataType, $newValue);
 

@@ -4,6 +4,7 @@ namespace Skipprd\Plugins\DataSources\OffsetDrivers;
 
 use Monolog\Registry;
 use Skipprd\Traits\Config;
+use Skipprd\Traits\SkipprLogger;
 
 class SkipprFileOffsetDriver implements OffsetDriverInterface
 {
@@ -72,7 +73,7 @@ class SkipprFileOffsetDriver implements OffsetDriverInterface
 
                     try {
 
-                        Registry::skipprd()->info('Found existing ' . Config::$dataDir . '/skippr-offsets.json');
+                        SkipprLogger::info('Found existing ' . Config::$dataDir . '/skippr-offsets.json');
 
                         $state = json_decode(
                             file_get_contents(Config::$dataDir . '/skippr-offsets.json'),
@@ -81,7 +82,7 @@ class SkipprFileOffsetDriver implements OffsetDriverInterface
 
                         if (!empty($state[Config::$pipelineName])) {
 
-                            Registry::skipprd()->info('Loading state for pipeline ' . Config::$pipelineName);
+                            SkipprLogger::info('Loading state for pipeline ' . Config::$pipelineName);
 
                             $offsets = (!empty($state[Config::$pipelineName]['offsets']) ? $state[Config::$pipelineName]['offsets'] : []);
 
@@ -99,7 +100,7 @@ class SkipprFileOffsetDriver implements OffsetDriverInterface
 
         } catch (\Exception $e) {
 
-            Registry::skipprd()->error($e->getMessage());
+            SkipprLogger::error($e->getMessage());
         }
     }
 

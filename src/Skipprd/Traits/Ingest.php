@@ -40,7 +40,7 @@ trait Ingest
                 if (!empty($metadata[$field]['enabled'])) { // only ingest fields enabled to sync to output
 
                     if ($this->i == 1) {
-                        Registry::skipprd()->info("Ingesting field: $field");
+                        SkipprLogger::info("Ingesting field: $field");
                     }
                     $this->ingestField($field, $value, $metadata, $message);
 
@@ -95,8 +95,8 @@ trait Ingest
             return false;
 //            $this->deadLetterMessage($message);
 
-//                                Registry::skipprd()->info("Message empty or could not emitArray, sending to dead letter queue.");
-//                                Registry::skipprd()->debug($message);
+//                                SkipprLogger::info("Message empty or could not emitArray, sending to dead letter queue.");
+//                                SkipprLogger::debug($message);
 //                        $this->deadLetters[] = $payload;
         }
     }
@@ -105,8 +105,8 @@ trait Ingest
     {
         $field = Helpers::cleanFieldName($field);
 
-//        Registry::skipprd()->debug($field);
-//        Registry::skipprd()->debug($metadata[$field]);
+//        SkipprLogger::debug($field);
+//        SkipprLogger::debug($metadata[$field]);
 //        exit(0);
 
         if (isset(Config::$specialFields[$field])) {
@@ -170,7 +170,7 @@ trait Ingest
 
             $this->flagMsgDeadLetter = true;
 
-//            Registry::skipprd()->debug("dead letter");
+//            SkipprLogger::debug("dead letter");
         }
 
 //        if (is_array($value) && !empty($value) && $dataType != 'array') {
@@ -182,7 +182,7 @@ trait Ingest
                 if (!empty($metadata[$field]['fields'][$sub_field]['enabled'])) { // only ingest fields enabled to sync to output
 
                     if ($this->i == 1) {
-                        Registry::skipprd()->info("Ingesting field: $sub_field");
+                        SkipprLogger::info("Ingesting field: $sub_field");
                     }
 
                     $this->ingestField($sub_field, $sub_value,$metadata[$field]['fields'],$message[$field]);
@@ -244,7 +244,7 @@ trait Ingest
             }
 
         } catch (Exception $e) {
-            Registry::skipprd()->error('Unable to build default message.');
+            SkipprLogger::error('Unable to build default message.');
             throw $e;
         }
 

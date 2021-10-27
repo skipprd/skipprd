@@ -241,7 +241,7 @@ class Config
 
             foreach (self::$discoveredFieldOccurrence as $partition => $mapping) {
 
-                Registry::skipprd()->info("Building $partition schema");
+                SkipprLogger::info("Building $partition schema");
 
                 $converter = new SkipprAvroSchemaConverter();
                 self::$schema[$partition] = $converter->convert($mapping['fields']);
@@ -258,7 +258,7 @@ class Config
 
                 if (class_exists($converterClass)) {
 
-                    Registry::skipprd()->info("Converting $partition schema to $outputFormat");
+                    SkipprLogger::info("Converting $partition schema to $outputFormat");
 
                     $converter = new $converterClass();
 
@@ -407,7 +407,7 @@ class Config
                     'json' => $json
                 ]);
 
-                Registry::skipprd()->info('Updated config via API');
+                SkipprLogger::info('Updated config via API');
 
             } catch (\Exception $e) {
                 Registry::skipprd()

@@ -107,18 +107,18 @@ class IngestTest extends TestCase
         $this->assertAvroFileOutput($this->buffer->driver->bufferDir . '/*');
     }
 
-    public function testJsonToAvroRecord()
-    {
-
-        Config::$sourceFormat = 'json';
-        Config::$outputFormat = 'avro_record';
-
-        Config::$dataDir = '/tmp';
-
-        $this->fullRun();
-
-        $this->assertAvroRecordOutput($this->buffer->driver->bufferDir . '/*');
-    }
+//    public function testJsonToAvroRecord()
+//    {
+//
+//        Config::$sourceFormat = 'json';
+//        Config::$outputFormat = 'avro_record';
+//
+//        Config::$dataDir = '/tmp';
+//
+//        $this->fullRun();
+//
+//        $this->assertAvroRecordOutput($this->buffer->driver->bufferDir . '/*');
+//    }
 
     public function testCsvToParquet()
     {
@@ -309,74 +309,74 @@ class IngestTest extends TestCase
 
     //////////////////
 
-    public function testAvroRecordToParquet()
-    {
-
-        Config::$sourceFormat = 'avro_record';
-        Config::$outputFormat = 'parquet';
-
-        Config::$dataDir = '/tmp';
-
-        $this->fullRun();
-        $this->assertParquetOutput($this->buffer->driver->bufferDir . '/*');
-    }
-
-    public function testAvroRecordToXml()
-    {
-        Config::$sourceFormat = 'avro_record';
-        Config::$outputFormat = 'xml';
-
-        Config::$dataDir = '/tmp';
-
-        $this->fullRun();
-        $this->assertXmlOutput($this->buffer->driver->bufferDir . '/*');
-    }
-
-    public function testAvroRecordToCsv()
-    {
-        Config::$sourceFormat = 'avro_record';
-        Config::$outputFormat = 'csv';
-
-        Config::$dataDir = '/tmp';
-
-        $this->fullRun();
-        $this->assertCsvOutput($this->buffer->driver->bufferDir . '/*');
-    }
-
-    public function testAvroRecordToJson()
-    {
-        Config::$sourceFormat = 'avro_record';
-        Config::$outputFormat = 'json';
-
-        Config::$dataDir = '/tmp';
-
-        $this->fullRun();
-        $this->assertJsonOutput($this->buffer->driver->bufferDir . '/*');
-    }
-
-    public function testAvroRecordToAvroFile()
-    {
-
-        Config::$sourceFormat = 'avro_record';
-        Config::$outputFormat = 'avro_file';
-
-        Config::$dataDir = '/tmp';
-
-        $this->fullRun();
-        $this->assertAvroFileOutput($this->buffer->driver->bufferDir . '/*');
-    }
-
-    public function testAvroRecordToAvroRecord()
-    {
-
-        Config::$sourceFormat = 'avro_record';
-        Config::$outputFormat = 'avro_record';
-
-        Config::$dataDir = '/tmp';
-
-        $this->fullRun();
-        $this->assertAvroRecordOutput($this->buffer->driver->bufferDir . '/*');
-    }
+//    public function testAvroRecordToParquet()
+//    {
+//
+//        Config::$sourceFormat = 'avro_record';
+//        Config::$outputFormat = 'parquet';
+//
+//        Config::$dataDir = '/tmp';
+//
+//        $this->fullRun();
+//        $this->assertParquetOutput($this->buffer->driver->bufferDir . '/*');
+//    }
+//
+//    public function testAvroRecordToXml()
+//    {
+//        Config::$sourceFormat = 'avro_record';
+//        Config::$outputFormat = 'xml';
+//
+//        Config::$dataDir = '/tmp';
+//
+//        $this->fullRun();
+//        $this->assertXmlOutput($this->buffer->driver->bufferDir . '/*');
+//    }
+//
+//    public function testAvroRecordToCsv()
+//    {
+//        Config::$sourceFormat = 'avro_record';
+//        Config::$outputFormat = 'csv';
+//
+//        Config::$dataDir = '/tmp';
+//
+//        $this->fullRun();
+//        $this->assertCsvOutput($this->buffer->driver->bufferDir . '/*');
+//    }
+//
+//    public function testAvroRecordToJson()
+//    {
+//        Config::$sourceFormat = 'avro_record';
+//        Config::$outputFormat = 'json';
+//
+//        Config::$dataDir = '/tmp';
+//
+//        $this->fullRun();
+//        $this->assertJsonOutput($this->buffer->driver->bufferDir . '/*');
+//    }
+//
+//    public function testAvroRecordToAvroFile()
+//    {
+//
+//        Config::$sourceFormat = 'avro_record';
+//        Config::$outputFormat = 'avro_file';
+//
+//        Config::$dataDir = '/tmp';
+//
+//        $this->fullRun();
+//        $this->assertAvroFileOutput($this->buffer->driver->bufferDir . '/*');
+//    }
+//
+//    public function testAvroRecordToAvroRecord()
+//    {
+//
+//        Config::$sourceFormat = 'avro_record';
+//        Config::$outputFormat = 'avro_record';
+//
+//        Config::$dataDir = '/tmp';
+//
+//        $this->fullRun();
+//        $this->assertAvroRecordOutput($this->buffer->driver->bufferDir . '/*');
+//    }
 
 
 //    public function testParquetToParquet()

@@ -303,7 +303,7 @@ class DockerRun extends TestCase
         $hostConfig->setBinds([$this->dataPath . ':/data']);
 
         // networking
-        $hostConfig->setNetworkMode('proxynet');
+//        $hostConfig->setNetworkMode('proxynet');
 
 //        $net = new Network();
 //        $net->setName('proxynet');

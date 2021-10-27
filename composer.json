@@ -9,7 +9,10 @@
     }
   ],
   "scripts": {
-    "phpstan": "phpstan analyse src/ -c phpstan.neon --level=4 --no-progress -vvv"
+    "phpstan": "vendor/bin/phpstan analyse src tests -c phpstan.neon --level=5 --no-progress",
+    "phpunit": "vendor/bin/phpunit --coverage-html coverage/ --coverage-clover clover.xml",
+    "phpcs": "vendor/bin/phpcs --standard=PSR2 --ignore=vendor/ --ignore=coverage/ --ignore=composer-setup.php ./",
+    "phpcbf": "vendor/bin/phpcbf --standard=PSR2 --ignore=vendor/ ./"
   },
   "repositories": [
     {
