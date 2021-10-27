@@ -26,7 +26,7 @@ trait LicenseChecker
 
             $this->licenseKey = Config::getenv('LICENSE_KEY', $this->licenseKey);
 
-            Registry::skipprd()->info('Looking up license');
+            SkipprLogger::info('Looking up license');
 
             $uri = Config::getenv('SCHEMA_REGISTRY');
 
@@ -73,22 +73,22 @@ trait LicenseChecker
                 && $this->license['license_key'] == $this->licenseKey
             ) {
 
-                Registry::skipprd()->info('Found valid license');
+                SkipprLogger::info('Found valid license');
 
                 $this->licenseIsValid = true;
 
             } else {
 
-                Registry::skipprd()->info('Did not find a valid license');
+                SkipprLogger::info('Did not find a valid license');
 
                 $this->licenseIsValid = false;
             }
 
 
         } catch (\Exception $e) {
-            Registry::skipprd()->error($e->getMessage());
+            SkipprLogger::error($e->getMessage());
 
-            Registry::skipprd()->info('Did not find a valid license');
+            SkipprLogger::info('Did not find a valid license');
 
             $this->licenseIsValid = false;
             

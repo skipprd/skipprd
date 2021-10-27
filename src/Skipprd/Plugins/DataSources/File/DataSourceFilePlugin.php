@@ -5,6 +5,7 @@ use Skipprd\Plugins\DataSources\DataSourcePluginBase;
 use Skipprd\Buffers\BufferInterface;
 use Monolog\Registry;
 use Skipprd\Plugins\ValidationResponse;
+use Skipprd\Traits\SkipprLogger;
 
 class DataSourceFilePlugin extends DataSourcePluginBase
 {
@@ -123,7 +124,7 @@ class DataSourceFilePlugin extends DataSourcePluginBase
                 }
             }
         } catch (\Exception $e) {
-            Registry::skipprd()->error("Error syncing data from File Plugin");
+            SkipprLogger::error("Error syncing data from File Plugin");
             throw $e;
         }
     }
@@ -139,7 +140,7 @@ class DataSourceFilePlugin extends DataSourcePluginBase
         } catch (\Exception $e) {
             $validationResp->title = "Could not connect to source data.";
             $validationResp->error = $e->getMessage();
-            Registry::skipprd()->error($validationResp->error);
+            SkipprLogger::error($validationResp->error);
             $data = false;
         }
 
@@ -157,7 +158,7 @@ class DataSourceFilePlugin extends DataSourcePluginBase
         } catch (\Exception $e) {
             $validationResp->title = "Could not connect to source data.";
             $validationResp->error = $e->getMessage();
-            Registry::skipprd()->error($validationResp->error);
+            SkipprLogger::error($validationResp->error);
         }
 
 

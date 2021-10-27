@@ -10,6 +10,7 @@ use Skipprd\Helpers;
 use Skipprd\MachineToHuman\BytesToHuman;
 use Skipprd\Serders\SerdersFactory;
 use Skipprd\Traits\Config;
+use Skipprd\Traits\SkipprLogger;
 
 class FileBufferDriver implements BufferDriverInterface
 {
@@ -104,6 +105,8 @@ class FileBufferDriver implements BufferDriverInterface
 
         }
 
+        SkipprLogger::debug("Flushed buffer chunk $chunkName");
+
         $this->finalise();
     }
 
@@ -172,7 +175,7 @@ class FileBufferDriver implements BufferDriverInterface
                 $this->cpFp = new \SplFileObject($checkpoint_filename, "a+");
                 $this->cpLine = (int) $this->cpFp->fgets();
 
-                Registry::skipprd()->info("Streaming file $filename from line $this->cpLine");
+                SkipprLogger::info("Streaming file $filename from line $this->cpLine");
 
                 $this->dataFp = new \SplFileObject($filename, "a+");
 
@@ -206,7 +209,7 @@ class FileBufferDriver implements BufferDriverInterface
 
                 } catch (\Exception $e) {
 
-                    Registry::skipprd()->error($e->getMessage());
+                    SkipprLogger::error($e->getMessage());
 
                     return false; // exit to prevent buffer destroy
                 }
@@ -274,7 +277,7 @@ class FileBufferDriver implements BufferDriverInterface
             } catch (\Exception $e) {
 
                 // Still possible the file has been deleted just after the file_exists check
-                Registry::skipprd()->debug($e->getMessage());
+                SkipprLogger::debug($e->getMessage());
 
             }
 
@@ -288,15 +291,19 @@ class FileBufferDriver implements BufferDriverInterface
         
         $locked = false;
 
+        SkipprLogger::debug("Creating lock buffer chunk $chunkName");
+
         // dir is more reliable than waiting for fstat on a file
         if (@mkdir($chunkName . '.lock',0777, true)) {
             $locked = true;
+            SkipprLogger::debug("Created lock buffer chunk $chunkName");
         }
 
         while (!$locked && $block) {
 
             if (@mkdir($chunkName . '.lock',0777, true)) {
                 $locked = true;
+                SkipprLogger::debug("Created lock buffer chunk $chunkName");
             } else {
 
                 sleep(1);
@@ -321,7 +328,7 @@ class FileBufferDriver implements BufferDriverInterface
                 } catch (\Exception $e) {
 
                     // Still possible the file has been deleted just before with stat the size
-                    Registry::skipprd()->debug($e->getMessage());
+                    SkipprLogger::debug($e->getMessage());
 
                 }
 
@@ -350,7 +357,7 @@ class FileBufferDriver implements BufferDriverInterface
 
         try {
 
-            Registry::skipprd()->debug("Destroying finished buffer file: " . $filename);
+            SkipprLogger::debug("Destroying finished buffer file: " . $filename);
 
             unlink($filename);
             @unlink($filename . '.checkpoint');
@@ -359,8 +366,8 @@ class FileBufferDriver implements BufferDriverInterface
             return true;
 
         } catch (\Exception $e) {
-            Registry::skipprd()->error("Failed to destroy buffer");
-            Registry::skipprd()->error($e->getMessage());
+            SkipprLogger::error("Failed to destroy buffer");
+            SkipprLogger::error($e->getMessage());
 
             return false;
         }
@@ -383,6 +390,8 @@ class FileBufferDriver implements BufferDriverInterface
                    // ignore locked files
                    if (strpos($filename, '.lock')) continue;
 
+                   SkipprLogger::debug("Finalising buffer file $filename");
+
                    $updatedTime = filectime($filename);
                    $updatedDelta = time() - $updatedTime;
 
@@ -390,8 +399,8 @@ class FileBufferDriver implements BufferDriverInterface
 
                    if (FileBufferDriver::lock($filename)) { // acquire an exclusive lock
 
-//                       Registry::skipprd()->debug("bytes: " . $bytes);
-//                       Registry::skipprd()->debug("flushBytes: " . $this->flushBytes);
+//                       SkipprLogger::debug("bytes: " . $bytes);
+//                       SkipprLogger::debug("flushBytes: " . $this->flushBytes);
 
                        if ($bytes >= $this->flushBytes || $updatedDelta > $this->flushFileSeconds || $force) {
 
@@ -403,7 +412,7 @@ class FileBufferDriver implements BufferDriverInterface
                            if (!$force) {
 
                                $humanSize = BytesToHuman::toHuman($bytes);
-                               Registry::skipprd()->debug("Buffer file $filename rotated at $humanSize and change time delta $updatedDelta");
+                               SkipprLogger::debug("Buffer file $filename rotated at $humanSize and change time delta $updatedDelta");
                            }
                        }
 
@@ -413,7 +422,7 @@ class FileBufferDriver implements BufferDriverInterface
                } catch (\Exception $e) {
 
                    // Still possible the file has been deleted just before with stat the size
-                   Registry::skipprd()->debug($e->getMessage());
+                   SkipprLogger::debug($e->getMessage());
 
                }
            }
@@ -469,7 +478,7 @@ class FileBufferDriver implements BufferDriverInterface
                 } catch (\Exception $e) {
 
                     // Still possible the file has been deleted just before with stat the size
-                    Registry::skipprd()->debug($e->getMessage());
+                    SkipprLogger::debug($e->getMessage());
 
                 }
             }
@@ -507,7 +516,7 @@ class FileBufferDriver implements BufferDriverInterface
                 } catch (\Exception $e) {
 
                     // Still possible the file has been deleted just before with stat the size
-                    Registry::skipprd()->debug($e->getMessage());
+                    SkipprLogger::debug($e->getMessage());
 
                 }
             }

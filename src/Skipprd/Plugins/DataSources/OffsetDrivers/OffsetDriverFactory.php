@@ -4,6 +4,7 @@ namespace Skipprd\Plugins\DataSources\OffsetDrivers;
 
 use Monolog\Registry;
 use Skipprd\Str;
+use Skipprd\Traits\SkipprLogger;
 
 
 class OffsetDriverFactory
@@ -16,7 +17,7 @@ class OffsetDriverFactory
     static function factory(string $type)
     {
 
-        Registry::skipprd()->info("Loading $type offset driver");
+        SkipprLogger::info("Loading $type offset driver");
 
         $type = Str::studly(ucwords(strtolower($type)));
 

@@ -34,6 +34,7 @@ use Skipprd\Plugins\DataSources\DataSourcePluginInterface;
 use Skipprd\Plugins\DataOutputs\DataOutputPluginInterface;
 use Skipprd\Plugins\DataSources\OffsetDrivers\SkipprInternalOffsetDriver;
 use Segment;
+use Skipprd\Traits\SkipprLogger;
 
 class PipelineCommand
 {
@@ -45,6 +46,7 @@ class PipelineCommand
     use Ingest;
     use BufferAdaptorsFactory;
     use LicenseChecker;
+    use SkipprLogger;
     
     protected $statsd = null;
 
@@ -171,21 +173,7 @@ class PipelineCommand
 
     public function createLogger() {
 
-        // the default date format is "Y-m-d\TH:i:sP"
-        $dateFormat = "Y-m-d\TH:i:sP";
-        // the default output format is "[%datetime%] %channel%.%level_name%: %message% %context% %extra%\n"
-        $output = "[%datetime%] %channel%.%level_name%: %message%\n";
 
-        $formatter = new LineFormatter($output, $dateFormat);
-
-        // Create a handler
-        $stream = new StreamHandler('php://stderr', Logger::DEBUG);
-        $stream->setFormatter($formatter);
-
-        $application = new Logger('skipprd');
-        $application->pushHandler($stream);
-
-        Registry::addLogger($application);
         
     }
 
@@ -284,7 +272,7 @@ class PipelineCommand
 
         $this->init();
 
-        Registry::skipprd()->info("Syncing");
+        SkipprLogger::info("Syncing");
         
 //        set_exception_handler([$this, 'exceptionHandler']);
 
@@ -303,7 +291,7 @@ class PipelineCommand
 
         if (!Config::$enableDeadLetters) {
 
-            Registry::skipprd()->info('Reprocessing dead letters');
+            SkipprLogger::info('Reprocessing dead letters');
         }
 
         if (!empty($this->inputPlugin)) {
@@ -326,7 +314,7 @@ class PipelineCommand
 
         if (Config::$analysing) { // in case we didn't see enough messages
 
-            Registry::skipprd()->info('Finished analysing data');
+            SkipprLogger::info('Finished analysing data');
 
         }
 
@@ -345,9 +333,9 @@ class PipelineCommand
 
     public function exceptionHandler(\Exception $e) {
 
-        Registry::skipprd()->error($e->getMessage());
+        SkipprLogger::error($e->getMessage());
 
-        Registry::skipprd()->warning("Uncaught exception, shutting down all threads.");
+        SkipprLogger::warning("Uncaught exception, shutting down all threads.");
 
         $this->shutdown();
 
@@ -407,7 +395,7 @@ class PipelineCommand
 
         if (!$this->licenseIsValid) {
 
-            Registry::skipprd()->info('Please validate license to continue using Skippr');
+            SkipprLogger::info('Please validate license to continue using Skippr');
 
             $this->shutdown();
         }
@@ -517,7 +505,7 @@ class PipelineCommand
 
         } catch (\AvroException $e) {
 
-//            Registry::skipprd()->error($e->getMessage());
+//            SkipprLogger::error($e->getMessage());
 
             try {
 
@@ -526,13 +514,13 @@ class PipelineCommand
 
             } catch (\Exception $e) {
 
-                Registry::skipprd()->emergency('Failed to write to dead letter queue');
-                Registry::skipprd()->error($e->getMessage());
+                SkipprLogger::emergency('Failed to write to dead letter queue');
+                SkipprLogger::error($e->getMessage());
             }
 
         } catch (\Exception $e) {
 
-            Registry::skipprd()->error($e->getMessage());
+            SkipprLogger::error($e->getMessage());
         }
 
     }
@@ -553,21 +541,21 @@ class PipelineCommand
         if ($timeFlush || $byteFlush || $msgCountFlush) {
 
             if ($timeFlush) {
-                Registry::skipprd()->debug("Flush trigger by: time interval");
+                SkipprLogger::debug("Flush trigger by: time interval");
             }
             if ($byteFlush) {
-                Registry::skipprd()->debug("Flush trigger by: byte size");
+                SkipprLogger::debug("Flush trigger by: byte size");
             }
             if ($msgCountFlush) {
-                Registry::skipprd()->debug("Flush trigger by: message count");
+                SkipprLogger::debug("Flush trigger by: message count");
             }
 
             if ($this->entries == 0) {
                 return false;
             }
 
-//            Registry::skipprd()->debug("Msg Bytes Current: " . BytesToHuman::toHuman($this->currentBytes, true, 'MB'));
-//            Registry::skipprd()->debug("Msg Bytes Limit: " . BytesToHuman::toHuman($this->flushBytes, true, 'MB'));
+//            SkipprLogger::debug("Msg Bytes Current: " . BytesToHuman::toHuman($this->currentBytes, true, 'MB'));
+//            SkipprLogger::debug("Msg Bytes Limit: " . BytesToHuman::toHuman($this->flushBytes, true, 'MB'));
 
             $this->outputPlugin->buffer->driver->unlockAll();
 //            $this->outputPlugin->buffer->flush("out");
@@ -603,7 +591,7 @@ class PipelineCommand
 
 //            $flushDocsCnt = $flushDocs->count();
 
-            Registry::skipprd()->info("Flushing " . $this->entries . " messages");
+            SkipprLogger::info("Flushing " . $this->entries . " messages");
 
             // Empty only after writing, will ensure still available for graceful shutdown
             $this->totalEntries += $this->entries;
@@ -658,7 +646,7 @@ class PipelineCommand
 
         } else {
 
-            Registry::skipprd()->critical('Schema not valid for events in dead letter queue');
+            SkipprLogger::critical('Schema not valid for events in dead letter queue');
 
 //            $this->inputPlugin->buffer->unlockAll('deadletter');
 //            $this->inputPlugin->buffer->flush("deadletter");
@@ -890,7 +878,7 @@ class PipelineCommand
                 if ($this->i > $this->minSample
                     || Carbon::now()->timestamp - $this->startTimestamp > $this->maxTime) {
 //
-                    Registry::skipprd()->info("Finished discovering schema for $partition record type");
+                    SkipprLogger::info("Finished discovering schema for $partition record type");
 
                     $this->i = 0;
                     $this->startTimestamp = Carbon::now()->timestamp;
@@ -924,8 +912,8 @@ class PipelineCommand
                         $this->deadLetterMessage($unwrappedMessage);
                     }
                 } else {
-                    Registry::skipprd()->info("found non-array message");
-                    Registry::skipprd()->info($unwrappedMessage);
+                    SkipprLogger::info("found non-array message");
+                    SkipprLogger::info($unwrappedMessage);
                 }
 
                 $this->offsetCommitRoutine($partition);
@@ -1007,7 +995,7 @@ class PipelineCommand
                         $unwrappedMessages = Arr::get($sourceMessage, Config::$eventPath);
 
                     } catch (\Exception $e) {
-                        Registry::skipprd()->error("Could not find field path " . Config::$eventPath . " in message.");
+                        SkipprLogger::error("Could not find field path " . Config::$eventPath . " in message.");
 
                     }
 
@@ -1130,7 +1118,7 @@ class PipelineCommand
     public function shutdown($signo = 0)
     {
 
-        Registry::skipprd()->info("Gracefully shutting down and flushing buffers");
+        SkipprLogger::info("Gracefully shutting down and flushing buffers");
 
         if (Config::$mode == 'async') {
 
@@ -1182,10 +1170,11 @@ class PipelineCommand
                     if (!Config::$analysing) {
 
                         $pluginName = Config::getenv('DATA_OUTPUT_PLUGIN_NAME');
-                        Registry::skipprd()->info("Syncing remaining output buffers to destination $pluginName.");
 
                         // Output job?
-                        if ($pluginName) {
+                        if (!empty($pluginName)) {
+
+                            SkipprLogger::info("Syncing remaining output buffers to destination $pluginName.");
 
                             $this->outputPlugin->sync(Config::$outputFormat);
 
@@ -1208,8 +1197,8 @@ class PipelineCommand
             $offsetClient = OffsetDriverFactory::factory($type);
             $offsetClient->syncAll($offsets);
 
-            Registry::skipprd()->info("Ingested " . $this->totalEntries . " messages");
-            Registry::skipprd()->info("Dead Letters " . $this->deadLetters . " dead letters");
+            SkipprLogger::info("Ingested " . $this->totalEntries . " messages");
+            SkipprLogger::info("Dead Letters " . $this->deadLetters . " dead letters");
         }
 
 //        $this->pipelineModel->save(); // commit offsets
@@ -1226,11 +1215,11 @@ class PipelineCommand
             $this->writeMapping();
 
         } else {
-            Registry::skipprd()->info("No fields found when analysing schema, did you send some data?");
+            SkipprLogger::info("No fields found when analysing schema, did you send some data?");
         }
 
-//        Registry::skipprd()->debug("Mem used: " . BytesToHuman::toHuman(memory_get_usage(true), true, 'MB'));
-//        Registry::skipprd()->debug("Mem limit: " . BytesToHuman::toHuman($this->flushBytes, true, 'MB'));
+//        SkipprLogger::debug("Mem used: " . BytesToHuman::toHuman(memory_get_usage(true), true, 'MB'));
+//        SkipprLogger::debug("Mem limit: " . BytesToHuman::toHuman($this->flushBytes, true, 'MB'));
 
         // Update metadata such as field mapping
 //        $configYml = $this->setConfig();
@@ -1263,7 +1252,9 @@ class PipelineCommand
             ]
         ));
 
-        Registry::skipprd()->info("Graceful shutdown complete, bye");
+        sleep(20);
+
+        SkipprLogger::info("Graceful shutdown complete, bye");
 
 //        $this->delete();
         exit($signo);
@@ -1277,7 +1268,7 @@ class PipelineCommand
 
         $configYml = Config::setConfig();
 
-        Registry::skipprd()->info("Updated analysed field schema");
+        SkipprLogger::info("Updated analysed field schema");
 
     }
 
@@ -1339,7 +1330,7 @@ class PipelineCommand
 
             $numCandidates = count(Config::$idFields);
 
-            Registry::skipprd()->info("Found $numCandidates ID fields");
+            SkipprLogger::info("Found $numCandidates ID fields");
 
         }
 

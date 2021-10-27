@@ -140,11 +140,14 @@ before_script:
 # This is just a template, you must extend it in the ci-templates directories.
 .tests:
   stage: tests
-  image: docker:latest
+  image: docker:19.03.12
   extends: .build
   script:
     # - docker run ${PROJECT_NAME}:${CURR_BUILD_TAG} /bin/bash -c "cd tests && ../vendor/phpunit/phpunit/phpunit --configuration ../phpunit.xml --coverage-text ."
-    - docker build --build-arg SSH_PRIVATE_KEY="${SSH_PRIVATE_KEY}" --build-arg TEST_SUITE=${TEST_SUITE} --target test -f ${DOCKERFILE_LOCATION} -t ${PROJECT_NAME}:${CURR_BUILD_TAG} .
+    - docker build --build-arg SSH_PRIVATE_KEY="${SSH_PRIVATE_KEY}" --target test -f ${DOCKERFILE_LOCATION} -t ${PROJECT_NAME}:${CURR_BUILD_TAG} .
+
+    - docker run -v /var/run/docker.sock:/var/run/docker.sock ${PROJECT_NAME}:${CURR_BUILD_TAG} ./vendor/phpunit/phpunit/phpunit --configuration ./phpunit.xml --coverage-text --testsuite ${TEST_SUITE}
+      
     - echo "end of component test"
   coverage: '/^\s*Lines:\s*\d+.\d+\%/'
 #  only:
@@ -249,16 +252,15 @@ unit:
     TEST_SUITE: Unit
   extends: .tests
 
-#feature:
-#  variables:
-#    COMPONENT_NAME: skippr-base
-#    DOCKERFILE_LOCATION: DockerfileTest
-#    TEST_SUITE: Feature
-#  extends: .tests
-#
-#
+feature:
+  variables:
+    COMPONENT_NAME: skippr-base
+    DOCKERFILE_LOCATION: DockerfileTest
+    TEST_SUITE: Feature
+  extends: .tests
+
+
 #integration:
-#  image: docker:19.03.12
 #  variables:
 #    COMPONENT_NAME: skippr-base
 #    DOCKERFILE_LOCATION: DockerfileTest

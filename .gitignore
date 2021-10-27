@@ -3,3 +3,7 @@ vendor
 docker-compose.yml
 debug.php
 test.sh
+.idea
+coverage
+.DS_Store
+clover.xml

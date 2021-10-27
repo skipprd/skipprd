@@ -19,6 +19,7 @@ use Skipprd\Converters\AvroParquetSchemaConverter;
 use Skipprd\Helpers;
 use Skipprd\Serders\SerderAvroFile;
 use Skipprd\Traits\Config;
+use Skipprd\Traits\SkipprLogger;
 
 class DockerRun extends TestCase
 {
@@ -28,6 +29,8 @@ class DockerRun extends TestCase
     protected $containerConfig;
 
     public $dataPath;
+
+    public $hostPath;
 
     public $testFile;
 
@@ -253,11 +256,13 @@ class DockerRun extends TestCase
 
         $tempPath = 'test-tmp/' . Helpers::randomStr(16);
 
-        $basePath = realpath(__DIR__ . '/../../');
-        $src = $basePath. '/test-data/' . $this->testFile;
-        $this->dataPath = $basePath . '/' . $tempPath;
+        $this->basePath = realpath(__DIR__ . '/../../') . '/test-data/';
+        $src = $this->basePath . $this->testFile;
+        $this->dataPath = $this->basePath . '/' . $tempPath;
         mkdir($this->dataPath . '/input', 0777, true);
         copy($src, $this->dataPath . '/input/' . $this->testFile);
+
+        $this->hostPath = getenv('HOST_PATH') . '/' . $tempPath;
 
     }
 
@@ -300,10 +305,10 @@ class DockerRun extends TestCase
 
         // volume
         $this->containerConfig->setVolumes(new \ArrayObject([$this->dataPath => (object) []]));
-        $hostConfig->setBinds([$this->dataPath . ':/data']);
+        $hostConfig->setBinds([$this->hostPath . ':/data']);
 
         // networking
-        $hostConfig->setNetworkMode('proxynet');
+//        $hostConfig->setNetworkMode('proxynet');
 
 //        $net = new Network();
 //        $net->setName('proxynet');

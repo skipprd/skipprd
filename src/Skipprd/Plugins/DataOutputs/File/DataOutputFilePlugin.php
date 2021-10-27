@@ -6,6 +6,7 @@ use Skipprd\Plugins\DataOutputs\DataOutputPluginBase;
 use Skipprd\Buffers\BufferInterface;
 use Monolog\Registry;
 use Skipprd\Plugins\ValidationResponse;
+use Skipprd\Traits\SkipprLogger;
 
 class DataOutputFilePlugin extends DataOutputPluginBase
 {
@@ -39,11 +40,11 @@ class DataOutputFilePlugin extends DataOutputPluginBase
             $result = rename($filename, $path);
 
             if ($result) {
-                Registry::skipprd()->info("Saved buffer file $filename to output $path.");
+                SkipprLogger::info("Saved buffer file $filename to output $path.");
 
                 @$this->buffer->driver->destroy($filename);
             } else {
-                Registry::skipprd()->error("Could not save buffer file $filename to output $path.");
+                SkipprLogger::error("Could not save buffer file $filename to output $path.");
             }
         }
     }
@@ -60,8 +61,8 @@ class DataOutputFilePlugin extends DataOutputPluginBase
         } catch (\Exception $e) {
             $validationResp->title = 'Config Failed';
             $validationResp->error = $e->getMessage();
-            Registry::skipprd()->error("Could not configure output.");
-            Registry::skipprd()->error($validationResp->error);
+            SkipprLogger::error("Could not configure output.");
+            SkipprLogger::error($validationResp->error);
         }
 
         return $validationResp;

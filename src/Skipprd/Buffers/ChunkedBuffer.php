@@ -6,7 +6,9 @@ namespace Skipprd\Buffers;
 use Monolog\Registry;
 use Carbon\Carbon;
 use Skipprd\Buffers\BufferDrivers\BufferDriverInterface;
+use Skipprd\MachineToHuman\BytesToHuman;
 use Skipprd\Str;
+use Skipprd\Traits\SkipprLogger;
 
 class ChunkedBuffer implements BufferInterface
 {
@@ -71,6 +73,8 @@ class ChunkedBuffer implements BufferInterface
 
             if (!empty($this->memBuffs[$chunkName]) && !empty($this->memBuffs[$chunkName]['buffer'])) {
 
+                SkipprLogger::debug("Flushing buffer chunk $chunkName of size ". BytesToHuman::toHuman($this->memBuffs[$chunkName]['size'], true));
+
                 $this->driver->flush($this->memBuffs[$chunkName]['buffer'], $chunkName, $partition);
 
                 unset($this->memBuffs[$chunkName]);
@@ -91,6 +95,8 @@ class ChunkedBuffer implements BufferInterface
                 $partition = $this->decodeChunkPartitionName($chunkName);
 
                 if (!empty($this->memBuffs[$chunkName]) && !empty($this->memBuffs[$chunkName]['buffer'])) {
+
+                    SkipprLogger::debug("Flushing buffer chunk $chunkName of size ". BytesToHuman::toHuman($this->memBuffs[$chunkName]['size'], true));
 
                     $this->driver->flush($this->memBuffs[$chunkName]['buffer'], $chunkName, $partition);
 
@@ -150,7 +156,7 @@ class ChunkedBuffer implements BufferInterface
 
     public function decodeChunkPartition($filename) : string {
 
-        Registry::skipprd()->debug("decoding partitions for file $filename");
+        SkipprLogger::debug("decoding partitions for file $filename");
 
         $parts = $this->getChunkName($filename);
 
@@ -166,7 +172,7 @@ class ChunkedBuffer implements BufferInterface
 
 //        $partition_dir = trim(implode('/', $parts), '/');
 
-        Registry::skipprd()->debug("decoded partition dir $partition_dir");
+        SkipprLogger::debug("decoded partition dir $partition_dir");
 
         return $partition_dir;
     }
@@ -206,7 +212,7 @@ class ChunkedBuffer implements BufferInterface
 //            } catch (\Exception $e) {
 //
 //                // Still possible the file has been deleted just before with stat the size
-//                Registry::skipprd()->debug($e->getMessage());
+//                SkipprLogger::debug($e->getMessage());
 //
 //            }
 //

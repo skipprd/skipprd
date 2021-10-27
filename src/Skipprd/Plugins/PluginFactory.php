@@ -7,6 +7,7 @@ use Skipprd\Plugins\DataOutputs\DataOutputPluginBase;
 use Skipprd\Plugins\DataSources\DataSourcePluginBase;
 use Skipprd\Buffers\BufferInterface;
 use Skipprd\Str;
+use Skipprd\Traits\SkipprLogger;
 
 
 class PluginFactory
@@ -29,7 +30,7 @@ class PluginFactory
             }
         }
 
-        Registry::skipprd()->info("Loading $type plugin $name");
+        SkipprLogger::info("Loading $type plugin $name");
 
         $type = Str::studly(ucwords(strtolower($type)));
         $name = Str::studly(ucwords(strtolower($name)));

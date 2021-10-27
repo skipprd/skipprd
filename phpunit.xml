@@ -18,7 +18,7 @@
         </testsuite>
 
         <testsuite name="Integration">
-            <directory suffix="Test.php">./tests/Integration</directory>
+            <directory suffix="Test.php">./tests/Integration/Skipprd</directory>
         </testsuite>
     </testsuites>
     <filter>
