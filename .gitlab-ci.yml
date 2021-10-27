@@ -260,10 +260,9 @@ feature:
   extends: .tests
 
 
-integration:
-  image: docker:19.03.12
-  variables:
-    COMPONENT_NAME: skippr-base
-    DOCKERFILE_LOCATION: DockerfileTest
-    TEST_SUITE: Integration
-  extends: .tests
+#integration:
+#  variables:
+#    COMPONENT_NAME: skippr-base
+#    DOCKERFILE_LOCATION: DockerfileTest
+#    TEST_SUITE: Integration
+#  extends: .tests

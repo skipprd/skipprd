@@ -45,7 +45,7 @@ class CsvToParquetTest extends DockerRun
 
         $this->containerConfig->setEnv($envs);
 
-        echo "@todo - provide expect schema to asset against";
+        echo "@todo - provide expected schema to assert against";
 //        $this->dockerRun();
 
 //        $this->assertParquetOutput();
