@@ -2,8 +2,8 @@
 ## Builder
 ###
 
-#FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v2.2.6 as builder
-FROM skippr-php:ubuntu as builder
+FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v3.0.0 as builder
+#FROM skippr-php:ubuntu as builder
 
 ##
 # docker-php-extension-installer
@@ -136,8 +136,8 @@ RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skippr
 #RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Services/AvroSubPub/MessageSerializer.php
 
 
-#FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v2.2.6
-FROM skippr-php:ubuntu
+FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v3.0.0
+#FROM skippr-php:ubuntu
 
 ENV PHP_INI_DIR=/etc/php/7.4/cli
 RUN echo $PHP_INI_DIR \
