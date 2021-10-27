@@ -7,8 +7,6 @@ ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update -y && apt-get install -y bash git rsync nodejs npm yarn composer openssh-client
 
-ARG TEST_SUITE
-
 ARG SSH_PRIVATE_KEY
 
 RUN mkdir -p ~/.ssh
@@ -28,8 +26,3 @@ COPY . .
 #RUN pecl install pcntl
 
 RUN composer install --no-interaction --no-ansi --prefer-dist --no-progress --optimize-autoloader --ignore-platform-reqs
-
-#RUN ./vendor/phpunit/phpunit/phpunit --configuration ./phpunit.xml --coverage-text --colors=never
-RUN ./vendor/phpunit/phpunit/phpunit --configuration ./phpunit.xml --coverage-text --testsuite $TEST_SUITE
-
-#RUN ./vendor/phpunit/phpunit/phpunit --configuration ./phpunit.xml ./tests
