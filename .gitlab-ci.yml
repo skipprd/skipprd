@@ -144,7 +144,7 @@ before_script:
   extends: .build
   script:
     # - docker run ${PROJECT_NAME}:${CURR_BUILD_TAG} /bin/bash -c "cd tests && ../vendor/phpunit/phpunit/phpunit --configuration ../phpunit.xml --coverage-text ."
-    - docker build --build-arg SSH_PRIVATE_KEY="${SSH_PRIVATE_KEY}" --build-arg TEST_SUITE=${TEST_SUITE} --target test -f ${DOCKERFILE_LOCATION} -t ${PROJECT_NAME}:${CURR_BUILD_TAG} .
+    - docker build -v /var/run/docker.sock:/var/run/docker.sock --build-arg SSH_PRIVATE_KEY="${SSH_PRIVATE_KEY}" --build-arg TEST_SUITE=${TEST_SUITE} --target test -f ${DOCKERFILE_LOCATION} -t ${PROJECT_NAME}:${CURR_BUILD_TAG} .
     - echo "end of component test"
   coverage: '/^\s*Lines:\s*\d+.\d+\%/'
 #  only:
