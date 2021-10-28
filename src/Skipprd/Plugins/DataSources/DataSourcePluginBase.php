@@ -5,6 +5,7 @@ namespace Skipprd\Plugins\DataSources;
 use Monolog\Registry;
 use Skipprd\Buffers\BufferInterface;
 use Skipprd\Plugins\ValidationResponse;
+use Skipprd\Traits\SkipprLogger;
 
 class DataSourcePluginBase implements DataSourcePluginInterface
 {
@@ -62,7 +63,7 @@ class DataSourcePluginBase implements DataSourcePluginInterface
             $this->continue[$partition] = true;
         }
 
-        //        Registry::skipprd()->info(var_dump($this->continue));
+        //        SkipprLogger::info(var_dump($this->continue));
         
         return $this->continue[$partition];
     }

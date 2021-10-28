@@ -129,8 +129,7 @@ class Config
             // Get Mapping
             try {
 
-                Registry::skipprd()
-                    ->info('Looking up config for pipeline ' . $defaultPipelineName);
+                SkipprLogger::info('Looking up config for pipeline ' . $defaultPipelineName);
 
                 $url = "http://$uri/";
                 $path = 'ingest-job/get-mapping/'. $defaultPipelineName;
@@ -150,15 +149,13 @@ class Config
 
 
             } catch (\Exception $e) {
-                Registry::skipprd()
-                    ->error($e->getMessage());
+                SkipprLogger::error($e->getMessage());
             }
 
             // Get Schema
             try {
 
-                Registry::skipprd()
-                    ->info('Looking up schema for pipeline ' . $defaultPipelineName);
+                SkipprLogger::info('Looking up schema for pipeline ' . $defaultPipelineName);
 
                 $schemaName = self::$tenantId . '_' . $defaultPipelineName . '-value';
                 $url = "http://$uri/";
@@ -177,8 +174,7 @@ class Config
                 
 
             } catch (\Exception $e) {
-                Registry::skipprd()
-                    ->error($e->getMessage());
+                SkipprLogger::error($e->getMessage());
             }
 
 
@@ -189,16 +185,14 @@ class Config
 
                 try {
 
-                    Registry::skipprd()
-                        ->info('Found existing ' . self::$dataDir . '/skippr-state.json');
+                    SkipprLogger::info('Found existing ' . self::$dataDir . '/skippr-state.json');
 
                     self::$state = json_decode(file_get_contents(self::$dataDir . '/skippr-state.json'),
                         true);
 
                     if (!empty(Config::$state[$defaultPipelineName])) {
 
-                        Registry::skipprd()
-                            ->info('Loading state for pipeline ' . $defaultPipelineName);
+                        SkipprLogger::info('Loading state for pipeline ' . $defaultPipelineName);
 
                         self::$discoveredFieldOccurrence = Config::$state[$defaultPipelineName]['mapping'];
 
@@ -207,8 +201,7 @@ class Config
                     }
 
                 } catch (\Exception $e) {
-                    Registry::skipprd()
-                        ->error($e->getMessage());
+                    SkipprLogger::error($e->getMessage());
                 }
 
             }
@@ -410,8 +403,7 @@ class Config
                 SkipprLogger::info('Updated config via API');
 
             } catch (\Exception $e) {
-                Registry::skipprd()
-                    ->error($e->getMessage());
+                SkipprLogger::error($e->getMessage());
             }
 
 
@@ -426,13 +418,11 @@ class Config
 
                 file_put_contents(self::$dataDir . '/skippr-state.json', json_encode(Config::$state));
 
-                Registry::skipprd()
-                    ->info('Written state to ' . self::$dataDir . '/skippr-state.json');
+                SkipprLogger::info('Written state to ' . self::$dataDir . '/skippr-state.json');
 
 
             } catch (\Exception $e) {
-                Registry::skipprd()
-                    ->error($e->getMessage());
+                SkipprLogger::error($e->getMessage());
             }
 
 

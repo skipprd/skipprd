@@ -166,8 +166,7 @@ trait Threaded
 
                     try {
 
-                        Registry::skipprd()
-                            ->debug("Starting threaded output worker");
+                        SkipprLogger::debug("Starting threaded output worker");
 
                         $pipeline->outputBuffer->finalise();
 
