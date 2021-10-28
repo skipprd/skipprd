@@ -43,8 +43,7 @@ class DataSourceFilePlugin extends DataSourcePluginBase
                 }
 
                 if ($offsetTimestamp && $offsetLine) {
-                    Registry::skipprd()
-                        ->info("Restarting File sync from checkpoint time $offsetTimestamp line $offsetLine");
+                    SkipprLogger::info("Restarting File sync from checkpoint time $offsetTimestamp line $offsetLine");
                 }
 
                 $filenames = glob($path . '/*', GLOB_NOSORT);
@@ -64,8 +63,7 @@ class DataSourceFilePlugin extends DataSourcePluginBase
                                 "/\.gz(ip)?$|.zip/",
                                 $filename
                             ) == true) {
-                                Registry::skipprd()
-                                    ->info('Uncompressing file ' . $filename);
+                                SkipprLogger::info('Uncompressing file ' . $filename);
 
                                 // open gz file for reading
                                 $sfp = gzopen($filename, 'rb');

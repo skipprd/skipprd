@@ -54,13 +54,11 @@ class SkipprFileOffsetDriver implements OffsetDriverInterface
 
                     file_put_contents(Config::$dataDir . '/skippr-offsets.json', json_encode($state));
 
-                    Registry::skipprd()
-                        ->info('Written state to ' . Config::$dataDir . '/skippr-offsets.json');
+                    SkipprLogger::info('Written state to ' . Config::$dataDir . '/skippr-offsets.json');
 
 
                 } catch (\Exception $e) {
-                    Registry::skipprd()
-                        ->error($e->getMessage());
+                    SkipprLogger::error($e->getMessage());
                 }
 
                 break;
@@ -89,8 +87,7 @@ class SkipprFileOffsetDriver implements OffsetDriverInterface
                         }
 
                     } catch (\Exception $e) {
-                        Registry::skipprd()
-                            ->error($e->getMessage());
+                        SkipprLogger::error($e->getMessage());
                     }
 
                 }

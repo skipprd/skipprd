@@ -4,6 +4,7 @@ namespace Skipprd\Plugins\DataSources\OffsetDrivers;
 
 use Monolog\Registry;
 use Skipprd\Traits\Config;
+use Skipprd\Traits\SkipprLogger;
 
 class SkipprInternalOffsetDriver implements OffsetDriverInterface
 {
@@ -80,8 +81,7 @@ class SkipprInternalOffsetDriver implements OffsetDriverInterface
 
 
         } catch (\Exception $e) {
-            Registry::skipprd()
-                ->error($e->getMessage());
+            SkipprLogger::error($e->getMessage());
         }
     }
 
