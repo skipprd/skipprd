@@ -13,6 +13,7 @@ use Skipprd\Converters\AvroParquetSchemaConverter;
 use Skipprd\Converters\SkipprAvroSchemaConverter;
 use Skipprd\Helpers;
 use Monolog\Registry;
+use Skipprd\Str;
 
 class Config
 {
@@ -48,6 +49,8 @@ class Config
     public static $schema = [];
 
     public static $mapping = [];
+
+    public static $filters = [];
 
     /**
      * @var \AvroSchema $avroSchemas
@@ -266,6 +269,7 @@ class Config
 
         }
 
+        self::initFilters();
 
         // Although we may be done analysing, we don't want to override candidate.
         // They should remain in the option list even if the user has rejected them.
@@ -276,6 +280,31 @@ class Config
 //        if (!empty($configYml['field_yml']['date_field_candidates'])) {
 //            Config::$idFields = $configYml['field_yml']['enitity_field_candidates'];
 //        }
+
+    }
+
+    public static function initFilters() {
+
+        $envs = getenv();
+
+        foreach ($envs as $name => $val) {
+
+            if (Str::startsWith($name, 'FILTER_')) {
+
+                SkipprLogger::info($name);
+                SkipprLogger::info($val);
+
+                $parts = explode('_', $name);
+                $filterName = strtolower($parts[1]);
+                unset($parts[0]);
+                unset($parts[1]);
+                $confName = strtolower(implode('_', $parts));
+
+                SkipprLogger::info($filterName);
+
+                Config::$filters[$filterName][$confName] = $val;
+            }
+        }
 
     }
 
