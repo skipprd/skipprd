@@ -34,6 +34,20 @@ class OffsetsTest extends TestCase
 
     }
 
+    public function testParseSinglePartitionOffsets()
+    {
+
+        $partition = 'table_a';
+
+        $offsets = new Offsets();
+        $offsets->setOffsets($partition, '123');
+
+        $commits = $offsets->parseOffsets($partition);
+
+        self::assertEquals([123], $commits);
+
+    }
+
     /**
      * Validate offsets
      */
