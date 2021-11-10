@@ -3,7 +3,6 @@
 
 namespace Skipprd\Plugins\DataSources;
 
-
 class Offsets
 {
 
@@ -33,7 +32,6 @@ class Offsets
         $offsets = [];
         
         if (!empty($this->offsets[$partition])) {
-
             $offsets = explode(' ', $this->offsets[$partition]);
         }
 
@@ -43,7 +41,6 @@ class Offsets
         }
 
         return $offsets;
-
     }
 
     public function validateOffset(string $partition, string $args) : bool
@@ -61,11 +58,8 @@ class Offsets
         $total = count($args);
 
         while ($i < $total) {
-
             if ($args[$i] >= $offsets[$i]) {
-
                 if ($args[$i] == $offsets[$i]) {
-
                     $next = $i + 1;
 
                     if ($total > $next) {
@@ -73,11 +67,9 @@ class Offsets
                         $subArgs = implode(' ', $subArgs);
                         $this->validateOffset($partition, $subArgs);
                     }
-
                 } else {
                     return true;
                 }
-
             } else {
                 return false;
             }
@@ -86,7 +78,5 @@ class Offsets
         }
 
         return false;
-
     }
-
 }

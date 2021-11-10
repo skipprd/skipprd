@@ -22,7 +22,6 @@ class SerderAvroRecordSchemaRegistry implements SerderStreamInterface
         $this->tenantId = getenv('TENANT_ID');
         
         $this->pipelineName = getenv('PIPELINE_NAME');
-
     }
 
     public function deserialize(string $record) : array
@@ -30,11 +29,8 @@ class SerderAvroRecordSchemaRegistry implements SerderStreamInterface
         $datum = [];
 
         try {
-
             $datum = $this->decodeMessage($record);
-
         } catch (\Exception $e) {
-
         }
 
         return $datum;
@@ -46,15 +42,10 @@ class SerderAvroRecordSchemaRegistry implements SerderStreamInterface
         $recordsWithSchema = false;
         
         try {
-
             if ($record && $schema) {
-
                 $recordsWithSchema = $this->encodeRecordWithSchema($schema, $record);
             }
-
-
         } catch (\Exception $e) {
-
             // unique error message
 //            $this->validationErrors[] = $e->getMessage();
 //            $this->validationErrors[] = $e->getLine();
@@ -64,7 +55,6 @@ class SerderAvroRecordSchemaRegistry implements SerderStreamInterface
         }
 
         return $recordsWithSchema;
-
     }
 
     /**
@@ -148,7 +138,5 @@ class SerderAvroRecordSchemaRegistry implements SerderStreamInterface
         $writer->write($record, $encoder);
 
         return $io->string();
-
     }
-
 }

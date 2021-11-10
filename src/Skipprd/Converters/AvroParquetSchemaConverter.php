@@ -61,8 +61,11 @@ class AvroParquetSchemaConverter implements SchemaConverterInterface
                 continue; // Avro nulls are not encoded, unless they are null unions
             }
 
-            $types[$field->attribute('name')] = $this->convertField($field->attribute('name'),
-                $field->type, self::OPTIONAL);
+            $types[$field->attribute('name')] = $this->convertField(
+                $field->attribute('name'),
+                $field->type,
+                self::OPTIONAL
+            );
         }
 
         return $types;
@@ -101,7 +104,8 @@ class AvroParquetSchemaConverter implements SchemaConverterInterface
     }
 
 
-    private function convertField(string $fieldName, \AvroSchema $schema, $repetition) {
+    private function convertField(string $fieldName, \AvroSchema $schema, $repetition)
+    {
 
         $parquetField = ['name' => $fieldName,];
 
@@ -117,12 +121,14 @@ class AvroParquetSchemaConverter implements SchemaConverterInterface
 //        $parquetField['schema'] = $this->convertField($schema->qualified_name(), $this->convertFields($schema), self::REQUIRED);
 //        $parquetField['schema'] = $schema->fields();
             $parquetField['schema'] = $this->convertFields($schema);
-
         } elseif ($type == \AvroSchema::ENUM_SCHEMA) {
             $parquetField['type'] = 'group';
             $parquetField['repeat'] = $repetition;
-            $parquetField['schema'] = $this->convertField($schema->name,
-                $schema->symbols(), self::REQUIRED);
+            $parquetField['schema'] = $this->convertField(
+                $schema->name,
+                $schema->symbols(),
+                self::REQUIRED
+            );
 //        builder = Types.primitive(BINARY, repetition).as(enumType());
         } elseif ($type == \AvroSchema::ARRAY_SCHEMA) {
             $parquetField['type'] = 'group';
@@ -135,19 +141,18 @@ class AvroParquetSchemaConverter implements SchemaConverterInterface
             $parquetField['schema']['name'] = 'list';
 
             // support list elements of primitive types and array of arrays
-            $parquetField['schema']['schema'] = $this->convertField('element',
-                $schema->items(), self::REQUIRED);
-
-
+            $parquetField['schema']['schema'] = $this->convertField(
+                'element',
+                $schema->items(),
+                self::REQUIRED
+            );
         } elseif ($type == \AvroSchema::MAP_SCHEMA) {
-
             $parquetField['type'] = 'group';
             $parquetField['repeat'] = $repetition;
 //        $parquetField['name'] = $schema->name;
             $parquetField['annotation'] = 'MAP';
 
             foreach ($schema->values() as $itemSchema) {
-
                 $parquetField['schema']['type'] = 'group';
                 $parquetField['schema']['repeat'] = $repetition;
                 $parquetField['schema']['annotation'] = 'MAP_KEY_VALUE'; // map keys are always strings
@@ -163,15 +168,16 @@ class AvroParquetSchemaConverter implements SchemaConverterInterface
                 $parquetField['schema']['schema']['value_type'] = $this->convertPrimitiveType($itemSchema);
                 $parquetField['schema']['schema']['name'] = 'value';
             }
-
         } elseif ($type == \AvroSchema::FIXED_SCHEMA) {
 //          $parquetField['type'] = self::FIXED_LEN_BYTE_ARRAY;
             $parquetField['type'] = self::BYTE_ARRAY;
             $parquetField['repeat'] = $repetition;
         } elseif ($type == \AvroSchema::UNION_SCHEMA) {
-            return $this->convertUnion($fieldName,
+            return $this->convertUnion(
+                $fieldName,
                 $schema,
-                $repetition);
+                $repetition
+            );
 //        return convertUnion(fieldName, schema, repetition);
         } else {
             throw new \AvroException("Cannot convert Avro type " . $type);
@@ -195,7 +201,8 @@ class AvroParquetSchemaConverter implements SchemaConverterInterface
         return $parquetField;
     }
 
-    public function convertUnion(string $fieldName, \AvroSchema $avroSchema, $repetition) {
+    public function convertUnion(string $fieldName, \AvroSchema $avroSchema, $repetition)
+    {
 
         $nonNullSchemas = [];
 
@@ -224,28 +231,40 @@ class AvroParquetSchemaConverter implements SchemaConverterInterface
                 return $parquetField;
             case 1:
                 if ($foundNullSchema) {
-                    return $this->convertField($fieldName, $nonNullSchemas[0],
-                        $repetition);
+                    return $this->convertField(
+                        $fieldName,
+                        $nonNullSchemas[0],
+                        $repetition
+                    );
                 } else {
-                    return $this->convertUnionToGroupType($fieldName,
+                    return $this->convertUnionToGroupType(
+                        $fieldName,
                         $repetition,
-                        $nonNullSchemas);
+                        $nonNullSchemas
+                    );
                 }
 
             default:
-                return $this->convertUnionToGroupType($fieldName, $repetition,
-                    $nonNullSchemas);
+                return $this->convertUnionToGroupType(
+                    $fieldName,
+                    $repetition,
+                    $nonNullSchemas
+                );
         }
     }
 
-    public function convertUnionToGroupType(string $fieldName, $repetition, array $nonNullSchemas) {
+    public function convertUnionToGroupType(string $fieldName, $repetition, array $nonNullSchemas)
+    {
 
         $unionTypes = [];
         $i = 0;
 
         foreach ($nonNullSchemas as $subSchema) {
-            $unionTypes[] = $this->convertField("member" . $i++, $subSchema,
-                self::OPTIONAL);
+            $unionTypes[] = $this->convertField(
+                "member" . $i++,
+                $subSchema,
+                self::OPTIONAL
+            );
         }
 
         $parquetField['type'] = 'group';

@@ -3,7 +3,6 @@
 
 namespace Skipprd\Commands;
 
-
 class RecordFilter
 {
 
@@ -24,7 +23,6 @@ class RecordFilter
         $result = self::applyComparison($value, $operator, $comparison);
 
         switch ($action) {
-
             case 'drop_field':
                 $value = null;
 
@@ -47,7 +45,6 @@ class RecordFilter
     ): bool {
 
         switch ($operator) {
-
             case 'eq':
                 return $value == $comparison;
                 break;
@@ -80,11 +77,8 @@ class RecordFilter
                 break;
             case 'default':
                 new \Exception("Filter operator $operator did not match expected operators (eq, ne, gt, gte, lt, lte, z, n, in, nin)");
-
         }
 
         return false;
-
     }
-
 }

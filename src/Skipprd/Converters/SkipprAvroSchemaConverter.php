@@ -56,14 +56,17 @@ class SkipprAvroSchemaConverter implements SchemaConverterInterface
         $avroSchema = [];
 
         foreach ($schema as $field => $metaData) {
-
             if (!empty($metaData['determined_type'])) {
-
                 // may create duplicates but that's handled on the Schema model
 
-                self::buildAvroFields($avroSchema, $field,
-                    $metaData['determined_type'], $schema, [],
-                    $sub_field_count);
+                self::buildAvroFields(
+                    $avroSchema,
+                    $field,
+                    $metaData['determined_type'],
+                    $schema,
+                    [],
+                    $sub_field_count
+                );
             }
         }
 
@@ -79,53 +82,50 @@ class SkipprAvroSchemaConverter implements SchemaConverterInterface
         $fieldCleanName = Helpers::cleanFieldName($field);
 
         if (in_array($determined_type, ['map', 'array', 'record']) > 0) {
-
             if ($determined_type == 'array'
                 && !empty($skipprSchema[$field]['determined_type_values']) // ignore empty arrays
                 && !empty($skipprSchema[$field]['enabled'])) {
-
                 $valuesType = self::$avroTypeMappings[$skipprSchema[$field]['determined_type_values']];
 
                 $type['type'][1]['items'] = $valuesType['type'][1];
 
                 $avroSchema[] = array_merge(['name' => $fieldCleanName], $type);
-
             }
 
             if ($determined_type == 'map') {
-
                 $sub_type = self::getComplexTypeScheme($skipprSchema, $field);
 
                 if (!empty($sub_type)) { // not empty array in source data
-
                     if (!empty($skipprSchema[$field]['fields'])
                         && !empty($skipprSchema[$field]['enabled'])
                         && !empty($sub_type['type'][1]['type'])
-                        && in_array($sub_type['type'][1]['type'],
-                            ['map', 'array', 'record'])) {
-
+                        && in_array(
+                            $sub_type['type'][1]['type'],
+                            ['map', 'array', 'record']
+                        )) {
 //                    $type['type'][1]['name'] = $fieldCleanName;
 
                         $sub_field_count = [];
 
                         foreach ($skipprSchema[$field]['fields'] as $sub_field => $sub_field_meta) {
-
                             if (!empty($sub_field_meta['enabled'])) {
-
-                                self::buildAvroFields($type['type'][1]['values'],
-                                    $sub_field, $sub_field_meta['determined_type'],
-                                    $skipprSchema[$field]['fields'], true, $sub_field_count);
-
+                                self::buildAvroFields(
+                                    $type['type'][1]['values'],
+                                    $sub_field,
+                                    $sub_field_meta['determined_type'],
+                                    $skipprSchema[$field]['fields'],
+                                    true,
+                                    $sub_field_count
+                                );
                             }
-
                         }
 
-                        $avroSchema[] = array_merge(['name' => $fieldCleanName],
-                            $type);
+                        $avroSchema[] = array_merge(
+                            ['name' => $fieldCleanName],
+                            $type
+                        );
 //                    $newSchema = $type;
-
                     } elseif (!empty($skipprSchema[$field]['enabled'])) {
-
                         //////
 //                    $sub_type = self::getComplexTypeScheme($skipprSchema, $field);
 //                    $type['type'][1]['default'] = null;
@@ -133,58 +133,55 @@ class SkipprAvroSchemaConverter implements SchemaConverterInterface
                         //////
 
                         if (!empty($parent)) { // has a parent field
-                            $avroSchema = array_merge(['name' => $fieldCleanName],
-                                $type);
+                            $avroSchema = array_merge(
+                                ['name' => $fieldCleanName],
+                                $type
+                            );
                         } else {
-                            $avroSchema[] = array_merge(['name' => $fieldCleanName],
-                                $type);
+                            $avroSchema[] = array_merge(
+                                ['name' => $fieldCleanName],
+                                $type
+                            );
                         }
                     }
                 }
 //                else {
 //                    $newSchema[] = array_merge(['name' => $fieldCleanName], $type);
 //                }
-
             }
 
             if ($determined_type == 'record') {
-
                 // handle sub records with repeated field names
                 // simply suffix an increment for field name in the schema
                 if (isset(self::$recordFieldNamesCount[$fieldCleanName])) {
-
                     self::$recordFieldNamesCount[$fieldCleanName]++;
 
                     $type['type'][1]['name'] = $fieldCleanName . self::$recordFieldNamesCount[$fieldCleanName];
-
                 } else {
-
                     self::$recordFieldNamesCount[$fieldCleanName] = 1;
 
                     $type['type'][1]['name'] = $fieldCleanName;
-
                 }
 
                 $sub_field_count = [];
 
                 foreach ($skipprSchema[$field]['fields'] as $sub_field => $sub_field_meta) {
-
                     if (!empty($sub_field_meta['enabled'])) {
-
-                        self::buildAvroFields($type['type'][1]['fields'],
-                            $sub_field, $sub_field_meta['determined_type'],
-                            $skipprSchema[$field]['fields'], [],
-                            $sub_field_count);
+                        self::buildAvroFields(
+                            $type['type'][1]['fields'],
+                            $sub_field,
+                            $sub_field_meta['determined_type'],
+                            $skipprSchema[$field]['fields'],
+                            [],
+                            $sub_field_count
+                        );
                     }
                 }
 
                 $avroSchema[] = array_merge(['name' => $fieldCleanName], $type);
 //                $newSchema[] = array_merge(['name' => $field], $type['type'][1]);
-
             }
-
         } elseif (!empty($skipprSchema[$field]['enabled'])) {
-
             // Add field to schema
 
             // its possible for a field to be added via "new field" evolution.
@@ -201,7 +198,6 @@ class SkipprAvroSchemaConverter implements SchemaConverterInterface
 
             // de-duplicate
             if (isset($fieldNamesCount[$fieldCleanName])) {
-
                 $fieldNamesCount[$fieldCleanName]++;
             } else {
                 $fieldNamesCount[$fieldCleanName] = 1;
@@ -213,38 +209,33 @@ class SkipprAvroSchemaConverter implements SchemaConverterInterface
 
             // Evolution
             foreach ($skipprSchema[$field]['evolution'] as $dataType => $evolution) {
-
-                if (in_array($evolution['type'], ['new', 'rename']) )  {
-
+                if (in_array($evolution['type'], ['new', 'rename'])) {
                     $new_field = Helpers::cleanFieldName($evolution['new_value']);
 
                     // de-duplicate
                     if (isset($fieldNamesCount[$new_field])) {
-
                         $fieldNamesCount[$new_field]++;
                     } else {
                         $fieldNamesCount[$new_field] = 1;
                     }
 
                     if ($fieldNamesCount[$new_field] == 1) {
-
                         $typeSchema = self::$avroTypeMappings[$dataType];
 
                         $avroSchema[] = array_merge(['name' => $new_field], $typeSchema);
-
                     }
                 }
             }
         }
     }
 
-    static function getComplexTypeScheme($skipprSchema, $field) {
+    static function getComplexTypeScheme($skipprSchema, $field)
+    {
 
         $typeCandidates = [];
         $sub_type = [];
 
         foreach ($skipprSchema[$field]['fields'] as $sub_field => $sub_field_meta) {
-
             if (empty($typeCandidates[$sub_field_meta['determined_type']])) {
                 $typeCandidates[$sub_field_meta['determined_type']] = 1;
             } else {
@@ -255,7 +246,6 @@ class SkipprAvroSchemaConverter implements SchemaConverterInterface
         // may have to sub_type if empty array
         // e.g. { "tags": [] }
         if (!empty($typeCandidates)) {
-
             // found sub field types, return most common
             $typeCandidates = array_flip($typeCandidates);
             krsort($typeCandidates);
@@ -265,7 +255,5 @@ class SkipprAvroSchemaConverter implements SchemaConverterInterface
         }
 
         return $sub_type;
-
     }
-
 }

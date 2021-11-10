@@ -9,8 +9,8 @@ use Skipprd\Traits\AnalyseSchema;
 class SerderJson implements SerderStreamInterface
 {
 
-    public function __construct() {
-
+    public function __construct()
+    {
     }
     
     public function deserialize(string $record): array
@@ -25,8 +25,7 @@ class SerderJson implements SerderStreamInterface
         rewind($fp);
 
         // deserialise handling multiline json
-        while ( ($data = fgets($fp) ) !== FALSE ) {
-
+        while (($data = fgets($fp) ) !== false) {
             $line = self::jsonDecode($data);
 
             $records = [];
@@ -35,26 +34,20 @@ class SerderJson implements SerderStreamInterface
                 // if array of json objects
 
                 if (is_array($line) && AnalyseSchema::checkStringOrInt(key($line)) == 'integer') {
-
                     $records = $line;
                     //                foreach ($record as $item) {
                     //                    $messages[] = $this->parseRecordJson($item, 1);
                     //                }
-
                 } else {
                     $records[] = $line;
                 }
-
             }
 
             foreach ($records as $item) {
-
                 if (is_string($item)) {
-
                     $message = self::jsonDecode($item);
 
                     $messages[] = $message;
-
                 } else {
                     $messages[] = $item;
                 }
@@ -125,5 +118,4 @@ class SerderJson implements SerderStreamInterface
 
         return $message;
     }
-
 }

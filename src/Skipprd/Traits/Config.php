@@ -8,7 +8,6 @@
 
 namespace Skipprd\Traits;
 
-
 use Skipprd\Converters\AvroParquetSchemaConverter;
 use Skipprd\Converters\SkipprAvroSchemaConverter;
 use Skipprd\Helpers;
@@ -88,10 +87,10 @@ class Config
         'avro_file'
     ];
 
-    public static function getenv(string $name, string $default = '') : string {
+    public static function getenv(string $name, string $default = '') : string
+    {
 
         return (!empty(getenv($name))) ? getenv($name) : $default;
-
     }
 
     public static function getPipelineName()
@@ -127,11 +126,8 @@ class Config
         $uri = self::getenv('SCHEMA_REGISTRY');
 
         if (!empty($uri)) {
-
-
             // Get Mapping
             try {
-
                 SkipprLogger::info('Looking up config for pipeline ' . $defaultPipelineName);
 
                 $url = "http://$uri/";
@@ -149,15 +145,12 @@ class Config
                 $mapping = json_decode($body, true);
 
                 self::$discoveredFieldOccurrence = $mapping;
-
-
             } catch (\Exception $e) {
                 SkipprLogger::error($e->getMessage());
             }
 
             // Get Schema
             try {
-
                 SkipprLogger::info('Looking up schema for pipeline ' . $defaultPipelineName);
 
                 $schemaName = self::$tenantId . '_' . $defaultPipelineName . '-value';
@@ -174,41 +167,30 @@ class Config
                 $resp = json_decode($client->get($path)->getBody()->getContents(), true);
 
                 $avroArr = json_decode($resp['schema'], true);
-                
-
             } catch (\Exception $e) {
                 SkipprLogger::error($e->getMessage());
             }
-
-
         } else {
-
-
             if (file_exists(self::$dataDir . '/skippr-state.json')) {
-
                 try {
-
                     SkipprLogger::info('Found existing ' . self::$dataDir . '/skippr-state.json');
 
-                    self::$state = json_decode(file_get_contents(self::$dataDir . '/skippr-state.json'),
-                        true);
+                    self::$state = json_decode(
+                        file_get_contents(self::$dataDir . '/skippr-state.json'),
+                        true
+                    );
 
                     if (!empty(Config::$state[$defaultPipelineName])) {
-
                         SkipprLogger::info('Loading state for pipeline ' . $defaultPipelineName);
 
                         self::$discoveredFieldOccurrence = Config::$state[$defaultPipelineName]['mapping'];
 
 //        Config::$discoveredFieldOccurrence = (empty($configYml['field_yml'])) ? [] : $configYml['field_yml'];
-
                     }
-
                 } catch (\Exception $e) {
                     SkipprLogger::error($e->getMessage());
                 }
-
             }
-
         }
 
 
@@ -234,9 +216,7 @@ class Config
         self::$systemUserApiToken = self::getenv('SCHEMA_API_TOKEN');
 
         if (!empty(self::$discoveredFieldOccurrence)) {
-
             foreach (self::$discoveredFieldOccurrence as $partition => $mapping) {
-
                 SkipprLogger::info("Building $partition schema");
 
                 $converter = new SkipprAvroSchemaConverter();
@@ -253,20 +233,15 @@ class Config
                 $converterClass = 'Skipprd\Converters\Avro' . $outputFormat . 'SchemaConverter';
 
                 if (class_exists($converterClass)) {
-
                     SkipprLogger::info("Converting $partition schema to $outputFormat");
 
                     $converter = new $converterClass();
 
                     self::$outputSchemas[Helpers::cleanFieldName($partition)] = $converter->convert(self::$avroSchemas[$partition]);
-
                 } else {
-
                     self::$outputSchemas[Helpers::cleanFieldName($partition)] = self::$avroSchemas[$partition];
                 }
-
             }
-
         }
 
         self::initFilters();
@@ -280,17 +255,15 @@ class Config
 //        if (!empty($configYml['field_yml']['date_field_candidates'])) {
 //            Config::$idFields = $configYml['field_yml']['enitity_field_candidates'];
 //        }
-
     }
 
-    public static function initFilters() {
+    public static function initFilters()
+    {
 
         $envs = getenv();
 
         foreach ($envs as $name => $val) {
-
             if (Str::startsWith($name, 'FILTER_')) {
-
                 SkipprLogger::info($name);
                 SkipprLogger::info($val);
 
@@ -305,7 +278,6 @@ class Config
                 Config::$filters[$filterName][$confName] = $val;
             }
         }
-
     }
 
     public static function buildAvroSchema($schema)
@@ -342,16 +314,12 @@ class Config
 
         if (!empty($newSchema)) {
             foreach ($newSchema as $i => $entry) {
-
                 if (!empty($existingSearchSchema[$entry['name']])) { // update existing schema at array index
                     $existingSearchSchema[$entry['name']]['schema'] = $entry;
-
                 } else { // add new schema field
                     $existingSearchSchema[$entry['name']]['index'] = $i;
                     $existingSearchSchema[$entry['name']]['schema'] = $entry;
-
                 }
-
             }
         }
 
@@ -363,7 +331,6 @@ class Config
         }
 
         return $parsedSchema;
-
     }
 
     public static function setConfig()
@@ -407,9 +374,7 @@ class Config
         $uri = self::getenv('SCHEMA_REGISTRY');
 
         if (!empty($uri)) {
-
             try {
-
                 $url = "http://$uri/";
                 $path = 'ingest-job/update-mapping';
 
@@ -430,35 +395,24 @@ class Config
                 ]);
 
                 SkipprLogger::info('Updated config via API');
-
             } catch (\Exception $e) {
                 SkipprLogger::error($e->getMessage());
             }
-
-
         } else {
-
             Config::$state[Config::$pipelineName]['mapping'] = Config::$discoveredFieldOccurrence;
             Config::$state[Config::$pipelineName]['pipeline_name'] = Config::$pipelineName;
             Config::$state['tenant_id'] = Config::$tenantId;
 //            Config::$state[Config::$pipelineName]['offsets'] = Config::$offsets;
 
             try {
-
                 file_put_contents(self::$dataDir . '/skippr-state.json', json_encode(Config::$state));
 
                 SkipprLogger::info('Written state to ' . self::$dataDir . '/skippr-state.json');
-
-
             } catch (\Exception $e) {
                 SkipprLogger::error($e->getMessage());
             }
-
-
         }
 
         return $configYml;
-
     }
-
 }

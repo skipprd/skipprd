@@ -13,8 +13,8 @@ class SerderCsv implements SerderBatchInterface
 
     public $csvHeaders = [];
     
-    public function __construct() {
-
+    public function __construct()
+    {
     }
     
     /**
@@ -55,8 +55,7 @@ class SerderCsv implements SerderBatchInterface
         /**
          * deserialise handling multilines in csv
          */
-        while ( ($data = fgetcsv($fp, null, $delimiter) ) !== FALSE ) {
-
+        while (($data = fgetcsv($fp, null, $delimiter) ) !== false) {
             $is_header_row = false;
             $headers = $this->csvHeaders;
 
@@ -67,7 +66,6 @@ class SerderCsv implements SerderBatchInterface
 
             // check for header row
             if (empty($headers)) {
-
                 $is_header_row = true;
 
                 foreach ($data as $item) {
@@ -86,19 +84,15 @@ class SerderCsv implements SerderBatchInterface
 
             // don't add header row to data
             if (!$is_header_row && $fieldCount > 1) {
-
                 // has header column names
                 // field count is greater than 1
                 if (!empty($this->csvHeaders)) {
-
                     $keyedRow = [];
 
                     foreach ($data as $key => $item) {
                         $keyedRow[$this->csvHeaders[$key]] = trim($item);
                     }
                     $messages[] = $keyedRow;
-
-
                 } else { // no header column names, int key index only
                     $messages[] = $data;
                 }
@@ -106,7 +100,7 @@ class SerderCsv implements SerderBatchInterface
         }
 
         // Ensure all fields present in each row
-        $messages = array_filter($messages, function($line) use ($fieldCount) {
+        $messages = array_filter($messages, function ($line) use ($fieldCount) {
             return $fieldCount == count($line);
         });
 
@@ -121,10 +115,8 @@ class SerderCsv implements SerderBatchInterface
         $i = 0;
 
         # write out the data
-        foreach ( $record as $row ) {
-
+        foreach ($record as $row) {
             if ($i === 0) {
-
                 # write out the headers
                 fputcsv($fh, array_keys(current($record)));
 
@@ -132,16 +124,11 @@ class SerderCsv implements SerderBatchInterface
             }
 
             foreach ($row as $field => $item) {
-
                 if (is_array($item)) {
-
                     $data[$field] = json_encode($item);
-
                 } else {
-
                     $data[$field] = $item;
                 }
-
             }
 
 //            $data = json_encode($row, 0, 2);
@@ -150,6 +137,5 @@ class SerderCsv implements SerderBatchInterface
         }
 
         fclose($fh);
-
     }
 }

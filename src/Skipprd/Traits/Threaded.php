@@ -3,7 +3,6 @@
 
 namespace Skipprd\Traits;
 
-
 use Monolog\Registry;
 use Skipprd\Commands\PipelineCommand;
 use Skipprd\SkipprPack;
@@ -15,7 +14,6 @@ trait Threaded
     {
 
         if (Config::$mode == 'async') {
-
             $offsetsChannel = \parallel\Channel::make("input.offset", 100);
 //            $this->offsetChannel = $offsetsChannel;
 
@@ -70,12 +68,9 @@ trait Threaded
             $ncpu = 4;
 //
             if (Config::$analysing || Config::$mode == 'sync') {
-
                 $ncpu = 1;
-
             } else {
                 if (is_file('/proc/cpuinfo')) {
-
                     $cpuinfo = file_get_contents('/proc/cpuinfo');
                     preg_match_all('/^processor/m', $cpuinfo, $matches);
                     $ncpu = count($matches[0]);
@@ -83,7 +78,6 @@ trait Threaded
             }
 //
             for ($i = 0; $i < $ncpu; $i++) {
-
                 $this->threadPool[$i] = new \parallel\Runtime(__DIR__ . '/../../../bootstrap/autoload.php');
 
                 $this->threadPool[$i]->run(function () use (
@@ -106,39 +100,37 @@ trait Threaded
                     // PHP 7.1 and later can handle asynchronous signals natively
                     pcntl_async_signals(true);
 
-                    pcntl_signal(SIGINT,
+                    pcntl_signal(
+                        SIGINT,
                         [
                             $pipeline,
                             'commit'
-                        ]); // Call $this->shutdown() on SIGINT
-                    pcntl_signal(SIGTERM,
+                        ]
+                    ); // Call $this->shutdown() on SIGINT
+                    pcntl_signal(
+                        SIGTERM,
                         [
                             $pipeline,
                             'commit'
-                        ]); // Call $this->shutdown() on SIGTERM
+                        ]
+                    ); // Call $this->shutdown() on SIGTERM
 
                     $pipeline->offsetChannel = $offsetsChannel;
 
                     while (true) {
-
                         sleep(1);
 
                         try {
-
 //                            SkipprLogger::debug("Starting threaded ingest worker $i");
 
                             $pipeline->inputBuffer->finalise();
 
                             $pipeline->process();
-
                         } catch (\Exception $e) {
-
                             SkipprLogger::error($e->getMessage());
                             SkipprLogger::error($e->getTraceAsString());
-
                         }
                     }
-
                 });
             }
 
@@ -161,11 +153,9 @@ trait Threaded
 
 
                 while (true) {
-
                     sleep(1);
 
                     try {
-
                         SkipprLogger::debug("Starting threaded output worker");
 
                         $pipeline->outputBuffer->finalise();
@@ -175,16 +165,11 @@ trait Threaded
 
 //                                $pipeline->offsetChannel->send($pipeline->outputPlugin->offset);
                         }
-
-
                     } catch (\Exception $e) {
-
                         SkipprLogger::error($e->getMessage());
                         SkipprLogger::error($e->getTraceAsString());
-
                     }
                 }
-
             });
 
             /**
@@ -260,7 +245,6 @@ trait Threaded
 ////                }
 //
 //            }
-
         }
     }
 
@@ -282,7 +266,6 @@ trait Threaded
         }
 
         while ($line = $this->inputPlugin->buffer->stream()) {
-
             $sp = new SkipprPack($line);
             $payload = $sp->decodeRecord();
             $offset = $sp->decodeOffset();
@@ -299,13 +282,8 @@ trait Threaded
         }
 
         if (!Config::$analysing) {
-
-
             $this->outputPlugin->buffer->flushAll();
             $this->deadletterPlugin->buffer->flushAll();
-
         }
-
     }
-
 }

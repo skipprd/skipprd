@@ -3,7 +3,6 @@
 
 namespace Skipprd\Converters;
 
-
 class AvroHiveSchemaConverter implements SchemaConverterInterface
 {
 
@@ -20,15 +19,11 @@ class AvroHiveSchemaConverter implements SchemaConverterInterface
         ];
 
         foreach ($schema as $field) {
-
             // nulls don't have type at pos 1
             // array at pos 1 means complex type
             if (!empty($field['type'][1]) && is_array($field['type'][1])) {
-
                 // record
                 if ($field['type'][1]['type'] == 'record') {
-
-
                     $structCols = $this->convert($field['type'][1]['fields']);
 
                     $typeStr = $mappings[$field['type'][1]['type']] . '<';
@@ -48,7 +43,6 @@ class AvroHiveSchemaConverter implements SchemaConverterInterface
 
                 // map
                 if ($field['type'][1]['type'] == 'map') {
-
                     $fieldType = $mappings[$field['type'][1]['type']] ? $mappings[$field['type'][1]['type']] : $field['type'][1]['type'];
                     $valueType = isset($mappings[$field['type'][1]['values']]) ? $mappings[$field['type'][1]['values']] : $field['type'][1]['values'];
 
@@ -61,7 +55,6 @@ class AvroHiveSchemaConverter implements SchemaConverterInterface
                 }
 
                 if ($field['type'][1]['type'] == 'array') {
-
                     $fieldType = $mappings[$field['type'][1]['type']] ? $mappings[$field['type'][1]['type']] : $field['type'][1]['type'];
                     $valueType = isset($mappings[$field['type'][1]['items']]) ? $mappings[$field['type'][1]['items']] : $field['type'][1]['items'];
 
@@ -72,7 +65,6 @@ class AvroHiveSchemaConverter implements SchemaConverterInterface
                         'Type' => $typeStr,
                     ];
                 }
-
             } else {
 
                 /**
@@ -80,8 +72,7 @@ class AvroHiveSchemaConverter implements SchemaConverterInterface
                  */
                 if (empty($field['type'][1])) { // null doesn't have type at pos 1
                     $parquetType = $field['type'][0];
-                }
-                elseif (!empty($mappings[$field['type'][1]])) {
+                } elseif (!empty($mappings[$field['type'][1]])) {
                     $parquetType = $mappings[$field['type'][1]];
                 } else {
                     $parquetType = $field['type'][1];
@@ -92,7 +83,6 @@ class AvroHiveSchemaConverter implements SchemaConverterInterface
                     'Type' => $parquetType,
                 ];
             }
-
         }
 
         return $columns;

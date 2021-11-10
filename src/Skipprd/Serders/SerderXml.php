@@ -10,8 +10,8 @@ use Skipprd\Traits\Config;
 class SerderXml implements SerderBatchInterface
 {
 
-    public function __construct(\AvroSchema $schema = null) {
-
+    public function __construct(\AvroSchema $schema = null)
+    {
     }
 
     public function deserialize(string $payload): array
@@ -21,11 +21,10 @@ class SerderXml implements SerderBatchInterface
         
         $xml = simplexml_load_string($payload, null, LIBXML_NOCDATA);
         foreach ($xml as $xmlItem) {
-            $array[] = json_decode(json_encode($xmlItem),TRUE);
+            $array[] = json_decode(json_encode($xmlItem), true);
         }
 
         return $array;
-
     }
 
     public function serialize(array $records, string $filename, $schema = null): void
@@ -33,29 +32,26 @@ class SerderXml implements SerderBatchInterface
 
         $xml_data = new \SimpleXMLElement('<?xml version="1.0"?><data></data>');
 
-        $this->array_to_xml($records,$xml_data);
+        $this->array_to_xml($records, $xml_data);
 
         $result = $xml_data->asXML($filename);
-
     }
 
-    public function array_to_xml( $data, &$xml_data ) {
-        foreach( $data as $key => $value ) {
-
+    public function array_to_xml($data, &$xml_data)
+    {
+        foreach ($data as $key => $value) {
             if (empty($value)) {
                 continue;
             }
-            if( is_array($value) ) {
-                if ( is_numeric($key) ){
+            if (is_array($value)) {
+                if (is_numeric($key)) {
                     $key = 'item'; //dealing with <0/>..<n/> issues
                 }
 
                 $subnode = $xml_data->addChild($key);
                 $this->array_to_xml($value, $subnode);
-
             } else {
-
-                if ( is_numeric($key) ){
+                if (is_numeric($key)) {
                     $key = 'item'; //dealing with <0/>..<n/> issues
                 }
                 

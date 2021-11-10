@@ -8,14 +8,12 @@
 
 namespace Skipprd\Traits;
 
-
 use Carbon\Carbon;
 use \Exception;
 use Monolog\Registry;
 use Skipprd\Arr;
 use Skipprd\Commands\RecordFilter;
 use Skipprd\Helpers;
-
 
 trait Ingest
 {
@@ -31,9 +29,7 @@ trait Ingest
 
         // Filter
         if (!empty(Config::$filters)) {
-
             foreach (Config::$filters as $filter) {
-
                 $value = Arr::get($sourceMessage, $filter['field_path'], false);
 
                 if ($value
@@ -43,9 +39,7 @@ trait Ingest
                         $filter['comparison'],
                         $filter['action']
                     )) {
-
                     Arr::set($sourceMessage, $filter['field_path'], $value);
-
                 } else { // record drop
                     return false;
                 }
@@ -54,26 +48,20 @@ trait Ingest
 
         // @todo - configurable timefields
         if (!empty($sourceMessage)) {
-
             $message = $this->defaultMsgs[$partition];
 
             /*
              * Transformations and schema evolution
              */
             foreach ($sourceMessage as $field => $value) {
-
                 if (!empty($metadata[$field]['enabled'])) { // only ingest fields enabled to sync to output
-
                     if ($this->i == 1) {
                         SkipprLogger::info("Ingesting field: $field");
                     }
                     $this->ingestField($field, $value, $metadata, $message);
-
                 } elseif (isset(Config::$specialFields[$field])) {
                     $message[$field] = $value;
-
                 }
-
             }
 
 
@@ -93,17 +81,13 @@ trait Ingest
             if (!$this->flagMsgDeadLetter
                 && $this->avroEncodeTest($message, $partition)
             ) {
-
                 $this->entries++;
 
 //                $this->entries[] = $message;
 
 //                $this->serialiseOutput($message, $offset);
                 return $message;
-
-
             } else {
-
                 // Don't attempt to ingest records with new fields.
                 // We must ensure the user selects a determined_type for the field first.
                 // So just dead letter it for now.
@@ -113,10 +97,7 @@ trait Ingest
 
                 return false;
             }
-
-
         } else {
-
             return false;
 //            $this->deadLetterMessage($message);
 
@@ -136,16 +117,12 @@ trait Ingest
 
         if (isset(Config::$specialFields[$field])) {
             $message[$field] = $value;
-            
-        }
-        elseif (!empty($metadata[$field]['determined_type'])) {
-
+        } elseif (!empty($metadata[$field]['determined_type'])) {
             $dataType = $metadata[$field]['determined_type'];
 
             // No need to process the actual parent field, just its values
 //            if ( !in_array($dataType, ['record', 'map']) ) {
-            if ( !in_array($dataType, ['record']) ) {
-
+            if (!in_array($dataType, ['record'])) {
                 // @todo - getLogicalType performance is slow, avoid calling.
 
                 //       - So only handle schema evolution on setValue failure
@@ -172,8 +149,12 @@ trait Ingest
                 if (!empty($metadata[$field]['transform'])) {
                     $transformation = $metadata[$field]['transform'];
 
-                    $this->applyTransformationFactory($field,
-                        $value, $transformation, $dataType);
+                    $this->applyTransformationFactory(
+                        $field,
+                        $value,
+                        $transformation,
+                        $dataType
+                    );
                 }
 
                 // $value will be cast or resolved by schema evolution
@@ -185,10 +166,7 @@ trait Ingest
                 if (!empty($resolvedValue)) {
                     $message[$field] = $resolvedValue;
                 }
-
             }
-
-
         } else {
             // discover schema for new fields
             $dataType = $this->resolveFieldType($metadata, $field, $value);
@@ -201,28 +179,24 @@ trait Ingest
 //        if (is_array($value) && !empty($value) && $dataType != 'array') {
         if (is_array($value) && !empty($value) && !in_array($dataType, ['array', 'map'])) {
             foreach ($value as $sub_field => $sub_value) {
-
                 $sub_field = Helpers::cleanFieldName($sub_field);
 
                 if (!empty($metadata[$field]['fields'][$sub_field]['enabled'])) { // only ingest fields enabled to sync to output
-
                     if ($this->i == 1) {
                         SkipprLogger::info("Ingesting field: $sub_field");
                     }
 
-                    $this->ingestField($sub_field, $sub_value,$metadata[$field]['fields'],$message[$field]);
+                    $this->ingestField($sub_field, $sub_value, $metadata[$field]['fields'], $message[$field]);
                 }
-
             }
         }
-
     }
 
     /**
      * Message must contain ALL fields described in the schema
      * (to support some destinations like Parquet and Athena)
      * Fields are null by default
-     * 
+     *
      * @param array $message
      * @return array
      */
@@ -230,44 +204,33 @@ trait Ingest
     {
 
         try {
-
             // Init with internal special fields
             if (empty($schema)) {
                 $message = Config::$specialFields;
             }
 
             foreach ($schema as $i => $field) {
-
                 if (!empty($field['type'][1]['fields'])) {
                     $message[$field['name']] = $this->defaultMessage($field['type'][1]['fields']);
                 } else {
                     if (!empty($field['type'][1]['type'])) {
-
                         if ($field['type'][1] == 'record') {
                             $message[$field['name']] = ['' => null];
-
                         } elseif ($field['type'][1]['type'] == 'array') {
-
                             $message[$field['name']] = [];
-
                         } elseif ($field['type'][1]['type'] == 'map') {
-
                             if ($field['type'][1]['values'] == 'string') {
                                 $message[$field['name']] = ['' => ''];
                             }
                             if ($field['type'][1]['values'] == 'int') {
                                 $message[$field['name']] = ['' => 0];
                             }
-
-
                         }
-
                     } else {
                         $message[$field['name']] = null;
                     }
                 }
             }
-
         } catch (Exception $e) {
             SkipprLogger::error('Unable to build default message.');
             throw $e;
@@ -286,7 +249,6 @@ trait Ingest
     ) {
         
         switch ($transformation) {
-
             case 'drop':
                 if (array_key_exists($dataType, AnalyseSchema::$dataTypeDrops)) {
                     $value = AnalyseSchema::$dataTypeDrops[$dataType];
@@ -306,9 +268,7 @@ trait Ingest
 //                break;
             case 'default':
                 break;
-
         }
-
     }
 
     public function avroEncodeTest(array $record, string $partition)
@@ -316,13 +276,11 @@ trait Ingest
 
         try {
             $valid = \AvroSchema::is_valid_datum(Config::$avroSchemas[$partition], $record);
-
         } catch (\AvroSchemaParseException $e) {
             $valid = false;
         }
 
         return $valid;
-
     }
 
     /**
@@ -336,16 +294,12 @@ trait Ingest
 
         try {
             switch ($dataType) {
-
                 case 'array':
-
                     if (is_array($value) && Helpers::isSequentialArrayKeys($value)) {
-
                         foreach ($value as $key => $val) {
                             $value[$key] = $this->setValue($fieldOccurrence[$field]['determined_type_values'], $key, $val);
                         }
                         return $value;
-
                     } else {
                         throw new \Exception();
                     }
@@ -357,13 +311,11 @@ trait Ingest
                     Helpers::cleanArrayFieldNames($value);
 
                     if (is_array($value)) {
-
                         foreach ($value as $key => $val) {
                             $value[$key] = $this->setValue($fieldOccurrence[$field]['determined_type_values'], $key, $val);
                         }
 
                         return $value;
-
                     } else {
                         throw new \Exception();
                     }
@@ -371,12 +323,10 @@ trait Ingest
                     break;
 
                 case 'string':
-
                     $value .= '';
 
                     if (gettype($value) == 'string') {
                         return $value;
-
                     } else {
                         throw new \Exception();
                     }
@@ -384,21 +334,17 @@ trait Ingest
                     break;
                 case 'timestamp':
                 case 'timestamp_milli':
-
                     return Carbon::createFromTimestamp($value)->timestamp;
 
                     break;
                 case 'date':
-
                     return Carbon::parse($value)->timestamp;
 
                     break;
                 case 'int':
                 case 'integer':
-
                     if (AnalyseSchema::is32bitSignedInt($value)) {
                         return (int) $value + 0; // force string to int
-
                     } else {
                         throw new \Exception();
                     }
@@ -409,25 +355,19 @@ trait Ingest
 
                     if (AnalyseSchema::is64bitSignedInt($value)) {
                         return (int) $value + 0; // force strings to long
-
                     } else {
                         throw new \Exception();
                     }
 
                     break;
                 case 'double':
-
                     if (AnalyseSchema::isFloat($value)) {
                         return (float) floatval($value); // force strings to number
-
                     } else {
-
                         $valFloat = (float) sprintf("%.2f", $value);
 
                         if (AnalyseSchema::isFloat($valFloat)) {
-
                             return (float) $valFloat; // force strings to number
-
                         } else {
                             throw new \Exception();
                         }
@@ -435,10 +375,8 @@ trait Ingest
 
                     break;
                 case 'boolean':
-
-                    if (filter_var($value,FILTER_VALIDATE_BOOLEAN)) {
+                    if (filter_var($value, FILTER_VALIDATE_BOOLEAN)) {
                         return (bool) $value;
-
                     } else {
                         throw new \Exception();
                     }
@@ -446,14 +384,10 @@ trait Ingest
                     break;
                 default:
                     throw new \Exception();
-
             }
-
         } catch (\Exception $e) {
             $this->handleValueError($field, $value, $fieldOccurrence);
             return $value;
-
         }
-
     }
 }

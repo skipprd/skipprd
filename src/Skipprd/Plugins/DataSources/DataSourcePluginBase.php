@@ -44,7 +44,7 @@ class DataSourcePluginBase implements DataSourcePluginInterface
     }
 
     public function connect()
-    { 
+    {
     }
 
     public function commit(string $offset = '')
@@ -85,5 +85,4 @@ class DataSourcePluginBase implements DataSourcePluginInterface
     public function shutdown()
     {
     }
-
 }

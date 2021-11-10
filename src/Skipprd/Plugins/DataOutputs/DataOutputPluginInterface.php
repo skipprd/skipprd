@@ -5,7 +5,7 @@ namespace Skipprd\Plugins\DataOutputs;
 use Skipprd\Buffers\BufferInterface;
 use Skipprd\Plugins\ValidationResponse;
 
-Interface DataOutputPluginInterface
+interface DataOutputPluginInterface
 {
 
     public function __construct(array $config, BufferInterface $buffer);
@@ -17,5 +17,4 @@ Interface DataOutputPluginInterface
     public function doValidateConfig(): ValidationResponse;
 
     public function shutdown();
-
 }

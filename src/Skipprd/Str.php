@@ -2,7 +2,6 @@
 
 namespace Skipprd;
 
-
 class Str
 {
 
@@ -36,8 +35,11 @@ class Str
      */
     public static function after($subject, $search)
     {
-        return $search === '' ? $subject : array_reverse(explode($search,
-            $subject, 2))[0];
+        return $search === '' ? $subject : array_reverse(explode(
+            $search,
+            $subject,
+            2
+        ))[0];
     }
 
     /**
@@ -52,8 +54,11 @@ class Str
         $languageSpecific = static::languageSpecificCharsArray($language);
 
         if (!is_null($languageSpecific)) {
-            $value = str_replace($languageSpecific[0], $languageSpecific[1],
-                $value);
+            $value = str_replace(
+                $languageSpecific[0],
+                $languageSpecific[1],
+                $value
+            );
         }
 
         foreach (static::charsArray() as $key => $val) {
@@ -223,8 +228,11 @@ class Str
      */
     public static function parseCallback($callback, $default = null)
     {
-        return static::contains($callback, '@') ? explode('@', $callback,
-            2) : [$callback, $default];
+        return static::contains($callback, '@') ? explode(
+            '@',
+            $callback,
+            2
+        ) : [$callback, $default];
     }
 
     /**
@@ -242,8 +250,11 @@ class Str
 
             $bytes = random_bytes($size);
 
-            $string .= substr(str_replace(['/', '+', '='], '',
-                base64_encode($bytes)), 0, $size);
+            $string .= substr(str_replace(
+                ['/', '+', '='],
+                '',
+                base64_encode($bytes)
+            ), 0, $size);
         }
 
         return $string;
@@ -283,8 +294,12 @@ class Str
         $position = strpos($subject, $search);
 
         if ($position !== false) {
-            return substr_replace($subject, $replace, $position,
-                strlen($search));
+            return substr_replace(
+                $subject,
+                $replace,
+                $position,
+                strlen($search)
+            );
         }
 
         return $subject;
@@ -303,8 +318,12 @@ class Str
         $position = strrpos($subject, $search);
 
         if ($position !== false) {
-            return substr_replace($subject, $replace, $position,
-                strlen($search));
+            return substr_replace(
+                $subject,
+                $replace,
+                $position,
+                strlen($search)
+            );
         }
 
         return $subject;
@@ -361,19 +380,28 @@ class Str
         // Convert all dashes/underscores into separator
         $flip = $separator === '-' ? '_' : '-';
 
-        $title = preg_replace('![' . preg_quote($flip) . ']+!u', $separator,
-            $title);
+        $title = preg_replace(
+            '![' . preg_quote($flip) . ']+!u',
+            $separator,
+            $title
+        );
 
         // Replace @ with the word 'at'
         $title = str_replace('@', $separator . 'at' . $separator, $title);
 
         // Remove all characters that are not the separator, letters, numbers, or whitespace.
-        $title = preg_replace('![^' . preg_quote($separator) . '\pL\pN\s]+!u',
-            '', static::lower($title));
+        $title = preg_replace(
+            '![^' . preg_quote($separator) . '\pL\pN\s]+!u',
+            '',
+            static::lower($title)
+        );
 
         // Replace all separator characters and whitespace by a single separator
-        $title = preg_replace('![' . preg_quote($separator) . '\s]+!u',
-            $separator, $title);
+        $title = preg_replace(
+            '![' . preg_quote($separator) . '\s]+!u',
+            $separator,
+            $title
+        );
 
         return trim($title, $separator);
     }
@@ -396,8 +424,11 @@ class Str
         if (!ctype_lower($value)) {
             $value = preg_replace('/\s+/u', '', ucwords($value));
 
-            $value = static::lower(preg_replace('/(.)(?=[A-Z])/u',
-                '$1' . $delimiter, $value));
+            $value = static::lower(preg_replace(
+                '/(.)(?=[A-Z])/u',
+                '$1' . $delimiter,
+                $value
+            ));
         }
 
         return static::$snakeCache[$key][$delimiter] = $value;
@@ -413,8 +444,11 @@ class Str
     public static function startsWith($haystack, $needles)
     {
         foreach ((array) $needles as $needle) {
-            if ($needle !== '' && substr($haystack, 0,
-                    strlen($needle)) === (string) $needle) {
+            if ($needle !== '' && substr(
+                $haystack,
+                0,
+                strlen($needle)
+            ) === (string) $needle) {
                 return true;
             }
         }
@@ -462,8 +496,11 @@ class Str
      */
     public static function ucfirst($string)
     {
-        return static::upper(static::substr($string, 0,
-                1)) . static::substr($string, 1);
+        return static::upper(static::substr(
+            $string,
+            0,
+            1
+        )) . static::substr($string, 1);
     }
 
     /**

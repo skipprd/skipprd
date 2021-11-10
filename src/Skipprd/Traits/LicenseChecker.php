@@ -23,7 +23,6 @@ trait LicenseChecker
 
 
         try {
-
             $this->licenseKey = Config::getenv('LICENSE_KEY', $this->licenseKey);
 
             SkipprLogger::info('Looking up license');
@@ -31,24 +30,18 @@ trait LicenseChecker
             $uri = Config::getenv('SCHEMA_REGISTRY');
 
             if (!empty($uri)) {
-
                 $authHeader = ['Authorization' => "Bearer " . Config::getenv('SCHEMA_API_TOKEN')];
 
                 $url = "http://$uri/";
-                
             } elseif (empty($uri)) {
-
                 $env = Config::getenv('APP_ENV', 'prod');
 
                 $authHeader =  ['x-api-key' => $this->licenseApiKey[$env]];
 
                 if ($env != 'prod') {
                     $uri = "license.$env.skippr.io/license-api";
-
                 } else {
-
                     $uri = "license.skippr.io/license-api";
-
                 }
 
                 $url = "https://$uri/";
@@ -68,32 +61,23 @@ trait LicenseChecker
             $this->license = json_decode($body, true);
 
             // API only returns license that are currently valid
-            if (
-                !empty($this->license)
+            if (!empty($this->license)
                 && $this->license['license_key'] == $this->licenseKey
             ) {
-
                 SkipprLogger::info('Found valid license');
 
                 $this->licenseIsValid = true;
-
             } else {
-
                 SkipprLogger::info('Did not find a valid license');
 
                 $this->licenseIsValid = false;
             }
-
-
         } catch (\Exception $e) {
             SkipprLogger::error($e->getMessage());
 
             SkipprLogger::info('Did not find a valid license');
 
             $this->licenseIsValid = false;
-            
         }
-
     }
-
 }

@@ -9,7 +9,6 @@ use Skipprd\Buffers\BufferInterface;
 use Skipprd\Str;
 use Skipprd\Traits\SkipprLogger;
 
-
 class PluginFactory
 {
 
@@ -43,5 +42,4 @@ class PluginFactory
 
         return $factoryModel;
     }
-
 }

@@ -42,10 +42,9 @@ class FileBufferDriver implements BufferDriverInterface
 
         $this->bufferDir = Config::$dataDir . '/buffer';
 
-        @mkdir($this->bufferDir,0777, true);
+        @mkdir($this->bufferDir, 0777, true);
 
         $this->setSerde(Config::$outputFormat);
-
     }
 
     public function setSerde(string $serde)
@@ -53,31 +52,26 @@ class FileBufferDriver implements BufferDriverInterface
         $this->serde = SerdersFactory::factory($serde);
     }
 
-    public function flush(array $memBuff, string $chunkName, string $partition) : void {
+    public function flush(array $memBuff, string $chunkName, string $partition) : void
+    {
 
         $schema = Config::$outputSchemas[$partition];
 
         $filename = $this->bufferDir . '/' . $chunkName . '_part';
 
         try {
-
             if (FileBufferDriver::lock($filename)) { // acquire an exclusive lock
-
                 if (in_array(Config::$outputFormat, Config::$batchFormats)
                     && Config::$enableDeadLetters) {
-
                     $this->serde->serialize($memBuff, $filename, $schema);
 
                     FileBufferDriver::unlock($filename);
 
                     $this->finalise(true);
-
                 } else {
-
                     $fp = fopen($filename, 'a+');
 
                     foreach ($memBuff as $buf) {
-
                         fputs($fp, $this->serde->serialize($buf, $schema) . "\n");
                     }
 
@@ -86,12 +80,9 @@ class FileBufferDriver implements BufferDriverInterface
                     FileBufferDriver::unlock($filename);
 
                     FileBufferDriver::close($fp);
-
                 }
             }
-
         } catch (\Exception $e) {
-
             echo $e->getMessage();
 
             echo $e->getTraceAsString();
@@ -102,7 +93,6 @@ class FileBufferDriver implements BufferDriverInterface
             FileBufferDriver::close($fp);
 
             throw $e;
-
         }
 
         SkipprLogger::debug("Flushed buffer chunk $chunkName");
@@ -163,7 +153,6 @@ class FileBufferDriver implements BufferDriverInterface
     {
 
         return $this->dataFp->getPathname();
-
     }
 
     public function stream()
@@ -171,11 +160,9 @@ class FileBufferDriver implements BufferDriverInterface
         
         // stream
         if ($this->dataFp == null) {
-
             $filename = $this->nextFile();
 
             if ($filename) {
-
                 // checkpoint
                 $checkpoint_filename = $filename . '.checkpoint';
 
@@ -187,21 +174,15 @@ class FileBufferDriver implements BufferDriverInterface
                 $this->dataFp = new \SplFileObject($filename, "a+");
 
                 $this->dataFp->seek($this->cpLine);
-                
             } else {
                 return false;
             }
-
         }
 
         if ($this->dataFp) {
-
             if (!$this->dataFp->eof()) {
-
                 try {
-
                     if ($payload = $this->dataFp->current()) {
-
                         $this->dataFp->next();
 
                         $this->cpLine++;
@@ -211,16 +192,12 @@ class FileBufferDriver implements BufferDriverInterface
 //                        return $this->serde->serialize($payload);
 
                         return $this->serde->deserialize($payload);
-                        
                     }
-
                 } catch (\Exception $e) {
-
                     SkipprLogger::error($e->getMessage());
 
                     return false; // exit to prevent buffer destroy
                 }
-
             }
 
             $this->destroy($this->dataFp->getPathname());
@@ -231,7 +208,6 @@ class FileBufferDriver implements BufferDriverInterface
         }
 
         return $this->stream();
-        
     }
 
 //    /**
@@ -262,57 +238,56 @@ class FileBufferDriver implements BufferDriverInterface
 
         $filenames = glob($this->bufferDir . '/' . $this->bufferName . '*_finalised_*', GLOB_NOSORT);
 
-        usort( $filenames, function( $a, $b ) { return filemtime($a) - filemtime($b); } );
+        usort($filenames, function ($a, $b) {
+            return filemtime($a) - filemtime($b);
+        });
 
         foreach ($filenames as $filename) {
-
             try {
-
                 // possible file removed by competing thread
-                if (!file_exists($filename)) continue;
-
-                // ignore locked files
-                if (strpos($filename, '.lock')) continue;
-                if (strpos($filename, '.checkpoint')) continue;
-
-                if (FileBufferDriver::lock($filename, false)) {
-
-                    return $filename;
-
+                if (!file_exists($filename)) {
+                    continue;
                 }
 
-            } catch (\Exception $e) {
+                // ignore locked files
+                if (strpos($filename, '.lock')) {
+                    continue;
+                }
+                if (strpos($filename, '.checkpoint')) {
+                    continue;
+                }
 
+                if (FileBufferDriver::lock($filename, false)) {
+                    return $filename;
+                }
+            } catch (\Exception $e) {
                 // Still possible the file has been deleted just after the file_exists check
                 SkipprLogger::debug($e->getMessage());
-
             }
-
         }
 
         return false;
     }
 
 
-    public function lock(string $chunkName, $block = true) : bool {
+    public function lock(string $chunkName, $block = true) : bool
+    {
         
         $locked = false;
 
         SkipprLogger::debug("Creating lock buffer chunk $chunkName");
 
         // dir is more reliable than waiting for fstat on a file
-        if (@mkdir($chunkName . '.lock',0777, true)) {
+        if (@mkdir($chunkName . '.lock', 0777, true)) {
             $locked = true;
             SkipprLogger::debug("Created lock buffer chunk $chunkName");
         }
 
         while (!$locked && $block) {
-
-            if (@mkdir($chunkName . '.lock',0777, true)) {
+            if (@mkdir($chunkName . '.lock', 0777, true)) {
                 $locked = true;
                 SkipprLogger::debug("Created lock buffer chunk $chunkName");
             } else {
-
                 sleep(1);
             }
         }
@@ -325,45 +300,39 @@ class FileBufferDriver implements BufferDriverInterface
         $file_list = glob($this->bufferDir . '/' . $this->bufferName . '*lock');
 
         if (!empty($file_list)) {
-
             foreach ($file_list as $filename) {
-
                 try {
-
                     rmdir($filename);
-
                 } catch (\Exception $e) {
-
                     // Still possible the file has been deleted just before with stat the size
                     SkipprLogger::debug($e->getMessage());
-
                 }
-
             }
         }
     }
 
-    public function unlock(string $chunkName) : bool {
+    public function unlock(string $chunkName) : bool
+    {
 
         rmdir($chunkName . '.lock');
 
         return true;
     }
 
-    public function close($fp) : bool {
+    public function close($fp) : bool
+    {
 
         if (fclose($fp)) { // release the lock)
             return true;
         } else {
             return false;
         }
-
     }
 
-    public function destroy($filename) : bool {
+    public function destroy($filename) : bool
+    {
 
         try {
-
             SkipprLogger::debug("Destroying finished buffer file: " . $filename);
 
             unlink($filename);
@@ -371,68 +340,65 @@ class FileBufferDriver implements BufferDriverInterface
             self::unlock($filename);
 
             return true;
-
         } catch (\Exception $e) {
             SkipprLogger::error("Failed to destroy buffer");
             SkipprLogger::error($e->getMessage());
 
             return false;
         }
-
-
     }
 
-    public function finalise($force = false) :void {
+    public function finalise($force = false) :void
+    {
 
         $file_list = glob($this->bufferDir . '/' . $this->bufferName . '*_part*');
 
         if (!empty($file_list)) {
-
-           foreach ($file_list as $filename) {
-
-               try {
-                   // possible file removed by competing thread
-                   if (!file_exists($filename)) continue;
-
-                   // ignore locked files
-                   if (strpos($filename, '.lock')) continue;
-
-                   SkipprLogger::debug("Finalising buffer file $filename");
-
-                   $updatedTime = filectime($filename);
-                   $updatedDelta = time() - $updatedTime;
-
-                   $bytes = filesize($filename);
-
-                   if (FileBufferDriver::lock($filename)) { // acquire an exclusive lock
-
-//                       SkipprLogger::debug("bytes: " . $bytes);
-//                       SkipprLogger::debug("flushBytes: " . $this->flushBytes);
-
-                       if ($bytes >= $this->flushBytes || $updatedDelta > $this->flushFileSeconds || $force) {
-
-                           $newFilename = str_replace('part', 'finalised',
-                               $filename);
-
-                           rename($filename, $newFilename . '_' . Helpers::randomPassword(32));
-
-                           if (!$force) {
-
-                               $humanSize = BytesToHuman::toHuman($bytes);
-                               SkipprLogger::debug("Buffer file $filename rotated at $humanSize and change time delta $updatedDelta");
-                           }
-                       }
-
-                       FileBufferDriver::unlock($filename);
+            foreach ($file_list as $filename) {
+                try {
+                    // possible file removed by competing thread
+                    if (!file_exists($filename)) {
+                        continue;
                     }
 
-               } catch (\Exception $e) {
+                    // ignore locked files
+                    if (strpos($filename, '.lock')) {
+                        continue;
+                    }
 
-                   // Still possible the file has been deleted just before with stat the size
-                   SkipprLogger::debug($e->getMessage());
+                    SkipprLogger::debug("Finalising buffer file $filename");
 
-               }
-           }
+                    $updatedTime = filectime($filename);
+                    $updatedDelta = time() - $updatedTime;
+
+                    $bytes = filesize($filename);
+
+                    if (FileBufferDriver::lock($filename)) { // acquire an exclusive lock
+ //                       SkipprLogger::debug("bytes: " . $bytes);
+ //                       SkipprLogger::debug("flushBytes: " . $this->flushBytes);
+
+                        if ($bytes >= $this->flushBytes || $updatedDelta > $this->flushFileSeconds || $force) {
+                            $newFilename = str_replace(
+                                'part',
+                                'finalised',
+                                $filename
+                            );
+
+                            rename($filename, $newFilename . '_' . Helpers::randomPassword(32));
+
+                            if (!$force) {
+                                $humanSize = BytesToHuman::toHuman($bytes);
+                                SkipprLogger::debug("Buffer file $filename rotated at $humanSize and change time delta $updatedDelta");
+                            }
+                        }
+
+                        FileBufferDriver::unlock($filename);
+                    }
+                } catch (\Exception $e) {
+                    // Still possible the file has been deleted just before with stat the size
+                    SkipprLogger::debug($e->getMessage());
+                }
+            }
         }
     }
 
@@ -444,7 +410,6 @@ class FileBufferDriver implements BufferDriverInterface
         $i = 0;
 
         foreach ($file_list as $filename) {
-
             // possible file removed by competing thread
             if (!file_exists($filename)) {
                 continue;
@@ -469,24 +434,22 @@ class FileBufferDriver implements BufferDriverInterface
         $file_list = glob($this->bufferDir . '/' . "$this->bufferName*");
 
         if (!empty($file_list)) {
-
             foreach ($file_list as $filename) {
-
                 try {
-
                     // possible file removed by competing thread
-                    if (!file_exists($filename)) continue;
+                    if (!file_exists($filename)) {
+                        continue;
+                    }
 
                     // ignore locked files
-                    if (strpos($filename, '.lock')) continue;
+                    if (strpos($filename, '.lock')) {
+                        continue;
+                    }
 
                     $bytes += filesize($filename);
-
                 } catch (\Exception $e) {
-
                     // Still possible the file has been deleted just before with stat the size
                     SkipprLogger::debug($e->getMessage());
-
                 }
             }
         }
@@ -502,29 +465,26 @@ class FileBufferDriver implements BufferDriverInterface
         $lines = 0;
 
         if (!empty($file_list)) {
-
             foreach ($file_list as $filename) {
-
                 try {
-
                     // possible file removed by competing thread
-                    if (!file_exists($filename)) continue;
+                    if (!file_exists($filename)) {
+                        continue;
+                    }
 
                     // ignore locked files
-                    if (strpos($filename, '.lock')) continue;
+                    if (strpos($filename, '.lock')) {
+                        continue;
+                    }
 
                     $fp = fopen($filename, "rb");
 
                     while (!feof($fp)) {
                         $lines += substr_count(fread($fp, 8192), "\n");
                     }
-
-
                 } catch (\Exception $e) {
-
                     // Still possible the file has been deleted just before with stat the size
                     SkipprLogger::debug($e->getMessage());
-
                 }
             }
         }

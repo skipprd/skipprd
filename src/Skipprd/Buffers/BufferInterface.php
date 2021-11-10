@@ -21,5 +21,4 @@ interface BufferInterface
     public function decodeChunkPartition($filename) : string;
 
     public function decodeChunkPartitionName(string $chunkName) : string;
-    
 }

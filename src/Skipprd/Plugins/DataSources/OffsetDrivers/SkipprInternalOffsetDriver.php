@@ -14,32 +14,32 @@ class SkipprInternalOffsetDriver implements OffsetDriverInterface
     public function __construct()
     {
         $this->pipelineName = Config::getPipelineName();
-
     }
 
-    public function get() : array {
+    public function get() : array
+    {
 
         $body = $this->client();
 
         $offsets = json_decode($body, true);
 
         return $offsets;
-
     }
 
-    public function sync(string $partition, string $offset) : void {
+    public function sync(string $partition, string $offset) : void
+    {
 
         $body = $this->client('PUT', [$partition => $offset]);
-
     }
 
-    public function syncAll(array $offsets) : void {
+    public function syncAll(array $offsets) : void
+    {
 
         $body = $this->client('PUT', $offsets);
-
     }
 
-    protected function client(string $method = 'GET', array $data = []) {
+    protected function client(string $method = 'GET', array $data = [])
+    {
 
         $uri = Config::getenv('SCHEMA_REGISTRY');
 
@@ -47,7 +47,6 @@ class SkipprInternalOffsetDriver implements OffsetDriverInterface
 
         // Get Mapping
         try {
-
             $url = "http://$uri/";
 
             $client = new \GuzzleHttp\Client([
@@ -59,14 +58,15 @@ class SkipprInternalOffsetDriver implements OffsetDriverInterface
 
             switch ($method) {
                 case 'PUT':
-
                     $uri = $url . $path;
 
-                    $response = $client->request('PUT',
+                    $response = $client->request(
+                        'PUT',
                         $uri,
                         [
                             'json' => $data
-                        ]);
+                        ]
+                    );
 
                     $body = $response->getBody();
 
@@ -78,11 +78,8 @@ class SkipprInternalOffsetDriver implements OffsetDriverInterface
             }
             
             return $body;
-
-
         } catch (\Exception $e) {
             SkipprLogger::error($e->getMessage());
         }
     }
-
 }

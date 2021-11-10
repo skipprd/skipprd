@@ -2,7 +2,6 @@
 
 namespace Skipprd\Serders\Interfaces;
 
-
 interface SerderBatchInterface
 {
 

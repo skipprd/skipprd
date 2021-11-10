@@ -3,7 +3,6 @@
 
 namespace Skipprd\Buffers;
 
-
 trait BufferAdaptorsFactory
 {
 
@@ -21,5 +20,4 @@ trait BufferAdaptorsFactory
 
         return $adaptor;
     }
-
 }

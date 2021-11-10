@@ -3,7 +3,6 @@
 
 namespace Skipprd;
 
-
 class SkipprPack
 {
 
@@ -39,14 +38,11 @@ class SkipprPack
         $this->string_buffer = '';
         $this->current_index = 0;
 
-        if(is_string($skipprPack)) {
+        if (is_string($skipprPack)) {
             $this->string_buffer .= $skipprPack;
-        }
-        else {
+        } else {
             throw new \Exception(sprintf('constructor argument must be a string: %s', gettype($skipprPack)));
         }
-
-
     }
 
     public function encode(string $payload = '', string $offset = '') : void
@@ -63,7 +59,6 @@ class SkipprPack
 
         // write the record
         $this->write($this->payload);
-
     }
 
     public function decodeRecord(): string
@@ -78,7 +73,6 @@ class SkipprPack
         $record = $this->fpassthru();
 
         return $record;
-
     }
 
     public function decodeOffset(): string
@@ -92,7 +86,6 @@ class SkipprPack
         $offset = $this->read($offsetSize[1]);
 
         return $offset;
-
     }
 
 
@@ -111,7 +104,6 @@ class SkipprPack
         $this->current_index += $len;
 
         return $read;
-
     }
 
 
@@ -125,7 +117,6 @@ class SkipprPack
         $this->current_index += $len;
 
         return $read;
-
     }
 
     /**
@@ -133,7 +124,7 @@ class SkipprPack
      * @param int $whence
      * @return bool true if successful
      */
-    public function seek($offset, $whence=self::SEEK_SET) : bool
+    public function seek($offset, $whence = self::SEEK_SET) : bool
     {
         if (!is_int($offset)) {
             throw new \Exception('Seek offset must be an integer.');
@@ -168,7 +159,6 @@ class SkipprPack
     {
 
         $this->seek(0, self::SEEK_SET);
-
     }
 
     /**
@@ -201,7 +191,6 @@ class SkipprPack
     {
 //        if (is_string($arg)) return $this->append_str($arg);
         return true;
-
     }
 
     /**
@@ -247,5 +236,4 @@ class SkipprPack
     {
         return $this->__toString();
     }
-
 }

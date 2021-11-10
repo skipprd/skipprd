@@ -24,7 +24,9 @@ class Helpers
     public static function isSequentialArrayKeys(array $arr)
     {
         ksort($arr);
-        if (array_key_first($arr) !== 0 && array() === $arr) return false;
+        if (array_key_first($arr) !== 0 && array() === $arr) {
+            return false;
+        }
         return array_keys($arr) === range(0, count($arr) - 1);
     }
 
@@ -43,15 +45,17 @@ class Helpers
 
         $field = strtolower($field);
 
-        $pattern = "/[^" . preg_quote('0123456789_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ',
-                "/") . "]/";
+        $pattern = "/[^" . preg_quote(
+            '0123456789_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ',
+            "/"
+        ) . "]/";
 
         return preg_replace($pattern, "", $field);
     }
 
-    static function cleanArrayFieldNames(&$array) {
+    static function cleanArrayFieldNames(&$array)
+    {
         foreach ($array as $field => $value) {
-
             unset($array[$field]);
 
             $field = Helpers::cleanFieldName($field);
@@ -62,10 +66,9 @@ class Helpers
 
             $array[$field] = $value;
         }
-
     }
 
-    static public function randomPassword($length = 8)
+    public static function randomPassword($length = 8)
     {
         $alphabet = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890';
         $pass = []; //remember to declare $pass as an array
@@ -78,7 +81,7 @@ class Helpers
         return implode($pass); //turn the array into a string
     }
 
-    static public function randomStr($length = 8)
+    public static function randomStr($length = 8)
     {
         $alphabet = 'abcdefghijklmnopqrstuvwxyz';
         $pass = []; //remember to declare $pass as an array
@@ -91,5 +94,3 @@ class Helpers
         return implode($pass); //turn the array into a string
     }
 }
-
-

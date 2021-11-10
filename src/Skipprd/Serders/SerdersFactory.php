@@ -22,18 +22,17 @@ class SerdersFactory
     {
         $className = "Skipprd\\Serders\\Serder" . ucfirst(Str::camel($serder));
         return new $className($schema);
-        
     }
 
 
-    public static function discover(string $record) {
+    public static function discover(string $record)
+    {
 
         // attempt to discover serialisation type
         $serders = ["json" => 0, "csv" => 0, "avro" => 0];
 
         foreach ($serders as $serderCandidate => &$count) {
             try {
-
                 $className = "Skipprd\\Serders\\Serder" . ucfirst(Str::camel($serderCandidate));
                 $serderClass = new $className();
 
@@ -42,11 +41,8 @@ class SerdersFactory
                 // serder with most fields in each message wins
                 // recursive count for nested data
                 $count = count($analysisMessages, COUNT_RECURSIVE);
-
             } catch (\Exception $e) {
-
             }
-
         }
 
         if (max($serders) > 0) {
@@ -55,10 +51,8 @@ class SerdersFactory
             return $serder;
 //            $className = "Skipprd\\Serders\\Serder" . Str::camel($serder);
 //            return new $className();
-
         }
 
         return false;
     }
-
 }

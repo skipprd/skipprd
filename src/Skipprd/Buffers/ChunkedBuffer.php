@@ -35,7 +35,8 @@ class ChunkedBuffer implements BufferInterface
         $this->driver = $bufferDriver;
     }
 
-    public function append(array $payload, bool $flush = false, int $eventTime = 0, string $partition = null) : void {
+    public function append(array $payload, bool $flush = false, int $eventTime = 0, string $partition = null) : void
+    {
 
         $timeBucket = $this->eventTimeBucket($eventTime);
 
@@ -49,18 +50,15 @@ class ChunkedBuffer implements BufferInterface
 //        }
 
         if (empty($this->memBuffs[$chunkName])) {
-
 //            $this->memBuffs[$chunkName]['size'] = mb_strlen($payload) * 8;
             $this->memBuffs[$chunkName]['size'] = mb_strlen(serialize((array)$payload), '8bit');
             $this->memBuffs[$chunkName]['time'] = time();
 //            $this->memBuffs[$chunkName]['buffer'] = "$payload";
-
         } else {
 //            $this->memBuffs[$chunkName]['size'] += mb_strlen($payload) * 8;
             $this->memBuffs[$chunkName]['size'] += mb_strlen(serialize((array)$payload), '8bit');
             $this->memBuffs[$chunkName]['time'] = time();
 //            $this->memBuffs[$chunkName]['buffer'] .= "$payload";
-
         }
 
         $this->memBuffs[$chunkName]['buffer'][] = $payload;
@@ -69,10 +67,7 @@ class ChunkedBuffer implements BufferInterface
             || $this->memBuffs[$chunkName]['size'] > $this->flushMemBytes
 //            || $this->memBuffs[$chunkName]['time'] < time() - $this->flushMemSeconds
         ) {
-
-
             if (!empty($this->memBuffs[$chunkName]) && !empty($this->memBuffs[$chunkName]['buffer'])) {
-
                 SkipprLogger::debug("Flushing buffer chunk $chunkName of size ". BytesToHuman::toHuman($this->memBuffs[$chunkName]['size'], true));
 
                 $this->driver->flush($this->memBuffs[$chunkName]['buffer'], $chunkName, $partition);
@@ -80,22 +75,19 @@ class ChunkedBuffer implements BufferInterface
                 unset($this->memBuffs[$chunkName]);
             }
         }
-
     }
 
-    public function flushAll(bool $force = false): void {
+    public function flushAll(bool $force = false): void
+    {
 
         foreach ($this->memBuffs as $chunkName => $buffer) {
-
             if ($force
                 || $buffer['size'] > $this->flushMemBytes
 //                || $buffer['time'] < time() - $this->flushMemSeconds
             ) {
-
                 $partition = $this->decodeChunkPartitionName($chunkName);
 
                 if (!empty($this->memBuffs[$chunkName]) && !empty($this->memBuffs[$chunkName]['buffer'])) {
-
                     SkipprLogger::debug("Flushing buffer chunk $chunkName of size ". BytesToHuman::toHuman($this->memBuffs[$chunkName]['size'], true));
 
                     $this->driver->flush($this->memBuffs[$chunkName]['buffer'], $chunkName, $partition);
@@ -103,16 +95,15 @@ class ChunkedBuffer implements BufferInterface
                     unset($this->memBuffs[$chunkName]);
                 }
             }
-
         }
     }
 
-    public function eventTimeBucket(int $eventTime) : int {
+    public function eventTimeBucket(int $eventTime) : int
+    {
 
         $bucket = $eventTime - ($eventTime % self::$eventTimeBucketDurationSeconds);
 
         return $bucket;
-
     }
 
     public function encodeChunkName($partition, $timeBucket): string
@@ -123,7 +114,8 @@ class ChunkedBuffer implements BufferInterface
         return $chunkName;
     }
 
-    public function getChunkName($filename) : array {
+    public function getChunkName($filename) : array
+    {
 
         $startPos = strpos($filename, $this->bufferName) + strlen($this->bufferName);
 //        $endPos = strpos($filename, '_finalised') - strlen('_finalised');
@@ -133,28 +125,26 @@ class ChunkedBuffer implements BufferInterface
         $encodedName = trim($encodedName, '-');
 
         return explode('-', $encodedName);
-
     }
 
-    public function decodeChunkTime($filename) : string {
+    public function decodeChunkTime($filename) : string
+    {
 
         $parts = $this->getChunkName($filename);
 
         if ($parts[0] < 0) {
-
             $timestamp = array_shift($parts);
 
             $date_string = Carbon::createFromTimestamp($timestamp)->format('Y-m-d');
 
             return 'dt=' . $date_string;
-
         }
 
         return '';
-
     }
 
-    public function decodeChunkPartition($filename) : string {
+    public function decodeChunkPartition($filename) : string
+    {
 
 //        SkipprLogger::debug("decoding partitions for file $filename");
 
@@ -177,7 +167,8 @@ class ChunkedBuffer implements BufferInterface
         return $partition_dir;
     }
 
-    public function decodeChunkPartitionName(string $chunkName) : string {
+    public function decodeChunkPartitionName(string $chunkName) : string
+    {
 
         $parts = explode('-', $chunkName);
         unset($parts[0]); // buffer name
@@ -220,5 +211,4 @@ class ChunkedBuffer implements BufferInterface
 //
 //        return false;
 //    }
-
 }

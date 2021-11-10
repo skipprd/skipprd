@@ -119,11 +119,8 @@ trait AnalyseSchema
         $this->i++;
 
         foreach ($message as $field => $value) {
-
-            $this->analyseField($field, $value,$metadata);
-
+            $this->analyseField($field, $value, $metadata);
         }
-
     }
 
     public function analyseField($field, $value, &$fieldOccurrence)
@@ -134,7 +131,6 @@ trait AnalyseSchema
 
         // Build mapping/Schema
         if ($fieldOccurrence[$field]['count'] < $this->minSample) {
-
             $fieldOccurrence[$field]['count']++;
 
             $this->resolveFieldType($fieldOccurrence, $field, $value);
@@ -149,14 +145,11 @@ trait AnalyseSchema
 //
 //
 //                                    }
-
         }
 
         if (is_array($value) && !empty($value)) {
             foreach ($value as $sub_field => $sub_value) {
-
                 $this->analyseField($sub_field, $sub_value, $fieldOccurrence[$field]['fields']);
-
             }
         }
 
@@ -164,8 +157,6 @@ trait AnalyseSchema
 //                                if (empty($fieldOccurrence[$field])) {
 //                                    continue;
 //                                }
-
-
     }
 
     public function resolveFieldType(&$array, $field, $value, $parentType = null)
@@ -175,13 +166,11 @@ trait AnalyseSchema
         $this->initDiscoveredType($array, $field);
 
         if ($dataType == 'array') {
-
             $typeCount = [];
 
             $isSequential = Helpers::isSequentialArrayKeys($value);
 
             foreach ($value as $sub_field => $sub_value) {
-
                 $logicalType = $this->getLogicalType($sub_field, $sub_value, $array, false);
 
                 $typeCount[$logicalType] = 'hit';
@@ -201,7 +190,6 @@ trait AnalyseSchema
             // Multiple type within array values?
             // Must be a record then.
             if (count($typeCount) > 1) {
-
                 $dataType = 'record';
 
                 // Array of Arrays? Use a Record for the parent.
@@ -209,11 +197,9 @@ trait AnalyseSchema
 //                } elseif (array_key_exists('array', $array[$sub_field]['type'])) {
                 $dataType = 'record';
 //                    $dataType = 'map';
-
             } elseif ($isSequential) {
                  // array of sequential int keys is an avro array
                 $dataType = 'array';
-
             } elseif (!$isSequential) {
                 // associative array is an avro map
                 $dataType = 'map';
@@ -231,12 +217,10 @@ trait AnalyseSchema
         $dataType = gettype($value);
 
         if ($dataType == 'string' || $dataType == 'integer' || $dataType == 'double') {
-
             // String really an int?
             $dataType = AnalyseSchema::checkStringOrInt($value);
 
             if ($allowDate) {
-
                 $validTimestamp = false;
 
                 if ($dataType == 'integer') {
@@ -250,13 +234,10 @@ trait AnalyseSchema
                 }
 
                 if ($validTimestamp) {
-
                     $this->setDateFieldCandidate($field, $metadata);
 
                     $this->incrementDateFieldCandidateCount($field, $metadata);
-
                 }
-
             }
 
 //            if (is_float($value + 0) && (float) $value == $value) {
@@ -268,11 +249,8 @@ trait AnalyseSchema
         }
 
         if ($dataType == 'string' && $allowDate) {
-
             // Limit number of check type attempts for data as expensive operation.
             if (empty($metadata[$field]['date_candidate']['check_count']) || $metadata[$field]['date_candidate']['check_count'] < $this->dateFieldvalidationMminSample) {
-
-
                 if ($format = AnalyseSchema::isValidDate($value)) {
                     $dataType = 'date';
                     $this->setDateFieldCandidate($field, $metadata, $format);
@@ -284,9 +262,7 @@ trait AnalyseSchema
             } elseif (!empty($metadata[$field]['date_candidate']['valid_count'])
                 && $metadata[$field]['date_candidate']['valid_count'] >= $this->dateFieldvalidationMminSample) {
                 $dataType = 'date';
-
             }
-
         }
 
         if (filter_var($value, FILTER_VALIDATE_BOOLEAN)) {
@@ -296,7 +272,6 @@ trait AnalyseSchema
         // @todo - logical interpretation based on field name
 
         return $dataType;
-
     }
 
     /**
@@ -311,12 +286,13 @@ trait AnalyseSchema
 
         // @todo - I think is_float is an alias of is_numeric
         if (is_numeric($value) && (int) $value == $value) {
-            if (filter_var($value, FILTER_VALIDATE_INT,
-                ['min_range' => PHP_INT_MIN, 'max_range' => PHP_INT_MAX])) {
-
+            if (filter_var(
+                $value,
+                FILTER_VALIDATE_INT,
+                ['min_range' => PHP_INT_MIN, 'max_range' => PHP_INT_MAX]
+            )) {
                 if (self::is32bitSignedInt($value)) {
                     $dataType = 'integer';
-
                 } elseif (self::is64bitSignedInt($value)) {
                     $dataType = 'long';
                 }
@@ -334,7 +310,6 @@ trait AnalyseSchema
         } else {
             $metadata[$field]['date_candidate']['check_count']++;
         }
-
     }
 
     function setDateFieldCandidate(string $field, array &$metadata, string $format = '')
@@ -347,7 +322,6 @@ trait AnalyseSchema
         }
 
         if ($metadata[$field]['date_candidate']['valid_count'] >= $this->dateFieldvalidationMminSample) {
-
             $metadata[$field]['date_candidate']['field'] = $field;
 
             // save the format, else calls to setValue() often hit Carbon::createFromFormat causing memory explosion
@@ -355,12 +329,14 @@ trait AnalyseSchema
                 $metadata[$field]['date_candidate']['format'] = $format;
             }
         }
-
     }
 
-    static public function isFloat($test) {
+    public static function isFloat($test)
+    {
 
-        if (!is_scalar($test)) {return false;}
+        if (!is_scalar($test)) {
+            return false;
+        }
 
         $type = gettype($test);
 
@@ -369,7 +345,6 @@ trait AnalyseSchema
         } else {
             return preg_match("/^\\d+\\.\\d+$/", $test) === 1;
         }
-
     }
 
     static function is32bitSignedInt($value)
@@ -381,8 +356,11 @@ trait AnalyseSchema
 
         $options = ['min_range' => -2147483647, 'max_range' => 2147483647];
 
-        return false !== filter_var($value, FILTER_VALIDATE_INT,
-            compact('options'));
+        return false !== filter_var(
+            $value,
+            FILTER_VALIDATE_INT,
+            compact('options')
+        );
     }
 
     static function is64bitSignedInt($value)
@@ -397,22 +375,25 @@ trait AnalyseSchema
             'max_range' => 9223372036854775807
         ];
 
-        return false !== filter_var($value, FILTER_VALIDATE_INT,
-            compact('options'));
+        return false !== filter_var(
+            $value,
+            FILTER_VALIDATE_INT,
+            compact('options')
+        );
     }
 
     static function isValidTimeStamp($timestamp)
     {
-        if (is_numeric($timestamp) && strtotime(date('d-m-Y H:i:s',
-                $timestamp)) === (int) $timestamp
+        if (is_numeric($timestamp) && strtotime(date(
+            'd-m-Y H:i:s',
+            $timestamp
+        )) === (int) $timestamp
         ) {
-
             $date = strtotime(date('d-m-Y H:i:s', $timestamp));
 
             if ($date >= strtotime('1970-01-01') && $date <= strtotime('+20 years')) {
                 return $timestamp;
             }
-
         } else {
             return false;
         }
@@ -456,7 +437,6 @@ trait AnalyseSchema
 
         foreach ($validFormats as $format) {
             try {
-
                 $return = Carbon::createFromFormat($format, $value);
 
                 if ($return !== false) {
@@ -471,7 +451,6 @@ trait AnalyseSchema
         }
 
         return false;
-
     }
 
     public function applyEvolutionFactory(
@@ -483,7 +462,6 @@ trait AnalyseSchema
     ) {
 
         switch ($evolution) {
-
             case 'cast':
                 $dataType = $newValue;
 //                $value = $this->setValue($newValue, $field, $value);
@@ -505,9 +483,7 @@ trait AnalyseSchema
 //                break;
             case 'default':
                 break;
-
         }
-
     }
 
     public function handleValueError(&$field, $value, $fieldOccurrence)
@@ -519,18 +495,16 @@ trait AnalyseSchema
 //        SkipprLogger::debug("Resolving type: $dataType for field: $field value: $value");
 
 //        // Evolution
-        if ( !empty($fieldOccurrence[$field]['evolution'][$dataType]['new_value']) ) {
+        if (!empty($fieldOccurrence[$field]['evolution'][$dataType]['new_value'])) {
             $evolution = $fieldOccurrence[$field]['evolution'][$dataType]['type'];
             $newValue = $fieldOccurrence[$field]['evolution'][$dataType]['new_value'];
 
 //            SkipprLogger::debug("Resolving with: $evolution to $newValue");
 
             $this->applyEvolutionFactory($field, $value, $evolution, $dataType, $newValue);
-
         }
 //
 //        return $value;
-
     }
 
     public function initDiscoveredType(&$array, $field)
@@ -561,7 +535,6 @@ trait AnalyseSchema
             $array[$field]['evolution'][$dataType]['solved'] = false;
         } else {
             $array[$field]['type'][$dataType]++;
-
         }
 
         // Timestamps possibly just plain old ints/longs
@@ -580,7 +553,6 @@ trait AnalyseSchema
             if ($validTimestamp) {
                 $this->setDiscoveredOccurrence($array, $field, 'timestamp_milli', $value);
             }
-
         }
 
 //        $types = Config::$discoveredFieldOccurrence = array_pull(Config::$discoveredFieldOccurrence, "$field.type");
@@ -590,7 +562,5 @@ trait AnalyseSchema
 //            $types[$dataType]++;
 //        }
 //        Config::$discoveredFieldOccurrence = array_add(Config::$discoveredFieldOccurrence, "$field.type", $types);
-
     }
-
 }

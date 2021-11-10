@@ -6,7 +6,6 @@ use Monolog\Registry;
 use Skipprd\Str;
 use Skipprd\Traits\SkipprLogger;
 
-
 class OffsetDriverFactory
 {
 
@@ -27,5 +26,4 @@ class OffsetDriverFactory
 
         return $factoryModel;
     }
-
 }

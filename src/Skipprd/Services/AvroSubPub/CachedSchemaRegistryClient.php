@@ -73,9 +73,9 @@ class CachedSchemaRegistryClient
 
         if ($status === 409) {
             throw new \RuntimeException('Incompatible Avro schema');
-        } else if ($status === 422) {
+        } elseif ($status === 422) {
             throw new \RuntimeException('Invalid Avro schema');
-        } else if (!($status >= 200 || $status < 300)) {
+        } elseif (!($status >= 200 || $status < 300)) {
             throw new \RuntimeException('Unable to register schema. Error code: '.$status);
         }
 
@@ -157,7 +157,7 @@ class CachedSchemaRegistryClient
 
         if ($status === 404) {
             throw new RuntimeException('Schema not found');
-        } else if (!($status >= 200 || $status < 300)) {
+        } elseif (!($status >= 200 || $status < 300)) {
             throw new \RuntimeException('Unable to get schema for the specific ID: '.$status);
         }
 
@@ -179,7 +179,7 @@ class CachedSchemaRegistryClient
 
         if ($status === 404) {
             throw new RuntimeException('Schema not found');
-        } else if (!($status >= 200 || $status < 300)) {
+        } elseif (!($status >= 200 || $status < 300)) {
             throw new \RuntimeException('Unable to get schema for the specific ID: '.$status);
         }
 

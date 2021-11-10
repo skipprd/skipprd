@@ -41,7 +41,6 @@ class AvroProducer
         $message = $value;
 
         $result = $this->pubsub->publish($this->topic, $message);
-
     }
 
     /**
@@ -51,5 +50,4 @@ class AvroProducer
     {
         $this->pubsub->getProducer()->flush($timeout);
     }
-    
 }

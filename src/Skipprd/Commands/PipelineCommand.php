@@ -171,13 +171,12 @@ class PipelineCommand
         $this->createLogger();
     }
 
-    public function createLogger() {
-
-
-        
+    public function createLogger()
+    {
     }
 
-    protected function setPlugin() {
+    protected function setPlugin()
+    {
 
 //        $bufferDriver = 'file';
 //
@@ -200,25 +199,23 @@ class PipelineCommand
         $deadLetterPluginName = Config::getenv('DEAD_LETTER_PLUGIN_NAME');
 
         if (!empty($deadLetterPluginName)) {
-
             $config = [];
             $envs = getenv();
 
             foreach ($envs as $key => $value) {
                 if (strpos($key, 'DEAD_LETTER') > -1) {
-                    $config[strtolower(substr($key,
-                        strlen('DEAD_LETTER_')))] = $value;
+                    $config[strtolower(substr(
+                        $key,
+                        strlen('DEAD_LETTER_')
+                    ))] = $value;
                 }
             }
 
             $deadLetterPluginName = Str::studly(ucwords(strtolower($deadLetterPluginName)));
-
         } else {
-
                 $deadLetterPluginName = 'File';
 
                 $config['path'] = '/dead-letters';
-
         }
 
 
@@ -230,9 +227,7 @@ class PipelineCommand
         
 
         if (Config::getenv('JOB_NAME') == 'deadletters') {
-
             Config::$enableDeadLetters = false;
-
         }
 
         /**
@@ -241,12 +236,8 @@ class PipelineCommand
         $pluginName = Config::getenv('DATA_SOURCE_PLUGIN_NAME');
 
         if (!empty($pluginName)) {
-
             $this->inputPlugin = PluginFactory::factory('data_source', $pluginName, $this->outputBuffer);
-
         } else {
-
-
             $outputPluginClass = "Skipprd\\Plugins\\DataSources\\" . 'File' . "\\DataSource" . 'File' . "Plugin";
 
             $this->inputPlugin = new $outputPluginClass($config, $this->outputBuffer);
@@ -258,11 +249,8 @@ class PipelineCommand
         $pluginName = Config::getenv('DATA_OUTPUT_PLUGIN_NAME');
 
         if (!empty($pluginName)) {
-
             $this->outputPlugin = PluginFactory::factory('data_output', $pluginName, $this->outputBuffer);
-
         } else {
-
 //            $this->outputPlugin = PluginFactory::factory('data_output', 'file', $this->outputBuffer);
 
 
@@ -270,7 +258,6 @@ class PipelineCommand
 
             $this->outputPlugin = new $outputPluginClass($config, $this->outputBuffer);
         }
-
     }
 
     /**
@@ -299,18 +286,14 @@ class PipelineCommand
 
 
         if (!Config::$enableDeadLetters) {
-
             SkipprLogger::info('Reprocessing dead letters');
         }
 
         if (!empty($this->inputPlugin)) {
-
             $this->inputPlugin->sync($this);
 
             $this->inputPlugin->buffer->flushAll();
-
         } else {
-
             if (!empty($this->deadletterPlugin)) {
                 $this->deadletterPlugin->sync(Config::$outputFormat);
             }
@@ -322,32 +305,27 @@ class PipelineCommand
 
 
         if (Config::$analysing) { // in case we didn't see enough messages
-
             SkipprLogger::info('Finished analysing data');
-
         }
 
         if (Config::$mode == 'async') {
-
             // keep alive to control child threads
             while (true) {
-
                 sleep(10);
             }
         }
 
         $this->shutdown();
-
     }
 
-    public function exceptionHandler(\Exception $e) {
+    public function exceptionHandler(\Exception $e)
+    {
 
         SkipprLogger::error($e->getMessage());
 
         SkipprLogger::warning("Uncaught exception, shutting down all threads.");
 
         $this->shutdown();
-
     }
 
     /**
@@ -361,7 +339,6 @@ class PipelineCommand
         Segment::init(Config::$segmentKey);
 
         if (Config::getenv('STATSD_HOST') && Config::getenv('STATSD_PORT')) {
-
             // @todo - factory stats interface (statsd + skippr enterpise http endpoint)
             $this->statsd = new Statsd();
 
@@ -394,7 +371,6 @@ class PipelineCommand
         $this->setPlugin();
 
         foreach (Config::$schema as $partition => $schema) {
-
             $this->defaultMsgs[$partition] = $this->defaultMessage($schema);
         }
 
@@ -403,7 +379,6 @@ class PipelineCommand
         $this->getLicense();
 
         if (!$this->licenseIsValid) {
-
             SkipprLogger::info('Please validate license to continue using Skippr');
 
             $this->shutdown();
@@ -421,7 +396,6 @@ class PipelineCommand
         $this->connect();
 
 //        $this->shutdown();
-
     }
 
     /**
@@ -436,28 +410,25 @@ class PipelineCommand
         $lines = '';
         $i = 0;
         
-        while ( ($line = $this->inputPlugin->buffer->stream() ) !== false ) {
+        while (($line = $this->inputPlugin->buffer->stream() ) !== false) {
             $i++;
             $lines .= $line;
 
             // grab enough lines, but not so many we get OOM
             // last one may get cut and be invalid
             if ($i == 1000) {
-
                 break;
             }
         }
         
 //        Serders::factory($lines, Config::$serder, $this->csvHeaders);
         return SerdersFactory::discover($lines);
-        
     }
 
     public function serialiseOutput(array $payload) : void
     {
 
         try {
-
             $eventTime = $payload['skpr_event_ts'];
             $partition = $payload['skpr_partition'];
 
@@ -482,22 +453,16 @@ class PipelineCommand
 
 
             if (Config::$mode == 'sync') {
-
 //                $this->outputPlugin->buffer->append($serialised, false, $eventTime, $partition);
                 $this->outputPlugin->buffer->append($payload, false, $eventTime, $partition);
 
                 if (!empty($this->outputPlugin)) {
-
                     $this->flushBuffer();
-
                 }
 
 //                    $this->inputPlugin->setOffsets($this->outputPlugin->offset);
-
             } elseif (Config::$mode == 'async') {
-
                 $this->outputPlugin->buffer->append($payload, false, $eventTime, $partition);
-
             }
 
             $tenantId = Config::$tenantId;
@@ -510,28 +475,18 @@ class PipelineCommand
 //            $this->statsd->increment("ingest.msgs.current.{Config::$tenantId }.{Config::$pipelineName}", 1);
 
 //            $flushedCount++;
-
-
         } catch (\AvroException $e) {
-
 //            SkipprLogger::error($e->getMessage());
 
             try {
-
                 $this->deadLetterMessage($payload);
-
-
             } catch (\Exception $e) {
-
                 SkipprLogger::emergency('Failed to write to dead letter queue');
                 SkipprLogger::error($e->getMessage());
             }
-
         } catch (\Exception $e) {
-
             SkipprLogger::error($e->getMessage());
         }
-
     }
 
 
@@ -548,7 +503,6 @@ class PipelineCommand
         $msgCountFlush = false;
 
         if ($timeFlush || $byteFlush || $msgCountFlush) {
-
             if ($timeFlush) {
                 SkipprLogger::debug("Flush trigger by: time interval");
             }
@@ -585,11 +539,15 @@ class PipelineCommand
             $pipelineName = Config::$pipelineName;
 
             if (!empty($this->statsd)) {
-                $this->statsd->increment("flushed.msgs.current.{$pipelineName}.{$pipelineName}",
-                    $this->entries);
+                $this->statsd->increment(
+                    "flushed.msgs.current.{$pipelineName}.{$pipelineName}",
+                    $this->entries
+                );
 
-                $this->statsd->increment("flushed.deadletters.current.{$tenantId }.{$pipelineName}",
-                    $this->deadLetters);
+                $this->statsd->increment(
+                    "flushed.deadletters.current.{$tenantId }.{$pipelineName}",
+                    $this->deadLetters
+                );
             }
 
 //                            $this->entries = 0;
@@ -614,7 +572,6 @@ class PipelineCommand
             $this->currentBytes = 0;
 
             return true;
-
         }
 
         return false;
@@ -626,7 +583,6 @@ class PipelineCommand
         // Don't dead letter message, if running the dead letter job
         // it will be skipped and so just remain in the queue
         if (Config::$enableDeadLetters) {
-
             $partition = $message['skpr_partition'];
 
             $deadLetterTopic = 'raw_' . Config::$tenantId  . '_' . Config::$pipelineName .'_deadletter';
@@ -644,17 +600,19 @@ class PipelineCommand
             $pipelineName = Config::$pipelineName;
 
             if (!empty($this->statsd)) {
-                $this->statsd->increment("ingest.deadletters.current.$tenantId.$pipelineName",
-                    1);
+                $this->statsd->increment(
+                    "ingest.deadletters.current.$tenantId.$pipelineName",
+                    1
+                );
 
-                $this->statsd->increment("ingest.deadletters.total.$tenantId.$pipelineName",
-                    1);
+                $this->statsd->increment(
+                    "ingest.deadletters.total.$tenantId.$pipelineName",
+                    1
+                );
             }
 
             $this->deadLetters++;
-
         } else {
-
             SkipprLogger::critical('Schema not valid for events in dead letter queue');
 
 //            $this->inputPlugin->buffer->unlockAll('deadletter');
@@ -665,18 +623,14 @@ class PipelineCommand
 
 //            exit(0);
         }
-
     }
 
     public function emit(string $payload, $partition) : void
     {
 
         if ($payload != '') {
-            
             if (Config::$mode == 'sync') {
-
                 if (!Config::$enableDeadLetters) {
-
                     // @todo - deprecate SkipprPack for Apache Arrow
                     $sp = new SkipprPack($payload);
                     $payload = $sp->decodeRecord();
@@ -684,10 +638,7 @@ class PipelineCommand
                 }
 
                 $this->emitString($payload, $partition);
-
-
             } elseif (Config::$mode == 'async') {
-
 //                $offset = (string) $offset;
 //                $sp = new SkipprPack();
 //                $sp->encode($payload, $offset);
@@ -702,17 +653,13 @@ class PipelineCommand
 //            }
 
                 $this->inputPlugin->buffer->append($payload, false, 0, $partition);
-
             }
-
         }
-
     }
 
     public function offsetCommitRoutine(string $partition, bool $force = false): void
     {
         if (!Config::$analysing) {
-
             if (!isset($this->j)) {
                 $this->j = 0;
             } else {
@@ -720,7 +667,6 @@ class PipelineCommand
             }
 
             if ($force || $this->j > self::$flushMaxMsg) {
-
                 $this->j = 0;
 
                 $offset = $this->inputPlugin->offsets->getOffset($partition);
@@ -728,7 +674,6 @@ class PipelineCommand
                 $type = Config::getenv('OFFSET_DRIVER', 'skippr_file');
                 $offsetClient = OffsetDriverFactory::factory($type);
                 $offsetClient->sync($partition, $offset);
-
             }
         }
     }
@@ -737,23 +682,18 @@ class PipelineCommand
     {
 
         if (preg_match("/\.gz(ip)?$|.zip/", $filename) == true) {
-
             // open gz file for reading
             $sfp = gzopen($filename, 'rb');
 
             // read and decode chunks into string stream
             while (!gzeof($sfp)) {
-
                 $string = gzgets($sfp);
 
                 call_user_func($callback, $string, $partition);
-
             }
 
             gzclose($sfp);
-
         } elseif (Config::$sourceFormat == 'parquet') {
-
             $parquet = new \Parquet();
 
             $parquet->create_reader($filename, 0);
@@ -773,28 +713,23 @@ class PipelineCommand
 //
 //                call_user_func($callback, $item);
 //            }
-
         } else {
-
             $sfp = fopen($filename, 'rb');
 
             // read and decode chunks into string stream
             while (!feof($sfp)) {
-
                 $string = fgets($sfp);
 
                 call_user_func($callback, $string, $partition);
-
             }
 
             // remove temp file
             fclose($sfp);
-
         }
-
     }
 
-    public function emitFile(string $filename, $partition) : void {
+    public function emitFile(string $filename, $partition) : void
+    {
 
         $fields = [];
         $payloadString = '';
@@ -804,45 +739,33 @@ class PipelineCommand
         $this->readFile($filename, $partition, function ($string, $partition) use ($serde, &$fields, &$payloadString) {
 
             if (in_array(Config::$sourceFormat, Config::$batchFormats)) {
-
                 $payloadString .= $string;
-
             } else {
-
                 $msgs = $serde->deserialize($string);
 
                 foreach ($msgs as $msg) {
-
 //                    array_push($fields, $msg);
                     $this->emitArray($msg, $partition);
                 }
             }
-
         });
 
         if (in_array(Config::$sourceFormat, Config::$batchFormats)) {
-
             $msgs = $serde->deserialize($payloadString);
 
             foreach ($msgs as $msg) {
-
 //                array_push($fields, $msg);
                 $this->emitArray($msg, $partition);
             }
         }
-
-
-
     }
 
-    public function emitString(string $payload, string $partition) : void {
+    public function emitString(string $payload, string $partition) : void
+    {
 
         if ($payload != '') {
-
             if (Config::$mode == 'sync') {
-
                 if (!Config::$enableDeadLetters) {
-
                     // @todo - deprecate SkipprPack for Apache Arrow
                     $sp = new SkipprPack($payload);
                     $payload = $sp->decodeRecord();
@@ -855,12 +778,12 @@ class PipelineCommand
                 $sourceMessages = $serder->deserialize($payload);
 
                 $this->emitArray($sourceMessages, $partition);
-
             }
         }
     }
 
-    public function emitArray(array $payload, string $partition) : void {
+    public function emitArray(array $payload, string $partition) : void
+    {
 
         $unwrappedMessages = $this->unwrap($payload);
 
@@ -872,11 +795,8 @@ class PipelineCommand
         }
         
         foreach ($unwrappedMessages as $unwrappedMessage) {  // outer array
-
             if (Config::$analysing && $this->inputPlugin->ingestPartition($partition) === true) {
-
                 if (is_array($unwrappedMessage)) {
-
                     $this->getIdFields($unwrappedMessage);
 
                     $this->parsePartitionField($unwrappedMessage, $partition);
@@ -902,14 +822,12 @@ class PipelineCommand
 
 
             if (!Config::$analysing) {
-
                 // Ensure time for new topic creation before first flush
                 if ($this->lastFlushtimesamp == 0) {
                     $this->lastFlushtimesamp = Carbon::now()->timestamp;
                 }
                 
                 if (is_array($unwrappedMessage)) {
-
                     $this->parseTimeField($unwrappedMessage);
                     $this->parsePartitionField($unwrappedMessage, $partition);
 
@@ -928,7 +846,6 @@ class PipelineCommand
                 $this->offsetCommitRoutine($partition);
             }
         }
-
     }
 
     public function parsePartitionField(array &$message, string $partition)
@@ -940,14 +857,12 @@ class PipelineCommand
         // optional: partition by composite key
         if (!empty(Config::$entityNames)) {
             foreach (Config::$entityNames as $entityField) {
-
                 $shardFieldName = $entityField;
                 // @todo - support entity naming
                 $entityName = $entityField;
 
                 if (!empty($message[$entityField])) {
                     if ($entityValue = $message[$entityField]) {
-
                         $shardFieldEntityValue .= '-' . Helpers::cleanFieldName($entityName) . '=' . Helpers::cleanFieldName($entityValue);
                     }
                 }
@@ -958,7 +873,6 @@ class PipelineCommand
         $shardFieldEntityValue = strtolower(trim($shardFieldEntityValue, '-'));
 
         $message['skpr_partition'] = $shardFieldEntityValue;
-
     }
 
     public function parseTimeField(&$message)
@@ -970,13 +884,10 @@ class PipelineCommand
         // Support nested time fields via array dot notation
         // For user confirmed event time fields, use the first one that matches
         foreach (Config::$timeFields as $field_dot) {
-
-
-            if ($time_value = Arr::get($message, $field_dot, false) ) {
+            if ($time_value = Arr::get($message, $field_dot, false)) {
                 $message['skpr_event_ts'] = $time_value;
                 break;
             }
-
         }
 
         // Handle millisecond timestamps
@@ -988,32 +899,24 @@ class PipelineCommand
         if (gettype($message['skpr_event_ts']) == 'string') {
             $message['skpr_event_ts'] = Carbon::parse($message['skpr_event_ts'])->timestamp;
         }
-
     }
 
     public function unwrap($sourceMessages)
     {
 
         if (!empty($sourceMessages) && is_array($sourceMessages)) {
-
             if (!empty(Config::$eventPath)) {
-
                 foreach ($sourceMessages as $sourceMessage) {
                     try {
-
                         $unwrappedMessages = Arr::get($sourceMessage, Config::$eventPath);
-
                     } catch (\Exception $e) {
                         SkipprLogger::error("Could not find field path " . Config::$eventPath . " in message.");
-
                     }
-
                 }
             }
         }
 
         if (empty($unwrappedMessages)) {
-
             $unwrappedMessages = $sourceMessages;
         }
         
@@ -1035,7 +938,6 @@ class PipelineCommand
 //        $this->inputPlugin->commit(Config::$offsets);
 
         if (!empty($this->inputPlugin)) {
-
             $this->inputPlugin->buffer->flushAll();
 
             $type = Config::getenv('OFFSET_DRIVER', 'skippr_file');
@@ -1044,9 +946,10 @@ class PipelineCommand
 
             if (!empty($offsets)) {
                 foreach ($offsets as $partition => $offset) {
-
-                    $this->inputPlugin->offsets->setOffsets($partition,
-                        $offset);
+                    $this->inputPlugin->offsets->setOffsets(
+                        $partition,
+                        $offset
+                    );
                 }
             }
 
@@ -1054,15 +957,12 @@ class PipelineCommand
         }
 
         if (!empty($this->deadletterPlugin)) {
-
             $this->deadletterPlugin->buffer->flushAll();
         }
 
         if (!empty($this->outputPlugin)) {
-
             $this->outputPlugin->buffer->flushAll();
         }
-
     }
 
     public function getUnwrappedMetadata()
@@ -1071,12 +971,10 @@ class PipelineCommand
         $metadata = Config::$discoveredFieldOccurrence;
 
         if (!empty(Config::$eventPath)) {
-
             $parts = explode(".", Config::$eventPath);
             $lng = count($parts);
 
             for ($i = 0; $i <= $lng; $i++) {
-
                 if ($i < $lng) {
                     $metadata = $metadata[$parts[$i]]['fields'];
                 } else {
@@ -1086,27 +984,22 @@ class PipelineCommand
         }
 
         return $metadata;
-
     }
 
     public function updateUnwrappedMetadata($metadata)
     {
 
         if (!empty(Config::$eventPath)) {
-
             $parts = array_reverse(explode(".", Config::$eventPath));
             $lng = count($parts);
 
             for ($i = $lng; $i <= 0; $i++) {
-
                 if ($i == $lng) { // first
                     $newMetadata = [];
                     $newMetadata['a0']['fields'] = $metadata;
                     $metadata = $newMetadata;
-
-                } else if ($i == 0) { // last
+                } elseif ($i == 0) { // last
                     Config::$discoveredFieldOccurrence[$parts[$i]]['fields'] = $metadata;
-
                 } else {
                     $newMetadata = [];
                     $newMetadata[$parts[$i]]['fields'] = $metadata;
@@ -1114,14 +1007,12 @@ class PipelineCommand
                 }
             }
         }
-
     }
 
     public function shutdownSig(int $signo, $siginfo): void
     {
 
         $this->shutdown($signo);
-
     }
 
     public function shutdown($signo = 0)
@@ -1130,32 +1021,28 @@ class PipelineCommand
         SkipprLogger::info("Gracefully shutting down and flushing buffers");
 
         if (Config::$mode == 'async') {
-
             if ($this->inputThread !== null) {
                 $this->inputThread->cancel();
             }
         }
 
         if (!empty($this->inputPlugin)) {
-
             $this->inputPlugin->shutdown();
         }
 
         if (Config::$mode == 'async') {
-
             $this->inputPlugin->buffer->driver->unlockAll();
 //            $this->inputPlugin->buffer->flush("input");
             $this->inputPlugin->buffer->flushAll(true);
             $this->inputPlugin->buffer->driver->finalise(true);
 
             if ($this->threadPool !== null) {
-
                 foreach ($this->threadPool as $thread) {
                     $thread->kill();
                 }
             }
 
-            if ( $this->outputThread != null) {
+            if ($this->outputThread != null) {
                 $this->outputThread->kill();
             }
         }
@@ -1173,23 +1060,18 @@ class PipelineCommand
             $this->totalEntries += $this->entries;
 
             if (Config::$mode == 'sync') {
-
                 if (!empty($this->outputPlugin)) {
-
                     if (!Config::$analysing) {
-
                         $pluginName = Config::getenv('DATA_OUTPUT_PLUGIN_NAME');
 
                         // Output job?
                         if (!empty($pluginName)) {
-
                             SkipprLogger::info("Syncing remaining output buffers to destination $pluginName.");
 
                             $this->outputPlugin->sync(Config::$outputFormat);
 
                             $this->deadletterPlugin->sync(Config::$outputFormat);
                         }
-
                     }
                     $this->outputPlugin->shutdown();
                     $this->deadletterPlugin->shutdown();
@@ -1198,7 +1080,6 @@ class PipelineCommand
 
             // Sync all offsets having synced to destination
             if (!empty($this->inputPlugin)) {
-                
                 $offsets = $this->inputPlugin->offsets->getOffsets();
             }
 
@@ -1218,11 +1099,9 @@ class PipelineCommand
 //        $this->updateDeadLetterQueueSize();
 
         if (!empty(Config::$discoveredFieldOccurrence)) {
-
             $this->finaliseFieldMapping();
 
             $this->writeMapping();
-
         } else {
             SkipprLogger::info("No fields found when analysing schema, did you send some data?");
         }
@@ -1278,14 +1157,12 @@ class PipelineCommand
         $configYml = Config::setConfig();
 
         SkipprLogger::info("Updated analysed field schema");
-
     }
 
     public function finaliseFieldCandidates()
     {
 
         foreach (Config::$discoveredFieldOccurrence as $partition => $metadata) {
-
             Config::$discoveredFieldOccurrence[$partition]['date_field_candidates'] = [];
             Config::$discoveredFieldOccurrence[$partition]['enitity_field_candidates'] = [];
             
@@ -1300,8 +1177,6 @@ class PipelineCommand
             Config::$discoveredFieldOccurrence[$partition]['date_field_candidates'] = $validDateFieldCandidates;
 
             Config::$discoveredFieldOccurrence[$partition]['enitity_field_candidates'] = Config::$idFields;
-
-
         }
     }
 
@@ -1309,14 +1184,12 @@ class PipelineCommand
     {
 
         foreach (Config::$discoveredFieldOccurrence as $partition => $metadata) {
-
             self::determineFieldTypes(Config::$discoveredFieldOccurrence[$partition]['fields']);
         }
 
         $this->findMessageIdField();
 
         Config::$analysing = false;
-
     }
     
     public function findMessageIdField()
@@ -1325,13 +1198,10 @@ class PipelineCommand
         $enitityFieldCandidates = [];
 
         if (!empty(Config::$idFields)) {
-
             foreach (Config::$idFields as $fieldName => $ids) {
-
                 // 95% of this fields ID's are unique, it's probably a message ID field
                 if (count(Config::$idFields[$fieldName]) / $this->minSample * 100 >= 70) {
                     unset(Config::$idFields[$fieldName]);
-
                 } else {
                     $enitityFieldCandidates[$fieldName] = [];
                 }
@@ -1340,48 +1210,39 @@ class PipelineCommand
             $numCandidates = count(Config::$idFields);
 
             SkipprLogger::info("Found $numCandidates ID fields");
-
         }
 
         Config::$idFields = $enitityFieldCandidates;
-
-
     }
 
-    public static function determineFieldTypes(&$metadata, $parent_type = null) {
+    public static function determineFieldTypes(&$metadata, $parent_type = null)
+    {
 
         $demotedTypes = ['boolean', 'date', 'timestamp', 'timestamp_milli'];
 
 
         foreach ($metadata as $fieldName => $field) {
-
             // Useful for field evolution logic for maps, which only support one sub-field type
             if ($parent_type !== null) {
                 $metadata[$fieldName]['parent_type'] = $parent_type;
             }
 
             if (empty($metadata[$fieldName]['determined_type'])) {
-
                 $highestType = '';
                 $highestCount = 0;
 
                 if (!empty($field['type'])) {
-
                     // Don't allow NULL type if we discovered any other types
-                    if (count($field['type']) > 1 ) {
+                    if (count($field['type']) > 1) {
                         unset($field['type']['NULL']);
                     }
 
                     // force to record type over map or array if ever present
                     if (key_exists('record', $field['type'])) {
                         $metadata[$fieldName]['determined_type'] = 'record';
-
                     } else {
-
                         foreach ($field['type'] as $dataType => $dataTypeCount) {
-
                             if ($highestCount < $dataTypeCount) {
-
                                 // Prefer primitive types to logical types or types
                                 // that cause frequent false positives (demoted types).
                                 // - if there's multiple discovered types
@@ -1397,19 +1258,15 @@ class PipelineCommand
 
                         $metadata[$fieldName]['determined_type'] = $highestType;
                     }
-
                 }
             }
 
             if (!empty($metadata[$fieldName]['determined_type'])
                 && in_array($metadata[$fieldName]['determined_type'], ['map', 'array', 'record'])) {
-
                 if (!empty($field['fields'])) {
-
                     if ($metadata[$fieldName]['determined_type'] == 'array'
                         || $metadata[$fieldName]['determined_type'] == 'map'
                     ) {
-
 //                        && (!empty($metadata[$fieldName]['fields'][0]['determined_type'])
 //                            && in_array($metadata[$fieldName]['fields'][0], ['map', 'array', 'record'])) ) {
 
@@ -1426,23 +1283,17 @@ class PipelineCommand
                             //         however, 'array' type is a special case... how to handle?
 
                             // Get avro arrays items primitive data type
-                            foreach ($metadata[$fieldName]['fields'] as $sub_field) {
-
-                                foreach ($sub_field['type'] as $dataType => $dataTypeCount) {
-
-                                    if (!in_array($dataType, $demotedTypes)) {
-
-                                        if (empty($typeCount[$dataType])) {
-                                            $typeCount[$dataType] = $dataTypeCount;
-
-                                        } else {
-                                            $typeCount[$dataType] += $dataTypeCount;
-                                        }
+                        foreach ($metadata[$fieldName]['fields'] as $sub_field) {
+                            foreach ($sub_field['type'] as $dataType => $dataTypeCount) {
+                                if (!in_array($dataType, $demotedTypes)) {
+                                    if (empty($typeCount[$dataType])) {
+                                        $typeCount[$dataType] = $dataTypeCount;
+                                    } else {
+                                        $typeCount[$dataType] += $dataTypeCount;
                                     }
-
                                 }
-
                             }
+                        }
 
                             arsort($typeCount);
 
@@ -1458,18 +1309,16 @@ class PipelineCommand
 
                         $metadata[$fieldName]['determined_type_values'] = $valueTypes;
 
-                                if ($metadata[$fieldName]['determined_type'] == 'array') {
-                                    $metadata[$fieldName]['fields'] = [];
-                                }
+                        if ($metadata[$fieldName]['determined_type'] == 'array') {
+                            $metadata[$fieldName]['fields'] = [];
+                        }
 
 //                            }
-
-
                     } if ($metadata[$fieldName]['determined_type'] != 'array') {
-
-                        self::determineFieldTypes($metadata[$fieldName]['fields'],
-                            $metadata[$fieldName]['determined_type']);
-
+                        self::determineFieldTypes(
+                            $metadata[$fieldName]['fields'],
+                            $metadata[$fieldName]['determined_type']
+                        );
                     }
                 }
 //                else {
@@ -1486,9 +1335,7 @@ class PipelineCommand
         $messageEntityNames = [];
 
         if (!empty($message)) {
-
             foreach ($message as $fieldName => $value) {
-
                 $fieldName = Helpers::cleanFieldName($fieldName);
 
                 $fieldHaystack = Helpers::explodeField($fieldName);
@@ -1505,7 +1352,6 @@ class PipelineCommand
                 $matches = array_intersect($fieldHaystack, $haystack);
 
                 if (!empty($matches)) {
-
                     // use field name as entity name,
                     if (count($fieldHaystack) > 1) {
                         $fieldHaystack = array_flip($fieldHaystack);
@@ -1546,9 +1392,7 @@ class PipelineCommand
         // expects string, e.g. serialised json
         $hash = md5(json_encode($message));
         if (isset($this->hashes[$hash])) {
-
             $this->duplicateCount++;
-
         } else {
             $this->hashes[$hash] = 0;
 
@@ -1558,4 +1402,3 @@ class PipelineCommand
         return $return;
     }
 }
-

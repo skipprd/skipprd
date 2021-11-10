@@ -84,7 +84,8 @@ class MessageSerializer
         return $io->string();
     }
 
-    public function subjectVersionToWritersSet(string $subject, int $version, AvroSchema $schema) {
+    public function subjectVersionToWritersSet(string $subject, int $version, AvroSchema $schema)
+    {
 
         $avroSchema = new \AvroIODatumWriter($schema);
 
@@ -269,7 +270,7 @@ class MessageSerializer
 
         $reader = new AvroIODatumReader($schema);
 
-        $this->idToDecoderFunc[$schemaId] = function(AvroIO $io) use ($reader) {
+        $this->idToDecoderFunc[$schemaId] = function (AvroIO $io) use ($reader) {
             return $reader->read(new AvroIOBinaryDecoder($io));
         };
 
@@ -290,7 +291,7 @@ class MessageSerializer
             $this->subjectVersionToDecoderFunc[$subject] = [];
         }
 
-        $this->subjectVersionToDecoderFunc[$subject][$version] = function(AvroIO $io) use ($reader) {
+        $this->subjectVersionToDecoderFunc[$subject][$version] = function (AvroIO $io) use ($reader) {
             return $reader->read(new AvroIOBinaryDecoder($io));
         };
 

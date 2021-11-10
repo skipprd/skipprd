@@ -3,7 +3,6 @@
 
 namespace Skipprd\Plugins;
 
-
 class ValidationResponse
 {
 
