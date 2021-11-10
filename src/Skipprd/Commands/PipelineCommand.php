@@ -240,8 +240,17 @@ class PipelineCommand
          */
         $pluginName = Config::getenv('DATA_SOURCE_PLUGIN_NAME');
 
-        $this->inputPlugin = PluginFactory::factory('data_source', $pluginName, $this->outputBuffer);
+        if (!empty($pluginName)) {
 
+            $this->inputPlugin = PluginFactory::factory('data_source', $pluginName, $this->outputBuffer);
+
+        } else {
+
+
+            $outputPluginClass = "Skipprd\\Plugins\\DataSources\\" . 'File' . "\\DataSource" . 'File' . "Plugin";
+
+            $this->inputPlugin = new $outputPluginClass($config, $this->outputBuffer);
+        }
 
         /**
          * Data Output Plugin
@@ -257,7 +266,7 @@ class PipelineCommand
 //            $this->outputPlugin = PluginFactory::factory('data_output', 'file', $this->outputBuffer);
 
 
-            $outputPluginClass = "Skipprd\\Plugins\\DataOutputs\\" . 'file' . "\\DataOutput" . 'file' . "Plugin";
+            $outputPluginClass = "Skipprd\\Plugins\\DataOutputs\\" . 'File' . "\\DataOutput" . 'File' . "Plugin";
 
             $this->outputPlugin = new $outputPluginClass($config, $this->outputBuffer);
         }
