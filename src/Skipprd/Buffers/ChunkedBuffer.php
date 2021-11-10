@@ -156,7 +156,7 @@ class ChunkedBuffer implements BufferInterface
 
     public function decodeChunkPartition($filename) : string {
 
-        SkipprLogger::debug("decoding partitions for file $filename");
+//        SkipprLogger::debug("decoding partitions for file $filename");
 
         $parts = $this->getChunkName($filename);
 
@@ -172,7 +172,7 @@ class ChunkedBuffer implements BufferInterface
 
 //        $partition_dir = trim(implode('/', $parts), '/');
 
-        SkipprLogger::debug("decoded partition dir $partition_dir");
+//        SkipprLogger::debug("decoded partition dir $partition_dir");
 
         return $partition_dir;
     }

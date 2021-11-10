@@ -159,6 +159,13 @@ class FileBufferDriver implements BufferDriverInterface
 //
 //    }
 
+    public function streamGetCurrentBufferFile()
+    {
+
+        return $this->dataFp->getPathname();
+
+    }
+
     public function stream()
     {
         
