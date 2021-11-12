@@ -43,7 +43,6 @@ class SkipprFileOffsetDriver implements OffsetDriverInterface
             switch ($method) {
                 case 'PUT':
                     try {
-
                         $state[Config::$pipelineName]['offsets'] = $data;
 
                         file_put_contents(Config::$dataDir . '/skippr-offsets.json', json_encode($state));

@@ -102,7 +102,7 @@ class Config
         'avro_file'
     ];
 
-    public static function getenv(string $name, string $default = '') : string
+    public static function getenv(string $name, string $default = ''): string
     {
 
         return (!empty(getenv($name))) ? getenv($name) : $default;
@@ -114,7 +114,10 @@ class Config
         $inputPluginName = Helpers::cleanFieldName(Config::getenv('DATA_SOURCE_PLUGIN_NAME'));
         $outputPluginName = Helpers::cleanFieldName(Config::getenv('DATA_OUTPUT_PLUGIN_NAME'));
         $defaultPipelineName = $inputPluginName . 'to' . $outputPluginName;
-        $defaultPipelineName = Config::getenv('PIPELINE_NAME', $defaultPipelineName);
+        $defaultPipelineName = Config::getenv(
+            'PIPELINE_NAME',
+            $defaultPipelineName
+        );
 
         return $defaultPipelineName;
     }
@@ -127,12 +130,15 @@ class Config
 //        self::$mapping = [];
         self::$discoveredFieldOccurrence = [];
 
-        self::$anonymousMetrics =  Config::getenv('ANONYMOUS_METRICS', true);
+        self::$anonymousMetrics = Config::getenv('ANONYMOUS_METRICS', true);
 
         $defaultPipelineName = Config::getPipelineName();
 
         Config::$state['tenant_id'] = Helpers::randomStr(16);
-        self::$tenantId = self::getenv('TENANT_ID', Config::$state['tenant_id']);
+        self::$tenantId = self::getenv(
+            'TENANT_ID',
+            Config::$state['tenant_id']
+        );
 
         $dataDir = self::getenv('DATA_DIR');
         self::$dataDir = (empty($dataDir)) ? self::$dataDir : $dataDir;
@@ -146,7 +152,7 @@ class Config
                 SkipprLogger::info('Looking up config for pipeline ' . $defaultPipelineName);
 
                 $url = "http://$uri/";
-                $path = 'ingest-job/get-mapping/'. $defaultPipelineName;
+                $path = 'ingest-job/get-mapping/' . $defaultPipelineName;
 
                 $client = new \GuzzleHttp\Client([
                     'base_uri' => $url,
@@ -170,7 +176,7 @@ class Config
 
                 $schemaName = self::$tenantId . '_' . $defaultPipelineName . '-value';
                 $url = "http://$uri/";
-                $path = 'subjects/'. $schemaName . '/versions/latest';
+                $path = 'subjects/' . $schemaName . '/versions/latest';
 
                 $client = new \GuzzleHttp\Client([
                     'base_uri' => $url,
@@ -179,7 +185,9 @@ class Config
                     ]
                 ]);
 
-                $resp = json_decode($client->get($path)->getBody()->getContents(), true);
+                $resp = json_decode($client->get($path)
+                    ->getBody()
+                    ->getContents(), true);
 
                 $avroArr = json_decode($resp['schema'], true);
             } catch (\Exception $e) {
@@ -209,7 +217,10 @@ class Config
         }
 
 
-        self::$pipelineName = Config::getenv('PIPELINE_NAME', $defaultPipelineName);
+        self::$pipelineName = Config::getenv(
+            'PIPELINE_NAME',
+            $defaultPipelineName
+        );
 
 //        self::$offsets = (!empty(self::$state[$defaultPipelineName]['offsets']) ? self::$state[$defaultPipelineName]['offsets'] : []);
 
@@ -282,7 +293,7 @@ class Config
         $schemaName = self::$tenantId . '_' . self::$pipelineName;
 
         $schemaNamespace = "io.skippr." . self::$tenantId . "." . self::$pipelineName;
-        
+
         $valueAvroSchema['namespace'] = $schemaNamespace;
         $valueAvroSchema['name'] = $schemaName;
         $valueAvroSchema['type'] = 'record';
@@ -401,7 +412,10 @@ class Config
 //            Config::$state[Config::$pipelineName]['offsets'] = Config::$offsets;
 
             try {
-                file_put_contents(self::$dataDir . '/skippr-state.json', json_encode(Config::$state));
+                file_put_contents(
+                    self::$dataDir . '/skippr-state.json',
+                    json_encode(Config::$state)
+                );
 
                 SkipprLogger::info('Written state to ' . self::$dataDir . '/skippr-state.json');
             } catch (\Exception $e) {
