@@ -42,6 +42,10 @@ class FileBufferDriver implements BufferDriverInterface
 
         $this->bufferDir = Config::$dataDir . '/buffer';
 
+        if (!empty( Config::$flushBytes)) {
+            $this->flushBytes = Config::$flushBytes;
+        }
+
         @mkdir($this->bufferDir, 0777, true);
 
         $this->setSerde(Config::$outputFormat);
@@ -236,7 +240,7 @@ class FileBufferDriver implements BufferDriverInterface
     public function nextFile()
     {
 
-        $filenames = glob($this->bufferDir . '/' . $this->bufferName . '*_finalised_*', GLOB_NOSORT);
+        $filenames = glob($this->bufferDir . '/buffer=' . $this->bufferName . '*_finalised_*', GLOB_NOSORT);
 
         usort($filenames, function ($a, $b) {
             return filemtime($a) - filemtime($b);
@@ -297,7 +301,7 @@ class FileBufferDriver implements BufferDriverInterface
 
     public function unlockAll() : void
     {
-        $file_list = glob($this->bufferDir . '/' . $this->bufferName . '*lock');
+        $file_list = glob($this->bufferDir . '/buffer=' . $this->bufferName . '*lock');
 
         if (!empty($file_list)) {
             foreach ($file_list as $filename) {
@@ -351,7 +355,7 @@ class FileBufferDriver implements BufferDriverInterface
     public function finalise($force = false) :void
     {
 
-        $file_list = glob($this->bufferDir . '/' . $this->bufferName . '*_part*');
+        $file_list = glob($this->bufferDir . '/buffer=' . $this->bufferName . '*_part*');
 
         if (!empty($file_list)) {
             foreach ($file_list as $filename) {
@@ -405,7 +409,7 @@ class FileBufferDriver implements BufferDriverInterface
     public function bufferGetNoFiles() : int
     {
 
-        $file_list = glob($this->bufferDir . '/' . "$this->bufferName*");
+        $file_list = glob($this->bufferDir . '/buffer=' . "$this->bufferName*");
 
         $i = 0;
 
@@ -431,7 +435,7 @@ class FileBufferDriver implements BufferDriverInterface
 
         $bytes = 0;
 
-        $file_list = glob($this->bufferDir . '/' . "$this->bufferName*");
+        $file_list = glob($this->bufferDir . '/buffer=' . "$this->bufferName*");
 
         if (!empty($file_list)) {
             foreach ($file_list as $filename) {
@@ -460,7 +464,7 @@ class FileBufferDriver implements BufferDriverInterface
     public function bufferGetNoLines() : int
     {
 
-        $file_list = glob($this->bufferDir . '/' . "$this->bufferName*");
+        $file_list = glob($this->bufferDir . '/buffer=' . "$this->bufferName*");
 
         $lines = 0;
 

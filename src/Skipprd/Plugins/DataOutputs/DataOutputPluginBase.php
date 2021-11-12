@@ -21,16 +21,13 @@ class DataOutputPluginBase implements DataOutputPluginInterface
         $this->tenantId = getenv('TENANT_ID');
         $this->pipelineName = getenv('PIPELINE_NAME');
         $this->buffer = $buffer;
-        $this->buffer->flushBytes = $this->flushBytes;
+//        $this->buffer->flushBytes = $this->flushBytes;
         $this->config = $config;
         
-        if (in_array(Config::$outputFormat, Config::$batchFormats)) {
-            $this->buffer->flushMemBytes = $this->flushBytes;
-        }
-
-        if (!empty(Config::$flushBytes)) {
-            $this->buffer->flushMemBytes = Config::$flushBytes;
-        }
+//        if (in_array(Config::$outputFormat, Config::$batchFormats)) {
+//            $this->buffer->flushMemBytes = $this->flushBytes;
+//        }
+        
     }
 
     public function sync(string $format = '')

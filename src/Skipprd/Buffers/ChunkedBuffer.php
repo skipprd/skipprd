@@ -162,6 +162,18 @@ class ChunkedBuffer implements BufferInterface
 //        return '';
     }
 
+    public function decodeFilePartition($filename) : string
+    {
+
+        parse_str($filename, $array);
+        $partition = $array['partition'];
+
+        SkipprLogger::debug("decoding buffer partition $partition file $filename");
+
+        return $partition;
+
+    }
+
     public function decodeFileNamespace($filename) : string
     {
 
