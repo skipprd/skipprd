@@ -52,6 +52,8 @@ class Config
 
     public static $filters = [];
 
+    public static $flushBytes = '';
+
     /**
      * @var \AvroSchema $avroSchemas
      */
@@ -127,6 +129,8 @@ class Config
 //        self::$pipelineId = self::getenv('PIPELINE_ID');
 
         self::$logLevel = Config::getenv('LOG_LEVEL', 'INFO');
+
+        self::$flushBytes = Config::getenv('OUTPUT_FLUSH_BYTES', '');
 
         $avroArr = [];
 //        self::$mapping = [];

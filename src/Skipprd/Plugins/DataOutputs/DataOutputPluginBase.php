@@ -27,6 +27,10 @@ class DataOutputPluginBase implements DataOutputPluginInterface
         if (in_array(Config::$outputFormat, Config::$batchFormats)) {
             $this->buffer->flushMemBytes = $this->flushBytes;
         }
+
+        if (!empty(Config::$flushBytes)) {
+            $this->buffer->flushMemBytes = Config::$flushBytes;
+        }
     }
 
     public function sync(string $format = '')
