@@ -76,7 +76,9 @@ class RecordFilter
                     return false;
                 }
 
-                SkipprLogger::info("Applied filter " . $filter['action'] . " for field path " . $filter['field_path']);
+                $action = $filter['action'];
+                $field_path = $filter['field_path'];
+                SkipprLogger::debug("Applied filter $action for field path $field_path and value $value");
             }
         }
 

@@ -12,8 +12,6 @@ use Skipprd\Commands\RecordFilter;
 use Skipprd\Converters\AvroParquetSchemaConverter;
 use Skipprd\Converters\SkipprAvroSchemaConverter;
 use Skipprd\Helpers;
-use Monolog\Registry;
-use Skipprd\Str;
 
 class Config
 {
@@ -21,6 +19,8 @@ class Config
     public static $segmentKey = 'RnewwWgZXQjl9xofcjGJkirCH0VswBPd';
 
     public static $anonymousMetrics = true;
+
+    public static $logLevel = 'INFO';
 
     public static $dataDir = '/data';
 
@@ -125,6 +125,8 @@ class Config
     public static function getConfig()
     {
 //        self::$pipelineId = self::getenv('PIPELINE_ID');
+
+        self::$logLevel = Config::getenv('LOG_LEVEL', 'INFO');
 
         $avroArr = [];
 //        self::$mapping = [];

@@ -27,6 +27,7 @@ trait SkipprLogger
             // Create a handler
             $stream = new StreamHandler('php://stderr', \Monolog\Logger::DEBUG);
             $stream->setFormatter($formatter);
+            $stream->setLevel(Config::$logLevel);
 
 
             $application = new Logger('skipprd');
