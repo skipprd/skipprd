@@ -455,7 +455,7 @@ class PipelineCommand
 
             if (Config::$mode == 'sync') {
 //                $this->outputPlugin->buffer->append($serialised, false, $eventTime, $partition);
-                $this->outputPlugin->buffer->append($payload, false, $eventTime, "$namespace");
+                $this->outputPlugin->buffer->append($payload, false, $eventTime, $namespace, $partition);
 
                 if (!empty($this->outputPlugin)) {
                     $this->flushBuffer();
@@ -463,7 +463,7 @@ class PipelineCommand
 
 //                    $this->inputPlugin->setOffsets($this->outputPlugin->offset);
             } elseif (Config::$mode == 'async') {
-                $this->outputPlugin->buffer->append($payload, false, $eventTime, "$namespace");
+                $this->outputPlugin->buffer->append($payload, false, $eventTime, $namespace, $partition);
             }
 
             $tenantId = Config::$tenantId;
@@ -596,7 +596,7 @@ class PipelineCommand
 //            $payload = $sp->string() . "\n";
 
 //            $this->deadletterPlugin->buffer->append($payload);
-            $this->deadletterPlugin->buffer->append($message, false, 0, "$namespace");
+            $this->deadletterPlugin->buffer->append($message, false, 0, $namespace, $partition);
 
             $tenantId = Config::$tenantId;
             $pipelineName = Config::$pipelineName;
@@ -654,7 +654,7 @@ class PipelineCommand
 //                sleep(1);
 //            }
 
-                $this->inputPlugin->buffer->append($payload, false, 0, "$namespace");
+                $this->inputPlugin->buffer->append($payload, false, 0, $namespace, $partition);
             }
         }
     }

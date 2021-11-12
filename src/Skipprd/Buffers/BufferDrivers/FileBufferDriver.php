@@ -52,10 +52,10 @@ class FileBufferDriver implements BufferDriverInterface
         $this->serde = SerdersFactory::factory($serde);
     }
 
-    public function flush(array $memBuff, string $chunkName, string $partition) : void
+    public function flush(array $memBuff, string $chunkName, string $namespace) : void
     {
 
-        $schema = Config::$outputSchemas[$partition];
+        $schema = Config::$outputSchemas[$namespace];
 
         $filename = $this->bufferDir . '/' . $chunkName . '_part';
 
@@ -228,7 +228,7 @@ class FileBufferDriver implements BufferDriverInterface
 //     * @param $filename
 //     * @return string
 //     */
-//    public function decodeChunkPartition($filename) : string {
+//    public function decodeFileNamespaceAndPartition($filename) : string {
 //
 //        return '';
 //    }
