@@ -823,6 +823,11 @@ class PipelineCommand
 
 //                    unlink("buffer.ready"); // clean up ready buffer - as we force exit here
 
+                    // @todo - wont analyse all namespaces (tables, topics, paths, etc)
+                    // if we exit here.
+                    // The trouble with ->continue['part'] above is that it only exits if another
+                    // record is found in the source. Else the source hangs till new data arrives.
+                    // We need a way to force the source to the next namespace
 //                    $this->shutdown();
                 }
             }
