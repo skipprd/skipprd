@@ -398,11 +398,11 @@ class IngestTest extends TestCase
         Config::$tenantId = 'foo';
         Config::$pipelineName = 'bar';
 
-        Config::$schema['foo_partition'] = [];
-        Config::$avroSchemas['foo_partition'] = [];
+        Config::$schema['foo_namespace'] = [];
+        Config::$avroSchemas['foo_namespace'] = [];
 
         Config::$analysing = true;
-        Config::$discoveredFieldOccurrence['foo_partition'] = [];
+        Config::$discoveredFieldOccurrence['foo_namespace'] = [];
         
         $container = Mockery::mock(PipelineCommand::class)->makePartial();
 //        $container->shouldReceive('AnalyseSchema');
@@ -425,7 +425,7 @@ class IngestTest extends TestCase
 
         $serde = SerdersFactory::factory(Config::$sourceFormat);
 
-        $container->readFile($filename, 'foo_partition', function ($payload) use ($serde, &$fields, &$payloadString) {
+        $container->readFile($filename, 'foo_namespace', function ($payload) use ($serde, &$fields, &$payloadString) {
 
             if (Config::$sourceFormat == 'parquet') {
 
@@ -461,18 +461,18 @@ class IngestTest extends TestCase
         }
 
         foreach ($fields as $field) {
-            $container->analysePayload($field, Config::$discoveredFieldOccurrence['foo_partition']);
+            $container->analysePayload($field, Config::$discoveredFieldOccurrence['foo_namespace']);
         }
 
-        $container->determineFieldTypes(Config::$discoveredFieldOccurrence['foo_partition']);
+        $container->determineFieldTypes(Config::$discoveredFieldOccurrence['foo_namespace']);
 
         $avroFieldSchema = $this->buildSchema($fields[0]);
-        Config::$schema['foo_partition'] = Config::schemaMerge(Config::$specialFieldsMapping, $avroFieldSchema);
-        Config::$avroSchemas['foo_partition'] = Config::buildAvroSchema(Config::$schema['foo_partition']);
+        Config::$schema['foo_namespace'] = Config::schemaMerge(Config::$specialFieldsMapping, $avroFieldSchema);
+        Config::$avroSchemas['foo_namespace'] = Config::buildAvroSchema(Config::$schema['foo_namespace']);
 
         Config::$analysing = false;
 
-        $container->defaultMsgs['foo_partition'] = $this->defaultMessage(Config::$schema['foo_partition']);
+        $container->defaultMsgs['foo_namespace'] = $this->defaultMessage(Config::$schema['foo_namespace']);
 
         Config::$outputSchemas = [];
 
@@ -483,11 +483,11 @@ class IngestTest extends TestCase
 
             $converter = new $converterClass();
 
-            Config::$outputSchemas['foo_partition'] = $converter->convert(Config::$avroSchemas['foo_partition']);
+            Config::$outputSchemas['foo_namespace'] = $converter->convert(Config::$avroSchemas['foo_namespace']);
 
         } else {
 
-            Config::$outputSchemas['foo_partition'] = Config::$avroSchemas['foo_partition'];
+            Config::$outputSchemas['foo_namespace'] = Config::$avroSchemas['foo_namespace'];
         }
 
         // Ingest messages
@@ -499,10 +499,10 @@ class IngestTest extends TestCase
         
         foreach ($fields as $field) {
 
-            $message = $container->ingestPayload($field, Config::$discoveredFieldOccurrence['foo_partition'], 'foo_partition');
+            $message = $container->ingestPayload($field, Config::$discoveredFieldOccurrence['foo_namespace'], 'foo_namespace');
 
 //            if (!empty($message)) {
-                $this->buffer->append($message, false, 0, 'foo_partition');
+                $this->buffer->append($message, false, 0, 'foo_namespace');
 //            }
             
 //            break;
@@ -511,9 +511,9 @@ class IngestTest extends TestCase
 
         $timeBucket = $this->buffer->eventTimeBucket(0);
 
-        $chunkName = $this->buffer->encodeChunkName('foo_partition', $timeBucket);
+        $chunkName = $this->buffer->encodeChunkName('foo_namespace', $timeBucket);
 
-//        $this->buffer->flush($this->buffer->memBuffs, $chunkName, 'foo_partition');
+//        $this->buffer->flush($this->buffer->memBuffs, $chunkName, 'foo_namespace');
         $this->buffer->flushAll(true);
 
         $this->buffer->driver->finalise(true);
@@ -528,13 +528,13 @@ class IngestTest extends TestCase
 
         foreach ($record as $field => $value) {
 
-            $field = Helpers::cleanFieldName($field);
+//            $field = Helpers::cleanFieldName($field);
 
 //            if (!array_key_exists($field, Config::$specialFields)) {
 
-                $avroType = Config::$discoveredFieldOccurrence['foo_partition'][$field]['determined_type'];
+                $avroType = Config::$discoveredFieldOccurrence['foo_namespace'][$field]['determined_type'];
 
-                SkipprAvroSchemaConverter::buildAvroFields($avroFieldSchema, $field, $avroType, Config::$discoveredFieldOccurrence['foo_partition'], [], $sub_field_count);
+                SkipprAvroSchemaConverter::buildAvroFields($avroFieldSchema, $field, $avroType, Config::$discoveredFieldOccurrence['foo_namespace'], [], $sub_field_count);
 
 //            }
 
@@ -560,7 +560,7 @@ class IngestTest extends TestCase
             $fileSchema = $info['schema']['schema'];
 
             $parCon = new AvroParquetSchemaConverter();
-            $parquetSchema = $parCon->convert(Config::$avroSchemas['foo_partition']);
+            $parquetSchema = $parCon->convert(Config::$avroSchemas['foo_namespace']);
 
             foreach ($parquetSchema as $field => $attr) {
 
@@ -597,7 +597,7 @@ class IngestTest extends TestCase
 
             $this->assertIsArray($data);
 
-            $defaultMsg = $this->defaultMessage(Config::$schema['foo_partition']);
+            $defaultMsg = $this->defaultMessage(Config::$schema['foo_namespace']);
 
             $missingFields = array_diff_key($data[0], $defaultMsg);
 
@@ -624,7 +624,7 @@ class IngestTest extends TestCase
 
             $this->assertIsArray($data);
 
-            $defaultMsg = $this->defaultMessage(Config::$schema['foo_partition']);
+            $defaultMsg = $this->defaultMessage(Config::$schema['foo_namespace']);
 
             $missingFields = array_diff_key($data[0], $defaultMsg);
 
@@ -651,7 +651,7 @@ class IngestTest extends TestCase
 
             $this->assertIsArray($data);
 
-            $defaultMsg = $this->defaultMessage(Config::$schema['foo_partition']);
+            $defaultMsg = $this->defaultMessage(Config::$schema['foo_namespace']);
 
             $missingFields = array_diff_key($data[0], $defaultMsg);
 
@@ -678,7 +678,7 @@ class IngestTest extends TestCase
 
             $this->assertIsArray($data);
 
-            $defaultMsg = $this->defaultMessage(Config::$schema['foo_partition']);
+            $defaultMsg = $this->defaultMessage(Config::$schema['foo_namespace']);
 
             $missingFields = array_diff_key($data[0], $defaultMsg);
 
@@ -711,7 +711,7 @@ class IngestTest extends TestCase
 
                 $this->assertIsArray($data);
 
-                $defaultMsg = $this->defaultMessage(Config::$schema['foo_partition']);
+                $defaultMsg = $this->defaultMessage(Config::$schema['foo_namespace']);
 
                 $missingFields = array_diff_key($data[0], $defaultMsg);
 

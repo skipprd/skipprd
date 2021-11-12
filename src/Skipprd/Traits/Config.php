@@ -73,12 +73,26 @@ class Config
 
     public static $specialFields = [
         'skpr_event_ts' => 0,
+        'skpr_namespace' => '',
         'skpr_partition' => '',
     ];
 
     static $specialFieldsMapping = [
-        ['name' => 'skpr_event_ts', 'default' => null, 'type' => ['null', 'int']],
-        ['name' => 'skpr_partition', 'default' => null, 'type' => ['null', 'string']],
+        [
+            'name' => 'skpr_event_ts',
+            'default' => null,
+            'type' => ['null', 'int']
+        ],
+        [
+            'name' => 'skpr_namespace',
+            'default' => null,
+            'type' => ['null', 'string']
+        ],
+        [
+            'name' => 'skpr_partition',
+            'default' => null,
+            'type' => ['null', 'string']
+        ],
     ];
 
     public static $batchFormats = [
@@ -213,34 +227,37 @@ class Config
 
         self::$analysing = (empty(self::$discoveredFieldOccurrence)) ? true : false;
         self::$analysing = (bool) self::getenv('ANALYSING', self::$analysing);
-        
+
         self::$systemUserApiToken = self::getenv('SCHEMA_API_TOKEN');
 
         if (!empty(self::$discoveredFieldOccurrence)) {
-            foreach (self::$discoveredFieldOccurrence as $partition => $mapping) {
-                SkipprLogger::info("Building $partition schema");
+            foreach (self::$discoveredFieldOccurrence as $namespace => $mapping) {
+                SkipprLogger::info("Building $namespace schema");
 
                 $converter = new SkipprAvroSchemaConverter();
-                self::$schema[$partition] = $converter->convert($mapping['fields']);
+                self::$schema[$namespace] = $converter->convert($mapping['fields']);
 
-                self::$schema[$partition] = self::schemaMerge(self::$specialFieldsMapping, self::$schema[$partition]);
+                self::$schema[$namespace] = self::schemaMerge(
+                    self::$specialFieldsMapping,
+                    self::$schema[$namespace]
+                );
 
-                self::$avroSchemas[$partition] = self::buildAvroSchema(self::$schema[$partition]);
+                self::$avroSchemas[$namespace] = self::buildAvroSchema(self::$schema[$namespace]);
 
 //                $converter = new AvroParquetSchemaConverter();
-//                self::$outputSchemas[$partition] = $converter->convert(Config::$avroSchemas[$partition]);
+//                self::$outputSchemas[$namespace] = $converter->convert(Config::$avroSchemas[$namespace]);
 
                 $outputFormat = ucfirst(self::$outputFormat);
                 $converterClass = 'Skipprd\Converters\Avro' . $outputFormat . 'SchemaConverter';
 
                 if (class_exists($converterClass)) {
-                    SkipprLogger::info("Converting $partition schema to $outputFormat");
+                    SkipprLogger::info("Converting $namespace schema to $outputFormat");
 
                     $converter = new $converterClass();
 
-                    self::$outputSchemas[Helpers::cleanFieldName($partition)] = $converter->convert(self::$avroSchemas[$partition]);
+                    self::$outputSchemas[$namespace] = $converter->convert(self::$avroSchemas[$namespace]);
                 } else {
-                    self::$outputSchemas[Helpers::cleanFieldName($partition)] = self::$avroSchemas[$partition];
+                    self::$outputSchemas[$namespace] = self::$avroSchemas[$namespace];
                 }
             }
         }

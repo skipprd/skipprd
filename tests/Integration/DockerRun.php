@@ -38,6 +38,7 @@ class DockerRun extends TestCase
 
     protected $avroSchema = array (
         'skpr_event_ts' => NULL,
+        'skpr_namespace' => NULL,
         'skpr_partition' => NULL,
         'rider_id' => NULL,
         'bike_id' => NULL,
@@ -89,6 +90,7 @@ class DockerRun extends TestCase
 
     protected $csvSchema = [
         'skpr_event_ts' => false,
+        'skpr_namespace' => false,
         'skpr_partition' => false,
         'rider_id' => false,
         'bike_id' => false,
@@ -102,6 +104,7 @@ class DockerRun extends TestCase
 
     protected $jsonSchema = [
             'skpr_event_ts' => 0,
+            'skpr_namespace' => '',
             'skpr_partition' => '',
             'rider_id' => '10e974bf-4a43-305a-9e39-1636c43cb22a',
             'bike_id' => '8b86f753-05f8-3254-aba6-739188a3c0b6',
@@ -187,6 +190,7 @@ class DockerRun extends TestCase
     protected $parquetSchema = array (
         0 => 'message schema {',
         1 => '  optional int32 skpr_event_ts;',
+        2 => '  optional binary skpr_namespace (UTF8);',
         2 => '  optional binary skpr_partition (UTF8);',
         3 => '  optional binary rider_id (UTF8);',
         4 => '  optional binary bike_id (UTF8);',
@@ -329,7 +333,7 @@ class DockerRun extends TestCase
 
     }
 
-    public function dockerRun() {
+    public function dockerRun(int $msgCount = 100, int $deadletterCount = 0) {
 
         $src = $this->dataPath . $this->testFile;
         copy($src, $this->basePath . '/input/' . $this->testFile);
@@ -352,8 +356,8 @@ class DockerRun extends TestCase
         $this->assertNotContains('error', $logs);
         $this->assertNotContains('fatal', $logs);
 
-//        $this->assertContains('Ingested 100 messages', $logs);
-//        $this->assertContains('Dead Letters 0 dead letters', $logs);
+        $this->assertContains("Ingested $msgCount messages", $logs);
+        $this->assertContains("Dead Letters $deadletterCount dead letters", $logs);
 
     }
 

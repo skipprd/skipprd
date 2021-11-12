@@ -370,8 +370,8 @@ class PipelineCommand
 
         $this->setPlugin();
 
-        foreach (Config::$schema as $partition => $schema) {
-            $this->defaultMsgs[$partition] = $this->defaultMessage($schema);
+        foreach (Config::$schema as $namespace => $schema) {
+            $this->defaultMsgs[$namespace] = $this->defaultMessage($schema);
         }
 
         $this->startTimestamp = Carbon::now()->timestamp;
@@ -430,6 +430,7 @@ class PipelineCommand
 
         try {
             $eventTime = $payload['skpr_event_ts'];
+            $namespace = $payload['skpr_namespace'];
             $partition = $payload['skpr_partition'];
 
 //            $serialised = json_encode($payload) . "\n";
@@ -454,7 +455,7 @@ class PipelineCommand
 
             if (Config::$mode == 'sync') {
 //                $this->outputPlugin->buffer->append($serialised, false, $eventTime, $partition);
-                $this->outputPlugin->buffer->append($payload, false, $eventTime, $partition);
+                $this->outputPlugin->buffer->append($payload, false, $eventTime, "$namespace");
 
                 if (!empty($this->outputPlugin)) {
                     $this->flushBuffer();
@@ -462,7 +463,7 @@ class PipelineCommand
 
 //                    $this->inputPlugin->setOffsets($this->outputPlugin->offset);
             } elseif (Config::$mode == 'async') {
-                $this->outputPlugin->buffer->append($payload, false, $eventTime, $partition);
+                $this->outputPlugin->buffer->append($payload, false, $eventTime, "$namespace");
             }
 
             $tenantId = Config::$tenantId;
@@ -583,6 +584,7 @@ class PipelineCommand
         // Don't dead letter message, if running the dead letter job
         // it will be skipped and so just remain in the queue
         if (Config::$enableDeadLetters) {
+            $namespace = $message['skpr_namespace'];
             $partition = $message['skpr_partition'];
 
             $deadLetterTopic = 'raw_' . Config::$tenantId  . '_' . Config::$pipelineName .'_deadletter';
@@ -594,7 +596,7 @@ class PipelineCommand
 //            $payload = $sp->string() . "\n";
 
 //            $this->deadletterPlugin->buffer->append($payload);
-            $this->deadletterPlugin->buffer->append($message, false, 0, $partition);
+            $this->deadletterPlugin->buffer->append($message, false, 0, "$namespace");
 
             $tenantId = Config::$tenantId;
             $pipelineName = Config::$pipelineName;
@@ -625,7 +627,7 @@ class PipelineCommand
         }
     }
 
-    public function emit(string $payload, $partition) : void
+    public function emit(string $payload, string $namespace, string $partition = '0') : void
     {
 
         if ($payload != '') {
@@ -637,7 +639,7 @@ class PipelineCommand
 //                $offset = $sp->decodeOffset();
                 }
 
-                $this->emitString($payload, $partition);
+                $this->emitString($payload, $namespace, $partition);
             } elseif (Config::$mode == 'async') {
 //                $offset = (string) $offset;
 //                $sp = new SkipprPack();
@@ -652,7 +654,7 @@ class PipelineCommand
 //                sleep(1);
 //            }
 
-                $this->inputPlugin->buffer->append($payload, false, 0, $partition);
+                $this->inputPlugin->buffer->append($payload, false, 0, "$namespace");
             }
         }
     }
@@ -728,7 +730,7 @@ class PipelineCommand
         }
     }
 
-    public function emitFile(string $filename, $partition) : void
+    public function emitFile(string $filename, string $namespace, string $partition = '0') : void
     {
 
         $fields = [];
@@ -736,32 +738,37 @@ class PipelineCommand
 
         $serde = SerdersFactory::factory(Config::$sourceFormat);
 
-        $this->readFile($filename, $partition, function ($string, $partition) use ($serde, &$fields, &$payloadString) {
+        $this->readFile(
+            $filename,
+            $partition,
+            function ($string, $partition) use ($serde, &$fields, &$payloadString, $namespace) {
 
-            if (in_array(Config::$sourceFormat, Config::$batchFormats)) {
-                $payloadString .= $string;
-            } else {
-                $msgs = $serde->deserialize($string);
+                if (in_array(Config::$sourceFormat, Config::$batchFormats)) {
+                    $payloadString .= $string;
+                } else {
+                    $msgs = $serde->deserialize($string);
 
-                foreach ($msgs as $msg) {
-//                    array_push($fields, $msg);
-                    $this->emitArray($msg, $partition);
+                    foreach ($msgs as $msg) {
+            //                    array_push($fields, $msg);
+                        $this->emitArray($msg, $namespace, $partition);
+                    }
                 }
             }
-        });
+        );
 
         if (in_array(Config::$sourceFormat, Config::$batchFormats)) {
             $msgs = $serde->deserialize($payloadString);
 
             foreach ($msgs as $msg) {
 //                array_push($fields, $msg);
-                $this->emitArray($msg, $partition);
+                $this->emitArray($msg, $namespace, $partition);
             }
         }
     }
 
-    public function emitString(string $payload, string $partition) : void
+    public function emitString(string $payload, string $namespace, string $partition = '0') : void
     {
+
 
         if ($payload != '') {
             if (Config::$mode == 'sync') {
@@ -777,18 +784,18 @@ class PipelineCommand
                 $serder = SerdersFactory::factory(Config::$sourceFormat);
                 $sourceMessages = $serder->deserialize($payload);
 
-                $this->emitArray($sourceMessages, $partition);
+                $this->emitArray($sourceMessages, $namespace, $partition);
             }
         }
     }
 
-    public function emitArray(array $payload, string $partition) : void
+    public function emitArray(array $payload, string $namespace, string $partition = '0') : void
     {
 
         $unwrappedMessages = $this->unwrap($payload);
 
-        if (empty(Config::$discoveredFieldOccurrence[$partition])) {
-            Config::$discoveredFieldOccurrence[$partition] = [
+        if (empty(Config::$discoveredFieldOccurrence[$namespace])) {
+            Config::$discoveredFieldOccurrence[$namespace] = [
                 'enabled' => true,
                 'fields' => [],
             ];
@@ -798,16 +805,16 @@ class PipelineCommand
             if (Config::$analysing && $this->inputPlugin->ingestPartition($partition) === true) {
                 if (is_array($unwrappedMessage)) {
                     $this->getIdFields($unwrappedMessage);
+                    $this->parseNamespaceField($unwrappedMessage, $namespace);
+                    $unwrappedMessage['skpr_partition'] = $partition;
 
-                    $this->parsePartitionField($unwrappedMessage, $partition);
-
-                    $this->analysePayload($unwrappedMessage, Config::$discoveredFieldOccurrence[$partition]['fields']);
+                    $this->analysePayload($unwrappedMessage, Config::$discoveredFieldOccurrence[$namespace]['fields']);
                 }
 
                 if ($this->i > $this->minSample
                     || Carbon::now()->timestamp - $this->startTimestamp > $this->maxTime) {
 //
-                    SkipprLogger::info("Finished discovering schema for $partition record type");
+                    SkipprLogger::info("Finished discovering schema for $namespace record type");
 
                     $this->i = 0;
                     $this->startTimestamp = Carbon::now()->timestamp;
@@ -829,9 +836,10 @@ class PipelineCommand
                 
                 if (is_array($unwrappedMessage)) {
                     $this->parseTimeField($unwrappedMessage);
-                    $this->parsePartitionField($unwrappedMessage, $partition);
+                    $this->parseNamespaceField($unwrappedMessage, $namespace);
+                    $unwrappedMessage['skpr_partition'] = $partition;
 
-                    $message = $this->ingestPayload($unwrappedMessage, Config::$discoveredFieldOccurrence[$partition]['fields'], $partition);
+                    $message = $this->ingestPayload($unwrappedMessage, Config::$discoveredFieldOccurrence[$namespace]['fields'], $namespace);
 
                     if ($message) {
                         $this->serialiseOutput($message);
@@ -848,11 +856,12 @@ class PipelineCommand
         }
     }
 
-    public function parsePartitionField(array &$message, string $partition)
+    public function parseNamespaceField(array &$message, string $namespace)
     {
 
         // default to data source partition (table, topic, queue, file dir, etc)
-        $shardFieldEntityValue =  Helpers::cleanFieldName($partition);
+//        $shardFieldEntityValue =  Helpers::cleanFieldName($namespace);
+        $shardFieldEntityValue = $namespace;
 
         // optional: partition by composite key
         if (!empty(Config::$entityNames)) {
@@ -870,9 +879,10 @@ class PipelineCommand
         }
 
 
-        $shardFieldEntityValue = strtolower(trim($shardFieldEntityValue, '-'));
+//        $shardFieldEntityValue = strtolower(trim($shardFieldEntityValue, '-'));
+        $shardFieldEntityValue = trim($shardFieldEntityValue, '-');
 
-        $message['skpr_partition'] = $shardFieldEntityValue;
+        $message['skpr_namespace'] = $shardFieldEntityValue;
     }
 
     public function parseTimeField(&$message)
@@ -1162,9 +1172,9 @@ class PipelineCommand
     public function finaliseFieldCandidates()
     {
 
-        foreach (Config::$discoveredFieldOccurrence as $partition => $metadata) {
-            Config::$discoveredFieldOccurrence[$partition]['date_field_candidates'] = [];
-            Config::$discoveredFieldOccurrence[$partition]['enitity_field_candidates'] = [];
+        foreach (Config::$discoveredFieldOccurrence as $namespace => $metadata) {
+            Config::$discoveredFieldOccurrence[$namespace]['date_field_candidates'] = [];
+            Config::$discoveredFieldOccurrence[$namespace]['enitity_field_candidates'] = [];
             
             $validDateFieldCandidates = [];
 
@@ -1174,17 +1184,17 @@ class PipelineCommand
                 }
             }
 
-            Config::$discoveredFieldOccurrence[$partition]['date_field_candidates'] = $validDateFieldCandidates;
+            Config::$discoveredFieldOccurrence[$namespace]['date_field_candidates'] = $validDateFieldCandidates;
 
-            Config::$discoveredFieldOccurrence[$partition]['enitity_field_candidates'] = Config::$idFields;
+            Config::$discoveredFieldOccurrence[$namespace]['enitity_field_candidates'] = Config::$idFields;
         }
     }
 
     public function finaliseFieldMapping()
     {
 
-        foreach (Config::$discoveredFieldOccurrence as $partition => $metadata) {
-            self::determineFieldTypes(Config::$discoveredFieldOccurrence[$partition]['fields']);
+        foreach (Config::$discoveredFieldOccurrence as $namespace => $metadata) {
+            self::determineFieldTypes(Config::$discoveredFieldOccurrence[$namespace]['fields']);
         }
 
         $this->findMessageIdField();
@@ -1336,7 +1346,7 @@ class PipelineCommand
 
         if (!empty($message)) {
             foreach ($message as $fieldName => $value) {
-                $fieldName = Helpers::cleanFieldName($fieldName);
+//                $fieldName = Helpers::cleanFieldName($fieldName);
 
                 $fieldHaystack = Helpers::explodeField($fieldName);
 
