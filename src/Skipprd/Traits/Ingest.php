@@ -27,28 +27,9 @@ trait Ingest
 
         $this->i++;
 
-        // Filter
-        if (!empty(Config::$filters)) {
-            foreach (Config::$filters as $filter) {
-                $value = Arr::get($sourceMessage, $filter['field_path'], false);
-
-                if ($value
-                    && RecordFilter::applyFilter(
-                        $value,
-                        $filter['operator'],
-                        $filter['comparison'],
-                        $filter['action']
-                    )) {
-                    Arr::set($sourceMessage, $filter['field_path'], $value);
-                } else { // record drop
-                    return false;
-                }
-            }
-        }
-
-        // @todo - configurable timefields
-        if (!empty($sourceMessage)) {
-            $message = $this->defaultMsgs[$partition];
+        if (!empty($sourceMessage)
+            && RecordFilter::filter($sourceMessage)) {
+            $message = $this->defaultMsgs[$namespace];
 
             /*
              * Transformations and schema evolution

@@ -13,7 +13,7 @@ use Docker\API\Model\ContainersCreatePostBody;
 use Docker\Docker;
 use Skipprd\Helpers;
 
-class JsonToJsonFiltersTest extends DockerRun
+class FiltersJsonToJsonTest extends DockerRun
 {
 
     public function setUp()
@@ -23,13 +23,13 @@ class JsonToJsonFiltersTest extends DockerRun
         parent::setUp();
     }
 
-    public function testIsSequentialArrayKeys() {
+    public function testFilterEquals() {
 
         $envs = [
             'DATA_SOURCE_PLUGIN_NAME=file',
             'DATA_SOURCE_PATH=/data/input',
             'DATA_SOURCE_FORMAT=json',
-            
+
             'FILTER_RIDERID_FIELD_PATH=rider_id',
             'FILTER_RIDERID_OPERATOR=eq',
             'FILTER_RIDERID_COMPARISON=10e974bf-4a43-305a-9e39-1636c43cb22a',
@@ -46,7 +46,36 @@ class JsonToJsonFiltersTest extends DockerRun
 
         $this->containerConfig->setEnv($envs);
 
-        $this->dockerRun();
+        $this->dockerRun(1, 99);
+
+        $this->assertJsonOutput();
+
+    }
+
+    public function testFilterIn() {
+
+        $envs = [
+            'DATA_SOURCE_PLUGIN_NAME=file',
+            'DATA_SOURCE_PATH=/data/input',
+            'DATA_SOURCE_FORMAT=json',
+
+            'FILTER_RIDERID_FIELD_PATH=rider_id',
+            'FILTER_RIDERID_OPERATOR=in',
+            'FILTER_RIDERID_COMPARISON=10e974bf-4a43-305a-9e39-1636c43cb22a',
+            'FILTER_RIDERID_ACTION=allow_record',
+
+            'DATA_OUTPUT_FORMAT=json',
+            'DATA_DIR=/data',
+            'TENANT_ID=skippr',
+            'PIPELINE_NAME=uattest',
+            'ANONYMOUS_METRICS=false',
+            'LICENSE_KEY=94708298-498f-4c74-802c-ff359dd56cdf',
+            'APP_ENV=dev',
+        ];
+
+        $this->containerConfig->setEnv($envs);
+
+        $this->dockerRun(1, 99);
 
         $this->assertJsonOutput();
 
