@@ -80,7 +80,7 @@ class PipelineCommand
 
 //    public static $flushMaxMsg = 100000;
 //    public static $flushMaxMsg = 10000;
-    public static $flushMaxMsg = 5000;
+    public static $flushMaxMsg = 100;
 //    public static $flushMaxMsg = 1;
 
     /**
@@ -679,14 +679,14 @@ class PipelineCommand
     public function offsetCommitRoutine(string $partition, bool $force = false): void
     {
         if (!Config::$analysing) {
-            if (!isset($this->j)) {
-                $this->j = 0;
+            if (!isset($this->j[$partition])) {
+                $this->j[$partition] = 0;
             } else {
-                $this->j++;
+                $this->j[$partition]++;
             }
 
-            if ($force || $this->j > self::$flushMaxMsg) {
-                $this->j = 0;
+            if ($force || $this->j[$partition] > self::$flushMaxMsg) {
+                $this->j[$partition] = 0;
 
                 $offset = $this->inputPlugin->offsets->getOffset($partition);
 
