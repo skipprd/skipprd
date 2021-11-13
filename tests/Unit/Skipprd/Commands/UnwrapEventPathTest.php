@@ -71,7 +71,7 @@ class UnwrapEventPathTest extends TestCase
 
         Config::$eventPath = 'messages.user_data.events';
 
-        // emitArray via serder as it adds an outer array itself which unwrap() handles.
+        // emitArray via serder as it adds an outer array itself which unwrapEventPath() handles.
         $payload = json_encode($message);
 
         $serder = SerdersFactory::factory('json');

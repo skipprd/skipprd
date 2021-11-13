@@ -82,7 +82,7 @@ class ingestMsgUnwrapOuterArrayTest extends TestCase
 
         $this->discoverSchema($container, $message['metrics'][0]);
 
-        // emitArray via serder as it adds an outer array itself which unwrap() handles.
+        // emitArray via serder as it adds an outer array itself which unwrapEventPath() handles.
         $payload = json_encode($message);
 
         $serder = SerdersFactory::factory('json');
@@ -153,7 +153,7 @@ class ingestMsgUnwrapOuterArrayTest extends TestCase
 
         $this->discoverSchema($container, $message['messages']['user_data']['events'][0]);
 
-        // emitArray via serder as it adds an outer array itself which unwrap() handles.
+        // emitArray via serder as it adds an outer array itself which unwrapEventPath() handles.
         $payload = json_encode($message);
         
         $serder = SerdersFactory::factory('json');

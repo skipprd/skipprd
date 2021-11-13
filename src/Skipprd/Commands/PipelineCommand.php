@@ -809,7 +809,7 @@ class PipelineCommand
     public function emitArray(array $payload, string $namespace, string $partition = '0') : void
     {
 
-        $unwrappedMessages = $this->unwrap($payload);
+        $unwrappedMessages = $this->unwrapEventPath($payload);
 
         if (empty(Config::$discoveredFieldOccurrence[$namespace])) {
             Config::$discoveredFieldOccurrence[$namespace] = [
@@ -933,7 +933,7 @@ class PipelineCommand
         }
     }
 
-    public function unwrap($sourceMessages)
+    public function unwrapEventPath($sourceMessages)
     {
 
         if (!empty($sourceMessages) && is_array($sourceMessages)) {
