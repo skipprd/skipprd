@@ -217,18 +217,20 @@ class PipelineCommand
             }
 
             $deadLetterPluginName = Str::studly(ucwords(strtolower($deadLetterPluginName)));
-        } else {
-                $deadLetterPluginName = 'File';
 
-                $config['path'] = '/dead-letters';
+            $deadLetterPluginClass = "Skipprd\\Plugins\\DataOutputs" . "\\$deadLetterPluginName\\DataOutput" . "$deadLetterPluginName" . "Plugin";
+
+            $this->deadletterPlugin = new $deadLetterPluginClass($config, $this->deadletterBuffer);
+
+            $this->deadletterPlugin->buffer->driver->setSerde('json');
+
         }
+//        else {
+//                $deadLetterPluginName = 'File';
+//
+//                $config['path'] = '/dead-letters';
+//        }
 
-
-        $deadLetterPluginClass = "Skipprd\\Plugins\\DataOutputs" . "\\$deadLetterPluginName\\DataOutput" . "$deadLetterPluginName" . "Plugin";
-
-        $this->deadletterPlugin = new $deadLetterPluginClass($config, $this->deadletterBuffer);
-
-        $this->deadletterPlugin->buffer->driver->setSerde('json');
         
 
         if (Config::getenv('JOB_NAME') == 'deadletters') {
@@ -242,11 +244,12 @@ class PipelineCommand
 
         if (!empty($pluginName)) {
             $this->inputPlugin = PluginFactory::factory('data_source', $pluginName, $this->outputBuffer);
-        } else {
-            $outputPluginClass = "Skipprd\\Plugins\\DataSources\\" . 'File' . "\\DataSource" . 'File' . "Plugin";
-
-            $this->inputPlugin = new $outputPluginClass($config, $this->outputBuffer);
         }
+//        else {
+//            $outputPluginClass = "Skipprd\\Plugins\\DataSources\\" . 'File' . "\\DataSource" . 'File' . "Plugin";
+//
+//            $this->inputPlugin = new $outputPluginClass($config, $this->outputBuffer);
+//        }
 
         /**
          * Data Output Plugin
@@ -255,11 +258,13 @@ class PipelineCommand
 
         if (!empty($pluginName)) {
             $this->outputPlugin = PluginFactory::factory('data_output', $pluginName, $this->outputBuffer);
-        } else {
-//            $this->outputPlugin = PluginFactory::factory('data_output', 'file', $this->outputBuffer);
-
+        }
+        else {
 
             $outputPluginClass = "Skipprd\\Plugins\\DataOutputs\\" . 'File' . "\\DataOutput" . 'File' . "Plugin";
+
+            $config = [];
+            $config['path'] = '/dead-letters';
 
             $this->outputPlugin = new $outputPluginClass($config, $this->outputBuffer);
         }
@@ -532,12 +537,16 @@ class PipelineCommand
             $this->outputPlugin->buffer->driver->finalise();
 
 
-            $this->deadletterPlugin->buffer->driver->unlockAll();
-//            $this->deadletterPlugin->buffer->flush("deadletter");
-            $this->deadletterPlugin->buffer->flushAll();
-            $this->deadletterPlugin->buffer->driver->finalise();
+            if (!empty($this->deadletterPlugin)) {
 
-//            $this->deadletterPlugin->sync(Config::$outputFormat);
+                $this->deadletterPlugin->buffer->driver->unlockAll();
+//            $this->deadletterPlugin->buffer->flush("deadletter");
+                $this->deadletterPlugin->buffer->flushAll();
+                $this->deadletterPlugin->buffer->driver->finalise();
+
+                $this->deadletterPlugin->sync(Config::$outputFormat);
+            }
+//
 
 //            $this->outputPlugin->sync(Config::$outputFormat);
 
@@ -600,9 +609,11 @@ class PipelineCommand
 //            $sp->encode($serialised, $offset);
 //            $payload = $sp->string() . "\n";
 
+            if (!empty($this->deadletterPlugin)) {
 //            $this->deadletterPlugin->buffer->append($payload);
-            $this->deadletterPlugin->buffer->append($message, false, 0, $namespace, $partition);
-
+                $this->deadletterPlugin->buffer->append($message, false, 0,
+                    $namespace, $partition);
+            }
             $tenantId = Config::$tenantId;
             $pipelineName = Config::$pipelineName;
 
@@ -1073,10 +1084,11 @@ class PipelineCommand
             $this->outputPlugin->buffer->flushAll(true);
             $this->outputPlugin->buffer->driver->finalise(true);
 
-            $this->deadletterPlugin->buffer->driver->unlockAll();
-            $this->deadletterPlugin->buffer->flushAll(true);
-            $this->deadletterPlugin->buffer->driver->finalise(true);
-
+            if (!empty($this->deadletterPlugin)) {
+                $this->deadletterPlugin->buffer->driver->unlockAll();
+                $this->deadletterPlugin->buffer->flushAll(true);
+                $this->deadletterPlugin->buffer->driver->finalise(true);
+            }
             $this->totalEntries += $this->entries;
 
             if (Config::$mode == 'sync') {
@@ -1090,11 +1102,16 @@ class PipelineCommand
 
                             $this->outputPlugin->sync(Config::$outputFormat);
 
-                            $this->deadletterPlugin->sync(Config::$outputFormat);
+                            if (!empty($this->deadletterPlugin)) {
+                                $this->deadletterPlugin->sync(Config::$outputFormat);
+                            }
                         }
                     }
                     $this->outputPlugin->shutdown();
-                    $this->deadletterPlugin->shutdown();
+
+                    if (!empty($this->deadletterPlugin)) {
+                        $this->deadletterPlugin->shutdown();
+                    }
                 }
             }
 
@@ -1126,7 +1143,10 @@ class PipelineCommand
 
             $this->writeMapping();
         } else {
-            SkipprLogger::info("No fields found when analysing schema, did you send some data?");
+            
+            if (!empty($this->inputPlugin)) {
+                SkipprLogger::info("No fields found when analysing schema, did you send some data?");
+            }
         }
 
 //        SkipprLogger::debug("Mem used: " . BytesToHuman::toHuman(memory_get_usage(true), true, 'MB'));

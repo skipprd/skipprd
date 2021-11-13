@@ -46,7 +46,7 @@ class RecordFilter
                 ) {
                     $comparison = $filters[$filterName]['comparison'];
 
-                    SkipprLogger::info("exploding comparison: $comparison");
+                    SkipprLogger::debug("exploding comparison: $comparison");
 
                     $filters[$filterName]['comparison'] = explode(
                         ',',
