@@ -9,5 +9,5 @@ interface OffsetDriverInterface
 
     public function sync(string $partition, string $offset) : void;
 
-    public function syncAll(array $offsets) : void;
+//    public function syncAll(array $offsets) : void;
 }

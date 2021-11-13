@@ -67,6 +67,11 @@ class PipelineCommand
     public $log = null;
 
     /**
+     * @var \Skipprd\Plugins\DataSources\OffsetDrivers\OffsetDriverInterface
+     */
+    public $offsetClient;
+
+    /**
      * @var int - don't set below 20
      *    A. because that's too low for throughput
      *    B. because it won't allow time for new kafka topic creation before flush, so we loose first messages
@@ -673,9 +678,9 @@ class PipelineCommand
 
                 $offset = $this->inputPlugin->offsets->getOffset($partition);
 
-                $type = Config::getenv('OFFSET_DRIVER', 'skippr_file');
-                $offsetClient = OffsetDriverFactory::factory($type);
-                $offsetClient->sync($partition, $offset);
+//                $type = Config::getenv('OFFSET_DRIVER', 'skippr_file');
+//                $offsetClient = OffsetDriverFactory::factory($type);
+                $this->offsetClient->sync($partition, $offset);
             }
         }
     }
@@ -956,8 +961,8 @@ class PipelineCommand
             $this->inputPlugin->buffer->flushAll();
 
             $type = Config::getenv('OFFSET_DRIVER', 'skippr_file');
-            $offsetClient = OffsetDriverFactory::factory($type);
-            $offsets = $offsetClient->get();
+            $this->offsetClient = OffsetDriverFactory::factory($type);
+            $offsets = $this->offsetClient->get();
 
             if (!empty($offsets)) {
                 foreach ($offsets as $partition => $offset) {
@@ -1094,13 +1099,16 @@ class PipelineCommand
             }
 
             // Sync all offsets having synced to destination
-            if (!empty($this->inputPlugin)) {
-                $offsets = $this->inputPlugin->offsets->getOffsets();
-            }
+//            if (!empty($this->inputPlugin)) {
+//                $offsets = $this->inputPlugin->offsets->getOffsets();
+//
+//                $type = Config::getenv('OFFSET_DRIVER', 'skippr_file');
+//                $offsetClient = OffsetDriverFactory::factory($type);
+//                $offsetClient->syncAll($offsets);
+//
+//            }
 
-            $type = Config::getenv('OFFSET_DRIVER', 'skippr_file');
-            $offsetClient = OffsetDriverFactory::factory($type);
-            $offsetClient->syncAll($offsets);
+
 
             SkipprLogger::info("Ingested " . $this->totalEntries . " messages");
             SkipprLogger::info("Dead Letters " . $this->deadLetters . " dead letters");
