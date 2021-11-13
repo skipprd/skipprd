@@ -57,8 +57,11 @@ class SkipprFileOffsetDriver implements OffsetDriverInterface
 
                         file_put_contents(
                             Config::$dataDir . '/skippr-offsets.json',
-                            json_encode($state)
+                            json_encode($state),
+                            LOCK_EX
                         );
+
+
 
                         SkipprLogger::info('Written state to ' . Config::$dataDir . '/skippr-offsets.json');
                     } catch (\Exception $e) {
