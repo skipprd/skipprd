@@ -130,7 +130,7 @@ class ChunkedBuffer implements BufferInterface
 
         $startPos = strpos($filename, $this->bufferName) + strlen($this->bufferName);
 //        $endPos = strpos($filename, '_finalised') - strlen('_finalised');
-        $endPos = strrpos($filename, '_finalised', -1);
+        $endPos = strrpos($filename, '&finalised', -1);
 //        $encodedName = substr($filename, $startPos, -$endPos);
         $encodedName = substr($filename, $startPos, -43);
         $encodedName = trim($encodedName, '-');

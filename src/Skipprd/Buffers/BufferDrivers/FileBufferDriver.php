@@ -61,7 +61,7 @@ class FileBufferDriver implements BufferDriverInterface
 
         $schema = Config::$outputSchemas[$namespace];
 
-        $filename = $this->bufferDir . '/' . $chunkName . '_part';
+        $filename = $this->bufferDir . '/' . $chunkName . '&temp_part';
 
         try {
             if (FileBufferDriver::lock($filename)) { // acquire an exclusive lock
@@ -85,6 +85,7 @@ class FileBufferDriver implements BufferDriverInterface
 
                     FileBufferDriver::close($fp);
                 }
+
             }
         } catch (\Exception $e) {
             echo $e->getMessage();
@@ -156,7 +157,7 @@ class FileBufferDriver implements BufferDriverInterface
     public function streamGetCurrentBufferFile()
     {
 
-        return $this->dataFp->getPathname();
+        return $this->dataFp->getBasename();
     }
 
     public function stream()
@@ -195,7 +196,8 @@ class FileBufferDriver implements BufferDriverInterface
 //
 //                        return $this->serde->serialize($payload);
 
-                        return $this->serde->deserialize($payload);
+//                        return $this->serde->deserialize($payload);
+                        return $payload;
                     }
                 } catch (\Exception $e) {
                     SkipprLogger::error($e->getMessage());
@@ -240,7 +242,7 @@ class FileBufferDriver implements BufferDriverInterface
     public function nextFile()
     {
 
-        $filenames = glob($this->bufferDir . '/buffer=' . $this->bufferName . '*_finalised_*', GLOB_NOSORT);
+        $filenames = glob($this->bufferDir . '/buffer=' . $this->bufferName . '*&finalised=*', GLOB_NOSORT);
 
         usort($filenames, function ($a, $b) {
             return filemtime($a) - filemtime($b);
@@ -279,18 +281,18 @@ class FileBufferDriver implements BufferDriverInterface
         
         $locked = false;
 
-        SkipprLogger::debug("Creating lock buffer chunk $chunkName");
+        SkipprLogger::debug("Creating lock on buffer chunk $chunkName");
 
         // dir is more reliable than waiting for fstat on a file
         if (@mkdir($chunkName . '.lock', 0777, true)) {
             $locked = true;
-            SkipprLogger::debug("Created lock buffer chunk $chunkName");
+            SkipprLogger::debug("Created lock on buffer chunk $chunkName");
         }
 
         while (!$locked && $block) {
             if (@mkdir($chunkName . '.lock', 0777, true)) {
                 $locked = true;
-                SkipprLogger::debug("Created lock buffer chunk $chunkName");
+                SkipprLogger::debug("Created lock on buffer chunk $chunkName");
             } else {
                 sleep(1);
             }
@@ -355,7 +357,7 @@ class FileBufferDriver implements BufferDriverInterface
     public function finalise($force = false) :void
     {
 
-        $file_list = glob($this->bufferDir . '/buffer=' . $this->bufferName . '*_part*');
+        $file_list = glob($this->bufferDir . '/buffer=' . $this->bufferName . '*&temp_part*');
 
         if (!empty($file_list)) {
             foreach ($file_list as $filename) {
@@ -383,12 +385,12 @@ class FileBufferDriver implements BufferDriverInterface
 
                         if ($bytes >= $this->flushBytes || $updatedDelta > $this->flushFileSeconds || $force) {
                             $newFilename = str_replace(
-                                'part',
-                                'finalised',
+                                '&temp_part',
+                                '&finalised',
                                 $filename
                             );
 
-                            rename($filename, $newFilename . '_' . Helpers::randomPassword(32));
+                            rename($filename, $newFilename . '=' . Helpers::randomPassword(32));
 
                             if (!$force) {
                                 $humanSize = BytesToHuman::toHuman($bytes);
