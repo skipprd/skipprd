@@ -41,8 +41,7 @@ class ChunkedBuffer implements BufferInterface
         int $eventTime = 0,
         string $namespace = null,
         string $partition = null
-    ) : void
-    {
+    ) : void {
 
         $timeBucket = $this->eventTimeBucket($eventTime);
 
@@ -119,8 +118,7 @@ class ChunkedBuffer implements BufferInterface
             'buffer' => $this->bufferName,
             'time' => $timeBucket,
             'namespace' => $namespace,
-            'partition' => $partition]
-        );
+            'partition' => $partition]);
 
         return $chunkName;
     }
@@ -171,7 +169,6 @@ class ChunkedBuffer implements BufferInterface
         SkipprLogger::debug("decoding buffer partition $partition file $filename");
 
         return $partition;
-
     }
 
     public function decodeFileNamespace($filename) : string
@@ -183,7 +180,6 @@ class ChunkedBuffer implements BufferInterface
         SkipprLogger::debug("decoding buffer namespace $namespace file $filename");
 
         return $namespace;
-
     }
 
     public function decodeChunkPartition(string $chunkName) : string
@@ -195,7 +191,6 @@ class ChunkedBuffer implements BufferInterface
         SkipprLogger::debug("decoding buffer partition $partition chunk $chunkName");
 
         return $partition;
-
     }
 
     public function decodeChunkNamespace(string $chunkName) : string

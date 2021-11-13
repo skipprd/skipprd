@@ -223,7 +223,6 @@ class PipelineCommand
             $this->deadletterPlugin = new $deadLetterPluginClass($config, $this->deadletterBuffer);
 
             $this->deadletterPlugin->buffer->driver->setSerde('json');
-
         }
 //        else {
 //                $deadLetterPluginName = 'File';
@@ -258,9 +257,7 @@ class PipelineCommand
 
         if (!empty($pluginName)) {
             $this->outputPlugin = PluginFactory::factory('data_output', $pluginName, $this->outputBuffer);
-        }
-        else {
-
+        } else {
             $outputPluginClass = "Skipprd\\Plugins\\DataOutputs\\" . 'File' . "\\DataOutput" . 'File' . "Plugin";
 
             $config = [];
@@ -538,7 +535,6 @@ class PipelineCommand
 
 
             if (!empty($this->deadletterPlugin)) {
-
                 $this->deadletterPlugin->buffer->driver->unlockAll();
 //            $this->deadletterPlugin->buffer->flush("deadletter");
                 $this->deadletterPlugin->buffer->flushAll();
@@ -611,8 +607,13 @@ class PipelineCommand
 
             if (!empty($this->deadletterPlugin)) {
 //            $this->deadletterPlugin->buffer->append($payload);
-                $this->deadletterPlugin->buffer->append($message, false, 0,
-                    $namespace, $partition);
+                $this->deadletterPlugin->buffer->append(
+                    $message,
+                    false,
+                    0,
+                    $namespace,
+                    $partition
+                );
             }
             $tenantId = Config::$tenantId;
             $pipelineName = Config::$pipelineName;
@@ -1143,7 +1144,6 @@ class PipelineCommand
 
             $this->writeMapping();
         } else {
-            
             if (!empty($this->inputPlugin)) {
                 SkipprLogger::info("No fields found when analysing schema, did you send some data?");
             }

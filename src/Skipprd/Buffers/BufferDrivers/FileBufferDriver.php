@@ -42,7 +42,7 @@ class FileBufferDriver implements BufferDriverInterface
 
         $this->bufferDir = Config::$dataDir . '/buffer';
 
-        if (!empty( Config::$flushBytes)) {
+        if (!empty(Config::$flushBytes)) {
             $this->flushBytes = Config::$flushBytes;
         }
 
@@ -85,7 +85,6 @@ class FileBufferDriver implements BufferDriverInterface
 
                     FileBufferDriver::close($fp);
                 }
-
             }
         } catch (\Exception $e) {
             echo $e->getMessage();

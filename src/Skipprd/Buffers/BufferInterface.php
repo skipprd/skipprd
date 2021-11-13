@@ -7,7 +7,7 @@ interface BufferInterface
 {
 
     public function append(
-        array $payload, 
+        array $payload,
         bool $flush = false,
         int $eventTime = 0,
         string $namespace = null,
