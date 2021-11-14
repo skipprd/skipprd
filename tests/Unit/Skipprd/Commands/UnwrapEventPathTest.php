@@ -77,7 +77,7 @@ class UnwrapEventPathTest extends TestCase
         $serder = SerdersFactory::factory('json');
         $sourceMessages = $serder->deserialize($payload);
 
-        $unwrappedMessages = $container->unwrap($sourceMessages);
+        $unwrappedMessages = $container->unwrapEventPath($sourceMessages);
 
         $this->assertEquals($message['messages']['user_data']['events'], $unwrappedMessages);
 
