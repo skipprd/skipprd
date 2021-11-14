@@ -125,7 +125,7 @@ trait AnalyseSchema
 
     public function analyseField($field, $value, &$fieldOccurrence)
     {
-        $field = Helpers::cleanFieldName($field);
+//        $field = Helpers::cleanFieldName($field);
 
         $this->initDiscoveredType($fieldOccurrence, $field);
 

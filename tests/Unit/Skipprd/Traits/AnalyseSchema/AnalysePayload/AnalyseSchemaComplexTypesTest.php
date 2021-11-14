@@ -26,7 +26,7 @@ class AnalyseSchemaComplexTypesTestComplexTypesTest extends TestCase
     {
         parent::setUp();
 
-        Config::$discoveredFieldOccurrence['foo_partition']['fields'] = [];
+        Config::$discoveredFieldOccurrence['foo_namespace']['fields'] = [];
 
     }
 
@@ -72,7 +72,7 @@ class AnalyseSchemaComplexTypesTestComplexTypesTest extends TestCase
             ],
         ];
         
-        $container->analysePayload($field, Config::$discoveredFieldOccurrence['foo_partition']['fields']);
+        $container->analysePayload($field, Config::$discoveredFieldOccurrence['foo_namespace']['fields']);
         
 //        $this->assertEquals(1, Config::$discoveredFieldOccurrence['foo']['type']['record']);
 //        $this->assertEquals(1, Config::$discoveredFieldOccurrence['foo']['fields']['sheep']['type']['string']);
@@ -93,18 +93,18 @@ class AnalyseSchemaComplexTypesTestComplexTypesTest extends TestCase
 //        $this->assertEquals(1, Config::$discoveredFieldOccurrence['foo']['fields']['crank_torques']['fields'][0]['fields'][0]['type']['integer']);
 
 
-        $container->determineFieldTypes(Config::$discoveredFieldOccurrence['foo_partition']['fields']);
+        $container->determineFieldTypes(Config::$discoveredFieldOccurrence['foo_namespace']['fields']);
 
-        $foo = Config::$discoveredFieldOccurrence['foo_partition']['fields'];
+        $foo = Config::$discoveredFieldOccurrence['foo_namespace']['fields'];
 
         $this->assertEquals('record', $foo["foo"]["fields"]["crank_torques"]["parent_type"]);
 
         $this->assertEquals('record', $foo["foo"]["fields"]["crank_torques"]["determined_type"]);
 
-        $this->assertEquals('array', $foo["foo"]["fields"]["crank_torques"]["fields"]['a0']["determined_type"]);
-        $this->assertEquals('array', $foo["foo"]["fields"]["crank_torques"]["fields"]['a1']["determined_type"]);
+        $this->assertEquals('array', $foo["foo"]["fields"]["crank_torques"]["fields"][0]["determined_type"]);
+        $this->assertEquals('array', $foo["foo"]["fields"]["crank_torques"]["fields"][1]["determined_type"]);
 
-        $this->assertEmpty($foo["foo"]["fields"]["crank_torques"]["fields"]['a1']["fields"]);
+        $this->assertEmpty($foo["foo"]["fields"]["crank_torques"]["fields"][1]["fields"]);
 
 
     }

@@ -23,9 +23,9 @@ class DefaultMessageTest extends TestCase
 
         foreach ($record as $field => $value) {
 
-            $avroType = Config::$discoveredFieldOccurrence['foo_partition'][$field]['determined_type'];
+            $avroType = Config::$discoveredFieldOccurrence['foo_namespace'][$field]['determined_type'];
 
-            SkipprAvroSchemaConverter::buildAvroFields($avroFieldSchema, $field, $avroType, Config::$discoveredFieldOccurrence['foo_partition'], [], $sub_field_count);
+            SkipprAvroSchemaConverter::buildAvroFields($avroFieldSchema, $field, $avroType, Config::$discoveredFieldOccurrence['foo_namespace'], [], $sub_field_count);
         }
 
         return $avroFieldSchema;
@@ -37,7 +37,7 @@ class DefaultMessageTest extends TestCase
 //        Config::$tenantId = 'foo';
 //        Config::$pipelineName = 'bar';
 
-        Config::$discoveredFieldOccurrence['foo_partition'] = [];
+        Config::$discoveredFieldOccurrence['foo_namespace'] = [];
 
         $container = Mockery::mock(PipelineCommand::class)->makePartial();
         $container->shouldReceive('AnalyseSchema');
@@ -60,16 +60,16 @@ class DefaultMessageTest extends TestCase
             ],
         ];
 
-        $container->analysePayload($field, Config::$discoveredFieldOccurrence['foo_partition']);
+        $container->analysePayload($field, Config::$discoveredFieldOccurrence['foo_namespace']);
 
-        $container->determineFieldTypes(Config::$discoveredFieldOccurrence['foo_partition']);
+        $container->determineFieldTypes(Config::$discoveredFieldOccurrence['foo_namespace']);
 
         $avroFieldSchema = $this->buildSchema($field);
-        Config::$schema['foo_partition'] = Config::schemaMerge(Config::$specialFieldsMapping, $avroFieldSchema);
+        Config::$schema['foo_namespace'] = Config::schemaMerge(Config::$specialFieldsMapping, $avroFieldSchema);
 
         // Test default message values (empty array, maps and records
         // Particularly relevant for serder to parquet
-        $container->defaultMsg = $this->defaultMessage(Config::$schema['foo_partition']);
+        $container->defaultMsg = $this->defaultMessage(Config::$schema['foo_namespace']);
 
         $this->assertArrayHasKey('foo', $container->defaultMsg);
 

@@ -14,7 +14,7 @@ class ChunkedBuffer implements BufferInterface
 {
 
     protected $memBuffs = [];
-    
+
     protected $bufferName = '';
     public $flushMemBytes = 1000000; # 1MB
 
@@ -35,12 +35,17 @@ class ChunkedBuffer implements BufferInterface
         $this->driver = $bufferDriver;
     }
 
-    public function append(array $payload, bool $flush = false, int $eventTime = 0, string $partition = null) : void
-    {
+    public function append(
+        array $payload,
+        bool $flush = false,
+        int $eventTime = 0,
+        string $namespace = null,
+        string $partition = null
+    ) : void {
 
         $timeBucket = $this->eventTimeBucket($eventTime);
 
-        $chunkName = $this->encodeChunkName($partition, $timeBucket);
+        $chunkName = $this->encodeChunkName($namespace, $partition, $timeBucket);
 
 //        if (empty($this->memBuffs[$chunkName])) {
 //
@@ -70,7 +75,7 @@ class ChunkedBuffer implements BufferInterface
             if (!empty($this->memBuffs[$chunkName]) && !empty($this->memBuffs[$chunkName]['buffer'])) {
                 SkipprLogger::debug("Flushing buffer chunk $chunkName of size ". BytesToHuman::toHuman($this->memBuffs[$chunkName]['size'], true));
 
-                $this->driver->flush($this->memBuffs[$chunkName]['buffer'], $chunkName, $partition);
+                $this->driver->flush($this->memBuffs[$chunkName]['buffer'], $chunkName, $namespace);
 
                 unset($this->memBuffs[$chunkName]);
             }
@@ -85,12 +90,12 @@ class ChunkedBuffer implements BufferInterface
                 || $buffer['size'] > $this->flushMemBytes
 //                || $buffer['time'] < time() - $this->flushMemSeconds
             ) {
-                $partition = $this->decodeChunkPartitionName($chunkName);
+                $namespace = $this->decodeChunkNamespace($chunkName);
 
                 if (!empty($this->memBuffs[$chunkName]) && !empty($this->memBuffs[$chunkName]['buffer'])) {
                     SkipprLogger::debug("Flushing buffer chunk $chunkName of size ". BytesToHuman::toHuman($this->memBuffs[$chunkName]['size'], true));
 
-                    $this->driver->flush($this->memBuffs[$chunkName]['buffer'], $chunkName, $partition);
+                    $this->driver->flush($this->memBuffs[$chunkName]['buffer'], $chunkName, $namespace);
 
                     unset($this->memBuffs[$chunkName]);
                 }
@@ -106,11 +111,15 @@ class ChunkedBuffer implements BufferInterface
         return $bucket;
     }
 
-    public function encodeChunkName($partition, $timeBucket): string
+    public function encodeChunkName(string $namespace = null, string $partition = null, $timeBucket = null): string
     {
 
-        $chunkName = implode('-', [$this->bufferName, $timeBucket, $partition]);
-        
+        $chunkName = http_build_query([
+            'buffer' => $this->bufferName,
+            'time' => $timeBucket,
+            'namespace' => $namespace,
+            'partition' => $partition]);
+
         return $chunkName;
     }
 
@@ -119,7 +128,7 @@ class ChunkedBuffer implements BufferInterface
 
         $startPos = strpos($filename, $this->bufferName) + strlen($this->bufferName);
 //        $endPos = strpos($filename, '_finalised') - strlen('_finalised');
-        $endPos = strrpos($filename, '_finalised', -1);
+        $endPos = strrpos($filename, '&finalised', -1);
 //        $encodedName = substr($filename, $startPos, -$endPos);
         $encodedName = substr($filename, $startPos, -43);
         $encodedName = trim($encodedName, '-');
@@ -130,50 +139,69 @@ class ChunkedBuffer implements BufferInterface
     public function decodeChunkTime($filename) : string
     {
 
-        $parts = $this->getChunkName($filename);
+        parse_str($filename, $array);
+        $date_string = Carbon::createFromTimestamp($array['time'])->format('Y-m-d');
 
-        if ($parts[0] < 0) {
-            $timestamp = array_shift($parts);
+        SkipprLogger::debug("decoding buffer time $date_string file $filename");
 
-            $date_string = Carbon::createFromTimestamp($timestamp)->format('Y-m-d');
 
-            return 'dt=' . $date_string;
-        }
+        return $date_string;
 
-        return '';
+//        $parts = $this->getChunkName($filename);
+//
+//        if ($parts[0] < 0) {
+//            $timestamp = array_shift($parts);
+//
+//            $date_string = Carbon::createFromTimestamp($timestamp)->format('Y-m-d');
+//
+//            return 'dt=' . $date_string;
+//        }
+//
+//        return '';
     }
 
-    public function decodeChunkPartition($filename) : string
+    public function decodeFilePartition($filename) : string
     {
 
-//        SkipprLogger::debug("decoding partitions for file $filename");
+        parse_str($filename, $array);
+        $partition = $array['partition'];
 
-        $parts = $this->getChunkName($filename);
+        SkipprLogger::debug("decoding buffer partition $partition file $filename");
 
-        // strip chunk time
-        if (is_numeric($parts[0])) {
-            array_shift($parts);
-        }
-
-        // reassemble chunk name
-//        $nameParts = array_pop($parts);
-        $partition_dir = implode('-', $parts);
-//        $parts[] = $partition;
-
-//        $partition_dir = trim(implode('/', $parts), '/');
-
-//        SkipprLogger::debug("decoded partition dir $partition_dir");
-
-        return $partition_dir;
+        return $partition;
     }
 
-    public function decodeChunkPartitionName(string $chunkName) : string
+    public function decodeFileNamespace($filename) : string
     {
 
-        $parts = explode('-', $chunkName);
-        unset($parts[0]); // buffer name
-        unset($parts[1]); // time
-        return implode('-', $parts);
+        parse_str($filename, $array);
+        $namespace = $array['namespace'];
+
+        SkipprLogger::debug("decoding buffer namespace $namespace file $filename");
+
+        return $namespace;
+    }
+
+    public function decodeChunkPartition(string $chunkName) : string
+    {
+
+        parse_str($chunkName, $array);
+        $partition = $array['partition'];
+
+        SkipprLogger::debug("decoding buffer partition $partition chunk $chunkName");
+
+        return $partition;
+    }
+
+    public function decodeChunkNamespace(string $chunkName) : string
+    {
+
+        parse_str($chunkName, $array);
+        $namespace = $array['namespace'];
+
+        SkipprLogger::debug("decoding buffer namespace $namespace chunk $chunkName");
+
+        return $namespace;
     }
 
 //    public function nextFile()

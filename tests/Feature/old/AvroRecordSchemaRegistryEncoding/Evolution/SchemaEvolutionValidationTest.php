@@ -202,6 +202,7 @@ class SchemaEvolutionValidationTest extends TestCase
 
         $fields = [
             'skpr_event_ts' => 0,
+            'skpr_namespace' => '',
             'skpr_partition' => '',
             'first_name' => 'paul',
             'last_name' => 'hudson',

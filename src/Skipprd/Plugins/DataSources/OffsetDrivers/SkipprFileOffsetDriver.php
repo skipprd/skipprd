@@ -9,6 +9,12 @@ use Skipprd\Traits\SkipprLogger;
 class SkipprFileOffsetDriver implements OffsetDriverInterface
 {
 
+    /**
+     * Offsets currently committed to the backend. These will be at or behind the offsets during ingestion.
+     * @var array
+     */
+    private $committedOffsets = [];
+
     protected $pipelineName = '';
 
     public function __construct()
@@ -16,25 +22,29 @@ class SkipprFileOffsetDriver implements OffsetDriverInterface
         $this->pipelineName = Config::getPipelineName();
     }
 
-    public function get() : array
+    public function get(): array
     {
 
-        $offsets = $this->client();
+        $this->committedOffsets = $this->client();
 
-        return $offsets;
+        return $this->committedOffsets;
     }
 
-    public function sync(string $partition, string $offset) : void
+    public function sync(string $partition, string $offset): void
     {
 
-        $this->client('PUT', [$partition => $offset]);
+        $this->committedOffsets[$partition] = $offset;
+
+        $this->client('PUT', $this->committedOffsets);
     }
 
-    public function syncAll(array $offsets) : void
-    {
-
-        $this->client('PUT', $offsets);
-    }
+//    public function syncAll(array $offsets): void
+//    {
+//
+//        $this->committedOffsets = $offsets;
+//
+//        $this->client('PUT', $this->committedOffsets);
+//    }
 
     protected function client(string $method = 'GET', array $data = [])
     {
@@ -43,10 +53,15 @@ class SkipprFileOffsetDriver implements OffsetDriverInterface
             switch ($method) {
                 case 'PUT':
                     try {
-
                         $state[Config::$pipelineName]['offsets'] = $data;
 
-                        file_put_contents(Config::$dataDir . '/skippr-offsets.json', json_encode($state));
+                        file_put_contents(
+                            Config::$dataDir . '/skippr-offsets.json',
+                            json_encode($state),
+                            LOCK_EX
+                        );
+
+
 
                         SkipprLogger::info('Written state to ' . Config::$dataDir . '/skippr-offsets.json');
                     } catch (\Exception $e) {

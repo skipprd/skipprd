@@ -8,11 +8,10 @@
 
 namespace Skipprd\Traits;
 
+use Skipprd\Commands\RecordFilter;
 use Skipprd\Converters\AvroParquetSchemaConverter;
 use Skipprd\Converters\SkipprAvroSchemaConverter;
 use Skipprd\Helpers;
-use Monolog\Registry;
-use Skipprd\Str;
 
 class Config
 {
@@ -20,6 +19,8 @@ class Config
     public static $segmentKey = 'RnewwWgZXQjl9xofcjGJkirCH0VswBPd';
 
     public static $anonymousMetrics = true;
+
+    public static $logLevel = 'INFO';
 
     public static $dataDir = '/data';
 
@@ -51,6 +52,8 @@ class Config
 
     public static $filters = [];
 
+    public static $flushBytes = '';
+
     /**
      * @var \AvroSchema $avroSchemas
      */
@@ -72,12 +75,26 @@ class Config
 
     public static $specialFields = [
         'skpr_event_ts' => 0,
+        'skpr_namespace' => '',
         'skpr_partition' => '',
     ];
 
     static $specialFieldsMapping = [
-        ['name' => 'skpr_event_ts', 'default' => null, 'type' => ['null', 'int']],
-        ['name' => 'skpr_partition', 'default' => null, 'type' => ['null', 'string']],
+        [
+            'name' => 'skpr_event_ts',
+            'default' => null,
+            'type' => ['null', 'int']
+        ],
+        [
+            'name' => 'skpr_namespace',
+            'default' => null,
+            'type' => ['null', 'string']
+        ],
+        [
+            'name' => 'skpr_partition',
+            'default' => null,
+            'type' => ['null', 'string']
+        ],
     ];
 
     public static $batchFormats = [
@@ -87,7 +104,7 @@ class Config
         'avro_file'
     ];
 
-    public static function getenv(string $name, string $default = '') : string
+    public static function getenv(string $name, string $default = ''): string
     {
 
         return (!empty(getenv($name))) ? getenv($name) : $default;
@@ -99,7 +116,10 @@ class Config
         $inputPluginName = Helpers::cleanFieldName(Config::getenv('DATA_SOURCE_PLUGIN_NAME'));
         $outputPluginName = Helpers::cleanFieldName(Config::getenv('DATA_OUTPUT_PLUGIN_NAME'));
         $defaultPipelineName = $inputPluginName . 'to' . $outputPluginName;
-        $defaultPipelineName = Config::getenv('PIPELINE_NAME', $defaultPipelineName);
+        $defaultPipelineName = Config::getenv(
+            'PIPELINE_NAME',
+            $defaultPipelineName
+        );
 
         return $defaultPipelineName;
     }
@@ -108,16 +128,23 @@ class Config
     {
 //        self::$pipelineId = self::getenv('PIPELINE_ID');
 
+        self::$logLevel = Config::getenv('LOG_LEVEL', 'INFO');
+
+        self::$flushBytes = Config::getenv('OUTPUT_FLUSH_BYTES', '');
+
         $avroArr = [];
 //        self::$mapping = [];
         self::$discoveredFieldOccurrence = [];
 
-        self::$anonymousMetrics =  Config::getenv('ANONYMOUS_METRICS', true);
+        self::$anonymousMetrics = Config::getenv('ANONYMOUS_METRICS', true);
 
         $defaultPipelineName = Config::getPipelineName();
 
         Config::$state['tenant_id'] = Helpers::randomStr(16);
-        self::$tenantId = self::getenv('TENANT_ID', Config::$state['tenant_id']);
+        self::$tenantId = self::getenv(
+            'TENANT_ID',
+            Config::$state['tenant_id']
+        );
 
         $dataDir = self::getenv('DATA_DIR');
         self::$dataDir = (empty($dataDir)) ? self::$dataDir : $dataDir;
@@ -131,7 +158,7 @@ class Config
                 SkipprLogger::info('Looking up config for pipeline ' . $defaultPipelineName);
 
                 $url = "http://$uri/";
-                $path = 'ingest-job/get-mapping/'. $defaultPipelineName;
+                $path = 'ingest-job/get-mapping/' . $defaultPipelineName;
 
                 $client = new \GuzzleHttp\Client([
                     'base_uri' => $url,
@@ -155,7 +182,7 @@ class Config
 
                 $schemaName = self::$tenantId . '_' . $defaultPipelineName . '-value';
                 $url = "http://$uri/";
-                $path = 'subjects/'. $schemaName . '/versions/latest';
+                $path = 'subjects/' . $schemaName . '/versions/latest';
 
                 $client = new \GuzzleHttp\Client([
                     'base_uri' => $url,
@@ -164,7 +191,9 @@ class Config
                     ]
                 ]);
 
-                $resp = json_decode($client->get($path)->getBody()->getContents(), true);
+                $resp = json_decode($client->get($path)
+                    ->getBody()
+                    ->getContents(), true);
 
                 $avroArr = json_decode($resp['schema'], true);
             } catch (\Exception $e) {
@@ -194,7 +223,10 @@ class Config
         }
 
 
-        self::$pipelineName = Config::getenv('PIPELINE_NAME', $defaultPipelineName);
+        self::$pipelineName = Config::getenv(
+            'PIPELINE_NAME',
+            $defaultPipelineName
+        );
 
 //        self::$offsets = (!empty(self::$state[$defaultPipelineName]['offsets']) ? self::$state[$defaultPipelineName]['offsets'] : []);
 
@@ -212,39 +244,42 @@ class Config
 
         self::$analysing = (empty(self::$discoveredFieldOccurrence)) ? true : false;
         self::$analysing = (bool) self::getenv('ANALYSING', self::$analysing);
-        
+
         self::$systemUserApiToken = self::getenv('SCHEMA_API_TOKEN');
 
         if (!empty(self::$discoveredFieldOccurrence)) {
-            foreach (self::$discoveredFieldOccurrence as $partition => $mapping) {
-                SkipprLogger::info("Building $partition schema");
+            foreach (self::$discoveredFieldOccurrence as $namespace => $mapping) {
+                SkipprLogger::info("Building $namespace schema");
 
                 $converter = new SkipprAvroSchemaConverter();
-                self::$schema[$partition] = $converter->convert($mapping['fields']);
+                self::$schema[$namespace] = $converter->convert($mapping['fields']);
 
-                self::$schema[$partition] = self::schemaMerge(self::$specialFieldsMapping, self::$schema[$partition]);
+                self::$schema[$namespace] = self::schemaMerge(
+                    self::$specialFieldsMapping,
+                    self::$schema[$namespace]
+                );
 
-                self::$avroSchemas[$partition] = self::buildAvroSchema(self::$schema[$partition]);
+                self::$avroSchemas[$namespace] = self::buildAvroSchema(self::$schema[$namespace]);
 
 //                $converter = new AvroParquetSchemaConverter();
-//                self::$outputSchemas[$partition] = $converter->convert(Config::$avroSchemas[$partition]);
+//                self::$outputSchemas[$namespace] = $converter->convert(Config::$avroSchemas[$namespace]);
 
                 $outputFormat = ucfirst(self::$outputFormat);
                 $converterClass = 'Skipprd\Converters\Avro' . $outputFormat . 'SchemaConverter';
 
                 if (class_exists($converterClass)) {
-                    SkipprLogger::info("Converting $partition schema to $outputFormat");
+                    SkipprLogger::info("Converting $namespace schema to $outputFormat");
 
                     $converter = new $converterClass();
 
-                    self::$outputSchemas[Helpers::cleanFieldName($partition)] = $converter->convert(self::$avroSchemas[$partition]);
+                    self::$outputSchemas[$namespace] = $converter->convert(self::$avroSchemas[$namespace]);
                 } else {
-                    self::$outputSchemas[Helpers::cleanFieldName($partition)] = self::$avroSchemas[$partition];
+                    self::$outputSchemas[$namespace] = self::$avroSchemas[$namespace];
                 }
             }
         }
 
-        self::initFilters();
+        RecordFilter::initFilters(self::$filters);
 
         // Although we may be done analysing, we don't want to override candidate.
         // They should remain in the option list even if the user has rejected them.
@@ -257,28 +292,6 @@ class Config
 //        }
     }
 
-    public static function initFilters()
-    {
-
-        $envs = getenv();
-
-        foreach ($envs as $name => $val) {
-            if (Str::startsWith($name, 'FILTER_')) {
-                SkipprLogger::info($name);
-                SkipprLogger::info($val);
-
-                $parts = explode('_', $name);
-                $filterName = strtolower($parts[1]);
-                unset($parts[0]);
-                unset($parts[1]);
-                $confName = strtolower(implode('_', $parts));
-
-                SkipprLogger::info($filterName);
-
-                Config::$filters[$filterName][$confName] = $val;
-            }
-        }
-    }
 
     public static function buildAvroSchema($schema)
     {
@@ -286,7 +299,7 @@ class Config
         $schemaName = self::$tenantId . '_' . self::$pipelineName;
 
         $schemaNamespace = "io.skippr." . self::$tenantId . "." . self::$pipelineName;
-        
+
         $valueAvroSchema['namespace'] = $schemaNamespace;
         $valueAvroSchema['name'] = $schemaName;
         $valueAvroSchema['type'] = 'record';
@@ -405,7 +418,10 @@ class Config
 //            Config::$state[Config::$pipelineName]['offsets'] = Config::$offsets;
 
             try {
-                file_put_contents(self::$dataDir . '/skippr-state.json', json_encode(Config::$state));
+                file_put_contents(
+                    self::$dataDir . '/skippr-state.json',
+                    json_encode(Config::$state)
+                );
 
                 SkipprLogger::info('Written state to ' . self::$dataDir . '/skippr-state.json');
             } catch (\Exception $e) {

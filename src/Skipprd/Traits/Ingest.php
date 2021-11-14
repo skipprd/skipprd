@@ -10,7 +10,6 @@ namespace Skipprd\Traits;
 
 use Carbon\Carbon;
 use \Exception;
-use Monolog\Registry;
 use Skipprd\Arr;
 use Skipprd\Commands\RecordFilter;
 use Skipprd\Helpers;
@@ -22,33 +21,14 @@ trait Ingest
 
     public $avroSchema = null;
 
-    public function ingestPayload(array $sourceMessage, array &$metadata, string $partition)
+    public function ingestPayload(array $sourceMessage, array &$metadata, string $namespace)
     {
 
         $this->i++;
 
-        // Filter
-        if (!empty(Config::$filters)) {
-            foreach (Config::$filters as $filter) {
-                $value = Arr::get($sourceMessage, $filter['field_path'], false);
-
-                if ($value
-                    && RecordFilter::applyFilter(
-                        $value,
-                        $filter['operator'],
-                        $filter['comparison'],
-                        $filter['action']
-                    )) {
-                    Arr::set($sourceMessage, $filter['field_path'], $value);
-                } else { // record drop
-                    return false;
-                }
-            }
-        }
-
-        // @todo - configurable timefields
-        if (!empty($sourceMessage)) {
-            $message = $this->defaultMsgs[$partition];
+        if (!empty($sourceMessage)
+            && RecordFilter::filter($sourceMessage)) {
+            $message = $this->defaultMsgs[$namespace];
 
             /*
              * Transformations and schema evolution
@@ -79,7 +59,7 @@ trait Ingest
 
 
             if (!$this->flagMsgDeadLetter
-                && $this->avroEncodeTest($message, $partition)
+                && $this->avroEncodeTest($message, $namespace)
             ) {
                 $this->entries++;
 
@@ -109,7 +89,7 @@ trait Ingest
 
     public function ingestField($field, $value, &$metadata, &$message)
     {
-        $field = Helpers::cleanFieldName($field);
+//        $field = Helpers::cleanFieldName($field);
 
 //        SkipprLogger::debug($field);
 //        SkipprLogger::debug($metadata[$field]);
@@ -179,7 +159,7 @@ trait Ingest
 //        if (is_array($value) && !empty($value) && $dataType != 'array') {
         if (is_array($value) && !empty($value) && !in_array($dataType, ['array', 'map'])) {
             foreach ($value as $sub_field => $sub_value) {
-                $sub_field = Helpers::cleanFieldName($sub_field);
+//                $sub_field = Helpers::cleanFieldName($sub_field);
 
                 if (!empty($metadata[$field]['fields'][$sub_field]['enabled'])) { // only ingest fields enabled to sync to output
                     if ($this->i == 1) {
@@ -271,11 +251,11 @@ trait Ingest
         }
     }
 
-    public function avroEncodeTest(array $record, string $partition)
+    public function avroEncodeTest(array $record, string $namespace)
     {
 
         try {
-            $valid = \AvroSchema::is_valid_datum(Config::$avroSchemas[$partition], $record);
+            $valid = \AvroSchema::is_valid_datum(Config::$avroSchemas[$namespace], $record);
         } catch (\AvroSchemaParseException $e) {
             $valid = false;
         }
@@ -308,7 +288,7 @@ trait Ingest
 
                 case 'record':
                 case 'map':
-                    Helpers::cleanArrayFieldNames($value);
+//                    Helpers::cleanArrayFieldNames($value);
 
                     if (is_array($value)) {
                         foreach ($value as $key => $val) {

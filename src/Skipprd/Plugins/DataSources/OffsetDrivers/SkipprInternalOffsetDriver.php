@@ -9,6 +9,12 @@ use Skipprd\Traits\SkipprLogger;
 class SkipprInternalOffsetDriver implements OffsetDriverInterface
 {
 
+    /**
+     * Offsets currently committed to the backend. These will be at or behind the offsets during ingestion.
+     * @var array
+     */
+    private $committedOffsets = [];
+
     protected $pipelineName = '';
 
     public function __construct()
@@ -21,22 +27,27 @@ class SkipprInternalOffsetDriver implements OffsetDriverInterface
 
         $body = $this->client();
 
-        $offsets = json_decode($body, true);
+        $this->committedOffsets = json_decode($body, true);
 
-        return $offsets;
+        return   $this->committedOffsets;
     }
 
     public function sync(string $partition, string $offset) : void
     {
 
-        $body = $this->client('PUT', [$partition => $offset]);
+        $this->committedOffsets[$partition] = $offset;
+
+        $this->client('PUT', $this->committedOffsets);
     }
 
-    public function syncAll(array $offsets) : void
-    {
-
-        $body = $this->client('PUT', $offsets);
-    }
+//    public function syncAll(array $offsets) : void
+//    {
+//
+//        $this->committedOffsets = $offsets;
+//
+//        $this->client('PUT', $this->committedOffsets);
+//
+//    }
 
     protected function client(string $method = 'GET', array $data = [])
     {
