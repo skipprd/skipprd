@@ -436,11 +436,17 @@ class PipelineCommand
     {
 
         try {
+
             $eventTime = $payload['skpr_event_ts'];
             $namespace = $payload['skpr_namespace'];
             $partition = $payload['skpr_partition'];
 
-//            $serialised = json_encode($payload) . "\n";
+            $record = $payload;
+            unset($record['skpr_event_ts']);
+            unset($record['skpr_namespace']);
+            unset($record['skpr_partition']);
+
+//            $serialised = json_encode($record) . "\n";
 
 //            $serder = SerdersFactory::factory(Config::$serder);
 //            $serialised = $serder->serialize($payload) . "\n";
@@ -462,15 +468,15 @@ class PipelineCommand
 
             if (Config::$mode == 'sync') {
 //                $this->outputPlugin->buffer->append($serialised, false, $eventTime, $partition);
-                $this->outputPlugin->buffer->append($payload, false, $eventTime, $namespace, $partition);
+                $this->outputPlugin->buffer->append($record, false, $eventTime, $namespace, $partition);
 
                 if (!empty($this->outputPlugin)) {
-                    $this->flushBuffer();
+                    $this->flushBuffersRoutine();
                 }
 
 //                    $this->inputPlugin->setOffsets($this->outputPlugin->offset);
             } elseif (Config::$mode == 'async') {
-                $this->outputPlugin->buffer->append($payload, false, $eventTime, $namespace, $partition);
+                $this->outputPlugin->buffer->append($record, false, $eventTime, $namespace, $partition);
             }
 
             $tenantId = Config::$tenantId;
@@ -499,7 +505,7 @@ class PipelineCommand
 
 
 
-    public function flushBuffer()
+    public function flushBuffersRoutine()
     {
 
         $flushBytes = $this->outputPlugin->buffer->flushBytes;
