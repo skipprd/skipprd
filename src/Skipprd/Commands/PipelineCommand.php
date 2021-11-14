@@ -692,15 +692,15 @@ class PipelineCommand
             }
 
             if ($force || $this->j[$partition] > self::$flushMaxMsg) {
+
+
                 $this->j[$partition] = 0;
 
                 $offset = $this->inputPlugin->offsets->getOffset($partition);
 
-//                $type = Config::getenv('OFFSET_DRIVER', 'skippr_file');
-//                $offsetClient = OffsetDriverFactory::factory($type);
-
                 $this->offsetClient->sync($partition, $offset);
             }
+
         }
     }
 
@@ -1122,11 +1122,6 @@ class PipelineCommand
                     }
                 }
             }
-
-            foreach ($this->j as $partition => $count) {
-                $this->offsetCommitRoutine($partition, true);
-            }
-
 
             // Sync all offsets having synced to destination
 //            if (!empty($this->inputPlugin)) {
