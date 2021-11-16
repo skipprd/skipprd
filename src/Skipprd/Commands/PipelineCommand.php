@@ -301,12 +301,20 @@ class PipelineCommand
 
             $this->inputPlugin->buffer->flushAll();
         } else {
+
             if (!empty($this->deadletterPlugin)) {
                 $this->deadletterPlugin->sync(Config::$outputFormat);
             }
 
+            // keep output alive
+            // we'll probably make output sycronous
             if (!empty($this->outputPlugin)) {
-                $this->outputPlugin->sync(Config::$outputFormat);
+                while(true) {
+
+                    $this->outputPlugin->sync(Config::$outputFormat);
+                    sleep(1);
+                }
+
             }
         }
 
