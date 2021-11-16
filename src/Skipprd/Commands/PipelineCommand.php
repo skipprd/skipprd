@@ -852,7 +852,7 @@ class PipelineCommand
                     // The trouble with ->continue['part'] above is that it only exits if another
                     // record is found in the source. Else the source hangs till new data arrives.
                     // We need a way to force the source to the next namespace
-//                    $this->shutdown();
+                    $this->shutdown();
                 }
             }
 
