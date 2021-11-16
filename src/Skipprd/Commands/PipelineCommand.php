@@ -312,7 +312,7 @@ class PipelineCommand
                 while(true) {
 
                     $this->outputPlugin->sync(Config::$outputFormat);
-                    sleep(1);
+                    sleep(10);
                 }
 
             }
