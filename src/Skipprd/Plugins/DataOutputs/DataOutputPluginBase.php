@@ -14,6 +14,8 @@ class DataOutputPluginBase implements DataOutputPluginInterface
 
     public $flushBytes = 10000000;
 
+    public $flushSeconds = 300;
+
     public $buffer = null;
 
     public function __construct(array $config, BufferInterface $buffer)

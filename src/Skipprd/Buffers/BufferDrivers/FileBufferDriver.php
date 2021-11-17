@@ -29,9 +29,8 @@ class FileBufferDriver implements BufferDriverInterface
 
     public $flushBytes = 1000000; # 1MB
 
-    public $flushFileSeconds = 600;
+    public $flushFileSeconds = 300;
 
-    public $flushMemSeconds = 300; # seconds
 
     public $serde;
 
@@ -42,8 +41,12 @@ class FileBufferDriver implements BufferDriverInterface
 
         $this->bufferDir = Config::$dataDir . '/buffer';
 
-        if (!empty(Config::$flushBytes)) {
-            $this->flushBytes = Config::$flushBytes;
+        if (!empty(Config::$flushBufferBytes)) {
+            $this->flushBytes = Config::$flushBufferBytes;
+        }
+
+        if (!empty(Config::$flushBufferSeconds)) {
+            $this->flushFileSeconds = Config::$flushBufferSeconds;
         }
 
         @mkdir($this->bufferDir, 0777, true);
@@ -101,7 +104,7 @@ class FileBufferDriver implements BufferDriverInterface
 
         SkipprLogger::debug("Flushed buffer chunk $chunkName");
 
-        $this->finalise();
+        $this->finalise(true);
     }
 
 //    public function append(array $message, bool $flush = false) : void {

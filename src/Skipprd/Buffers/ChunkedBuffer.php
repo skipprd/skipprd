@@ -8,6 +8,7 @@ use Carbon\Carbon;
 use Skipprd\Buffers\BufferDrivers\BufferDriverInterface;
 use Skipprd\MachineToHuman\BytesToHuman;
 use Skipprd\Str;
+use Skipprd\Traits\Config;
 use Skipprd\Traits\SkipprLogger;
 
 class ChunkedBuffer implements BufferInterface
@@ -17,6 +18,7 @@ class ChunkedBuffer implements BufferInterface
 
     protected $bufferName = '';
     public $flushMemBytes = 1000000; # 1MB
+    public $flushMemSeconds = 300;
 
     public $driver;
 
@@ -29,7 +31,14 @@ class ChunkedBuffer implements BufferInterface
         $this->bufferName = $bufferName;
 
         if (!empty($flushBytes)) {
-            $this->flushMemBytes = $flushBytes;
+
+            if (!empty(Config::$flushBufferBytes)) {
+                $this->flushMemBytes = Config::$flushBufferBytes;
+            }
+        }
+
+        if (!empty(Config::$flushBufferSeconds)) {
+            $this->flushMemSeconds = Config::$flushBufferSeconds;
         }
 
         $this->driver = $bufferDriver;
@@ -58,11 +67,13 @@ class ChunkedBuffer implements BufferInterface
 //            $this->memBuffs[$chunkName]['size'] = mb_strlen($payload) * 8;
             $this->memBuffs[$chunkName]['size'] = mb_strlen(serialize((array)$payload), '8bit');
             $this->memBuffs[$chunkName]['time'] = time();
+            $this->memBuffs[$chunkName]['count'] = 1;
 //            $this->memBuffs[$chunkName]['buffer'] = "$payload";
         } else {
 //            $this->memBuffs[$chunkName]['size'] += mb_strlen($payload) * 8;
             $this->memBuffs[$chunkName]['size'] += mb_strlen(serialize((array)$payload), '8bit');
             $this->memBuffs[$chunkName]['time'] = time();
+            $this->memBuffs[$chunkName]['count']++;
 //            $this->memBuffs[$chunkName]['buffer'] .= "$payload";
         }
 
@@ -70,7 +81,8 @@ class ChunkedBuffer implements BufferInterface
 
         if ($flush
             || $this->memBuffs[$chunkName]['size'] > $this->flushMemBytes
-//            || $this->memBuffs[$chunkName]['time'] < time() - $this->flushMemSeconds
+            || $this->memBuffs[$chunkName]['time'] > (time() - $this->flushMemSeconds)
+            || $this->memBuffs[$chunkName]['count'] == Config::$flushBufferRecords
         ) {
             if (!empty($this->memBuffs[$chunkName]) && !empty($this->memBuffs[$chunkName]['buffer'])) {
                 SkipprLogger::debug("Flushing buffer chunk $chunkName of size ". BytesToHuman::toHuman($this->memBuffs[$chunkName]['size'], true));
@@ -88,7 +100,8 @@ class ChunkedBuffer implements BufferInterface
         foreach ($this->memBuffs as $chunkName => $buffer) {
             if ($force
                 || $buffer['size'] > $this->flushMemBytes
-//                || $buffer['time'] < time() - $this->flushMemSeconds
+                || $buffer['time'] > (time() - $this->flushMemSeconds)
+                || $buffer['time'] == Config::$flushBufferRecords
             ) {
                 $namespace = $this->decodeChunkNamespace($chunkName);
 
