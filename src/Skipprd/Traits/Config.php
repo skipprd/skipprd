@@ -52,11 +52,13 @@ class Config
 
     public static $filters = [];
 
-    public static $flushBufferBytes = '';
+    public static $flushBufferBytes = null;
 
-    public static $flushBufferSeconds = '';
+    public static $flushBufferSeconds = null;
 
-    public static $flushBufferRecords = '';
+    public static $flushBufferRecords = null;
+
+    public static $pollIntervalSeconds = null;
 
     /**
      * @var \AvroSchema $avroSchemas
@@ -134,9 +136,11 @@ class Config
 
         self::$logLevel = Config::getenv('LOG_LEVEL', 'INFO');
 
-        self::$flushBufferBytes = Config::getenv('OUTPUT_FLUSH_BYTES', '');
-        self::$flushBufferSeconds = Config::getenv('OUTPUT_FLUSH_SECONDS', '');
-        self::$flushBufferRecords = Config::getenv('OUTPUT_FLUSH_RECORDS', '');
+        self::$flushBufferBytes = Config::getenv('OUTPUT_FLUSH_BYTES', null);
+        self::$flushBufferSeconds = Config::getenv('OUTPUT_FLUSH_SECONDS', null);
+        self::$flushBufferRecords = Config::getenv('OUTPUT_FLUSH_RECORDS', null);
+
+        self::$pollIntervalSeconds = Config::getenv('POLL_INTERVAL_SECONDS', null);
 
         $avroArr = [];
 //        self::$mapping = [];

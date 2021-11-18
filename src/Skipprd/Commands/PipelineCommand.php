@@ -297,22 +297,48 @@ class PipelineCommand
         }
 
         if (!empty($this->inputPlugin)) {
-            $this->inputPlugin->sync($this);
 
-            $this->inputPlugin->buffer->flushAll();
+            $ran = false;
+
+            while(!$ran || !empty(Config::$pollIntervalSeconds)) {
+
+                $ran = true;
+                $this->inputPlugin->sync($this);
+
+                $this->inputPlugin->buffer->flushAll();
+
+                sleep(Config::$pollIntervalSeconds ?? 1);
+            }
         } else {
 
             if (!empty($this->deadletterPlugin)) {
-                $this->deadletterPlugin->sync(Config::$outputFormat);
+                $ran = false;
+
+                while(!$ran || !empty(Config::$pollIntervalSeconds)) {
+
+                    $ran = true;
+
+                    $this->deadletterPlugin->sync(Config::$outputFormat);
+
+                    $this->deadletterPlugin->buffer->flushAll();
+
+                    sleep(Config::$pollIntervalSeconds ?? 1);
+                }
             }
 
             // keep output alive
             // we'll probably make output sycronous
             if (!empty($this->outputPlugin)) {
-                while(true) {
+
+                $ran = false;
+
+                while(!$ran || !empty(Config::$pollIntervalSeconds)) {
+
+                    $ran = true;
 
                     $this->outputPlugin->sync(Config::$outputFormat);
-                    sleep(10);
+
+                    sleep(Config::$pollIntervalSeconds ?? 1);
                 }
 
             }
