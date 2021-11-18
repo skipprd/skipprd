@@ -1004,10 +1004,12 @@ class PipelineCommand
         }
 
         if (!empty($this->deadletterPlugin)) {
+            $this->deadletterPlugin->connect();
             $this->deadletterPlugin->buffer->flushAll();
         }
 
         if (!empty($this->outputPlugin)) {
+            $this->outputPlugin->connect();
             $this->outputPlugin->buffer->flushAll();
         }
     }

@@ -10,6 +10,8 @@ interface DataOutputPluginInterface
 
     public function __construct(array $config, BufferInterface $buffer);
 
+    public function connect() : void;
+
     public function sync(string $format = '');
 
     public function doValidateConnection(): ValidationResponse;

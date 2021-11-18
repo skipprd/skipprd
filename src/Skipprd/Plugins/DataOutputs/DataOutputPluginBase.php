@@ -31,6 +31,10 @@ class DataOutputPluginBase implements DataOutputPluginInterface
 //        }
     }
 
+    public function connect() : void
+    {
+    }
+
     public function sync(string $format = '')
     {
     }

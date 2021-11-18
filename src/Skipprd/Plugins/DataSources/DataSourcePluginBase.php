@@ -43,7 +43,7 @@ class DataSourcePluginBase implements DataSourcePluginInterface
         return explode(',', $partitionField);
     }
 
-    public function connect()
+    public function connect() : void
     {
     }
 

@@ -10,7 +10,7 @@ interface DataSourcePluginInterface
 
     public function __construct(array $config, BufferInterface $buffer);
 
-    public function connect();
+    public function connect(): void;
 
     public function commit(string $offset = '');
     

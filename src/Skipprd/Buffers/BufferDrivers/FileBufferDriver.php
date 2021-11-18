@@ -176,7 +176,7 @@ class FileBufferDriver implements BufferDriverInterface
                 $this->cpFp = new \SplFileObject($checkpoint_filename, "a+");
                 $this->cpLine = (int) $this->cpFp->fgets();
 
-                SkipprLogger::info("Streaming file $filename from line $this->cpLine");
+                SkipprLogger::info("Streaming buffer file $filename from line $this->cpLine");
 
                 $this->dataFp = new \SplFileObject($filename, "a+");
 
