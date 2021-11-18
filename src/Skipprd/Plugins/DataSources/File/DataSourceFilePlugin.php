@@ -18,9 +18,8 @@ class DataSourceFilePlugin extends DataSourcePluginBase
         parent::__construct($config, $buffer);
     }
 
-    public function connect()
+    public function connect(): void
     {
-        return true;
     }
     
     public function sync($pipelineJob)
