@@ -110,7 +110,7 @@ class Config
         'avro_file'
     ];
 
-    public static function getenv(string $name, string $default = ''): string
+    public static function getenv(string $name, $default = null)
     {
 
         return (!empty(getenv($name))) ? getenv($name) : $default;
