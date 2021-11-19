@@ -12,7 +12,7 @@ interface BufferInterface
         int $eventTime = 0,
         string $namespace = null,
         string $partition = null
-    ) : void;
+    ) : int;
 
     public function flushAll(bool $force = false): void;
 

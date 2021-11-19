@@ -6,7 +6,7 @@ namespace Skipprd\Buffers;
 trait BufferAdaptorsFactory
 {
 
-    static function getAdaptor(string $bufferName, string $driverType, int $flushBytes = null) : BufferInterface
+    static function getAdaptor(string $bufferName, string $driverType) : BufferInterface
     {
 
         $driverName = ucfirst($driverType) . 'BufferDriver';
@@ -16,7 +16,7 @@ trait BufferAdaptorsFactory
 
         $adaptorClassName = "Skipprd\\Buffers\\ChunkedBuffer";
 
-        $adaptor = new $adaptorClassName($bufferName, $driver, $flushBytes);
+        $adaptor = new $adaptorClassName($bufferName, $driver);
 
         return $adaptor;
     }

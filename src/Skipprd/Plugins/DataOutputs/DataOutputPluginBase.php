@@ -12,10 +12,6 @@ class DataOutputPluginBase implements DataOutputPluginInterface
 
     protected $pipelineName = '';
 
-    public $flushBytes = 10000000;
-
-    public $flushSeconds = 300;
-
     public $buffer = null;
 
     public function __construct(array $config, BufferInterface $buffer)
@@ -23,12 +19,7 @@ class DataOutputPluginBase implements DataOutputPluginInterface
         $this->tenantId = getenv('TENANT_ID');
         $this->pipelineName = getenv('PIPELINE_NAME');
         $this->buffer = $buffer;
-//        $this->buffer->flushBytes = $this->flushBytes;
         $this->config = $config;
-        
-//        if (in_array(Config::$outputFormat, Config::$batchFormats)) {
-//            $this->buffer->flushMemBytes = $this->flushBytes;
-//        }
     }
 
     public function connect() : void

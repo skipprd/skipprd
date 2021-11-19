@@ -130,7 +130,7 @@ trait AnalyseSchema
         $this->initDiscoveredType($fieldOccurrence, $field);
 
         // Build mapping/Schema
-        if ($fieldOccurrence[$field]['count'] < $this->minSample) {
+        if ($fieldOccurrence[$field]['count'] < Config::$minDiscoveryRecords) {
             $fieldOccurrence[$field]['count']++;
 
             $this->resolveFieldType($fieldOccurrence, $field, $value);

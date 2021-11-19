@@ -40,6 +40,10 @@ class Config
 
     public static $analysing = true;
 
+    public static $minDiscoveryRecords = 10000;
+
+    public static $maxDiscoverySeconds = 60;
+
     public static $idFields = [];
 
     public static $dateFieldCandidates = [];
@@ -52,13 +56,13 @@ class Config
 
     public static $filters = [];
 
-    public static $flushBufferBytes = null;
+    public static $flushBufferBytes = 1000000;
 
-    public static $flushBufferSeconds = null;
+    public static $flushBufferSeconds = 60;
 
-    public static $flushBufferRecords = null;
+    public static $flushBufferRecords = 100;
 
-    public static $pollIntervalSeconds = null;
+    public static $pollIntervalSeconds = 60;
 
     /**
      * @var \AvroSchema $avroSchemas
@@ -136,11 +140,11 @@ class Config
 
         self::$logLevel = Config::getenv('LOG_LEVEL', 'INFO');
 
-        self::$flushBufferBytes = Config::getenv('OUTPUT_FLUSH_BYTES', null);
-        self::$flushBufferSeconds = Config::getenv('OUTPUT_FLUSH_SECONDS', null);
-        self::$flushBufferRecords = Config::getenv('OUTPUT_FLUSH_RECORDS', null);
+        self::$flushBufferBytes = Config::getenv('OUTPUT_FLUSH_BYTES', self::$flushBufferBytes);
+        self::$flushBufferSeconds = Config::getenv('OUTPUT_FLUSH_SECONDS', self::$flushBufferSeconds);
+        self::$flushBufferRecords = Config::getenv('OUTPUT_FLUSH_RECORDS', self::$flushBufferRecords);
 
-        self::$pollIntervalSeconds = Config::getenv('POLL_INTERVAL_SECONDS', null);
+        self::$pollIntervalSeconds = Config::getenv('POLL_INTERVAL_SECONDS', self::$pollIntervalSeconds);
 
         $avroArr = [];
 //        self::$mapping = [];

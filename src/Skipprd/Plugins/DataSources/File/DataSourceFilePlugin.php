@@ -28,7 +28,7 @@ class DataSourceFilePlugin extends DataSourcePluginBase
         try {
             $paths = $this->config['path'];
 
-            foreach ($this->splitPartitions($paths) as $path) {
+            foreach ($this->splitNamespaces($paths) as $path) {
                 $offsetTimestamp = 0;
                 $offsetLine = 0;
 
@@ -52,7 +52,7 @@ class DataSourceFilePlugin extends DataSourcePluginBase
                 });
 
                 foreach ($filenames as $filename) {
-                    if ($this->ingestPartition($path)) {
+                    if ($this->ingestNamespace($path)) {
                         $timestamp = filemtime($filename);
 
                         if ($timestamp >= $offsetTimestamp) {
@@ -133,7 +133,7 @@ class DataSourceFilePlugin extends DataSourcePluginBase
 
         try {
             $paths = $this->config['path'];
-            $paths = $this->splitPartitions($paths);
+            $paths = $this->splitNamespaces($paths);
         } catch (\Exception $e) {
             $validationResp->title = "Could not connect to source data.";
             $validationResp->error = $e->getMessage();
@@ -151,7 +151,7 @@ class DataSourceFilePlugin extends DataSourcePluginBase
 
         try {
             $paths = $this->config['path'];
-            $paths = $this->splitPartitions($paths);
+            $paths = $this->splitNamespaces($paths);
         } catch (\Exception $e) {
             $validationResp->title = "Could not connect to source data.";
             $validationResp->error = $e->getMessage();

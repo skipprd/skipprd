@@ -16,8 +16,6 @@ class DataSourcePluginBase implements DataSourcePluginInterface
 
     public $continue = [];
 
-    public $flushBytes = 10000000;
-    
     public $buffer = null;
 
     /**
@@ -33,17 +31,20 @@ class DataSourcePluginBase implements DataSourcePluginInterface
         $this->pipelineName = getenv('PIPELINE_NAME');
         $this->offsets = new Offsets();
         $this->buffer = $buffer;
-        $this->buffer->flushBytes = $this->flushBytes;
         $this->config = $config;
     }
 
-
-    public function splitPartitions(string $partitionField = '') : array
+    /**
+     * Input connectors can specify multiple namespaces to ingest (tables, topics, streams, file paths, etc)
+     * @param string $namespaces - comma separated list of namespaces
+     * @return array
+     */
+    public function splitNamespaces(string $namespaces = ''): array
     {
-        return explode(',', $partitionField);
+        return explode(',', $namespaces);
     }
 
-    public function connect() : void
+    public function connect(): void
     {
     }
 
@@ -51,21 +52,26 @@ class DataSourcePluginBase implements DataSourcePluginInterface
     {
         $this->offsets->setOffsets($offset);
     }
-    
+
     public function sync($pipelineJob)
     {
     }
 
-    public function ingestPartition($partition)
+    /**
+     * Hack used when discovering schema. true on an array key indicates that namespace
+     * has finished discovering and should consume no more data.
+     * @param $namespace
+     * @return mixed
+     * @todo - need a better way (threading per namespace/partition? multiple container workers?)
+     */
+    public function ingestNamespace($namespace)
     {
 
-        if (!isset($this->continue[$partition])) {
-            $this->continue[$partition] = true;
+        if (!isset($this->continue[$namespace])) {
+            $this->continue[$namespace] = true;
         }
 
-        //        SkipprLogger::info(var_dump($this->continue));
-        
-        return $this->continue[$partition];
+        return $this->continue[$namespace];
     }
 
     public function doValidateConnection(): ValidationResponse

@@ -27,11 +27,6 @@ class FileBufferDriver implements BufferDriverInterface
 
     public $bufferDir = '';
 
-    public $flushBytes = 1000000; # 1MB
-
-    public $flushFileSeconds = 300;
-
-
     public $serde;
 
     public function __construct(string $bufferName)
@@ -40,14 +35,6 @@ class FileBufferDriver implements BufferDriverInterface
         $this->bufferName = $bufferName;
 
         $this->bufferDir = Config::$dataDir . '/buffer';
-
-        if (!empty(Config::$flushBufferBytes)) {
-            $this->flushBytes = Config::$flushBufferBytes;
-        }
-
-        if (!empty(Config::$flushBufferSeconds)) {
-            $this->flushFileSeconds = Config::$flushBufferSeconds;
-        }
 
         @mkdir($this->bufferDir, 0777, true);
 
@@ -356,7 +343,11 @@ class FileBufferDriver implements BufferDriverInterface
         }
     }
 
-    public function finalise($force = false) :void
+    /**
+     * Simply closes a buffer file by renaming it with '&finalised' suffix
+     * which prevents further append writes and indicates the buffer file is ready for output
+     */
+    public function finalise() :void
     {
 
         $file_list = glob($this->bufferDir . '/buffer=' . $this->bufferName . '*&temp_part*');
@@ -374,31 +365,21 @@ class FileBufferDriver implements BufferDriverInterface
                         continue;
                     }
 
-                    SkipprLogger::debug("Finalising buffer file $filename");
-
-                    $updatedTime = filectime($filename);
-                    $updatedDelta = time() - $updatedTime;
-
-                    $bytes = filesize($filename);
-
                     if (FileBufferDriver::lock($filename)) { // acquire an exclusive lock
- //                       SkipprLogger::debug("bytes: " . $bytes);
- //                       SkipprLogger::debug("flushBytes: " . $this->flushBytes);
+                        $newFilename = str_replace(
+                            '&temp_part',
+                            '&finalised',
+                            $filename
+                        );
 
-                        if ($bytes >= $this->flushBytes || $updatedDelta > $this->flushFileSeconds || $force) {
-                            $newFilename = str_replace(
-                                '&temp_part',
-                                '&finalised',
-                                $filename
-                            );
+                        rename($filename, $newFilename . '=' . Helpers::randomPassword(32));
 
-                            rename($filename, $newFilename . '=' . Helpers::randomPassword(32));
+                        $updatedTime = filectime($filename);
+                        $updatedDelta = time() - $updatedTime;
+                        $bytes = filesize($filename);
+                        $humanSize = BytesToHuman::toHuman($bytes);
 
-                            if (!$force) {
-                                $humanSize = BytesToHuman::toHuman($bytes);
-                                SkipprLogger::debug("Buffer file $filename rotated at $humanSize and change time delta $updatedDelta");
-                            }
-                        }
+                        SkipprLogger::debug("Buffer file $filename finalised at $humanSize and age of $updatedDelta seconds");
 
                         FileBufferDriver::unlock($filename);
                     }

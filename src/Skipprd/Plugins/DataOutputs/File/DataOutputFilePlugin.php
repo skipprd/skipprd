@@ -13,8 +13,6 @@ class DataOutputFilePlugin extends DataOutputPluginBase
 
     protected $config = [];
 
-    public $flushBytes = 100000000;
-
     public function __construct(array $config, BufferInterface $buffer)
     {
 

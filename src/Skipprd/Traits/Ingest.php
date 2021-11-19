@@ -60,8 +60,10 @@ trait Ingest
 
             if (!$this->flagMsgDeadLetter
                 && $this->avroEncodeTest($message, $namespace)
+                // @todo replace avrow with something else (flatbuffers?) as avro doesn't support array in array,
+                // but skippr schema does.
             ) {
-                $this->entries++;
+                $this->totalEntries++;
 
 //                $this->entries[] = $message;
 

@@ -14,11 +14,12 @@ use Skipprd\Traits\SkipprLogger;
 class ChunkedBuffer implements BufferInterface
 {
 
+    protected const BUFFER_APPENDED=1;
+    protected const BUFFER_APPENDED_FLUSHED=2;
+
     protected $memBuffs = [];
 
     protected $bufferName = '';
-    public $flushMemBytes = 1000000; # 1MB
-    public $flushMemSeconds = 300;
 
     public $driver;
 
@@ -26,42 +27,35 @@ class ChunkedBuffer implements BufferInterface
 //    protected static $eventTimeBucketDurationSeconds = 3600;
 //    protected static $eventTimeBucketDurationSeconds = 86400;
 
-    public function __construct(string $bufferName, BufferDriverInterface $bufferDriver, string $flushBytes = null)
+    public function __construct(string $bufferName, BufferDriverInterface $bufferDriver)
     {
         $this->bufferName = $bufferName;
-
-        if (!empty($flushBytes)) {
-
-            if (!empty(Config::$flushBufferBytes)) {
-                $this->flushMemBytes = Config::$flushBufferBytes;
-            }
-        }
-
-        if (!empty(Config::$flushBufferSeconds)) {
-            $this->flushMemSeconds = Config::$flushBufferSeconds;
-        }
 
         $this->driver = $bufferDriver;
     }
 
+    /**
+     * @param array $payload
+     * @param bool $flush
+     * @param int $eventTime
+     * @param string|null $namespace
+     * @param string|null $partition
+     * @return int - status flag, BUFFER_APPENDED for record appened to buffer memory.
+     * BUFFER_APPENDED_FLUSHED for record appended and all buffer memory flushed to persistent buffer driver.
+     */
     public function append(
         array $payload,
         bool $flush = false,
         int $eventTime = 0,
         string $namespace = null,
         string $partition = null
-    ) : void {
+    ) : int {
+
+        $return = self::BUFFER_APPENDED;
 
         $timeBucket = $this->eventTimeBucket($eventTime);
 
         $chunkName = $this->encodeChunkName($namespace, $partition, $timeBucket);
-
-//        if (empty($this->memBuffs[$chunkName])) {
-//
-//            $this->memBuffs[$chunkName]['size'] = 0;
-//            $this->memBuffs[$chunkName]['buffer'] = "";
-//
-//        }
 
         if (empty($this->memBuffs[$chunkName])) {
 //            $this->memBuffs[$chunkName]['size'] = mb_strlen($payload) * 8;
@@ -79,42 +73,29 @@ class ChunkedBuffer implements BufferInterface
 
         $this->memBuffs[$chunkName]['buffer'][] = $payload;
 
-        if ($flush
-            || $this->memBuffs[$chunkName]['size'] > ($this->flushMemBytes - ($this->flushMemBytes / 20)) // 5%
-            || (time() - $this->memBuffs[$chunkName]['time']) > $this->flushMemSeconds
-            || $this->memBuffs[$chunkName]['count'] >= (Config::$flushBufferRecords - (Config::$flushBufferRecords / 20)) // 5%
+        if ($flush|| $this->checkFlushLimit($this->memBuffs[$chunkName])
         ) {
             if (!empty($this->memBuffs[$chunkName]) && !empty($this->memBuffs[$chunkName]['buffer'])) {
-                SkipprLogger::info("Flushing buffer of size ". BytesToHuman::toHuman($this->memBuffs[$chunkName]['size'], true));
-
-                SkipprLogger::info("Flushing buffer of time ". (time() - $this->memBuffs[$chunkName]['time']));
-
-                SkipprLogger::info("Flushing buffer of count ". $this->memBuffs[$chunkName]['count']);
-
                 $this->driver->flush($this->memBuffs[$chunkName]['buffer'], $chunkName, $namespace);
+
+                $return = self::BUFFER_APPENDED_FLUSHED;
 
                 unset($this->memBuffs[$chunkName]);
             }
         }
+
+        return $return;
     }
 
     public function flushAll(bool $force = false): void
     {
 
         foreach ($this->memBuffs as $chunkName => $buffer) {
-            if ($force
-//                || $buffer['size'] > $this->flushMemBytes
-//                || $buffer['time'] > (time() - $this->flushMemSeconds)
-//                || $buffer['time'] == Config::$flushBufferRecords
-                || $buffer['size'] > ($this->flushMemBytes - ($this->flushMemBytes / 20)) // 5%
-                || (time() - $buffer['time']) > $this->flushMemSeconds
-                || $buffer['count'] >= (Config::$flushBufferRecords - (Config::$flushBufferRecords / 20)) // 5%
+            if ($force || $this->checkFlushLimit($this->memBuffs[$chunkName])
             ) {
                 $namespace = $this->decodeChunkNamespace($chunkName);
 
                 if (!empty($this->memBuffs[$chunkName]) && !empty($this->memBuffs[$chunkName]['buffer'])) {
-                    SkipprLogger::debug("Flushing buffer chunk $chunkName of size ". BytesToHuman::toHuman($this->memBuffs[$chunkName]['size'], true));
-
                     $this->driver->flush($this->memBuffs[$chunkName]['buffer'], $chunkName, $namespace);
 
                     unset($this->memBuffs[$chunkName]);
@@ -123,6 +104,55 @@ class ChunkedBuffer implements BufferInterface
         }
     }
 
+    public function checkFlushLimit($chunk): bool
+    {
+
+        $result = false;
+
+        if ($chunk['size'] > (Config::$flushBufferBytes - (Config::$flushBufferBytes / 20))) {
+            SkipprLogger::debug("Rotating buffer with size ". BytesToHuman::toHuman($chunk['size'], true));
+            $result = true;
+        }
+
+        if ((time() - $chunk['time']) > Config::$flushBufferSeconds) {
+            SkipprLogger::debug("Rotating buffer with ttl ". (time() - $chunk['time']) . " seconds");
+            $result = true;
+        }
+
+        if ($chunk['count'] >= (Config::$flushBufferRecords - (Config::$flushBufferRecords / 20))) {
+            SkipprLogger::debug("Rotating buffer of ". $chunk['count'] . " records");
+            $result = true;
+        }
+
+        if ($result) {
+            $size = BytesToHuman::toHuman($chunk['size'], true);
+            $time = $chunk['time'];
+            $count = $chunk['count'];
+
+            SkipprLogger::debug("Flushing buffer of $size, $count records and age of $time seconds");
+
+            $tenantId = Config::$tenantId;
+            $pipelineName = Config::$pipelineName;
+
+            if (!empty($this->statsd)) {
+                $this->statsd->increment(
+                    "{$tenantId}.{$pipelineName}.flushed.records.current",
+                    $count
+                );
+                $this->statsd->increment(
+                    "{$tenantId}.{$pipelineName}.flushed.age.current",
+                    $time
+                );
+                $this->statsd->increment(
+                    "{$tenantId}.{$pipelineName}.flushed.bytes.current",
+                    $chunk['size']
+                );
+            }
+        }
+
+        return $result;
+    }
+    
     public function eventTimeBucket(int $eventTime) : int
     {
 
