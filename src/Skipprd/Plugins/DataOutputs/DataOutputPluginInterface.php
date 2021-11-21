@@ -12,7 +12,7 @@ interface DataOutputPluginInterface
 
     public function connect() : void;
 
-    public function sync(string $format = '');
+    public function sync();
 
     public function doValidateConnection(): ValidationResponse;
 

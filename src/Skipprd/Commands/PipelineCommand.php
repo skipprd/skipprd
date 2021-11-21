@@ -260,7 +260,7 @@ class PipelineCommand
                 while (!$ran || !empty(Config::$pollIntervalSeconds)) {
                     $ran = true;
 
-                    $this->deadletterPlugin->sync(Config::$outputFormat);
+                    $this->deadletterPlugin->sync();
 
                     $this->deadletterPlugin->buffer->flushAll();
 
@@ -276,7 +276,7 @@ class PipelineCommand
                 while (!$ran || !empty(Config::$pollIntervalSeconds)) {
                     $ran = true;
 
-                    $this->outputPlugin->sync(Config::$outputFormat);
+                    $this->outputPlugin->sync();
 
                     sleep(Config::$pollIntervalSeconds ?? 1);
                 }

@@ -26,7 +26,7 @@ class DataOutputPluginBase implements DataOutputPluginInterface
     {
     }
 
-    public function sync(string $format = '')
+    public function sync()
     {
     }
 

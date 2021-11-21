@@ -23,7 +23,7 @@ class DataOutputFilePlugin extends DataOutputPluginBase
     {
     }
     
-    public function sync(string $serde = 'json')
+    public function sync()
     {
 
         while ($filename = $this->buffer->driver->nextFile()) {
