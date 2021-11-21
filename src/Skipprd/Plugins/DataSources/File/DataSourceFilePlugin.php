@@ -23,7 +23,7 @@ class DataSourceFilePlugin extends DataSourcePluginBase
     {
     }
 
-    public function sync($pipelineJob)
+    public function sync()
     {
 
         try {
@@ -52,50 +52,48 @@ class DataSourceFilePlugin extends DataSourcePluginBase
             });
 
             foreach ($filenames as $filename) {
-                if ($this->ingestNamespace($path)) {
-                    $timestamp = filemtime($filename);
+                $timestamp = filemtime($filename);
 
-                    if ($timestamp >= $offsetTimestamp) {
-                        $line = 0;
+                if ($timestamp >= $offsetTimestamp) {
+                    $line = 0;
 
-                        if (preg_match(
-                                "/\.gz(ip)?$|.zip/",
-                                $filename
-                            ) == true) {
-                            SkipprLogger::info('Uncompressing file ' . $filename);
+                    if (preg_match(
+                            "/\.gz(ip)?$|.zip/",
+                            $filename
+                        ) == true) {
+                        SkipprLogger::info('Uncompressing file ' . $filename);
 
-                            // open gz file for reading
-                            $sfp = gzopen($filename, 'rb');
+                        // open gz file for reading
+                        $sfp = gzopen($filename, 'rb');
 
-                            // read and decode chunks into string stream
-                            while (!gzeof($sfp)) {
-                                $line++;
+                        // read and decode chunks into string stream
+                        while (!gzeof($sfp)) {
+                            $line++;
 
-                                $string = gzgets($sfp);
+                            $string = gzgets($sfp);
 
-                                $offset = "$timestamp $line";
+                            $offset = "$timestamp $line";
 
-                                $pipelineJob->emit($string, $offset, $path);
-                            }
-
-                            gzclose($sfp);
-                        } else {
-                            $sfp = fopen($filename, 'rb');
-
-                            // read and decode chunks into string stream
-                            while (!feof($sfp)) {
-                                $line++;
-
-                                $string = fgets($sfp);
-
-                                $offset = "$timestamp $line";
-
-                                $pipelineJob->emit($string, $offset, $path);
-                            }
-
-                            // remove temp file
-                            fclose($sfp);
+                            skippr_emit($string, $offset, $path);
                         }
+
+                        gzclose($sfp);
+                    } else {
+                        $sfp = fopen($filename, 'rb');
+
+                        // read and decode chunks into string stream
+                        while (!feof($sfp)) {
+                            $line++;
+
+                            $string = fgets($sfp);
+
+                            $offset = "$timestamp $line";
+
+                            skippr_emit($string, $offset, $path);
+                        }
+
+                        // remove temp file
+                        fclose($sfp);
                     }
                 }
             }
@@ -112,7 +110,6 @@ class DataSourceFilePlugin extends DataSourcePluginBase
 
         try {
             $paths = $this->config['path'];
-            $paths = $this->splitNamespaces($paths);
         } catch (\Exception $e) {
             $validationResp->title = "Could not connect to source data.";
             $validationResp->error = $e->getMessage();
@@ -130,7 +127,6 @@ class DataSourceFilePlugin extends DataSourcePluginBase
 
         try {
             $paths = $this->config['path'];
-            $paths = $this->splitNamespaces($paths);
         } catch (\Exception $e) {
             $validationResp->title = "Could not connect to source data.";
             $validationResp->error = $e->getMessage();

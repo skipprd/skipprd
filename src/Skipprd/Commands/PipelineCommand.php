@@ -247,7 +247,7 @@ class PipelineCommand
 
             while (!$ran || !empty(Config::$pollIntervalSeconds)) {
                 $ran = true;
-                $this->inputPlugin->sync($this);
+                $this->inputPlugin->sync();
 
                 $this->inputPlugin->buffer->flushAll();
 
@@ -592,8 +592,7 @@ class PipelineCommand
         string $partition
     ): void {
         if (!Config::$analysing) { // should never be here on analyse schema, but just in case of code error
-            $offset = $this->inputPlugin->offsets->getOffset($namespace,
-                $partition);
+            $offset = $this->inputPlugin->offsets->getCurrentOffsets($namespace, $partition);
 
             $this->offsetClient->sync($namespace, $partition, $offset);
         }

@@ -55,7 +55,7 @@ class DataSourcePluginBase implements DataSourcePluginInterface
 //        $this->offsets->setOffsets($offset);
 //    }
 
-    public function sync($pipelineJob)
+    public function sync()
     {
     }
 

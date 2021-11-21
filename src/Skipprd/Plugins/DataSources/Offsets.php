@@ -31,6 +31,11 @@ class Offsets
         return $offsets;
     }
 
+    public function getCurrentOffsets(string $namespace, string $partition = '0')
+    {
+        return $this->offsets[$namespace][$partition];
+    }
+
     public function validateOffset(string $args, string $namespace, string $partition = '0') : bool {
 
         //        $offsets = $this->getOffsets();
