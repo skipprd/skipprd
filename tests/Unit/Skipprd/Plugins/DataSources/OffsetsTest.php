@@ -10,11 +10,12 @@ class OffsetsTest extends TestCase
 //    public function testGetOffsetsNew()
 //    {
 //
-//        $partition = 'table_a';
+//        $namespace = 'table_a';
+//        $partition = 'shard_1';
 //
 //        $offsets = new Offsets();
 //
-//        $commits = $offsets->parseOffsets($partition);
+//        $commits = $offsets->getOffsets($namespace, $partition);
 //
 //        self::assertEquals([0], $commits);
 //
@@ -23,12 +24,13 @@ class OffsetsTest extends TestCase
     public function testParseOffsets()
     {
 
-        $partition = 'table_a';
+        $namespace = 'table_a';
+        $partition = 'shard_1';
 
         $offsets = new Offsets();
-        $offsets->setOffsets($partition, '123 123');
+        $offsets->setOffsets('123 123', $namespace, $partition);
 
-        $commits = $offsets->parseOffsets($partition);
+        $commits = $offsets->getOffsets($namespace, $partition);
 
         self::assertEquals([123, 123], $commits);
 
@@ -37,12 +39,13 @@ class OffsetsTest extends TestCase
     public function testParseSinglePartitionOffsets()
     {
 
-        $partition = 'table_a';
+        $namespace = 'table_a';
+        $partition = 'shard_1';
 
         $offsets = new Offsets();
-        $offsets->setOffsets($partition, '123');
+        $offsets->setOffsets('123', $namespace, $partition);
 
-        $commits = $offsets->parseOffsets($partition);
+        $commits = $offsets->getOffsets($namespace, $partition);
 
         self::assertEquals([123], $commits);
 
@@ -55,12 +58,13 @@ class OffsetsTest extends TestCase
     public function testValidateOffsetFloatDecimalLess()
     {
 
-        $partition = 'table_a';
+        $namespace = 'table_a';
+        $partition = 'shard_1';
 
         $offsets = new Offsets();
-        $offsets->setOffsets( $partition, ' 123 12');
+        $offsets->setOffsets(' 123 12', $namespace, $partition);
 
-        $valid = $offsets->validateOffset( $partition, ' 123 4');
+        $valid = $offsets->validateOffset(' 123 4', $namespace, $partition);
 
         self::assertEquals(false, $valid);
 
@@ -69,12 +73,13 @@ class OffsetsTest extends TestCase
     public function testValidateOffsetFloatDecimalGreater()
     {
 
-        $partition = 'table_a';
+        $namespace = 'table_a';
+        $partition = 'shard_1';
 
         $offsets = new Offsets();
-        $offsets->setOffsets( $partition, ' 123 4');
+        $offsets->setOffsets(' 123 4', $namespace, $partition);
 
-        $valid = $offsets->validateOffset( $partition, ' 123 12');
+        $valid = $offsets->validateOffset(' 123 12', $namespace, $partition);
 
         self::assertEquals(true, $valid);
 
@@ -83,12 +88,13 @@ class OffsetsTest extends TestCase
     public function testValidateOffsetBothLess()
     {
 
-        $partition = 'table_a';
+        $namespace = 'table_a';
+        $partition = 'shard_1';
 
         $offsets = new Offsets();
-        $offsets->setOffsets( $partition, ' 123 123');
+        $offsets->setOffsets(' 123 123', $namespace, $partition);
 
-        $valid = $offsets->validateOffset( $partition, ' 122 122');
+        $valid = $offsets->validateOffset(' 122 122', $namespace, $partition);
 
         self::assertEquals(false, $valid);
 
@@ -97,12 +103,13 @@ class OffsetsTest extends TestCase
     public function testValidateOffsetMinorLess()
     {
 
-        $partition = 'table_a';
+        $namespace = 'table_a';
+        $partition = 'shard_1';
 
         $offsets = new Offsets();
-        $offsets->setOffsets($partition, ' 123 123');
+        $offsets->setOffsets(' 123 123', $namespace, $partition);
 
-        $valid = $offsets->validateOffset($partition, ' 123 122');
+        $valid = $offsets->validateOffset(' 123 122', $namespace, $partition);
 
         self::assertEquals(false, $valid);
 
@@ -111,12 +118,13 @@ class OffsetsTest extends TestCase
     public function testValidateOffsetMajorLess()
     {
 
-        $partition = 'table_a';
+        $namespace = 'table_a';
+        $partition = 'shard_1';
 
         $offsets = new Offsets();
-        $offsets->setOffsets($partition, ' 123 123');
+        $offsets->setOffsets(' 123 123', $namespace, $partition);
 
-        $valid = $offsets->validateOffset($partition, ' 122 123');
+        $valid = $offsets->validateOffset(' 122 123', $namespace, $partition);
 
         self::assertEquals(false, $valid);
 
@@ -125,12 +133,13 @@ class OffsetsTest extends TestCase
     public function testValidateOffsetBothEqual()
     {
 
-        $partition = 'table_a';
+        $namespace = 'table_a';
+        $partition = 'shard_1';
 
         $offsets = new Offsets();
-        $offsets->setOffsets($partition, ' 123 123');
+        $offsets->setOffsets(' 123 123', $namespace, $partition);
 
-        $valid = $offsets->validateOffset($partition, ' 123 123');
+        $valid = $offsets->validateOffset(' 123 123', $namespace, $partition);
 
         self::assertEquals(false, $valid);
 
@@ -139,12 +148,13 @@ class OffsetsTest extends TestCase
     public function testValidateOffsetBothGreater()
     {
 
-        $partition = 'table_a';
+        $namespace = 'table_a';
+        $partition = 'shard_1';
 
         $offsets = new Offsets();
-        $offsets->setOffsets($partition, ' 123 123');
+        $offsets->setOffsets(' 123 123', $namespace, $partition);
 
-        $valid = $offsets->validateOffset($partition, ' 124 124');
+        $valid = $offsets->validateOffset(' 124 124', $namespace, $partition);
 
         self::assertEquals(true, $valid);
 
@@ -153,12 +163,13 @@ class OffsetsTest extends TestCase
     public function testValidateOffsetMinorGreater()
     {
 
-        $partition = 'table_a';
+        $namespace = 'table_a';
+        $partition = 'shard_1';
 
         $offsets = new Offsets();
-        $offsets->setOffsets($partition, ' 123 123');
+        $offsets->setOffsets(' 123 123', $namespace, $partition);
 
-        $valid = $offsets->validateOffset($partition, ' 123 124');
+        $valid = $offsets->validateOffset(' 123 124', $namespace, $partition);
 
         self::assertEquals(true, $valid);
 
@@ -167,12 +178,13 @@ class OffsetsTest extends TestCase
     public function testValidateOffsetMajorGreater()
     {
 
-        $partition = 'table_a';
+        $namespace = 'table_a';
+        $partition = 'shard_1';
 
         $offsets = new Offsets();
-        $offsets->setOffsets($partition, ' 123 123');
+        $offsets->setOffsets(' 123 123', $namespace, $partition);
 
-        $valid = $offsets->validateOffset($partition, ' 124 123');
+        $valid = $offsets->validateOffset(' 124 123', $namespace, $partition);
 
         self::assertEquals(true, $valid);
 

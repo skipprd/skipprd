@@ -1,4 +1,5 @@
 <?php
+
 namespace Skipprd\Plugins\DataSources\File;
 
 use Skipprd\Plugins\DataSources\DataSourcePluginBase;
@@ -21,101 +22,79 @@ class DataSourceFilePlugin extends DataSourcePluginBase
     public function connect(): void
     {
     }
-    
+
     public function sync($pipelineJob)
     {
 
         try {
-            $paths = $this->config['path'];
+            $path = $this->config['path'];
 
-            foreach ($this->splitNamespaces($paths) as $path) {
-                $offsetTimestamp = 0;
-                $offsetLine = 0;
+            $offsetTimestamp = 0;
+            $offsetLine = 0;
 
-                $offset = $this->offsets->parseOffsets($path);
+            $offset = $this->offsets->getOffsets($path);
 
-                if (isset($offset[0])) {
-                    $offsetTimestamp = $offset[0];
-                }
-                if (isset($offset[1])) {
-                    $offsetLine = $offset[1];
-                }
+            if (isset($offset[0])) {
+                $offsetTimestamp = $offset[0];
+            }
+            if (isset($offset[1])) {
+                $offsetLine = $offset[1];
+            }
 
-                if ($offsetTimestamp && $offsetLine) {
-                    SkipprLogger::info("Restarting File sync from checkpoint time $offsetTimestamp line $offsetLine");
-                }
+            if ($offsetTimestamp && $offsetLine) {
+                SkipprLogger::info("Restarting File sync from checkpoint time $offsetTimestamp line $offsetLine");
+            }
 
-                $filenames = glob($path . '/*', GLOB_NOSORT);
+            $filenames = glob($path . '/*', GLOB_NOSORT);
 
-                usort($filenames, function ($a, $b) {
-                    return filemtime($a) - filemtime($b);
-                });
+            usort($filenames, function ($a, $b) {
+                return filemtime($a) - filemtime($b);
+            });
 
-                foreach ($filenames as $filename) {
-                    if ($this->ingestNamespace($path)) {
-                        $timestamp = filemtime($filename);
+            foreach ($filenames as $filename) {
+                if ($this->ingestNamespace($path)) {
+                    $timestamp = filemtime($filename);
 
-                        if ($timestamp >= $offsetTimestamp) {
-                            $line = 0;
+                    if ($timestamp >= $offsetTimestamp) {
+                        $line = 0;
 
-                            if (preg_match(
+                        if (preg_match(
                                 "/\.gz(ip)?$|.zip/",
                                 $filename
                             ) == true) {
-                                SkipprLogger::info('Uncompressing file ' . $filename);
+                            SkipprLogger::info('Uncompressing file ' . $filename);
 
-                                // open gz file for reading
-                                $sfp = gzopen($filename, 'rb');
+                            // open gz file for reading
+                            $sfp = gzopen($filename, 'rb');
 
-                                // read and decode chunks into string stream
-                                while (!gzeof($sfp)) {
-                                    $line++;
+                            // read and decode chunks into string stream
+                            while (!gzeof($sfp)) {
+                                $line++;
 
-                                    $string = gzgets($sfp);
+                                $string = gzgets($sfp);
 
-                                    if ($this->offsets->validateOffset(
-                                        $path,
-                                        "$timestamp $line"
-                                    )) {
-                                        $offset = "$timestamp $line";
+                                $offset = "$timestamp $line";
 
-                                        $pipelineJob->emit($string, $path);
-
-                                        $this->offsets->setOffsets(
-                                            $path,
-                                            $offset
-                                        );
-                                    }
-                                }
-
-                                gzclose($sfp);
-                            } else {
-                                $sfp = fopen($filename, 'rb');
-
-                                // read and decode chunks into string stream
-                                while (!feof($sfp)) {
-                                    $line++;
-
-                                    $string = fgets($sfp);
-
-                                    if ($this->offsets->validateOffset(
-                                        $path,
-                                        "$timestamp $line"
-                                    )) {
-                                        $offset = "$timestamp $line";
-
-                                        $pipelineJob->emit($string, $path);
-
-                                        $this->offsets->setOffsets(
-                                            $path,
-                                            $offset
-                                        );
-                                    }
-                                }
-
-                                // remove temp file
-                                fclose($sfp);
+                                $pipelineJob->emit($string, $offset, $path);
                             }
+
+                            gzclose($sfp);
+                        } else {
+                            $sfp = fopen($filename, 'rb');
+
+                            // read and decode chunks into string stream
+                            while (!feof($sfp)) {
+                                $line++;
+
+                                $string = fgets($sfp);
+
+                                $offset = "$timestamp $line";
+
+                                $pipelineJob->emit($string, $offset, $path);
+                            }
+
+                            // remove temp file
+                            fclose($sfp);
                         }
                     }
                 }

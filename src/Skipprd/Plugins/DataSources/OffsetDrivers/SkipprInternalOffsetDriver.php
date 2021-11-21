@@ -32,10 +32,10 @@ class SkipprInternalOffsetDriver implements OffsetDriverInterface
         return   $this->committedOffsets;
     }
 
-    public function sync(string $partition, string $offset) : void
+    public function sync(string $namespace, string $partition, string $offset) : void
     {
 
-        $this->committedOffsets[$partition] = $offset;
+        $this->committedOffsets[$namespace][$partition] = $offset;
 
         $this->client('PUT', $this->committedOffsets);
     }

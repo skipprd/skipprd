@@ -8,31 +8,19 @@ class Offsets
 
     protected array $offsets = [];
 
-    public function setOffsets(string $partition, string $offsets = '')
+    public function setOffsets(string $offsets, string $namespace, string $partition = '0')
     {
 
-        $this->offsets[$partition] = $offsets;
+        $this->offsets[$namespace][$partition] = $offsets;
     }
 
-    public function getOffsets()
-    {
-
-        return $this->offsets;
-    }
-
-    public function getOffset(string $partition)
-    {
-
-        return $this->offsets[$partition];
-    }
-
-    public function parseOffsets(string $partition)
+    public function getOffsets(string $namespace, string $partition = '0')
     {
 
         $offsets = [];
         
-        if (!empty($this->offsets[$partition])) {
-            $offsets = explode(' ', $this->offsets[$partition]);
+        if (!empty($this->offsets[$namespace][$partition])) {
+            $offsets = explode(' ', $this->offsets[$namespace][$partition]);
         }
 
 
@@ -43,14 +31,13 @@ class Offsets
         return $offsets;
     }
 
-    public function validateOffset(string $partition, string $args) : bool
-    {
+    public function validateOffset(string $args, string $namespace, string $partition = '0') : bool {
 
         //        $offsets = $this->getOffsets();
         //        return bccomp($args, $offsets, 5) == 1;
 
 
-        $offsets = $this->parseOffsets($partition);
+        $offsets = $this->getOffsets($namespace, $partition);
 
         $args = explode(' ', $args);
 
@@ -65,7 +52,7 @@ class Offsets
                     if ($total > $next) {
                         $subArgs = array_slice($args, $next);
                         $subArgs = implode(' ', $subArgs);
-                        $this->validateOffset($partition, $subArgs);
+                        $this->validateOffset($subArgs, $namespace, $partition);
                     }
                 } else {
                     return true;

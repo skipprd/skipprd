@@ -38,6 +38,8 @@ class DataSourcePluginBase implements DataSourcePluginInterface
      * Input connectors can specify multiple namespaces to ingest (tables, topics, streams, file paths, etc)
      * @param string $namespaces - comma separated list of namespaces
      * @return array
+     * @todo - relocate this to Skippr SaaS, workers should be single process
+     * able to operate on one namespace + partition pair for scaling
      */
     public function splitNamespaces(string $namespaces = ''): array
     {
@@ -48,10 +50,10 @@ class DataSourcePluginBase implements DataSourcePluginInterface
     {
     }
 
-    public function commit(string $offset = '')
-    {
-        $this->offsets->setOffsets($offset);
-    }
+//    public function commit(string $offset = '')
+//    {
+//        $this->offsets->setOffsets($offset);
+//    }
 
     public function sync($pipelineJob)
     {

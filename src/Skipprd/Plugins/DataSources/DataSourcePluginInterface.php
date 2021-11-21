@@ -12,7 +12,7 @@ interface DataSourcePluginInterface
 
     public function connect(): void;
 
-    public function commit(string $offset = '');
+//    public function commit(string $offset = '');
     
     public function sync($pipelineJob);
 

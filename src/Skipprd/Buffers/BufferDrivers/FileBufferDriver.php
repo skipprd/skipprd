@@ -46,8 +46,11 @@ class FileBufferDriver implements BufferDriverInterface
         $this->serde = SerdersFactory::factory($serde);
     }
 
-    public function flush(array $memBuff, string $chunkName, string $namespace) : void
-    {
+    public function flush(
+        array $memBuff,
+        string $chunkName,
+        string $namespace
+    ): void {
 
         $schema = Config::$outputSchemas[$namespace];
 
@@ -66,7 +69,10 @@ class FileBufferDriver implements BufferDriverInterface
                     $fp = fopen($filename, 'a+');
 
                     foreach ($memBuff as $buf) {
-                        fputs($fp, $this->serde->serialize($buf, $schema) . "\n");
+                        fputs(
+                            $fp,
+                            $this->serde->serialize($buf, $schema) . "\n"
+                        );
                     }
 
                     fflush($fp);            // flush output before releasing the lock
@@ -151,7 +157,7 @@ class FileBufferDriver implements BufferDriverInterface
 
     public function stream()
     {
-        
+
         // stream
         if ($this->dataFp == null) {
             $filename = $this->nextFile();
@@ -231,7 +237,10 @@ class FileBufferDriver implements BufferDriverInterface
     public function nextFile()
     {
 
-        $filenames = glob($this->bufferDir . '/buffer=' . $this->bufferName . '*&finalised=*', GLOB_NOSORT);
+        $filenames = glob(
+            $this->bufferDir . '/buffer=' . $this->bufferName . '*&finalised=*',
+            GLOB_NOSORT
+        );
 
         usort($filenames, function ($a, $b) {
             return filemtime($a) - filemtime($b);
@@ -265,9 +274,9 @@ class FileBufferDriver implements BufferDriverInterface
     }
 
 
-    public function lock(string $chunkName, $block = true) : bool
+    public function lock(string $chunkName, $block = true): bool
     {
-        
+
         $locked = false;
 
         SkipprLogger::debug("Creating lock on buffer chunk $chunkName");
@@ -278,6 +287,7 @@ class FileBufferDriver implements BufferDriverInterface
             SkipprLogger::debug("Created lock on buffer chunk $chunkName");
         }
 
+        // @todo - check update time of lock file and force delete if it's past an expire time
         while (!$locked && $block) {
             if (@mkdir($chunkName . '.lock', 0777, true)) {
                 $locked = true;
@@ -290,7 +300,7 @@ class FileBufferDriver implements BufferDriverInterface
         return $locked;
     }
 
-    public function unlockAll() : void
+    public function unlockAll(): void
     {
         $file_list = glob($this->bufferDir . '/buffer=' . $this->bufferName . '*lock');
 
@@ -306,7 +316,7 @@ class FileBufferDriver implements BufferDriverInterface
         }
     }
 
-    public function unlock(string $chunkName) : bool
+    public function unlock(string $chunkName): bool
     {
 
         rmdir($chunkName . '.lock');
@@ -314,7 +324,7 @@ class FileBufferDriver implements BufferDriverInterface
         return true;
     }
 
-    public function close($fp) : bool
+    public function close($fp): bool
     {
 
         if (fclose($fp)) { // release the lock)
@@ -324,7 +334,7 @@ class FileBufferDriver implements BufferDriverInterface
         }
     }
 
-    public function destroy($filename) : bool
+    public function destroy($filename): bool
     {
 
         try {
@@ -347,7 +357,7 @@ class FileBufferDriver implements BufferDriverInterface
      * Simply closes a buffer file by renaming it with '&finalised' suffix
      * which prevents further append writes and indicates the buffer file is ready for output
      */
-    public function finalise() :void
+    public function finalise(): void
     {
 
         $file_list = glob($this->bufferDir . '/buffer=' . $this->bufferName . '*&temp_part*');
@@ -366,17 +376,20 @@ class FileBufferDriver implements BufferDriverInterface
                     }
 
                     if (FileBufferDriver::lock($filename)) { // acquire an exclusive lock
-                        $newFilename = str_replace(
+                        $finalFilename = str_replace(
                             '&temp_part',
                             '&finalised',
                             $filename
+                        ) . '=' . Helpers::randomPassword(32);
+
+                        rename(
+                            $filename,
+                            $finalFilename
                         );
 
-                        rename($filename, $newFilename . '=' . Helpers::randomPassword(32));
-
-                        $updatedTime = filectime($filename);
+                        $updatedTime = filectime($finalFilename);
                         $updatedDelta = time() - $updatedTime;
-                        $bytes = filesize($filename);
+                        $bytes = filesize($finalFilename);
                         $humanSize = BytesToHuman::toHuman($bytes);
 
                         SkipprLogger::debug("Buffer file $filename finalised at $humanSize and age of $updatedDelta seconds");
@@ -384,14 +397,14 @@ class FileBufferDriver implements BufferDriverInterface
                         FileBufferDriver::unlock($filename);
                     }
                 } catch (\Exception $e) {
-                    // Still possible the file has been deleted just before with stat the size
+                    // Still possible the file has been deleted just before we stat the size
                     SkipprLogger::debug($e->getMessage());
                 }
             }
         }
     }
 
-    public function bufferGetNoFiles() : int
+    public function bufferGetNoFiles(): int
     {
 
         $file_list = glob($this->bufferDir . '/buffer=' . "$this->bufferName*");
@@ -415,7 +428,7 @@ class FileBufferDriver implements BufferDriverInterface
         return $i;
     }
 
-    public function bufferGetBytes() : int
+    public function bufferGetBytes(): int
     {
 
         $bytes = 0;
@@ -446,7 +459,7 @@ class FileBufferDriver implements BufferDriverInterface
         return $bytes;
     }
 
-    public function bufferGetNoLines() : int
+    public function bufferGetNoLines(): int
     {
 
         $file_list = glob($this->bufferDir . '/buffer=' . "$this->bufferName*");
