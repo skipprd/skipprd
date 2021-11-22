@@ -736,7 +736,7 @@ class PipelineCommand
         }
 
         foreach ($unwrappedMessages as $unwrappedMessage) {  // outer array
-            if (Config::$analysing && $this->inputPlugin->ingestNamespace($partition) === true) {
+            if (Config::$analysing && $this->inputPlugin->ingestNamespace($namespace) === true) {
                 if (is_array($unwrappedMessage)) {
                     $this->getIdFields($unwrappedMessage);
                     $this->parseNamespaceField($unwrappedMessage, $namespace);

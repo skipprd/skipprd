@@ -62,7 +62,7 @@ class Config
 
     public static $flushBufferRecords = 100;
 
-    public static $pollIntervalSeconds = 60;
+    public static $pollIntervalSeconds = null;
 
     /**
      * @var \AvroSchema $avroSchemas
