@@ -58,9 +58,9 @@ class DataSourceFilePlugin extends DataSourcePluginBase
                     $line = 0;
 
                     if (preg_match(
-                            "/\.gz(ip)?$|.zip/",
-                            $filename
-                        ) == true) {
+                        "/\.gz(ip)?$|.zip/",
+                        $filename
+                    ) == true) {
                         SkipprLogger::info('Uncompressing file ' . $filename);
 
                         // open gz file for reading

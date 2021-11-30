@@ -36,7 +36,8 @@ class Offsets
         return $this->offsets[$namespace][$partition];
     }
 
-    public function validateOffset(string $args, string $namespace, string $partition = '0') : bool {
+    public function validateOffset(string $args, string $namespace, string $partition = '0') : bool
+    {
 
         //        $offsets = $this->getOffsets();
         //        return bccomp($args, $offsets, 5) == 1;
