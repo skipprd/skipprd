@@ -64,7 +64,7 @@ class FileBufferDriver implements BufferDriverInterface
 
                     FileBufferDriver::unlock($filename);
 
-                    $this->finalise(true);
+                    $this->finalise();
                 } else {
                     $fp = fopen($filename, 'a+');
 
@@ -97,7 +97,7 @@ class FileBufferDriver implements BufferDriverInterface
 
         SkipprLogger::debug("Flushed buffer chunk $chunkName");
 
-        $this->finalise(true);
+        $this->finalise();
     }
 
 //    public function append(array $message, bool $flush = false) : void {

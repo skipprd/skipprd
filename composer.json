@@ -49,9 +49,9 @@
     "skipprd/machine-to-human": "^1.0.0",
     "skipprd/data-source-file": "dev-develop",
     "skipprd/data-output-file": "dev-develop",
+    "monolog/monolog": "^1.12",
     "wikimedia/avro": "^1.9",
     "league/statsd": "^1.5",
-    "monolog/monolog": "^1.12",
     "aws/aws-sdk-php": "^3.173",
     "guzzlehttp/guzzle": "^6.3",
     "segmentio/analytics-php": "^1.7"

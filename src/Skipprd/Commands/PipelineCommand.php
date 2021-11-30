@@ -773,18 +773,26 @@ class PipelineCommand
                     $this->parseNamespaceField($unwrappedMessage, $namespace);
                     $unwrappedMessage['skpr_partition'] = $partition;
 
-                    $message = $this->ingestPayload($unwrappedMessage,
-                        Config::$discoveredFieldOccurrence[$namespace]['fields'],
-                        $namespace);
+                    try {
+                        $message = $this->ingestPayload($unwrappedMessage,
+                            Config::$discoveredFieldOccurrence[$namespace]['fields'],
+                            $namespace);
 
+                    } catch (\Exception $e) {
+
+                        SkipprLogger::error($e->getMessage());
+                        $this->deadLetters++;
+                        $message = false;
+                    }
+                    
                     if ($message) {
                         $this->serialiseOutput($message);
                     } else {
                         $this->deadLetterMessage($unwrappedMessage);
                     }
                 } else {
-                    SkipprLogger::info("found non-array message");
-                    SkipprLogger::info($unwrappedMessage);
+                    SkipprLogger::error("found non-array message");
+                    SkipprLogger::debug($unwrappedMessage);
                 }
             }
         }
@@ -981,7 +989,7 @@ class PipelineCommand
             $this->inputPlugin->buffer->driver->unlockAll();
 //            $this->inputPlugin->buffer->flush("input");
             $this->inputPlugin->buffer->flushAll(true);
-            $this->inputPlugin->buffer->driver->finalise(true);
+            $this->inputPlugin->buffer->driver->finalise();
 
             if ($this->threadPool !== null) {
                 foreach ($this->threadPool as $thread) {
@@ -998,12 +1006,12 @@ class PipelineCommand
             $this->outputPlugin->buffer->driver->unlockAll();
 //            $this->outputPlugin->buffer->flush("out");
             $this->outputPlugin->buffer->flushAll(true);
-            $this->outputPlugin->buffer->driver->finalise(true);
+            $this->outputPlugin->buffer->driver->finalise();
 
             if (!empty($this->deadletterPlugin)) {
                 $this->deadletterPlugin->buffer->driver->unlockAll();
                 $this->deadletterPlugin->buffer->flushAll(true);
-                $this->deadletterPlugin->buffer->driver->finalise(true);
+                $this->deadletterPlugin->buffer->driver->finalise();
             }
 
             if (Config::$mode == 'sync') {
@@ -1015,10 +1023,10 @@ class PipelineCommand
                         if (!empty($pluginName)) {
                             SkipprLogger::info("Syncing remaining output buffers to destination $pluginName.");
 
-                            $this->outputPlugin->sync(Config::$outputFormat);
+                            $this->outputPlugin->sync();
 
                             if (!empty($this->deadletterPlugin)) {
-                                $this->deadletterPlugin->sync(Config::$outputFormat);
+                                $this->deadletterPlugin->sync();
                             }
                         }
                     }
