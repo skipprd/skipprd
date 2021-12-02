@@ -52,7 +52,7 @@ class SkipprInternalOffsetDriver implements OffsetDriverInterface
     protected function client(string $method = 'GET', array $data = [])
     {
 
-        $uri = Config::getenv('SCHEMA_REGISTRY');
+        $uri = Config::getenv('SKIPPR_API_ENDPOINT');
 
         $path = "ingest-job/offsets/$this->pipelineName";
 
@@ -63,7 +63,7 @@ class SkipprInternalOffsetDriver implements OffsetDriverInterface
             $client = new \GuzzleHttp\Client([
                 'base_uri' => $url,
                 'headers' => [
-                    'Authorization' => "Bearer " . Config::getenv('SCHEMA_API_TOKEN')
+                    'Authorization' => "Bearer " . Config::getenv('SKIPPR_API_TOKEN')
                 ]
             ]);
 

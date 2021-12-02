@@ -41,7 +41,7 @@ class JsonToParquetTest extends DockerRun
 ////            'PIPELINE_NAME=uattest',
 //            'ANONYMOUS_METRICS=false',
 ////            'SCHEMA_REGISTRY=host.docker.internal:8081',
-////            'SCHEMA_API_TOKEN=uyWYU7nxPzBAHZutIpjf376K368rL9r2',
+////            'SKIPPR_API_TOKEN=uyWYU7nxPzBAHZutIpjf376K368rL9r2',
 //            'LICENSE_KEY=94708298-498f-4c74-802c-ff359dd56cdf',
 //        ];
 //
@@ -84,7 +84,7 @@ class JsonToParquetTest extends DockerRun
 //            'PIPELINE_NAME=uattest',
             'ANONYMOUS_METRICS=false',
 //            'SCHEMA_REGISTRY=host.docker.internal:8081',
-//            'SCHEMA_API_TOKEN=uyWYU7nxPzBAHZutIpjf376K368rL9r2',
+//            'SKIPPR_API_TOKEN=uyWYU7nxPzBAHZutIpjf376K368rL9r2',
             'LICENSE_KEY=94708298-498f-4c74-802c-ff359dd56cdf',
         ];
 

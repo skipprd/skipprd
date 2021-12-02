@@ -164,7 +164,7 @@ class Config
         self::$dataDir = (empty($dataDir)) ? self::$dataDir : $dataDir;
         @mkdir(self::$dataDir);
 
-        $uri = self::getenv('SCHEMA_REGISTRY');
+        $uri = self::getenv('SKIPPR_API_ENDPOINT');
 
         if (!empty($uri)) {
             // Get Mapping
@@ -177,7 +177,7 @@ class Config
                 $client = new \GuzzleHttp\Client([
                     'base_uri' => $url,
                     'headers' => [
-                        'Authorization' => "Bearer " . self::getenv('SCHEMA_API_TOKEN')
+                        'Authorization' => "Bearer " . self::getenv('SKIPPR_API_TOKEN')
                     ]
                 ]);
 
@@ -201,7 +201,7 @@ class Config
                 $client = new \GuzzleHttp\Client([
                     'base_uri' => $url,
                     'headers' => [
-                        'Authorization' => "Bearer " . Config::getenv('SCHEMA_API_TOKEN')
+                        'Authorization' => "Bearer " . Config::getenv('SKIPPR_API_TOKEN')
                     ]
                 ]);
 
@@ -259,7 +259,7 @@ class Config
         self::$analysing = (empty(self::$discoveredFieldOccurrence)) ? true : false;
         self::$analysing = (bool) self::getenv('ANALYSING', self::$analysing);
 
-        self::$systemUserApiToken = self::getenv('SCHEMA_API_TOKEN');
+        self::$systemUserApiToken = self::getenv('SKIPPR_API_TOKEN');
 
         if (!empty(self::$discoveredFieldOccurrence)) {
             foreach (self::$discoveredFieldOccurrence as $namespace => $mapping) {
@@ -398,7 +398,7 @@ class Config
 //        ];
 
 
-        $uri = self::getenv('SCHEMA_REGISTRY');
+        $uri = self::getenv('SKIPPR_API_ENDPOINT');
 
         if (!empty($uri)) {
             try {
@@ -408,7 +408,7 @@ class Config
                 $client = new \GuzzleHttp\Client([
                     'base_uri' => $url,
                     'headers' => [
-                        'Authorization' => "Bearer " . self::getenv('SCHEMA_API_TOKEN')
+                        'Authorization' => "Bearer " . self::getenv('SKIPPR_API_TOKEN')
                     ]
                 ]);
 

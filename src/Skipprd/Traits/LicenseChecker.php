@@ -27,10 +27,10 @@ trait LicenseChecker
 
             SkipprLogger::info('Looking up license');
 
-            $uri = Config::getenv('SCHEMA_REGISTRY');
+            $uri = Config::getenv('SKIPPR_API_ENDPOINT');
 
             if (!empty($uri)) {
-                $authHeader = ['Authorization' => "Bearer " . Config::getenv('SCHEMA_API_TOKEN')];
+                $authHeader = ['Authorization' => "Bearer " . Config::getenv('SKIPPR_API_TOKEN')];
 
                 $url = "http://$uri/";
             } elseif (empty($uri)) {
