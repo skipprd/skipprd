@@ -191,28 +191,28 @@ class Config
             }
 
             // Get Schema
-            try {
-                SkipprLogger::info('Looking up schema for pipeline ' . $defaultPipelineName);
-
-                $schemaName = self::$tenantId . '_' . $defaultPipelineName . '-value';
-                $url = "http://$uri/";
-                $path = 'subjects/' . $schemaName . '/versions/latest';
-
-                $client = new \GuzzleHttp\Client([
-                    'base_uri' => $url,
-                    'headers' => [
-                        'Authorization' => "Bearer " . Config::getenv('SKIPPR_API_TOKEN')
-                    ]
-                ]);
-
-                $resp = json_decode($client->get($path)
-                    ->getBody()
-                    ->getContents(), true);
-
-                $avroArr = json_decode($resp['schema'], true);
-            } catch (\Exception $e) {
-                SkipprLogger::error($e->getMessage());
-            }
+//            try {
+//                SkipprLogger::info('Looking up schema for pipeline ' . $defaultPipelineName);
+//
+//                $schemaName = self::$tenantId . '_' . $defaultPipelineName . '-value';
+//                $url = "http://$uri/";
+//                $path = 'subjects/' . $schemaName . '/versions/latest';
+//
+//                $client = new \GuzzleHttp\Client([
+//                    'base_uri' => $url,
+//                    'headers' => [
+//                        'Authorization' => "Bearer " . Config::getenv('SKIPPR_API_TOKEN')
+//                    ]
+//                ]);
+//
+//                $resp = json_decode($client->get($path)
+//                    ->getBody()
+//                    ->getContents(), true);
+//
+//                $avroArr = json_decode($resp['schema'], true);
+//            } catch (\Exception $e) {
+//                SkipprLogger::error($e->getMessage());
+//            }
         } else {
             if (file_exists(self::$dataDir . '/skippr-state.json')) {
                 try {
