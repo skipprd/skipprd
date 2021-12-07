@@ -16,7 +16,7 @@ trait LicenseChecker
     protected $licenseApiKey = [
         'dev' => 'nFCBbKgf72pXNcKS9wKFA7n419Y9ql0J',
         'prod' => 'QYwmw6noVkPgCc5U3nWzW0e2PV2mP6HS',
-        ];
+    ];
 
     public function getLicense()
     {
