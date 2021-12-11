@@ -30,6 +30,10 @@ class Config
 
     public static $state = [];
 
+    public static $taskId;
+
+    public static $exitCode;
+
     public static $mode = 'sync';
 
     public static $offsets = [];
@@ -146,6 +150,8 @@ class Config
 
         self::$pollIntervalSeconds = Config::getenv('POLL_INTERVAL_SECONDS', self::$pollIntervalSeconds);
 
+        self::$taskId = Config::getenv('TASK_ID');
+            
         $avroArr = [];
 //        self::$mapping = [];
         self::$discoveredFieldOccurrence = [];
@@ -412,10 +418,16 @@ class Config
                     ]
                 ]);
 
-                $json = json_encode([
+                $data = [
                     'id' => self::getenv('PIPELINE_ID'),
                     'mapping' => Config::$discoveredFieldOccurrence,
-                ]);
+                    'exit_status' => Config::$exitCode,
+                ];
+                if (!empty(self::$taskId)) {
+                    $data['task_id'] = Config::$taskId;
+                }
+
+                $json = json_encode($data);
 
                 $response = $client->post($path, [
                     'json' => $json

@@ -1014,7 +1014,7 @@ class PipelineCommand
         $this->shutdown($signo);
     }
 
-    public function shutdown($signo = 0)
+    public function shutdown(int $signo = 0)
     {
 
         SkipprLogger::info("Gracefully shutting down and flushing buffers");
@@ -1103,6 +1103,8 @@ class PipelineCommand
 
 //        $this->updateDeadLetterQueueSize();
 
+        Config::$exitCode = $signo;
+
         if (!empty(Config::$discoveredFieldOccurrence)) {
             $this->finaliseFieldMapping();
 
@@ -1112,6 +1114,8 @@ class PipelineCommand
                 SkipprLogger::info("No fields found when analysing schema, did you send some data?");
             }
         }
+
+        Config::setConfig();
 
 //        SkipprLogger::debug("Mem used: " . BytesToHuman::toHuman(memory_get_usage(true), true, 'MB'));
 //        SkipprLogger::debug("Mem limit: " . BytesToHuman::toHuman($this->flushBytes, true, 'MB'));
@@ -1160,8 +1164,6 @@ class PipelineCommand
     {
 
         $this->finaliseFieldCandidates();
-
-        $configYml = Config::setConfig();
 
         SkipprLogger::info("Updated analysed field schema");
     }
