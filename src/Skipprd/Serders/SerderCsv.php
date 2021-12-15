@@ -7,6 +7,7 @@ use Skipprd\Serders\Interfaces\SerderBatchInterface;
 use Skipprd\Traits\AnalyseSchema;
 use Skipprd\Traits\Config;
 use Skipprd\Traits\Ingest;
+use Skipprd\Traits\SkipprLogger;
 
 class SerderCsv implements SerderBatchInterface
 {
@@ -137,5 +138,46 @@ class SerderCsv implements SerderBatchInterface
         }
 
         fclose($fh);
+    }
+
+    public function defaultMessage(array $schema = []): array
+    {
+
+        try {
+            // Init with internal special fields
+            if (empty($schema)) {
+                $message = Config::$specialFields;
+            }
+
+            foreach ($schema as $i => $field) {
+                if (!empty($field['type'][1]['fields'])) {
+                    $message[$field['name']] = $this->defaultMessage($field['type'][1]['fields']);
+                } else {
+                    if (!empty($field['type'][1]['type'])) {
+                        if ($field['type'][1] == 'record') {
+                            $message[$field['name']] = ['' => null];
+                        } elseif ($field['type'][1]['type'] == 'array') {
+                            $message[$field['name']] = [];
+                        } elseif ($field['type'][1]['type'] == 'map') {
+                            if ($field['type'][1]['values'] == 'string') {
+                                $message[$field['name']] = ['' => ''];
+//                                $message[$field['name']] = ['' => null];
+                            }
+                            if ($field['type'][1]['values'] == 'int') {
+//                                $message[$field['name']] = ['' => 0];
+                                $message[$field['name']] = ['' => null];
+                            }
+                        }
+                    } else {
+                        $message[$field['name']] = null;
+                    }
+                }
+            }
+        } catch (\Exception $e) {
+            SkipprLogger::error('Unable to build default message.');
+            throw $e;
+        }
+
+        return $message;
     }
 }

@@ -36,6 +36,15 @@ class Config
 
     public static $mode = 'sync';
 
+    /**
+     * @var bool - TRUE for apply casts to values, set default NULL values, etc
+     *              critical for supporting conversion to formats such as Parquet
+     *              and to ensure destination tables, datalakes, etc have complete rows
+     *             FALSE to duplicate immutable clones of source data to destinations
+     *              useful for simple replication jobs syncing json, etc.
+     */
+    public static $mutableMode = true;
+
     public static $offsets = [];
 
     public static $sourceFormat = null;
@@ -149,6 +158,12 @@ class Config
         self::$flushBufferRecords = Config::getenv('OUTPUT_FLUSH_RECORDS', self::$flushBufferRecords);
 
         self::$pollIntervalSeconds = Config::getenv('POLL_INTERVAL_SECONDS', self::$pollIntervalSeconds);
+
+        self::$mutableMode = filter_var(Config::getenv('MUTABLE_MODE', self::$mutableMode), FILTER_VALIDATE_BOOLEAN);
+
+        if (!self::$mutableMode) {
+            SkipprLogger::info('Immutable mode enabled, will sync an exact copy of records.');
+        }
 
         self::$taskId = Config::getenv('TASK_ID');
             

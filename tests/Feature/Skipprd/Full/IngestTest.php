@@ -408,7 +408,7 @@ class IngestTest extends TestCase
 //        $container->shouldReceive('AnalyseSchema');
 //        $container->shouldReceive('serder');
 
-        $serde = SerdersFactory::factory(Config::$sourceFormat);
+//        $serde = SerdersFactory::factory(Config::$sourceFormat);
 
         $basePath = realpath(__DIR__ . '/../../../../');
 
@@ -472,7 +472,9 @@ class IngestTest extends TestCase
 
         Config::$analysing = false;
 
-        $container->defaultMsgs['foo_namespace'] = $this->defaultMessage(Config::$schema['foo_namespace']);
+        $serde = SerdersFactory::factory(Config::$outputFormat);
+
+        $container->defaultMsgs['foo_namespace'] = $serde->defaultMessage(Config::$schema['foo_namespace']);
 
         Config::$outputSchemas = [];
 
@@ -597,7 +599,7 @@ class IngestTest extends TestCase
 
             $this->assertIsArray($data);
 
-            $defaultMsg = $this->defaultMessage(Config::$schema['foo_namespace']);
+            $defaultMsg = $serde->defaultMessage(Config::$schema['foo_namespace']);
 
             $missingFields = array_diff_key($data[0], $defaultMsg);
 
@@ -624,7 +626,7 @@ class IngestTest extends TestCase
 
             $this->assertIsArray($data);
 
-            $defaultMsg = $this->defaultMessage(Config::$schema['foo_namespace']);
+            $defaultMsg = $serde->defaultMessage(Config::$schema['foo_namespace']);
 
             $missingFields = array_diff_key($data[0], $defaultMsg);
 
@@ -651,7 +653,7 @@ class IngestTest extends TestCase
 
             $this->assertIsArray($data);
 
-            $defaultMsg = $this->defaultMessage(Config::$schema['foo_namespace']);
+            $defaultMsg = $serde->defaultMessage(Config::$schema['foo_namespace']);
 
             $missingFields = array_diff_key($data[0], $defaultMsg);
 
@@ -678,7 +680,7 @@ class IngestTest extends TestCase
 
             $this->assertIsArray($data);
 
-            $defaultMsg = $this->defaultMessage(Config::$schema['foo_namespace']);
+            $defaultMsg = $serde->defaultMessage(Config::$schema['foo_namespace']);
 
             $missingFields = array_diff_key($data[0], $defaultMsg);
 
@@ -698,7 +700,7 @@ class IngestTest extends TestCase
 
         array_map(function ($file) use (&$foundFiles) {
 
-//            $serde = new SerderAvroRecord();
+            $serde = new SerderAvroRecord();
 
             $line = file_get_contents($file);
 
@@ -711,7 +713,8 @@ class IngestTest extends TestCase
 
                 $this->assertIsArray($data);
 
-                $defaultMsg = $this->defaultMessage(Config::$schema['foo_namespace']);
+
+                $defaultMsg = $serde->defaultMessage(Config::$schema['foo_namespace']);
 
                 $missingFields = array_diff_key($data[0], $defaultMsg);
 

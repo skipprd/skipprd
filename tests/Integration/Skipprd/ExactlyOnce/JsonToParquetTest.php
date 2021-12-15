@@ -1,6 +1,6 @@
 <?php
 
-namespace Tests\Integration\ExactlyOnce;
+namespace Tests\Integration\Skipprd\ExactlyOnce;
 
 use Docker\API\Endpoint\VolumeCreate;
 use Docker\API\Model\HostConfig;

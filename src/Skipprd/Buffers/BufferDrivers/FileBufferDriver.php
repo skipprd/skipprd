@@ -39,6 +39,7 @@ class FileBufferDriver implements BufferDriverInterface
         @mkdir($this->bufferDir, 0777, true);
 
         $this->setSerde(Config::$outputFormat);
+        
     }
 
     public function setSerde(string $serde)

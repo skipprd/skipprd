@@ -42,7 +42,24 @@ class AnalyseSchemaFloatTest extends TestCase
         $value = $container->setValue($dataType,  $field, $value);
 
         $this->assertEquals('double', $dataType);
-        $this->assertEquals(1.234, $value);
+        $this->assertSame(1.234, $value);
+
+    }
+
+    public function testSetValueZeroFloat()
+    {
+
+        $container = Mockery::mock(PipelineCommand::class)->makePartial();
+        $container->shouldReceive('AnalyseSchema');
+
+        $value = 0.0;
+        $field = 'foo';
+        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
+
+        $value = $container->setValue($dataType,  $field, $value);
+
+        $this->assertEquals('double', $dataType);
+        $this->assertSame(0.0, $value);
 
     }
 
@@ -59,7 +76,7 @@ class AnalyseSchemaFloatTest extends TestCase
         $value = $container->setValue($dataType,  $field, $value);
 
         $this->assertEquals('double', $dataType);
-        $this->assertEquals(-1.234, $value);
+        $this->assertSame(-1.234, $value);
 
     }
 
@@ -76,7 +93,7 @@ class AnalyseSchemaFloatTest extends TestCase
         $value = $container->setValue($dataType,  $field, $value);
 
         $this->assertEquals('double', $dataType);
-        $this->assertEquals(1.234, $value);
+        $this->assertSame(1.234, $value);
 
     }
 
@@ -93,7 +110,7 @@ class AnalyseSchemaFloatTest extends TestCase
         $value = $container->setValue($dataType,  $field, $value);
 
         $this->assertEquals('double', $dataType);
-        $this->assertEquals(1.234386065604908, $value);
+        $this->assertSame(1.234386065604908, $value);
 
     }
 
@@ -110,7 +127,7 @@ class AnalyseSchemaFloatTest extends TestCase
         $value = $container->setValue($dataType,  $field, $value);
 
         $this->assertEquals('double', $dataType);
-        $this->assertEquals(1.234386065604908, $value);
+        $this->assertSame(1.234386065604908, $value);
 
     }
 
@@ -127,7 +144,7 @@ class AnalyseSchemaFloatTest extends TestCase
         $value = $container->setValue($dataType,  $field, $value);
 
         $this->assertEquals('double', $dataType);
-        $this->assertEquals(3.1415926535897932384626433832795, $value);
+        $this->assertSame(3.1415926535897932384626433832795, $value);
 
     }
 
@@ -144,7 +161,7 @@ class AnalyseSchemaFloatTest extends TestCase
         $value = $container->setValue($dataType,  $field, $value);
 
         $this->assertEquals('double', $dataType);
-        $this->assertEquals(3.1415926535897932384626433832795, $value);
+        $this->assertSame(3.1415926535897932384626433832795, $value);
 
     }
 

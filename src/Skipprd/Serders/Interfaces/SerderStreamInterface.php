@@ -10,4 +10,7 @@ interface SerderStreamInterface
     public function deserialize(string $record) : array;
 
     public function serialize(array $record, $schema = null) : string;
+
+    public function defaultMessage(array $schema): array ;
+
 }

@@ -505,13 +505,13 @@ class DockerRun extends TestCase
 
                 } elseif ($i === 1) {
 
-                    // assert nested feild data is json encoded
+                    // assert nested field data is json encoded
 
-                    $tripField = json_decode($data[5], true);
+                    $tripField = json_decode($data[3], true);
 
                     $this->assertIsArray($tripField);
 
-                    $missingFields = array_diff_key($tripField, ['start_temprature' => '', 'end_temprature' => '']);
+                    $missingFields = array_diff_key($tripField, ['start_temprature' => null, 'end_temprature' => null]);
 
                     $this->assertEmpty($missingFields);
 

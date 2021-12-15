@@ -6,6 +6,8 @@ use PHPUnit\Framework\TestCase;
 use Skipprd\Commands\PipelineCommand;
 use Mockery;
 use Skipprd\Converters\SkipprAvroSchemaConverter;
+use Skipprd\Serders\SerderJson;
+use Skipprd\Serders\SerdersFactory;
 use Skipprd\Traits\Config;
 use Skipprd\Traits\Ingest;
 
@@ -45,18 +47,21 @@ class DefaultMessageTest extends TestCase
 
         $field = [
             'foo' => [
-                'abc1' => [2, 3, 4, 6, 7, 4, 3, 6, 7, 9], // array
-                'abc2' => ['a', 'b', 'c'], // array
-                'abc3' => ["0" => 'a', "1" => 'b', "2" => 'c'], // array
-                'abc4' => ["1" => 'a', "0" => 'b', "2" => 'c'], // array - null
-                'abc5' => ["a" => 123, "b" => 456, "c" => 789], // map - null
-                'abc6' => ["a" => 'x', "b" => 'y', "c" =>'z'], // map - null
-                'abc7' => [
+                'array' => [2, 3, 4, 6, 7, 4, 3, 6, 7, 9], // array
+                'array_strings' => ['a', 'b', 'c'], // array
+                'array_ints' => ["1" => 'a', "0" => 'b', "2" => 'c'], // array - null
+                'map_ints' => ["a" => 123, "b" => 456, "c" => 789], // map - null
+                'map_strings' => ["a" => 'x', "b" => 'y', "c" =>'z'], // map - null
+                'record' => [
                     'a0' => 'abc',
                     'a1' => 123,
                     'a2' => 0,
                     'a3' => 123.456,
                 ], // record - record
+                'float_field' => 1.1,
+                'int_field' => 100,
+                'bool_field' => true,
+                'string_field' => 'a string',
             ],
         ];
 
@@ -69,20 +74,26 @@ class DefaultMessageTest extends TestCase
 
         // Test default message values (empty array, maps and records
         // Particularly relevant for serder to parquet
-        $container->defaultMsg = $this->defaultMessage(Config::$schema['foo_namespace']);
+
+        $serde = new SerderJson();
+        $container->defaultMsg = $serde->defaultMessage(Config::$schema['foo_namespace']);
 
         $this->assertArrayHasKey('foo', $container->defaultMsg);
 
-        $this->assertequals([], $container->defaultMsg['foo']['abc1']);
-        $this->assertequals([], $container->defaultMsg['foo']['abc2']);
-        $this->assertequals([], $container->defaultMsg['foo']['abc3']);
-        $this->assertequals([], $container->defaultMsg['foo']['abc4']);
+        $this->assertSame(null, $container->defaultMsg['foo']['float_field']);
+        $this->assertSame(null, $container->defaultMsg['foo']['int_field']);
+        $this->assertSame(null, $container->defaultMsg['foo']['bool_field']);
+        $this->assertSame(null, $container->defaultMsg['foo']['string_field']);
+
+        $this->assertSame([], $container->defaultMsg['foo']['array']);
+        $this->assertSame([], $container->defaultMsg['foo']['array_strings']);
+        $this->assertSame([], $container->defaultMsg['foo']['array_ints']);
 
         // map of ints
-        $this->assertequals(['' => 0], $container->defaultMsg['foo']['abc5']);
+        $this->assertSame(['' => null], $container->defaultMsg['foo']['map_ints']);
 
         // map of strings
-        $this->assertequals(['' => null], $container->defaultMsg['foo']['abc6']);
+        $this->assertSame(['' => ''], $container->defaultMsg['foo']['map_strings']);
 
         // record
         $recordDefault = [
@@ -91,7 +102,7 @@ class DefaultMessageTest extends TestCase
             'a2' => NULL,
             'a3' => NULL,
         ];
-        $this->assertequals($recordDefault, $container->defaultMsg['foo']['abc7']);
+        $this->assertSame($recordDefault, $container->defaultMsg['foo']['record']);
 
     }
 }

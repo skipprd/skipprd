@@ -43,8 +43,26 @@ class AnalyseSchemaNumberTest extends TestCase
         $value = $container->setValue($dataType,  $field, $value);
 
         $this->assertEquals('integer', $dataType);
-        $this->assertEquals(2147483647, $value);
-//                                        2147483647
+        $this->assertSame(2147483647, $value);
+    }
+
+    public function testSetValueIntZero()
+    {
+
+        $container = Mockery::mock(PipelineCommand::class)->makePartial();
+        $container->shouldReceive('AnalyseSchema');
+
+        $value = 2147483647;
+        $field = 'foo';
+
+        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
+
+        $value = 0;
+        
+        $value = $container->setValue($dataType,  $field, $value);
+
+        $this->assertEquals('integer', $dataType);
+        $this->assertSame(0, $value);
     }
 
     public function testSetValueIntString()
@@ -61,7 +79,7 @@ class AnalyseSchemaNumberTest extends TestCase
         $value = $container->setValue($dataType,  $field, $value);
 
         $this->assertEquals('long', $dataType);
-        $this->assertEquals('8598265768', $value);
+        $this->assertSame(8598265768, $value);
 
     }
     public function testSetValueIntTimestamp()
@@ -78,7 +96,7 @@ class AnalyseSchemaNumberTest extends TestCase
         $value = $container->setValue($dataType,  $field, $value);
         
         $this->assertEquals('integer', $dataType);
-        $this->assertEquals(123456, $value);
+        $this->assertSame(123456, $value);
 
     }
 
@@ -96,7 +114,7 @@ class AnalyseSchemaNumberTest extends TestCase
         $value = $container->setValue($dataType,  $field, $value);
 
         $this->assertEquals('integer', $dataType);
-        $this->assertEquals('123456', $value);
+        $this->assertSame(123456, $value);
 
     }
 
@@ -114,7 +132,7 @@ class AnalyseSchemaNumberTest extends TestCase
         $value = $container->setValue($dataType,  $field, $value);
 
         $this->assertEquals('long', $dataType);
-        $this->assertEquals(853386065604908, $value);
+        $this->assertSame(853386065604908, $value);
 
     }
 
@@ -132,7 +150,7 @@ class AnalyseSchemaNumberTest extends TestCase
         $value = $container->setValue($dataType,  $field, $value);
 
         $this->assertEquals('long', $dataType);
-        $this->assertEquals('853386065604908', $value);
+        $this->assertSame(853386065604908, $value);
 
     }
 
@@ -150,7 +168,7 @@ class AnalyseSchemaNumberTest extends TestCase
         $value = $container->setValue($dataType,  $field, $value);
         
         $this->assertEquals('long', $dataType);
-        $this->assertEquals(2147483647000, $value);
+        $this->assertSame(2147483647000, $value);
 
     }
 
@@ -168,7 +186,7 @@ class AnalyseSchemaNumberTest extends TestCase
         $value = $container->setValue($dataType,  $field, $value);
         
         $this->assertEquals('long', $dataType);
-        $this->assertEquals(2147483647000, $value);
+        $this->assertSame(2147483647000, $value);
 
     }
 

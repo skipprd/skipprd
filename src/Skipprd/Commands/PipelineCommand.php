@@ -370,8 +370,10 @@ class PipelineCommand
 
         $this->setPlugin();
 
+        $serde = SerdersFactory::factory(Config::$outputFormat);
+
         foreach (Config::$schema as $namespace => $schema) {
-            $this->defaultMsgs[$namespace] = $this->defaultMessage($schema);
+            $this->defaultMsgs[$namespace] = $serde->defaultMessage($schema);
         }
 
         $this->startTimestamp = Carbon::now()->timestamp;
@@ -816,11 +818,20 @@ class PipelineCommand
                     $unwrappedMessage['skpr_partition'] = $partition;
 
                     try {
-                        $message = $this->ingestPayload(
-                            $unwrappedMessage,
-                            Config::$discoveredFieldOccurrence[$namespace]['fields'],
-                            $namespace
-                        );
+
+                        if (Config::$mutableMode) {
+
+                            $message = $this->ingestPayload(
+                                $unwrappedMessage,
+                                Config::$discoveredFieldOccurrence[$namespace]['fields'],
+                                $namespace
+                            );
+
+                        } else {
+                            $this->totalEntries++;
+                            $message = $unwrappedMessage;
+                        }
+
                     } catch (\Exception $e) {
                         SkipprLogger::error($e->getMessage());
                         $this->deadLetters++;

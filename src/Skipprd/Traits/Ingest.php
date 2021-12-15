@@ -174,53 +174,6 @@ trait Ingest
         }
     }
 
-    /**
-     * Message must contain ALL fields described in the schema
-     * (to support some destinations like Parquet and Athena)
-     * Fields are null by default
-     *
-     * @param array $message
-     * @return array
-     */
-    public function defaultMessage(array $schema = [])
-    {
-
-        try {
-            // Init with internal special fields
-            if (empty($schema)) {
-                $message = Config::$specialFields;
-            }
-
-            foreach ($schema as $i => $field) {
-                if (!empty($field['type'][1]['fields'])) {
-                    $message[$field['name']] = $this->defaultMessage($field['type'][1]['fields']);
-                } else {
-                    if (!empty($field['type'][1]['type'])) {
-                        if ($field['type'][1] == 'record') {
-                            $message[$field['name']] = ['' => null];
-                        } elseif ($field['type'][1]['type'] == 'array') {
-                            $message[$field['name']] = [];
-                        } elseif ($field['type'][1]['type'] == 'map') {
-                            if ($field['type'][1]['values'] == 'string') {
-                                $message[$field['name']] = ['' => ''];
-                            }
-                            if ($field['type'][1]['values'] == 'int') {
-                                $message[$field['name']] = ['' => 0];
-                            }
-                        }
-                    } else {
-                        $message[$field['name']] = null;
-                    }
-                }
-            }
-        } catch (Exception $e) {
-            SkipprLogger::error('Unable to build default message.');
-            throw $e;
-        }
-
-        return $message;
-    }
-
     public function applyTransformationFactory(
         &$field,
         &$value,
