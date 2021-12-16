@@ -953,11 +953,14 @@ class PipelineCommand
             $offsets = $this->offsetClient->get();
 
             if (!empty($offsets)) {
-                foreach ($offsets as $partition => $offset) {
-                    $this->inputPlugin->offsets->setOffsets(
-                        $offset,
-                        $partition
-                    );
+                foreach ($offsets as $namespace => $offsetsParts) {
+                    foreach ($offsetsParts as $partition => $offset) {
+                        $this->inputPlugin->offsets->setOffsets(
+                            $offset,
+                            $namespace,
+                            $partition
+                        );
+                    }
                 }
             }
 
