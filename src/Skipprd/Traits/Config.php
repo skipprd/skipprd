@@ -55,7 +55,7 @@ class Config
 
     public static $minDiscoveryRecords = 10000;
 
-    public static $maxDiscoverySeconds = 60;
+    public static $maxDiscoverySeconds = 600;
 
     public static $idFields = [];
 
