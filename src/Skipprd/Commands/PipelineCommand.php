@@ -631,7 +631,8 @@ class PipelineCommand
         string $partition
     ): void {
         if (!Config::$analysing) { // should never be here on analyse schema, but just in case of code error
-            $offset = $this->inputPlugin->offsets->getCurrentOffsets($namespace, $partition);
+            $offset = $this->inputPlugin->offsets->getCurrentOffsets($namespace,
+                $partition);
 
             $this->offsetClient->sync($namespace, $partition, $offset);
         }
@@ -819,17 +820,23 @@ class PipelineCommand
 
                     try {
 
-                        if (Config::$mutableMode) {
+                        $message = false;
+                        
+                        if (!empty($unwrappedMessage)
+                            && RecordFilter::filter($unwrappedMessage)) {
 
-                            $message = $this->ingestPayload(
-                                $unwrappedMessage,
-                                Config::$discoveredFieldOccurrence[$namespace]['fields'],
-                                $namespace
-                            );
+                            if (Config::$mutableMode) {
 
-                        } else {
-                            $this->totalEntries++;
-                            $message = $unwrappedMessage;
+                                $message = $this->ingestPayload(
+                                    $unwrappedMessage,
+                                    Config::$discoveredFieldOccurrence[$namespace]['fields'],
+                                    $namespace
+                                );
+
+                            } else {
+                                $this->totalEntries++;
+                                $message = $unwrappedMessage;
+                            }
                         }
 
                     } catch (\Exception $e) {
@@ -837,7 +844,7 @@ class PipelineCommand
                         $this->deadLetters++;
                         $message = false;
                     }
-                    
+
                     if ($message) {
                         $this->serialiseOutput($message);
                     } else {
@@ -1273,9 +1280,9 @@ class PipelineCommand
                                 // - select the next most common, non-date type
                                 if (count($field['type']) == 1
                                     || (count($field['type']) > 1 && !in_array(
-                                        $dataType,
-                                        $demotedTypes
-                                    ))) {
+                                            $dataType,
+                                            $demotedTypes
+                                        ))) {
                                     $highestType = $dataType;
                                     $highestCount = $dataTypeCount;
                                 }

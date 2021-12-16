@@ -26,8 +26,7 @@ trait Ingest
 
         $this->i++;
 
-        if (!empty($sourceMessage)
-            && RecordFilter::filter($sourceMessage)) {
+        if (!empty($sourceMessage)) {
             $message = $this->defaultMsgs[$namespace];
 
             /*
