@@ -58,10 +58,9 @@ class SkipprInternalOffsetDriver implements OffsetDriverInterface
 
         // Get Mapping
         try {
-            $url = "http://$uri/";
 
             $client = new \GuzzleHttp\Client([
-                'base_uri' => $url,
+                'base_uri' => $uri,
                 'headers' => [
                     'Authorization' => "Bearer " . Config::getenv('SKIPPR_API_TOKEN')
                 ]
@@ -69,7 +68,7 @@ class SkipprInternalOffsetDriver implements OffsetDriverInterface
 
             switch ($method) {
                 case 'PUT':
-                    $uri = $url . $path;
+                    $uri = $uri . $path;
 
                     $response = $client->request(
                         'PUT',

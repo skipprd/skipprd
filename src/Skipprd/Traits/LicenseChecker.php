@@ -32,26 +32,24 @@ trait LicenseChecker
             if (!empty($uri)) {
                 $authHeader = ['Authorization' => "Bearer " . Config::getenv('SKIPPR_API_TOKEN')];
 
-                $url = "http://$uri/";
             } elseif (empty($uri)) {
                 $env = Config::getenv('APP_ENV', 'prod');
 
                 $authHeader =  ['x-api-key' => $this->licenseApiKey[$env]];
 
                 if ($env != 'prod') {
-                    $uri = "license.$env.skippr.io/license-api";
+                    $uri = "https://license.$env.skippr.io/license-api";
                 } else {
-                    $uri = "license.skippr.io/license-api";
+                    $uri = "https://license.skippr.io/license-api";
                 }
 
-                $url = "https://$uri/";
             }
 
 
             $path = 'check/' . $this->licenseKey;
 
             $client = new \GuzzleHttp\Client([
-                'base_uri' => $url,
+                'base_uri' => $uri,
                 'headers' => $authHeader
 
             ]);

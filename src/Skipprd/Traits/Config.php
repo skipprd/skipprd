@@ -192,11 +192,10 @@ class Config
             try {
                 SkipprLogger::info('Looking up config for pipeline ' . $defaultPipelineName);
 
-                $url = "http://$uri/";
                 $path = 'ingest-job/get-mapping/' . $defaultPipelineName;
 
                 $client = new \GuzzleHttp\Client([
-                    'base_uri' => $url,
+                    'base_uri' => $uri,
                     'headers' => [
                         'Authorization' => "Bearer " . self::getenv('SKIPPR_API_TOKEN')
                     ]
@@ -423,11 +422,10 @@ class Config
 
         if (!empty($uri)) {
             try {
-                $url = "http://$uri/";
                 $path = 'ingest-job/update-mapping';
 
                 $client = new \GuzzleHttp\Client([
-                    'base_uri' => $url,
+                    'base_uri' => $uri,
                     'headers' => [
                         'Authorization' => "Bearer " . self::getenv('SKIPPR_API_TOKEN')
                     ]
