@@ -187,7 +187,7 @@ class Config
 
         $uri = self::getenv('SKIPPR_API_ENDPOINT');
 
-        SkipprLogger::debug("Skippr API endpoint configured to $uri");
+        SkipprLogger::info("Skippr API endpoint configured to $uri");
 
         if (!empty($uri)) {
             // Get Mapping
