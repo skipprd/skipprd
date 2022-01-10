@@ -38,15 +38,15 @@ trait LicenseChecker
                 $authHeader =  ['x-api-key' => $this->licenseApiKey[$env]];
 
                 if ($env != 'prod') {
-                    $uri = "https://license.$env.skippr.io/license-api";
+                    $uri = "https://license.$env.skippr.io";
                 } else {
-                    $uri = "https://license.skippr.io/license-api";
+                    $uri = "https://license.skippr.io";
                 }
 
             }
 
 
-            $path = 'check/' . $this->licenseKey;
+            $path = 'license-api/check/' . $this->licenseKey;
 
             $client = new \GuzzleHttp\Client([
                 'base_uri' => $uri,
