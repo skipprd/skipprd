@@ -815,7 +815,7 @@ class PipelineCommand
             }
 
 
-            if (!Config::$analysing) {
+            if (!Config::$analysing && !empty(Config::$discoveredFieldOccurrence[$namespace])) {
                 if (is_array($unwrappedMessage)) {
                     $this->parseTimeField($unwrappedMessage);
                     $this->parseNamespaceField($unwrappedMessage, $namespace);
@@ -1134,7 +1134,9 @@ class PipelineCommand
             }
         }
 
-        Config::setConfig();
+        if (!empty($this->inputPlugin)) {
+            Config::setConfig();
+        }
 
 //        SkipprLogger::debug("Mem used: " . BytesToHuman::toHuman(memory_get_usage(true), true, 'MB'));
 //        SkipprLogger::debug("Mem limit: " . BytesToHuman::toHuman($this->flushBytes, true, 'MB'));
