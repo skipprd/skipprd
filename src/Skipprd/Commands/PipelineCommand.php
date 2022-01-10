@@ -631,8 +631,10 @@ class PipelineCommand
         string $partition
     ): void {
         if (!Config::$analysing) { // should never be here on analyse schema, but just in case of code error
-            $offset = $this->inputPlugin->offsets->getCurrentOffsets($namespace,
-                $partition);
+            $offset = $this->inputPlugin->offsets->getCurrentOffsets(
+                $namespace,
+                $partition
+            );
 
             $this->offsetClient->sync($namespace, $partition, $offset);
         }
@@ -779,7 +781,8 @@ class PipelineCommand
         }
 
         foreach ($unwrappedMessages as $unwrappedMessage) {  // outer array
-            if (Config::$analysing && $this->inputPlugin->ingestNamespace($namespace) === true) {
+            if ((Config::$analysing || empty(Config::$discoveredFieldOccurrence[$namespace]))
+                && $this->inputPlugin->ingestNamespace($namespace) === true) {
                 if (is_array($unwrappedMessage)) {
                     $this->getIdFields($unwrappedMessage);
                     $this->parseNamespaceField($unwrappedMessage, $namespace);
@@ -819,26 +822,21 @@ class PipelineCommand
                     $unwrappedMessage['skpr_partition'] = $partition;
 
                     try {
-
                         $message = false;
                         
                         if (!empty($unwrappedMessage)
                             && RecordFilter::filter($unwrappedMessage)) {
-
                             if (Config::$mutableMode) {
-
                                 $message = $this->ingestPayload(
                                     $unwrappedMessage,
                                     Config::$discoveredFieldOccurrence[$namespace]['fields'],
                                     $namespace
                                 );
-
                             } else {
                                 $this->totalEntries++;
                                 $message = $unwrappedMessage;
                             }
                         }
-
                     } catch (\Exception $e) {
                         SkipprLogger::error($e->getMessage());
                         $this->deadLetters++;
@@ -1280,9 +1278,9 @@ class PipelineCommand
                                 // - select the next most common, non-date type
                                 if (count($field['type']) == 1
                                     || (count($field['type']) > 1 && !in_array(
-                                            $dataType,
-                                            $demotedTypes
-                                        ))) {
+                                        $dataType,
+                                        $demotedTypes
+                                    ))) {
                                     $highestType = $dataType;
                                     $highestCount = $dataTypeCount;
                                 }
