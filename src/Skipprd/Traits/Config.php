@@ -187,12 +187,12 @@ class Config
 
         $uri = self::getenv('SKIPPR_API_ENDPOINT');
 
-        SkipprLogger::debug("Skippr API endpoint configured to $uri");
+        SkipprLogger::info("Skippr API endpoint configured to $uri");
 
         if (!empty($uri)) {
             // Get Mapping
             try {
-                SkipprLogger::info('Looking up config for pipeline ' . $defaultPipelineName);
+                SkipprLogger::info('Requesting config for pipeline ' . $defaultPipelineName . ' from Skippr API');
 
                 $path = 'ingest-job/get-mapping/' . $defaultPipelineName;
 
@@ -436,7 +436,7 @@ class Config
                 $data = [
                     'id' => self::getenv('PIPELINE_ID'),
                     'mapping' => Config::$discoveredFieldOccurrence,
-                    'exit_status' => Config::$exitCode,
+                    'exit_code' => Config::$exitCode,
                 ];
                 if (!empty(self::$taskId)) {
                     $data['task_id'] = Config::$taskId;

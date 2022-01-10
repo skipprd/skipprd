@@ -63,7 +63,7 @@ class SkipprFileOffsetDriver implements OffsetDriverInterface
 
 
 
-                        SkipprLogger::info('Written state to ' . Config::$dataDir . '/skippr-offsets.json');
+                        SkipprLogger::debug('Written offsets to ' . Config::$dataDir . '/skippr-offsets.json');
                     } catch (\Exception $e) {
                         SkipprLogger::error($e->getMessage());
                     }
@@ -83,7 +83,7 @@ class SkipprFileOffsetDriver implements OffsetDriverInterface
                             );
 
                             if (!empty($state[Config::$pipelineName])) {
-                                SkipprLogger::info('Loading state for pipeline ' . Config::$pipelineName);
+                                SkipprLogger::info('Loading offsets for pipeline ' . Config::$pipelineName);
 
                                 $offsets = (!empty($state[Config::$pipelineName]['offsets']) ? $state[Config::$pipelineName]['offsets'] : []);
                             }
