@@ -12,8 +12,6 @@ interface DataSourcePluginInterface
 
     public function connect(): void;
 
-//    public function commit(string $offset = '');
-    
     public function sync();
 
     public function doValidateConnection(): ValidationResponse;
@@ -21,4 +19,11 @@ interface DataSourcePluginInterface
     public function doValidateConfig(): ValidationResponse;
 
     public function shutdown();
+
+    public function doSave();
+
+    public function deletePlugin();
+
+    public function resetSourceOffsets(): void ;
+
 }

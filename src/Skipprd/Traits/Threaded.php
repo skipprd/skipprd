@@ -13,7 +13,7 @@ trait Threaded
     public function __construct()
     {
 
-        if (Config::$mode == 'async') {
+        if (Config::$syncMode == 'async') {
             $offsetsChannel = \parallel\Channel::make("input.offset", 100);
 //            $this->offsetChannel = $offsetsChannel;
 
@@ -67,7 +67,7 @@ trait Threaded
 
             $ncpu = 4;
 //
-            if (Config::$analysing || Config::$mode == 'sync') {
+            if (Config::$analysing || Config::$syncMode == 'sync') {
                 $ncpu = 1;
             } else {
                 if (is_file('/proc/cpuinfo')) {

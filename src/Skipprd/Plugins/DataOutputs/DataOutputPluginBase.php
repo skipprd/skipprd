@@ -47,4 +47,21 @@ class DataOutputPluginBase implements DataOutputPluginInterface
     public function shutdown()
     {
     }
+
+    public function doSave() {
+
+    }
+
+    public function createOrUpdateSchema() {
+
+    }
+
+    public function deleteSchema() {
+
+    }
+
+    public function deletePlugin() {
+        
+    }
+
 }

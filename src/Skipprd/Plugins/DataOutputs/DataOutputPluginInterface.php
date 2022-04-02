@@ -19,4 +19,13 @@ interface DataOutputPluginInterface
     public function doValidateConfig(): ValidationResponse;
 
     public function shutdown();
+
+    public function doSave();
+
+    public function createOrUpdateSchema();
+
+    public function deleteSchema();
+
+    public function deletePlugin();
+
 }

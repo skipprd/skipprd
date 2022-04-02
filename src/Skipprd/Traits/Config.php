@@ -16,6 +16,17 @@ use Skipprd\Helpers;
 class Config
 {
 
+    // input an output plugin run modes
+    public const RUN_MODE_SYNC = 'sync';
+    public const RUN_MODE_VALIDATE_CONNECTION = 'validate_connection';
+    public const RUN_MODE_VALIDATE_CONFIG = 'validate_config';
+    public const RUN_MODE_SAVE = 'save';
+    public const RUN_MODE_RESET_SOURCE_OFFSETS = 'reset_source_offsets';
+    public const RUN_MODE_DELETE_PLUGIN = 'delete_plugin';
+    // output plugins only
+    public const RUN_MODE_CREATE_UPDATE_DEST_SCHEMA = 'create_update_schema';
+    public const RUN_MODE_DELETE_DEST_SCHEMA = 'delete_schema';
+
     public static $segmentKey = 'RnewwWgZXQjl9xofcjGJkirCH0VswBPd';
 
     public static $anonymousMetrics = true;
@@ -34,7 +45,7 @@ class Config
 
     public static $exitCode;
 
-    public static $mode = 'sync';
+    public static $syncMode = 'sync';
 
     /**
      * @var bool - TRUE for apply casts to values, set default NULL values, etc
@@ -44,6 +55,8 @@ class Config
      *              useful for simple replication jobs syncing json, etc.
      */
     public static $mutableMode = true;
+
+    public static $runMode = self::RUN_MODE_SYNC;
 
     public static $offsets = [];
 
@@ -160,6 +173,8 @@ class Config
         self::$pollIntervalSeconds = Config::getenv('POLL_INTERVAL_SECONDS', self::$pollIntervalSeconds);
 
         self::$mutableMode = filter_var(Config::getenv('MUTABLE_MODE', self::$mutableMode), FILTER_VALIDATE_BOOLEAN);
+
+        self::$runMode = Config::getenv('RUN_MODE', self::$runMode);
 
         if (!self::$mutableMode) {
             SkipprLogger::info('Immutable mode enabled, will sync an exact copy of records.');

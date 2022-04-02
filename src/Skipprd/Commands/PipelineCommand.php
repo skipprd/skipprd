@@ -267,11 +267,37 @@ class PipelineCommand
 
             while (!$ran || !empty(Config::$pollIntervalSeconds)) {
                 $ran = true;
-                $this->inputPlugin->sync();
 
-                $this->inputPlugin->buffer->flushAll();
+                if (Config::$runMode == Config::RUN_MODE_SYNC) {
+                    $this->inputPlugin->sync();
 
-                sleep(Config::$pollIntervalSeconds ?? 1);
+                    $this->inputPlugin->buffer->flushAll();
+
+                    sleep(Config::$pollIntervalSeconds ?? 1);
+
+                }
+
+                if (Config::$runMode == Config::RUN_MODE_VALIDATE_CONFIG) {
+                    $this->inputPlugin->doValidateConfig();
+                }
+
+                if (Config::$runMode == Config::RUN_MODE_VALIDATE_CONNECTION) {
+                    $this->inputPlugin->doValidateConnection();
+                }
+
+                if (Config::$runMode == Config::RUN_MODE_SAVE) {
+                    // @todo - need this?
+                    $this->inputPlugin->doSave();
+                }
+
+                if (Config::$runMode == Config::RUN_MODE_DELETE_PLUGIN) {
+                    $this->inputPlugin->deletePlugin();
+                }
+
+                if (Config::$runMode == Config::RUN_MODE_RESET_SOURCE_OFFSETS) {
+                    $this->inputPlugin->resetSourceOffsets();
+                }
+
             }
         } else {
             if (!empty($this->deadletterPlugin)) {
@@ -280,11 +306,32 @@ class PipelineCommand
                 while (!$ran || !empty(Config::$pollIntervalSeconds)) {
                     $ran = true;
 
-                    $this->deadletterPlugin->sync();
+                    if (Config::$runMode == Config::RUN_MODE_SYNC) {
+                        $this->deadletterPlugin->sync();
 
-                    $this->deadletterPlugin->buffer->flushAll();
+                        $this->deadletterPlugin->buffer->flushAll();
 
-                    sleep(Config::$pollIntervalSeconds ?? 1);
+                        sleep(Config::$pollIntervalSeconds ?? 1);
+                    }
+
+                    if (Config::$runMode == Config::RUN_MODE_VALIDATE_CONFIG) {
+                        $this->deadletterPlugin->doValidateConfig();
+                    }
+
+                    if (Config::$runMode == Config::RUN_MODE_VALIDATE_CONNECTION) {
+                        $this->deadletterPlugin->doValidateConnection();
+                    }
+
+                    if (Config::$runMode == Config::RUN_MODE_SAVE) {
+                        // @todo - need this?
+                        $this->deadletterPlugin->doSave();
+                    }
+
+                    if (Config::$runMode == Config::RUN_MODE_DELETE_PLUGIN) {
+                        $this->deadletterPlugin->deletePlugin();
+                    }
+
+
                 }
             }
 
@@ -296,9 +343,37 @@ class PipelineCommand
                 while (!$ran || !empty(Config::$pollIntervalSeconds)) {
                     $ran = true;
 
-                    $this->outputPlugin->sync();
+                    if (Config::$runMode == Config::RUN_MODE_SYNC) {
+                        $this->outputPlugin->sync();
 
-                    sleep(Config::$pollIntervalSeconds ?? 1);
+                        sleep(Config::$pollIntervalSeconds ?? 1);
+                    }
+
+                    if (Config::$runMode == Config::RUN_MODE_VALIDATE_CONFIG) {
+                        $this->outputPlugin->doValidateConfig();
+                    }
+
+                    if (Config::$runMode == Config::RUN_MODE_VALIDATE_CONNECTION) {
+                        $this->outputPlugin->doValidateConnection();
+                    }
+
+                    if (Config::$runMode == Config::RUN_MODE_SAVE) {
+                        // @todo - need this?
+                        $this->outputPlugin->doSave();
+                    }
+
+                    if (Config::$runMode == Config::RUN_MODE_DELETE_PLUGIN) {
+                        $this->outputPlugin->deletePlugin();
+                    }
+
+                    if (Config::$runMode == Config::RUN_MODE_CREATE_UPDATE_DEST_SCHEMA) {
+                        $this->outputPlugin->createOrUpdateSchema();
+                    }
+
+                    if (Config::$runMode == Config::RUN_MODE_DELETE_DEST_SCHEMA) {
+                        $this->outputPlugin->deleteSchema();
+                    }
+
                 }
             }
         }
@@ -308,7 +383,7 @@ class PipelineCommand
             SkipprLogger::info('Finished analysing data');
         }
 
-        if (Config::$mode == 'async') {
+        if (Config::$syncMode == 'async') {
             // keep alive to control child threads
             while (true) {
                 sleep(10);
@@ -460,7 +535,7 @@ class PipelineCommand
 //            $serialised = $sp->string();
 
 
-            if (Config::$mode == 'sync') {
+            if (Config::$syncMode == 'sync') {
 //                $this->outputPlugin->buffer->append($serialised, false, $eventTime, $partition);
                 $result = $this->outputPlugin->buffer->append(
                     $record,
@@ -475,7 +550,7 @@ class PipelineCommand
 //                }
 
 //                    $this->inputPlugin->setOffsets($this->outputPlugin->offset);
-            } elseif (Config::$mode == 'async') {
+            } elseif (Config::$syncMode == 'async') {
                 $result = $this->outputPlugin->buffer->append(
                     $record,
                     false,
@@ -585,7 +660,7 @@ class PipelineCommand
                 $namespace,
                 $partition
             )) {
-                if (Config::$mode == 'sync') {
+                if (Config::$syncMode == 'sync') {
                     if (!Config::$enableDeadLetters) {
                         // @todo - deprecate SkipprPack for Apache Arrow
                         $sp = new SkipprPack($payload);
@@ -594,7 +669,7 @@ class PipelineCommand
                     }
 
                     $this->emitString($payload, $namespace, $partition);
-                } elseif (Config::$mode == 'async') {
+                } elseif (Config::$syncMode == 'async') {
 //                $offset = (string) $offset;
 //                $sp = new SkipprPack();
 //                $sp->encode($payload, $offset);
@@ -749,7 +824,7 @@ class PipelineCommand
 
 
         if ($payload != '') {
-            if (Config::$mode == 'sync') {
+            if (Config::$syncMode == 'sync') {
                 if (!Config::$enableDeadLetters) {
                     // @todo - deprecate SkipprPack for Apache Arrow
                     $sp = new SkipprPack($payload);
@@ -1038,7 +1113,7 @@ class PipelineCommand
 
         SkipprLogger::info("Gracefully shutting down and flushing buffers");
 
-        if (Config::$mode == 'async') {
+        if (Config::$syncMode == 'async') {
             if ($this->inputThread !== null) {
                 $this->inputThread->cancel();
             }
@@ -1048,7 +1123,7 @@ class PipelineCommand
             $this->inputPlugin->shutdown();
         }
 
-        if (Config::$mode == 'async') {
+        if (Config::$syncMode == 'async') {
             $this->inputPlugin->buffer->driver->unlockAll();
 //            $this->inputPlugin->buffer->flush("input");
             $this->inputPlugin->buffer->flushAll(true);
@@ -1063,9 +1138,9 @@ class PipelineCommand
             if ($this->outputThread != null) {
                 $this->outputThread->kill();
             }
-        }
+//        }
 
-        if (!Config::$analysing) {
+//        if (!Config::$analysing) {
             $this->outputPlugin->buffer->driver->unlockAll();
 //            $this->outputPlugin->buffer->flush("out");
             $this->outputPlugin->buffer->flushAll(true);
@@ -1077,7 +1152,7 @@ class PipelineCommand
                 $this->deadletterPlugin->buffer->driver->finalise();
             }
 
-            if (Config::$mode == 'sync') {
+            if (Config::$syncMode == 'sync') {
                 if (!empty($this->outputPlugin)) {
                     if (!Config::$analysing) {
                         $pluginName = Config::getenv('DATA_OUTPUT_PLUGIN_NAME');
