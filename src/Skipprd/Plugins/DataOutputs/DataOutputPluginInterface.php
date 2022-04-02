@@ -22,7 +22,7 @@ interface DataOutputPluginInterface
 
     public function doSave();
 
-    public function createOrUpdateSchema();
+    public function createOrUpdateSchema(string $partition, array $schema);
 
     public function deleteSchema();
 

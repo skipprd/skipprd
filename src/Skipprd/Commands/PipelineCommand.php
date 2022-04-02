@@ -367,7 +367,9 @@ class PipelineCommand
                     }
 
                     if (Config::$runMode == Config::RUN_MODE_CREATE_UPDATE_DEST_SCHEMA) {
-                        $this->outputPlugin->createOrUpdateSchema();
+                        foreach (Config::$avroSchemas as $namespace => $avroSchema) {
+                            $this->outputPlugin->createOrUpdateSchema($namespace, $avroSchema);
+                        }
                     }
 
                     if (Config::$runMode == Config::RUN_MODE_DELETE_DEST_SCHEMA) {

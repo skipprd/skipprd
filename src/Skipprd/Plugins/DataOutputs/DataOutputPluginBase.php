@@ -52,7 +52,7 @@ class DataOutputPluginBase implements DataOutputPluginInterface
 
     }
 
-    public function createOrUpdateSchema() {
+    public function createOrUpdateSchema(string $partition, array $schema) {
 
     }
 
