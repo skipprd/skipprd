@@ -451,7 +451,6 @@ class Config
                 $data = [
                     'id' => self::getenv('PIPELINE_ID'),
                     'mapping' => Config::$discoveredFieldOccurrence,
-                    'exit_code' => Config::$exitCode,
                 ];
                 if (!empty(self::$taskId)) {
                     $data['task_id'] = Config::$taskId;
@@ -486,5 +485,42 @@ class Config
         }
 
         return $configYml;
+    }
+
+    static public function setStatus(string $response = null)
+    {
+
+        $uri = self::getenv('SKIPPR_API_ENDPOINT');
+
+        try {
+            $path = 'tasks/set-status';
+
+            $client = new \GuzzleHttp\Client([
+                'base_uri' => $uri,
+                'headers' => [
+                    'Authorization' => "Bearer " . self::getenv('SKIPPR_API_TOKEN')
+                ]
+            ]);
+
+            $data = [
+                'response' => $response,
+                'exit_code' => Config::$exitCode,
+            ];
+            if (!empty(self::$taskId)) {
+                $data['task_id'] = Config::$taskId;
+            }
+
+            $json = json_encode($data);
+
+            $response = $client->post($path, [
+                'json' => $json
+            ]);
+
+            SkipprLogger::debug('Updated task status health check API');
+            
+        } catch (\Exception $e) {
+            SkipprLogger::error($e->getMessage());
+        }
+
     }
 }

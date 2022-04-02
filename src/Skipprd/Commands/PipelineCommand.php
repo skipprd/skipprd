@@ -1215,6 +1215,8 @@ class PipelineCommand
             Config::setConfig();
         }
 
+        Config::setStatus();
+
 //        SkipprLogger::debug("Mem used: " . BytesToHuman::toHuman(memory_get_usage(true), true, 'MB'));
 //        SkipprLogger::debug("Mem limit: " . BytesToHuman::toHuman($this->flushBytes, true, 'MB'));
 
