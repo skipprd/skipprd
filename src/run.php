@@ -1,19 +1,31 @@
 <?php
 
+use Skipprd\Traits\Config;
+
 require_once __DIR__ . '/../vendor/autoload.php';
 
-$pipeline = new \Skipprd\Commands\PipelineCommand();
+Config::getConfig();
 
-function skippr_emit(
-    string $payload,
-    string $offset,
-    string $namespace,
-    string $partition = '0'
-): void {
+if (Config::$runMode == Config::RUN_MODE_VALIDATE_SCHEMA) {
 
-    global $pipeline;
+    $command = new \Skipprd\Commands\ValidateSchemaFile();
 
-    $pipeline->emit($payload, $offset, $namespace, $partition);
+} else {
+
+    $command = new \Skipprd\Commands\PipelineCommand();
+
+    function skippr_emit(
+        string $payload,
+        string $offset,
+        string $namespace,
+        string $partition = '0'
+    ): void {
+
+        global $command;
+
+        $command->emit($payload, $offset, $namespace, $partition);
+    }
 }
 
-$pipeline->handle();
+
+$command->handle();

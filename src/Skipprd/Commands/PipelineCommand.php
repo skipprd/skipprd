@@ -8,33 +8,24 @@
 
 namespace Skipprd\Commands;
 
-use Skipprd\Buffers\ChunkedBuffer;
 use Skipprd\Plugins\DataSources\OffsetDrivers\OffsetDriverFactory;
-use Skipprd\Traits\LicenseChecker;
-use Monolog\Formatter\LineFormatter;
-use Monolog\Handler\StreamHandler;
-use Monolog\Handler\SyslogHandler;
-use Monolog\Logger;
-use Monolog\Registry;
 use Skipprd\Arr;
 use Skipprd\Buffers\BufferAdaptorsFactory;
 use Skipprd\Plugins\PluginFactory;
-use Aws\Exception\AwsException;
-use Aws\Sqs\SqsClient;
 use Carbon\Carbon;
 use Skipprd\Helpers;
-use Skipprd\Jobs\PodsStatus;
 use Skipprd\SkipprPack;
 use Skipprd\Str;
-use Skipprd\Traits\AnalyseSchema;
-use Skipprd\Traits\Ingest;
 use Skipprd\Serders\SerdersFactory;
-use Skipprd\Traits\Config;
 use League\StatsD\Client as Statsd;
 use Skipprd\Plugins\DataSources\DataSourcePluginInterface;
 use Skipprd\Plugins\DataOutputs\DataOutputPluginInterface;
-use Skipprd\Plugins\DataSources\OffsetDrivers\SkipprInternalOffsetDriver;
 use Segment;
+use Skipprd\Traits\AnalyseSchema;
+use Skipprd\Traits\Config;
+use Skipprd\Traits\Ingest;
+use Skipprd\Traits\LicenseChecker;
+use Skipprd\Traits\RecordFilter;
 use Skipprd\Traits\SkipprLogger;
 
 class PipelineCommand
@@ -48,6 +39,7 @@ class PipelineCommand
     use BufferAdaptorsFactory;
     use LicenseChecker;
     use SkipprLogger;
+    use RecordFilter;
 
     protected $statsd = null;
 
@@ -411,8 +403,6 @@ class PipelineCommand
     public function init()
     {
 
-        Config::getConfig();
-
         Segment::init(Config::$segmentKey);
 
         if (Config::getenv('STATSD_HOST') && Config::getenv('STATSD_PORT')) {
@@ -431,11 +421,6 @@ class PipelineCommand
 //        Registry::addLogger($application);
 
 //        $this->pipelineModel = IngestJob::where('id', $this->pipelineId)->get()->first();
-
-        // Update job status in Skippr Enterprise
-        if (class_exists(PodsStatus::class)) {
-            PodsStatus::dispatch();
-        }
 
 //        $config = $this->pipelineModel->buildJobConfig();
 

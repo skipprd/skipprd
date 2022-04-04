@@ -8,13 +8,13 @@
 
 namespace Skipprd\Traits;
 
-use Skipprd\Commands\RecordFilter;
-use Skipprd\Converters\AvroParquetSchemaConverter;
 use Skipprd\Converters\SkipprAvroSchemaConverter;
 use Skipprd\Helpers;
 
 class Config
 {
+
+    use RecordFilter;
 
     // input an output plugin run modes
     public const RUN_MODE_SYNC = 'sync';
@@ -26,6 +26,9 @@ class Config
     // output plugins only
     public const RUN_MODE_CREATE_UPDATE_DEST_SCHEMA = 'create_update_schema';
     public const RUN_MODE_DELETE_DEST_SCHEMA = 'delete_schema';
+
+    public const RUN_MODE_VALIDATE_SCHEMA = 'validate_schema';
+
 
     public static $segmentKey = 'RnewwWgZXQjl9xofcjGJkirCH0VswBPd';
 
@@ -77,9 +80,7 @@ class Config
     public static $discoveredFieldOccurrence = [];
 
     public static $schema = [];
-
-    public static $mapping = [];
-
+    
     public static $filters = [];
 
     public static $flushBufferBytes = 1000000;

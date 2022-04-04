@@ -9,9 +9,6 @@
 namespace Skipprd\Traits;
 
 use Carbon\Carbon;
-use \Exception;
-use Skipprd\Arr;
-use Skipprd\Commands\RecordFilter;
 use Skipprd\Helpers;
 
 trait Ingest

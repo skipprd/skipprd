@@ -1,14 +1,12 @@
 <?php
 
 
-namespace Skipprd\Commands;
+namespace Skipprd\Traits;
 
 use Skipprd\Arr;
 use Skipprd\Str;
-use Skipprd\Traits\Config;
-use Skipprd\Traits\SkipprLogger;
 
-class RecordFilter
+trait RecordFilter
 {
 
     private static $actions = [
