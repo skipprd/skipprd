@@ -129,8 +129,8 @@ class ValidateSchemaFile
 
                     $chunkSize = self::$msgMax / 5;
 
-                    if ($i % $chunkSize = 0) {
-                        Config::setStatus($this->setStatusString($i));
+                    if ($i % $chunkSize == 0) {
+                        Config::setStatus($this->setStatusString($i / 100));
                     }
 
 

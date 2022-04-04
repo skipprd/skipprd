@@ -507,7 +507,7 @@ class Config
                 'response' => $response,
                 'exit_code' => Config::$exitCode,
             ];
-            if (!empty(self::$taskId)) {
+            if (!empty(Config::$taskId)) {
                 $data['task_id'] = Config::$taskId;
             }
 
