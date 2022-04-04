@@ -181,7 +181,7 @@ class ValidateSchemaFile
     public function setStatusString(int $progressPercent, array $result = []): string
     {
 
-        $response = array_merge(['progress_percent' => $progressPercent], $result);
+        $response = array_merge(['progress' => $progressPercent], $result);
 
         return json_encode($response);
     }
