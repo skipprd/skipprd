@@ -156,6 +156,9 @@ class FileBufferDriver implements BufferDriverInterface
         return $this->dataFp->getBasename();
     }
 
+    /**
+     * @return bool|string
+     */
     public function stream()
     {
 
@@ -235,6 +238,9 @@ class FileBufferDriver implements BufferDriverInterface
 //        return '';
 //    }
 
+    /**
+     * @return bool|string
+     */
     public function nextFile()
     {
 

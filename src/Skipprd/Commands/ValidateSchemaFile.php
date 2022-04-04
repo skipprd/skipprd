@@ -109,7 +109,7 @@ class ValidateSchemaFile
 //            $identifier = $ingestJob->tenant_id . '-' . $ingestJob->getCleanName() . '-skipprd-deadletter';
 //            $fileBuffer->tempdir = '/data/' . $identifier;
 
-            while ($line = $fileBuffer->stream()) {
+            while ($line = $fileBuffer->driver->stream()) {
 
                 try {
 
@@ -138,7 +138,7 @@ class ValidateSchemaFile
 
                         SkipprLogger::info("Validated against $i records");
 
-                        $fileBuffer->unlockAll();
+                        $fileBuffer->driver->unlockAll();
                         
                         return $this->isValid();
 
@@ -151,7 +151,7 @@ class ValidateSchemaFile
 
                     $this->validationErrors[$namespace]['fatal_dead_letter'] = $e->getMessage();
 
-                    $fileBuffer->unlockAll();
+                    $fileBuffer->driver->unlockAll();
 
                     return $this->isValid();
                 }
@@ -167,7 +167,7 @@ class ValidateSchemaFile
 
             $this->validationErrors['fatal_run'] = $e->getMessage();
 
-            $fileBuffer->unlockAll();
+            $fileBuffer->driver->unlockAll();
 
             return $this->isValid();
         }
@@ -269,7 +269,7 @@ class ValidateSchemaFile
     public function isValid()
     {
 
-        $this->delete();
+//        $this->delete();
 
         $result = [];
 
