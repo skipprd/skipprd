@@ -210,7 +210,7 @@ class PipelineCommand
             $outputPluginClass = "Skipprd\\Plugins\\DataOutputs\\" . 'File' . "\\DataOutput" . 'File' . "Plugin";
 
             $config = [];
-            $config['path'] = '/dead-letters';
+            $config['path'] = '/';
 
             $this->outputPlugin = new $outputPluginClass(
                 $config,
@@ -1151,29 +1151,31 @@ class PipelineCommand
                 $this->deadletterPlugin->buffer->driver->finalise();
             }
 
-            if (Config::$syncMode == 'sync') {
+        }
+
+        if (Config::$syncMode == 'sync') {
+            if (!Config::$analysing) {
+
                 if (!empty($this->outputPlugin)) {
-                    if (!Config::$analysing) {
-                        $pluginName = Config::getenv('DATA_OUTPUT_PLUGIN_NAME');
 
-                        // Output job?
-                        if (!empty($pluginName)) {
-                            SkipprLogger::info("Syncing remaining output buffers to destination $pluginName.");
-
-                            $this->outputPlugin->sync();
-
-                            if (!empty($this->deadletterPlugin)) {
-                                $this->deadletterPlugin->sync();
-                            }
-                        }
-                    }
+                    $outputPluginName = Config::getenv('DATA_OUTPUT_PLUGIN_NAME');
+                    SkipprLogger::info("Flushing output buffers to $outputPluginName destination.");
+                    $this->outputPlugin->sync();
                     $this->outputPlugin->shutdown();
-
-                    if (!empty($this->deadletterPlugin)) {
-                        $this->deadletterPlugin->shutdown();
-                    }
                 }
+
+                if (!empty($this->deadletterPlugin)) {
+
+                    $deadLetterPluginName = Config::getenv('DATA_OUTPUT_PLUGIN_NAME');
+                    SkipprLogger::info("Flushing dead letter buffers to $deadLetterPluginName destination.");
+                    $this->deadletterPlugin->sync();
+                    $this->deadletterPlugin->shutdown();
+                }
+
+                SkipprLogger::info("Ingested " . $this->totalEntries . " messages");
+                SkipprLogger::info("Dead Letters " . $this->deadLetters . " dead letters");
             }
+        }
 
             // Sync all offsets having synced to destination
 //            if (!empty($this->inputPlugin)) {
@@ -1185,10 +1187,6 @@ class PipelineCommand
 //
 //            }
 
-
-            SkipprLogger::info("Ingested " . $this->totalEntries . " messages");
-            SkipprLogger::info("Dead Letters " . $this->deadLetters . " dead letters");
-        }
 
 //        $this->pipelineModel->save(); // commit offsets
         // @todo - implement state storage
