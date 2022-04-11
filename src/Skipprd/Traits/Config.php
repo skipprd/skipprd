@@ -493,35 +493,38 @@ class Config
 
         $uri = self::getenv('SKIPPR_API_ENDPOINT');
 
-        try {
-            $path = 'tasks/set-status';
+        if (!empty($uri)) {
 
-            $client = new \GuzzleHttp\Client([
-                'base_uri' => $uri,
-                'headers' => [
-                    'Authorization' => "Bearer " . self::getenv('SKIPPR_API_TOKEN')
-                ]
-            ]);
+            try {
+                $path = 'tasks/set-status';
 
-            $data = [
-                'response' => $response,
-                'exit_code' => Config::$exitCode,
-            ];
-            if (!empty(Config::$taskId)) {
-                $data['task_id'] = Config::$taskId;
+                $client = new \GuzzleHttp\Client([
+                    'base_uri' => $uri,
+                    'headers' => [
+                        'Authorization' => "Bearer " . self::getenv('SKIPPR_API_TOKEN')
+                    ]
+                ]);
+
+                $data = [
+                    'response' => $response,
+                    'exit_code' => Config::$exitCode,
+                ];
+                if (!empty(Config::$taskId)) {
+                    $data['task_id'] = Config::$taskId;
+                }
+
+                $json = json_encode($data);
+
+                $response = $client->post($path, [
+                    'json' => $json
+                ]);
+
+                SkipprLogger::debug('Updated task status health check API');
+
+            } catch (\Exception $e) {
+                SkipprLogger::error($e->getMessage());
             }
 
-            $json = json_encode($data);
-
-            $response = $client->post($path, [
-                'json' => $json
-            ]);
-
-            SkipprLogger::debug('Updated task status health check API');
-            
-        } catch (\Exception $e) {
-            SkipprLogger::error($e->getMessage());
         }
-
     }
 }
