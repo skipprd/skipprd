@@ -225,24 +225,26 @@ class PipelineCommand
     public function handle()
     {
 
-        $this->init();
+        try {
 
-        SkipprLogger::info("Syncing");
+            $this->init();
+
+            SkipprLogger::info("Syncing");
 
 //        set_exception_handler([$this, 'exceptionHandler']);
 
-        // handle sigs
-        // PHP 7.1 and later can handle asynchronous signals natively
-        pcntl_async_signals(true);
+            // handle sigs
+            // PHP 7.1 and later can handle asynchronous signals natively
+            pcntl_async_signals(true);
 
-        pcntl_signal(
-            SIGINT,
-            [$this, 'shutdownSig']
-        ); // Call $this->shutdown() on SIGINT
-        pcntl_signal(
-            SIGTERM,
-            [$this, 'shutdownSig']
-        ); // Call $this->shutdown() on SIGTERM
+            pcntl_signal(
+                SIGINT,
+                [$this, 'shutdownSig']
+            ); // Call $this->shutdown() on SIGINT
+            pcntl_signal(
+                SIGTERM,
+                [$this, 'shutdownSig']
+            ); // Call $this->shutdown() on SIGTERM
 
 
 //        if (Config::$analysing) {
@@ -250,138 +252,148 @@ class PipelineCommand
 //        }
 
 
-        if (!Config::$enableDeadLetters) {
-            SkipprLogger::info('Reprocessing dead letters');
-        }
-
-        if (!empty($this->inputPlugin)) {
-            $ran = false;
-
-            while (!$ran || !empty(Config::$pollIntervalSeconds)) {
-                $ran = true;
-
-                if (Config::$runMode == Config::RUN_MODE_SYNC) {
-                    $this->inputPlugin->sync();
-
-                    $this->inputPlugin->buffer->flushAll();
-
-                    sleep(Config::$pollIntervalSeconds ?? 1);
-
-                }
-
-                if (Config::$runMode == Config::RUN_MODE_VALIDATE_CONFIG) {
-                    $this->inputPlugin->doValidateConfig();
-                }
-
-                if (Config::$runMode == Config::RUN_MODE_VALIDATE_CONNECTION) {
-                    $this->inputPlugin->doValidateConnection();
-                }
-
-                if (Config::$runMode == Config::RUN_MODE_SAVE) {
-                    // @todo - need this?
-                    $this->inputPlugin->doSave();
-                }
-
-                if (Config::$runMode == Config::RUN_MODE_DELETE_PLUGIN) {
-                    $this->inputPlugin->deletePlugin();
-                }
-
-                if (Config::$runMode == Config::RUN_MODE_RESET_SOURCE_OFFSETS) {
-                    $this->inputPlugin->resetSourceOffsets();
-                }
-
+            if (!Config::$enableDeadLetters) {
+                SkipprLogger::info('Reprocessing dead letters');
             }
-        } else {
-            if (!empty($this->deadletterPlugin)) {
+
+            if (!empty($this->inputPlugin)) {
                 $ran = false;
 
                 while (!$ran || !empty(Config::$pollIntervalSeconds)) {
                     $ran = true;
 
                     if (Config::$runMode == Config::RUN_MODE_SYNC) {
-                        $this->deadletterPlugin->sync();
+                        $this->inputPlugin->sync();
 
-                        $this->deadletterPlugin->buffer->flushAll();
+                        $this->inputPlugin->buffer->flushAll();
 
                         sleep(Config::$pollIntervalSeconds ?? 1);
+
                     }
 
                     if (Config::$runMode == Config::RUN_MODE_VALIDATE_CONFIG) {
-                        $this->deadletterPlugin->doValidateConfig();
+                        $this->inputPlugin->doValidateConfig();
                     }
 
                     if (Config::$runMode == Config::RUN_MODE_VALIDATE_CONNECTION) {
-                        $this->deadletterPlugin->doValidateConnection();
+                        $this->inputPlugin->doValidateConnection();
                     }
 
                     if (Config::$runMode == Config::RUN_MODE_SAVE) {
                         // @todo - need this?
-                        $this->deadletterPlugin->doSave();
+                        $this->inputPlugin->doSave();
                     }
 
                     if (Config::$runMode == Config::RUN_MODE_DELETE_PLUGIN) {
-                        $this->deadletterPlugin->deletePlugin();
+                        $this->inputPlugin->deletePlugin();
                     }
 
+                    if (Config::$runMode == Config::RUN_MODE_RESET_SOURCE_OFFSETS) {
+                        $this->inputPlugin->resetSourceOffsets();
+                    }
 
                 }
-            }
+            } else {
+                if (!empty($this->deadletterPlugin)) {
+                    $ran = false;
 
-            // keep output alive
-            // we'll probably make output sycronous
-            if (!empty($this->outputPlugin)) {
-                $ran = false;
+                    while (!$ran || !empty(Config::$pollIntervalSeconds)) {
+                        $ran = true;
 
-                while (!$ran || !empty(Config::$pollIntervalSeconds)) {
-                    $ran = true;
+                        if (Config::$runMode == Config::RUN_MODE_SYNC) {
+                            $this->deadletterPlugin->sync();
 
-                    if (Config::$runMode == Config::RUN_MODE_SYNC) {
-                        $this->outputPlugin->sync();
+                            $this->deadletterPlugin->buffer->flushAll();
 
-                        sleep(Config::$pollIntervalSeconds ?? 1);
-                    }
-
-                    if (Config::$runMode == Config::RUN_MODE_VALIDATE_CONFIG) {
-                        $this->outputPlugin->doValidateConfig();
-                    }
-
-                    if (Config::$runMode == Config::RUN_MODE_VALIDATE_CONNECTION) {
-                        $this->outputPlugin->doValidateConnection();
-                    }
-
-                    if (Config::$runMode == Config::RUN_MODE_SAVE) {
-                        // @todo - need this?
-                        $this->outputPlugin->doSave();
-                    }
-
-                    if (Config::$runMode == Config::RUN_MODE_DELETE_PLUGIN) {
-                        $this->outputPlugin->deletePlugin();
-                    }
-
-                    if (Config::$runMode == Config::RUN_MODE_CREATE_UPDATE_DEST_SCHEMA) {
-                        foreach (Config::$avroSchemas as $namespace => $avroSchema) {
-                            $this->outputPlugin->createOrUpdateSchema($namespace, $avroSchema);
+                            sleep(Config::$pollIntervalSeconds ?? 1);
                         }
-                    }
 
-                    if (Config::$runMode == Config::RUN_MODE_DELETE_DEST_SCHEMA) {
-                        $this->outputPlugin->deleteSchema();
-                    }
+                        if (Config::$runMode == Config::RUN_MODE_VALIDATE_CONFIG) {
+                            $this->deadletterPlugin->doValidateConfig();
+                        }
 
+                        if (Config::$runMode == Config::RUN_MODE_VALIDATE_CONNECTION) {
+                            $this->deadletterPlugin->doValidateConnection();
+                        }
+
+                        if (Config::$runMode == Config::RUN_MODE_SAVE) {
+                            // @todo - need this?
+                            $this->deadletterPlugin->doSave();
+                        }
+
+                        if (Config::$runMode == Config::RUN_MODE_DELETE_PLUGIN) {
+                            $this->deadletterPlugin->deletePlugin();
+                        }
+
+
+                    }
+                }
+
+                // keep output alive
+                // we'll probably make output sycronous
+                if (!empty($this->outputPlugin)) {
+                    $ran = false;
+
+                    while (!$ran || !empty(Config::$pollIntervalSeconds)) {
+                        $ran = true;
+
+                        if (Config::$runMode == Config::RUN_MODE_SYNC) {
+                            $this->outputPlugin->sync();
+
+                            sleep(Config::$pollIntervalSeconds ?? 1);
+                        }
+
+                        if (Config::$runMode == Config::RUN_MODE_VALIDATE_CONFIG) {
+                            $this->outputPlugin->doValidateConfig();
+                        }
+
+                        if (Config::$runMode == Config::RUN_MODE_VALIDATE_CONNECTION) {
+                            $this->outputPlugin->doValidateConnection();
+                        }
+
+                        if (Config::$runMode == Config::RUN_MODE_SAVE) {
+                            // @todo - need this?
+                            $this->outputPlugin->doSave();
+                        }
+
+                        if (Config::$runMode == Config::RUN_MODE_DELETE_PLUGIN) {
+                            $this->outputPlugin->deletePlugin();
+                        }
+
+                        if (Config::$runMode == Config::RUN_MODE_CREATE_UPDATE_DEST_SCHEMA) {
+                            foreach (Config::$avroSchemas as $namespace => $avroSchema) {
+                                $this->outputPlugin->createOrUpdateSchema($namespace,
+                                    $avroSchema);
+                            }
+                        }
+
+                        if (Config::$runMode == Config::RUN_MODE_DELETE_DEST_SCHEMA) {
+                            $this->outputPlugin->deleteSchema();
+                        }
+
+                    }
                 }
             }
-        }
 
 
-        if (Config::$analysing) { // in case we didn't see enough messages
-            SkipprLogger::info('Finished analysing data');
-        }
-
-        if (Config::$syncMode == 'async') {
-            // keep alive to control child threads
-            while (true) {
-                sleep(10);
+            if (Config::$analysing) { // in case we didn't see enough messages
+                SkipprLogger::info('Finished analysing data');
             }
+
+            if (Config::$syncMode == 'async') {
+                // keep alive to control child threads
+                while (true) {
+                    sleep(10);
+                }
+            }
+
+        } catch (\Exception $e) {
+
+            SkipprLogger::error($e->getTraceAsString());
+            SkipprLogger::error($e->getMessage());
+            SkipprLogger::critical('Sorry, something failed badly. Please report this error to us with the logs above.');
+            
+            $this->shutdown(1);
         }
 
         $this->shutdown();
