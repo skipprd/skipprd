@@ -320,7 +320,7 @@ class Config
                 $converterClass = 'Skipprd\Converters\Avro' . $outputFormat . 'SchemaConverter';
 
                 if (class_exists($converterClass)) {
-                    SkipprLogger::info("Converting $namespace schema to $outputFormat");
+                    SkipprLogger::info("Generating $namespace $outputFormat schema");
 
                     $converter = new $converterClass();
 
@@ -463,7 +463,7 @@ class Config
                     'json' => $json
                 ]);
 
-                SkipprLogger::info('Updated config via API');
+                SkipprLogger::debug('Notified pipeline config API');
             } catch (\Exception $e) {
                 SkipprLogger::error($e->getMessage());
             }
@@ -507,10 +507,11 @@ class Config
 
                 $data = [
                     'response' => $response,
-                    'exit_code' => Config::$exitCode,
+                    'task_id' => Config::$taskId
                 ];
-                if (!empty(Config::$taskId)) {
-                    $data['task_id'] = Config::$taskId;
+
+                if (!empty(Config::$exitCode)) {
+                    $data['exit_code'] = Config::$exitCode;
                 }
 
                 $json = json_encode($data);
@@ -519,7 +520,7 @@ class Config
                     'json' => $json
                 ]);
 
-                SkipprLogger::debug('Updated task status health check API');
+                SkipprLogger::debug('Notified task status API');
 
             } catch (\Exception $e) {
                 SkipprLogger::error($e->getMessage());

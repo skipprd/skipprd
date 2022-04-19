@@ -72,6 +72,10 @@ class PipelineCommand
 
     public $deadLetters = 0;
 
+    protected $lastStatusUpdate = 0;
+
+    protected $statusUpdateIntervalSeconds = 60;
+
     /**
      * @var \Skipprd\Plugins\DataSources\DataSourcePluginInterface
      */
@@ -269,6 +273,7 @@ class PipelineCommand
 
                         sleep(Config::$pollIntervalSeconds ?? 1);
 
+                        $this->scheduledStatusUpdate();
                     }
 
                     if (Config::$runMode == Config::RUN_MODE_VALIDATE_CONFIG) {
@@ -397,6 +402,14 @@ class PipelineCommand
         }
 
         $this->shutdown();
+    }
+
+    protected function scheduledStatusUpdate() {
+
+        if ($this->lastStatusUpdate < time() - $this->statusUpdateIntervalSeconds) {
+            Config::setStatus();
+            $this->lastStatusUpdate = time();
+        }
     }
 
     public function exceptionHandler(\Exception $e)
@@ -839,11 +852,19 @@ class PipelineCommand
         }
     }
 
+    /**
+     * All emit functions end up here after deserialising payload
+     * @param array $payload - the payload to ingest
+     * @param string $namespace - the schema namespace (table, avro namespace, event type, etc)
+     * @param string $partition - data sources partition (shard, kafka topic, index, FS dir, etc)
+     */
     public function emitArray(
         array $payload,
         string $namespace,
         string $partition = '0'
     ): void {
+
+        $this->scheduledStatusUpdate();
 
         $unwrappedMessages = $this->unwrapEventPath($payload);
 
@@ -1172,8 +1193,10 @@ class PipelineCommand
                     $this->deadletterPlugin->shutdown();
                 }
 
-                SkipprLogger::info("Ingested " . $this->totalEntries . " messages");
-                SkipprLogger::info("Dead Letters " . $this->deadLetters . " dead letters");
+                if (!empty($this->inputPlugin)) {
+                    SkipprLogger::info("Ingested " . $this->totalEntries . " messages");
+                    SkipprLogger::info("Dead Letters " . $this->deadLetters . " dead letters");
+                }
             }
         }
 
@@ -1196,13 +1219,15 @@ class PipelineCommand
 
         Config::$exitCode = $signo;
 
-        if (!empty(Config::$discoveredFieldOccurrence)) {
-            $this->finaliseFieldMapping();
+        if (!empty($this->inputPlugin)) {
+            if (!empty(Config::$discoveredFieldOccurrence)) {
+                $this->finaliseFieldMapping();
 
-            $this->writeMapping();
-        } else {
-            if (!empty($this->inputPlugin)) {
+                $this->writeMapping();
+
+            } else {
                 SkipprLogger::info("No fields found when analysing schema, did you send some data?");
+
             }
         }
 
@@ -1260,7 +1285,7 @@ class PipelineCommand
 
         $this->finaliseFieldCandidates();
 
-        SkipprLogger::info("Updated analysed field schema");
+//        SkipprLogger::info("Updated analysed field schema");
     }
 
     public function finaliseFieldCandidates()
