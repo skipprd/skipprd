@@ -373,7 +373,7 @@ class PipelineCommand
                         }
 
                         if (Config::$runMode == Config::RUN_MODE_CREATE_UPDATE_DEST_SCHEMA) {
-                            foreach (Config::$avroSchemas as $namespace => $avroSchema) {
+                            foreach (Config::$schema as $namespace => $avroSchema) {
 
                                 SkipprLogger::info("Evolving $namespace destination schema");
 
