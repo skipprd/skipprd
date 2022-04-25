@@ -233,8 +233,6 @@ class PipelineCommand
 
             $this->init();
 
-            SkipprLogger::info("Syncing");
-
 //        set_exception_handler([$this, 'exceptionHandler']);
 
             // handle sigs
@@ -267,6 +265,9 @@ class PipelineCommand
                     $ran = true;
 
                     if (Config::$runMode == Config::RUN_MODE_SYNC) {
+
+                        SkipprLogger::info("Syncing");
+
                         $this->inputPlugin->sync();
 
                         $this->inputPlugin->buffer->flushAll();
@@ -277,10 +278,14 @@ class PipelineCommand
                     }
 
                     if (Config::$runMode == Config::RUN_MODE_VALIDATE_CONFIG) {
+
+                        SkipprLogger::info("Validating config");
+
                         $this->inputPlugin->doValidateConfig();
                     }
 
                     if (Config::$runMode == Config::RUN_MODE_VALIDATE_CONNECTION) {
+                        SkipprLogger::info("Validating connection");
                         $this->inputPlugin->doValidateConnection();
                     }
 
@@ -294,6 +299,7 @@ class PipelineCommand
                     }
 
                     if (Config::$runMode == Config::RUN_MODE_RESET_SOURCE_OFFSETS) {
+                        SkipprLogger::info("Resetting offsets");
                         $this->inputPlugin->resetSourceOffsets();
                     }
 
@@ -343,6 +349,7 @@ class PipelineCommand
                         $ran = true;
 
                         if (Config::$runMode == Config::RUN_MODE_SYNC) {
+                            SkipprLogger::info("Syncing");
                             $this->outputPlugin->sync();
 
                             sleep(Config::$pollIntervalSeconds ?? 1);
@@ -367,6 +374,9 @@ class PipelineCommand
 
                         if (Config::$runMode == Config::RUN_MODE_CREATE_UPDATE_DEST_SCHEMA) {
                             foreach (Config::$avroSchemas as $namespace => $avroSchema) {
+
+                                SkipprLogger::info("Evolving $namespace destination schema");
+
                                 $this->outputPlugin->createOrUpdateSchema($namespace,
                                     $avroSchema);
                             }
