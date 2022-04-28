@@ -4,7 +4,6 @@ namespace Skipprd\Plugins\DataSources\File;
 
 use Skipprd\Plugins\DataSources\DataSourcePluginBase;
 use Skipprd\Buffers\BufferInterface;
-use Monolog\Registry;
 use Skipprd\Plugins\ValidationResponse;
 use Skipprd\Traits\SkipprLogger;
 

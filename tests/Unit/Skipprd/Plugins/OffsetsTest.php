@@ -1,8 +1,9 @@
 <?php
 
-namespace Skipprd\Plugins\DataSources;
+namespace Unit\Skipprd\Plugins;
 
 use PHPUnit\Framework\TestCase;
+use Skipprd\Plugins\Offsets;
 
 class OffsetsTest extends TestCase
 {

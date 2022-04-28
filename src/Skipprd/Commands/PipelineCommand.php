@@ -8,7 +8,13 @@
 
 namespace Skipprd\Commands;
 
-use Skipprd\Plugins\DataSources\OffsetDrivers\OffsetDriverFactory;
+use _PHPStan_76800bfb5\React\Socket\Connector;
+use React\EventLoop\Factory;
+use React\EventLoop\Loop;
+use React\Socket\ConnectionInterface;
+use React\Socket\SocketServer;
+use React\Stream\WritableResourceStream;
+use Skipprd\Plugins\OffsetDrivers\OffsetDriverFactory;
 use Skipprd\Arr;
 use Skipprd\Buffers\BufferAdaptorsFactory;
 use Skipprd\Plugins\PluginFactory;
@@ -52,10 +58,24 @@ class PipelineCommand
 
     public $offsetChannel = null;
 
+
+    private $host = '';
+    private $port = 5544;
+
+    /**
+     * @var \React\Socket\Connector
+     */
+    private $conn;
+
+    /**
+     * @var \React\Socket\SocketServer
+     */
+    private $sock;
+
     public $defaultMsgs = [];
 
     /**
-     * @var \Skipprd\Plugins\DataSources\OffsetDrivers\OffsetDriverInterface
+     * @var \Skipprd\Plugins\OffsetDrivers\OffsetDriverInterface
      */
     public $offsetClient;
 
@@ -194,7 +214,7 @@ class PipelineCommand
             );
         }
 //        else {
-//            $outputPluginClass = "Skipprd\\Plugins\\DataSources\\" . 'File' . "\\DataSource" . 'File' . "Plugin";
+//            $outputPluginClass = "Skipprd\\Plugins\\DataOutputs\\" . 'File' . "\\DataSource" . 'File' . "Plugin";
 //
 //            $this->inputPlugin = new $outputPluginClass($config, $this->outputBuffer);
 //        }
@@ -210,17 +230,18 @@ class PipelineCommand
                 $pluginName,
                 $this->outputBuffer
             );
-        } else {
-            $outputPluginClass = "Skipprd\\Plugins\\DataOutputs\\" . 'File' . "\\DataOutput" . 'File' . "Plugin";
-
-            $config = [];
-            $config['path'] = '/';
-
-            $this->outputPlugin = new $outputPluginClass(
-                $config,
-                $this->outputBuffer
-            );
         }
+//        else {
+//            $outputPluginClass = "Skipprd\\Plugins\\DataOutputs\\" . 'File' . "\\DataOutput" . 'File' . "Plugin";
+//
+//            $config = [];
+//            $config['path'] = '/';
+//
+//            $this->outputPlugin = new $outputPluginClass(
+//                $config,
+//                $this->outputBuffer
+//            );
+//        }
     }
 
     /**
@@ -261,10 +282,30 @@ class PipelineCommand
             if (!empty($this->inputPlugin)) {
                 $ran = false;
 
+                $this->conn = new \React\Socket\Connector([
+                    'happy_eyeballs' => false,
+                    'dns' => '127.0.0.11'
+                ]);
+
                 while (!$ran || !empty(Config::$pollIntervalSeconds)) {
                     $ran = true;
 
                     if (Config::$runMode == Config::RUN_MODE_SYNC) {
+
+                        ///
+
+//                        $this->sock = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
+
+//                        $timeout = 30;
+//                        $time = 0;
+//                        $conn = false;
+
+//                        while($conn !== true && $time <= $timeout) {
+//                            $conn = socket_connect($this->sock, $this->host, $this->port);
+//
+//                            sleep(1);
+//                            $time++;
+//                        }
 
                         SkipprLogger::info("Syncing");
 
@@ -345,15 +386,61 @@ class PipelineCommand
                 if (!empty($this->outputPlugin)) {
                     $ran = false;
 
-                    while (!$ran || !empty(Config::$pollIntervalSeconds)) {
-                        $ran = true;
+                    if (Config::$runMode == Config::RUN_MODE_SYNC) {
 
-                        if (Config::$runMode == Config::RUN_MODE_SYNC) {
-                            SkipprLogger::info("Syncing");
-                            $this->outputPlugin->sync();
+                        SkipprLogger::info("Syncing");
 
-                            sleep(Config::$pollIntervalSeconds ?? 1);
-                        }
+                        $this->sock = new SocketServer("0.0.0.0:{$this->port}");
+
+                        $this->sock->on('connection',
+                            function (ConnectionInterface $connection) {
+
+                                $connection->on('data',
+                                    function ($data) use ($connection) {
+
+                                        $sp = new SkipprPack($data);
+
+                                        $this->serialiseOutput($sp);
+
+                                        $this->outputPlugin->sync();
+                                        $this->offsetCommitAll();
+
+                                    });
+
+                            });
+                    }
+
+//                    while (!$ran || !empty(Config::$pollIntervalSeconds)) {
+//                        $ran = true;
+//
+//                        if (Config::$runMode == Config::RUN_MODE_SYNC) {
+//
+//
+//                            $this->sock = socket_create_listen($this->port);
+//                            socket_getsockname($this->sock, $addr, $port);
+//                            SkipprLogger::info("Server Listening on $addr:$port");
+//
+//                            while($c = socket_accept($this->sock)) {
+//                                $msg = trim(socket_read($c, 1024, PHP_BINARY_READ));
+//
+//                                if ($msg) {
+//
+//
+//                                    SkipprLogger::info("Recieved msg $msg");
+//
+//                                    $payload = msgpack_unpack($msg);
+//
+//                                    $this->serialiseOutput($payload);
+//
+//                                    $this->outputPlugin->sync();
+//                                } {
+//                                    sleep(1);
+//                                }
+//                            }
+//
+//
+//                            sleep(Config::$pollIntervalSeconds ?? 1);
+//                        }
 
                         if (Config::$runMode == Config::RUN_MODE_VALIDATE_CONFIG) {
                             $this->outputPlugin->doValidateConfig();
@@ -388,7 +475,7 @@ class PipelineCommand
 
                     }
                 }
-            }
+
 
 
             if (Config::$analysing) { // in case we didn't see enough messages
@@ -411,7 +498,7 @@ class PipelineCommand
             $this->shutdown(1);
         }
 
-        $this->shutdown();
+//        $this->shutdown();
     }
 
     protected function scheduledStatusUpdate() {
@@ -524,14 +611,68 @@ class PipelineCommand
         return SerdersFactory::discover($lines);
     }
 
-    public function serialiseOutput(array $payload): void
+    public function outputEmit(array $payload): void {
+
+
+        $namespace = $payload['skpr_namespace'];
+        $partition = $payload['skpr_partition'];
+
+        $offset = (string) $this->inputPlugin->offsets->getCurrentOffsets(
+            $namespace,
+            $partition
+        );
+
+        if (!empty($payload) && !empty($offset)) {
+
+            SkipprLogger::info("sending offset: $offset");
+
+            $serialised = msgpack_pack($payload);
+            $sp = new SkipprPack();
+            $sp->encode($serialised, $offset);
+//
+            $skippr_packed = $sp->string();
+
+
+            $this->host = Config::getenv('HOST', '127.0.0.1');
+
+            $this->conn->connect("{$this->host}:{$this->port}")
+                ->then(function (ConnectionInterface $connection) use (
+                    $skippr_packed
+                ) {
+
+//                SkipprLogger::info("sending data");
+
+                    $result = $connection->write($skippr_packed);
+
+                    $connection->on('error', function (\Exception $e) {
+                        SkipprLogger::error($e->getMessage());
+                    });
+
+                    $connection->end();
+
+
+//                $this->offsetCommitRoutine($namespace, $partition);
+
+                });
+        }
+
+    }
+
+    public function serialiseOutput(SkipprPack $sp): void
     {
+
+        $record = $sp->decodeRecord();
+        $offset = $sp->decodeOffset();
+
+        $payload = msgpack_unpack($record);
 
         try {
             $eventTime = $payload['skpr_event_ts'];
             $namespace = $payload['skpr_namespace'];
             $partition = $payload['skpr_partition'];
 
+            $offset = $this->outputPlugin->offsets->setOffsets($offset, $namespace, $partition);
+            
             $record = $payload;
             unset($record['skpr_event_ts']);
             unset($record['skpr_namespace']);
@@ -676,12 +817,19 @@ class PipelineCommand
     ): void {
 
 
-        if ($payload != '') {
+        if (!empty($payload) && !empty($offset)) {
             if ($this->inputPlugin->offsets->validateOffset(
                 $offset,
                 $namespace,
                 $partition
             )) {
+
+                $this->inputPlugin->offsets->setOffsets(
+                    $offset,
+                    $namespace,
+                    $partition
+                );
+                
                 if (Config::$syncMode == 'sync') {
                     if (!Config::$enableDeadLetters) {
                         // @todo - deprecate SkipprPack for Apache Arrow
@@ -714,11 +862,7 @@ class PipelineCommand
                     );
                 }
 
-                $this->inputPlugin->offsets->setOffsets(
-                    $offset,
-                    $namespace,
-                    $partition
-                );
+
             }
         }
     }
@@ -728,12 +872,26 @@ class PipelineCommand
         string $partition
     ): void {
         if (!Config::$analysing) { // should never be here on analyse schema, but just in case of code error
-            $offset = $this->inputPlugin->offsets->getCurrentOffsets(
+            $offset = $this->outputPlugin->offsets->getCurrentOffsets(
                 $namespace,
                 $partition
             );
 
             $this->offsetClient->sync($namespace, $partition, $offset);
+        }
+    }
+
+    public function offsetCommitAll(): void
+    {
+        $offsets = $this->outputPlugin->offsets->getAll();
+
+        foreach ($offsets as $namespace => $partitionArr) {
+            foreach ($partitionArr as $partition => $offset) {
+
+                SkipprLogger::info("offset sink");
+                SkipprLogger::info("$namespace, $partition, $offset");
+                $this->offsetClient->sync($namespace, $partition, $offset);
+            }
         }
     }
 
@@ -949,7 +1107,8 @@ class PipelineCommand
                     }
 
                     if ($message) {
-                        $this->serialiseOutput($message);
+//                        $this->serialiseOutput($message);
+                        $this->outputEmit($message);
                     } else {
                         $this->deadLetterMessage($unwrappedMessage);
                     }
@@ -1056,7 +1215,6 @@ class PipelineCommand
 //        $this->inputPlugin->commit(Config::$offsets);
 
         if (!empty($this->inputPlugin)) {
-            $this->inputPlugin->buffer->flushAll();
 
             $type = Config::getenv('OFFSET_DRIVER', 'skippr_file');
             $this->offsetClient = OffsetDriverFactory::factory($type);
@@ -1075,6 +1233,7 @@ class PipelineCommand
             }
 
             $this->inputPlugin->connect();
+            $this->inputPlugin->buffer->flushAll();
         }
 
         if (!empty($this->deadletterPlugin)) {
@@ -1083,6 +1242,24 @@ class PipelineCommand
         }
 
         if (!empty($this->outputPlugin)) {
+
+            $type = Config::getenv('OFFSET_DRIVER', 'skippr_file');
+            $this->offsetClient = OffsetDriverFactory::factory($type);
+            $offsets = $this->offsetClient->get();
+
+            if (!empty($offsets)) {
+                foreach ($offsets as $namespace => $offsetsParts) {
+                    foreach ($offsetsParts as $partition => $offset) {
+                        $this->outputPlugin->offsets->setOffsets(
+                            $offset,
+                            $namespace,
+                            $partition
+                        );
+                    }
+                }
+            }
+
+
             $this->outputPlugin->connect();
             $this->outputPlugin->buffer->flushAll();
         }
@@ -1189,10 +1366,14 @@ class PipelineCommand
 
                 if (!empty($this->outputPlugin)) {
 
+                    $this->sock->close();
+                    
                     $outputPluginName = Config::getenv('DATA_OUTPUT_PLUGIN_NAME');
                     SkipprLogger::info("Flushing output buffers to $outputPluginName destination.");
                     $this->outputPlugin->sync();
+                    $this->offsetCommitAll();
                     $this->outputPlugin->shutdown();
+
                 }
 
                 if (!empty($this->deadletterPlugin)) {
@@ -1201,9 +1382,13 @@ class PipelineCommand
                     SkipprLogger::info("Flushing dead letter buffers to $deadLetterPluginName destination.");
                     $this->deadletterPlugin->sync();
                     $this->deadletterPlugin->shutdown();
+
                 }
 
                 if (!empty($this->inputPlugin)) {
+
+//                    socket_close($this->sock);
+                    
                     SkipprLogger::info("Ingested " . $this->totalEntries . " messages");
                     SkipprLogger::info("Dead Letters " . $this->deadLetters . " dead letters");
                 }

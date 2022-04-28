@@ -139,6 +139,8 @@ RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skippr
 FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v3.0.0
 #FROM skippr-php:ubuntu
 
+RUN apt-get update -y && apt-get install -y php-msgpack
+
 ENV PHP_INI_DIR=/etc/php/7.4/cli
 RUN echo $PHP_INI_DIR \
     && touch $PHP_INI_DIR/conf.d/05-custom.ini \

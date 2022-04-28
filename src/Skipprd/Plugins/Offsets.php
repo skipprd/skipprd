@@ -1,12 +1,17 @@
 <?php
 
 
-namespace Skipprd\Plugins\DataSources;
+namespace Skipprd\Plugins;
 
 class Offsets
 {
 
     protected array $offsets = [];
+
+    public function getAll(): array {
+
+        return $this->offsets;
+    }
 
     public function setOffsets(string $offsets, string $namespace, string $partition = '0')
     {

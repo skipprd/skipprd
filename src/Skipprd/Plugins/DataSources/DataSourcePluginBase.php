@@ -4,6 +4,7 @@ namespace Skipprd\Plugins\DataSources;
 
 use Monolog\Registry;
 use Skipprd\Buffers\BufferInterface;
+use Skipprd\Plugins\Offsets;
 use Skipprd\Plugins\ValidationResponse;
 use Skipprd\Traits\SkipprLogger;
 
@@ -19,7 +20,7 @@ class DataSourcePluginBase implements DataSourcePluginInterface
     public $buffer = null;
 
     /**
-     * @var \Skipprd\Plugins\DataSources\Offsets
+     * @var \Skipprd\Plugins\Offsets
      */
     public $offsets;
 
@@ -29,8 +30,8 @@ class DataSourcePluginBase implements DataSourcePluginInterface
     {
         $this->tenantId = getenv('TENANT_ID');
         $this->pipelineName = getenv('PIPELINE_NAME');
-        $this->offsets = new Offsets();
         $this->buffer = $buffer;
+        $this->offsets = new Offsets();
         $this->config = $config;
     }
 
@@ -49,11 +50,6 @@ class DataSourcePluginBase implements DataSourcePluginInterface
     public function connect(): void
     {
     }
-
-//    public function commit(string $offset = '')
-//    {
-//        $this->offsets->setOffsets($offset);
-//    }
 
     public function sync()
     {
@@ -106,4 +102,5 @@ class DataSourcePluginBase implements DataSourcePluginInterface
     public function resetSourceOffsets(): void {
 
     }
+    
 }

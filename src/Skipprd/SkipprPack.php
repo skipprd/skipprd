@@ -131,26 +131,26 @@ class SkipprPack
         }
 
         // Prevent seeking before BOF
-//        switch ($whence)
-//        {
-//            case self::SEEK_SET:
-//                if (0 > $offset)
-//                    throw new \Exception('Cannot seek before beginning of file.');
-//                $this->current_index = $offset;
-//                break;
-//            case self::SEEK_CUR:
-//                if (0 > $this->current_index + $whence)
-//                    throw new \Exception('Cannot seek before beginning of file.');
-//                $this->current_index += $offset;
-//                break;
-//            case self::SEEK_END:
-//                if (0 > $this->length() + $offset)
-//                    throw new \Exception('Cannot seek before beginning of file.');
-//                $this->current_index = $this->length() + $offset;
-//                break;
-//            default:
-//                throw new \Exception(sprintf('Invalid seek whence %d', $whence));
-//        }
+        switch ($whence)
+        {
+            case self::SEEK_SET:
+                if (0 > $offset)
+                    throw new \Exception('Cannot seek before beginning of file.');
+                $this->current_index = $offset;
+                break;
+            case self::SEEK_CUR:
+                if (0 > $this->current_index + $whence)
+                    throw new \Exception('Cannot seek before beginning of file.');
+                $this->current_index += $offset;
+                break;
+            case self::SEEK_END:
+                if (0 > $this->length() + $offset)
+                    throw new \Exception('Cannot seek before beginning of file.');
+                $this->current_index = $this->length() + $offset;
+                break;
+            default:
+                throw new \Exception(sprintf('Invalid seek whence %d', $whence));
+        }
 
         return true;
     }
@@ -189,8 +189,7 @@ class SkipprPack
      */
     public function write($arg)
     {
-//        if (is_string($arg)) return $this->append_str($arg);
-        return true;
+        if (is_string($arg)) return $this->append_str($arg);
     }
 
     /**

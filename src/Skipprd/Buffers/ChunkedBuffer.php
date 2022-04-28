@@ -164,11 +164,17 @@ class ChunkedBuffer implements BufferInterface
     public function encodeChunkName(string $namespace = null, string $partition = null, $timeBucket = null): string
     {
 
-        $chunkName = http_build_query([
+        $chunks = [
             'buffer' => $this->bufferName,
-            'time' => $timeBucket,
             'namespace' => $namespace,
-            'partition' => $partition]);
+            'partition' => $partition
+        ];
+
+        if (!empty($timeBucket)) {
+            $chunks['time'] = $timeBucket;
+        }
+
+        $chunkName = http_build_query($chunks);
 
         return $chunkName;
     }
@@ -190,9 +196,14 @@ class ChunkedBuffer implements BufferInterface
     {
 
         parse_str($filename, $array);
-        $date_string = Carbon::createFromTimestamp($array['time'])->format('Y-m-d');
+        if (isset($array['time'])) {
+            $date_string = Carbon::createFromTimestamp($array['time'])->format('Y-m-d');
 
-        SkipprLogger::debug("decoding buffer time $date_string file $filename");
+            SkipprLogger::debug("decoding buffer time $date_string file $filename");
+        } else {
+            $date_string = '';
+        }
+
 
 
         return $date_string;

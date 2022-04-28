@@ -24,6 +24,4 @@ interface DataSourcePluginInterface
 
     public function deletePlugin();
 
-    public function resetSourceOffsets(): void ;
-
 }

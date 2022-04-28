@@ -1,8 +1,7 @@
 <?php
 
-namespace Skipprd\Plugins\DataSources\OffsetDrivers;
+namespace Skipprd\Plugins\OffsetDrivers;
 
-use Monolog\Registry;
 use Skipprd\Traits\Config;
 use Skipprd\Traits\SkipprLogger;
 

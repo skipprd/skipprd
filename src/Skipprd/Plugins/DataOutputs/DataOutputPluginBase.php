@@ -3,6 +3,7 @@
 namespace Skipprd\Plugins\DataOutputs;
 
 use Skipprd\Buffers\BufferInterface;
+use Skipprd\Plugins\Offsets;
 use Skipprd\Plugins\ValidationResponse;
 use Skipprd\Traits\Config;
 
@@ -14,10 +15,16 @@ class DataOutputPluginBase implements DataOutputPluginInterface
 
     public $buffer = null;
 
+    /**
+     * @var \Skipprd\Plugins\Offsets
+     */
+    public $offsets;
+
     public function __construct(array $config, BufferInterface $buffer)
     {
         $this->tenantId = getenv('TENANT_ID');
         $this->pipelineName = getenv('PIPELINE_NAME');
+        $this->offsets = new Offsets();
         $this->buffer = $buffer;
         $this->config = $config;
     }
@@ -62,6 +69,10 @@ class DataOutputPluginBase implements DataOutputPluginInterface
 
     public function deletePlugin() {
         
+    }
+
+    public function resetSourceOffsets(): void {
+
     }
 
 }

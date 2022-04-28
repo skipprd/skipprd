@@ -1,6 +1,6 @@
 <?php
 
-namespace Skipprd\Plugins\DataSources\OffsetDrivers;
+namespace Skipprd\Plugins\OffsetDrivers;
 
 interface OffsetDriverInterface
 {
