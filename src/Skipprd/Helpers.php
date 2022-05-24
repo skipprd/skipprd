@@ -39,7 +39,7 @@ class Helpers
     public static function cleanFieldName($field)
     {
         if (is_numeric($field)) {
-            $field = 'A' . $field;
+            $field = 'item_' . $field;
 //            return $field;
         }
 

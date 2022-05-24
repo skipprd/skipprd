@@ -127,8 +127,8 @@ class DiscoverSchemaTest extends TestCase
 
         $this->assertEquals('tags', $avroFieldSchema[0]['name']);
         $this->assertEquals('record', $avroFieldSchema[0]['type'][1]['type']);
-        $this->assertEquals('a0', $avroFieldSchema[0]['type'][1]['fields'][0]['name']);
-        $this->assertEquals('a1', $avroFieldSchema[0]['type'][1]['fields'][1]['name']);
+        $this->assertEquals('item_0', $avroFieldSchema[0]['type'][1]['fields'][0]['name']);
+        $this->assertEquals('item_1', $avroFieldSchema[0]['type'][1]['fields'][1]['name']);
         $this->assertEquals('map', $avroFieldSchema[0]['type'][1]['fields'][0]['type'][1]['type']);
         $this->assertEquals('string', $avroFieldSchema[0]['type'][1]['fields'][0]['type'][1]['values']);
     }
