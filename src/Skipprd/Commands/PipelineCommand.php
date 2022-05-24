@@ -311,6 +311,12 @@ class PipelineCommand
                 }
 
 
+                if (Config::$runMode == Config::RUN_MODE_VALIDATE_SCHEMA) {
+                    $command = new \Skipprd\Commands\ValidateSchemaFile();
+                    $command->handle();
+                    $this->shutdown();
+                }
+
                 if (Config::$runMode == Config::RUN_MODE_VALIDATE_CONFIG) {
                     SkipprLogger::info("Validating config");
 
