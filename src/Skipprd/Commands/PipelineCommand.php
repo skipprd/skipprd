@@ -278,24 +278,29 @@ class PipelineCommand
 
                     $this->inputPlugin->buffer->flushAll();
 
-                    $this->streamConnect();
+                    if (!Config::$analysing) {
+                        $this->streamConnect();
+                    }
 
                     $ran = false;
-                    while (!$ran || !empty(Config::$pollIntervalSeconds)) {
+                    while (!Config::$analysing && (!$ran || !empty(Config::$pollIntervalSeconds))) {
                         $ran = true;
 
                         $this->inputPlugin->sync();
 
 //                        sleep(1); // Ensure outputs TCP buffer is flush
 
-                        $skipprPack = new SkipprPack();
-                        $skipprPack->encode('sync_complete', '');
+                        if (!Config::$analysing) {
+                            
+                            $skipprPack = new SkipprPack();
+                            $skipprPack->encode('sync_complete', '');
 
-                        $this->streamSend($skipprPack, null);
+                            $this->streamSend($skipprPack, null);
 
-                        sleep(Config::$pollIntervalSeconds ?? 1);
+                            sleep(Config::$pollIntervalSeconds ?? 1);
 
-                        $this->scheduledStatusUpdate();
+                            $this->scheduledStatusUpdate();
+                        }
 
                     }
 
