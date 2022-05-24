@@ -1416,9 +1416,7 @@ class PipelineCommand
                 "skippr_version" => Config::getenv('SKIPPR_BUILD_VERSION'),
             ]
         ));
-
-        sleep(20);
-
+        
         SkipprLogger::info("Graceful shutdown complete, bye");
 
 //        $this->delete();
