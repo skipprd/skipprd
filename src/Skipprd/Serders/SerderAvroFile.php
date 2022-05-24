@@ -19,8 +19,10 @@ class SerderAvroFile implements SerderBatchInterface
 
         try {
             $read_io = new \AvroStringIO($payload);
-            $data_reader = new \AvroDataIOReader($read_io,
-                new \AvroIODatumReader());
+            $data_reader = new \AvroDataIOReader(
+                $read_io,
+                new \AvroIODatumReader()
+            );
 
             foreach ($data_reader->data() as $datum) {
                 $data[] = $datum;

@@ -1,22 +1,22 @@
 <?php
 
-namespace Iq\Listeners;
+namespace Skipprd\Commands;
 
-use App\IngestJob;
-use App\Schema;
-use Illuminate\Contracts\Queue\ShouldQueue;
-use Illuminate\Support\Facades\Cache;
-use Illuminate\Support\Facades\Log;
-use Iq\Commands\PipelineCommand;
-use Iq\Events\ValidateSchemaRequested;
-use Iq\Services\AvroSubPub\CachedSchemaRegistryClient;
-use Iq\Services\AvroSubPub\MessageSerializer;
-use Iq\Traits\Config;
-use phpDocumentor\Reflection\Types\Self_;
-use Superbalist\LaravelPubSub\PubSubConnectionFactory;
-use Illuminate\Queue\InteractsWithQueue;
-use Iq\Traits\Ingest;
-use Iq\Traits\AnalyseSchema;
+//use App\IngestJob;
+//use App\Schema;
+//use Illuminate\Contracts\Queue\ShouldQueue;
+//use Illuminate\Support\Facades\Cache;
+//use Illuminate\Support\Facades\Log;
+//use Iq\Commands\PipelineCommand;
+//use Iq\Events\ValidateSchemaRequested;
+//use Iq\Services\AvroSubPub\CachedSchemaRegistryClient;
+//use Iq\Services\AvroSubPub\MessageSerializer;
+//use Iq\Traits\Config;
+//use phpDocumentor\Reflection\Types\Self_;
+//use Superbalist\LaravelPubSub\PubSubConnectionFactory;
+//use Illuminate\Queue\InteractsWithQueue;
+//use Iq\Traits\Ingest;
+//use Iq\Traits\AnalyseSchema;
 
 class ValidateSchemaKafka
 {

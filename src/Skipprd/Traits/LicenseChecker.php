@@ -31,7 +31,6 @@ trait LicenseChecker
 
             if (!empty($uri)) {
                 $authHeader = ['Authorization' => "Bearer " . Config::getenv('SKIPPR_API_TOKEN')];
-
             } elseif (empty($uri)) {
                 $env = Config::getenv('APP_ENV', 'prod');
 
@@ -42,7 +41,6 @@ trait LicenseChecker
                 } else {
                     $uri = "https://license.skippr.io";
                 }
-
             }
 
 

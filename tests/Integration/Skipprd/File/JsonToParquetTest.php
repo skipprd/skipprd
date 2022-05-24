@@ -23,7 +23,7 @@ class JsonToParquetTest extends DockerRun
         parent::setUp();
     }
 
-    public function testIsSequentialArrayKeys() {
+    public function testJsontoParquet() {
 
         $envs = [
             'DATA_SOURCE_PLUGIN_NAME=file',

@@ -8,12 +8,6 @@
 
 namespace Skipprd\Commands;
 
-use _PHPStan_76800bfb5\React\Socket\Connector;
-use React\EventLoop\Factory;
-use React\EventLoop\Loop;
-use React\Socket\ConnectionInterface;
-use React\Socket\SocketServer;
-use React\Stream\WritableResourceStream;
 use Skipprd\Plugins\OffsetDrivers\OffsetDriverFactory;
 use Skipprd\Arr;
 use Skipprd\Buffers\BufferAdaptorsFactory;
@@ -33,6 +27,7 @@ use Skipprd\Traits\Ingest;
 use Skipprd\Traits\LicenseChecker;
 use Skipprd\Traits\RecordFilter;
 use Skipprd\Traits\SkipprLogger;
+use Skipprd\Traits\SkipprStream;
 
 class PipelineCommand
 {
@@ -46,6 +41,7 @@ class PipelineCommand
     use LicenseChecker;
     use SkipprLogger;
     use RecordFilter;
+    use SkipprStream;
 
     protected $statsd = null;
 
@@ -59,18 +55,13 @@ class PipelineCommand
     public $offsetChannel = null;
 
 
-    private $host = '';
-    private $port = 5544;
+    public $host = '';
+    public $port = 5544;
 
     /**
-     * @var \React\Socket\Connector
+     * @var resource
      */
-    private $conn;
-
-    /**
-     * @var \React\Socket\SocketServer
-     */
-    private $sock;
+    public $sock;
 
     public $defaultMsgs = [];
 
@@ -92,38 +83,38 @@ class PipelineCommand
 
     public $deadLetters = 0;
 
-    protected $lastStatusUpdate = 0;
+    public $lastStatusUpdate = 0;
 
-    protected $statusUpdateIntervalSeconds = 60;
-
-    /**
-     * @var \Skipprd\Plugins\DataSources\DataSourcePluginInterface
-     */
-    protected $inputPlugin = null;
+    public $statusUpdateIntervalSeconds = 60;
 
     /**
-     * @var \Skipprd\Plugins\DataOutputs\DataOutputPluginInterface
+     * @var \Skipprd\Plugins\DataSources\DataSourcePluginBase
      */
-    protected $outputPlugin = null;
+    public $inputPlugin = null;
 
     /**
-     * @var \Skipprd\Plugins\DataOutputs\DataOutputPluginInterface
+     * @var \Skipprd\Plugins\DataOutputs\DataOutputPluginBase
      */
-    protected $deadletterPlugin = null;
+    public $outputPlugin = null;
 
     /**
-     * @var \Skipprd\Buffers\BufferInterface|null
+     * @var \Skipprd\Plugins\DataOutputs\DataOutputPluginBase
      */
-    protected $inputBuffer = null;
+    public $deadletterPlugin = null;
 
     /**
      * @var \Skipprd\Buffers\BufferInterface|null
      */
-    protected $outputBuffer = null;
+    public $inputBuffer = null;
+
     /**
      * @var \Skipprd\Buffers\BufferInterface|null
      */
-    protected $deadletterBuffer = null;
+    public $outputBuffer = null;
+    /**
+     * @var \Skipprd\Buffers\BufferInterface|null
+     */
+    public $deadletterBuffer = null;
 
     /**
      * PipelineJob constructor.
@@ -244,6 +235,7 @@ class PipelineCommand
 //        }
     }
 
+
     /**
      * Execute the console command.
      */
@@ -251,7 +243,6 @@ class PipelineCommand
     {
 
         try {
-
             $this->init();
 
 //        set_exception_handler([$this, 'exceptionHandler']);
@@ -282,69 +273,70 @@ class PipelineCommand
             if (!empty($this->inputPlugin)) {
                 $ran = false;
 
-                $this->conn = new \React\Socket\Connector([
-                    'happy_eyeballs' => false,
-                    'dns' => '127.0.0.11'
-                ]);
 
-                while (!$ran || !empty(Config::$pollIntervalSeconds)) {
-                    $ran = true;
+                if (Config::$runMode == Config::RUN_MODE_SYNC) {
 
-                    if (Config::$runMode == Config::RUN_MODE_SYNC) {
+                    $this->inputPlugin->buffer->flushAll();
 
-                        ///
+                    $this->streamConnect();
 
-//                        $this->sock = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
-
-//                        $timeout = 30;
-//                        $time = 0;
-//                        $conn = false;
-
-//                        while($conn !== true && $time <= $timeout) {
-//                            $conn = socket_connect($this->sock, $this->host, $this->port);
-//
-//                            sleep(1);
-//                            $time++;
-//                        }
-
-                        SkipprLogger::info("Syncing");
+                    $ran = false;
+                    while (!$ran || !empty(Config::$pollIntervalSeconds)) {
+                        $ran = true;
 
                         $this->inputPlugin->sync();
 
-                        $this->inputPlugin->buffer->flushAll();
+//                        sleep(1); // Ensure outputs TCP buffer is flush
+
+                        $skipprPack = new SkipprPack();
+                        $skipprPack->encode('sync_complete', '');
+
+                        $this->streamSend($skipprPack, null);
 
                         sleep(Config::$pollIntervalSeconds ?? 1);
 
                         $this->scheduledStatusUpdate();
+
                     }
 
-                    if (Config::$runMode == Config::RUN_MODE_VALIDATE_CONFIG) {
+                    fclose($this->sock);
 
-                        SkipprLogger::info("Validating config");
-
-                        $this->inputPlugin->doValidateConfig();
-                    }
-
-                    if (Config::$runMode == Config::RUN_MODE_VALIDATE_CONNECTION) {
-                        SkipprLogger::info("Validating connection");
-                        $this->inputPlugin->doValidateConnection();
-                    }
-
-                    if (Config::$runMode == Config::RUN_MODE_SAVE) {
-                        // @todo - need this?
-                        $this->inputPlugin->doSave();
-                    }
-
-                    if (Config::$runMode == Config::RUN_MODE_DELETE_PLUGIN) {
-                        $this->inputPlugin->deletePlugin();
-                    }
-
-                    if (Config::$runMode == Config::RUN_MODE_RESET_SOURCE_OFFSETS) {
-                        SkipprLogger::info("Resetting offsets");
-                        $this->inputPlugin->resetSourceOffsets();
-                    }
+                    $this->shutdown();
 
                 }
+
+
+                if (Config::$runMode == Config::RUN_MODE_VALIDATE_CONFIG) {
+                    SkipprLogger::info("Validating config");
+
+                    $this->inputPlugin->doValidateConfig();
+                    $this->shutdown();
+                }
+
+                if (Config::$runMode == Config::RUN_MODE_VALIDATE_CONNECTION) {
+                    SkipprLogger::info("Validating connection");
+                    $this->inputPlugin->doValidateConnection();
+                    $this->shutdown();
+                }
+
+                if (Config::$runMode == Config::RUN_MODE_SAVE) {
+                    // @todo - need this?
+                    $this->inputPlugin->doSave();
+                    $this->shutdown();
+                }
+
+                if (Config::$runMode == Config::RUN_MODE_DELETE_PLUGIN) {
+                    $this->inputPlugin->deletePlugin();
+                    $this->shutdown();
+                }
+
+                if (Config::$runMode == Config::RUN_MODE_RESET_SOURCE_OFFSETS) {
+                    SkipprLogger::info("Resetting offsets");
+                    $this->resetSourceOffsets();
+                    $this->shutdown();
+                }
+
+                
             } else {
                 if (!empty($this->deadletterPlugin)) {
                     $ran = false;
@@ -376,8 +368,6 @@ class PipelineCommand
                         if (Config::$runMode == Config::RUN_MODE_DELETE_PLUGIN) {
                             $this->deadletterPlugin->deletePlugin();
                         }
-
-
                     }
                 }
 
@@ -388,98 +378,56 @@ class PipelineCommand
 
                     if (Config::$runMode == Config::RUN_MODE_SYNC) {
 
-                        SkipprLogger::info("Syncing");
+                        $this->host = Config::getenv('HOST', '0.0.0.0');
 
-                        $this->sock = new SocketServer("0.0.0.0:{$this->port}");
+                        SkipprLogger::info("Listening on {$this->host}:{$this->port}");
 
-                        $this->sock->on('connection',
-                            function (ConnectionInterface $connection) {
+                        $this->sock = $this->streamListen();
 
-                                $connection->on('data',
-                                    function ($data) use ($connection) {
-
-                                        $sp = new SkipprPack($data);
-
-                                        $this->serialiseOutput($sp);
-
-                                        $this->outputPlugin->sync();
-                                        $this->offsetCommitAll();
-
-                                    });
-
-                            });
+                        $this->streamRead([$this, 'serialiseOutput'], [$this->outputPlugin, 'sync']);
+                        
                     }
 
-//                    while (!$ran || !empty(Config::$pollIntervalSeconds)) {
-//                        $ran = true;
-//
-//                        if (Config::$runMode == Config::RUN_MODE_SYNC) {
-//
-//
-//                            $this->sock = socket_create_listen($this->port);
-//                            socket_getsockname($this->sock, $addr, $port);
-//                            SkipprLogger::info("Server Listening on $addr:$port");
-//
-//                            while($c = socket_accept($this->sock)) {
-//                                $msg = trim(socket_read($c, 1024, PHP_BINARY_READ));
-//
-//                                if ($msg) {
-//
-//
-//                                    SkipprLogger::info("Recieved msg $msg");
-//
-//                                    $payload = msgpack_unpack($msg);
-//
-//                                    $this->serialiseOutput($payload);
-//
-//                                    $this->outputPlugin->sync();
-//                                } {
-//                                    sleep(1);
-//                                }
-//                            }
-//
-//
-//                            sleep(Config::$pollIntervalSeconds ?? 1);
-//                        }
 
-                        if (Config::$runMode == Config::RUN_MODE_VALIDATE_CONFIG) {
-                            $this->outputPlugin->doValidateConfig();
+                    if (Config::$runMode == Config::RUN_MODE_VALIDATE_CONFIG) {
+                        $this->outputPlugin->doValidateConfig();
+                    }
+
+                    if (Config::$runMode == Config::RUN_MODE_VALIDATE_CONNECTION) {
+                        $this->outputPlugin->doValidateConnection();
+                    }
+
+                    if (Config::$runMode == Config::RUN_MODE_SAVE) {
+                        // @todo - need this?
+                        $this->outputPlugin->doSave();
+                    }
+
+                    if (Config::$runMode == Config::RUN_MODE_DELETE_PLUGIN) {
+                        $this->outputPlugin->deletePlugin();
+                    }
+
+                    if (Config::$runMode == Config::RUN_MODE_CREATE_UPDATE_DEST_SCHEMA) {
+                        foreach (Config::$schema as $namespace => $avroSchema) {
+                            SkipprLogger::info("Evolving $namespace destination schema");
+
+                            $this->outputPlugin->createOrUpdateSchema(
+                                $namespace,
+                                $avroSchema
+                            );
                         }
+                    }
 
-                        if (Config::$runMode == Config::RUN_MODE_VALIDATE_CONNECTION) {
-                            $this->outputPlugin->doValidateConnection();
-                        }
-
-                        if (Config::$runMode == Config::RUN_MODE_SAVE) {
-                            // @todo - need this?
-                            $this->outputPlugin->doSave();
-                        }
-
-                        if (Config::$runMode == Config::RUN_MODE_DELETE_PLUGIN) {
-                            $this->outputPlugin->deletePlugin();
-                        }
-
-                        if (Config::$runMode == Config::RUN_MODE_CREATE_UPDATE_DEST_SCHEMA) {
-                            foreach (Config::$schema as $namespace => $avroSchema) {
-
-                                SkipprLogger::info("Evolving $namespace destination schema");
-
-                                $this->outputPlugin->createOrUpdateSchema($namespace,
-                                    $avroSchema);
-                            }
-                        }
-
-                        if (Config::$runMode == Config::RUN_MODE_DELETE_DEST_SCHEMA) {
-                            $this->outputPlugin->deleteSchema();
-                        }
-
+                    if (Config::$runMode == Config::RUN_MODE_DELETE_DEST_SCHEMA) {
+                        $this->outputPlugin->deleteSchema();
                     }
                 }
+            }
 
 
 
             if (Config::$analysing) { // in case we didn't see enough messages
                 SkipprLogger::info('Finished analysing data');
+                $this->shutdown();
             }
 
             if (Config::$syncMode == 'async') {
@@ -488,20 +436,17 @@ class PipelineCommand
                     sleep(10);
                 }
             }
-
         } catch (\Exception $e) {
-
             SkipprLogger::error($e->getTraceAsString());
             SkipprLogger::error($e->getMessage());
             SkipprLogger::critical('Sorry, something failed badly. Please report this error to us with the logs above.');
             
             $this->shutdown(1);
         }
-
-//        $this->shutdown();
     }
 
-    protected function scheduledStatusUpdate() {
+    protected function scheduledStatusUpdate()
+    {
 
         if ($this->lastStatusUpdate < time() - $this->statusUpdateIntervalSeconds) {
             Config::setStatus();
@@ -611,7 +556,8 @@ class PipelineCommand
         return SerdersFactory::discover($lines);
     }
 
-    public function outputEmit(array $payload): void {
+    public function outputEmit(array $payload): void
+    {
 
 
         $namespace = $payload['skpr_namespace'];
@@ -624,62 +570,55 @@ class PipelineCommand
 
         if (!empty($payload) && !empty($offset)) {
 
-            SkipprLogger::info("sending offset: $offset");
-
             $serialised = msgpack_pack($payload);
             $sp = new SkipprPack();
             $sp->encode($serialised, $offset);
-//
-            $skippr_packed = $sp->string();
+
+            $skipprPack = $sp->string();
+
+            $this->streamSend($skipprPack, null);
 
 
-            $this->host = Config::getenv('HOST', '127.0.0.1');
-
-            $this->conn->connect("{$this->host}:{$this->port}")
-                ->then(function (ConnectionInterface $connection) use (
-                    $skippr_packed
-                ) {
-
-//                SkipprLogger::info("sending data");
-
-                    $result = $connection->write($skippr_packed);
-
-                    $connection->on('error', function (\Exception $e) {
-                        SkipprLogger::error($e->getMessage());
-                    });
-
-                    $connection->end();
-
-
-//                $this->offsetCommitRoutine($namespace, $partition);
-
-                });
+        } else {
+            SkipprLogger::error("Failed to output, no offset or payload");
         }
-
     }
 
     public function serialiseOutput(SkipprPack $sp): void
     {
 
-        $record = $sp->decodeRecord();
-        $offset = $sp->decodeOffset();
-
-        $payload = msgpack_unpack($record);
+        $record = '';
 
         try {
-            $eventTime = $payload['skpr_event_ts'];
-            $namespace = $payload['skpr_namespace'];
-            $partition = $payload['skpr_partition'];
 
-            $offset = $this->outputPlugin->offsets->setOffsets($offset, $namespace, $partition);
+            $record = $sp->decodeRecord();
+            $offset = $sp->decodeOffset();
             
-            $record = $payload;
-            unset($record['skpr_event_ts']);
-            unset($record['skpr_namespace']);
-            unset($record['skpr_partition']);
+        } catch (\Exception $e) {
+
+            SkipprLogger::error($e->getMessage());
+
+        }
+
+        if (!empty($record)) { // @todo - why do we get emtpy messages over the network sometimes?
+
+            // @todo - often get 'Warning: [msgpack] (php_msgpack_unserialize) Extra bytes' without @
+            $payload = @msgpack_unpack($record);
+            
+            try {
+                $eventTime = $payload['skpr_event_ts'];
+                $namespace = $payload['skpr_namespace'];
+                $partition = $payload['skpr_partition'];
+
+                $offset = $this->outputPlugin->offsets->setOffsets($offset,
+                    $namespace, $partition);
+
+                $record = $payload;
+//            unset($record['skpr_event_ts']);
+//            unset($record['skpr_namespace']);
+//            unset($record['skpr_partition']);
 
 //            $serialised = json_encode($record) . "\n";
-
 //            $serder = SerdersFactory::factory(Config::$serder);
 //            $serialised = $serder->serialize($payload) . "\n";
 
@@ -698,62 +637,67 @@ class PipelineCommand
 //            $serialised = $sp->string();
 
 
-            if (Config::$syncMode == 'sync') {
+                if (Config::$syncMode == 'sync') {
 //                $this->outputPlugin->buffer->append($serialised, false, $eventTime, $partition);
-                $result = $this->outputPlugin->buffer->append(
-                    $record,
-                    false,
-                    $eventTime,
-                    $namespace,
-                    $partition
-                );
+                    $result = $this->outputPlugin->buffer->append(
+                        $record,
+                        false,
+                        $eventTime,
+                        $namespace,
+                        $partition
+                    );
 
 //                if (!empty($this->outputPlugin)) {
 //                    $this->flushBuffersRoutine();
 //                }
 
 //                    $this->inputPlugin->setOffsets($this->outputPlugin->offset);
-            } elseif (Config::$syncMode == 'async') {
-                $result = $this->outputPlugin->buffer->append(
-                    $record,
-                    false,
-                    $eventTime,
-                    $namespace,
-                    $partition
-                );
-            }
+                } elseif (Config::$syncMode == 'async') {
+                    $result = $this->outputPlugin->buffer->append(
+                        $record,
+                        false,
+                        $eventTime,
+                        $namespace,
+                        $partition
+                    );
+                }
 
-            if ($result == 2) { // buffer was flushed
-                $this->offsetCommitRoutine($namespace, $partition);
-            }
+                if ($result == 2) { // buffer was flushed
+                    $this->offsetCommitRoutine($namespace, $partition);
+                }
 
-            $tenantId = Config::$tenantId;
-            $pipelineName = Config::$pipelineName;
+                $tenantId = Config::$tenantId;
+                $pipelineName = Config::$pipelineName;
 
-            if (!empty($this->statsd)) {
-                $this->statsd->increment(
-                    "$tenantId.$pipelineName.ingest.records.current",
-                    1
-                );
-            }
+                if (!empty($this->statsd)) {
+                    $this->statsd->increment(
+                        "$tenantId.$pipelineName.ingest.records.current",
+                        1
+                    );
+                }
 
-            // Empty only after writing, will ensure still available for graceful shutdown
-            $this->hashes = [];
-            $this->duplicateCount = 0;
+                // Empty only after writing, will ensure still available for graceful shutdown
+                $this->hashes = [];
+                $this->duplicateCount = 0;
 
 
 //            $flushedCount++;
-        } catch (\AvroException $e) {
+            } catch (\AvroException $e) {
 //            SkipprLogger::error($e->getMessage());
 
-            try {
-                $this->deadLetterMessage($payload);
+                try {
+                    $this->deadLetterMessage($payload);
+                } catch (\Exception $e) {
+                    SkipprLogger::emergency('Failed to write to dead letter queue');
+                    SkipprLogger::error($e->getMessage());
+                }
             } catch (\Exception $e) {
-                SkipprLogger::emergency('Failed to write to dead letter queue');
                 SkipprLogger::error($e->getMessage());
             }
-        } catch (\Exception $e) {
-            SkipprLogger::error($e->getMessage());
+
+        } else {
+            SkipprLogger::error("SkipprPack unpacked empty record");
+
         }
     }
 
@@ -823,7 +767,6 @@ class PipelineCommand
                 $namespace,
                 $partition
             )) {
-
                 $this->inputPlugin->offsets->setOffsets(
                     $offset,
                     $namespace,
@@ -861,8 +804,6 @@ class PipelineCommand
                         $partition
                     );
                 }
-
-
             }
         }
     }
@@ -877,19 +818,31 @@ class PipelineCommand
                 $partition
             );
 
+            SkipprLogger::info("Committing offset for Namespace: $namespace Partition: $partition Offset: $offset");
+
             $this->offsetClient->sync($namespace, $partition, $offset);
         }
     }
 
+    public function resetSourceOffsets(): void
+    {
+        $offsets = $this->inputPlugin->offsets->getAll();
+
+        foreach ($offsets as $namespace => $partitionArr) {
+            foreach ($partitionArr as $partition => $offset) {
+                SkipprLogger::info("Resetting offset for Namespace: $namespace Partition: $partition from current offset $offset to ''");
+                $this->inputPlugin->offsets->setOffsets('', $namespace, $partition);
+                $this->offsetClient->sync($namespace, $partition, '');
+            }
+        }
+    }
     public function offsetCommitAll(): void
     {
         $offsets = $this->outputPlugin->offsets->getAll();
 
         foreach ($offsets as $namespace => $partitionArr) {
             foreach ($partitionArr as $partition => $offset) {
-
-                SkipprLogger::info("offset sink");
-                SkipprLogger::info("$namespace, $partition, $offset");
+                SkipprLogger::info("Committing offset for Namespace: $namespace Partition: $partition Offset: $offset");
                 $this->offsetClient->sync($namespace, $partition, $offset);
             }
         }
@@ -1215,7 +1168,6 @@ class PipelineCommand
 //        $this->inputPlugin->commit(Config::$offsets);
 
         if (!empty($this->inputPlugin)) {
-
             $type = Config::getenv('OFFSET_DRIVER', 'skippr_file');
             $this->offsetClient = OffsetDriverFactory::factory($type);
             $offsets = $this->offsetClient->get();
@@ -1242,7 +1194,6 @@ class PipelineCommand
         }
 
         if (!empty($this->outputPlugin)) {
-
             $type = Config::getenv('OFFSET_DRIVER', 'skippr_file');
             $this->offsetClient = OffsetDriverFactory::factory($type);
             $offsets = $this->offsetClient->get();
@@ -1318,7 +1269,7 @@ class PipelineCommand
     public function shutdown(int $signo = 0)
     {
 
-        SkipprLogger::info("Gracefully shutting down and flushing buffers");
+        SkipprLogger::info("Gracefully shutting down");
 
         if (Config::$syncMode == 'async') {
             if ($this->inputThread !== null) {
@@ -1358,37 +1309,33 @@ class PipelineCommand
                 $this->deadletterPlugin->buffer->flushAll(true);
                 $this->deadletterPlugin->buffer->driver->finalise();
             }
-
         }
 
         if (Config::$syncMode == 'sync') {
             if (!Config::$analysing) {
-
                 if (!empty($this->outputPlugin)) {
-
-                    $this->sock->close();
-                    
                     $outputPluginName = Config::getenv('DATA_OUTPUT_PLUGIN_NAME');
+                    $this->outputPlugin->buffer->driver->unlockAll();
+                    $this->outputPlugin->buffer->flushAll(true);
+                    $this->outputPlugin->buffer->driver->finalise();
                     SkipprLogger::info("Flushing output buffers to $outputPluginName destination.");
                     $this->outputPlugin->sync();
                     $this->offsetCommitAll();
                     $this->outputPlugin->shutdown();
-
                 }
 
                 if (!empty($this->deadletterPlugin)) {
-
                     $deadLetterPluginName = Config::getenv('DATA_OUTPUT_PLUGIN_NAME');
+                    $this->deadletterPlugin->buffer->driver->unlockAll();
+                    $this->deadletterPlugin->buffer->flushAll(true);
+                    $this->deadletterPlugin->buffer->driver->finalise();
                     SkipprLogger::info("Flushing dead letter buffers to $deadLetterPluginName destination.");
                     $this->deadletterPlugin->sync();
                     $this->deadletterPlugin->shutdown();
-
                 }
 
                 if (!empty($this->inputPlugin)) {
 
-//                    socket_close($this->sock);
-                    
                     SkipprLogger::info("Ingested " . $this->totalEntries . " messages");
                     SkipprLogger::info("Dead Letters " . $this->deadLetters . " dead letters");
                 }
@@ -1419,10 +1366,8 @@ class PipelineCommand
                 $this->finaliseFieldMapping();
 
                 $this->writeMapping();
-
             } else {
                 SkipprLogger::info("No fields found when analysing schema, did you send some data?");
-
             }
         }
 
@@ -1440,11 +1385,6 @@ class PipelineCommand
 //        $configYml['update_status'] = true;
 //        $configYml['status'] = false;
 //        event(new WorkerConfigRequested($configYml));
-
-        // Update Job Status
-        if (class_exists(PodsStatus::class)) {
-            PodsStatus::dispatch();
-        }
 
         $inputName = Config::getenv('DATA_SOURCE_PLUGIN_NAME');
         $outputName = Config::getenv('DATA_OUTPUT_PLUGIN_NAME');

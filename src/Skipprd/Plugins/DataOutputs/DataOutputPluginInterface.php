@@ -28,6 +28,5 @@ interface DataOutputPluginInterface
 
     public function deletePlugin();
 
-    public function resetSourceOffsets(): void ;
-    
+    public function resetSourceOffsets(): void;
 }

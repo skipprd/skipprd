@@ -90,17 +90,16 @@ class DataSourcePluginBase implements DataSourcePluginInterface
     {
     }
 
-    public function doSave() {
-
+    public function doSave()
+    {
     }
 
 
-    public function deletePlugin() {
-
+    public function deletePlugin()
+    {
     }
 
-    public function resetSourceOffsets(): void {
-
+    public function resetSourceOffsets(): void
+    {
     }
-    
 }

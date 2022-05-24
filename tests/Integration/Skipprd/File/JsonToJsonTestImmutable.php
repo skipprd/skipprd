@@ -23,7 +23,7 @@ class JsonToJsonTestImmutable extends DockerRun
         parent::setUp();
     }
 
-    public function testIsSequentialArrayKeys() {
+    public function testJsontoJsonImmutable() {
 
         $envs = [
             'DATA_SOURCE_PLUGIN_NAME=file',

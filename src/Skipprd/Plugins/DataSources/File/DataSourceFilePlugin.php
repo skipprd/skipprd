@@ -44,11 +44,17 @@ class DataSourceFilePlugin extends DataSourcePluginBase
                 SkipprLogger::info("Restarting File sync from checkpoint time $offsetTimestamp line $offsetLine");
             }
 
+            SkipprLogger::debug("Globing files from $path");
+            
             $filenames = glob($path . '/*', GLOB_NOSORT);
 
             usort($filenames, function ($a, $b) {
                 return filemtime($a) - filemtime($b);
             });
+
+            $filenamesList = json_encode($filenames);
+
+            SkipprLogger::debug("File list: $filenamesList");
 
             foreach ($filenames as $filename) {
                 $timestamp = filemtime($filename);

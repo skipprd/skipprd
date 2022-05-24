@@ -7,11 +7,8 @@ require_once __DIR__ . '/../vendor/autoload.php';
 Config::getConfig();
 
 if (Config::$runMode == Config::RUN_MODE_VALIDATE_SCHEMA) {
-
     $command = new \Skipprd\Commands\ValidateSchemaFile();
-
 } else {
-
     $command = new \Skipprd\Commands\PipelineCommand();
 
     function skippr_emit(

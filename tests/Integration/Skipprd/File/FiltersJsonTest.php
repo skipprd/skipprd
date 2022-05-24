@@ -13,7 +13,7 @@ use Docker\API\Model\ContainersCreatePostBody;
 use Docker\Docker;
 use Skipprd\Helpers;
 
-class FiltersJsonToJsonTest extends DockerRun
+class FiltersJsonTest extends DockerRun
 {
 
     public function setUp()
@@ -23,7 +23,7 @@ class FiltersJsonToJsonTest extends DockerRun
         parent::setUp();
     }
 
-    public function testFilterEquals() {
+    public function testFilterJsonEquals() {
 
         $envs = [
             'DATA_SOURCE_PLUGIN_NAME=file',
@@ -52,7 +52,7 @@ class FiltersJsonToJsonTest extends DockerRun
 
     }
 
-    public function testFilterIn() {
+    public function testFilterJsonIn() {
 
         $envs = [
             'DATA_SOURCE_PLUGIN_NAME=file',

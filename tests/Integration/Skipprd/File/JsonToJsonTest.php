@@ -23,7 +23,7 @@ class JsonToJsonTest extends DockerRun
         parent::setUp();
     }
 
-    public function testIsSequentialArrayKeys() {
+    public function testJsonToJson() {
 
         $envs = [
             'DATA_SOURCE_PLUGIN_NAME=file',

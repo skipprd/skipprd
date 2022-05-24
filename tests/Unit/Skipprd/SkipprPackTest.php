@@ -24,6 +24,23 @@ class SkipprPackTest extends TestCase
 
     }
 
+    public function testDecodeMessageLength()
+    {
+
+        $record = 'record_value';
+        $offset = 'offset_value';
+
+        $sp = new SkipprPack();
+
+        $sp->encode($record, $offset);
+
+        $msgLgn = $sp->decodeMessageLength();
+
+        $this->assertStringContainsString(28, $msgLgn);
+//        $this->assertStringNotContainsString($offset, $msgLgn);
+
+    }
+
 //    public function testString()
 //    {
 //

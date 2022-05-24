@@ -10,7 +10,7 @@ class OffsetDriverFactory
 
     /**
      * @param  String $type
-     * @return SkipprInternalOffsetDriver|SkipprFileOffsetDriver
+     * @return SkipprSaasOffsetDriver|SkipprFileOffsetDriver
      */
     static function factory(string $type)
     {

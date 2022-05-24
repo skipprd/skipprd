@@ -25,7 +25,7 @@ class DataOutputFilePlugin extends DataOutputPluginBase
     
     public function sync()
     {
-
+        
         while ($filename = $this->buffer->driver->nextFile()) {
             $path = $this->config['path'];
 

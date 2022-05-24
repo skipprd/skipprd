@@ -32,7 +32,7 @@ trait Ingest
             foreach ($sourceMessage as $field => $value) {
                 if (!empty($metadata[$field]['enabled'])) { // only ingest fields enabled to sync to output
                     if ($this->i == 1) {
-                        SkipprLogger::info("Ingesting field: $field");
+                        SkipprLogger::debug("Ingesting field: $field");
                     }
                     $this->ingestField($field, $value, $metadata, $message);
                 } elseif (isset(Config::$specialFields[$field])) {
@@ -161,7 +161,7 @@ trait Ingest
 
                 if (!empty($metadata[$field]['fields'][$sub_field]['enabled'])) { // only ingest fields enabled to sync to output
                     if ($this->i == 1) {
-                        SkipprLogger::info("Ingesting field: $sub_field");
+                        SkipprLogger::debug("Ingesting field: $sub_field");
                     }
 
                     $this->ingestField($sub_field, $sub_value, $metadata[$field]['fields'], $message[$field]);

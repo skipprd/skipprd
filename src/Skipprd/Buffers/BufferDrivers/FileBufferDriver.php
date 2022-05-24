@@ -39,7 +39,6 @@ class FileBufferDriver implements BufferDriverInterface
         @mkdir($this->bufferDir, 0777, true);
 
         $this->setSerde(Config::$outputFormat);
-        
     }
 
     public function setSerde(string $serde)
@@ -286,8 +285,6 @@ class FileBufferDriver implements BufferDriverInterface
 
         $locked = false;
 
-        SkipprLogger::debug("Creating lock on buffer chunk $chunkName");
-
         // dir is more reliable than waiting for fstat on a file
         if (@mkdir($chunkName . '.lock', 0777, true)) {
             $locked = true;
@@ -397,7 +394,7 @@ class FileBufferDriver implements BufferDriverInterface
                         $updatedTime = filectime($finalFilename);
                         $updatedDelta = time() - $updatedTime;
                         $bytes = filesize($finalFilename);
-                        $humanSize = BytesToHuman::toHuman($bytes);
+                        $humanSize = BytesToHuman::toHuman($bytes, true);
 
                         SkipprLogger::debug("Buffer file $filename finalised at $humanSize and age of $updatedDelta seconds");
 

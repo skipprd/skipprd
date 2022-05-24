@@ -23,7 +23,7 @@ class CsvToParquetTest extends DockerRun
         parent::setUp();
     }
 
-    public function testIsSequentialArrayKeys() {
+    public function testCsvToParquet() {
 
         $envs = [
             'DATA_SOURCE_PLUGIN_NAME=file',
@@ -50,7 +50,7 @@ class CsvToParquetTest extends DockerRun
 
 //        $this->assertParquetOutput();
 
-        $this->assertTrue(true);
+        $this->assertTrue(false);
     }
 
 }

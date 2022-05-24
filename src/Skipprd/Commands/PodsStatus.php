@@ -1,19 +1,19 @@
 <?php
 
-namespace Iq\Jobs;
+namespace Skipprd\Commands;
 
-use App\IngestJob;
-use App\Services\KubeClient;
-use Illuminate\Bus\Queueable;
-use Illuminate\Contracts\Queue\ShouldQueue;
-use Illuminate\Foundation\Bus\Dispatchable;
-use Illuminate\Queue\InteractsWithQueue;
-use Illuminate\Queue\SerializesModels;
-use Illuminate\Support\Facades\Cache;
-use Illuminate\Support\Facades\Log;
-use Iq\Events\PodsStatusRequested;
-use League\StatsD\Laravel5\Facade\StatsdFacade as Statsd;
-use RdKafka\TopicPartition;
+//use App\IngestJob;
+//use App\Services\KubeClient;
+//use Illuminate\Bus\Queueable;
+//use Illuminate\Contracts\Queue\ShouldQueue;
+//use Illuminate\Foundation\Bus\Dispatchable;
+//use Illuminate\Queue\InteractsWithQueue;
+//use Illuminate\Queue\SerializesModels;
+//use Illuminate\Support\Facades\Cache;
+//use Illuminate\Support\Facades\Log;
+//use Iq\Events\PodsStatusRequested;
+//use League\StatsD\Laravel5\Facade\StatsdFacade as Statsd;
+//use RdKafka\TopicPartition;
 
 class PodsStatus
 {
@@ -127,5 +127,4 @@ class PodsStatus
 //
 //        return 'Unknown';
 //    }
-
 }

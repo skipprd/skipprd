@@ -126,10 +126,10 @@ class ChunkedBuffer implements BufferInterface
 
         if ($result) {
             $size = BytesToHuman::toHuman($chunk['size'], true);
-            $time = $chunk['time'];
+            $time = (time() - $chunk['time']);
             $count = $chunk['count'];
 
-            SkipprLogger::debug("Flushing buffer of $size, $count records and age of $time seconds");
+            SkipprLogger::info("Flushing buffer of $size, $count records and age of $time seconds");
 
             $tenantId = Config::$tenantId;
             $pipelineName = Config::$pipelineName;

@@ -2,7 +2,6 @@
 
 namespace Skipprd\Commands;
 
-
 use Skipprd\Buffers\BufferAdaptorsFactory;
 use Skipprd\Serders\SerdersFactory;
 use Skipprd\Services\AvroSubPub\CachedSchemaRegistryClient;
@@ -38,19 +37,16 @@ class ValidateSchemaFile
      */
     public function init()
     {
-
-
     }
 
 
-        public function handle()
+    public function handle()
     {
 
 
         $this->init();
 
         try {
-
 //            $ingestJob = $configRequest->ingestJob;
             $fieldYml = Config::$discoveredFieldOccurrence;
 
@@ -110,9 +106,7 @@ class ValidateSchemaFile
 //            $fileBuffer->tempdir = '/data/' . $identifier;
 
             while ($line = $fileBuffer->driver->stream()) {
-
                 try {
-
                     $i++;
 
                     $sp = new SkipprPack($line);
@@ -135,16 +129,12 @@ class ValidateSchemaFile
 
 
                     if ($i > self::$msgMax) {
-
                         SkipprLogger::info("Validated against $i records");
 
                         $fileBuffer->driver->unlockAll();
                         
                         return $this->isValid();
-
                     }
-
-
                 } catch (\Exception $e) {
                     SkipprLogger::error("Fatal error while validating schema againstDead Letter queue");
 //                    SkipprLogger::error($e->getTraceAsString()); // very verbose for each message
@@ -155,11 +145,9 @@ class ValidateSchemaFile
 
                     return $this->isValid();
                 }
-
             }
 
             return $this->isValid();
-
         } catch (\Exception $e) {
             SkipprLogger::error('Caught exception: ' . $e->getMessage());
             SkipprLogger::error('On line: ' . $e->getLine());
@@ -171,7 +159,6 @@ class ValidateSchemaFile
 
             return $this->isValid();
         }
-
     }
 
     /**
@@ -190,21 +177,16 @@ class ValidateSchemaFile
     public function validateMapEvolution($fieldYml)
     {
         foreach ($fieldYml as $field => $metaData) {
-
             if (!empty($metaData['parent_type']) && $metaData['parent_type'] == 'map') {
-
                 if (!empty($metaData['evolution']) && count($metaData['evolution'])) {
                     foreach ($metaData['evolution'] as $type => $evolution) {
                         if ($evolution['type'] == 'new') {
-
                             $newField = $evolution['new_value'];
                             $parentType = $metaData['parent_type'];
                             $parentMapType = $metaData['determined_type'];
 
                             if ($type != $metaData['type']) {
-
                                 $this->validationErrors['new' . $field . $type . $newField] = "Field: $field - $type cannot be added to a $parentType field of $parentMapType.";
-
                             }
                         }
                     }
@@ -215,7 +197,6 @@ class ValidateSchemaFile
                 $this->validateMapEvolution($metaData['fields']);
             }
         }
-
     }
 
     public function ingestRecord(array $record, array $fieldYml, string $namespace)
@@ -229,19 +210,14 @@ class ValidateSchemaFile
         }
 
         foreach ($record as $field => $value) {
-
             try {
-
                 $this->ingestField($field, $value, $fieldYml, $this->msg[$namespace]);
-
             } catch (\Exception $e) {
-
                 $type = $fieldYml[$field]['determined_type'];
 
                 $this->validationErrors[$namespace]['ingest' . $field . $type] = "Field: $field - 
                 cannot ingest and cast value ($value) to data type $type.";
 //                            throw $e;
-
             }
         }
 
@@ -252,9 +228,7 @@ class ValidateSchemaFile
         // Test encode of whole message (e.g. to check maps)
         try {
             $this->encodeRecord(Config::$avroSchemas[$namespace], $this->msg);
-
         } catch (\Exception $e) {
-
             // Very verbose for each messsage
 //            SkipprLogger::error($e->getMessage());
 //            SkipprLogger::error($e->getTraceAsString());
@@ -262,8 +236,6 @@ class ValidateSchemaFile
             $this->validationErrors[$namespace]['record_encode'] = "Cannot encode data, 
             one or more of the fields schema types are invalid.";
         }
-
-
     }
 
     public function isValid()
@@ -274,7 +246,6 @@ class ValidateSchemaFile
         $result = [];
 
         if (empty($this->validationErrors)) {
-
             SkipprLogger::info("Schema is valid");
 
             $result = [
@@ -286,16 +257,13 @@ class ValidateSchemaFile
             Config::setStatus($this->setStatusString(100, $result));
 
             return true;
-
         } else {
-
             $result = [
                 'result' => 'invalid',
                 'errors' => [],
             ];
 
             foreach ($this->validationErrors as $namespace => $error) {
-
                 $result['errors'][$namespace][] = $error;
 
                 SkipprLogger::error($error);
@@ -308,8 +276,6 @@ class ValidateSchemaFile
 
             return false;
         }
-
-        
     }
 
     public function encodeAvroFields($avroFields, array $record, string $namespace)
@@ -318,7 +284,6 @@ class ValidateSchemaFile
         $recordsWithSchema = [];
 
         foreach ($avroFields as $key => $avroField) {
-
             $value = $record[$avroField['name']];
             $field = $avroField['name'];
             $fieldRecord = [];
@@ -326,28 +291,23 @@ class ValidateSchemaFile
 
             if (!empty($avroField['type'][1]['type'])
                 && in_array($avroField['type'][1]['type'], ['map', 'array', 'record'])) {
-
                 $type = $avroField['type'][1]['type'];
-
             } else {
                 $type = $avroField['type'][1];
             }
 
 
             try {
-
                 if ($type == 'record') {
-
-                    $recordsWithSchema[] = $this->encodeAvroFields($avroField['type'][1]['fields'],
-                        $fieldRecord[$field], $namespace);
-
+                    $recordsWithSchema[] = $this->encodeAvroFields(
+                        $avroField['type'][1]['fields'],
+                        $fieldRecord[$field],
+                        $namespace
+                    );
                 } else { // primitive/map type
-
                     $recordsWithSchema[] = $this->encodeRecord([$avroField], $fieldRecord);
                 }
-
             } catch (\Exception $e) {
-
                 $serialisedValue = json_encode($value, true);
 
                 $errorMsg = $e->getMessage();
@@ -355,13 +315,11 @@ class ValidateSchemaFile
                 // unique error message
                 $this->validationErrors[$namespace]['encode' . $field . $type] = "Field: $field - 
                 cannot encode value ($serialisedValue) to data type $type.";
-
             }
         }
 
 
         return $recordsWithSchema;
-
     }
 
     public function encodeRecord($avroSchema, $record)
@@ -371,7 +329,6 @@ class ValidateSchemaFile
         $recordsWithSchema = [];
         
         try {
-
             $valueSchemaJson = json_encode($schema);
             $valueSchema = \AvroSchema::parse($valueSchemaJson);
 
@@ -383,9 +340,7 @@ class ValidateSchemaFile
 
             $this->serde->subjectVersionToWritersSet($subject, $version, $valueSchema);
             $recordsWithSchema = $this->serde->encodeRecordWithSubjectAndVersion($subject, $version, $record, false);
-
         } catch (\Exception $e) {
-
             // unique error message
 //            $this->validationErrors[] = $e->getMessage();
 //            $this->validationErrors[] = $e->getLine();
@@ -401,7 +356,8 @@ class ValidateSchemaFile
      * @param $name
      * @return \Skipprd\Services\AvroSubPub\MessageSerializer
      */
-    public function avroSerde(string $name) {
+    public function avroSerde(string $name)
+    {
 
         $container = new CachedSchemaRegistryClient([]);
 
@@ -409,5 +365,4 @@ class ValidateSchemaFile
 
         return $serde;
     }
-
 }

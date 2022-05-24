@@ -5,7 +5,7 @@ namespace Skipprd\Plugins\OffsetDrivers;
 use Skipprd\Traits\Config;
 use Skipprd\Traits\SkipprLogger;
 
-class SkipprInternalOffsetDriver implements OffsetDriverInterface
+class SkipprSaasOffsetDriver implements OffsetDriverInterface
 {
 
     /**
@@ -53,11 +53,10 @@ class SkipprInternalOffsetDriver implements OffsetDriverInterface
 
         $uri = Config::getenv('SKIPPR_API_ENDPOINT');
 
-        $path = "ingest-job/offsets/$this->pipelineName";
+        $path = "/ingest-job/offsets/$this->pipelineName";
 
         // Get Mapping
         try {
-
             $client = new \GuzzleHttp\Client([
                 'base_uri' => $uri,
                 'headers' => [

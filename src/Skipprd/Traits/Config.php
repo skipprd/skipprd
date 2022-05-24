@@ -203,9 +203,9 @@ class Config
 
         $uri = self::getenv('SKIPPR_API_ENDPOINT');
 
-        SkipprLogger::info("Skippr API endpoint configured to $uri");
-
         if (!empty($uri)) {
+            SkipprLogger::info("Skippr API endpoint configured to $uri");
+            
             // Get Mapping
             try {
                 SkipprLogger::info('Requesting config for pipeline ' . $defaultPipelineName . ' from Skippr API');
@@ -488,13 +488,12 @@ class Config
         return $configYml;
     }
 
-    static public function setStatus(string $response = null)
+    public static function setStatus(string $response = null)
     {
 
         $uri = self::getenv('SKIPPR_API_ENDPOINT');
 
         if (!empty($uri)) {
-
             try {
                 $path = 'tasks/set-status';
 
@@ -521,11 +520,9 @@ class Config
                 ]);
 
                 SkipprLogger::debug('Notified task status API');
-
             } catch (\Exception $e) {
                 SkipprLogger::error($e->getMessage());
             }
-
         }
     }
 }

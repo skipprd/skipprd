@@ -23,7 +23,7 @@ class JsonToCsvTest extends DockerRun
         parent::setUp();
     }
 
-    public function testIsSequentialArrayKeys() {
+    public function testJsonToCsv() {
 
         $envs = [
             'DATA_SOURCE_PLUGIN_NAME=file',

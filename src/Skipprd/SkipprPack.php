@@ -41,11 +41,13 @@ class SkipprPack
         if (is_string($skipprPack)) {
             $this->string_buffer .= $skipprPack;
         } else {
-            throw new \Exception(sprintf('constructor argument must be a string: %s', gettype($skipprPack)));
+            throw new \Exception(sprintf('constructor argument must be a string: %s',
+                gettype($skipprPack)));
         }
     }
 
-    public function encode(string $payload = '', string $offset = '') : void
+
+    public function encode(string $payload = '', string $offset = ''): void
     {
 
         $this->payload = $payload;
@@ -59,6 +61,21 @@ class SkipprPack
 
         // write the record
         $this->write($this->payload);
+
+        // write message length for message framing
+        $this->string_buffer = pack('N',
+                $this->length()) . $this->string_buffer;
+    }
+
+    public function decodeMessageLength(): string
+    {
+        $this->rewind();
+
+        // skip message framing
+        $size = $this->read(4);
+        $msgLen = unpack('N', $size);
+
+        return $msgLen[1];
     }
 
     public function decodeRecord(): string
@@ -66,6 +83,13 @@ class SkipprPack
 
         $this->rewind();
 
+        // skip message framing
+//        $size = $this->read(4);
+//        $frameSize = unpack('N', $size);
+//        $this->seek($frameSize[1], SEEK_CUR);
+        $this->seek(4, SEEK_CUR);
+
+        // skip offset
         $size = $this->read(4);
         $offsetSize = unpack('N', $size);
         $this->seek($offsetSize[1], SEEK_CUR);
@@ -80,6 +104,11 @@ class SkipprPack
 
         $this->rewind();
 
+
+        // skip message framing
+        $this->seek(4, SEEK_CUR);
+
+
         $size = $this->read(4);
         $offsetSize = unpack('N', $size);
 
@@ -89,7 +118,7 @@ class SkipprPack
     }
 
 
-    public function read($len) : string
+    public function read($len): string
     {
 //        $read='';
 //        for($i=$this->current_index; $i<($this->current_index+$len); $i++)
@@ -107,7 +136,7 @@ class SkipprPack
     }
 
 
-    public function fpassthru() : string
+    public function fpassthru(): string
     {
 
         $len = $this->length() - $this->current_index;
@@ -124,38 +153,41 @@ class SkipprPack
      * @param int $whence
      * @return bool true if successful
      */
-    public function seek($offset, $whence = self::SEEK_SET) : bool
+    public function seek($offset, $whence = self::SEEK_SET): bool
     {
         if (!is_int($offset)) {
             throw new \Exception('Seek offset must be an integer.');
         }
 
         // Prevent seeking before BOF
-        switch ($whence)
-        {
+        switch ($whence) {
             case self::SEEK_SET:
-                if (0 > $offset)
+                if (0 > $offset) {
                     throw new \Exception('Cannot seek before beginning of file.');
+                }
                 $this->current_index = $offset;
                 break;
             case self::SEEK_CUR:
-                if (0 > $this->current_index + $whence)
+                if (0 > $this->current_index + $whence) {
                     throw new \Exception('Cannot seek before beginning of file.');
+                }
                 $this->current_index += $offset;
                 break;
             case self::SEEK_END:
-                if (0 > $this->length() + $offset)
+                if (0 > $this->length() + $offset) {
                     throw new \Exception('Cannot seek before beginning of file.');
+                }
                 $this->current_index = $this->length() + $offset;
                 break;
             default:
-                throw new \Exception(sprintf('Invalid seek whence %d', $whence));
+                throw new \Exception(sprintf('Invalid seek whence %d',
+                    $whence));
         }
 
         return true;
     }
 
-    public function rewind() : void
+    public function rewind(): void
     {
 
         $this->seek(0, self::SEEK_SET);
@@ -164,7 +196,7 @@ class SkipprPack
     /**
      * @return int
      */
-    public function tell() : int
+    public function tell(): int
     {
         return $this->current_index;
     }
@@ -172,12 +204,12 @@ class SkipprPack
     /**
      * @return boolean
      */
-    public function is_eof() : int
+    public function is_eof(): int
     {
         return ($this->current_index >= $this->length());
     }
 
-    public function length() : int
+    public function length(): int
     {
         return strlen($this->string_buffer);
     }
@@ -189,7 +221,9 @@ class SkipprPack
      */
     public function write($arg)
     {
-        if (is_string($arg)) return $this->append_str($arg);
+        if (is_string($arg)) {
+            return $this->append_str($arg);
+        }
     }
 
     /**
@@ -197,11 +231,12 @@ class SkipprPack
      * @param string $str
      * @return integer count of bytes written.
      */
-    private function append_str($str) : int
+    private function append_str($str): int
     {
         $this->string_buffer .= $str;
         $len = strlen($str);
         $this->current_index += $len;
+
         return $len;
     }
 
@@ -210,10 +245,11 @@ class SkipprPack
      * to the beginning of the buffer.
      * @return boolean true
      */
-    public function truncate() : bool
+    public function truncate(): bool
     {
         $this->string_buffer = '';
         $this->current_index = 0;
+
         return true;
     }
 
@@ -221,7 +257,7 @@ class SkipprPack
     /**
      * @return string
      */
-    public function __toString() : string
+    public function __toString(): string
     {
         return $this->string_buffer;
     }
@@ -231,7 +267,7 @@ class SkipprPack
      * @return string
      * @uses self::__toString()
      */
-    public function string() : string
+    public function string(): string
     {
         return $this->__toString();
     }

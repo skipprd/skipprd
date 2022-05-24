@@ -8,7 +8,8 @@ class Offsets
 
     protected array $offsets = [];
 
-    public function getAll(): array {
+    public function getAll(): array
+    {
 
         return $this->offsets;
     }

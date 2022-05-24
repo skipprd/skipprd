@@ -55,24 +55,23 @@ class DataOutputPluginBase implements DataOutputPluginInterface
     {
     }
 
-    public function doSave() {
-
+    public function doSave()
+    {
     }
 
-    public function createOrUpdateSchema(string $partition, array $schema) {
-
+    public function createOrUpdateSchema(string $partition, array $schema)
+    {
     }
 
-    public function deleteSchema() {
-
+    public function deleteSchema()
+    {
     }
 
-    public function deletePlugin() {
-        
+    public function deletePlugin()
+    {
     }
 
-    public function resetSourceOffsets(): void {
-
+    public function resetSourceOffsets(): void
+    {
     }
-
 }

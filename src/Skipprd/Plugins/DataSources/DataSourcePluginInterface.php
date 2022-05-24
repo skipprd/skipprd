@@ -23,5 +23,4 @@ interface DataSourcePluginInterface
     public function doSave();
 
     public function deletePlugin();
-
 }
