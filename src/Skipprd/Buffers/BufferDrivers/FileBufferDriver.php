@@ -211,7 +211,7 @@ class FileBufferDriver implements BufferDriverInterface
             $this->cpLine = 0;
         }
 
-//        return $this->stream(); // determined by env POLL_INTERVAL_SECONDS
+//        return $this->stream(); // determined by env DATA_SOURCE_POLL_INTERVAL_SECONDS
     }
 
 //    /**

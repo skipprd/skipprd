@@ -10,11 +10,14 @@ namespace Skipprd\Traits;
 
 use Carbon\Carbon;
 use Skipprd\Helpers;
+use Skipprd\SkipprPack;
 
 trait Ingest
 {
 
     public $flagMsgDeadLetter = false;
+
+    public $flagEvolvedField = false;
 
     public $avroSchema = null;
 
@@ -24,13 +27,21 @@ trait Ingest
         $this->i++;
 
         if (!empty($sourceMessage)) {
-            $message = $this->defaultMsgs[$namespace];
+            if (!empty($this->defaultMsgs[$namespace])) {
+                $message = $this->defaultMsgs[$namespace];
+            } else {
+                $message = [];
+            }
 
             /*
              * Transformations and schema evolution
              */
             foreach ($sourceMessage as $field => $value) {
-                if (!empty($metadata[$field]['enabled'])) { // only ingest fields enabled to sync to output
+                $field = Helpers::cleanFieldName($field);
+
+                // only ingest fields enabled to sync to output
+                // or that are unknown, therefore we want to discover their schema
+                if (empty($metadata[$field]) || $metadata[$field]['enabled'] === true) {
                     if ($this->i == 1) {
                         SkipprLogger::debug("Ingesting field: $field");
                     }
@@ -53,6 +64,31 @@ trait Ingest
 
             //                            $this->entries[$key] = $record;
 
+            if ($this->flagEvolvedField
+                && !Config::$analysing
+                && Config::$runMode == Config::RUN_MODE_SYNC
+                && Config::$mutableMode === Config::MUTABLE_MODE_EVOLVE
+            ) {
+                SkipprLogger::info("Discovered new fields in namespace $namespace");
+
+                // ensure we can start ingesting the newly discovered field.
+                // auto-accepted new fields types, then fetch that mapping
+                // and set the local reference for the current namespace.
+                Config::setConfig();
+                Config::getConfig();
+                $metadata = Config::$discoveredFieldOccurrence[$namespace]['fields'];
+
+                // send schema update signal to output
+                $skipprPack = new SkipprPack();
+                $skipprPack->encode('schema_update', '');
+
+                $this->streamSend($skipprPack, STREAM_OOB);
+
+                $this->flagEvolvedField = false;
+
+                // IMPORTANT to backoff here
+                sleep(10);
+            }
 
             if (!$this->flagMsgDeadLetter
                 && $this->avroEncodeTest($message, $namespace)
@@ -149,9 +185,13 @@ trait Ingest
             // discover schema for new fields
             $dataType = $this->resolveFieldType($metadata, $field, $value);
 
-            $this->flagMsgDeadLetter = true;
+//            if (empty($metadata[$field])) {
+//                SkipprLogger::info("Discovered new field: '$field' of type: '$dataType'");
+//            }
 
-//            SkipprLogger::debug("dead letter");
+            SkipprLogger::info("Discovered new field: '$field' of type: '$dataType'");
+
+            $this->flagEvolvedField = true;
         }
 
 //        if (is_array($value) && !empty($value) && $dataType != 'array') {
@@ -220,7 +260,7 @@ trait Ingest
      * @param $value string -  the actual field value
      * @return mixed|null - value data type on success or null on error
      */
-    public function setValue($dataType, &$field, $value, $fieldOccurrence = [])
+    public function setValue($dataType, &$field, $value, $fieldOccurrence = [], $allowFallback = true)
     {
 
         try {
@@ -317,8 +357,92 @@ trait Ingest
                     throw new \Exception();
             }
         } catch (\Exception $e) {
-            $this->handleValueError($field, $value, $fieldOccurrence);
+            if ($allowFallback) {
+                $this->handleValueError($field, $value, $fieldOccurrence);
+            }
+
             return $value;
         }
+    }
+
+    /**
+     * @param $dataType string - the expected data type of the field value
+     * @param $field string - field name
+     * @param $value string -  the actual field value
+     * @return mixed|null - value data type on success or null on error
+     */
+    static public function fastSetValue(string $dataType, string $field, $value, array $metadata = null)
+    {
+
+        if (
+            $value !== null
+            && (
+                $metadata[$field]['enabled'] === true
+                || empty($metadata)
+            )
+        ) {
+            if ($dataType === 'record') {
+                foreach ($value as $key => $val) {
+//                    $newValue[$key] = $this->fastSetValue(
+//                        $metadata[$field]['fields'][$key]['determined_type'],
+//                        $key,
+//                        $val,
+//                        $metadata[$field]['fields'][$key]['fields']
+//                    );
+//
+//                    unset($key, $val);
+
+                    $value = self::fastSetValue($metadata[$field]['fields'][$key]['determined_type'],
+                        $key,
+                        $val,
+                        $metadata[$field]['fields'][$key]['fields']
+                    );
+                }
+//                $value = $newValue;
+//                unset($newValue);
+//            } elseif ($dataType === 'map') {
+//                $newValue = [];
+//                foreach ($value as $key => $val) {
+//                    $newValue[$key] = $this->fastSetValue(
+//                        $metadata[$field]['fields'][$key]['determined_type'],
+//                        $key,
+//                        $val,
+//                        $metadata[$field]['fields'][$key]['fields']
+//                    );
+//                }
+//                $value = $newValue;
+//            } elseif ($dataType === 'array') {
+//                $newValue = [];
+//                foreach ($value as $key => $val) {
+//                    if ($metadata[$field]['determined_type_values'] !== null) {
+//                        $newValue[$key] = $this->fastSetValue(
+//                            $metadata[$field]['determined_type_values'],
+//                            $key,
+//                            $val
+//                        );
+//                    }
+//                }
+//                $value = $newValue;
+
+            } elseif ($dataType === 'string') {
+                $value .= '';
+            } elseif ($dataType === 'timestamp' || $dataType === 'timestamp_milli') {
+                $value = (int) $value + 0;// force string to int
+            } elseif ($dataType === 'date') {
+                $value = (int) $value + 0; // force string to int
+            } elseif ($dataType === 'int' || $dataType === 'integer') {
+                $value = (int) $value + 0; // force string to int
+            } elseif ($dataType === 'long') {
+                $value = (int) $value + 0; // force strings to long
+            } elseif ($dataType === 'double') {
+                $value = (float) sprintf("%.2f", $value);
+            } elseif ($dataType === 'boolean') {
+                $value = (bool) $value;
+            }
+        }
+
+        unset($dataType, $field, $metadata);
+
+        return $value;
     }
 }

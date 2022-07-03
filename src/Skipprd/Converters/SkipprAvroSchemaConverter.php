@@ -80,7 +80,8 @@ class SkipprAvroSchemaConverter implements SchemaConverterInterface
         $type = self::$avroTypeMappings[$determined_type];
 
         $fieldCleanName = Helpers::cleanFieldName($field);
-
+//        $fieldCleanName = $field;
+        
         if (in_array($determined_type, ['map', 'array', 'record']) > 0) {
             if ($determined_type == 'array'
                 && !empty($skipprSchema[$field]['determined_type_values']) // ignore empty arrays
@@ -211,6 +212,7 @@ class SkipprAvroSchemaConverter implements SchemaConverterInterface
             foreach ($skipprSchema[$field]['evolution'] as $dataType => $evolution) {
                 if (in_array($evolution['type'], ['new', 'rename'])) {
                     $new_field = Helpers::cleanFieldName($evolution['new_value']);
+//                    $new_field = $evolution['new_value'];
 
                     // de-duplicate
                     if (isset($fieldNamesCount[$new_field])) {

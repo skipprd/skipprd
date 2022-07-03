@@ -77,4 +77,23 @@ class ChunkedBufferTest extends TestCase
 
         $this->assertStringNotContainsString('time', $chunkName);
     }
+
+    public function testDecodeChunkTime()
+    {
+
+        $testBuffer = new TestBuffer();
+
+        $chunkedBuffer = new ChunkedBuffer('foo', $testBuffer);
+
+        $namespace = 'foo_namespace';
+        $partition = 'foo_partition';
+        $timeBucket = 1653902353;
+
+        $chunkName = $chunkedBuffer->encodeChunkName($namespace, $partition, $timeBucket);
+
+        $timePartition = $chunkedBuffer->decodeChunkTime($chunkName);
+
+        $this->assertEquals('2022-05-30T09:19:13+00:00', $timePartition);
+
+    }
 }

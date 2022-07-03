@@ -14,25 +14,21 @@ class SkipprSaasOffsetDriver implements OffsetDriverInterface
      */
     private $committedOffsets = [];
 
-    protected $pipelineName = '';
-
-    public function __construct()
+    public function get(): array
     {
-        $this->pipelineName = Config::getPipelineName();
+
+        $this->committedOffsets = $this->client();
+
+//        $this->committedOffsets = json_decode($body, true);
+
+        return $this->committedOffsets;
     }
 
-    public function get() : array
-    {
-
-        $body = $this->client();
-
-        $this->committedOffsets = json_decode($body, true);
-
-        return   $this->committedOffsets;
-    }
-
-    public function sync(string $namespace, string $partition, string $offset) : void
-    {
+    public function sync(
+        string $namespace,
+        string $partition,
+        string $offset
+    ): void {
 
         $this->committedOffsets[$namespace][$partition] = $offset;
 
@@ -53,7 +49,7 @@ class SkipprSaasOffsetDriver implements OffsetDriverInterface
 
         $uri = Config::getenv('SKIPPR_API_ENDPOINT');
 
-        $path = "/ingest-job/offsets/$this->pipelineName";
+        $path = "/ingest-job/offsets/" . Config::$pipelineId;
 
         // Get Mapping
         try {
@@ -81,11 +77,11 @@ class SkipprSaasOffsetDriver implements OffsetDriverInterface
                     break;
 
                 case 'GET':
-                    $body = $client->get($path)->getBody();
-                    break;
+                    $body = json_decode($client->get($path)->getBody(), true);
+                    $offsets = (!empty($body) ? $body : []);
+
+                    return $offsets;
             }
-            
-            return $body;
         } catch (\Exception $e) {
             SkipprLogger::error($e->getMessage());
         }

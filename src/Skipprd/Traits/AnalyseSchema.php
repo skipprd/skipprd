@@ -119,6 +119,8 @@ trait AnalyseSchema
         $this->i++;
 
         foreach ($message as $field => $value) {
+            $field = Helpers::cleanFieldName($field);
+            
             $this->analyseField($field, $value, $metadata);
         }
     }
@@ -269,6 +271,9 @@ trait AnalyseSchema
             $dataType = 'boolean';
         }
 
+        if ($dataType == 'NULL') { // most systems won't support null
+            $dataType = 'string';
+        }
         // @todo - logical interpretation based on field name
 
         return $dataType;
@@ -533,6 +538,17 @@ trait AnalyseSchema
             $array[$field]['evolution'][$dataType]['new_value'] = '';
             $array[$field]['evolution'][$dataType]['sample'] = $value;
             $array[$field]['evolution'][$dataType]['solved'] = false;
+
+            if (!Config::$analysing
+                && Config::$runMode == Config::RUN_MODE_SYNC
+                && Config::$mutableMode === Config::MUTABLE_MODE_EVOLVE
+            ) {
+
+                // auto-accept new fields and types when syncing in 'evolve' mode
+                $array[$field]['determined_type'] = $dataType;
+
+            }
+
         } else {
             $array[$field]['type'][$dataType]++;
         }

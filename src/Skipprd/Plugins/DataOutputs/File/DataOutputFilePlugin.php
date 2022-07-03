@@ -32,10 +32,10 @@ class DataOutputFilePlugin extends DataOutputPluginBase
             $namespace = $this->buffer->decodeFileNamespace($filename);
             $partition = $this->buffer->decodeFilePartition($filename);
             $timePartition = $this->buffer->decodeChunkTime($filename);
-            
-            $path = (!empty($timePartition)) ? $path . '/' . $timePartition : $path;
+
             $path = (!empty($namespace)) ? $path . '/' . $namespace : $path;
             $path = (!empty($partition)) ? $path . '/' . $partition : $path;
+            $path = (!empty($timePartition)) ? $path . '/' . $timePartition : $path;
 
             @mkdir($path, 0755, true);
 

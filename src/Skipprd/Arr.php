@@ -29,10 +29,10 @@ class Arr
      * @param  mixed  $value
      * @return bool
      */
-    public static function accessible($value)
-    {
-        return is_array($value) || $value instanceof ArrayAccess;
-    }
+//    public static function accessible($value)
+//    {
+//        return is_array($value) || $value instanceof ArrayAccess;
+//    }
 
     /**
      * Add an element to an array using "dot" notation if it doesn't exist.
@@ -157,11 +157,12 @@ class Arr
      */
     public static function exists($array, $key)
     {
-        if ($array instanceof ArrayAccess) {
-            return $array->offsetExists($key);
-        }
-
-        return array_key_exists($key, $array);
+        return isset($array[$key]);
+//        if ($array instanceof ArrayAccess) {
+//            return $array->offsetExists($key);
+//        }
+//
+//        return array_key_exists($key, $array);
     }
 
     /**
@@ -222,7 +223,7 @@ class Arr
         $result = [];
 
         foreach ($array as $item) {
-            $item = $item instanceof Collection ? $item->all() : $item;
+//            $item = $item instanceof \Collection ? $item->all() : $item;
 
             if (! is_array($item)) {
                 $result[] = $item;
@@ -243,7 +244,7 @@ class Arr
      * @param  array|string  $keys
      * @return void
      */
-    public static function forget(&$array, $keys)
+    public static function forget(array &$array, $keys)
     {
         $original = &$array;
 
@@ -288,11 +289,11 @@ class Arr
      * @param  mixed   $default
      * @return mixed
      */
-    public static function get($array, $key, $default = null)
+    public static function get(array $array, $key, $default = null)
     {
-        if (! static::accessible($array)) {
-            return value($default);
-        }
+//        if (!static::accessible($array)) {
+//            return value($default);
+//        }
 
         if (is_null($key)) {
             return $array;
@@ -307,7 +308,8 @@ class Arr
         }
 
         foreach (explode('.', $key) as $segment) {
-            if (static::accessible($array) && static::exists($array, $segment)) {
+//            if (static::accessible($array) && static::exists($array, $segment)) {
+            if (static::exists($array, $segment)) {
                 $array = $array[$segment];
             } else {
                 return value($default);
@@ -324,7 +326,7 @@ class Arr
      * @param  string|array  $keys
      * @return bool
      */
-    public static function has($array, $keys)
+    public static function has(array $array, $keys)
     {
         if (is_null($keys)) {
             return false;
@@ -332,7 +334,7 @@ class Arr
 
         $keys = (array) $keys;
 
-        if (! $array) {
+        if (!$array) {
             return false;
         }
 
@@ -348,7 +350,7 @@ class Arr
             }
 
             foreach (explode('.', $key) as $segment) {
-                if (static::accessible($subKeyArray) && static::exists($subKeyArray, $segment)) {
+                if (static::exists($subKeyArray, $segment)) {
                     $subKeyArray = $subKeyArray[$segment];
                 } else {
                     return false;
@@ -524,7 +526,7 @@ class Arr
      * @param  mixed   $value
      * @return array
      */
-    public static function set(&$array, $key, $value)
+    public static function set(array &$array, $key, $value)
     {
         if (is_null($key)) {
             return $array = $value;

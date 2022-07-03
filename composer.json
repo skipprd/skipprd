@@ -17,10 +17,6 @@
   "repositories": [
     {
       "type": "git",
-      "url": "https://github.com/paulhudson/laravel-pubsub.git"
-    },
-    {
-      "type": "git",
       "url": "git@github.com:skipprd/machine-to-human.git"
     },
     {
@@ -53,8 +49,7 @@
     "wikimedia/avro": "^1.9",
     "league/statsd": "^1.5",
     "aws/aws-sdk-php": "^3.173",
-    "guzzlehttp/guzzle": "^6.3",
-    "segmentio/analytics-php": "^1.7"
+    "guzzlehttp/guzzle": "^6.3"
   },
   "require-dev": {
     "fzaninotto/faker": "~1.4",

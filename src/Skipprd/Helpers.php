@@ -3,6 +3,9 @@
 
 namespace Skipprd;
 
+use Skipprd\Traits\Config;
+use Skipprd\Traits\SkipprLogger;
+
 class Helpers
 {
 
@@ -27,6 +30,7 @@ class Helpers
         if (array_key_first($arr) !== 0 && array() === $arr) {
             return false;
         }
+
         return array_keys($arr) === range(0, count($arr) - 1);
     }
 
@@ -46,11 +50,20 @@ class Helpers
         $field = strtolower($field);
 
         $pattern = "/[^" . preg_quote(
-            '0123456789_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ',
+            '_0123456789_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ',
             "/"
         ) . "]/";
 
-        return preg_replace($pattern, "", $field);
+        $clean = preg_replace($pattern, "_", $field);
+
+        $clean = preg_replace($pattern, "_", $field);
+
+        $clean = ltrim($clean, '0123456789');
+
+        // '_' at the beginning is common and probably allowable
+        $clean = trim($clean, '_');
+
+        return $clean;
     }
 
     static function cleanArrayFieldNames(&$array)
@@ -92,5 +105,49 @@ class Helpers
         }
 
         return implode($pass); //turn the array into a string
+    }
+
+    /**
+     * Flatten a multi-dimensional array into a single level.
+     *
+     * @param array $array
+     * @param int $depth
+     * @return array
+     */
+    public static function flatten(array $array, $delimiter = '', $prefix = '')
+    {
+        $result = array();
+        foreach ($array as $key => $value) {
+            if (is_array($value)) {
+                $result = $result + self::flatten(
+                    $value,
+                    '_',
+                    $prefix . $delimiter . $key
+                );
+            } else {
+                $result[$prefix . $delimiter . $key] = $value;
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * @return bool - true for mem allocation full, false for mem available
+     *
+     * clone from https://www.php.net/manual/en/function.memory-get-usage.php#120665
+     */
+    public static function memLimitReached(): bool
+    {
+
+        $memLimit = Config::$containerMem * 1024 * 1024 * 0.8; // allow overhead, set below memory_limit
+
+        $memUsage = memory_get_usage();
+
+        if ($memUsage >= $memLimit) {
+            return true;
+        }
+
+        return false;
     }
 }

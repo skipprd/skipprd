@@ -56,6 +56,8 @@ class SerderJson implements SerderStreamInterface
             }
         }
 
+        fclose($fp);
+
         return $messages;
     }
 
@@ -115,7 +117,42 @@ class SerderJson implements SerderStreamInterface
                 $string = substr($string, $jsonStart);
             }
 
+
             $message = json_decode($string, true);
+
+            if (json_last_error() == 4) {
+
+                /**
+                 * Check for object concatinated into single line with no delemiter
+                 * e.g. as AWS Kinesis Firehose does
+                 */
+
+                $records = explode('}{', $string);
+
+                $count = count($records);
+                $i = 1;
+
+                foreach ($records as $record) {
+
+//                    if (substr($record, strlen($record) - 1) !== '}') {
+                    if ($i === 1) {
+                         $record .= '}';
+                    }
+
+                    if ($i > 1 && $i < $count) {
+                        $record = '{' . $record;
+                        $record .= '}';
+                    }
+
+//                    if (substr($record, 0, 1) !== '{') {
+                    if ($i === $count) {
+                        $record = '{' . $record;
+                    }
+                    $message[] = json_decode($record, true);
+
+                    $i++;
+                }
+            }
         }
 
         return $message;

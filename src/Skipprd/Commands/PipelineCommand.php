@@ -8,19 +8,24 @@
 
 namespace Skipprd\Commands;
 
+use Skipprd\InternalFields;
+use Skipprd\MachineToHuman\BytesToHuman;
+use Skipprd\MachineToHuman\NumberToHuman;
+use Skipprd\MachineToHuman\TimeToHuman;
 use Skipprd\Plugins\OffsetDrivers\OffsetDriverFactory;
 use Skipprd\Arr;
 use Skipprd\Buffers\BufferAdaptorsFactory;
 use Skipprd\Plugins\PluginFactory;
 use Carbon\Carbon;
 use Skipprd\Helpers;
+use Skipprd\Serders\SerderAvroRecord;
+use Skipprd\Serders\SerderParquet;
 use Skipprd\SkipprPack;
 use Skipprd\Str;
 use Skipprd\Serders\SerdersFactory;
 use League\StatsD\Client as Statsd;
 use Skipprd\Plugins\DataSources\DataSourcePluginInterface;
 use Skipprd\Plugins\DataOutputs\DataOutputPluginInterface;
-use Segment;
 use Skipprd\Traits\AnalyseSchema;
 use Skipprd\Traits\Config;
 use Skipprd\Traits\Ingest;
@@ -43,6 +48,9 @@ class PipelineCommand
     use RecordFilter;
     use SkipprStream;
 
+    /**
+     * @var Statsd
+     */
     protected $statsd = null;
 
     public $inputThread = null;
@@ -76,6 +84,8 @@ class PipelineCommand
     public $startTimestamp = 0;
 
     public $totalEntries = 0;
+    public $fastPath = 0;
+    public $slowPath = 0;
 
     public $hashes = [];
 
@@ -85,7 +95,7 @@ class PipelineCommand
 
     public $lastStatusUpdate = 0;
 
-    public $statusUpdateIntervalSeconds = 60;
+    public $statusUpdateIntervalSeconds = 10;
 
     /**
      * @var \Skipprd\Plugins\DataSources\DataSourcePluginBase
@@ -245,7 +255,15 @@ class PipelineCommand
         try {
             $this->init();
 
-//        set_exception_handler([$this, 'exceptionHandler']);
+//            $converterClass = 'Skipprd\Converters\AvroParquetSchemaConverter';
+//            $this->converter = new $converterClass();
+//            foreach(Config::$schema as $namespace => $schema) {
+//                $this->converter->convert(self::$avroSchemas[$namespace]);
+//            }
+//            $this->testSerde = new SerderParquet();
+//            set_exception_handler([$this, 'exceptionHandler']);
+
+            set_error_handler([$this, 'exceptionsErrorHandler']);
 
             // handle sigs
             // PHP 7.1 and later can handle asynchronous signals natively
@@ -275,39 +293,24 @@ class PipelineCommand
 
 
                 if (Config::$runMode == Config::RUN_MODE_SYNC) {
-
                     $this->inputPlugin->buffer->flushAll();
 
                     if (!Config::$analysing) {
-                        $this->streamConnect();
+                        $conn = $this->streamConnect();
                     }
 
                     $ran = false;
-                    while (!Config::$analysing && (!$ran || !empty(Config::$pollIntervalSeconds))) {
+                    while ($conn && (!$ran || !empty(Config::$pollIntervalSeconds))) {
                         $ran = true;
 
                         $this->inputPlugin->sync();
 
-//                        sleep(1); // Ensure outputs TCP buffer is flush
+                        $this->scheduledStatusUpdate();
 
-                        if (!Config::$analysing) {
-                            
-                            $skipprPack = new SkipprPack();
-                            $skipprPack->encode('sync_complete', '');
-
-                            $this->streamSend($skipprPack, null);
-
-                            sleep(Config::$pollIntervalSeconds ?? 1);
-
-                            $this->scheduledStatusUpdate();
-                        }
-
+                        sleep(Config::$pollIntervalSeconds ?? 1);
                     }
-
-                    fclose($this->sock);
-
+                    
                     $this->shutdown();
-
                 }
 
 
@@ -346,8 +349,6 @@ class PipelineCommand
                     $this->resetSourceOffsets();
                     $this->shutdown();
                 }
-
-                
             } else {
                 if (!empty($this->deadletterPlugin)) {
                     $ran = false;
@@ -380,6 +381,8 @@ class PipelineCommand
                             $this->deadletterPlugin->deletePlugin();
                         }
                     }
+
+                    $this->shutdown();
                 }
 
                 // keep output alive
@@ -387,34 +390,58 @@ class PipelineCommand
                 if (!empty($this->outputPlugin)) {
                     $ran = false;
 
+                    if (Config::$analysing) {
+                        SkipprLogger::info("In analysing mode, nothing for output to do. Did you mean to run an input?");
+                        $this->shutdown();
+                    }
+
                     if (Config::$runMode == Config::RUN_MODE_SYNC) {
 
                         $this->host = Config::getenv('HOST', '0.0.0.0');
-
                         SkipprLogger::info("Listening on {$this->host}:{$this->port}");
 
                         $this->sock = $this->streamListen();
 
-                        $this->streamRead([$this, 'serialiseOutput'], [$this->outputPlugin, 'sync']);
-                        
+                        while (true) {
+//                            if ($this->sock) {
+//                                @socket_close($this->sock);
+//                            }
+
+
+
+                            $this->streamRead(
+                                [$this, 'serialiseOutput'],
+                                [$this->outputPlugin, 'sync']
+                            );
+
+                            // reconnect if we drop for some reason, input container will send a signal when complete
+//                            sleep(1);
+                        }
                     }
 
+                    SkipprLogger::info("Finished reading from stream socket.");
+
+                    $this->shutdown();
 
                     if (Config::$runMode == Config::RUN_MODE_VALIDATE_CONFIG) {
                         $this->outputPlugin->doValidateConfig();
+                        $this->shutdown();
                     }
 
                     if (Config::$runMode == Config::RUN_MODE_VALIDATE_CONNECTION) {
                         $this->outputPlugin->doValidateConnection();
+                        $this->shutdown();
                     }
 
                     if (Config::$runMode == Config::RUN_MODE_SAVE) {
                         // @todo - need this?
                         $this->outputPlugin->doSave();
+                        $this->shutdown();
                     }
 
                     if (Config::$runMode == Config::RUN_MODE_DELETE_PLUGIN) {
                         $this->outputPlugin->deletePlugin();
+                        $this->shutdown();
                     }
 
                     if (Config::$runMode == Config::RUN_MODE_CREATE_UPDATE_DEST_SCHEMA) {
@@ -426,10 +453,12 @@ class PipelineCommand
                                 $avroSchema
                             );
                         }
+                        $this->shutdown();
                     }
 
                     if (Config::$runMode == Config::RUN_MODE_DELETE_DEST_SCHEMA) {
                         $this->outputPlugin->deleteSchema();
+                        $this->shutdown();
                     }
                 }
             }
@@ -460,19 +489,33 @@ class PipelineCommand
     {
 
         if ($this->lastStatusUpdate < time() - $this->statusUpdateIntervalSeconds) {
-            Config::setStatus();
+
+            if (extension_loaded('newrelic')) {
+                newrelic_ignore_transaction();
+            }
+
+            SkipprLogger::info("Memory used ". BytesToHuman::toHuman(memory_get_usage(), true));
+
+            if (!empty($this->inputPlugin)) {
+                SkipprLogger::info("Ingested messages " . NumberToHuman::toHuman($this->totalEntries));
+                SkipprLogger::info("Fast Path messages " . NumberToHuman::toHuman($this->fastPath));
+                SkipprLogger::info("Slow Path messages " . NumberToHuman::toHuman($this->slowPath));
+                SkipprLogger::info("Ingested Bytes " . BytesToHuman::toHuman($this->dataReadBytes, true));
+                SkipprLogger::info("Runtime " . TimeToHuman::toHuman(Carbon::now()->timestamp - $this->startTimestamp, true));
+            }
+
+
+            $resp = [
+                "msgs_total" => $this->totalEntries,
+                "bytes_total" => $this->dataReadBytes,
+                "deadletters_total" => $this->deadLetters,
+                "run_time_seconds" => Carbon::now()->timestamp - $this->startTimestamp,
+            ];
+
+            Config::setStatus($resp);
+            Config::setConfig();
             $this->lastStatusUpdate = time();
         }
-    }
-
-    public function exceptionHandler(\Exception $e)
-    {
-
-        SkipprLogger::error($e->getMessage());
-
-        SkipprLogger::warning("Uncaught exception, shutting down all threads.");
-
-        $this->shutdown();
     }
 
     /**
@@ -481,18 +524,20 @@ class PipelineCommand
     public function init()
     {
 
-        Segment::init(Config::$segmentKey);
+        $this->statsd = new Statsd();
 
         if (Config::getenv('STATSD_HOST') && Config::getenv('STATSD_PORT')) {
             // @todo - factory stats interface (statsd + skippr enterpise http endpoint)
-            $this->statsd = new Statsd();
-
             $this->statsd->configure([
                 'host' => Config::getenv('STATSD_HOST'),
                 'port' => Config::getenv('STATSD_PORT'),
 //            'namespace' => 'skippr'
             ]);
         }
+
+//        if (extension_loaded('newrelic')) { // Ensure PHP agent is available
+//            newrelic_ignore_transaction();
+//        }
 
         // setup global monolog
 //        $application = new Logger('skipprd');
@@ -525,15 +570,6 @@ class PipelineCommand
 
             $this->shutdown();
         }
-
-        Segment::identify([
-            "userId" => hash('sha256', Config::$tenantId),
-            "licenseKey" => $this->licenseKey,
-            "traits" => [
-                "pipeline_name" => hash('sha256', Config::$pipelineName),
-            ]
-        ]);
-
 
         $this->connect();
 
@@ -570,59 +606,70 @@ class PipelineCommand
     public function outputEmit(array $payload): void
     {
 
-
+        $source_namespace = $payload['source_namespace'];
+        $source_partition = $payload['source_partition'];
         $namespace = $payload['skpr_namespace'];
         $partition = $payload['skpr_partition'];
 
         $offset = (string) $this->inputPlugin->offsets->getCurrentOffsets(
-            $namespace,
-            $partition
+            $source_namespace,
+            $source_partition
         );
 
-        if (!empty($payload) && !empty($offset)) {
-
+//        if (!empty($payload) && !empty($offset)) {
+        try {
             $serialised = msgpack_pack($payload);
             $sp = new SkipprPack();
             $sp->encode($serialised, $offset);
 
             $skipprPack = $sp->string();
 
-            $this->streamSend($skipprPack, null);
+            unset($sp);
 
-
-        } else {
+//            $this->streamSend($skipprPack, null);
+        } catch (\Exception $e) {
             SkipprLogger::error("Failed to output, no offset or payload");
         }
+//        }
     }
 
     public function serialiseOutput(SkipprPack $sp): void
     {
 
+        $this->scheduledStatusUpdate();
+
+        if (extension_loaded('newrelic')) {
+            newrelic_start_transaction('skipprd');
+            newrelic_name_transaction('output');
+        }
+
         $record = '';
 
         try {
-
             $record = $sp->decodeRecord();
             $offset = $sp->decodeOffset();
-            
+            $sizeBytes = strlen($sp->string());
         } catch (\Exception $e) {
-
             SkipprLogger::error($e->getMessage());
-
         }
 
-        if (!empty($record)) { // @todo - why do we get emtpy messages over the network sometimes?
-
-            // @todo - often get 'Warning: [msgpack] (php_msgpack_unserialize) Extra bytes' without @
-            $payload = @msgpack_unpack($record);
-            
+//        if (!empty($record)) { // @todo - why do we get emtpy messages over the network sometimes?
             try {
-                $eventTime = $payload['skpr_event_ts'];
-                $namespace = $payload['skpr_namespace'];
-                $partition = $payload['skpr_partition'];
+                // @todo - often get 'Warning: [msgpack] (php_msgpack_unserialize) Extra bytes' without @
+                $payload = @msgpack_unpack($record);
 
-                $offset = $this->outputPlugin->offsets->setOffsets($offset,
-                    $namespace, $partition);
+//                if (empty($payload)) {
+//                    SkipprLogger::error("Empty message");
+//                }
+
+                $eventTime = InternalFields::parseTimeField($payload);
+                $source_namespace = $payload['source_namespace'];
+                $source_partition = $payload['source_partition'];
+                $namespace = $payload['skpr_namespace'];
+                // @todo - empty() performance
+                $partition = InternalFields::parsePartitionField($payload, $source_partition);
+
+                $this->outputPlugin->offsets->setOffsets($offset, $source_namespace, $source_partition);
 
                 $record = $payload;
 //            unset($record['skpr_event_ts']);
@@ -652,6 +699,7 @@ class PipelineCommand
 //                $this->outputPlugin->buffer->append($serialised, false, $eventTime, $partition);
                     $result = $this->outputPlugin->buffer->append(
                         $record,
+                        $sizeBytes,
                         false,
                         $eventTime,
                         $namespace,
@@ -666,6 +714,7 @@ class PipelineCommand
                 } elseif (Config::$syncMode == 'async') {
                     $result = $this->outputPlugin->buffer->append(
                         $record,
+                        $sizeBytes,
                         false,
                         $eventTime,
                         $namespace,
@@ -674,18 +723,13 @@ class PipelineCommand
                 }
 
                 if ($result == 2) { // buffer was flushed
-                    $this->offsetCommitRoutine($namespace, $partition);
+                    $this->offsetCommitRoutine($source_namespace, $source_partition);
                 }
 
                 $tenantId = Config::$tenantId;
                 $pipelineName = Config::$pipelineName;
 
-                if (!empty($this->statsd)) {
-                    $this->statsd->increment(
-                        "$tenantId.$pipelineName.ingest.records.current",
-                        1
-                    );
-                }
+                $this->statsd->increment("$tenantId.$pipelineName.ingest.records.current", 1);
 
                 // Empty only after writing, will ensure still available for graceful shutdown
                 $this->hashes = [];
@@ -705,10 +749,12 @@ class PipelineCommand
             } catch (\Exception $e) {
                 SkipprLogger::error($e->getMessage());
             }
+//        } else {
+//            SkipprLogger::error("SkipprPack unpacked empty record");
+//        }
 
-        } else {
-            SkipprLogger::error("SkipprPack unpacked empty record");
-
+        if (extension_loaded('newrelic')) {
+            newrelic_end_transaction();
         }
     }
 
@@ -719,6 +765,8 @@ class PipelineCommand
         // Don't dead letter message, if running the dead letter job
         // it will be skipped and so just remain in the queue
         if (Config::$enableDeadLetters) {
+            $source_namespace = $message['source_namespace'];
+            $source_partition = $message['source_partition'];
             $namespace = $message['skpr_namespace'];
             $partition = $message['skpr_partition'];
 
@@ -734,6 +782,7 @@ class PipelineCommand
 //            $this->deadletterPlugin->buffer->append($payload);
                 $this->deadletterPlugin->buffer->append(
                     $message,
+                    strlen(serialize($message)),
                     false,
                     0,
                     $namespace,
@@ -743,16 +792,11 @@ class PipelineCommand
             $tenantId = Config::$tenantId;
             $pipelineName = Config::$pipelineName;
 
-            if (!empty($this->statsd)) {
-                $this->statsd->increment(
-                    "$tenantId.$pipelineName.ingest.deadletters.current",
-                    1
-                );
-            }
+            $this->statsd->increment("$tenantId.$pipelineName.ingest.deadletters.current", 1);
 
             $this->deadLetters++;
         } else {
-            SkipprLogger::critical('Schema not valid for events in dead letter queue');
+            SkipprLogger::error('Schema not valid for events in dead letter queue');
 
 //            $this->inputPlugin->buffer->unlockAll('deadletter');
 //            $this->inputPlugin->buffer->flush("deadletter");
@@ -767,21 +811,21 @@ class PipelineCommand
     public function emit(
         string $payload,
         string $offset,
-        string $namespace,
-        string $partition = '0'
+        string $source_namespace,
+        string $source_partition = ''
     ): void {
 
 
         if (!empty($payload) && !empty($offset)) {
             if ($this->inputPlugin->offsets->validateOffset(
                 $offset,
-                $namespace,
-                $partition
+                $source_namespace,
+                $source_partition
             )) {
                 $this->inputPlugin->offsets->setOffsets(
                     $offset,
-                    $namespace,
-                    $partition
+                    $source_namespace,
+                    $source_partition
                 );
                 
                 if (Config::$syncMode == 'sync') {
@@ -792,7 +836,7 @@ class PipelineCommand
 //                $offset = $sp->decodeOffset();
                     }
 
-                    $this->emitString($payload, $namespace, $partition);
+                    $this->emitString($payload, $source_namespace, $source_partition);
                 } elseif (Config::$syncMode == 'async') {
 //                $offset = (string) $offset;
 //                $sp = new SkipprPack();
@@ -809,10 +853,11 @@ class PipelineCommand
 
                     $this->inputPlugin->buffer->append(
                         $payload,
+                        strlen($payload),
                         false,
                         0,
-                        $namespace,
-                        $partition
+                        $source_namespace,
+                        $source_partition
                     );
                 }
             }
@@ -820,18 +865,18 @@ class PipelineCommand
     }
 
     public function offsetCommitRoutine(
-        string $namespace,
-        string $partition
+        string $source_namespace,
+        string $source_partition
     ): void {
         if (!Config::$analysing) { // should never be here on analyse schema, but just in case of code error
             $offset = $this->outputPlugin->offsets->getCurrentOffsets(
-                $namespace,
-                $partition
+                $source_namespace,
+                $source_partition
             );
 
-            SkipprLogger::info("Committing offset for Namespace: $namespace Partition: $partition Offset: $offset");
+            SkipprLogger::info("Committing offset for Namespace: $source_namespace Partition: $source_partition Offset: $offset");
 
-            $this->offsetClient->sync($namespace, $partition, $offset);
+            $this->offsetClient->sync($source_namespace, $source_partition, $offset);
         }
     }
 
@@ -839,11 +884,11 @@ class PipelineCommand
     {
         $offsets = $this->inputPlugin->offsets->getAll();
 
-        foreach ($offsets as $namespace => $partitionArr) {
-            foreach ($partitionArr as $partition => $offset) {
-                SkipprLogger::info("Resetting offset for Namespace: $namespace Partition: $partition from current offset $offset to ''");
-                $this->inputPlugin->offsets->setOffsets('', $namespace, $partition);
-                $this->offsetClient->sync($namespace, $partition, '');
+        foreach ($offsets as $source_namespace => $partitionArr) {
+            foreach ($partitionArr as $source_partition => $offset) {
+                SkipprLogger::info("Resetting offset for Namespace: $source_namespace Partition: $source_partition from current offset $offset to ''");
+                $this->inputPlugin->offsets->setOffsets('', $source_namespace, $source_partition);
+                $this->offsetClient->sync($source_namespace, $source_partition, '');
             }
         }
     }
@@ -851,17 +896,17 @@ class PipelineCommand
     {
         $offsets = $this->outputPlugin->offsets->getAll();
 
-        foreach ($offsets as $namespace => $partitionArr) {
-            foreach ($partitionArr as $partition => $offset) {
-                SkipprLogger::info("Committing offset for Namespace: $namespace Partition: $partition Offset: $offset");
-                $this->offsetClient->sync($namespace, $partition, $offset);
+        foreach ($offsets as $source_namespace => $partitionArr) {
+            foreach ($partitionArr as $source_partition => $offset) {
+                SkipprLogger::info("Committing offset for Namespace: $source_namespace Partition: $source_partition Offset: $offset");
+                $this->offsetClient->sync($source_namespace, $source_partition, $offset);
             }
         }
     }
 
     public function readFile(
         string $filename,
-        string $partition,
+        string $source_partition,
         callable $callback
     ) {
 
@@ -873,7 +918,7 @@ class PipelineCommand
             while (!gzeof($sfp)) {
                 $string = gzgets($sfp);
 
-                call_user_func($callback, $string, $partition);
+                call_user_func($callback, $string, $source_partition);
             }
 
             gzclose($sfp);
@@ -892,7 +937,7 @@ class PipelineCommand
 
             $data = json_decode($jsonString, true);
 
-            call_user_func($callback, $data, $partition);
+            call_user_func($callback, $data, $source_partition);
 //            foreach ($data as $item) {
 //
 //                call_user_func($callback, $item);
@@ -904,7 +949,7 @@ class PipelineCommand
             while (!feof($sfp)) {
                 $string = fgets($sfp);
 
-                call_user_func($callback, $string, $partition);
+                call_user_func($callback, $string, $source_partition);
             }
 
             // remove temp file
@@ -915,7 +960,7 @@ class PipelineCommand
     public function emitFile(
         string $filename,
         string $namespace,
-        string $partition = '0'
+        string $source_partition = ''
     ): void {
 
         $fields = [];
@@ -925,10 +970,10 @@ class PipelineCommand
 
         $this->readFile(
             $filename,
-            $partition,
+            $source_partition,
             function (
                 $string,
-                $partition
+                $source_partition
             ) use (
                 $serde,
                 &$fields,
@@ -944,7 +989,7 @@ class PipelineCommand
 
                     foreach ($msgs as $msg) {
                         //                    array_push($fields, $msg);
-                        $this->emitArray($msg, $namespace, $partition);
+                        $this->emitArray($msg, $namespace, $source_partition);
                     }
                 }
             }
@@ -955,17 +1000,22 @@ class PipelineCommand
 
             foreach ($msgs as $msg) {
 //                array_push($fields, $msg);
-                $this->emitArray($msg, $namespace, $partition);
+                $this->emitArray($msg, $namespace, $source_partition);
             }
         }
     }
 
     public function emitString(
         string $payload,
-        string $namespace,
-        string $partition = '0'
+        string $source_namespace,
+        string $source_partition = ''
     ): void {
 
+        if (extension_loaded('newrelic')) {
+            newrelic_end_transaction(true);
+            newrelic_start_transaction('skipprd');
+            newrelic_name_transaction('input');
+        }
 
         if ($payload != '') {
             if (Config::$syncMode == 'sync') {
@@ -979,42 +1029,60 @@ class PipelineCommand
                 $serder = SerdersFactory::factory(Config::$sourceFormat);
                 $sourceMessages = $serder->deserialize($payload);
 
-                $this->emitArray($sourceMessages, $namespace, $partition);
+                $this->emitArray($sourceMessages, $source_namespace, $source_partition);
             }
+        }
+
+        if (extension_loaded('newrelic')) {
+            newrelic_end_transaction();
         }
     }
 
     /**
      * All emit functions end up here after deserialising payload
      * @param array $payload - the payload to ingest
-     * @param string $namespace - the schema namespace (table, avro namespace, event type, etc)
-     * @param string $partition - data sources partition (shard, kafka topic, index, FS dir, etc)
+     * @param string $source_namespace - the schema namespace (table, avro namespace, event type, etc)
+     * @param string $source_partition - data sources partition (shard, kafka topic, index, FS dir, etc)
      */
     public function emitArray(
         array $payload,
-        string $namespace,
-        string $partition = '0'
+        string $source_namespace,
+        string $source_partition = ''
     ): void {
 
         $this->scheduledStatusUpdate();
 
         $unwrappedMessages = $this->unwrapEventPath($payload);
 
-        if (empty(Config::$discoveredFieldOccurrence[$namespace])) {
-            Config::$discoveredFieldOccurrence[$namespace] = [
-                'enabled' => true,
-                'fields' => [],
-            ];
-        }
-
         foreach ($unwrappedMessages as $unwrappedMessage) {  // outer array
-            if ((Config::$analysing || empty(Config::$discoveredFieldOccurrence[$namespace]))
-                && $this->inputPlugin->ingestNamespace($namespace) === true) {
-                if (is_array($unwrappedMessage)) {
-                    $this->getIdFields($unwrappedMessage);
-                    $this->parseNamespaceField($unwrappedMessage, $namespace);
-                    $unwrappedMessage['skpr_partition'] = $partition;
+//            $this->getIdFields($unwrappedMessage); // slow and we don't even use this
 
+            // @todo - stuff like this, do an empty() once and store a bool var
+            $namespace = InternalFields::parseNamespaceField($unwrappedMessage, $source_namespace);
+
+            $message = $this->defaultMsgs[$namespace];
+            $message['namespace'] = $namespace;
+            $message['source_namespace'] = $source_namespace;
+            $message['source_partition'] = $source_partition;
+
+            if (Config::$flattenEvents) {
+//                if (is_array($unwrappedMessage)) {
+                    $unwrappedMessage = Helpers::flatten($unwrappedMessage);
+//                }
+            }
+
+            if (Config::$analysing
+                && $this->inputPlugin->ingestNamespace($namespace) === true
+            ) {
+
+                if (empty(Config::$discoveredFieldOccurrence[$namespace])) {
+                    Config::$discoveredFieldOccurrence[$namespace] = [
+                        'enabled' => true,
+                        'fields' => [],
+                    ];
+                }
+
+                if (is_array($unwrappedMessage)) {
                     $this->analysePayload(
                         $unwrappedMessage,
                         Config::$discoveredFieldOccurrence[$namespace]['fields']
@@ -1028,7 +1096,7 @@ class PipelineCommand
 
                     $this->i = 0;
 
-                    $this->inputPlugin->continue[$partition] = false;
+                    $this->inputPlugin->continue[$namespace] = false;
 
 //                    unlink("buffer.ready"); // clean up ready buffer - as we force exit here
 
@@ -1042,108 +1110,123 @@ class PipelineCommand
             }
 
 
-            if (!Config::$analysing && !empty(Config::$discoveredFieldOccurrence[$namespace])) {
-                if (is_array($unwrappedMessage)) {
-                    $this->parseTimeField($unwrappedMessage);
-                    $this->parseNamespaceField($unwrappedMessage, $namespace);
-                    $unwrappedMessage['skpr_partition'] = $partition;
-
+            if (!Config::$analysing
+//                && !empty(Config::$discoveredFieldOccurrence[$namespace])
+            ) {
+//                if (is_array($unwrappedMessage)) {
                     try {
-                        $message = false;
-                        
-                        if (!empty($unwrappedMessage)
-                            && RecordFilter::filter($unwrappedMessage)) {
-                            if (Config::$mutableMode) {
-                                $message = $this->ingestPayload(
-                                    $unwrappedMessage,
-                                    Config::$discoveredFieldOccurrence[$namespace]['fields'],
-                                    $namespace
+//                        $message = false;
+
+                        if (
+                            //!empty($unwrappedMessage) &&
+                        RecordFilter::filter($unwrappedMessage)
+                        ) {
+
+                            /*
+                             * Transformations and schema evolution
+                             */
+                            foreach ($unwrappedMessage as $field => $value) {
+
+//                                if (!isset($this->defaultMsgs[$namespace][$field])) {
+//                                    $field = Helpers::cleanFieldName($field);
+//                                }
+
+
+                                $message[$field] = self::fastSetValue(
+                                    Config::$discoveredFieldOccurrence[$namespace]['fields'][$field]['determined_type'],
+                                    $field,
+                                    $value,
+                                    Config::$discoveredFieldOccurrence[$namespace]['fields']
                                 );
-                            } else {
-                                $this->totalEntries++;
-                                $message = $unwrappedMessage;
+
+//                                $message = $this->fastIngestField(
+//                                    $field,
+//                                    $value,
+//                                    Config::$discoveredFieldOccurrence[$namespace]['fields'],
+//                                    $message
+//                                );
                             }
+
+                            // @todo - faster type checking
+//                            if ($this->avroEncodeTest($message, $namespace)) {
+//                            if ($this->testSerde->serialize($message, 'test',  $this->testSchema[$namespace])) {
+                                $this->totalEntries++;
+                                $this->fastPath++;
+                                $this->outputEmit($message);
+//                            } else {
+//                                throw new \Exception('Fallback to slow path');
+//                            }
+
                         }
                     } catch (\Exception $e) {
-                        SkipprLogger::error($e->getMessage());
-                        $this->deadLetters++;
-                        $message = false;
+
+                            try {
+                                // @todo - put slow bath fallback here if not doing empty(), etc
+
+                                if (Config::$mutableMode !== Config::MUTABLE_MODE_STRICT) {
+                                    $message = $this->ingestPayload(
+                                        $unwrappedMessage,
+                                        Config::$discoveredFieldOccurrence[$namespace]['fields'],
+                                        $namespace
+                                    );
+                                    $this->slowPath++;
+                                    $this->outputEmit($message);
+                                } else {
+                                    throw new \Exception("Message didn't meet strict schema validation");
+                                }
+
+                            } catch (\Exception $e) {
+                                SkipprLogger::error($e->getMessage());
+                                $this->deadLetters++;
+                                $message = false;
+
+                                $this->deadLetterMessage($unwrappedMessage);
+                            }
+
                     }
 
-                    if ($message) {
-//                        $this->serialiseOutput($message);
-                        $this->outputEmit($message);
-                    } else {
-                        $this->deadLetterMessage($unwrappedMessage);
-                    }
-                } else {
-                    SkipprLogger::error("found non-array message");
-                    SkipprLogger::debug($unwrappedMessage);
-                }
             }
         }
     }
 
-    public function parseNamespaceField(array &$message, string $namespace)
+    public function fastIngestField(string $field, $value, array $metadata, array $message): array
     {
 
-        // default to data source partition (table, topic, queue, file dir, etc)
-//        $shardFieldEntityValue =  Helpers::cleanFieldName($namespace);
-        $shardFieldEntityValue = $namespace;
+        // only ingest fields enabled to sync to output
+        // or that are unknown, therefore we want to discover their schema
+//        if (
+//            $metadata[$field]['enabled'] === true
+//            && $metadata[$field]['determined_type'] === 'record'
+//        ) {
+//
+//            if ($message[$field] !== null) {
+//                foreach ($value as $sub_field => $sub_value) {
+//
+//
+//                        $this->fastIngestField($sub_field, $sub_value, $metadata[$field]['fields'], $message[$field]);
+//
+//
+//                }
+//            }
+//
+//        } else {
 
-        // optional: partition by composite key
-        if (!empty(Config::$entityNames)) {
-            foreach (Config::$entityNames as $entityField) {
-                $shardFieldName = $entityField;
-                // @todo - support entity naming
-                $entityName = $entityField;
+            $message[$field] = $this->fastSetValue(
+                $metadata[$field]['determined_type'],
+                $field,
+                $value,
+                $metadata
+            );
+//        }
 
-                if (!empty($message[$entityField])) {
-                    if ($entityValue = $message[$entityField]) {
-                        $shardFieldEntityValue .= '-' . Helpers::cleanFieldName($entityName) . '=' . Helpers::cleanFieldName($entityValue);
-                    }
-                }
-            }
-        }
-
-
-//        $shardFieldEntityValue = strtolower(trim($shardFieldEntityValue, '-'));
-        $shardFieldEntityValue = trim($shardFieldEntityValue, '-');
-
-        $message['skpr_namespace'] = $shardFieldEntityValue;
-    }
-
-    public function parseTimeField(&$message)
-    {
-
-        // default to beginning of epoch.
-        $message['skpr_event_ts'] = 0;
-
-        // Support nested time fields via array dot notation
-        // For user confirmed event time fields, use the first one that matches
-        foreach (Config::$timeFields as $field_dot) {
-            if ($time_value = Arr::get($message, $field_dot, false)) {
-                $message['skpr_event_ts'] = $time_value;
-                break;
-            }
-        }
-
-        // Handle millisecond timestamps
-        if (strlen((string) $message['skpr_event_ts']) == 13) {
-            $message['skpr_event_ts'] = floor($message['skpr_event_ts'] / 1000);
-        }
-
-        // Handle datetime strings
-        if (gettype($message['skpr_event_ts']) == 'string') {
-            $message['skpr_event_ts'] = Carbon::parse($message['skpr_event_ts'])->timestamp;
-        }
+        return $message;
     }
 
     public function unwrapEventPath($sourceMessages)
     {
 
-        if (!empty($sourceMessages) && is_array($sourceMessages)) {
-            if (!empty(Config::$eventPath)) {
+        if (!empty(Config::$eventPath)) {
+            if (!empty($sourceMessages) && is_array($sourceMessages)) {
                 foreach ($sourceMessages as $sourceMessage) {
                     try {
                         $unwrappedMessages = Arr::get(
@@ -1184,12 +1267,12 @@ class PipelineCommand
             $offsets = $this->offsetClient->get();
 
             if (!empty($offsets)) {
-                foreach ($offsets as $namespace => $offsetsParts) {
-                    foreach ($offsetsParts as $partition => $offset) {
+                foreach ($offsets as $source_namespace => $offsetsParts) {
+                    foreach ($offsetsParts as $source_partition => $offset) {
                         $this->inputPlugin->offsets->setOffsets(
                             $offset,
-                            $namespace,
-                            $partition
+                            $source_namespace,
+                            $source_partition
                         );
                     }
                 }
@@ -1210,12 +1293,12 @@ class PipelineCommand
             $offsets = $this->offsetClient->get();
 
             if (!empty($offsets)) {
-                foreach ($offsets as $namespace => $offsetsParts) {
-                    foreach ($offsetsParts as $partition => $offset) {
+                foreach ($offsets as $source_namespace => $offsetsParts) {
+                    foreach ($offsetsParts as $source_partition => $offset) {
                         $this->outputPlugin->offsets->setOffsets(
                             $offset,
-                            $namespace,
-                            $partition
+                            $source_namespace,
+                            $source_partition
                         );
                     }
                 }
@@ -1271,8 +1354,31 @@ class PipelineCommand
         }
     }
 
+    public function exceptionsErrorHandler(int $severity, string $message, string $filename, int $lineno): void
+    {
+
+        if (error_reporting() & $severity) {
+            Config::$taskLogs[] = $message;
+            Config::$taskLogs[] = "In filename: $filename, line: $lineno";
+        }
+    }
+
+    public function exceptionHandler(\Throwable $e): void
+    {
+
+        SkipprLogger::error($e->getMessage());
+        SkipprLogger::error($e->getTraceAsString());
+
+        SkipprLogger::critical("Uncaught exception, shutting down all threads.");
+
+        $this->shutdown(137);
+    }
+
+
     public function shutdownSig(int $signo, $siginfo): void
     {
+
+        SkipprLogger::info("Received SIGNAL.");
 
         $this->shutdown($signo);
     }
@@ -1282,6 +1388,7 @@ class PipelineCommand
 
         SkipprLogger::info("Gracefully shutting down");
 
+
         if (Config::$syncMode == 'async') {
             if ($this->inputThread !== null) {
                 $this->inputThread->cancel();
@@ -1290,6 +1397,18 @@ class PipelineCommand
 
         if (!empty($this->inputPlugin)) {
             $this->inputPlugin->shutdown();
+
+            if ($signo !== 1000) { // 1000 = output container gone away
+                if (!Config::$analysing && Config::$runMode == Config::RUN_MODE_SYNC) {
+                    // send shutdown signal to output
+                    $skipprPack = new SkipprPack();
+                    $skipprPack->encode('sync_complete', '');
+
+                    $this->streamSend($skipprPack); // don't use STREAM_OOB, we want to ingest the whole TCP buffer
+
+                    fclose($this->sock);
+                }
+            }
         }
 
         if (Config::$syncMode == 'async') {
@@ -1346,7 +1465,6 @@ class PipelineCommand
                 }
 
                 if (!empty($this->inputPlugin)) {
-
                     SkipprLogger::info("Ingested " . $this->totalEntries . " messages");
                     SkipprLogger::info("Dead Letters " . $this->deadLetters . " dead letters");
                 }
@@ -1384,9 +1502,21 @@ class PipelineCommand
 
         if (!empty($this->inputPlugin)) {
             Config::setConfig();
+
+            $resp = [
+                "msgs_total" => $this->totalEntries,
+                "deadletters_total" => $this->deadLetters,
+                "run_time_seconds" => Carbon::now()->timestamp - $this->startTimestamp,
+            ];
+
+            Config::setStatus($resp);
         }
 
-        Config::setStatus();
+        // don't update final output job status when exiting due to the source container
+        // sending a sync_complete event. These result in essential container tak exited in ECS (exit code 15)
+        if (!empty($this->outputPlugin)) {
+            Config::setStatus();
+        }
 
 //        SkipprLogger::debug("Mem used: " . BytesToHuman::toHuman(memory_get_usage(true), true, 'MB'));
 //        SkipprLogger::debug("Mem limit: " . BytesToHuman::toHuman($this->flushBytes, true, 'MB'));
@@ -1399,27 +1529,11 @@ class PipelineCommand
 
         $inputName = Config::getenv('DATA_SOURCE_PLUGIN_NAME');
         $outputName = Config::getenv('DATA_OUTPUT_PLUGIN_NAME');
-
-        Segment::track(array(
-            "userId" => hash('sha256', Config::$tenantId),
-            "licenseKey" => $this->licenseKey,
-            "tenant_id" => hash('sha256', Config::$tenantId),
-            "pipeline_name" => hash('sha256', Config::$pipelineName),
-            'event' => 'shutdown',
-            "properties" => [
-                "msgs_total" => $this->totalEntries,
-                "deadletters_total" => $this->deadLetters,
-                "input_plugin" => $inputName,
-                "output_plugin" => $outputName,
-                "input_format" => Config::getenv('DATA_SOURCE_FORMAT'),
-                "output_format" => Config::getenv('DATA_OUTPUT_FORMAT'),
-                "skippr_version" => Config::getenv('SKIPPR_BUILD_VERSION'),
-            ]
-        ));
         
         SkipprLogger::info("Graceful shutdown complete, bye");
 
 //        $this->delete();
+
         exit($signo);
 //        return;
     }
@@ -1609,12 +1723,12 @@ class PipelineCommand
         }
     }
 
-    public function getIdFields($message)
+    public function getIdFields(array $message)
     {
 
         $messageEntityNames = [];
 
-        if (!empty($message)) {
+//        if (!empty($message)) {
             foreach ($message as $fieldName => $value) {
 //                $fieldName = Helpers::cleanFieldName($fieldName);
 
@@ -1654,7 +1768,7 @@ class PipelineCommand
 //                    $this->mapping = $this->dataTypeMappings['parent'];
                 }
             }
-        }
+//        }
 
         // @todo - return not used anymore
         return $messageEntityNames;

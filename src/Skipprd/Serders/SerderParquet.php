@@ -39,16 +39,14 @@ class SerderParquet implements SerderBatchInterface
                 $this->parquet->close_writer();
             }
         } catch (\Exception $exception) {
-                        var_export($schema);
-                        print("\n");
+//                        print("\n");
 
 //                        var_export($records);
 //                        print("\n");
 
-                        print($exception->getMessage());
+//                        print($exception->getMessage());
 //                        print($exception->getTraceAsString());
 
-            exit(1);
         }
     }
 

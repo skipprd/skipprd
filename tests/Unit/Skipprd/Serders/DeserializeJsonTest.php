@@ -8,6 +8,7 @@
 
 namespace Unit\Skipprd\Serders;
 
+use Skipprd\Serders\SerderJson;
 use Skipprd\Serders\SerdersFactory;
 use Tests\TestCase;
 
@@ -211,6 +212,28 @@ EOF;
 
     }
 
+
+    /**
+     * This madness is common, for instance AWS Firehose S3 Destination produces this crap
+     */
+    public function testValidJsonSingleLineObjects()
+    {
+
+        $record = '{"foo": {"nest": "bar"}}{"foo": {"nest": "baz"}}{"foo": {"nest": "boo"}}';
+
+        $serder = SerdersFactory::factory($this->serder);
+        $msg = $serder->deserialize($record);
+
+
+        $this->assertIsArray($msg);
+        $this->assertArrayHasKey('foo', $msg[0]);
+        $this->assertArrayHasKey('foo', $msg[1]);
+        $this->assertArrayHasKey('foo', $msg[2]);
+        $this->assertEquals('bar', $msg[0]['foo']['nest']);
+        $this->assertEquals('baz', $msg[1]['foo']['nest']);
+        $this->assertEquals('boo', $msg[2]['foo']['nest']);
+
+    }
 //    public function testValidJsonMultiLineArrayPrettyPrint()
 //    {
 //
