@@ -6,37 +6,68 @@
 Install PHP with required libs:
 
 ````
-export OPENSSL_PREFIX=$(brew --prefix openssl@1.1)
+brew install automake autoconf curl pcre bison re2c mhash libtool icu4c gettext jpeg openssl libxml2 mcrypt gd gmp libevent zlib libzip bzip2 imagemagick pkg-config oniguruma
+brew link --force icu4c
+brew link --force openssl
+brew link --force libxml2
+
+export OPENSSL_PREFIX=$(brew --prefix openssl@3)
 export OPENSSL_CFLAGS="-I${OPENSSL_PREFIX}/include"
 export OPENSSL_LIBS="-L${OPENSSL_PREFIX}/lib -lcrypto -lssl"
 
+phpbrew install -j 10 7.4.0 +gd +default +sqlite +mysql +dbs +zts +zlib +zlib=/usr/local/Cellar/zlib/1.2.11/ -- --with-gd=shared --with-openssl="${OPENSSL_PREFIX}" --enable-maintainer-zts --with-libedit 
+
+
+
+LDFLAGS="-L/usr/local/opt/openssl@1.1/lib"
+CPPFLAGS="-I/usr/local/opt/openssl@1.1/include"
+OPENSSL_CFLAGS="-I/usr/local/opt/openssl@1.1/include"
+OPENSSL_LIBS="-L/usr/local/opt/openssl@1.1/lib -lcrypto -lssl"
+export PKG_CONFIG_PATH="/usr/local/opt/openssl@1.1/lib/pkgconfig"
+export OPENSSL_PREFIX=$(brew --prefix openssl@1.1)
 export CFLAGS=-DU_DEFINE_FALSE_AND_TRUE=1
 
-phpbrew install php-7.4.0 +default +dbs +zts +zlib +intl  -- --with-openssl="shared,${OPENSSL_PREFIX}" --enable-maintainer-zts --with-libedit 
- 
- 
-# Install intl
+phpbrew install -j 10 7.4.0 +gd +default +sqlite +mysql +dbs +zts +zlib +zlib=/usr/local/Cellar/zlib/1.2.11/ -- --with-gd=shared --with-openssl="${OPENSSL_PREFIX}" --enable-maintainer-zts --with-libedit
+
+
+
+phpbrew ext install xdebug stable
+phpbrew ext install soap stable
+phpbrew ext install gmp stable
+phpbrew ext install gd stable -- --with-zlib-dir=/usr/local/Cellar/zlib/1.2.11/
+phpbrew ext install exif stable
+phpbrew --debug ext install imagick stable -- --with-imagick=/usr/local/Cellar/imagemagick/7.0.9-27/
+# intl specifications
+export LDFLAGS="-L/usr/local/opt/icu4c/lib" 
 export PKG_CONFIG_PATH=$(brew --prefix icu4c)/lib/pkgconfig
 export CXX="g++ -DTRUE=1 -DFALSE=0"
-export  CC="gcc -DTRUE=1 -DFALSE=0"
- 
-LANG=C phpbrew ext install intl -- --with-openssl=$OPENSSL_PREFIX -with-libdir=lib/x86_64-linux-gnu --enable-maintainer-zts --with-libedit 
-phpbrew ext install intl -- --with-openssl=$OPENSSL_PREFIX -with-libdir=lib/x86_64-linux-gnu
+export CC="gcc -DTRUE=1 -DFALSE=0"
+LANG=C phpbrew ext install intl stable <--- not working, even after all the flag monkey business above
 
 ````
 
 PHP 8.0
 As per: https://github.com/phpbrew/phpbrew/issues/1249#issuecomment-1013031187
 ```
-export OPENSSL_PREFIX=$(export PHP_AUTOCONF=/usr/local/bin/autoconfbrew --prefix openssl@1.1)
-export OPENSSL_CFLAGS="-I${OPENSSL_PREFIX}/include"
-export OPENSSL_LIBS="-L${OPENSSL_PREFIX}/lib -lcrypto -lssl"
+As above for PHP 7.4
 
-phpbrew --debug install -j 16 8.0 +default +dbs +zts +zlib -- --with-openssl="shared,${OPENSSL_PREFIX}" --enable-maintainer-zts --with-libedit
+phpbrew install -j 10 8.0 +default +dbs +zts +zlib -- --with-openssl="shared,${OPENSSL_PREFIX}" --enable-maintainer-zts --with-libedit
 
 phpbrew switch php-8.0.0
 
 phpbrew ext install openssl -- --with-openssl=$OPENSSL_PREFIX
+LANG=C phpbrew ext install intl stable
+```
+
+PHP 8.1
+```
+As above for PHP 7.4
+
+export LDFLAGS="-L/usr/local/opt/openldap/lib"
+export CPPFLAGS="-I/usr/local/opt/openldap/include"
+
+
+phpbrew install -j 10 8.1.7 +default +dbs +zts +zlib +bz2=/usr/local/Cellar/bzip2/1.0.8 -- --with-openssl="${OPENSSL_PREFIX}" --enable-maintainer-zts --with-libedit
 ```
  
 ## Local Build and Testing

@@ -371,60 +371,52 @@ trait Ingest
      * @param $value string -  the actual field value
      * @return mixed|null - value data type on success or null on error
      */
-    static public function fastSetValue(string $dataType, string $field, $value, array $metadata = null)
+    public function fastSetValue(string $dataType, string $field, $value, array $metadata = null)
     {
 
-        if (
-            $value !== null
-            && (
-                $metadata[$field]['enabled'] === true
-                || empty($metadata)
-            )
-        ) {
+        if ($value !== null) {
+
             if ($dataType === 'record') {
-                foreach ($value as $key => $val) {
-//                    $newValue[$key] = $this->fastSetValue(
-//                        $metadata[$field]['fields'][$key]['determined_type'],
-//                        $key,
-//                        $val,
-//                        $metadata[$field]['fields'][$key]['fields']
-//                    );
-//
-//                    unset($key, $val);
 
-                    $value = self::fastSetValue($metadata[$field]['fields'][$key]['determined_type'],
-                        $key,
-                        $val,
-                        $metadata[$field]['fields'][$key]['fields']
-                    );
+                foreach ($value as $sub_field => $sub_value) {
+
+                    // only ingest fields enabled to sync to output
+                    if ($metadata[$field]['fields'][$sub_field]['enabled'] == true) {
+
+                        $clean_sub_field = Helpers::cleanFieldName($sub_field);
+
+                        $newValue[$clean_sub_field] = $this->fastSetValue(
+                            $metadata[$field]['fields'][$sub_field]['determined_type'],
+                            $sub_field,
+                            $sub_value,
+                            $metadata[$field]['fields']
+                        );
+                    }
                 }
-//                $value = $newValue;
-//                unset($newValue);
-//            } elseif ($dataType === 'map') {
-//                $newValue = [];
-//                foreach ($value as $key => $val) {
-//                    $newValue[$key] = $this->fastSetValue(
-//                        $metadata[$field]['fields'][$key]['determined_type'],
-//                        $key,
-//                        $val,
-//                        $metadata[$field]['fields'][$key]['fields']
-//                    );
-//                }
-//                $value = $newValue;
-//            } elseif ($dataType === 'array') {
-//                $newValue = [];
-//                foreach ($value as $key => $val) {
-//                    if ($metadata[$field]['determined_type_values'] !== null) {
-//                        $newValue[$key] = $this->fastSetValue(
-//                            $metadata[$field]['determined_type_values'],
-//                            $key,
-//                            $val
-//                        );
-//                    }
-//                }
-//                $value = $newValue;
 
-            } elseif ($dataType === 'string') {
+                $value = $newValue;
+
+            } else if ($dataType === 'map') {
+                foreach ($value as $key => $val) {
+                    if ($val !== null) {
+                        $value[$key] = $this->fastSetValue(
+                            $metadata[$field]['determined_type_values'],
+                            $key,
+                            $val,
+                        );
+                    }
+                }
+            } else if ($dataType === 'array') {
+                foreach ($value as $key => $val) {
+                    if ($value !== null) {
+                        $value[$key] = $this->fastSetValue(
+                            $metadata[$field]['determined_type_values'],
+                            $key,
+                            $val
+                        );
+                    }
+                }
+            } else if ($dataType === 'string') {
                 $value .= '';
             } elseif ($dataType === 'timestamp' || $dataType === 'timestamp_milli') {
                 $value = (int) $value + 0;// force string to int

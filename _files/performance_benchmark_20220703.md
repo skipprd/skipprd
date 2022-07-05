@@ -73,3 +73,7 @@ skipprd-source_1  | [2022-07-02T21:15:40+00:00] skipprd.INFO: Fast Path messages
 skipprd-source_1  | [2022-07-02T21:15:51+00:00] skipprd.INFO: Fast Path messages 659.5 K
 
 
+git checkout -b icu4c-69 c278d3dc42a6aac6ad7a46bd7d638c305364a888
+
+brew switch icu4c 69.1
+

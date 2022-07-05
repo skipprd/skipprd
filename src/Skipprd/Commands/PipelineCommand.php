@@ -79,6 +79,10 @@ class PipelineCommand
     public $offsetClient;
 
     /**
+     * @var \Skipprd\Serders\Interfaces\SerderBatchInterface|\Skipprd\Serders\Interfaces\SerderStreamInterface
+     */
+    public $inputSerder;
+    /**
      * @var int - seconds analysinc jobs has been running for
      */
     public $startTimestamp = 0;
@@ -283,7 +287,6 @@ class PipelineCommand
 //            Config::$mode = 'sync';
 //        }
 
-
             if (!Config::$enableDeadLetters) {
                 SkipprLogger::info('Reprocessing dead letters');
             }
@@ -291,8 +294,10 @@ class PipelineCommand
             if (!empty($this->inputPlugin)) {
                 $ran = false;
 
+                $this->inputSerder = SerdersFactory::factory(Config::$sourceFormat);
 
                 if (Config::$runMode == Config::RUN_MODE_SYNC) {
+
                     $this->inputPlugin->buffer->flushAll();
 
                     if (!Config::$analysing) {
@@ -300,7 +305,7 @@ class PipelineCommand
                     }
 
                     $ran = false;
-                    while ($conn && (!$ran || !empty(Config::$pollIntervalSeconds))) {
+                    while (!$ran || !empty(Config::$pollIntervalSeconds)) {
                         $ran = true;
 
                         $this->inputPlugin->sync();
@@ -490,9 +495,9 @@ class PipelineCommand
 
         if ($this->lastStatusUpdate < time() - $this->statusUpdateIntervalSeconds) {
 
-            if (extension_loaded('newrelic')) {
-                newrelic_ignore_transaction();
-            }
+//            if (extension_loaded('newrelic')) {
+//                newrelic_ignore_transaction();
+//            }
 
             SkipprLogger::info("Memory used ". BytesToHuman::toHuman(memory_get_usage(), true));
 
@@ -556,6 +561,7 @@ class PipelineCommand
         $this->setPlugin();
 
         $serde = SerdersFactory::factory(Config::$outputFormat);
+//        $serde = SerdersFactory::factory('parquet');
 
         foreach (Config::$schema as $namespace => $schema) {
             $this->defaultMsgs[$namespace] = $serde->defaultMessage($schema);
@@ -638,10 +644,10 @@ class PipelineCommand
 
         $this->scheduledStatusUpdate();
 
-        if (extension_loaded('newrelic')) {
-            newrelic_start_transaction('skipprd');
-            newrelic_name_transaction('output');
-        }
+//        if (extension_loaded('newrelic')) {
+//            newrelic_start_transaction('skipprd');
+//            newrelic_name_transaction('output');
+//        }
 
         $record = '';
 
@@ -753,9 +759,9 @@ class PipelineCommand
 //            SkipprLogger::error("SkipprPack unpacked empty record");
 //        }
 
-        if (extension_loaded('newrelic')) {
-            newrelic_end_transaction();
-        }
+//        if (extension_loaded('newrelic')) {
+//            newrelic_end_transaction();
+//        }
     }
 
 
@@ -1011,11 +1017,11 @@ class PipelineCommand
         string $source_partition = ''
     ): void {
 
-        if (extension_loaded('newrelic')) {
-            newrelic_end_transaction(true);
-            newrelic_start_transaction('skipprd');
-            newrelic_name_transaction('input');
-        }
+//        if (extension_loaded('newrelic')) {
+//            newrelic_end_transaction(true);
+//            newrelic_start_transaction('skipprd');
+//            newrelic_name_transaction('input');
+//        }
 
         if ($payload != '') {
             if (Config::$syncMode == 'sync') {
@@ -1026,16 +1032,15 @@ class PipelineCommand
 //                $offset = $sp->decodeOffset();
                 }
 
-                $serder = SerdersFactory::factory(Config::$sourceFormat);
-                $sourceMessages = $serder->deserialize($payload);
+                $sourceMessages = $this->inputSerder->deserialize($payload);
 
                 $this->emitArray($sourceMessages, $source_namespace, $source_partition);
             }
         }
 
-        if (extension_loaded('newrelic')) {
-            newrelic_end_transaction();
-        }
+//        if (extension_loaded('newrelic')) {
+//            newrelic_end_transaction();
+//        }
     }
 
     /**
@@ -1060,10 +1065,10 @@ class PipelineCommand
             // @todo - stuff like this, do an empty() once and store a bool var
             $namespace = InternalFields::parseNamespaceField($unwrappedMessage, $source_namespace);
 
-            $message = $this->defaultMsgs[$namespace];
-            $message['namespace'] = $namespace;
-            $message['source_namespace'] = $source_namespace;
-            $message['source_partition'] = $source_partition;
+            $unwrappedMessage['skpr_namespace'] = $namespace;
+            $unwrappedMessage['skpr_partition'] = '';
+            $unwrappedMessage['source_namespace'] = $source_namespace;
+            $unwrappedMessage['source_partition'] = $source_partition;
 
             if (Config::$flattenEvents) {
 //                if (is_array($unwrappedMessage)) {
@@ -1110,122 +1115,91 @@ class PipelineCommand
             }
 
 
-            if (!Config::$analysing
-//                && !empty(Config::$discoveredFieldOccurrence[$namespace])
-            ) {
-//                if (is_array($unwrappedMessage)) {
-                    try {
-//                        $message = false;
+            if (!Config::$analysing) {
+                try {
 
-                        if (
-                            //!empty($unwrappedMessage) &&
-                        RecordFilter::filter($unwrappedMessage)
-                        ) {
+                    if (RecordFilter::filter($unwrappedMessage)) {
 
-                            /*
-                             * Transformations and schema evolution
-                             */
-                            foreach ($unwrappedMessage as $field => $value) {
+                        /*
+                         * Transformations and schema evolution
+                         */
+                        $message1 = $this->fastPathIngest($unwrappedMessage, $namespace);
+//                            $message2 = $this->slowPathIngest($unwrappedMessage, $namespace);
 
-//                                if (!isset($this->defaultMsgs[$namespace][$field])) {
-//                                    $field = Helpers::cleanFieldName($field);
-//                                }
-
-
-                                $message[$field] = self::fastSetValue(
-                                    Config::$discoveredFieldOccurrence[$namespace]['fields'][$field]['determined_type'],
-                                    $field,
-                                    $value,
-                                    Config::$discoveredFieldOccurrence[$namespace]['fields']
-                                );
-
-//                                $message = $this->fastIngestField(
-//                                    $field,
-//                                    $value,
-//                                    Config::$discoveredFieldOccurrence[$namespace]['fields'],
-//                                    $message
-//                                );
-                            }
-
-                            // @todo - faster type checking
-//                            if ($this->avroEncodeTest($message, $namespace)) {
-//                            if ($this->testSerde->serialize($message, 'test',  $this->testSchema[$namespace])) {
-                                $this->totalEntries++;
-                                $this->fastPath++;
-                                $this->outputEmit($message);
-//                            } else {
-//                                throw new \Exception('Fallback to slow path');
-//                            }
-
-                        }
-                    } catch (\Exception $e) {
-
-                            try {
-                                // @todo - put slow bath fallback here if not doing empty(), etc
-
-                                if (Config::$mutableMode !== Config::MUTABLE_MODE_STRICT) {
-                                    $message = $this->ingestPayload(
-                                        $unwrappedMessage,
-                                        Config::$discoveredFieldOccurrence[$namespace]['fields'],
-                                        $namespace
-                                    );
-                                    $this->slowPath++;
-                                    $this->outputEmit($message);
-                                } else {
-                                    throw new \Exception("Message didn't meet strict schema validation");
-                                }
-
-                            } catch (\Exception $e) {
-                                SkipprLogger::error($e->getMessage());
-                                $this->deadLetters++;
-                                $message = false;
-
-                                $this->deadLetterMessage($unwrappedMessage);
-                            }
-
+//                            SkipprLogger::info(json_encode($message1));
+//                            SkipprLogger::info(json_encode($message2));
+//                            exit(0);
                     }
+                } catch (\Exception $e) {
 
+                    $this->slowPathIngest($unwrappedMessage, $namespace);
+                }
             }
         }
     }
 
-    public function fastIngestField(string $field, $value, array $metadata, array $message): array
-    {
+    public function fastPathIngest(array $unwrappedMessage, string $namespace): array {
 
-        // only ingest fields enabled to sync to output
-        // or that are unknown, therefore we want to discover their schema
-//        if (
-//            $metadata[$field]['enabled'] === true
-//            && $metadata[$field]['determined_type'] === 'record'
-//        ) {
-//
-//            if ($message[$field] !== null) {
-//                foreach ($value as $sub_field => $sub_value) {
-//
-//
-//                        $this->fastIngestField($sub_field, $sub_value, $metadata[$field]['fields'], $message[$field]);
-//
-//
-//                }
-//            }
-//
-//        } else {
+        $message = $this->defaultMsgs[$namespace];
 
-            $message[$field] = $this->fastSetValue(
-                $metadata[$field]['determined_type'],
+        foreach ($unwrappedMessage as $field => $value) {
+
+            $field = Helpers::cleanFieldName($field);
+
+            $resolvedValue = $this->fastSetValue(
+                Config::$discoveredFieldOccurrence[$namespace]['fields'][$field]['determined_type'],
                 $field,
                 $value,
-                $metadata
+                Config::$discoveredFieldOccurrence[$namespace]['fields']
             );
-//        }
+
+            // ignore if null, use default message which has correct null for data type
+            if ($resolvedValue !== null) {
+                $message[$field] = $resolvedValue;
+            }
+
+        }
+
+        $this->totalEntries++;
+        $this->fastPath++;
+        unset($unwrappedMessage);
+//            $this->outputEmit($message);
 
         return $message;
     }
 
-    public function unwrapEventPath($sourceMessages)
+    public function slowPathIngest(array $unwrappedMessage, string $namespace): array {
+        try {
+
+            if (Config::$mutableMode !== Config::MUTABLE_MODE_STRICT) {
+                $message = $this->ingestPayload(
+                    $unwrappedMessage,
+                    Config::$discoveredFieldOccurrence[$namespace]['fields'],
+                    $namespace
+                );
+
+                $this->slowPath++;
+                $this->outputEmit($message);
+
+            } else {
+                throw new \Exception("Message didn't meet strict schema validation");
+            }
+
+        } catch (\Exception $e) {
+            SkipprLogger::error($e->getMessage());
+            $this->deadLetters++;
+            $message = false;
+
+            $this->deadLetterMessage($unwrappedMessage);
+        }
+
+        return $message;
+    }
+
+    public function unwrapEventPath($sourceMessages): array
     {
 
-        if (!empty(Config::$eventPath)) {
+        if (Config::$eventPath) {
             if (!empty($sourceMessages) && is_array($sourceMessages)) {
                 foreach ($sourceMessages as $sourceMessage) {
                     try {
@@ -1238,13 +1212,13 @@ class PipelineCommand
                     }
                 }
             }
+
+            if (!empty($unwrappedMessages)) {
+                $sourceMessages = $unwrappedMessages;
+            }
         }
 
-        if (empty($unwrappedMessages)) {
-            $unwrappedMessages = $sourceMessages;
-        }
-
-        return $unwrappedMessages;
+        return $sourceMessages;
     }
 
     public function connect()

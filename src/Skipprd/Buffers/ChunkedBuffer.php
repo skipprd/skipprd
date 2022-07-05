@@ -22,6 +22,9 @@ class ChunkedBuffer implements BufferInterface
 
     protected $bufferName = '';
 
+    /**
+     * @var \Skipprd\Buffers\BufferDrivers\FileBufferDriver
+     */
     public $driver;
 
     public function __construct(string $bufferName, BufferDriverInterface $bufferDriver)

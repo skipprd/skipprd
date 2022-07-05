@@ -18,7 +18,7 @@ abstract class TestCase extends PHPUnitTestCase
 //    use DatabaseMigrations;
 //    use RefreshDatabase;
 
-    protected function setUp() {
+    protected function setUp(): void {
 
 //        parent::setUp();
 
@@ -31,7 +31,7 @@ abstract class TestCase extends PHPUnitTestCase
 
     }
 
-    protected function tearDown()
+    protected function tearDown(): void
     {
 
         Config::$dateFieldCandidates = [];

@@ -6,9 +6,12 @@ use Carbon\Carbon;
 use Skipprd\Traits\Config;
 use Skipprd\Traits\SkipprLogger;
 
+global $parseNamespaceCache;
+
 class InternalFields
 {
 
+    protected static $parseNamespaceCache;
     /**
      * @param array $message - payload being ingested from the source system
      * @param string $partition - partition defined by the semantics of the source system.
@@ -61,33 +64,44 @@ class InternalFields
      * could generally add real complexity.
      * @param $message
      */
-    public static function parseNamespaceField(array &$message, string $namespace)
+    public static function parseNamespaceField(array &$message, string $namespace): string
     {
 
-        // default to data source partition (table, topic, queue, file dir, etc)
-        $namespace = Helpers::cleanFieldName($namespace);
+//        $cleanNamespace = $namespace;
 
-        // optional: partition by composite key
-        if (!empty(Config::$eventTypeFields)) {
-            $namespaces = [];
+        if (!isset(self::$parseNamespaceCache[$namespace]) || self::$parseNamespaceCache[$namespace]) {
+
+            // default to data source partition (table, topic, queue, file dir, etc)
+            $cleanNamespace = Helpers::cleanFieldName($namespace);
+
+            // optional: partition by composite key
+            if (Config::$eventTypeFields) {
+                $namespaces = [];
 
 
-            foreach (Config::$eventTypeFields as $entityFieldDot) {
-                if ($entityValue = Arr::get($message, $entityFieldDot, false)) {
+                foreach (Config::$eventTypeFields as $entityFieldDot) {
+                    if ($entityValue = Arr::get($message, $entityFieldDot,
+                        false)) {
                         $namespaces[] = Helpers::cleanFieldName($entityValue);
+                    }
                 }
+
+                $namespace_suffix = implode('_', $namespaces);
+
+                $cleanNamespace = $namespace_suffix;
             }
 
-            $namespace_suffix = implode('_', $namespaces);
+            $cleanNamespace = strtolower(trim($cleanNamespace, '-'));
 
-            $namespace = $namespace_suffix;
+//            $message['skpr_namespace'] = $cleanNamespace;
+
+            if ($cleanNamespace !== $namespace) {
+                self::$parseNamespaceCache[$namespace] = true;
+            } else {
+                self::$parseNamespaceCache[$namespace] = false;
+            }
         }
-
-        $namespace = strtolower(trim($namespace, '-'));
-
-        $message['skpr_namespace'] = $namespace;
-
-        return $namespace;
+        return $cleanNamespace;
     }
 
     public static function parseSourceNamespace(string $namespace)

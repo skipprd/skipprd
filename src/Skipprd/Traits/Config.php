@@ -97,8 +97,8 @@ class Config
     public static $discoveredFieldOccurrence = [];
 
     public static $schema = [];
-    
-    public static $filters = [];
+
+    public static $filters = false;
 
     public static $flushBufferBytes = 250000;
 
@@ -119,9 +119,9 @@ class Config
 
     public static $partitionByFields = [];
 
-    public static $eventTypeFields = [];
+    public static $eventTypeFields = false;
 
-    public static $eventPath = '';
+    public static $eventPath = false;
 
     public static $flattenEvents = false;
 
@@ -176,7 +176,7 @@ class Config
         'avro_file'
     ];
 
-    public static function getenv(string $name, $default = null)
+    public static function getenv(string $name, $default = '')
     {
 
         return (!empty(getenv($name))) ? getenv($name) : $default;

@@ -11,7 +11,7 @@ use Monolog\Registry;
 trait SkipprLogger
 {
 
-    public static function init()
+    protected static function init()
     {
 
         $skipprLogger = Registry::hasLogger('skipprd');

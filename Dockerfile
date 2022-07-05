@@ -35,6 +35,7 @@ COPY ./composer.lock ./
 #COPY --from=encoder /usr/src/encoded-app ./
 #WORKDIR /usr/src/app
 
+RUN #composer install
 # parallel download and install of dependencies
 #RUN composer global require hirak/prestissimo
 RUN composer check-platform-reqs --no-dev --lock --no-interaction --no-ansi --no-cache
@@ -50,6 +51,7 @@ RUN rm composer.*
 # performance testing
 ##
 FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v3.0.0 as perf
+#FROM skippr-php:ubuntu as perf
 
 RUN apt-get update -y && apt-get install -y php-msgpack
 
@@ -88,6 +90,7 @@ CMD ["src/run.sh"]
 ##
 #FROM php:7.4-cli as encoder
 FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v3.0.0 as encoder
+#FROM skippr-php:ubuntu as encoder
 
 WORKDIR /usr/src/encoding-source
 
@@ -175,7 +178,7 @@ RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skippr
 
 
 FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v3.0.0 as final
-#FROM skippr-php:ubuntu
+#FROM skippr-php:ubuntu as final
 
 RUN apt-get update -y && apt-get install -y php-msgpack
 

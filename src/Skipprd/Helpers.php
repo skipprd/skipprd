@@ -9,6 +9,8 @@ use Skipprd\Traits\SkipprLogger;
 class Helpers
 {
 
+    protected static $cleanFieldCache = [];
+
     public static function explodeField($field)
     {
 
@@ -40,28 +42,39 @@ class Helpers
      * @param $field
      * @return string field
      */
-    public static function cleanFieldName($field)
+    public static function cleanFieldName(string $field = ''): string
     {
-        if (is_numeric($field)) {
-            $field = 'item_' . $field;
+        $clean = $field;
+
+        if (!isset(self::$cleanFieldCache[$field]) || self::$cleanFieldCache[$field]) {
+
+            if (is_numeric($field)) {
+                $field = 'item_' . $field;
 //            return $field;
+            }
+
+            $field = strtolower($field);
+
+            $pattern = "/[^" . preg_quote(
+                    '_0123456789_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ',
+                    "/"
+                ) . "]/";
+
+            $clean = preg_replace($pattern, "_", $field);
+
+            $clean = preg_replace($pattern, "_", $field);
+
+            $clean = ltrim($clean, '0123456789');
+
+            // '_' at the beginning is common and probably allowable
+            $clean = trim($clean, '_');
+
+            if ($clean !== $field) {
+                self::$cleanFieldCache[$field] = true;
+            } else {
+                self::$cleanFieldCache[$field] = false;
+            }
         }
-
-        $field = strtolower($field);
-
-        $pattern = "/[^" . preg_quote(
-            '_0123456789_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ',
-            "/"
-        ) . "]/";
-
-        $clean = preg_replace($pattern, "_", $field);
-
-        $clean = preg_replace($pattern, "_", $field);
-
-        $clean = ltrim($clean, '0123456789');
-
-        // '_' at the beginning is common and probably allowable
-        $clean = trim($clean, '_');
 
         return $clean;
     }
