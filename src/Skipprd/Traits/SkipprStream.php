@@ -205,7 +205,7 @@ trait SkipprStream
 
                             Config::getConfig();
 
-                            $this->connect();
+//                            $this->connect();
 
                             //                        $this->shutdown(0);
 

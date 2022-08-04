@@ -113,13 +113,13 @@ trait Ingest
                 $skipprPack = new SkipprPack();
                 $skipprPack->encode('schema_update', '');
 
-                $this->streamSend($skipprPack, STREAM_OOB);
+                $this->streamSend($skipprPack);
 
                 // IMPORTANT to backoff here
                 sleep(10);
 
                 // Re-ingest message now we have discovered its schema
-                $this->fastPathIngest($sourceMessage, $namespace);
+                return $this->ingestPayload($sourceMessage, $metadata, $namespace);
 
             } else if (!$this->flagMsgDeadLetter
                 && $this->avroEncodeTest($message, $namespace)
