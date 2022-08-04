@@ -689,8 +689,6 @@ class PipelineCommand
                 // @todo - often get 'Warning: [msgpack] (php_msgpack_unserialize) Extra bytes' without @
                 $payload = @msgpack_unpack($record);
 
-                $message = $payload;
-
                 $eventTime = InternalFields::parseTimeField($payload);
                 $source_namespace = $payload['source_namespace'];
                 $source_partition = $payload['source_partition'];
@@ -707,7 +705,7 @@ class PipelineCommand
 
                 if (Config::$syncMode == 'sync') {
                     $result = $this->outputPlugin->buffer->append(
-                        $message,
+                        $payload,
                         $sizeBytes,
                         false,
                         $eventTime,
@@ -717,7 +715,7 @@ class PipelineCommand
 
                 } elseif (Config::$syncMode == 'async') {
                     $result = $this->outputPlugin->buffer->append(
-                        $message,
+                        $payload,
                         $sizeBytes,
                         false,
                         $eventTime,
