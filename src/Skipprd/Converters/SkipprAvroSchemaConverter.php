@@ -37,7 +37,7 @@ class SkipprAvroSchemaConverter implements SchemaConverterInterface
 //        'unknown type' => [''],
 //        'date' => ['type' => ['type' => 'string', 'logicalType' => 'timestamp-micros']],
 //        'timestamp' => ['type' => ['type' => 'string', 'logicalType' => 'timestamp-micros']],
-        'date' => ['default' => null, 'type' => ['null', 'long']],
+        'date' => ['default' => null, 'type' => ['null', 'string']],
         'timestamp' => ['default' => null, 'type' => ['null', 'int']],
         'timestamp_milli' => ['default' => null, 'type' => ['null', 'long']],
         'seconds' => ['default' => null, 'type' => ['null', 'int']],

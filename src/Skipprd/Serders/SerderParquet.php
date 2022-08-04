@@ -43,9 +43,8 @@ class SerderParquet implements SerderBatchInterface
 
 //                        var_export($records);
 //                        print("\n");
-
-//                        print($exception->getMessage());
-//                        print($exception->getTraceAsString());
+            SkipprLogger::error("Parquet serialise error");
+            SkipprLogger::error($exception->getMessage());
 
         }
     }
@@ -74,6 +73,7 @@ class SerderParquet implements SerderBatchInterface
 //                                $message[$field['name']] = ['' => null];
                             }
                             if ($field['type'][1]['values'] == 'int') {
+                                // @todo - I think parquet and athena might support null now?
                                 $message[$field['name']] = ['' => 0];
 //                                $message[$field['name']] = ['' => null];
                             }

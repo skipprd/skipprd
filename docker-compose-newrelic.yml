@@ -2,7 +2,7 @@
 version: "3.7"
 services:
   skipprd-source:
-#    platform: linux/amd64
+    platform: linux/amd64
 #    depends_on:
 #      - newrelic-php-daemon
 #    image: skipprd_with_newrelic
@@ -45,7 +45,7 @@ services:
       APP_ENV: dev
 
   skipprd-output:
-#    platform: linux/amd64
+    platform: linux/amd64
 #    depends_on:
 #      - newrelic-php-daemon
 #    image: skipprd_with_newrelic

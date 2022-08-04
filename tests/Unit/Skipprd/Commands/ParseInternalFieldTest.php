@@ -19,7 +19,7 @@ class ParseInternalFieldTest extends TestCase
 
     protected array $event;
 
-    protected function setUp()
+    protected function setUp(): void
     {
         parent::setUp();
 

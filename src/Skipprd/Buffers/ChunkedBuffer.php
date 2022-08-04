@@ -75,7 +75,7 @@ class ChunkedBuffer implements BufferInterface
 
         $this->memBuffs[$chunkName]['buffer'][] = $payload;
 
-        if ($flush|| $this->checkFlushLimit($this->memBuffs[$chunkName])) {
+        if ($flush || $this->checkFlushLimit($this->memBuffs[$chunkName])) {
             if (!empty($this->memBuffs[$chunkName]) && !empty($this->memBuffs[$chunkName]['buffer'])) {
                 $this->driver->flush($this->memBuffs[$chunkName]['buffer'], $chunkName, $namespace);
 
@@ -215,13 +215,13 @@ class ChunkedBuffer implements BufferInterface
 
         } else {
 
-            $bucket = 0;
+            $bucket = false;
         }
 
         return $bucket;
     }
 
-    public function encodeChunkName(string $namespace = null, string $partition = null, $timeBucket = null): string
+    public function encodeChunkName(string $namespace = null, string $partition = null, int $timeBucket = 0): string
     {
 
         $chunks = [
@@ -230,7 +230,7 @@ class ChunkedBuffer implements BufferInterface
             'partition' => $partition
         ];
 
-        if (!empty($timeBucket)) {
+        if ($timeBucket) {
             $chunks['time'] = $timeBucket;
         }
 

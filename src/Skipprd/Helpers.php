@@ -62,8 +62,6 @@ class Helpers
 
             $clean = preg_replace($pattern, "_", $field);
 
-            $clean = preg_replace($pattern, "_", $field);
-
             $clean = ltrim($clean, '0123456789');
 
             // '_' at the beginning is common and probably allowable
@@ -155,7 +153,7 @@ class Helpers
 
         $memLimit = Config::$containerMem * 1024 * 1024 * 0.8; // allow overhead, set below memory_limit
 
-        $memUsage = memory_get_usage();
+        $memUsage = memory_get_usage(true);
 
         if ($memUsage >= $memLimit) {
             return true;

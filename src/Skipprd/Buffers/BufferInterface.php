@@ -19,7 +19,7 @@ interface BufferInterface
 
     public function eventTimeBucket(int $eventTime) : int;
 
-    public function encodeChunkName(string $namespace, string $partition, $timeBucket): string;
+    public function encodeChunkName(string $namespace, string $partition, int $timeBucket = 0): string;
 
     public function getChunkName($filename) : array;
 

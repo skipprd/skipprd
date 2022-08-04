@@ -249,7 +249,7 @@ class ValidateSchemaFile
             SkipprLogger::info("Schema is valid");
 
             $result = [
-                'result' => 'valid',
+                'result' => 'schema_valid',
                 'errors' => [],
             ];
 

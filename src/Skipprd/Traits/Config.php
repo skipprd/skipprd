@@ -88,7 +88,7 @@ class Config
 
     public static $minDiscoveryRecords = 10000;
 
-    public static $maxDiscoverySeconds = 600;
+    public static $maxDiscoverySeconds = 300;
 
     public static $idFields = [];
 
@@ -117,15 +117,15 @@ class Config
 
     public static $outputSchemas = [];
 
-    public static $partitionByFields = [];
+    public static $partitionByFields = false;
 
-    public static $eventTypeFields = false;
+    public static $eventTypeFields = [];
 
     public static $eventPath = false;
 
     public static $flattenEvents = false;
 
-    public static $timeFields = [];
+    public static $timeFields = false;
 
     public static $systemUserApiToken = '';
 
@@ -202,7 +202,7 @@ class Config
 
         self::$logLevel = Config::getenv('LOG_LEVEL', 'INFO');
 
-        self::$containerMem = Config::getenv('MEM', 1024); // convert to bytes
+        self::$containerMem = Config::getenv('MEM', 1024);
         self::$containerMem = self::$containerMem * 0.8; // allow some overhead
         ini_set('memory_limit', self::$containerMem . 'M');
 
@@ -447,7 +447,7 @@ class Config
         return $parsedSchema;
     }
 
-    public static function setConfig()
+    public static function setConfig(bool $evolved = false)
     {
 
         $configYml = [];
@@ -501,6 +501,7 @@ class Config
                 $data = [
                     'id' => self::$pipelineId,
                     'mapping' => Config::$discoveredFieldOccurrence,
+                    'evolved' => $evolved,
                 ];
                 if (!empty(self::$taskId)) {
                     $data['task_id'] = Config::$taskId;

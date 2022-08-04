@@ -2,9 +2,9 @@
 ## Builder
 ###
 
-FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v3.0.0 as builder
+#FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v3.0.0 as builder
 #FROM skippr-php:ubuntu as builder
-#FROM skippr-php:zts as builder
+FROM skippr-php:zts as builder
 
 ##
 # docker-php-extension-installer
@@ -51,9 +51,9 @@ RUN rm composer.*
 ##
 # performance testing
 ##
-FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v3.0.0 as perf
+#FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v3.0.0 as perf
 #FROM skippr-php:ubuntu as perf
-#FROM skippr-php:zts as perf
+FROM skippr-php:zts as perf
 
 RUN apt-get update -y && apt-get install -y php-msgpack
 
@@ -91,9 +91,9 @@ CMD ["src/run.sh"]
 # encoder
 ##
 #FROM php:7.4-cli as encoder
-FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v3.0.0 as encoder
+#FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v3.0.0 as encoder
 #FROM skippr-php:ubuntu as encoder
-#FROM skippr-php:zts as encoder
+FROM skippr-php:zts as encoder
 
 WORKDIR /usr/src/encoding-source
 
@@ -116,8 +116,8 @@ COPY --from=builder /usr/src/app .
 #RUN mkdir -p /usr/src/encoded-modules
 
 #--copy "@/*/" \
-RUN ioncube/ioncube_encoder.sh --activate && \
-    ioncube/ioncube_encoder.sh \
+RUN ioncube/ioncube_encoder.sh --activate  \
+    && ioncube/ioncube_encoder.sh \
       -72 \
       --binary \
       --optimise "max" \
@@ -147,7 +147,8 @@ RUN ioncube/ioncube_encoder.sh --activate && \
 #      --expire-in 180d \
       ./ \
       -o /usr/src/encoded-app/
-#      --deactivate
+
+RUN ioncube/ioncube_encoder.sh --deactivate
 
 
 RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Buffers/BufferDrivers/FileBufferDriver.php
@@ -180,11 +181,15 @@ RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skippr
 #RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Services/AvroSubPub/MessageSerializer.php
 
 
-FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v3.0.0 as final
+#FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v3.0.0 as final
 #FROM skippr-php:ubuntu as final
-#FROM skippr-php:zts as final
+FROM skippr-php:zts as final
 
-RUN apt-get update -y && apt-get install -y php-msgpack
+#RUN apt-get update -y && apt-get install -y php-msgpack
+RUN pecl install parallel msgpack \
+	&& docker-php-ext-enable parallel msgpack
+
+RUN docker-php-ext-install pcntl
 
 ARG SKIPPR_BUILD_VERSION
 RUN echo "export SKIPPR_BUILD_VERSION=${SKIPPR_BUILD_VERSION}" > /etc/profile.d/skpr_version.sh
@@ -195,6 +200,10 @@ COPY --from=encoder /usr/src/encoded-app .
 
 COPY ./composer.json ./
 COPY ./composer.lock ./
+
+RUN ls -la /usr/local/lib/php/extensions/no-debug-zts-20190902
+
+RUN ls -la /usr/local/lib/php/extensions/no-debug-zts-20190902
 
 CMD ["php", "src/run.php"]
 

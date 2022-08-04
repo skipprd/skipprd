@@ -46,10 +46,16 @@ class SkipprPack
         }
     }
 
+    public function create(string $payload)
+    {
+        $this->truncate();
+        $this->write($payload);
+    }
 
     public function encode(string $payload = '', string $offset = ''): void
     {
 
+        $this->truncate();
         $this->payload = $payload;
         $this->offset = $offset;
 

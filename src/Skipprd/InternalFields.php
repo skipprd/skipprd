@@ -25,7 +25,7 @@ class InternalFields
         $partition =  Helpers::cleanFieldName($partition);
 
         // optional: partition by composite key
-        if (!empty(Config::$partitionByFields)) {
+        if (Config::$partitionByFields) {
             $partition = '';
             
             foreach (Config::$partitionByFields as $entityFieldDot) {
@@ -67,7 +67,7 @@ class InternalFields
     public static function parseNamespaceField(array &$message, string $namespace): string
     {
 
-//        $cleanNamespace = $namespace;
+        $cleanNamespace = $namespace;
 
         if (!isset(self::$parseNamespaceCache[$namespace]) || self::$parseNamespaceCache[$namespace]) {
 
@@ -75,32 +75,30 @@ class InternalFields
             $cleanNamespace = Helpers::cleanFieldName($namespace);
 
             // optional: partition by composite key
-            if (Config::$eventTypeFields) {
+            if (!empty(Config::$eventTypeFields)) {
                 $namespaces = [];
 
-
                 foreach (Config::$eventTypeFields as $entityFieldDot) {
-                    if ($entityValue = Arr::get($message, $entityFieldDot,
-                        false)) {
+                    if ($entityValue = Arr::get($message, $entityFieldDot, false)) {
                         $namespaces[] = Helpers::cleanFieldName($entityValue);
                     }
                 }
 
-                $namespace_suffix = implode('_', $namespaces);
+                $cleanNamespace = implode('_', $namespaces);
 
-                $cleanNamespace = $namespace_suffix;
+                $cleanNamespace = strtolower(trim($cleanNamespace, '-'));
             }
 
-            $cleanNamespace = strtolower(trim($cleanNamespace, '-'));
-
-//            $message['skpr_namespace'] = $cleanNamespace;
-
-            if ($cleanNamespace !== $namespace) {
-                self::$parseNamespaceCache[$namespace] = true;
-            } else {
-                self::$parseNamespaceCache[$namespace] = false;
-            }
         }
+
+        if ($cleanNamespace !== $namespace) {
+            self::$parseNamespaceCache[$namespace] = true;
+        } else {
+            self::$parseNamespaceCache[$namespace] = false;
+        }
+
+        $message['skpr_namespace'] = $cleanNamespace;
+
         return $cleanNamespace;
     }
 
@@ -122,25 +120,27 @@ class InternalFields
         // default to beginning of epoch.
         $message['skpr_event_ts'] = 0;
 
-        // Support nested time fields via array dot notation
-        // For user confirmed event time fields, use the first one that matches
-        foreach (Config::$timeFields as $field_dot) {
-            if ($time_value = Arr::get($message, $field_dot, false)) {
-                $message['skpr_event_ts'] = $time_value;
-                break;
+        if (Config::$timeFields) {
+            // Support nested time fields via array dot notation
+            // For user confirmed event time fields, use the first one that matches
+            foreach (Config::$timeFields as $field_dot) {
+                if ($time_value = Arr::get($message, $field_dot, false)) {
+                    $message['skpr_event_ts'] = $time_value;
+                    break;
+                }
+            }
+
+            // Handle millisecond timestamps
+            if (strlen((string) $message['skpr_event_ts']) == 13) {
+                $message['skpr_event_ts'] = floor($message['skpr_event_ts'] / 1000);
+            }
+
+            // Handle datetime strings
+            if (gettype($message['skpr_event_ts']) == 'string') {
+                $message['skpr_event_ts'] = Carbon::parse($message['skpr_event_ts'])->timestamp;
             }
         }
 
-        // Handle millisecond timestamps
-        if (strlen((string) $message['skpr_event_ts']) == 13) {
-            $message['skpr_event_ts'] = floor($message['skpr_event_ts'] / 1000);
-        }
-
-        // Handle datetime strings
-        if (gettype($message['skpr_event_ts']) == 'string') {
-            $message['skpr_event_ts'] = Carbon::parse($message['skpr_event_ts'])->timestamp;
-        }
-
-        return $message['skpr_event_ts'];
+        return (int) $message['skpr_event_ts'];
     }
 }

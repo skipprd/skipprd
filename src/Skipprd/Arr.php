@@ -157,12 +157,12 @@ class Arr
      */
     public static function exists($array, $key)
     {
-        return isset($array[$key]);
+//        return isset($array[$key]);
 //        if ($array instanceof ArrayAccess) {
 //            return $array->offsetExists($key);
 //        }
 //
-//        return array_key_exists($key, $array);
+        return array_key_exists($key, $array);
     }
 
     /**

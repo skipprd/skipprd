@@ -3,6 +3,7 @@
 
 namespace Skipprd\Traits;
 
+use Monolog\Formatter\JsonFormatter;
 use Monolog\Formatter\LineFormatter;
 use Monolog\Handler\StreamHandler;
 use Monolog\Logger;
@@ -10,6 +11,8 @@ use Monolog\Registry;
 
 trait SkipprLogger
 {
+
+    private static $jsonFormatter;
 
     protected static function init()
     {
@@ -23,12 +26,12 @@ trait SkipprLogger
             $output = "[%datetime%] %channel%.%level_name%: %message%\n";
 
             $formatter = new LineFormatter($output, $dateFormat);
+            self::$jsonFormatter = new JsonFormatter($output, $dateFormat);
 
             // Create a handler
             $stream = new StreamHandler('php://stderr', \Monolog\Logger::DEBUG);
             $stream->setFormatter($formatter);
             $stream->setLevel(Config::$logLevel);
-
 
             $application = new Logger('skipprd');
             $application->pushHandler($stream);

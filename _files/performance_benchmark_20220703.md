@@ -73,6 +73,32 @@ skipprd-source_1  | [2022-07-02T21:15:40+00:00] skipprd.INFO: Fast Path messages
 skipprd-source_1  | [2022-07-02T21:15:51+00:00] skipprd.INFO: Fast Path messages 659.5 K
 
 
+
+Seralise output
+
+skippr pack and msgpack
+[2022-07-05T21:47:30+00:00] skipprd.INFO: Fast Path messages 44.2 K
+[2022-07-05T21:47:41+00:00] skipprd.INFO: Fast Path messages 92.5 K
+[2022-07-05T21:47:52+00:00] skipprd.INFO: Fast Path messages 140.9 K
+
+no skippr pack, msgpack
+[2022-07-05T21:48:50+00:00] skipprd.INFO: Fast Path messages 51.6 K
+[2022-07-05T21:49:01+00:00] skipprd.INFO: Fast Path messages 105.9 K
+[2022-07-05T21:49:12+00:00] skipprd.INFO: Fast Path messages 160.1 K
+
+
+no skippr pack, no msgpack
+[2022-07-05T21:51:22+00:00] skipprd.INFO: Fast Path messages 56.3 K
+[2022-07-05T21:51:33+00:00] skipprd.INFO: Fast Path messages 112.9 K
+[2022-07-05T21:51:44+00:00] skipprd.INFO: Fast Path messages 169.6 K
+
+skippr pack (instantiated once) and msgpack
+[2022-07-05T21:57:18+00:00] skipprd.INFO: Fast Path messages 50.5 K
+[2022-07-05T21:57:29+00:00] skipprd.INFO: Fast Path messages 101.6 K
+[2022-07-05T21:57:29+00:00] skipprd.INFO: Fast Path messages 101.6 K
+
+
+
 git checkout -b icu4c-69 c278d3dc42a6aac6ad7a46bd7d638c305364a888
 
 brew switch icu4c 69.1

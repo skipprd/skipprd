@@ -77,16 +77,12 @@ phpbrew install -j 10 8.1.7 +default +dbs +zts +zlib +bz2=/usr/local/Cellar/bzip
 ```
 AWS_PROFILE=skippr docker login --username AWS --password $(AWS_PROFILE=skippr aws ecr get-login-password --region eu-west-2) 536671797322.dkr.ecr.eu-west-2.amazonaws.com
 ```
- 
-2. export ssh key to authenticate with gitlab for php composer
-```
-export SSH_PRIVATE_KEY=`cat ~/.ssh/skippr/id_rsa_deployer`
-```
 
-3. build with local tag
+2. build with local tag
 
 ```
 docker build --build-arg SSH_PRIVATE_KEY="${SSH_PRIVATE_KEY}" --platform=linux/amd64 -f ./Dockerfile -t skipprd:build .
+docker build --platform=linux/amd64 -f ./Dockerfile -t skipprd:build .
 ```
 
 

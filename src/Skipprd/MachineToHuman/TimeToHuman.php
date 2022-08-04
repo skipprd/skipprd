@@ -66,7 +66,6 @@ class TimeToHuman
         // Convert to logical units
         if (!$forceUnit) {
             foreach (self::$unitTime as $unit) {
-                $i++;
 
                 if ($seconds > $unit) {
                     continue;
@@ -75,6 +74,7 @@ class TimeToHuman
                 if ($withUnits) {
                     $return = $return . ' ' . self::$units[$i];
                 }
+                $i++;
             }
         } else {
             $unitTimeFraction = round($seconds / self::$unitTime[$forceUnit], 2);

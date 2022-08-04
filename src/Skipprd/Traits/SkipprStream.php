@@ -14,8 +14,6 @@ trait SkipprStream
 
     protected $connAttemptsMax = 6;
 
-    protected $dataReadBytes = 0;
-
     protected $tcpBufferSize = 1000000;
 
     public function streamSend(string $message, $flags = null)
@@ -31,12 +29,10 @@ trait SkipprStream
 
             $bytes = strlen($message);
 
-            $this->dataReadBytes += $bytes;
-
             $tenantId = Config::$tenantId;
             $pipelineName = Config::$pipelineName;
 
-            $this->statsd->increment("{$tenantId}.{$pipelineName}.ingest.bytes.current", $bytes);
+//            $this->statsd->increment("{$tenantId}.{$pipelineName}.ingest.bytes.current", $bytes);
 
             // sometimes bytes written, sometime success exit code
             // might be platform based, someone else suggest due to blockking/non-blocking
@@ -127,7 +123,6 @@ trait SkipprStream
                                 $postReadCallback
                             );
                         } catch (\Exception $e) {
-                            SkipprLogger::error("Failed to read stream: $data");
                             SkipprLogger::error($e->getMessage());
                         }
                     } elseif (feof($conn)) {

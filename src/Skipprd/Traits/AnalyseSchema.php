@@ -113,6 +113,45 @@ trait AnalyseSchema
 //        ]
     ];
 
+    /**
+     * @param array $sourceMessage - the source message
+     * @param string $namespace
+     * @return void
+     */
+    public function analyse(array $sourceMessage, string $namespace): void
+    {
+        if (empty(Config::$discoveredFieldOccurrence[$namespace])) {
+            Config::$discoveredFieldOccurrence[$namespace] = [
+                'enabled' => true,
+                'fields' => [],
+            ];
+        }
+
+        if (is_array($sourceMessage)) {
+            $this->analysePayload(
+                $sourceMessage,
+                Config::$discoveredFieldOccurrence[$namespace]['fields']
+            );
+        }
+
+        if ($this->i > Config::$minDiscoveryRecords
+            || (Carbon::now()->timestamp - $this->startTimestamp) > Config::$maxDiscoverySeconds) {
+
+            SkipprLogger::info("Finished discovering schema of {$this->i} message of $namespace record type");
+
+            $this->i = 0;
+
+            $this->inputPlugin->continue[$namespace] = false;
+
+            // @todo - wont analyse all namespaces (tables, topics, paths, etc)
+            // if we exit here.
+            // The trouble with ->continue['part'] above is that it only exits if another
+            // record is found in the source. Else the source hangs till new data arrives.
+            // We need a way to force the source to the next namespace
+            $this->shutdown();
+        }
+    }
+
     public function analysePayload(array $message, array &$metadata)
     {
         

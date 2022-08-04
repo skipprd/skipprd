@@ -157,9 +157,9 @@ class SerderJson implements SerderStreamInterface
                     }
                 }
             }
-        }
 
-        fclose($fp);
+            fclose($fp);
+        }
 
         return $message;
     }
