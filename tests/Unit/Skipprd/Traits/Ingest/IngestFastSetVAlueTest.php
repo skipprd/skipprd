@@ -38,13 +38,17 @@ class IngestFastSetVAlueTest extends TestCase
         $message['skpr_partition'] = 'gdh';
         $message['source_namespace'] = 'foo_namespace';
         $message['source_partition'] = 'dh';
+        $message['skpr_event_ts'] = '';
 
         /**
          * analyse
          */
         Config::$discoveredFieldOccurrence['foo_namespace']['fields'] = [];
         $container->analysePayload($message, Config::$discoveredFieldOccurrence['foo_namespace']['fields']);
-        $container->determineFieldTypes(Config::$discoveredFieldOccurrence['foo_namespace']['fields']);
+//        $container->determineFieldTypes(Config::$discoveredFieldOccurrence['foo_namespace']['fields']);
+        foreach (Config::$discoveredFieldOccurrence as $namespace => $metadata) {
+            $container->determineFieldTypes(Config::$discoveredFieldOccurrence[$namespace]['fields']);
+        }
         $metadata = Config::$discoveredFieldOccurrence['foo_namespace']['fields'];
 
         /**

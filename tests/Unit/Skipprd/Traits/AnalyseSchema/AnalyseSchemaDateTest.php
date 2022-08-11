@@ -17,7 +17,7 @@ use AvroSchema;
 class AnalyseSchemaDateTest extends TestCase
 {
 
-    protected function setUp()
+    protected function setUp(): void
     {
         parent::setUp();
 
@@ -43,7 +43,7 @@ class AnalyseSchemaDateTest extends TestCase
         $this->assertArrayHasKey($field, $dateCandidates);
         
         $this->assertEquals('date', $dataType);
-        $this->assertEquals(1567174191, $value);
+        $this->assertEquals('2019-08-30T14:09:51.807Z', $value);
 
     }
 
@@ -140,7 +140,7 @@ class AnalyseSchemaDateTest extends TestCase
         $this->assertArrayHasKey('date_candidate', Config::$discoveredFieldOccurrence[$field]);
 
         $this->assertEquals('date', $dataType);
-        $this->assertEquals(1427068800, $value);
+        $this->assertEquals('2015-03-23', $value);
 
     }
 

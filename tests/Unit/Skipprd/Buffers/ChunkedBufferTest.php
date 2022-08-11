@@ -29,7 +29,7 @@ class ChunkedBufferTest extends TestCase
 
         $namespace = 'foo_namespace';
         $partition = 'foo_partition';
-        $timeBucket = 'foo_1';
+        $timeBucket = 600;
 
         $chunkName = $chunkedBuffer->encodeChunkName($namespace, $partition, $timeBucket);
         
@@ -68,7 +68,7 @@ class ChunkedBufferTest extends TestCase
 
         $namespace = 'foo_namespace';
         $partition = 'foo_partition';
-        $timeBucket = null;
+        $timeBucket = 0;
 
         $chunkName = $chunkedBuffer->encodeChunkName($namespace, $partition, $timeBucket);
 

@@ -23,7 +23,7 @@ use AvroSchema;
 class AnalyseSchemaFloatTest extends TestCase
 {
 
-    protected function setUp()
+    protected function setUp(): void
     {
         parent::setUp();
 

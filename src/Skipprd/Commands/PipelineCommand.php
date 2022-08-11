@@ -1531,7 +1531,6 @@ class PipelineCommand
 
         $demotedTypes = ['boolean', 'date', 'timestamp', 'timestamp_milli'];
 
-
         foreach ($metadata as $fieldName => $field) {
             // Useful for field evolution logic for maps, which only support one sub-field type
             if ($parent_type !== null) {
@@ -1602,7 +1601,17 @@ class PipelineCommand
                         // Get avro arrays items primitive data type
                         foreach ($metadata[$fieldName]['fields'] as $sub_field) {
                             foreach ($sub_field['type'] as $dataType => $dataTypeCount) {
-                                if (!in_array($dataType, $demotedTypes)) {
+                                // Prefer primitive types to logical types or types
+                                // that cause frequent false positives (demoted types).
+                                // - if there's multiple discovered types
+                                // - and the most common type is a demoted type
+                                // - select the next most common, non-date type
+//                                if (!in_array($dataType, $demotedTypes)) {
+                                if (count($sub_field['type']) == 1
+                                    || (count($sub_field['type']) > 1 && !in_array(
+                                            $dataType,
+                                            $demotedTypes
+                                        ))) {
                                     if (empty($typeCount[$dataType])) {
                                         $typeCount[$dataType] = $dataTypeCount;
                                     } else {

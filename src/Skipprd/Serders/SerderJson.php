@@ -67,6 +67,7 @@ class SerderJson implements SerderStreamInterface
 
         if (json_last_error() == 4) {
 
+            $message = [];
 
             // mocking a stream is best way to deal with new line chars
             $fp = fopen("php://temp", 'r+');
@@ -117,13 +118,15 @@ class SerderJson implements SerderStreamInterface
                 }
 
                 if ($jsonStart > 0) {
-                    $string = substr($string, $jsonStart);
+                    $string = substr($string, $jsonStart -1);
                 }
 
 
-                $message = json_decode($string, true);
+                $message[] = json_decode($string, true);
 
                 if (json_last_error() == 4) {
+
+                    $message = [];
 
                     /**
                      * Check for object concatinated into single line with no delemiter
@@ -151,6 +154,7 @@ class SerderJson implements SerderStreamInterface
                         if ($i === $count) {
                             $record = '{' . $record;
                         }
+
                         $message[] = json_decode($record, true);
 
                         $i++;

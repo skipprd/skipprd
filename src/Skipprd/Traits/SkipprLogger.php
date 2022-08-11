@@ -14,7 +14,7 @@ trait SkipprLogger
 
     private static $jsonFormatter;
 
-    protected static function init()
+    public static function init()
     {
 
         $skipprLogger = Registry::hasLogger('skipprd');

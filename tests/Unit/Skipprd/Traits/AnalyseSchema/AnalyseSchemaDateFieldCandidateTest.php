@@ -17,7 +17,7 @@ use AvroSchema;
 class AnalyseSchemaDateFieldCandidateTest extends TestCase
 {
 
-    protected function setUp()
+    protected function setUp(): void
     {
         parent::setUp();
 
