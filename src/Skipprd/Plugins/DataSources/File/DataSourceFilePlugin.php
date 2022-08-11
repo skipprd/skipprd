@@ -22,6 +22,16 @@ class DataSourceFilePlugin extends DataSourcePluginBase
     {
     }
 
+    function rglob(string $path, int $flags = 0): array
+    {
+        $files = glob($path . '/*', $flags);
+        foreach (glob(dirname($path) . '/*', GLOB_ONLYDIR | GLOB_NOSORT) as $dir) {
+            $files = array_merge($files, $this->rglob($dir, GLOB_ONLYDIR | GLOB_NOSORT));
+        }
+
+        return $files;
+    }
+
     public function sync()
     {
 
@@ -46,7 +56,7 @@ class DataSourceFilePlugin extends DataSourcePluginBase
 
             SkipprLogger::debug("Globing files from $path");
             
-            $filenames = glob($path . '/*', GLOB_NOSORT);
+            $filenames = $this->rglob($path, GLOB_NOSORT);
 
             usort($filenames, function ($a, $b) {
                 return filemtime($a) - filemtime($b);
