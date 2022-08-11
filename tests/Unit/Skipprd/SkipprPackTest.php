@@ -41,6 +41,51 @@ class SkipprPackTest extends TestCase
 
     }
 
+    public function testDecodeMessageBytes()
+    {
+
+        $string = 'record_value';
+        $offset = 'offset_value';
+
+        $spw = new SkipprPack();
+        $spr = new SkipprPack();
+
+        $spw->encode($string, $offset);
+        $skipprPack = $spw->string();
+
+        $spr->create($skipprPack);
+        $record = $spr->decodeRecord();
+        $offset = $spr->decodeOffset();
+        $sizeBytes = $spr->length();
+        $msgLgn = $spr->decodeMessageLength();
+
+        $this->assertEquals($record, $string);
+        $this->assertEquals(strlen($record), strlen($string));
+
+    }
+
+    public function testDecodeMessageJson()
+    {
+
+        $array = ['foo' => 123, 'bar' => 456];
+        $offset = 'offset_value';
+
+        $spw = new SkipprPack();
+        $spr = new SkipprPack();
+
+        $spw->encode(json_encode($array), $offset);
+        $skipprPack = $spw->string();
+
+        $spr->create($skipprPack);
+        $record = json_decode($spr->decodeRecord(), true);
+        $offset = $spr->decodeOffset();
+        $sizeBytes = $spr->length();
+        $msgLgn = $spr->decodeMessageLength();
+
+        $this->assertEquals($record, $array);
+
+    }
+
 //    public function testString()
 //    {
 //
