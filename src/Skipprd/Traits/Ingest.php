@@ -119,7 +119,7 @@ trait Ingest
                 sleep(10);
 
                 // Re-ingest message now we have discovered its schema
-                return $this->ingestPayload($sourceMessage, $metadata, $namespace);
+                return $this->fastPathIngest($sourceMessage, $namespace);
 
             } else if (!$this->flagMsgDeadLetter
                 && $this->avroEncodeTest($message, $namespace)

@@ -146,6 +146,7 @@ class SkipprPack
     {
 
         $len = $this->length() - $this->current_index;
+//        $len = $len - 4; // minus last four bytes representing message length
 
         $read = substr($this->string_buffer, $this->current_index, $len);
 

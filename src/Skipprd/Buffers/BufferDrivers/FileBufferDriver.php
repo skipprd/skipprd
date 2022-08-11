@@ -49,55 +49,134 @@ class FileBufferDriver implements BufferDriverInterface
     public function flush(
         array $memBuff,
         string $chunkName,
-        string $namespace
+        string $namespace,
+        bool $finalize = false
     ): void {
 
-        $schema = Config::$outputSchemas[$namespace];
+//        $schema = Config::$outputSchemas[$namespace];
 
         $filename = $this->bufferDir . '/' . $chunkName . '&temp_part';
 
         try {
+
+            SkipprLogger::debug("Requesting lock on $filename");
+
             if (FileBufferDriver::lock($filename)) { // acquire an exclusive lock
-                if (in_array(Config::$outputFormat, Config::$batchFormats)
-                    && Config::$enableDeadLetters) {
-                    $this->serde->serialize($memBuff, $filename, $schema);
+//                if (in_array(Config::$outputFormat, Config::$batchFormats)
+//                    && Config::$enableDeadLetters) {
+//                    $this->serde->serialize($memBuff, $filename, $schema);
+//
+//                    FileBufferDriver::unlock($filename);
+//
+//                    $this->finalise();
+//                } else {
+//                    $fp = fopen($filename, 'a+');
+//
+//                    foreach ($memBuff as $buf) {
+//                        fputs(
+//                            $fp,
+//                            $this->serde->serialize($buf, $schema) . "\n"
+//                        );
+//                    }
+
+//                $fp = fopen($filename, 'a+');
+
+                SkipprLogger::debug("Flushing buffer $chunkName to disk");
+
+                $fh = fopen($filename, 'a+');
+                fputs($fh, implode(PHP_EOL, $memBuff));
+                fflush($fh);
+                fclose($fh);
+
+//                file_put_contents($filename, implode(PHP_EOL, $memBuff), FILE_APPEND);
+
+//                foreach ($memBuff as $buf) {
+//                    fputs($fp, "$buf\n");
+//                }
+
+//                    fflush($fp);            // flush output before releasing the lock
 
                     FileBufferDriver::unlock($filename);
 
-                    $this->finalise();
-                } else {
-                    $fp = fopen($filename, 'a+');
+//                    FileBufferDriver::close($fp);
 
-                    foreach ($memBuff as $buf) {
-                        fputs(
-                            $fp,
-                            $this->serde->serialize($buf, $schema) . "\n"
-                        );
-                    }
-
-                    fflush($fp);            // flush output before releasing the lock
-
-                    FileBufferDriver::unlock($filename);
-
-                    FileBufferDriver::close($fp);
                 }
-            }
+//            }
         } catch (\Exception $e) {
             echo $e->getMessage();
 
             echo $e->getTraceAsString();
-            fflush($fp);            // flush output before releasing the lock
+//            fflush($fp);            // flush output before releasing the lock
 
             FileBufferDriver::unlock($filename);
 
-            FileBufferDriver::close($fp);
+//            FileBufferDriver::close($fp);
 
             throw $e;
         }
 
         SkipprLogger::debug("Flushed buffer chunk $chunkName");
 
-        $this->finalise();
+        if ($finalize || $this->checkFlushLimit($filename)) {
+            $this->finalise($filename, $namespace);
+        }
+
+    }
+
+    public function checkFlushLimit(string $filename): bool
+    {
+
+        $result = false;
+
+//        if (Helpers::memLimitReached()) {
+//            SkipprLogger::info("Rotating buffer as memory limit has low headroom at ". BytesToHuman::toHuman(memory_get_usage(), true));
+//            $result = true;
+//        }
+
+        // possible file removed by competing thread
+        if (!file_exists($filename)) return $result;
+
+        // ignore locked files
+        if (strpos($filename, '.lock')) return $result;
+        if (strpos($filename, '.checkpoint')) return $result;
+
+        $updatedTime = filectime($filename);
+//        $updatedDelta = time() - $updatedTime;
+        $bytes = filesize($filename);
+//        $humanSize = BytesToHuman::toHuman($bytes, true);
+
+        if ($bytes > Config::$flushBufferBytes) {
+            SkipprLogger::debug("Rotating output file with size ". BytesToHuman::toHuman($bytes, true));
+            $result = true;
+        }
+
+        if ((time() - $updatedTime) > Config::$flushBufferSeconds) {
+            SkipprLogger::debug("Rotating output file with ttl ". (time() - $updatedTime) . " seconds");
+            $result = true;
+        }
+
+//        if ($chunk['count'] >= Config::$flushBufferRecords) {
+//            SkipprLogger::debug("Rotating buffer of ". $chunk['count'] . " records");
+//            $result = true;
+//        }
+
+        if ($result) {
+            $size = BytesToHuman::toHuman($bytes, true);
+            $time = (time() - $updatedTime);
+            $count = 'with';
+
+            SkipprLogger::info("Finalising output file of $size, $count records and age of $time seconds");
+
+            $tenantId = Config::$tenantId;
+            $pipelineName = Config::$pipelineName;
+
+//            $this->statsd->increment("{$tenantId}.{$pipelineName}.flushed.records.current", $count);
+//            $this->statsd->increment("{$tenantId}.{$pipelineName}.flushed.age.current", $time);
+//            $this->statsd->increment("{$tenantId}.{$pipelineName}.flushed.bytes.current", $chunk['size']);
+
+        }
+
+        return $result;
     }
 
 //    public function append(array $message, bool $flush = false) : void {
@@ -172,7 +251,7 @@ class FileBufferDriver implements BufferDriverInterface
                 $this->cpFp = new \SplFileObject($checkpoint_filename, "a+");
                 $this->cpLine = (int) $this->cpFp->fgets();
 
-                SkipprLogger::info("Streaming buffer file $filename from line $this->cpLine");
+                SkipprLogger::info("Streaming output file $filename from line $this->cpLine");
 
                 $this->dataFp = new \SplFileObject($filename, "a+");
 
@@ -288,14 +367,14 @@ class FileBufferDriver implements BufferDriverInterface
         // dir is more reliable than waiting for fstat on a file
         if (@mkdir($chunkName . '.lock', 0777, true)) {
             $locked = true;
-            SkipprLogger::debug("Created lock on buffer chunk $chunkName");
+            SkipprLogger::debug("Created lock on file $chunkName");
         }
 
         // @todo - check update time of lock file and force delete if it's past an expire time
         while (!$locked && $block) {
             if (@mkdir($chunkName . '.lock', 0777, true)) {
                 $locked = true;
-                SkipprLogger::debug("Created lock on buffer chunk $chunkName");
+                SkipprLogger::debug("Created lock on file $chunkName");
             } else {
                 sleep(1);
             }
@@ -306,11 +385,16 @@ class FileBufferDriver implements BufferDriverInterface
 
     public function unlockAll(): void
     {
+
         $file_list = glob($this->bufferDir . '/buffer=' . $this->bufferName . '*lock');
+
+        SkipprLogger::info("Removing all buffer locks: " . json_encode($file_list));
 
         if (!empty($file_list)) {
             foreach ($file_list as $filename) {
+
                 try {
+                    SkipprLogger::debug("Unlocking file $filename");
                     rmdir($filename);
                 } catch (\Exception $e) {
                     // Still possible the file has been deleted just before with stat the size
@@ -361,51 +445,103 @@ class FileBufferDriver implements BufferDriverInterface
      * Simply closes a buffer file by renaming it with '&finalised' suffix
      * which prevents further append writes and indicates the buffer file is ready for output
      */
-    public function finalise(): void
+    public function finalise(string $filename, string $namespace): void
     {
 
-        $file_list = glob($this->bufferDir . '/buffer=' . $this->bufferName . '*&temp_part*');
+//        $file_list = glob($this->bufferDir . '/buffer=' . $this->bufferName . '*&temp_part*');
 
-        if (!empty($file_list)) {
-            foreach ($file_list as $filename) {
+//        if (!empty($file_list)) {
+//            foreach ($file_list as $filename) {
                 try {
-                    // possible file removed by competing thread
-                    if (!file_exists($filename)) {
-                        continue;
+
+                    if (
+                        file_exists($filename) // possible file removed by competing thread
+                        && !strpos($filename, '.lock') // ignore locked files
+                    ) {
+
+                        SkipprLogger::info("Finalising output file $filename");
+
+                        if (FileBufferDriver::lock($filename)) { // acquire an exclusive lock
+                            $finalFilename = str_replace(
+                                    '&temp_part',
+                                    '&finalised',
+                                    $filename
+                                ) . '=' . Helpers::randomPassword(32);
+
+//                        rename(
+//                            $filename,
+//                            $finalFilename
+//                        );
+
+
+                            $fpr = fopen($filename, 'r');
+
+                            if (in_array(Config::$outputFormat,
+                                    Config::$batchFormats)
+                                && Config::$enableDeadLetters) {
+
+//                                SkipprLogger::info("Unpacking buffer file $filename");
+
+                                $this->serde->openWriter($finalFilename, Config::$outputSchemas[$namespace]);
+
+                                SkipprLogger::info("Unpacking buffer file $filename and serializing to " . Config::$outputFormat . " output format");
+
+                                while (($buf = fgets($fpr)) !== false) {
+//                                    $memBuff[] = @msgpack_unpack($buf);
+
+//                                    $memBuff[] = unpack("c*", $buf);
+                                    if (is_array($message = @msgpack_unpack($buf))) {
+                                        $this->serde->serialize($message,
+                                            $finalFilename,
+                                            Config::$outputSchemas[$namespace]);
+                                    }
+                                }
+
+//                                SkipprLogger::info("Unpacked buffer file $filename, serializing to " . Config::$outputFormat . " output format");
+
+//                                $this->serde->serialize($memBuff,
+//                                    $finalFilename,
+//                                    Config::$outputSchemas[$namespace]);
+
+                                $this->serde->closeWriter();
+
+                            } else {
+                                $fpw = fopen($finalFilename, 'a+');
+                                while (($buf = fgets($fpr)) !== false) {
+
+                                    fputs(
+                                        $fpw,
+                                        $this->serde->serialize(@msgpack_unpack($buf),
+//                                        $this->serde->serialize(unpack("c*", $buf),
+                                            Config::$outputSchemas[$namespace]) . "\n"
+                                    );
+                                }
+
+                                fflush($fpw);
+                                fclose($fpw);
+                            }
+
+                            fflush($fpr);
+                            fclose($fpr);
+
+                            $updatedTime = filectime($finalFilename);
+                            $updatedDelta = time() - $updatedTime;
+                            $bytes = filesize($finalFilename);
+                            $humanSize = BytesToHuman::toHuman($bytes, true);
+
+                            SkipprLogger::debug("Output file $filename finalised at $humanSize and age of $updatedDelta seconds");
+
+                            $this->destroy($filename);
+                            FileBufferDriver::unlock($filename);
+                        }
                     }
-
-                    // ignore locked files
-                    if (strpos($filename, '.lock')) {
-                        continue;
-                    }
-
-                    if (FileBufferDriver::lock($filename)) { // acquire an exclusive lock
-                        $finalFilename = str_replace(
-                            '&temp_part',
-                            '&finalised',
-                            $filename
-                        ) . '=' . Helpers::randomPassword(32);
-
-                        rename(
-                            $filename,
-                            $finalFilename
-                        );
-
-                        $updatedTime = filectime($finalFilename);
-                        $updatedDelta = time() - $updatedTime;
-                        $bytes = filesize($finalFilename);
-                        $humanSize = BytesToHuman::toHuman($bytes, true);
-
-                        SkipprLogger::debug("Buffer file $filename finalised at $humanSize and age of $updatedDelta seconds");
-
-                        FileBufferDriver::unlock($filename);
-                    }
-                } catch (\Exception $e) {
-                    // Still possible the file has been deleted just before we stat the size
-                    SkipprLogger::debug($e->getMessage());
+                } catch
+                    (\Exception $e) {
+                        // Still possible the file has been deleted just before we stat the size
+                        SkipprLogger::debug($e->getMessage());
                 }
-            }
-        }
+
+
     }
 
     public function bufferGetNoFiles(): int
@@ -488,6 +624,9 @@ class FileBufferDriver implements BufferDriverInterface
                     while (!feof($fp)) {
                         $lines += substr_count(fread($fp, 8192), "\n");
                     }
+
+                    fclose($fp);
+
                 } catch (\Exception $e) {
                     // Still possible the file has been deleted just before with stat the size
                     SkipprLogger::debug($e->getMessage());

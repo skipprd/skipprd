@@ -18,7 +18,7 @@ class InternalFields
      *                            For instance kinesis shard, kafka partition, etc.
      * @return string
      */
-    public static function parsePartitionField(array &$message, string $partition): string
+    public static function parsePartitionField(array &$message, string $partition = ''): string
     {
 
         // default to data source partition (table, topic, queue, file dir, etc)

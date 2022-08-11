@@ -44,7 +44,7 @@ class DataOutputFilePlugin extends DataOutputPluginBase
             $result = rename($filename, $path);
 
             if ($result) {
-                SkipprLogger::info("Saved buffer file $filename to output $path.");
+                SkipprLogger::debug("Saved buffer file $filename to output $path.");
 
                 @$this->buffer->driver->destroy($filename);
             } else {

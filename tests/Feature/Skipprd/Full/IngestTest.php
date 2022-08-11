@@ -518,8 +518,6 @@ class IngestTest extends TestCase
 //        $this->buffer->flush($this->buffer->memBuffs, $chunkName, 'foo_namespace');
         $this->buffer->flushAll(true);
 
-        $this->buffer->driver->finalise(true);
-
     }
 
     public function buildSchema($record) {

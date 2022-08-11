@@ -81,10 +81,15 @@ AWS_PROFILE=skippr docker login --username AWS --password $(AWS_PROFILE=skippr a
 2. build with local tag
 
 ```
-docker build --build-arg SSH_PRIVATE_KEY="${SSH_PRIVATE_KEY}" --platform=linux/amd64 -f ./Dockerfile -t skipprd:build .
 docker build --platform=linux/amd64 -f ./Dockerfile -t skipprd:build .
 ```
 
+3. run docker compose
+(don't forget the timeout for shutdown function)
+
+```
+
+```
 
 ## Integration Testing
 

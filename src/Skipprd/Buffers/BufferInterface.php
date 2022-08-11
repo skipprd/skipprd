@@ -7,15 +7,14 @@ interface BufferInterface
 {
 
     public function append(
-        array $payload,
+        string $payload,
         int $bytes,
-        bool $flush = false,
         int $eventTime = 0,
         string $namespace = null,
         string $partition = null
     ) : int;
 
-    public function flushAll(bool $force = false): void;
+    public function flushAll(bool $finalize = false): void;
 
     public function eventTimeBucket(int $eventTime) : int;
 

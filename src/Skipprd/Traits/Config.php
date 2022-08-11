@@ -203,6 +203,7 @@ class Config
         self::$logLevel = Config::getenv('LOG_LEVEL', 'INFO');
 
         self::$containerMem = Config::getenv('MEM', 1024);
+//        self::$containerMem = 1024;
         self::$containerMem = self::$containerMem * 0.8; // allow some overhead
         ini_set('memory_limit', self::$containerMem . 'M');
 
