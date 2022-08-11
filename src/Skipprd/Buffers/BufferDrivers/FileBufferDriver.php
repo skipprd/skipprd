@@ -480,39 +480,28 @@ class FileBufferDriver implements BufferDriverInterface
                                     Config::$batchFormats)
                                 && Config::$enableDeadLetters) {
 
-//                                SkipprLogger::info("Unpacking buffer file $filename");
-
                                 $this->serde->openWriter($finalFilename, Config::$outputSchemas[$namespace]);
 
                                 SkipprLogger::info("Unpacking buffer file $filename and serializing to " . Config::$outputFormat . " output format");
 
                                 while (($buf = fgets($fpr)) !== false) {
-//                                    $memBuff[] = @msgpack_unpack($buf);
 
-//                                    $memBuff[] = unpack("c*", $buf);
-                                    if (is_array($message = @msgpack_unpack($buf))) {
-                                        $this->serde->serialize($message,
-                                            $finalFilename,
-                                            Config::$outputSchemas[$namespace]);
-                                    }
+                                    $this->serde->serialize(msgpack_unpack($buf),
+                                        $finalFilename,
+                                        Config::$outputSchemas[$namespace]);
                                 }
-
-//                                SkipprLogger::info("Unpacked buffer file $filename, serializing to " . Config::$outputFormat . " output format");
-
-//                                $this->serde->serialize($memBuff,
-//                                    $finalFilename,
-//                                    Config::$outputSchemas[$namespace]);
 
                                 $this->serde->closeWriter();
 
                             } else {
+
                                 $fpw = fopen($finalFilename, 'a+');
                                 while (($buf = fgets($fpr)) !== false) {
 
                                     fputs(
                                         $fpw,
-                                        $this->serde->serialize(@msgpack_unpack($buf),
-//                                        $this->serde->serialize(unpack("c*", $buf),
+                                        $this->serde->serialize(msgpack_unpack($buf),
+                                            $finalFilename,
                                             Config::$outputSchemas[$namespace]) . "\n"
                                     );
                                 }
