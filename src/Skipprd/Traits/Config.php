@@ -350,8 +350,11 @@ class Config
         self::$systemUserApiToken = self::getenv('SKIPPR_API_TOKEN');
 
         if (!empty(self::$discoveredFieldOccurrence)) {
+
+            SkipprLogger::debug("Building schemas");
+
             foreach (self::$discoveredFieldOccurrence as $namespace => $mapping) {
-                SkipprLogger::info("Building $namespace schema");
+                SkipprLogger::debug("Building $namespace schema");
 
                 $converter = new SkipprAvroSchemaConverter();
                 self::$schema[$namespace] = $converter->convert($mapping['fields']);
@@ -370,7 +373,7 @@ class Config
                 $converterClass = 'Skipprd\Converters\Avro' . $outputFormat . 'SchemaConverter';
 
                 if (class_exists($converterClass)) {
-                    SkipprLogger::info("Generating $namespace $outputFormat schema");
+                    SkipprLogger::debug("Generating $namespace $outputFormat schema");
 
                     $converter = new $converterClass();
 
