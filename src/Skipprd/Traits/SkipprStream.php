@@ -8,6 +8,8 @@ use Skipprd\SkipprPack;
 trait SkipprStream
 {
 
+    protected $skipprPack;
+
     protected $remainingData = '';
 
     protected $connAttempts = 0;
@@ -15,6 +17,7 @@ trait SkipprStream
     protected $connAttemptsMax = 6;
 
     protected $tcpBufferSize = 1000000;
+
 
     public function streamSend(string $message, $flags = null)
     {
@@ -106,6 +109,9 @@ trait SkipprStream
         callable $postReadCallback
     ) {
         try {
+
+            $this->skipprPack = new SkipprPack();
+
             while ($conn = @stream_socket_accept($this->sock, 60)) {
 //                stream_set_blocking($conn, true);
 //                stream_set_timeout($conn, 120);
@@ -114,6 +120,7 @@ trait SkipprStream
 
                 while ($data = fread($conn, 8192)) {
                     if ($data) {
+
                         try {
                             $newData = $this->remainingData . $data;
 
@@ -176,7 +183,10 @@ trait SkipprStream
 //                SkipprLogger::info("ReadLen: $readLen");
             }
 
-            if ($i < strlen($data)) { // index is out of bounds without this, not sure why
+            // `index is out of bounds` without this
+            // we may have reached the end of the socket buffer
+            // more data will likely arrive soon to concat onto our $read buffer
+            if ($i < strlen($data)) {
                 $read .= $data[$i];
             }
 
@@ -189,10 +199,11 @@ trait SkipprStream
 
 
                 try {
-                    $sp = new SkipprPack($read);
+
+                    $this->skipprPack->create($read);
 
 
-                    $record = $sp->decodeRecord();
+                    $record = $this->skipprPack->decodeRecord();
 
                     switch ($record) {
                         case 'sync_complete':
@@ -210,15 +221,15 @@ trait SkipprStream
                             //                        $this->shutdown(0);
 
 //                            return '';
-                            break;
+//                            break;
 
                         default:
-                            call_user_func($emitMessageCallback, $sp);
+                            call_user_func($emitMessageCallback, $this->skipprPack);
                             break;
                     }
 
 
-//                    $this->serialiseOutput($sp);
+//                    $this->serialiseOutput($this->skipprPack);
 
 //                    $remainingData = substr($remainingData, $readLen);
                 } catch (\Exception $e) {
