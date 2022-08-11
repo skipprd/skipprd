@@ -22,11 +22,13 @@ class DataSourceFilePlugin extends DataSourcePluginBase
     {
     }
 
-    function rglob(string $path, int $flags = 0): array
+    function rglob(string $path, int $flags = GLOB_NOSORT): array
     {
         $files = glob($path . '/*', $flags);
-        foreach (glob(dirname($path) . '/*', GLOB_ONLYDIR | GLOB_NOSORT) as $dir) {
-            $files = array_merge($files, $this->rglob($dir, GLOB_ONLYDIR | GLOB_NOSORT));
+        foreach (glob($path . '/*', GLOB_ONLYDIR | GLOB_NOSORT) as $dir) {
+            if ( $dir !== $path) {
+                $files = array_merge($files, $this->rglob($dir));
+            }
         }
 
         return $files;
