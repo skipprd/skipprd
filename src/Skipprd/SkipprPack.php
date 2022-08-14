@@ -21,18 +21,18 @@ class SkipprPack
 
     const OFFSET_FORMAT = 'N';
 
-    private string $offset;
+    private $offset;
 
-    private string $payload;
+    private $payload;
 
     /**
      * @var string
      */
-    private string $string_buffer;
+    private $string_buffer;
     /**
      * @var int  current position in string
      */
-    private int $current_index;
+    private $current_index;
 
     public function __construct(string $skipprPack = '')
     {
