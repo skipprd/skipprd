@@ -17,7 +17,7 @@ class Offsets
         return $this->offsets;
     }
 
-    public function setOffsets(string $offsets, string $namespace, string $partition = '')
+    public function setOffsets(string $offsets, string $namespace, string $partition = ''): void
     {
 
         try {
@@ -29,7 +29,7 @@ class Offsets
         }
     }
 
-    public function getOffsets(string $namespace, string $partition = '')
+    public function getOffsets(string $namespace, string $partition = ''): array
     {
 
         $offsets = [];
@@ -40,15 +40,15 @@ class Offsets
 
 
         if (empty($offsets[0])) {
-            $offsets[0] = 0;
+            $offsets[0] = '';
         }
 
         return $offsets;
     }
 
-    public function getCurrentOffsets(string $namespace, string $partition = '')
+    public function getCurrentOffsets(string $namespace, string $partition = ''): string
     {
-        return $this->offsets[$namespace][$partition];
+        return $this->offsets[$namespace][$partition] ?? '';
     }
 
     public function validateOffset(string $args, string $namespace, string $partition = '') : bool

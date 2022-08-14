@@ -2,6 +2,7 @@
 
 namespace Skipprd\Traits;
 
+use _PHPStan_76800bfb5\Nette\Neon\Exception;
 use Skipprd\Helpers;
 
 trait IngestFast
@@ -51,67 +52,83 @@ trait IngestFast
     public function fastSetValue(string $dataType, string $field, $value, array $metadata = null)
     {
 
-        if ($value !== null) {
+        try {
+            if ($value !== null) {
 
-            if ($dataType === 'record') {
+                if ($dataType === 'record') {
 
-                foreach ($value as $sub_field => $sub_value) {
+                    foreach ($value as $sub_field => $sub_value) {
 
-                    // only ingest fields enabled to sync to output
-                    if ($metadata[$field]['fields'][$sub_field]['enabled'] == true) {
+                        // only ingest fields enabled to sync to output
+                        if ($metadata[$field]['fields'][$sub_field]['enabled'] == true) {
 
-                        $clean_sub_field = Helpers::cleanFieldName($sub_field);
+                            $clean_sub_field = Helpers::cleanFieldName($sub_field);
 
-                        $newValue[$clean_sub_field] = $this->fastSetValue(
-                            $metadata[$field]['fields'][$sub_field]['determined_type'],
-                            $sub_field,
-                            $sub_value,
-                            $metadata[$field]['fields']
-                        );
+                            $newValue[$clean_sub_field] = $this->fastSetValue(
+                                $metadata[$field]['fields'][$sub_field]['determined_type'],
+                                $sub_field,
+                                $sub_value,
+                                $metadata[$field]['fields']
+                            );
+                        }
                     }
-                }
 
-                $value = $newValue;
+                    $value = $newValue;
 
-            } else if ($dataType === 'map') {
-                foreach ($value as $key => $val) {
-                    if ($val !== null) {
-                        $value[$key] = $this->fastSetValue(
-                            $metadata[$field]['determined_type_values'],
-                            $key,
-                            $val,
-                        );
-                    }
-                }
-            } else if ($dataType === 'array') {
-                foreach ($value as $key => $val) {
-                    if ($value !== null) {
-                        $value[$key] = $this->fastSetValue(
-                            $metadata[$field]['determined_type_values'],
-                            $key,
-                            $val
-                        );
-                    }
-                }
-            } else if ($dataType === 'string' || $dataType === 'date') {
-                $value .= '';
-            } elseif ($dataType === 'timestamp' || $dataType === 'timestamp_milli') {
-                $value = (int) $value + 0;// force string to int
+                } else {
+                    if ($dataType === 'map') {
+                        foreach ($value as $key => $val) {
+                            if ($val !== null) {
+                                $value[$key] = $this->fastSetValue(
+                                    $metadata[$field]['determined_type_values'],
+                                    $key,
+                                    $val,
+                                );
+                            }
+                        }
+                    } else {
+                        if ($dataType === 'array') {
+                            foreach ($value as $key => $val) {
+                                if ($value !== null) {
+                                    $value[$key] = $this->fastSetValue(
+                                        $metadata[$field]['determined_type_values'],
+                                        $key,
+                                        $val
+                                    );
+                                }
+                            }
+                        } else {
+                            if ($dataType === 'string' || $dataType === 'date') {
+                                $value .= '';
+                            } elseif ($dataType === 'timestamp' || $dataType === 'timestamp_milli') {
+                                $value = (int) $value + 0;// force string to int
 //            } elseif ($dataType === 'date') {
 //                $value = (int) $value + 0; // force string to int
-            } elseif ($dataType === 'int' || $dataType === 'integer') {
-                $value = (int) $value + 0; // force string to int
-            } elseif ($dataType === 'long') {
-                $value = (int) $value + 0; // force strings to long
-            } elseif ($dataType === 'double') {
-                $value = (float) sprintf("%.2f", $value);
-            } elseif ($dataType === 'boolean') {
-                $value = (bool) $value;
+                            } elseif ($dataType === 'int' || $dataType === 'integer') {
+                                $value = (int) $value + 0; // force string to int
+                            } elseif ($dataType === 'long') {
+                                $value = (int) $value + 0; // force strings to long
+                            } elseif ($dataType === 'double') {
+                                $value = (float) sprintf("%.2f", $value);
+                            } elseif ($dataType === 'boolean') {
+                                $value = (bool) $value;
+                            }
+                        }
+                    }
+                }
             }
+
+            unset($dataType, $field, $metadata);
+
+            return $value;
+
+        } catch (\Exception $e) {
+            SkipprLogger::info("Failed setting value $value of type $dataType for field $field");
+            throw $e;
         }
-
-        unset($dataType, $field, $metadata);
-
-        return $value;
+        catch (\Error $e) {
+            SkipprLogger::info("Failed setting value $value of type $dataType for field $field");
+            throw $e;
+        }
     }
 }

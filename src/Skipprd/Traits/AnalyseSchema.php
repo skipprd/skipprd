@@ -219,7 +219,7 @@ trait AnalyseSchema
                 // Special handling of bools in array/map of ints
                 // [1,2,3] may discover as schema [bool, int, int] and therefore
                 // parent field resolve type as `record`.
-                // When in fact we'd want to discover schema as [int, int int] and
+                // When in fact we'd want to discover schema as [int, int, int] and
                 // parent field resolve as `array`.
                 if (count($typeCount) === 2) {
                     if (array_key_exists('integer', $typeCount) && array_key_exists('boolean', $typeCount)) {
@@ -306,7 +306,10 @@ trait AnalyseSchema
             }
         }
 
-        if (filter_var($value, FILTER_VALIDATE_BOOLEAN)) {
+//
+        if (
+            $dataType !== 'double' && // ignore 0.0 floats
+            is_bool(filter_var($value, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE))) {
             $dataType = 'boolean';
         }
 

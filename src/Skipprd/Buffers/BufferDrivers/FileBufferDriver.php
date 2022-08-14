@@ -9,11 +9,14 @@ use Skipprd\Converters\SkipprAvroSchemaConverter;
 use Skipprd\Helpers;
 use Skipprd\MachineToHuman\BytesToHuman;
 use Skipprd\Serders\SerdersFactory;
+use Skipprd\SkipprPack;
 use Skipprd\Traits\Config;
 use Skipprd\Traits\SkipprLogger;
 
 class FileBufferDriver implements BufferDriverInterface
 {
+
+    protected $skipprPack;
 
     public $rows = 0;
 
@@ -38,6 +41,8 @@ class FileBufferDriver implements BufferDriverInterface
 
         @mkdir($this->bufferDir, 0777, true);
 
+        $this->skipprPack = new SkipprPack();
+
         $this->setSerde(Config::$outputFormat);
     }
 
@@ -61,69 +66,39 @@ class FileBufferDriver implements BufferDriverInterface
 
             SkipprLogger::debug("Requesting lock on $filename");
 
-            if (FileBufferDriver::lock($filename)) { // acquire an exclusive lock
-//                if (in_array(Config::$outputFormat, Config::$batchFormats)
-//                    && Config::$enableDeadLetters) {
-//                    $this->serde->serialize($memBuff, $filename, $schema);
-//
-//                    FileBufferDriver::unlock($filename);
-//
-//                    $this->finalise();
-//                } else {
-//                    $fp = fopen($filename, 'a+');
-//
-//                    foreach ($memBuff as $buf) {
-//                        fputs(
-//                            $fp,
-//                            $this->serde->serialize($buf, $schema) . "\n"
-//                        );
-//                    }
+            if (FileBufferDriver::lock($filename, $finalize)) { // acquire an exclusive lock
 
-//                $fp = fopen($filename, 'a+');
+                SkipprLogger::info("Flushing buffer $chunkName to disk");
 
-                SkipprLogger::debug("Flushing buffer $chunkName to disk");
+                $fh = fopen($filename, 'a+b');
 
-                $fh = fopen($filename, 'a+');
-                fputs($fh, implode(PHP_EOL, $memBuff));
+                if (strpos($memBuff[0], "\n")) {
+                    fputs($fh, implode('', $memBuff));
+                } else {
+                    fputs($fh, implode("\n", $memBuff) . "\n");
+//                fputs($fh, $memBuff);
+                }
                 fflush($fh);
                 fclose($fh);
 
-//                file_put_contents($filename, implode(PHP_EOL, $memBuff), FILE_APPEND);
+                FileBufferDriver::unlock($filename);
 
-//                foreach ($memBuff as $buf) {
-//                    fputs($fp, "$buf\n");
-//                }
-
-//                    fflush($fp);            // flush output before releasing the lock
-
-                    FileBufferDriver::unlock($filename);
-
-//                    FileBufferDriver::close($fp);
-
-                }
-//            }
+            }
         } catch (\Exception $e) {
             echo $e->getMessage();
 
             echo $e->getTraceAsString();
-//            fflush($fp);            // flush output before releasing the lock
 
             FileBufferDriver::unlock($filename);
-
-//            FileBufferDriver::close($fp);
 
             throw $e;
         }
 
         SkipprLogger::debug("Flushed buffer chunk $chunkName");
 
-        if ($finalize || $this->checkFlushLimit($filename)) {
-            $this->finalise($filename, $namespace);
-        }
-
     }
 
-    public function checkFlushLimit(string $filename): bool
+    public function checkFileBufferLimit(string $filename): bool
     {
 
         $result = false;
@@ -140,18 +115,26 @@ class FileBufferDriver implements BufferDriverInterface
         if (strpos($filename, '.lock')) return $result;
         if (strpos($filename, '.checkpoint')) return $result;
 
+        stat($filename); // refresh os file system stats
+
         $updatedTime = filectime($filename);
 //        $updatedDelta = time() - $updatedTime;
         $bytes = filesize($filename);
 //        $humanSize = BytesToHuman::toHuman($bytes, true);
 
+        $size = BytesToHuman::toHuman($bytes, true);
+        $time = (time() - $updatedTime);
+        $count = 'with';
+
+        SkipprLogger::info("Evaluating input buffer file of $size, $count records and age of $time seconds");
+
         if ($bytes > Config::$flushBufferBytes) {
-            SkipprLogger::debug("Rotating output file with size ". BytesToHuman::toHuman($bytes, true));
+            SkipprLogger::debug("Rotating input buffer file with size ". BytesToHuman::toHuman($bytes, true));
             $result = true;
         }
 
         if ((time() - $updatedTime) > Config::$flushBufferSeconds) {
-            SkipprLogger::debug("Rotating output file with ttl ". (time() - $updatedTime) . " seconds");
+            SkipprLogger::debug("Rotating input buffer file with ttl ". (time() - $updatedTime) . " seconds");
             $result = true;
         }
 
@@ -165,7 +148,7 @@ class FileBufferDriver implements BufferDriverInterface
             $time = (time() - $updatedTime);
             $count = 'with';
 
-            SkipprLogger::info("Finalising output file of $size, $count records and age of $time seconds");
+            SkipprLogger::info("Finalising buffer file $filename of $size, $count records and age of $time seconds");
 
             $tenantId = Config::$tenantId;
             $pipelineName = Config::$pipelineName;
@@ -346,7 +329,7 @@ class FileBufferDriver implements BufferDriverInterface
                     continue;
                 }
 
-                if (FileBufferDriver::lock($filename, false)) {
+                if (FileBufferDriver::lock($filename)) {
                     return $filename;
                 }
             } catch (\Exception $e) {
@@ -370,13 +353,12 @@ class FileBufferDriver implements BufferDriverInterface
             SkipprLogger::debug("Created lock on file $chunkName");
         }
 
-        // @todo - check update time of lock file and force delete if it's past an expire time
         while (!$locked && $block) {
             if (@mkdir($chunkName . '.lock', 0777, true)) {
                 $locked = true;
                 SkipprLogger::debug("Created lock on file $chunkName");
             } else {
-                sleep(1);
+                usleep(500);
             }
         }
 
@@ -441,17 +423,140 @@ class FileBufferDriver implements BufferDriverInterface
         }
     }
 
+    public function readSkipprStream(string $data, string $functionName, array $metadata, callable $callback)
+    {
+
+        $current_index = 0;
+
+        $bytes = strlen($data);
+
+        $read = '';
+        for ($i = $current_index; $i <= $bytes; $i++) {
+
+            if ($read === '') {
+                // get message framing
+                $size = substr($data, $current_index, 4);
+                $msgLen = @unpack('N', $size);
+
+                if (!$msgLen) {
+                    break;
+                } // not sure why we sometimes get here...
+
+                $readLen = $msgLen[1] + 4;
+
+                if ($i !== 0) { // ensure we read whole message inc length
+                    $i--;
+                }
+
+//                if ($readLen > ($bytes - $current_index)) {
+//                    $remainingBytes = $bytes - $current_index;
+//                    $remainingData = substr($data, $current_index);
+//
+//                    SkipprLogger::info("Returning partially read buffer where readlen $readLen is greater than remaining bytes $remainingBytes");
+//                    SkipprLogger::info($remainingData);
+//
+//                    // @todo - WTF is breaking the message framing...
+//                    if ($readLen > 250000) {
+//                        // invalid readLen, too long
+//                       return '';
+//                    } else {
+//                        return $remainingData;
+//                    }
+//                }
+
+            }
+
+            // `index is out of bounds` without this
+            // we may have reached the end of the socket buffer
+            // more data will likely arrive soon to concat onto our $read buffer
+            if ($i < strlen($data)) {
+                $read .= $data[$i];
+            }
+
+
+//            SkipprLogger::info("Read $read");
+
+            if ($i === ($current_index + $readLen) && !empty($read)) {
+//                SkipprLogger::info("Current msg start: $current_index");
+//                SkipprLogger::info("Current pos: $i");
+//                SkipprLogger::info("Outputting $read");
+
+
+                try {
+
+                    $this->skipprPack->create($read);
+
+                    $current_index = $i;
+                    $read = '';
+
+                    $record = $this->skipprPack->decodeRecord();
+//                    $payload = igbinary_unserialize($record);
+//                    $payload = msgpack_unpack($record);
+                    $payload = json_decode($record, true);
+
+//                    SkipprLogger::info($record);
+
+                    if (!empty($payload)) {
+                        call_user_func($callback, $payload, $functionName,
+                            $metadata);
+                    }
+
+                } catch (\Exception $e) {
+                    $unpacked = unpack($read);
+                    $unpackedStr = serialize($unpacked);
+                    SkipprLogger::error("Failed to output SkipprPack received bytes: $unpackedStr");
+                    SkipprLogger::error($e->getMessage());
+                }
+
+
+            }
+        }
+
+        if ($current_index < $bytes) {
+            $remainingData = substr($data, $current_index); // remaining bytes
+
+            SkipprLogger::info("Returning remaining data");
+            SkipprLogger::info($remainingData);
+            return $remainingData;
+        } else {
+            return '';
+        }
+    }
+
+    public function streamRead($fp, string $finalFilename, array $metadata, callable $callback)
+    {
+
+        while ($data = fread($fp, 8192)) {
+            if ($data) {
+
+                try {
+                    $newData = $this->remainingData . $data;
+
+                    $this->remainingData = $this->readSkipprStream($newData, $finalFilename, $metadata, $callback);
+
+//                    if ($this->remainingData !== '') {
+//                        SkipprLogger::info("Remaining data: $this->remainingData");
+//                    }
+                } catch (\Exception $e) {
+                    SkipprLogger::error($e->getMessage());
+                }
+            } elseif (feof($fp)) {
+                SkipprLogger::info('Client closed connection');
+                fclose($fp);
+            } else {
+                SkipprLogger::info('No client input, sleeping');
+                sleep(1);
+            }
+        }
+    }
+
     /**
      * Simply closes a buffer file by renaming it with '&finalised' suffix
      * which prevents further append writes and indicates the buffer file is ready for output
      */
-    public function finalise(string $filename, string $namespace): void
+    public function finalise(string $filename, string $namespace, string $bucketName): void
     {
 
-//        $file_list = glob($this->bufferDir . '/buffer=' . $this->bufferName . '*&temp_part*');
-
-//        if (!empty($file_list)) {
-//            foreach ($file_list as $filename) {
                 try {
 
                     if (
@@ -459,66 +564,101 @@ class FileBufferDriver implements BufferDriverInterface
                         && !strpos($filename, '.lock') // ignore locked files
                     ) {
 
-                        SkipprLogger::info("Finalising output file $filename");
-
                         if (FileBufferDriver::lock($filename)) { // acquire an exclusive lock
-                            $finalFilename = str_replace(
-                                    '&temp_part',
-                                    '&finalised',
-                                    $filename
-                                ) . '=' . Helpers::randomPassword(32);
+//                            $finalFilename = str_replace(
+//                                    '&temp_part',
+//                                    '&finalised',
+//                                    $filename
+//                                ) . '=' . Helpers::randomPassword(32);
 
-//                        rename(
-//                            $filename,
-//                            $finalFilename
-//                        );
+                            $finalFilename = $this->bufferDir . '/' . $bucketName . '&finalised=' . Helpers::randomPassword(32);
 
+                            SkipprLogger::info("Unpacking buffer file $filename and serializing to " . Config::$outputFormat . " output format");
 
-                            $fpr = fopen($filename, 'r');
+                            if (FileBufferDriver::lock($finalFilename)) { // acquire an exclusive lock
 
-                            if (in_array(Config::$outputFormat,
-                                    Config::$batchFormats)
-                                && Config::$enableDeadLetters) {
+                                $fpr = fopen($filename, 'rb');
 
-                                $this->serde->openWriter($finalFilename, Config::$outputSchemas[$namespace]);
+                                if (in_array(Config::$outputFormat,
+                                        Config::$batchFormats)
+                                    && Config::$enableDeadLetters) {
 
-                                SkipprLogger::info("Unpacking buffer file $filename and serializing to " . Config::$outputFormat . " output format");
-
-                                while (($buf = fgets($fpr)) !== false) {
-
-                                    $this->serde->serialize(msgpack_unpack($buf),
-                                        $finalFilename,
+                                    $this->serde->openWriter($finalFilename,
                                         Config::$outputSchemas[$namespace]);
+
+//                                    $this->streamRead($fpr, $finalFilename, Config::$outputSchemas[$namespace], [$this->serde, 'serialize']);
+
+                                    while (($buf = fgets($fpr)) !== false) {
+
+                                        try {
+//                                            if ($payload = igbinary_unserialize($buf)) {
+//                                            if ($payload = msgpack_unpack($buf)) {
+                                            if ($payload = json_decode($buf, true)) {
+                                                if (is_array($payload)) {
+                                                    $this->serde->serialize($payload,
+                                                        $finalFilename,
+                                                        Config::$outputSchemas[$namespace]);
+                                                } else {
+                                                    SkipprLogger::info("buff not decoded to array: $buf");
+//                                                    SkipprLogger::info($payload);
+                                                }
+                                            } else {
+                                                SkipprLogger::info("buf failed to decode: $buf");
+//                                                SkipprLogger::info($payload);
+                                            }
+                                        } catch (\Exception $e) {
+                                            // Still possible the file has been deleted just before we stat the size
+                                            SkipprLogger::error($e->getMessage());
+                                            SkipprLogger::error($e->getTraceAsString());
+                                        }
+
+                                    }
+
+                                    $this->serde->closeWriter();
+
+                                } else {
+
+                                    $fpw = fopen($finalFilename, 'a+b');
+
+                                    while (($buf = fgets($fpr)) !== false) {
+
+//                                        $sp = new SkipprPack($buf);
+//                                        $buf = $sp->decodeRecord();
+
+                                        if ($payload = json_decode($buf, true)) {
+                                            if (is_array($payload)) {
+                                                $data = $this->serde->serialize($payload,
+                                                    $finalFilename,
+                                                    Config::$outputSchemas[$namespace]);
+                                            } else {
+                                                SkipprLogger::info($buf);
+                                                SkipprLogger::info(serialize($payload));
+                                            }
+                                        } else {
+                                            SkipprLogger::info($buf);
+                                            SkipprLogger::info(serialize($payload));
+                                        }
+
+                                        fputs($fpw, $data . "\n");
+                                    }
+
+                                    fflush($fpw);
+                                    fclose($fpw);
                                 }
 
-                                $this->serde->closeWriter();
+                                fflush($fpr);
+                                fclose($fpr);
 
-                            } else {
+                                $updatedTime = filectime($finalFilename);
+                                $updatedDelta = time() - $updatedTime;
+                                $bytes = filesize($finalFilename);
+                                $humanSize = BytesToHuman::toHuman($bytes,
+                                    true);
 
-                                $fpw = fopen($finalFilename, 'a+');
-                                while (($buf = fgets($fpr)) !== false) {
+                                SkipprLogger::info("Output file $finalFilename finalised at $humanSize and age of $updatedDelta seconds");
 
-                                    fputs(
-                                        $fpw,
-                                        $this->serde->serialize(msgpack_unpack($buf),
-                                            $finalFilename,
-                                            Config::$outputSchemas[$namespace]) . "\n"
-                                    );
-                                }
-
-                                fflush($fpw);
-                                fclose($fpw);
+                                FileBufferDriver::unlock($finalFilename);
                             }
-
-                            fflush($fpr);
-                            fclose($fpr);
-
-                            $updatedTime = filectime($finalFilename);
-                            $updatedDelta = time() - $updatedTime;
-                            $bytes = filesize($finalFilename);
-                            $humanSize = BytesToHuman::toHuman($bytes, true);
-
-                            SkipprLogger::debug("Output file $filename finalised at $humanSize and age of $updatedDelta seconds");
 
                             $this->destroy($filename);
                             FileBufferDriver::unlock($filename);
@@ -527,7 +667,7 @@ class FileBufferDriver implements BufferDriverInterface
                 } catch
                     (\Exception $e) {
                         // Still possible the file has been deleted just before we stat the size
-                        SkipprLogger::debug($e->getMessage());
+                        SkipprLogger::error($e->getMessage());
                 }
 
 

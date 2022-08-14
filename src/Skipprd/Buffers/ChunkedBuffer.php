@@ -6,8 +6,11 @@ namespace Skipprd\Buffers;
 use Monolog\Registry;
 use Carbon\Carbon;
 use Skipprd\Buffers\BufferDrivers\BufferDriverInterface;
+use Skipprd\Buffers\BufferDrivers\FileBufferDriver;
 use Skipprd\Helpers;
+use Skipprd\InternalFields;
 use Skipprd\MachineToHuman\BytesToHuman;
+use Skipprd\SkipprPack;
 use Skipprd\Str;
 use Skipprd\Traits\Config;
 use Skipprd\Traits\SkipprLogger;
@@ -48,8 +51,8 @@ class ChunkedBuffer implements BufferInterface
         string $payload,
         int $bytes,
         int $eventTime = 0,
-        string $namespace = null,
-        string $partition = null
+        string $namespace = '',
+        string $partition = ''
     ) : int {
 
         $return = self::BUFFER_APPENDED;
@@ -63,7 +66,7 @@ class ChunkedBuffer implements BufferInterface
             $this->memBuffs[$chunkName]['size'] = $bytes;
             $this->memBuffs[$chunkName]['time'] = time();
             $this->memBuffs[$chunkName]['count'] = 1;
-//            $this->memBuffs[$chunkName]['buffer'] = "$payload";
+//            $this->memBuffs[$chunkName]['buffer'] = '';
         } else {
 //            $this->memBuffs[$chunkName]['size'] += mb_strlen($payload) * 8;
             $this->memBuffs[$chunkName]['size'] += $bytes;
@@ -73,6 +76,7 @@ class ChunkedBuffer implements BufferInterface
         }
 
         $this->memBuffs[$chunkName]['buffer'][] = $payload;
+//        $this->memBuffs[$chunkName]['buffer'] .= $payload;
 
         if ($this->checkFlushLimit($chunkName, $this->memBuffs[$chunkName])) {
             if (!empty($this->memBuffs[$chunkName]) && !empty($this->memBuffs[$chunkName]['buffer'])) {
@@ -133,7 +137,7 @@ class ChunkedBuffer implements BufferInterface
 
         }
 
-        $this->flushFinalised();
+//        $this->flushFinalised();
     }
 
     public function flushFinalised(bool $finalize = false): void
@@ -142,12 +146,16 @@ class ChunkedBuffer implements BufferInterface
 
         foreach ($file_list as $filename) {
 
-            if ($finalize || $this->driver->checkFlushLimit($filename)
+            if ($finalize || $this->driver->checkFileBufferLimit($filename)
             ) {
 
                 $namespace = $this->decodeFileNamespace($filename);
+                $partition = $this->decodeFilePartition($filename);
+                $timeBucket = $this->getFileChunkTime($filename);
 
-                $this->driver->finalise($filename, $namespace);
+                $bucketName = $this->encodeChunkName($namespace, $partition, $timeBucket);
+
+                $this->driver->finalise($filename, $namespace, $bucketName);
             }
         }
     }
@@ -162,17 +170,17 @@ class ChunkedBuffer implements BufferInterface
 //            $result = true;
 //        }
 
-        if ($chunk['size'] > 100000000) {
+        if ($chunk['size'] > Config::$flushMemBufferBytes) {
             SkipprLogger::debug("Rotating memory buffer with size ". BytesToHuman::toHuman($chunk['size'], true));
             $result = true;
         }
 
-        if ((time() - $chunk['time']) > 60) {
+        if ((time() - $chunk['time']) > Config::$flushMemBufferSeconds) {
             SkipprLogger::debug("Rotating memory buffer with ttl ". (time() - $chunk['time']) . " seconds");
             $result = true;
         }
 
-        if ($chunk['count'] >= 1000000) {
+        if ($chunk['count'] >= Config::$flushMemBufferRecords) {
             SkipprLogger::debug("Rotating memory buffer of ". $chunk['count'] . " records");
             $result = true;
         }
@@ -266,6 +274,17 @@ class ChunkedBuffer implements BufferInterface
         $encodedName = trim($encodedName, '-');
 
         return explode('-', $encodedName);
+    }
+
+    public function getFileChunkTime($filename) : int
+    {
+        parse_str($filename, $array);
+
+        if (isset($array['time'])) {
+            return $array['time'];
+        } else {
+            return 0;
+        }
     }
 
     public function decodeChunkTime($filename) : string

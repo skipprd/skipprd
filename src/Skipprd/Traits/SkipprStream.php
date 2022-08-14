@@ -177,8 +177,24 @@ trait SkipprStream
                 $readLen = $msgLen[1] + 4;
 
                 if ($i !== 0) { // ensure we read whole message inc length
-                    $i--;
+//                    $i--;
                 }
+
+//                if ($readLen > ($bytes - $current_index)) {
+//                    $remainingBytes = $bytes - $current_index;
+//                    $remainingData = substr($data, $current_index);
+//
+////                    SkipprLogger::info("Returning socket partially read buffer where readlen $readLen is greater than remaining bytes $remainingBytes");
+//                    SkipprLogger::info($remainingData);
+//
+//                    // @todo - WTF is breaking the message framing...
+////                    if ($readLen > 250000) {
+//                        // invalid readLen, too long
+////                        return '';
+////                    } else {
+//                        return $remainingData;
+////                    }
+//                }
 
 //                SkipprLogger::info("ReadLen: $readLen");
             }
@@ -186,9 +202,9 @@ trait SkipprStream
             // `index is out of bounds` without this
             // we may have reached the end of the socket buffer
             // more data will likely arrive soon to concat onto our $read buffer
-            if ($i < strlen($data)) {
+//            if ($i < strlen($data)) {
                 $read .= $data[$i];
-            }
+//            }
 
 //            SkipprLogger::info("Read $read");
 
@@ -202,8 +218,10 @@ trait SkipprStream
 
                     $this->skipprPack->create($read);
 
-
                     $record = $this->skipprPack->decodeRecord();
+
+                    $current_index = $i;
+                    $read = '';
 
                     switch ($record) {
                         case 'sync_complete':
@@ -224,9 +242,11 @@ trait SkipprStream
 //                            break;
 
                         default:
+
                             call_user_func($emitMessageCallback, $this->skipprPack);
                             break;
                     }
+
 
 
 //                    $this->serialiseOutput($this->skipprPack);
@@ -237,13 +257,12 @@ trait SkipprStream
                     SkipprLogger::error($e->getMessage());
                 }
 
-                $current_index = $i;
-                $read = '';
+
             }
         }
 
 
-        $remainingData = substr($data, $current_index);
+//        $remainingData = substr($data, $current_index);
 
 //        if (!empty($remainingData)) {
 //            SkipprLogger::debug("Remaining data $remainingData");
@@ -253,7 +272,17 @@ trait SkipprStream
 
 //        $this->outputPlugin->sync();
 
-        return $remainingData;
+        if ($current_index < $bytes) {
+            $remainingData = substr($data, $current_index); // remaining bytes
+
+            SkipprLogger::info("Returning remaining data");
+            SkipprLogger::info($remainingData);
+            return $remainingData;
+        } else {
+            return '';
+        }
+
+//        return $remainingData;
     }
 
     public function streamConnect()

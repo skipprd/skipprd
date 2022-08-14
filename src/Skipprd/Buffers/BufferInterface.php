@@ -10,8 +10,8 @@ interface BufferInterface
         string $payload,
         int $bytes,
         int $eventTime = 0,
-        string $namespace = null,
-        string $partition = null
+        string $namespace = '',
+        string $partition = ''
     ) : int;
 
     public function flushAll(bool $finalize = false): void;

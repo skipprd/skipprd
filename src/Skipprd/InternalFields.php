@@ -114,7 +114,7 @@ class InternalFields
         }
     }
 
-    public static function parseTimeField(&$message): int
+    public static function parseTimeField(array &$message): int
     {
 
         // default to beginning of epoch.
@@ -124,7 +124,17 @@ class InternalFields
             // Support nested time fields via array dot notation
             // For user confirmed event time fields, use the first one that matches
             foreach (Config::$timeFields as $field_dot) {
+
+
+//                SkipprLogger::info("Looging for field $field_dot ");
+//                if (isset($message[$field_dot])) {
+//                    $time_value = $message[$field_dot];
+//                    $message['skpr_event_ts'] = $time_value;
+////                    SkipprLogger::info("Found time field $field_dot of value $time_value");
+//                }
+
                 if ($time_value = Arr::get($message, $field_dot, false)) {
+//                    SkipprLogger::info("Found time field $field_dot of value $time_value");
                     $message['skpr_event_ts'] = $time_value;
                     break;
                 }

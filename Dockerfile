@@ -3,6 +3,7 @@
 ###
 
 FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v3.0.0 as builder
+#FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:arm64 as builder
 #FROM skippr-php:ubuntu as builder
 #FROM skippr-php:zts as builder
 
@@ -52,10 +53,11 @@ RUN rm composer.*
 # performance testing
 ##
 FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v3.0.0 as perf
+#FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:arm64 as perf
 #FROM skippr-php:ubuntu as perf
 #FROM skippr-php:zts as perf
 
-RUN apt-get update -y && apt-get install -y php-msgpack
+RUN apt-get update -y && apt-get install -y php-msgpack php-igbinary
 
 ARG SKIPPR_BUILD_VERSION
 RUN echo "export SKIPPR_BUILD_VERSION=${SKIPPR_BUILD_VERSION}" > /etc/profile.d/skpr_version.sh
@@ -184,7 +186,7 @@ FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v3.0.0 as fi
 #FROM skippr-php:ubuntu as final
 #FROM skippr-php:zts as final
 
-RUN apt-get update -y && apt-get install -y php-msgpack
+RUN apt-get update -y && apt-get install -y php-msgpack php-igbinary
 
 ARG SKIPPR_BUILD_VERSION
 RUN echo "export SKIPPR_BUILD_VERSION=${SKIPPR_BUILD_VERSION}" > /etc/profile.d/skpr_version.sh

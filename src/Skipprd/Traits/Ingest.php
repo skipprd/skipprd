@@ -105,7 +105,7 @@ trait Ingest
                 Config::setConfig(true);
                 sleep(2);
                 Config::getConfig();
-                $metadata = Config::$discoveredFieldOccurrence[$namespace]['fields'];
+//                $metadata = Config::$discoveredFieldOccurrence[$namespace]['fields'];
 
                 $this->flagEvolvedField = false;
 
@@ -119,9 +119,12 @@ trait Ingest
                 sleep(10);
 
                 // Re-ingest message now we have discovered its schema
-                return $this->fastPathIngest($sourceMessage, $namespace);
+//                return $this->fastPathIngest($sourceMessage, $namespace);
+//                return $this->slowPathIngest($sourceMessage, $namespace);
+                return $message;
 
-            } else if (!$this->flagMsgDeadLetter
+            }
+            if (!$this->flagMsgDeadLetter
                 && $this->avroEncodeTest($message, $namespace)
                 // @todo replace avrow with something else (flatbuffers?) as avro doesn't support array in array,
                 // but skippr schema does.
@@ -221,7 +224,9 @@ trait Ingest
         } else {
 
                 // discover schema for new fields
-                $dataType = $this->resolveFieldType($metadata, $field, $value);
+//                $dataType = $this->resolveFieldType($metadata, $field, $value);
+                $this->analyseField($field, $value, $metadata);
+                $dataType = $metadata[$field]['determined_type'];
 
 //            if (empty($metadata[$field])) {
 //                SkipprLogger::info("Discovered new field: '$field' of type: '$dataType'");
@@ -324,7 +329,7 @@ trait Ingest
 
                                 $clean_sub_field = Helpers::cleanFieldName($sub_field);
 
-                                $newValue[$clean_sub_field] = $this->fastSetValue(
+                                $newValue[$clean_sub_field] = $this->setValue(
                                     $fieldOccurrence[$field]['fields'][$sub_field]['determined_type'],
                                     $sub_field,
                                     $sub_value,

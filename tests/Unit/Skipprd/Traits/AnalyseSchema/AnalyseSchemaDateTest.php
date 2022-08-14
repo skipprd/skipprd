@@ -29,6 +29,7 @@ class AnalyseSchemaDateTest extends TestCase
 
         $container = Mockery::mock(PipelineCommand::class)->makePartial();
         $container->shouldReceive('AnalyseSchema');
+
         $container->dateFieldvalidationMminSample = 1;
 
         $value = "2019-08-30T14:09:51.807Z";
@@ -39,7 +40,6 @@ class AnalyseSchemaDateTest extends TestCase
 
         $container->finaliseFieldCandidates();
         $dateCandidates = Config::$discoveredFieldOccurrence['foo']['date_field_candidates'];
-
         $this->assertArrayHasKey($field, $dateCandidates);
         
         $this->assertEquals('date', $dataType);

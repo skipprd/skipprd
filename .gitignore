@@ -7,3 +7,4 @@ test.sh
 coverage
 .DS_Store
 clover.xml
+/test-tmp/
