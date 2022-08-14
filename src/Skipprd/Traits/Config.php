@@ -24,13 +24,10 @@ class Config
     public const RUN_MODE_RESET_SOURCE_OFFSETS = 'reset_source_offsets';
     public const RUN_MODE_DELETE_PLUGIN = 'delete_plugin';
     // output plugins only
-    public const RUN_MODE_CREATE_UPDATE_DEST_SCHEMA = 'create_update_schema';
+    public const RUN_MODE_CREATE_UPDATE_DEST_SCHEMA = 'sync_schema';
     public const RUN_MODE_DELETE_DEST_SCHEMA = 'delete_schema';
 
     public const RUN_MODE_VALIDATE_SCHEMA = 'validate_schema';
-
-
-    public static $segmentKey = 'RnewwWgZXQjl9xofcjGJkirCH0VswBPd';
 
     public static $anonymousMetrics = true;
 
@@ -38,7 +35,11 @@ class Config
 
     public static $dataDir = '/data';
 
+    public static $containerMem = '/data';
+
     public static $pipelineName = '';
+
+    public static $pipelineId;
 
     public static $tenantId = '';
 
@@ -46,18 +47,34 @@ class Config
 
     public static $taskId;
 
+    public static $taskLogs = [];
+
     public static $exitCode;
 
     public static $syncMode = 'sync';
 
     /**
-     * @var bool - TRUE for apply casts to values, set default NULL values, etc
-     *              critical for supporting conversion to formats such as Parquet
-     *              and to ensure destination tables, datalakes, etc have complete rows
-     *             FALSE to duplicate immutable clones of source data to destinations
-     *              useful for simple replication jobs syncing json, etc.
+     * strict     - Ingest messages to output exactly as is with no attempt to cast to expected type
+     *              or conform to schema. Won't discover new fields!
+     *              Useful for replicating data across ENV/systems json -> json for instance or when in
+     *              production and solving schema evolution in lower environments.
      */
-    public static $mutableMode = true;
+    public const MUTABLE_MODE_STRICT = 'strict';
+
+    /**
+     * resolve    - Attempted to resolve data types to expected schema, by safe type casing
+     *              and padding missing fields with nulls. Supporting conversion to formats such as Parquet
+     *              and to ensure destination tables, datalakes, etc have complete rows.
+     */
+    public const MUTABLE_MODE_RESOLVE = 'resolve';
+
+    /**
+     * evolve     - As resolve, plus auto ingest any new fields and forward to the destination.
+     */
+    public const MUTABLE_MODE_EVOLVE = 'evolve';
+
+
+    public static $mutableMode = self::MUTABLE_MODE_STRICT | self::MUTABLE_MODE_RESOLVE | self::MUTABLE_MODE_EVOLVE;
 
     public static $runMode = self::RUN_MODE_SYNC;
 
@@ -71,7 +88,7 @@ class Config
 
     public static $minDiscoveryRecords = 10000;
 
-    public static $maxDiscoverySeconds = 600;
+    public static $maxDiscoverySeconds = 300;
 
     public static $idFields = [];
 
@@ -80,14 +97,19 @@ class Config
     public static $discoveredFieldOccurrence = [];
 
     public static $schema = [];
-    
-    public static $filters = [];
 
-    public static $flushBufferBytes = 1000000;
+    public static $filters = false;
 
+    public static $flushMemBufferBytes = 25000000;
+    public static $flushBufferBytes = 25000000;
+
+    public static $flushMemBufferSeconds = 60;
     public static $flushBufferSeconds = 60;
 
-    public static $flushBufferRecords = 100;
+    public static $flushMemBufferRecords = 1000000;
+    public static $flushBufferRecords = 1000000;
+
+    public static $eventTimeBucketDurationSeconds = false;
 
     public static $pollIntervalSeconds = null;
 
@@ -98,11 +120,15 @@ class Config
 
     public static $outputSchemas = [];
 
-    public static $entityNames = [];
+    public static $partitionByFields = false;
 
-    public static $eventPath = '';
+    public static $eventTypeFields = [];
 
-    public static $timeFields = [];
+    public static $eventPath = false;
+
+    public static $flattenEvents = false;
+
+    public static $timeFields = false;
 
     public static $systemUserApiToken = '';
 
@@ -111,12 +137,24 @@ class Config
     protected static $configUpdatedTime = 0;
 
     public static $specialFields = [
+        'source_namespace' => '',
+        'source_partition' => '',
         'skpr_event_ts' => 0,
         'skpr_namespace' => '',
         'skpr_partition' => '',
     ];
 
     static $specialFieldsMapping = [
+        [
+            'name' => 'source_namespace',
+            'default' => null,
+            'type' => ['null', 'string']
+        ],
+        [
+            'name' => 'source_partition',
+            'default' => null,
+            'type' => ['null', 'string']
+        ],
         [
             'name' => 'skpr_event_ts',
             'default' => null,
@@ -141,7 +179,7 @@ class Config
         'avro_file'
     ];
 
-    public static function getenv(string $name, $default = null)
+    public static function getenv(string $name, $default = '')
     {
 
         return (!empty(getenv($name))) ? getenv($name) : $default;
@@ -163,23 +201,32 @@ class Config
 
     public static function getConfig()
     {
-//        self::$pipelineId = self::getenv('PIPELINE_ID');
+        self::$pipelineId = self::getenv('PIPELINE_ID');
 
         self::$logLevel = Config::getenv('LOG_LEVEL', 'INFO');
 
-        self::$flushBufferBytes = Config::getenv('OUTPUT_FLUSH_BYTES', self::$flushBufferBytes);
-        self::$flushBufferSeconds = Config::getenv('OUTPUT_FLUSH_SECONDS', self::$flushBufferSeconds);
-        self::$flushBufferRecords = Config::getenv('OUTPUT_FLUSH_RECORDS', self::$flushBufferRecords);
+        self::$containerMem = Config::getenv('MEM', 1024);
+//        self::$containerMem = 1024;
+        self::$containerMem = self::$containerMem * 0.8; // allow some overhead
+        ini_set('memory_limit', self::$containerMem . 'M');
 
-        self::$pollIntervalSeconds = Config::getenv('POLL_INTERVAL_SECONDS', self::$pollIntervalSeconds);
+        self::$flushBufferBytes = Config::getenv('DATA_OUTPUT_FLUSH_BYTES', self::$flushBufferBytes);
+        self::$flushBufferSeconds = Config::getenv('DATA_OUTPUT_FLUSH_SECONDS', self::$flushBufferSeconds);
+        self::$flushBufferRecords = Config::getenv('DATA_OUTPUT_FLUSH_RECORDS', self::$flushBufferRecords);
 
-        self::$mutableMode = filter_var(Config::getenv('MUTABLE_MODE', self::$mutableMode), FILTER_VALIDATE_BOOLEAN);
+        self::$eventTimeBucketDurationSeconds = Config::getenv('DATA_OUTPUT_TIME_BUCKET', false);
+
+        self::$pollIntervalSeconds = Config::getenv('DATA_SOURCE_POLL_INTERVAL_SECONDS', self::$pollIntervalSeconds);
+
+        self::$mutableMode = Config::getenv('DATA_SOURCE_MUTABLE_MODE', self::MUTABLE_MODE_RESOLVE);
+
+        if (self::$mutableMode == self::MUTABLE_MODE_STRICT) {
+            SkipprLogger::info('Strict mutable mode enabled, will sync an exact copy of records.');
+        }
 
         self::$runMode = Config::getenv('RUN_MODE', self::$runMode);
 
-        if (!self::$mutableMode) {
-            SkipprLogger::info('Immutable mode enabled, will sync an exact copy of records.');
-        }
+        self::$flattenEvents = Config::getenv('DATA_SOURCE_FLATTEN_EVENTS', self::$flattenEvents);
 
         self::$taskId = Config::getenv('TASK_ID');
             
@@ -189,7 +236,7 @@ class Config
 
         self::$anonymousMetrics = Config::getenv('ANONYMOUS_METRICS', true);
 
-        $defaultPipelineName = Config::getPipelineName();
+        self::$pipelineName = Config::getPipelineName();
 
         Config::$state['tenant_id'] = Helpers::randomStr(16);
         self::$tenantId = self::getenv(
@@ -208,9 +255,9 @@ class Config
             
             // Get Mapping
             try {
-                SkipprLogger::info('Requesting config for pipeline ' . $defaultPipelineName . ' from Skippr API');
+                SkipprLogger::info('Requesting config for pipeline ' . self::$pipelineName . ' from Skippr API');
 
-                $path = 'ingest-job/get-mapping/' . $defaultPipelineName;
+                $path = 'ingest-job/get-mapping/' . self::$pipelineId;
 
                 $client = new \GuzzleHttp\Client([
                     'base_uri' => $uri,
@@ -232,7 +279,7 @@ class Config
 //            try {
 //                SkipprLogger::info('Looking up schema for pipeline ' . $defaultPipelineName);
 //
-//                $schemaName = self::$tenantId . '_' . $defaultPipelineName . '-value';
+//                $schemaName = self::$tenantId . '_' . self::$pipelineId . '-value';
 //                $url = "http://$uri/";
 //                $path = 'subjects/' . $schemaName . '/versions/latest';
 //
@@ -261,10 +308,10 @@ class Config
                         true
                     );
 
-                    if (!empty(Config::$state[$defaultPipelineName])) {
-                        SkipprLogger::info('Loading state for pipeline ' . $defaultPipelineName);
+                    if (!empty(Config::$state[self::$pipelineName])) {
+                        SkipprLogger::info('Loading state for pipeline ' . self::$pipelineName);
 
-                        self::$discoveredFieldOccurrence = Config::$state[$defaultPipelineName]['mapping'];
+                        self::$discoveredFieldOccurrence = Config::$state[self::$pipelineName]['mapping'];
 
 //        Config::$discoveredFieldOccurrence = (empty($configYml['field_yml'])) ? [] : $configYml['field_yml'];
                     }
@@ -273,12 +320,6 @@ class Config
                 }
             }
         }
-
-
-        self::$pipelineName = Config::getenv(
-            'PIPELINE_NAME',
-            $defaultPipelineName
-        );
 
 //        self::$offsets = (!empty(self::$state[$defaultPipelineName]['offsets']) ? self::$state[$defaultPipelineName]['offsets'] : []);
 
@@ -291,8 +332,20 @@ class Config
         self::$sourceFormat = self::getenv('DATA_SOURCE_FORMAT', '');
         self::$outputFormat = self::getenv('DATA_OUTPUT_FORMAT', 'json');
 
-        self::$entityNames = [];
-        self::$timeFields = [];
+        $partitionFields = self::getenv('DATA_OUTPUT_PARTITION_BY_FIELDS', null);
+        if (!empty($partitionFields)) {
+            self::$partitionByFields = explode(',', $partitionFields);
+        }
+
+        $eventTypeFields = self::getenv('DATA_SOURCE_EVENT_TYPE_FIELDS', null);
+        if (!empty($eventTypeFields)) {
+            self::$eventTypeFields = explode(',', $eventTypeFields);
+        }
+
+        $timeFields = self::getenv('DATA_OUTPUT_TIME_FIELDS', null);
+        if (!empty($timeFields)) {
+            self::$timeFields = explode(',', $timeFields);
+        }
 
         self::$analysing = (empty(self::$discoveredFieldOccurrence)) ? true : false;
         self::$analysing = (bool) self::getenv('ANALYSING', self::$analysing);
@@ -300,8 +353,11 @@ class Config
         self::$systemUserApiToken = self::getenv('SKIPPR_API_TOKEN');
 
         if (!empty(self::$discoveredFieldOccurrence)) {
+
+            SkipprLogger::debug("Building schemas");
+
             foreach (self::$discoveredFieldOccurrence as $namespace => $mapping) {
-                SkipprLogger::info("Building $namespace schema");
+                SkipprLogger::debug("Building $namespace schema");
 
                 $converter = new SkipprAvroSchemaConverter();
                 self::$schema[$namespace] = $converter->convert($mapping['fields']);
@@ -320,7 +376,7 @@ class Config
                 $converterClass = 'Skipprd\Converters\Avro' . $outputFormat . 'SchemaConverter';
 
                 if (class_exists($converterClass)) {
-                    SkipprLogger::info("Generating $namespace $outputFormat schema");
+                    SkipprLogger::debug("Generating $namespace $outputFormat schema");
 
                     $converter = new $converterClass();
 
@@ -398,7 +454,7 @@ class Config
         return $parsedSchema;
     }
 
-    public static function setConfig()
+    public static function setConfig(bool $evolved = false)
     {
 
         $configYml = [];
@@ -450,20 +506,19 @@ class Config
                 ]);
 
                 $data = [
-                    'id' => self::getenv('PIPELINE_ID'),
+                    'id' => self::$pipelineId,
                     'mapping' => Config::$discoveredFieldOccurrence,
+                    'evolved' => $evolved,
                 ];
                 if (!empty(self::$taskId)) {
                     $data['task_id'] = Config::$taskId;
                 }
 
-                $json = json_encode($data);
-
                 $response = $client->post($path, [
-                    'json' => $json
+                    'json' => $data
                 ]);
 
-                SkipprLogger::debug('Notified pipeline config API');
+                SkipprLogger::info('Updated pipeline metadata in Skippr SaaS');
             } catch (\Exception $e) {
                 SkipprLogger::error($e->getMessage());
             }
@@ -488,7 +543,7 @@ class Config
         return $configYml;
     }
 
-    public static function setStatus(string $response = null)
+    public static function setStatus(array $response = null)
     {
 
         $uri = self::getenv('SKIPPR_API_ENDPOINT');
@@ -504,22 +559,38 @@ class Config
                     ]
                 ]);
 
-                $data = [
-                    'response' => $response,
-                    'task_id' => Config::$taskId
-                ];
 
-                if (!empty(Config::$exitCode)) {
-                    $data['exit_code'] = Config::$exitCode;
+                if (!empty(Config::getenv('DATA_SOURCE_PLUGIN_NAME'))) {
+                    $logs['input'] = Config::$taskLogs;
                 }
 
-                $json = json_encode($data);
+                if (!empty(Config::getenv('DATA_OUTPUT_PLUGIN_NAME'))) {
+                    $logs['output'] = Config::$taskLogs;
+                }
+
+                $data = [
+                    'response' => $response,
+                    'task_id' => Config::$taskId,
+                    'logs' => $logs,
+                ];
+
+                Config::$taskLogs = [];
+
+                $exitMsg = "Notified task status API";
+
+                if (isset(Config::$exitCode) && Config::$exitCode !== null) {
+                    $data['exit_code'] = Config::$exitCode;
+
+                    $exitCode = Config::$exitCode;
+                    $exitMsg = "{$exitMsg} with exit code {$exitCode}";
+                }
+
+                SkipprLogger::info($exitMsg);
 
                 $response = $client->post($path, [
-                    'json' => $json
+                    'json' => $data
                 ]);
 
-                SkipprLogger::debug('Notified task status API');
             } catch (\Exception $e) {
                 SkipprLogger::error($e->getMessage());
             }

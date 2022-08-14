@@ -13,7 +13,10 @@ class DataOutputPluginBase implements DataOutputPluginInterface
 
     protected $pipelineName = '';
 
-    public $buffer = null;
+    /**
+     * @var \Skipprd\Buffers\ChunkedBuffer
+     */
+    public $buffer;
 
     /**
      * @var \Skipprd\Plugins\Offsets

@@ -23,7 +23,7 @@ use AvroSchema;
 class AnalyseSchemaNumberTest extends TestCase
 {
 
-    protected function setUp()
+    protected function setUp(): void
     {
         parent::setUp();
 

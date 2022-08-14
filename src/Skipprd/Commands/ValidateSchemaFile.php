@@ -98,7 +98,7 @@ class ValidateSchemaFile
 
             $i = 0;
 
-            Config::setStatus($this->setStatusString(0));
+            Config::setStatus($this->setStatusResponse(0));
 
             $fileBuffer = BufferAdaptorsFactory::getAdaptor('deadletter', 'file');
 
@@ -124,7 +124,7 @@ class ValidateSchemaFile
                     $chunkSize = self::$msgMax / 5;
 
                     if ($i % $chunkSize == 0) {
-                        Config::setStatus($this->setStatusString($i / 100));
+                        Config::setStatus($this->setStatusResponse($i / 100));
                     }
 
 
@@ -165,12 +165,12 @@ class ValidateSchemaFile
      * @param int $progressPercent
      * @return string
      */
-    public function setStatusString(int $progressPercent, array $result = []): string
+    public function setStatusResponse(int $progressPercent, array $result = []): array
     {
 
         $response = array_merge(['progress' => $progressPercent], $result);
 
-        return json_encode($response);
+        return $response;
     }
 
 
@@ -249,12 +249,12 @@ class ValidateSchemaFile
             SkipprLogger::info("Schema is valid");
 
             $result = [
-                'result' => 'valid',
+                'result' => 'schema_valid',
                 'errors' => [],
             ];
 
             Config::$exitCode = 0;
-            Config::setStatus($this->setStatusString(100, $result));
+            Config::setStatus($this->setStatusResponse(100, $result));
 
             return true;
         } else {
@@ -272,7 +272,7 @@ class ValidateSchemaFile
             SkipprLogger::info("Schema not valid");
 
             Config::$exitCode = 0;
-            Config::setStatus($this->setStatusString(100, $result));
+            Config::setStatus($this->setStatusResponse(100, $result));
 
             return false;
         }

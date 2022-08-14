@@ -19,9 +19,11 @@ class SkipprPack
      */
     const SEEK_END = SEEK_END;
 
-    private $offset = '';
+    const OFFSET_FORMAT = 'N';
 
-    private $payload = '';
+    private $offset;
+
+    private $payload;
 
     /**
      * @var string
@@ -38,26 +40,28 @@ class SkipprPack
         $this->string_buffer = '';
         $this->current_index = 0;
 
-        if (is_string($skipprPack)) {
-            $this->string_buffer .= $skipprPack;
-        } else {
-            throw new \Exception(sprintf('constructor argument must be a string: %s',
-                gettype($skipprPack)));
-        }
+        $this->string_buffer .= $skipprPack;
+
     }
 
+    public function create(string $payload): void
+    {
+        $this->truncate();
+        $this->write($payload);
+    }
 
-    public function encode(string $payload = '', string $offset = ''): void
+    public function encode(string $payload, string $offset): void
     {
 
+        $this->truncate();
         $this->payload = $payload;
         $this->offset = $offset;
 
         // write the offset length in network byte order (big end)
-        $this->write(pack('N', strlen($this->offset)));
+//        $this->write(pack(self::OFFSET_FORMAT, strlen($this->offset)));
 
         // write the offset in network byte order (big end)
-        $this->write($this->offset);
+//        $this->write($this->offset);
 
         // write the record
         $this->write($this->payload);
@@ -84,15 +88,12 @@ class SkipprPack
         $this->rewind();
 
         // skip message framing
-//        $size = $this->read(4);
-//        $frameSize = unpack('N', $size);
-//        $this->seek($frameSize[1], SEEK_CUR);
         $this->seek(4, SEEK_CUR);
 
         // skip offset
-        $size = $this->read(4);
-        $offsetSize = unpack('N', $size);
-        $this->seek($offsetSize[1], SEEK_CUR);
+//        $size = $this->read(4);
+//        $offsetSize = unpack(self::OFFSET_FORMAT, $size);
+//        $this->seek($offsetSize[1], SEEK_CUR);
 
         $record = $this->fpassthru();
 
@@ -102,6 +103,8 @@ class SkipprPack
     public function decodeOffset(): string
     {
 
+        return '';
+
         $this->rewind();
 
 
@@ -110,7 +113,7 @@ class SkipprPack
 
 
         $size = $this->read(4);
-        $offsetSize = unpack('N', $size);
+        $offsetSize = unpack(self::OFFSET_FORMAT, $size);
 
         $offset = $this->read($offsetSize[1]);
 
@@ -118,7 +121,7 @@ class SkipprPack
     }
 
 
-    public function read($len): string
+    public function read(int $len): string
     {
 //        $read='';
 //        for($i=$this->current_index; $i<($this->current_index+$len); $i++)
@@ -140,6 +143,7 @@ class SkipprPack
     {
 
         $len = $this->length() - $this->current_index;
+//        $len = $len - 4; // minus last four bytes representing message length
 
         $read = substr($this->string_buffer, $this->current_index, $len);
 
@@ -153,7 +157,7 @@ class SkipprPack
      * @param int $whence
      * @return bool true if successful
      */
-    public function seek($offset, $whence = self::SEEK_SET): bool
+    public function seek(int $offset, $whence = self::SEEK_SET): bool
     {
         if (!is_int($offset)) {
             throw new \Exception('Seek offset must be an integer.');
@@ -219,11 +223,9 @@ class SkipprPack
      * @param string $arg bytes to write
      * @return int count of bytes written.
      */
-    public function write($arg)
+    public function write(string $arg): int
     {
-        if (is_string($arg)) {
-            return $this->append_str($arg);
-        }
+        return $this->append_str($arg);
     }
 
     /**
@@ -231,7 +233,7 @@ class SkipprPack
      * @param string $str
      * @return integer count of bytes written.
      */
-    private function append_str($str): int
+    private function append_str(string $str): int
     {
         $this->string_buffer .= $str;
         $len = strlen($str);

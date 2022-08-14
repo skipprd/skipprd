@@ -105,6 +105,8 @@ class SerderCsv implements SerderBatchInterface
             return $fieldCount == count($line);
         });
 
+        fclose($fp);
+
         return $messages;
     }
 

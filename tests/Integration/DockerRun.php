@@ -344,8 +344,12 @@ class DockerRun extends TestCase
 
         $logs = (string) $this->docker->containerLogs($containerCreateResult->getId(), ['stdout' => true, 'stderr' => true], Docker::FETCH_RESPONSE)->getBody();
 
-        $this->assertNotContains('error', $logs);
-        $this->assertNotContains('fatal', $logs);
+        try {
+            $this->assertNotContains('error', $logs);
+            $this->assertNotContains('fatal', $logs);
+        } catch (ExpectationFailedException $e) {
+            print $logs;
+        }
 
         $containerCreateResult = $this->dockerStart();
 
@@ -353,11 +357,17 @@ class DockerRun extends TestCase
 
         $logs = (string) $this->docker->containerLogs($containerCreateResult->getId(), ['stdout' => true, 'stderr' => true], Docker::FETCH_RESPONSE)->getBody();
 
-        $this->assertNotContains('error', $logs);
-        $this->assertNotContains('fatal', $logs);
+        try {
+            $this->assertNotContains('error', $logs);
+            $this->assertNotContains('fatal', $logs);
 
-        $this->assertContains("Ingested $msgCount messages", $logs);
-        $this->assertContains("Dead Letters $deadletterCount dead letters", $logs);
+            $this->assertContains("Ingested $msgCount messages", $logs);
+            $this->assertContains("Dead Letters $deadletterCount dead letters", $logs);
+        } catch (ExpectationFailedException $e) {
+            print $logs;
+        }
+
+        $this->docker->containerDelete($containerCreateResult->getId());
 
     }
 
@@ -369,8 +379,12 @@ class DockerRun extends TestCase
 
         $logs = (string) $this->docker->containerLogs($containerCreateResult->getId(), ['stdout' => true, 'stderr' => true], Docker::FETCH_RESPONSE)->getBody();
 
-        $this->assertNotContains('error', $logs);
-        $this->assertNotContains('fatal', $logs);
+        try {
+            $this->assertNotContains('error', $logs);
+            $this->assertNotContains('fatal', $logs);
+        } catch (ExpectationFailedException $e) {
+            print $logs;
+        }
 
         $containerCreateResult = $this->dockerStart();
 
@@ -395,6 +409,7 @@ class DockerRun extends TestCase
 //        $this->assertContains('Ingested 100000 messages', $logs);
 //        $this->assertContains('Dead Letters 0 dead letters', $logs);
 
+        $this->docker->containerDelete($containerCreateResult->getId());
     }
 
     public function dockerStart() {

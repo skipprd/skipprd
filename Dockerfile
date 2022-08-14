@@ -3,7 +3,9 @@
 ###
 
 FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v3.0.0 as builder
+#FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:arm64 as builder
 #FROM skippr-php:ubuntu as builder
+#FROM skippr-php:zts as builder
 
 ##
 # docker-php-extension-installer
@@ -35,6 +37,7 @@ COPY ./composer.lock ./
 #COPY --from=encoder /usr/src/encoded-app ./
 #WORKDIR /usr/src/app
 
+RUN #composer install
 # parallel download and install of dependencies
 #RUN composer global require hirak/prestissimo
 RUN composer check-platform-reqs --no-dev --lock --no-interaction --no-ansi --no-cache
@@ -47,14 +50,57 @@ RUN rm composer.*
 #############################################################
 
 ##
+# performance testing
+##
+FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v3.0.0 as perf
+#FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:arm64 as perf
+#FROM skippr-php:ubuntu as perf
+#FROM skippr-php:zts as perf
+
+RUN apt-get update -y && apt-get install -y php-msgpack php-igbinary
+
+ARG SKIPPR_BUILD_VERSION
+RUN echo "export SKIPPR_BUILD_VERSION=${SKIPPR_BUILD_VERSION}" > /etc/profile.d/skpr_version.sh
+
+WORKDIR /usr/src/app
+
+COPY --from=builder /usr/src/app .
+
+COPY ./composer.json ./
+COPY ./composer.lock ./
+
+#RUN apt-get update -y && apt-get install -y curl
+#
+#RUN curl -L https://download.newrelic.com/php_agent/archive/9.17.0.300/newrelic-php5-9.17.0.300-linux.tar.gz | tar -C /tmp -zx \
+#    && export NR_INSTALL_USE_CP_NOT_LN=1 \
+#    && export NR_INSTALL_SILENT=1 \
+#    && /tmp/newrelic-php5-9.17.0.300-linux/newrelic-install install \
+#    && rm -rf /tmp/newrelic-php5-* /tmp/nrinstall*
+#
+#RUN sed -i -e "s/REPLACE_WITH_REAL_KEY/504b373600890ad32d725c7dcd656e465bd63105/" \
+#    -e "s/newrelic.appname[[:space:]]=[[:space:]].*/newrelic.appname=\"skipprd\"/" \
+#    -e '$anewrelic.daemon.address="newrelic-php-daemon:31339"' \
+#    $(php -r "echo(PHP_CONFIG_FILE_SCAN_DIR);")/newrelic.ini
+
+
+#CMD ["php", "src/run.php"]
+CMD ["src/run.sh"]
+
+
+#############################################################
+
+##
 # encoder
 ##
 #FROM php:7.4-cli as encoder
+FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v3.0.0 as encoder
+#FROM skippr-php:ubuntu as encoder
+#FROM skippr-php:zts as encoder
 
-#WORKDIR /usr/src/app
+WORKDIR /usr/src/encoding-source
 
 COPY ./ioncube ./ioncube
-#COPY --from=builder /usr/src/app/src ./source/
+COPY --from=builder /usr/src/app .
 
 # NOTE: don't encode blade files, encrypt and replace
 # See: https://blog.ioncube.com/2016/12/19/ioncube-encoding-laravel-project-controllers-models-templates/
@@ -136,22 +182,18 @@ RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skippr
 #RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Services/AvroSubPub/MessageSerializer.php
 
 
-FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v3.0.0
-#FROM skippr-php:ubuntu
+FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v3.0.0 as final
+#FROM skippr-php:ubuntu as final
+#FROM skippr-php:zts as final
 
-RUN apt-get update -y && apt-get install -y php-msgpack
-
-ENV PHP_INI_DIR=/etc/php/7.4/cli
-RUN echo $PHP_INI_DIR \
-    && touch $PHP_INI_DIR/conf.d/05-custom.ini \
-    && echo 'memory_limit=1024M' >> $PHP_INI_DIR/conf.d/05-custom.ini
+RUN apt-get update -y && apt-get install -y php-msgpack php-igbinary
 
 ARG SKIPPR_BUILD_VERSION
 RUN echo "export SKIPPR_BUILD_VERSION=${SKIPPR_BUILD_VERSION}" > /etc/profile.d/skpr_version.sh
 
 WORKDIR /usr/src/app
 
-COPY --from=builder /usr/src/encoded-app .
+COPY --from=encoder /usr/src/encoded-app .
 
 COPY ./composer.json ./
 COPY ./composer.lock ./
@@ -160,3 +202,4 @@ CMD ["php", "src/run.php"]
 
 #RUN test -f /usr/lib/php/20190902/parquet_cpp_php.so
 #RUN test -f /usr/lib/libphpcpp.so
+

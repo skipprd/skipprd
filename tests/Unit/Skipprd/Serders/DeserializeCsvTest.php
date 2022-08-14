@@ -18,7 +18,7 @@ class DeserializeCsvTest extends TestCase
 
     protected $serder;
 
-    protected function setUp()
+    protected function setUp(): void
     {
         parent::setUp();
 

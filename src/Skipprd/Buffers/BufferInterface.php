@@ -7,18 +7,18 @@ interface BufferInterface
 {
 
     public function append(
-        array $payload,
-        bool $flush = false,
+        string $payload,
+        int $bytes,
         int $eventTime = 0,
-        string $namespace = null,
-        string $partition = null
+        string $namespace = '',
+        string $partition = ''
     ) : int;
 
-    public function flushAll(bool $force = false): void;
+    public function flushAll(bool $finalize = false): void;
 
     public function eventTimeBucket(int $eventTime) : int;
 
-    public function encodeChunkName(string $namespace, string $partition, $timeBucket): string;
+    public function encodeChunkName(string $namespace, string $partition, int $timeBucket = 0): string;
 
     public function getChunkName($filename) : array;
 

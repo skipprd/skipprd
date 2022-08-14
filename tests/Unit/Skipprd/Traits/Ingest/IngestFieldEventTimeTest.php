@@ -10,6 +10,7 @@ namespace Unit\Skipprd\Traits\Ingest;
 
 use Illuminate\Contracts\Container\Container;
 use Skipprd\Commands\PipelineCommand;
+use Skipprd\InternalFields;
 use Skipprd\Traits\AnalyseSchema;
 use Skipprd\Traits\Config;
 use Superbalist\LaravelPubSub\PubSubConnectionFactory;
@@ -23,7 +24,7 @@ use AvroSchema;
 class IngestFieldEventTimeTest extends TestCase
 {
 
-    protected function setUp()
+    protected function setUp(): void
     {
         parent::setUp();
 
@@ -54,7 +55,7 @@ class IngestFieldEventTimeTest extends TestCase
 
         Config::$timeFields[] = 'event_time';
 
-        $container->parseTimeField($message);
+        InternalFields::parseTimeField($message);
          
         $this->assertIsArray($message);
 
@@ -90,7 +91,7 @@ class IngestFieldEventTimeTest extends TestCase
 
         Config::$timeFields[] = 'customer.metadata.event_time';
 
-        $container->parseTimeField($message);
+        InternalFields::parseTimeField($message);
 
         $this->assertIsArray($message);
 
@@ -127,7 +128,7 @@ class IngestFieldEventTimeTest extends TestCase
         Config::$timeFields[] = 'customer.other.foo_time';
 //        Config::$timeFields[] = 'customer.metadata.event_time';
 
-        $container->parseTimeField($message);
+        InternalFields::parseTimeField($message);
 
         $this->assertIsArray($message);
 

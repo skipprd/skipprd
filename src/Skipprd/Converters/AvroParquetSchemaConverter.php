@@ -125,7 +125,7 @@ class AvroParquetSchemaConverter implements SchemaConverterInterface
             $parquetField['type'] = 'group';
             $parquetField['repeat'] = $repetition;
             $parquetField['schema'] = $this->convertField(
-                $schema->name,
+                $schema->fullname(),
                 $schema->symbols(),
                 self::REQUIRED
             );

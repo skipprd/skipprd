@@ -8,6 +8,7 @@
 
 namespace Unit\Skipprd\Serders;
 
+use Skipprd\Serders\SerderJson;
 use Skipprd\Serders\SerdersFactory;
 use Tests\TestCase;
 
@@ -16,7 +17,7 @@ class DeserializeJsonTest extends TestCase
 
     protected $serder = 'json';
 
-    protected function setUp()
+    protected function setUp(): void
     {
         parent::setUp();
 
@@ -204,13 +205,35 @@ EOF;
         $msg = $serder->deserialize($record);
 
 
-        $this->assertEquals('200', $msg[0]['status']);
-        $this->assertEquals('201', $msg[1]['status']);
-        $this->assertEquals('202', $msg[2]['status']);
-        $this->assertEquals('203', $msg[3]['status']);
+        $this->assertEquals('200', $msg[0][0]['status']);
+        $this->assertEquals('201', $msg[0][1]['status']);
+        $this->assertEquals('202', $msg[1][0]['status']);
+        $this->assertEquals('203', $msg[1][1]['status']);
 
     }
 
+
+    /**
+     * This madness is common, for instance AWS Firehose S3 Destination produces this crap
+     */
+    public function testValidJsonSingleLineObjects()
+    {
+
+        $record = '{"foo": {"nest": "bar"}}{"foo": {"nest": "baz"}}{"foo": {"nest": "boo"}}';
+
+        $serder = SerdersFactory::factory($this->serder);
+        $msg = $serder->deserialize($record);
+
+
+        $this->assertIsArray($msg);
+        $this->assertArrayHasKey('foo', $msg[0]);
+        $this->assertArrayHasKey('foo', $msg[1]);
+        $this->assertArrayHasKey('foo', $msg[2]);
+        $this->assertEquals('bar', $msg[0]['foo']['nest']);
+        $this->assertEquals('baz', $msg[1]['foo']['nest']);
+        $this->assertEquals('boo', $msg[2]['foo']['nest']);
+
+    }
 //    public function testValidJsonMultiLineArrayPrettyPrint()
 //    {
 //

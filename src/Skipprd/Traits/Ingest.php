@@ -10,13 +10,43 @@ namespace Skipprd\Traits;
 
 use Carbon\Carbon;
 use Skipprd\Helpers;
+use Skipprd\SkipprPack;
 
 trait Ingest
 {
 
     public $flagMsgDeadLetter = false;
 
+    public $flagEvolvedField = false;
+
     public $avroSchema = null;
+
+    public function slowPathIngest(array $unwrappedMessage, string $namespace) {
+        try {
+
+            if (empty(Config::$discoveredFieldOccurrence[$namespace]['fields'])) {
+                Config::$discoveredFieldOccurrence[$namespace]['fields'] = [];
+            }
+
+            $message = $this->ingestPayload(
+                $unwrappedMessage,
+                Config::$discoveredFieldOccurrence[$namespace]['fields'],
+                $namespace
+            );
+
+            $this->slowPath++;
+
+        } catch (\Exception $e) {
+//            SkipprLogger::error($e->getMessage());
+            $this->deadLetters++;
+            $this->deadLettersCurrent++;
+            $message = false;
+
+            $this->deadLetterMessage($unwrappedMessage);
+        }
+
+        return $message;
+    }
 
     public function ingestPayload(array $sourceMessage, array &$metadata, string $namespace)
     {
@@ -24,13 +54,21 @@ trait Ingest
         $this->i++;
 
         if (!empty($sourceMessage)) {
-            $message = $this->defaultMsgs[$namespace];
+            if (!empty($this->defaultMsgs[$namespace])) {
+                $message = $this->defaultMsgs[$namespace];
+            } else {
+                $message = [];
+            }
 
             /*
              * Transformations and schema evolution
              */
             foreach ($sourceMessage as $field => $value) {
-                if (!empty($metadata[$field]['enabled'])) { // only ingest fields enabled to sync to output
+                $field = Helpers::cleanFieldName($field);
+
+                // only ingest fields enabled to sync to output
+                // or that are unknown, therefore we want to discover their schema
+                if (empty($metadata[$field]) || $metadata[$field]['enabled'] === true) {
                     if ($this->i == 1) {
                         SkipprLogger::debug("Ingesting field: $field");
                     }
@@ -53,18 +91,53 @@ trait Ingest
 
             //                            $this->entries[$key] = $record;
 
+            if ($this->flagEvolvedField
+                && !Config::$analysing
+                && Config::$runMode == Config::RUN_MODE_SYNC
+                && Config::$mutableMode === Config::MUTABLE_MODE_EVOLVE
+            ) {
+                SkipprLogger::info("Discovered new fields in namespace $namespace");
 
+                // ensure we can start ingesting the newly discovered field.
+                // auto-accepted new fields types, then fetch that mapping
+                // and set the local reference for the current namespace.
+                $this->finaliseFieldMapping();
+                Config::setConfig(true);
+                sleep(2);
+                Config::getConfig();
+//                $metadata = Config::$discoveredFieldOccurrence[$namespace]['fields'];
+
+                $this->flagEvolvedField = false;
+
+                // send schema update signal to output
+                $skipprPack = new SkipprPack();
+                $skipprPack->encode('schema_update', '');
+
+                $this->streamSend($skipprPack);
+
+                // IMPORTANT to backoff here
+                sleep(10);
+
+                // Re-ingest message now we have discovered its schema
+//                return $this->fastPathIngest($sourceMessage, $namespace);
+//                return $this->slowPathIngest($sourceMessage, $namespace);
+                return $message;
+
+            }
             if (!$this->flagMsgDeadLetter
                 && $this->avroEncodeTest($message, $namespace)
                 // @todo replace avrow with something else (flatbuffers?) as avro doesn't support array in array,
                 // but skippr schema does.
             ) {
                 $this->totalEntries++;
+                $this->incrementNamespacesCount($namespace);
+                $this->currentEntries++;
 
 //                $this->entries[] = $message;
 
 //                $this->serialiseOutput($message, $offset);
                 return $message;
+
             } else {
                 // Don't attempt to ingest records with new fields.
                 // We must ensure the user selects a determined_type for the field first.
@@ -93,9 +166,12 @@ trait Ingest
 //        SkipprLogger::debug($metadata[$field]);
 //        exit(0);
 
-        if (isset(Config::$specialFields[$field])) {
-            $message[$field] = $value;
-        } elseif (!empty($metadata[$field]['determined_type'])) {
+        // @todo - really need to decide if we want internal fields in the schema or not
+//        if (isset(Config::$specialFields[$field])) {
+//            $message[$field] = $value;
+//        } else
+
+        if (!empty($metadata[$field]['determined_type'])) {
             $dataType = $metadata[$field]['determined_type'];
 
             // No need to process the actual parent field, just its values
@@ -146,28 +222,46 @@ trait Ingest
                 }
             }
         } else {
-            // discover schema for new fields
-            $dataType = $this->resolveFieldType($metadata, $field, $value);
 
-            $this->flagMsgDeadLetter = true;
+                // discover schema for new fields
+//                $dataType = $this->resolveFieldType($metadata, $field, $value);
+                $this->analyseField($field, $value, $metadata);
+                $dataType = $metadata[$field]['determined_type'];
 
-//            SkipprLogger::debug("dead letter");
+//            if (empty($metadata[$field])) {
+//                SkipprLogger::info("Discovered new field: '$field' of type: '$dataType'");
+//            }
+
+            if (!Config::$analysing
+                && Config::$runMode == Config::RUN_MODE_SYNC
+                && Config::$mutableMode === Config::MUTABLE_MODE_EVOLVE
+            ) {
+
+                $resolvedValue = $this->setValue($dataType, $field, $value, $metadata);
+                if (!empty($resolvedValue)) {
+                    $message[$field] = $resolvedValue;
+                }
+
+                SkipprLogger::info("Discovered new field: '$field' of type: '$dataType'");
+
+                $this->flagEvolvedField = true;
+            }
         }
 
 //        if (is_array($value) && !empty($value) && $dataType != 'array') {
-        if (is_array($value) && !empty($value) && !in_array($dataType, ['array', 'map'])) {
-            foreach ($value as $sub_field => $sub_value) {
-//                $sub_field = Helpers::cleanFieldName($sub_field);
-
-                if (!empty($metadata[$field]['fields'][$sub_field]['enabled'])) { // only ingest fields enabled to sync to output
-                    if ($this->i == 1) {
-                        SkipprLogger::debug("Ingesting field: $sub_field");
-                    }
-
-                    $this->ingestField($sub_field, $sub_value, $metadata[$field]['fields'], $message[$field]);
-                }
-            }
-        }
+//        if (is_array($value) && !empty($value) && !in_array($dataType, ['array', 'map'])) {
+//            foreach ($value as $sub_field => $sub_value) {
+////                $sub_field = Helpers::cleanFieldName($sub_field);
+//
+//                if (!empty($metadata[$field]['fields'][$sub_field]['enabled'])) { // only ingest fields enabled to sync to output
+//                    if ($this->i == 1) {
+//                        SkipprLogger::debug("Ingesting field: $sub_field");
+//                    }
+//
+//                    $this->ingestField($sub_field, $sub_value, $metadata[$field]['fields'], $message[$field]);
+//                }
+//            }
+//        }
     }
 
     public function applyTransformationFactory(
@@ -220,11 +314,32 @@ trait Ingest
      * @param $value string -  the actual field value
      * @return mixed|null - value data type on success or null on error
      */
-    public function setValue($dataType, &$field, $value, $fieldOccurrence = [])
+    public function setValue($dataType, &$field, $value, $fieldOccurrence = [], $allowFallback = true)
     {
 
         try {
             switch ($dataType) {
+                case 'record':
+                    if (!empty($value) && is_array($value)) {
+
+                        foreach ($value as $sub_field => $sub_value) {
+
+                            // only ingest fields enabled to sync to output
+                            if ($fieldOccurrence[$field]['fields'][$sub_field]['enabled'] == true) {
+
+                                $clean_sub_field = Helpers::cleanFieldName($sub_field);
+
+                                $newValue[$clean_sub_field] = $this->setValue(
+                                    $fieldOccurrence[$field]['fields'][$sub_field]['determined_type'],
+                                    $sub_field,
+                                    $sub_value,
+                                    $fieldOccurrence[$field]['fields']
+                                );
+                            }
+                        }
+                    }
+
+                    return $newValue;
                 case 'array':
                     if (is_array($value) && Helpers::isSequentialArrayKeys($value)) {
                         foreach ($value as $key => $val) {
@@ -237,7 +352,6 @@ trait Ingest
 
                     break;
 
-                case 'record':
                 case 'map':
 //                    Helpers::cleanArrayFieldNames($value);
 
@@ -253,6 +367,7 @@ trait Ingest
 
                     break;
 
+                case 'date':
                 case 'string':
                     $value .= '';
 
@@ -268,10 +383,9 @@ trait Ingest
                     return Carbon::createFromTimestamp($value)->timestamp;
 
                     break;
-                case 'date':
-                    return Carbon::parse($value)->timestamp;
-
-                    break;
+//                case 'date':
+//                    return Carbon::parse($value)->timestamp;
+//                    break;
                 case 'int':
                 case 'integer':
                     if (AnalyseSchema::is32bitSignedInt($value)) {
@@ -317,8 +431,13 @@ trait Ingest
                     throw new \Exception();
             }
         } catch (\Exception $e) {
-            $this->handleValueError($field, $value, $fieldOccurrence);
+            if ($allowFallback) {
+                $this->handleValueError($field, $value, $fieldOccurrence);
+            }
+
             return $value;
         }
     }
+
+
 }

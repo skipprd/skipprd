@@ -3,6 +3,9 @@
 
 namespace Skipprd\Plugins;
 
+use Skipprd\InternalFields;
+use Skipprd\Traits\SkipprLogger;
+
 class Offsets
 {
 
@@ -14,13 +17,19 @@ class Offsets
         return $this->offsets;
     }
 
-    public function setOffsets(string $offsets, string $namespace, string $partition = '0')
+    public function setOffsets(string $offsets, string $namespace, string $partition = ''): void
     {
 
-        $this->offsets[$namespace][$partition] = $offsets;
+        try {
+            $this->offsets[$namespace][$partition] = $offsets;
+        } catch (\Exception $e) {
+            SkipprLogger::error($e->getMessage());
+            SkipprLogger::error("Namespace: $namespace, Partition: $partition, Offsets: $offsets");
+
+        }
     }
 
-    public function getOffsets(string $namespace, string $partition = '0')
+    public function getOffsets(string $namespace, string $partition = ''): array
     {
 
         $offsets = [];
@@ -31,24 +40,23 @@ class Offsets
 
 
         if (empty($offsets[0])) {
-            $offsets[0] = 0;
+            $offsets[0] = '';
         }
 
         return $offsets;
     }
 
-    public function getCurrentOffsets(string $namespace, string $partition = '0')
+    public function getCurrentOffsets(string $namespace, string $partition = ''): string
     {
-        return $this->offsets[$namespace][$partition];
+        return $this->offsets[$namespace][$partition] ?? '';
     }
 
-    public function validateOffset(string $args, string $namespace, string $partition = '0') : bool
+    public function validateOffset(string $args, string $namespace, string $partition = '') : bool
     {
 
         //        $offsets = $this->getOffsets();
         //        return bccomp($args, $offsets, 5) == 1;
-
-
+        
         $offsets = $this->getOffsets($namespace, $partition);
 
         $args = explode(' ', $args);

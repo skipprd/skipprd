@@ -3,6 +3,7 @@
 namespace Skipprd;
 
 use PHPUnit\Framework\TestCase;
+use Skipprd\Traits\SkipprLogger;
 
 class SkipprPackTest extends TestCase
 {
@@ -11,7 +12,7 @@ class SkipprPackTest extends TestCase
     {
 
         $record = 'record_value';
-        $offset = 'offset_value';
+        $offset = 'offset 123';
 
         $sp = new SkipprPack();
 
@@ -28,7 +29,7 @@ class SkipprPackTest extends TestCase
     {
 
         $record = 'record_value';
-        $offset = 'offset_value';
+        $offset = 'offset 123';
 
         $sp = new SkipprPack();
 
@@ -36,11 +37,105 @@ class SkipprPackTest extends TestCase
 
         $msgLgn = $sp->decodeMessageLength();
 
-        $this->assertStringContainsString(28, $msgLgn);
+        $this->assertStringContainsString(12, $msgLgn);
 //        $this->assertStringNotContainsString($offset, $msgLgn);
 
     }
 
+    public function testDecodeMessageBytes()
+    {
+
+        $string = 'record_value';
+        $offset = 'offset 123';
+
+        $spw = new SkipprPack();
+        $spr = new SkipprPack();
+
+        $spw->encode($string, $offset);
+        $skipprPack = $spw->string();
+
+        $spr->create($skipprPack);
+        $record = $spr->decodeRecord();
+        $offset = $spr->decodeOffset();
+        $sizeBytes = $spr->length();
+        $msgLgn = $spr->decodeMessageLength();
+
+        $this->assertEquals($record, $string);
+        $this->assertEquals(strlen($record), strlen($string));
+
+    }
+
+    public function testDecodeMessageJson()
+    {
+
+        $array = ['foo' => 123, 'bar' => 456];
+        $offset = 'offset 123';
+
+        $spw = new SkipprPack();
+        $spr = new SkipprPack();
+
+        $spw->encode(json_encode($array), $offset);
+        $skipprPack = $spw->string();
+
+        $spr->create($skipprPack);
+        $record = json_decode($spr->decodeRecord(), true);
+        $offset = $spr->decodeOffset();
+        $sizeBytes = $spr->length();
+        $msgLgn = $spr->decodeMessageLength();
+
+        $this->assertEquals($record, $array);
+
+    }
+
+
+    public function testDecodeRecordFromBinaryFile()
+    {
+
+        $array = ['foo' => 123, 'bar' => 456];
+        $offset = 'offset 123'; // NOTE, something about this offset is interpreted as a new line char when packed to binary
+
+        $spw = new SkipprPack();
+        $spr = new SkipprPack();
+
+        $spw->encode(msgpack_pack($array), $offset);
+//        $spw->encode(serialize($array), $offset);
+        $skipprPack = $spw->string();
+
+//        $skipprPack = preg_replace('/[[:cntrl:]]/', '', $skipprPack);
+
+        $fp = fopen('test', 'wb');
+        fputs($fp, "$skipprPack");
+        fflush($fp);
+        fclose($fp);
+
+        $fp = fopen('test', 'rb');
+
+        $line = '';
+//        while (($buf = fgets($fp)) !== false) {
+//            $line .= $buf;
+//        }
+        $line = fgets($fp);
+
+        fclose($fp);
+
+        try {
+            $spr->create($line);
+            $record = msgpack_unpack($spr->decodeRecord());
+//            $record = msgpack_unpack($spr->decodeRecord());
+            $offset = $spr->decodeOffset();
+            $sizeBytes = $spr->length();
+            $msgLgn = $spr->decodeMessageLength();
+
+        } catch (\Exception $e) {
+            SkipprLogger::info($e->getMessage());
+        }
+        catch (\Error $e) {
+            SkipprLogger::info($e->getMessage());
+        }
+
+        $this->assertEquals($record, $array);
+
+    }
 //    public function testString()
 //    {
 //

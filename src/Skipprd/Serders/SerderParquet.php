@@ -11,7 +11,7 @@ use Skipprd\Traits\SkipprLogger;
 class SerderParquet implements SerderBatchInterface
 {
 
-    private $parquet;
+    private $parquet = false;
 
     public function __construct()
     {
@@ -23,32 +23,43 @@ class SerderParquet implements SerderBatchInterface
         throw new \Exception("Method not implemented");
     }
 
-    public function serialize(array $records, string $filename, $schema = null): void
+    public function openWriter(string $filename, array $schema) {
+
+        if (!$this->parquet) {
+            $this->parquet = new \Parquet();
+
+            $this->parquet->create_writer($filename, $schema, 'snappy');
+        }
+    }
+
+    public function closeWriter() {
+
+        $this->parquet->close_writer();
+
+        $this->parquet = false;
+    }
+
+
+    public function serialize(array $record, string $filename, $schema = null): void
     {
 
-        $this->parquet = new \Parquet();
-        
         try {
-            if (!empty($records)) {
-                $this->parquet->create_writer($filename, $schema, 'snappy');
 
-                foreach ($records as $record) {
+            if (!empty($record)) {
+
+//                foreach ($records as $record) {
                     $this->parquet->write([$record]);
-                }
+//                }
 
-                $this->parquet->close_writer();
             }
         } catch (\Exception $exception) {
-                        var_export($schema);
-                        print("\n");
+//                        print("\n");
 
 //                        var_export($records);
 //                        print("\n");
+            SkipprLogger::error("Parquet serialise error");
+            SkipprLogger::error($exception->getMessage());
 
-                        print($exception->getMessage());
-//                        print($exception->getTraceAsString());
-
-            exit(1);
         }
     }
 
@@ -76,6 +87,7 @@ class SerderParquet implements SerderBatchInterface
 //                                $message[$field['name']] = ['' => null];
                             }
                             if ($field['type'][1]['values'] == 'int') {
+                                // @todo - I think parquet and athena might support null now?
                                 $message[$field['name']] = ['' => 0];
 //                                $message[$field['name']] = ['' => null];
                             }

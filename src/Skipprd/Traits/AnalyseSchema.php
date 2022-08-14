@@ -113,12 +113,53 @@ trait AnalyseSchema
 //        ]
     ];
 
+    /**
+     * @param array $sourceMessage - the source message
+     * @param string $namespace
+     * @return void
+     */
+    public function analyse(array $sourceMessage, string $namespace): void
+    {
+        if (empty(Config::$discoveredFieldOccurrence[$namespace])) {
+            Config::$discoveredFieldOccurrence[$namespace] = [
+                'enabled' => true,
+                'fields' => [],
+            ];
+        }
+
+        if (is_array($sourceMessage)) {
+            $this->analysePayload(
+                $sourceMessage,
+                Config::$discoveredFieldOccurrence[$namespace]['fields']
+            );
+        }
+
+        if ($this->i > Config::$minDiscoveryRecords
+            || (Carbon::now()->timestamp - $this->startTimestamp) > Config::$maxDiscoverySeconds) {
+
+            SkipprLogger::info("Finished discovering schema of {$this->i} message of $namespace record type");
+
+            $this->i = 0;
+
+            $this->inputPlugin->continue[$namespace] = false;
+
+            // @todo - wont analyse all namespaces (tables, topics, paths, etc)
+            // if we exit here.
+            // The trouble with ->continue['part'] above is that it only exits if another
+            // record is found in the source. Else the source hangs till new data arrives.
+            // We need a way to force the source to the next namespace
+            $this->shutdown();
+        }
+    }
+
     public function analysePayload(array $message, array &$metadata)
     {
         
         $this->i++;
 
         foreach ($message as $field => $value) {
+            $field = Helpers::cleanFieldName($field);
+            
             $this->analyseField($field, $value, $metadata);
         }
     }
@@ -178,7 +219,7 @@ trait AnalyseSchema
                 // Special handling of bools in array/map of ints
                 // [1,2,3] may discover as schema [bool, int, int] and therefore
                 // parent field resolve type as `record`.
-                // When in fact we'd want to discover schema as [int, int int] and
+                // When in fact we'd want to discover schema as [int, int, int] and
                 // parent field resolve as `array`.
                 if (count($typeCount) === 2) {
                     if (array_key_exists('integer', $typeCount) && array_key_exists('boolean', $typeCount)) {
@@ -265,10 +306,16 @@ trait AnalyseSchema
             }
         }
 
-        if (filter_var($value, FILTER_VALIDATE_BOOLEAN)) {
+//
+        if (
+            $dataType !== 'double' && // ignore 0.0 floats
+            is_bool(filter_var($value, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE))) {
             $dataType = 'boolean';
         }
 
+        if ($dataType == 'NULL') { // most systems won't support null
+            $dataType = 'string';
+        }
         // @todo - logical interpretation based on field name
 
         return $dataType;
@@ -533,6 +580,17 @@ trait AnalyseSchema
             $array[$field]['evolution'][$dataType]['new_value'] = '';
             $array[$field]['evolution'][$dataType]['sample'] = $value;
             $array[$field]['evolution'][$dataType]['solved'] = false;
+
+            if (!Config::$analysing
+                && Config::$runMode == Config::RUN_MODE_SYNC
+                && Config::$mutableMode === Config::MUTABLE_MODE_EVOLVE
+            ) {
+
+                // auto-accept new fields and types when syncing in 'evolve' mode
+                $array[$field]['determined_type'] = $dataType;
+
+            }
+
         } else {
             $array[$field]['type'][$dataType]++;
         }

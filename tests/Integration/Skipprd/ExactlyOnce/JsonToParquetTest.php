@@ -35,7 +35,7 @@ class JsonToParquetTest extends DockerRun
 //            'TENANT_ID=skippr',
 //            'PIPELINE_NAME=uattest',
             'ANONYMOUS_METRICS=false',
-            'LICENSE_KEY=94708298-498f-4c74-802c-ff359dd56cdf',
+            'LICENSE_KEY=97d8afc1-6712-439b-9016-eee4ad6f37cc',
             'APP_ENV=dev',
         ];
 

@@ -504,7 +504,7 @@ class IngestTest extends TestCase
             $message = $container->ingestPayload($field, Config::$discoveredFieldOccurrence['foo_namespace'], 'foo_namespace');
 
 //            if (!empty($message)) {
-                $this->buffer->append($message, false, 0, 'foo_namespace');
+                $this->buffer->append(msgpack_pack($message), strlen(serialize($message)), false, 0, 'foo_namespace');
 //            }
             
 //            break;
@@ -517,8 +517,6 @@ class IngestTest extends TestCase
 
 //        $this->buffer->flush($this->buffer->memBuffs, $chunkName, 'foo_namespace');
         $this->buffer->flushAll(true);
-
-        $this->buffer->driver->finalise(true);
 
     }
 

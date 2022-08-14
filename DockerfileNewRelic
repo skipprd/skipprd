@@ -1,0 +1,65 @@
+ARG IMAGE_NAME
+FROM ${IMAGE_NAME}
+
+ARG NEW_RELIC_AGENT_VERSION
+ARG NEW_RELIC_LICENSE_KEY
+ARG NEW_RELIC_APPNAME
+
+
+RUN apt-get update -y && apt-get install -y curl
+
+RUN curl -L https://download.newrelic.com/php_agent/archive/${NEW_RELIC_AGENT_VERSION}/newrelic-php5-${NEW_RELIC_AGENT_VERSION}-linux.tar.gz | tar -C /tmp -zx
+
+RUN ls -la /tmp \
+    && export NR_INSTALL_USE_CP_NOT_LN=1 \
+    && export NR_INSTALL_PHPLIST=/usr/bin \
+    && export NR_INSTALL_KEY=504b373600890ad32d725c7dcd656e465bd63105 \
+    && /tmp/newrelic-php5-${NEW_RELIC_AGENT_VERSION}-linux/newrelic-install install \
+    && rm -rf /tmp/newrelic-php5-* /tmp/nrinstall*
+
+RUN sed -i -e "s/REPLACE_WITH_REAL_KEY/${NEW_RELIC_LICENSE_KEY}/" \
+    -e "s/newrelic.appname[[:space:]]=[[:space:]].*/newrelic.appname=\"${NEW_RELIC_APPNAME}\"/" \
+    -e "s/;newrelic.daemon.start_timeout[[:space:]]=[[:space:]].*/newrelic.daemon.start_timeout=\"5s\"/" \
+    -e "s/;newrelic.daemon.app_connect_timeout[[:space:]]=[[:space:]].*/newrelic.daemon.app_connect_timeout=\"15s\"/" \
+    -e "s/;newrelic.daemon.app_timeout[[:space:]]=[[:space:]].*/newrelic.daemon.app_timeout=\"144h\"/" \
+    -e "s/;newrelic.enabled[[:space:]]=[[:space:]].*/newrelic.enabled=\"true\"/" \
+    -e "s/newrelic.logfile[[:space:]]=[[:space:]].*/newrelic.logfile=\"\/dev\/stdout\"/" \
+    -e "s/;newrelic.transaction_tracer.threshold[[:space:]]=[[:space:]].*/newrelic.transaction_tracer.threshold=\"1ms\"/" \
+    -e "s/;newrelic.transaction_tracer.detail[[:space:]]=[[:space:]].*/newrelic.transaction_tracer.detail=\"1\"/" \
+    $(php -r "echo(PHP_CONFIG_FILE_SCAN_DIR);")/newrelic.ini
+#
+
+
+
+
+#RUN echo 'deb http://apt.newrelic.com/debian/ newrelic non-free' | sudo tee /etc/apt/sources.list.d/newrelic.list
+#
+#RUN wget -O- https://download.newrelic.com/548C16BF.gpg | sudo apt-key add -
+#
+#RUN apt-get -y update
+#
+##RUN echo 'debconf debconf/frontend select Noninteractive' | debconf-set-selections
+##RUN echo 'newrelic-php5 newrelic-php5/application-name string "skipprd"' | debconf-set-selections
+##RUN echo 'newrelic-php5 newrelic-php5/license-key string "504b373600890ad32d725c7dcd656e465bd63105"' | debconf-set-selections
+#RUN DEBIAN_FRONTEND=noninteractive apt-get -y install newrelic-php5
+#
+##RUN NR_INSTALL_SILENT=1 newrelic-install install
+#RUN NR_INSTALL_PHPLIST=/usr/bin NR_INSTALL_KEY=504b373600890ad32d725c7dcd656e465bd63105 newrelic-install install
+#
+##RUN echo 'newrelic-php5 newrelic-php5/application-name string "skipprd"' | debconf-set-selections
+##RUN echo 'newrelic-php5 newrelic-php5/license-key string "504b373600890ad32d725c7dcd656e465bd63105"' | debconf-set-selections
+##RUN newrelic-install install
+#
+##RUN php -r "echo(PHP_CONFIG_FILE_SCAN_DIR);"
+#RUN sed -i -e "s/REPLACE_WITH_REAL_KEY/504b373600890ad32d725c7dcd656e465bd63105/" \
+#      -e "s/newrelic.appname[[:space:]]=[[:space:]].*/newrelic.appname=\"skipprdfoo\"/" \
+#    -e "s/newrelic.daemon.start_timeout[[:space:]]=[[:space:]].*/newrelic.daemon.start_timeout=\"30\"/" \
+#    -e "s/newrelic.daemon.app_connect_timeout[[:space:]]=[[:space:]].*/newrelic.daemon.app_connect_timeout=\"60\"/" \
+#    $(php -r "echo(PHP_CONFIG_FILE_SCAN_DIR);")/20-newrelic.ini
+
+
+#RUN php -i | grep newrelic
+
+
+# External startup mode requires a newrelic.cfg
+RUN cp /etc/newrelic/newrelic.cfg.template /etc/newrelic/newrelic.cfg

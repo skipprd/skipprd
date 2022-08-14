@@ -5,6 +5,7 @@ namespace Feature\Skipprd;
 
 use Skipprd\Commands\PipelineCommand;
 use Skipprd\Converters\SkipprAvroSchemaConverter;
+use Skipprd\Helpers;
 use Skipprd\Traits\Config;
 use Symfony\Component\Yaml\Yaml;
 use Tests\TestCase;
@@ -12,12 +13,12 @@ use Tests\TestCase;
 class DiscoverSchemaTest extends TestCase
 {
 
-    public function setUp() {
+    public function setUp(): void {
 
         parent::setUp();
     }
 
-    public function tearDown()
+    public function tearDown(): void
     {
         parent::tearDown();
     }
@@ -38,6 +39,8 @@ class DiscoverSchemaTest extends TestCase
         $container->determineFieldTypes(Config::$discoveredFieldOccurrence);
 
         $skippr_schema = Config::$discoveredFieldOccurrence;
+
+        $field = Helpers::cleanFieldName($field);
         
         $avroType = Config::$discoveredFieldOccurrence[$field]['determined_type'];
 
