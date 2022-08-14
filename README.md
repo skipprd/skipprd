@@ -2,7 +2,7 @@
 
 ## Development
 
-##### PHP .4
+##### PHP 7.4
 Install PHP with required libs:
 
 ````
@@ -81,7 +81,11 @@ AWS_PROFILE=skippr docker login --username AWS --password $(AWS_PROFILE=skippr a
 2. build with local tag
 
 ```
-docker build --platform=linux/amd64 -f ./Dockerfile -t skipprd:build .
+docker build -f ./Dockerfile -t skipprd:build .
+```
+
+```
+docker buildx build --platform linux/amd64,linux/arm64 -f ./Dockerfile -t skipprd:build .
 ```
 
 3. run docker compose
@@ -104,7 +108,7 @@ Build as above in local build and then run integration tests
 
 Build skipprd to performance profile stage
 ```
-docker build --target perf --build-arg SSH_PRIVATE_KEY="${SSH_PRIVATE_KEY}" --platform=linux/amd64 -f ./Dockerfile -t skipprd:perf .
+docker build --target perf --platform=linux/arm64 -f ./Dockerfile -t skipprd:perf .
 ```
 
 
