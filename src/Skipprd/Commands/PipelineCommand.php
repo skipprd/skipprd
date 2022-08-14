@@ -107,7 +107,7 @@ class PipelineCommand
 
     public $duplicateCount = 0;
 
-    public int $rejectedSrcMesgCount = 0;
+    public $rejectedSrcMesgCount = 0;
 
 //    public $deadLetters = 0;
 

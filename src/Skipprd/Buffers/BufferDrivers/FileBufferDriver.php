@@ -126,15 +126,15 @@ class FileBufferDriver implements BufferDriverInterface
         $time = (time() - $updatedTime);
         $count = 'with';
 
-        SkipprLogger::info("Evaluating input buffer file of $size, $count records and age of $time seconds");
+        SkipprLogger::info("Evaluating buffer file of $size, $count records and age of $time seconds");
 
         if ($bytes > Config::$flushBufferBytes) {
-            SkipprLogger::debug("Rotating input buffer file with size ". BytesToHuman::toHuman($bytes, true));
+            SkipprLogger::debug("Rotating buffer file with size ". BytesToHuman::toHuman($bytes, true));
             $result = true;
         }
 
         if ((time() - $updatedTime) > Config::$flushBufferSeconds) {
-            SkipprLogger::debug("Rotating input buffer file with ttl ". (time() - $updatedTime) . " seconds");
+            SkipprLogger::debug("Rotating buffer file with ttl ". (time() - $updatedTime) . " seconds");
             $result = true;
         }
 
