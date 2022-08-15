@@ -427,6 +427,8 @@ class PipelineCommand
                         $this->sock = $this->streamListen();
 
                         while (true) {
+
+                            // @todo - schema updates still need to be recieved
 //                            $this->streamRead(
 //                                [$this, 'serialiseOutput'],
 //                                [$this->outputPlugin, 'sync']
@@ -435,6 +437,7 @@ class PipelineCommand
                             $this->processInputBuffers();
                             $this->outputPlugin->buffer->flushFinalised();
                             $this->outputPlugin->sync();
+                            $this->scheduledStatusUpdate();
                             sleep(10);
                         }
 
