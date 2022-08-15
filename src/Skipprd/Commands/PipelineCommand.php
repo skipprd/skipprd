@@ -480,7 +480,10 @@ class PipelineCommand
                     }
 
                     if (Config::$runMode == Config::RUN_MODE_DELETE_DEST_SCHEMA) {
-                        $this->outputPlugin->deleteSchema();
+                        foreach (Config::$schema as $namespace => $avroSchema) {
+                            SkipprLogger::info("Deleting destination schema for $namespace");
+                            $this->outputPlugin->deleteSchema($namespace);
+                        }
                         $this->shutdown();
                     }
 
