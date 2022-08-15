@@ -485,8 +485,10 @@ class PipelineCommand
                     }
 
                     if (Config::$runMode == Config::RUN_MODE_RESET_SOURCE_OFFSETS) {
-                        SkipprLogger::info("Deleting destination schema");
-                        $this->outputPlugin->deleteSchema();
+                        foreach (Config::$schema as $namespace => $avroSchema) {
+                            SkipprLogger::info("Deleting destination schema for $namespace");
+                            $this->outputPlugin->deleteSchema($namespace);
+                        }
                         $this->shutdown();
                     }
                 }
