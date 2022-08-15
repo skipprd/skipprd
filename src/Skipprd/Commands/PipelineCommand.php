@@ -483,6 +483,12 @@ class PipelineCommand
                         $this->outputPlugin->deleteSchema();
                         $this->shutdown();
                     }
+
+                    if (Config::$runMode == Config::RUN_MODE_RESET_SOURCE_OFFSETS) {
+                        SkipprLogger::info("Deleting destination schema");
+                        $this->outputPlugin->deleteSchema();
+                        $this->shutdown();
+                    }
                 }
             }
 
