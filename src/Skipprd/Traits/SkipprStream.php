@@ -241,10 +241,14 @@ trait SkipprStream
 //                            return '';
 //                            break;
 
-                        default:
-
+                        case 'input_buffer_flush':
+                            SkipprLogger::info("Received input buffer flush from source stream");
                             call_user_func($emitMessageCallback, $this->skipprPack);
                             break;
+
+//                        default:
+//                            call_user_func($emitMessageCallback, $this->skipprPack);
+//                            break;
                     }
 
 
@@ -268,7 +272,7 @@ trait SkipprStream
 //            SkipprLogger::debug("Remaining data $remainingData");
 //        }
 
-        call_user_func($postReadCallback);
+//        call_user_func($postReadCallback);
 
 //        $this->outputPlugin->sync();
 

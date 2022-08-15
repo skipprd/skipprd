@@ -429,16 +429,13 @@ class PipelineCommand
                         while (true) {
 
                             // @todo - schema updates still need to be recieved
-//                            $this->streamRead(
-//                                [$this, 'serialiseOutput'],
-//                                [$this->outputPlugin, 'sync']
-//                            );
+                            $this->streamRead(
+                                [$this, 'serialiseOutput'],
+                                [$this->outputPlugin, 'sync']
+                            );
 
-                            $this->processInputBuffers();
-                            $this->outputPlugin->buffer->flushFinalised();
-                            $this->outputPlugin->sync();
-                            $this->scheduledStatusUpdate();
-                            sleep(10);
+
+//                            sleep(10);
                         }
 
                         SkipprLogger::info("Finished reading from stream socket.");
@@ -718,6 +715,10 @@ class PipelineCommand
 
                 if ($result == 2) { // buffer was flushed
 
+                    $skipprPack = new SkipprPack();
+                    $skipprPack->encode('input_buffer_flush', '');
+                    $this->streamSend($skipprPack);
+
                     $this->offsetCommitRoutine(
                         $source_namespace,
                         $source_partition
@@ -837,127 +838,13 @@ class PipelineCommand
     public function serialiseOutput(string $skipprPack): void
     {
 
-//        $this->scheduledStatusUpdate();
+        $this->processInputBuffers();
+        $this->outputPlugin->buffer->flushFinalised();
+        $this->outputPlugin->sync();
+        $this->scheduledStatusUpdate();
 
+        /////////////////////////////////////////////////////////////////
 
-//        if (extension_loaded('newrelic')) {
-//            newrelic_start_transaction('skipprd');
-//            newrelic_name_transaction('output');
-//        }
-
-        $record = '';
-
-        try {
-            $this->skipprPack->create($skipprPack);
-            $record = $this->skipprPack->decodeRecord();
-//            $offset = $this->skipprPack->decodeOffset();
-            $sizeBytes = $this->skipprPack->length();
-        } catch (\Exception $e) {
-            SkipprLogger::error($e->getMessage());
-        }
-
-//        if (!empty($record)) { // @todo - why do we get emtpy messages over the network sometimes?
-            try {
-                // @todo - often get 'Warning: [msgpack] (php_msgpack_unserialize) Extra bytes' without @
-//                $payload = json_decode($record, true);
-
-                // @todo - really don't understand where the control chars are coming from
-                //         They break deserialisation of the SkipprPack record
-                // - pretty sure the root cause was pack()-ing offsets. 'offset 123' was interpreted as \n
-                // and so we parsed half a message.
-
-//                $record = preg_replace('/[[:cntrl:]]/', '', $record);
-
-//                $payload = igbinary_unserialize($record);
-//                $payload = msgpack_unpack($record);
-                $payload = json_decode($record, true);
-//                $payload = unpack("c*", $record);
-
-//                SkipprLogger::info($payload);
-
-                $eventTime = InternalFields::parseTimeField($payload); // time field config is set on the output
-//                $eventTime = $payload['skpr_event_ts'];
-                $source_namespace = $payload['source_namespace'];
-                $source_partition = $payload['source_partition'];
-                $namespace = $payload['skpr_namespace'];
-                $partition = $payload['skpr_partition'];
-                // @todo - empty() performance
-//                $partition = InternalFields::parsePartitionField($payload, $source_partition);
-
-//                $this->outputPlugin->offsets->setOffsets(
-//                    $offset,
-//                    $source_namespace,
-//                    $source_partition
-//                );
-
-                if (Config::$syncMode == 'sync') {
-                    $result = $this->outputPlugin->buffer->append(
-                        $record,
-                        $sizeBytes,
-                        $eventTime,
-                        $namespace,
-                        $partition
-                    );
-
-                } elseif (Config::$syncMode == 'async') {
-                    $result = $this->outputPlugin->buffer->append(
-                        $record,
-                        $sizeBytes,
-                        $eventTime,
-                        $namespace,
-                        $partition
-                    );
-                }
-
-                $this->dataReadBytes += $sizeBytes;
-
-                if ($result == 2) { // buffer was flushed
-
-                    $this->offsetCommitRoutine(
-                        $source_namespace,
-                        $source_partition
-                    );
-                }
-
-                $this->scheduledStatusUpdate();
-
-//                $tenantId = Config::$tenantId;
-//                $pipelineName = Config::$pipelineName;
-//                $this->statsd->increment("$tenantId.$pipelineName.ingest.records.current", 1);
-
-                // Empty only after writing, will ensure still available for graceful shutdown
-                $this->hashes = [];
-                $this->duplicateCount = 0;
-
-                //        if (extension_loaded('newrelic')) {
-                //            newrelic_end_transaction();
-                //        }
-
-            } catch (\AvroException $e) {
-
-                try {
-                    $this->deadLetterMessage($payload);
-                } catch (\Exception $e) {
-                    SkipprLogger::emergency('Failed to write to dead letter queue');
-                    SkipprLogger::error($e->getMessage());
-                }
-            } catch (\Exception $e) {
-//                SkipprLogger::info($record);
-//                SkipprLogger::info("Namepsace $namespace, partition $partition, bytes $sizeBytes, event time $eventTime");
-//                SkipprLogger::info(serialize($payload));
-
-                SkipprLogger::error($e->getMessage());
-                SkipprLogger::error($e->getTraceAsString());
-
-            } catch (\Error $e) {
-//                SkipprLogger::info($record);
-//                SkipprLogger::info("Namepsace $namespace, partition $partition, bytes $sizeBytes, event time $eventTime");
-//                SkipprLogger::info(serialize($payload));
-
-                SkipprLogger::error($e->getMessage());
-                SkipprLogger::error($e->getTraceAsString());
-            }
-//        }
     }
 
 
