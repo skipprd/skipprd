@@ -24,7 +24,7 @@ interface DataOutputPluginInterface
 
     public function createOrUpdateSchema(string $partition, array $schema);
 
-    public function deleteSchema();
+    public function deleteSchema(string $namespace);
 
     public function deletePlugin();
 

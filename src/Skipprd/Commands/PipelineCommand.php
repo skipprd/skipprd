@@ -412,12 +412,12 @@ class PipelineCommand
                 if (!empty($this->outputPlugin)) {
                     $ran = false;
 
-                    if (Config::$analysing) {
-                        SkipprLogger::info("In analysing mode, nothing for output to do. Did you mean to run an input?");
-                        $this->shutdown();
-                    }
-
                     if (Config::$runMode == Config::RUN_MODE_SYNC) {
+
+                        if (Config::$analysing) {
+                            SkipprLogger::info("In analysing mode, nothing for output to do. Did you mean to run an input?");
+                            $this->shutdown();
+                        }
 
                         $this->host = Config::getenv('HOST', '0.0.0.0');
                         SkipprLogger::info("Listening on {$this->host}:{$this->port}");

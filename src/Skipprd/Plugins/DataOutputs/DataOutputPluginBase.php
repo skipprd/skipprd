@@ -66,7 +66,7 @@ class DataOutputPluginBase implements DataOutputPluginInterface
     {
     }
 
-    public function deleteSchema()
+    public function deleteSchema(string $namespace)
     {
     }
 
