@@ -367,7 +367,9 @@ class PipelineCommand
                 }
 
                 if (Config::$runMode == Config::RUN_MODE_RESET_SOURCE_OFFSETS) {
-                    SkipprLogger::info("Resetting offsets");
+                    SkipprLogger::info("Resetting config, offsets and buffers");
+                    $this->inputPlugin->buffer->driver->unlockAll();
+                    $this->inputPlugin->buffer->driver->destroyAll();
                     $this->resetSourceOffsets();
                     $this->shutdown();
                 }
@@ -423,6 +425,7 @@ class PipelineCommand
                         SkipprLogger::info("Listening on {$this->host}:{$this->port}");
 
                         $this->outputPlugin->buffer->driver->unlockAll();
+                        $this->outputPlugin->buffer->flushAll();
 
                         $this->sock = $this->streamListen();
 
@@ -485,6 +488,10 @@ class PipelineCommand
                     }
 
                     if (Config::$runMode == Config::RUN_MODE_RESET_SOURCE_OFFSETS) {
+
+                        $this->outputPlugin->buffer->driver->unlockAll();
+                        $this->outputPlugin->buffer->driver->destroyAll();
+
                         foreach (Config::$schema as $namespace => $avroSchema) {
                             SkipprLogger::info("Deleting destination schema for $namespace");
                             $this->outputPlugin->deleteSchema($namespace);
@@ -1308,8 +1315,7 @@ class PipelineCommand
 
 
             $this->outputPlugin->connect();
-            $this->outputPlugin->buffer->driver->unlockAll();
-            $this->outputPlugin->buffer->flushAll();
+
         }
     }
 

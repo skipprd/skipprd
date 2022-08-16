@@ -404,11 +404,33 @@ class FileBufferDriver implements BufferDriverInterface
         }
     }
 
+    public function destroyAll(): void
+    {
+
+        $file_list = glob($this->bufferDir . '/buffer=' . $this->bufferName . '*');
+
+        SkipprLogger::info("Purging all buffer files: " . json_encode($file_list));
+
+        if (!empty($file_list)) {
+            foreach ($file_list as $filename) {
+
+                try {
+                    if (!is_dir($filename)) {
+                        $this->destroy($filename);
+                    }
+                } catch (\Exception $e) {
+                    // Still possible the file has been deleted just before with stat the size
+                    SkipprLogger::debug($e->getMessage());
+                }
+            }
+        }
+    }
+
     public function destroy($filename): bool
     {
 
         try {
-            SkipprLogger::debug("Destroying finished buffer file: " . $filename);
+            SkipprLogger::debug("Destroying buffer file: " . $filename);
 
             unlink($filename);
             @unlink($filename . '.checkpoint');
