@@ -126,7 +126,7 @@ class FileBufferDriver implements BufferDriverInterface
         $time = (time() - $updatedTime);
         $count = 'with';
 
-        SkipprLogger::info("Evaluating buffer file of $size, $count records and age of $time seconds");
+        SkipprLogger::info("Evaluating buffer file of $size, $count records and age of $time seconds: $filename");
 
         if ($bytes > Config::$flushBufferBytes) {
             SkipprLogger::debug("Rotating buffer file with size ". BytesToHuman::toHuman($bytes, true));
@@ -148,7 +148,7 @@ class FileBufferDriver implements BufferDriverInterface
             $time = (time() - $updatedTime);
             $count = 'with';
 
-            SkipprLogger::info("Finalising buffer file $filename of $size, $count records and age of $time seconds");
+            SkipprLogger::info("Finalising buffer file of $size, $count records and age of $time seconds: $filename");
 
             $tenantId = Config::$tenantId;
             $pipelineName = Config::$pipelineName;

@@ -3,6 +3,7 @@
 
 namespace Skipprd\Traits;
 
+use Carbon\Carbon;
 use Monolog\Formatter\JsonFormatter;
 use Monolog\Formatter\LineFormatter;
 use Monolog\Handler\StreamHandler;
@@ -51,35 +52,38 @@ trait SkipprLogger
 
     public static function info(string $message) : void
     {
-
-        Config::$taskLogs[] = $message;
-
         SkipprLogger::init();
+
+        $datetime = Carbon::now()->toIso8601String();
+        Config::$taskLogs[] = "$datetime skipprd.INFO $message";
         Registry::skipprd()->info($message);
     }
 
     public static function error(string $message) : void
     {
 
-        Config::$taskLogs[] = $message;
-
         SkipprLogger::init();
+
+        $datetime = Carbon::now()->toIso8601String();
+        Config::$taskLogs[] = "$datetime skipprd.INFO $message";
         Registry::skipprd()->error($message);
     }
 
     public static function emergency(string $message) : void
     {
-        Config::$taskLogs[] = $message;
-
         SkipprLogger::init();
+
+        $datetime = Carbon::now()->toIso8601String();
+        Config::$taskLogs[] = "$datetime skipprd.INFO $message";
         Registry::skipprd()->emergency($message);
     }
 
     public static function critical(string $message) : void
     {
-        Config::$taskLogs[] = $message;
-
         SkipprLogger::init();
+
+        $datetime = Carbon::now()->toIso8601String();
+        Config::$taskLogs[] = "$datetime skipprd.INFO $message";
         Registry::skipprd()->critical($message);
     }
 }
