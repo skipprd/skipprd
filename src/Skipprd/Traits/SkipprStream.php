@@ -308,7 +308,7 @@ trait SkipprStream
 //            STREAM_CLIENT_CONNECT | STREAM_CLIENT_PERSISTENT
         );
         //        stream_set_timeout($this->sock, 600);
-        stream_set_blocking($this->sock, true); // wait for data on read or we fill the buffer quickly
+        stream_set_blocking($this->sock, false); // wait for data on read or we fill the buffer quickly
         stream_set_chunk_size($this->sock, $this->tcpBufferSize);
         stream_set_write_buffer($this->sock, $this->tcpBufferSize);
 
@@ -341,7 +341,7 @@ trait SkipprStream
             );
 
 //            stream_set_timeout($this->sock, 600);
-            stream_set_blocking($this->sock, true);
+            stream_set_blocking($this->sock, false);
             stream_set_chunk_size($this->sock, $this->tcpBufferSize);
             stream_set_read_buffer($this->sock, $this->tcpBufferSize);
 
