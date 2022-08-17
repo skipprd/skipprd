@@ -371,6 +371,8 @@ class PipelineCommand
                     $this->inputPlugin->buffer->driver->unlockAll();
                     $this->inputPlugin->buffer->driver->destroyAll();
                     $this->resetSourceOffsets();
+
+                    sleep(120); // wait for output to complete
                     $this->shutdown();
                 }
             } else {
@@ -421,11 +423,12 @@ class PipelineCommand
                             $this->shutdown();
                         }
 
+                        $this->outputPlugin->buffer->driver->unlockAll();
+                        $this->processInputBuffers();
+                        $this->outputPlugin->buffer->flushFinalised();
+
                         $this->host = Config::getenv('HOST', '0.0.0.0');
                         SkipprLogger::info("Listening on {$this->host}:{$this->port}");
-
-                        $this->outputPlugin->buffer->driver->unlockAll();
-                        $this->outputPlugin->buffer->flushAll();
 
                         $this->sock = $this->streamListen();
 
