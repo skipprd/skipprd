@@ -621,11 +621,11 @@ class FileBufferDriver implements BufferDriverInterface
                                                         $finalFilename,
                                                         Config::$outputSchemas[$namespace]);
                                                 } else {
-                                                    SkipprLogger::info("buff not decoded to array: $buf");
+//                                                    SkipprLogger::info("buff not decoded to array: $buf");
 //                                                    SkipprLogger::info($payload);
                                                 }
                                             } else {
-                                                SkipprLogger::info("buf failed to decode: $buf");
+//                                                SkipprLogger::info("buf failed to decode: $buf");
 //                                                SkipprLogger::info($payload);
                                             }
                                         } catch (\Exception $e) {
@@ -653,12 +653,12 @@ class FileBufferDriver implements BufferDriverInterface
                                                     $finalFilename,
                                                     Config::$outputSchemas[$namespace]);
                                             } else {
-                                                SkipprLogger::info($buf);
-                                                SkipprLogger::info(serialize($payload));
+//                                                SkipprLogger::info($buf);
+//                                                SkipprLogger::info(serialize($payload));
                                             }
                                         } else {
-                                            SkipprLogger::info($buf);
-                                            SkipprLogger::info(serialize($payload));
+//                                            SkipprLogger::info($buf);
+//                                            SkipprLogger::info(serialize($payload));
                                         }
 
                                         fputs($fpw, $data . "\n");
