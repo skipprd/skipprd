@@ -142,21 +142,17 @@ class ChunkedBuffer implements BufferInterface
 
     public function flushFinalised(bool $finalize = false): void
     {
-        $file_list = glob($this->driver->bufferDir . '/buffer=' . $this->bufferName . '*&temp_part*');
+        $file_list = glob($this->driver->bufferDir . '/buffer=' . $this->bufferName . '*&finalised*');
 
         foreach ($file_list as $filename) {
 
-            if ($finalize || $this->driver->checkFileBufferLimit($filename)
-            ) {
+            $namespace = $this->decodeFileNamespace($filename);
+            $partition = $this->decodeFilePartition($filename);
+            $timeBucket = $this->getFileChunkTime($filename);
 
-                $namespace = $this->decodeFileNamespace($filename);
-                $partition = $this->decodeFilePartition($filename);
-                $timeBucket = $this->getFileChunkTime($filename);
+            $bucketName = $this->encodeChunkName($namespace, $partition, $timeBucket);
 
-                $bucketName = $this->encodeChunkName($namespace, $partition, $timeBucket);
-
-                $this->driver->finalise($filename, $namespace, $bucketName);
-            }
+            $this->driver->finalise($filename, $namespace, $bucketName);
         }
     }
 
@@ -190,7 +186,7 @@ class ChunkedBuffer implements BufferInterface
             $time = (time() - $chunk['time']);
             $count = $chunk['count'];
 
-            SkipprLogger::debug("Flushing memory buffer $chunkName of $size, $count records and age of $time seconds to disk");
+            SkipprLogger::debug("Rotating memory buffer $chunkName of $size, $count records and age of $time seconds to disk");
 
             $tenantId = Config::$tenantId;
             $pipelineName = Config::$pipelineName;

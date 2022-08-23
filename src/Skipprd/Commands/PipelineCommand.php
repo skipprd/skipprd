@@ -113,7 +113,7 @@ class PipelineCommand
 
     public $lastStatusUpdate = 0;
 
-    public $statusUpdateIntervalSeconds = 30;
+    public $statusUpdateIntervalSeconds = 60;
 
     /**
      * @var \Skipprd\Plugins\DataSources\DataSourcePluginBase
@@ -423,14 +423,17 @@ class PipelineCommand
                             $this->shutdown();
                         }
 
-                        $this->outputPlugin->buffer->driver->unlockAll();
-                        $this->processInputBuffers();
-                        $this->outputPlugin->buffer->flushFinalised();
-
                         $this->host = Config::getenv('HOST', '0.0.0.0');
                         SkipprLogger::info("Listening on {$this->host}:{$this->port}");
 
                         $this->sock = $this->streamListen();
+
+                        $this->outputPlugin->buffer->driver->unlockAll();
+
+                        $this->outputPlugin->sync();
+                        $this->processInputBuffers();
+                        $this->outputPlugin->buffer->driver->finaliseFileBuffers();
+                        $this->outputPlugin->buffer->flushFinalised();
 
                         while (true) {
 
@@ -725,6 +728,8 @@ class PipelineCommand
 
                 if ($result == 2) { // buffer was flushed
 
+//                    $this->inputPlugin->buffer->driver->finaliseFileBuffers();
+
                     $skipprPack = new SkipprPack();
                     $skipprPack->encode('input_buffer_flush', '');
                     $this->streamSend($skipprPack);
@@ -747,15 +752,15 @@ class PipelineCommand
         }
     }
 
-
     public function processInputBuffers(bool $force = false): void
     {
-        $file_list = glob($this->outputPlugin->buffer->driver->bufferDir . '/buffer=input' . '*&temp_part');
+        $file_list = glob($this->outputPlugin->buffer->driver->bufferDir . '/buffer=input*finalised-*'); // temp_part and finalised
+//        $file_list = glob($this->outputPlugin->buffer->driver->bufferDir . '/buffer=input*temp_part'); // temp_part and finalised
 
         if (!empty($file_list)) {
             foreach ($file_list as $filename) {
 
-                if ($force || $this->outputPlugin->buffer->driver->checkFileBufferLimit($filename)) {
+//                if ($force || $this->outputPlugin->buffer->driver->checkFileBufferLimit($filename)) {
 
                     if ($this->outputPlugin->buffer->driver->lock($filename)) { // acquire an exclusive lock
 
@@ -799,56 +804,35 @@ class PipelineCommand
 
                                 }
 
+                                if ($result == 2) { // buffer was flushed
+                                    $this->outputPlugin->buffer->driver->finaliseFileBuffers();
+                                }
+
 //                                SkipprLogger::info("unpacking input buffer $record");
                             } else {
-                                SkipprLogger::info("Problem unpacking input buffer $record");
+//                                SkipprLogger::info("Problem unpacking input buffer $record");
                             }
                         }
 
                         fclose($fpr);
 
-                        $this->outputPlugin->buffer->flushAll(true);
-
                         $this->outputPlugin->buffer->driver->destroy($filename);
 
-
-//                        $finalFilename = str_replace(
-//                            'buffer=input',
-//                            'buffer=output',
-//                            $filename
-//                        );
-////                        $finalFilename = str_replace(
-////                                '&temp_part',
-////                                '&finalised',
-////                                $finalFilename
-////                            ) . '=' . Helpers::randomPassword(32);
-//
-//                        rename(
-//                            $filename,
-//                            $finalFilename
-//                        );
-//
-//                        $updatedTime = filectime($finalFilename);
-//
-//                        $updatedDelta = time() - $updatedTime;
-//                        $bytes = filesize($finalFilename);
-//                        $humanSize = BytesToHuman::toHuman($bytes, true);
-//
-//                        SkipprLogger::info("Rotating input buffer file $filename finalised at $humanSize and age of $updatedDelta seconds");
-//
-//                        $this->destroy($filename);
-
                         $this->outputPlugin->buffer->driver->unlock($filename);
+
+                        $this->outputPlugin->buffer->flushAll();
                     }
                 }
-            }
+//            }
         }
     }
 
     public function serialiseOutput(string $skipprPack): void
     {
 
+        $this->outputPlugin->buffer->flushFinalised();
         $this->processInputBuffers();
+        $this->outputPlugin->buffer->driver->finaliseFileBuffers();
         $this->outputPlugin->buffer->flushFinalised();
         $this->outputPlugin->sync();
         $this->scheduledStatusUpdate();
@@ -1471,6 +1455,7 @@ class PipelineCommand
                     $this->outputPlugin->buffer->driver->unlockAll();
 
                     $this->processInputBuffers(true);
+                    $this->outputPlugin->buffer->driver->finaliseFileBuffers(true);
                     $this->outputPlugin->buffer->flushFinalised(true);
                     $this->outputPlugin->sync();
 

@@ -23,7 +23,7 @@ class SerderParquet implements SerderBatchInterface
         throw new \Exception("Method not implemented");
     }
 
-    public function openWriter(string $filename, array $schema) {
+    public function openWriter(string $filename, array $schema): void {
 
         if (!$this->parquet) {
             $this->parquet = new \Parquet();
@@ -32,33 +32,28 @@ class SerderParquet implements SerderBatchInterface
         }
     }
 
-    public function closeWriter() {
+    public function closeWriter(): void {
 
         $this->parquet->close_writer();
 
-        $this->parquet = false;
+        unset($this->parquet);
     }
 
 
-    public function serialize(array $record, string $filename, $schema = null): void
+    public function serialize(array $record): void
     {
 
         try {
+            $this->parquet->write([$record]);
 
-            if (!empty($record)) {
-
-//                foreach ($records as $record) {
-                    $this->parquet->write([$record]);
-//                }
-
-            }
+            unset($record);
         } catch (\Exception $exception) {
 //                        print("\n");
 
 //                        var_export($records);
 //                        print("\n");
-            SkipprLogger::error("Parquet serialise error");
-            SkipprLogger::error($exception->getMessage());
+//            SkipprLogger::error("Parquet serialise error");
+//            SkipprLogger::error($exception->getMessage());
 
         }
     }

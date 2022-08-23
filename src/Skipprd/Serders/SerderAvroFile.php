@@ -9,8 +9,19 @@ use Skipprd\Traits\SkipprLogger;
 class SerderAvroFile implements SerderBatchInterface
 {
 
+    protected $data_writer;
+
     public function __construct()
     {
+    }
+
+    public function openWriter(string $filename, array $schema): void {
+
+        $this->data_writer = \AvroDataIO::open_file($filename, 'w', $schema);
+    }
+
+    public function closeWriter(): void {
+        $this->data_writer->close();
     }
 
     public function deserialize(string $payload): array
@@ -34,21 +45,11 @@ class SerderAvroFile implements SerderBatchInterface
         return $data;
     }
 
-    public function serialize(
-        array $records,
-        string $filename,
-        $schema = null
-    ): void {
+    public function serialize(array $record): void {
 
         try {
-            if (!empty($records)) {
-                $data_writer = \AvroDataIO::open_file($filename, 'w', $schema);
-
-                foreach ($records as $datum) {
-                    $data_writer->append($datum);
-                }
-
-                $data_writer->close();
+            if (!empty($record)) {
+                $this->data_writer->append($record);
             }
         } catch (\Exception $e) {
             throw $e;

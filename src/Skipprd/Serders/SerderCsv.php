@@ -12,6 +12,9 @@ use Skipprd\Traits\SkipprLogger;
 class SerderCsv implements SerderBatchInterface
 {
 
+    protected $fh;
+    protected $records;
+
     public $csvHeaders = [];
     
     public function __construct()
@@ -110,18 +113,20 @@ class SerderCsv implements SerderBatchInterface
         return $messages;
     }
 
-    public function serialize(array $record, string $filename, $schema = null): void
-    {
+    public function openWriter(string $filename, array $schema): void {
 
-        $fh = fopen($filename, 'a+');
+        $this->fh = fopen($filename, 'a+');
+    }
+
+    public function closeWriter(): void {
 
         $i = 0;
 
         # write out the data
-        foreach ($record as $row) {
+        foreach ($this->records as $row) {
             if ($i === 0) {
                 # write out the headers
-                fputcsv($fh, array_keys(current($record)));
+                fputcsv($this->fh, array_keys(current($this->records)));
 
                 $i++;
             }
@@ -136,10 +141,15 @@ class SerderCsv implements SerderBatchInterface
 
 //            $data = json_encode($row, 0, 2);
 
-            fputcsv($fh, $data);
+            fputcsv($this->fh, $data);
         }
 
-        fclose($fh);
+        fclose($this->fh);
+    }
+
+    public function serialize(array $record): void
+    {
+        $this->records[] = $record;
     }
 
     public function defaultMessage(array $schema = []): array

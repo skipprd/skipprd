@@ -11,6 +11,9 @@ use Skipprd\Traits\SkipprLogger;
 class SerderXml implements SerderBatchInterface
 {
 
+    protected $xml_data;
+    protected $filename;
+
     public function __construct(\AvroSchema $schema = null)
     {
     }
@@ -28,14 +31,19 @@ class SerderXml implements SerderBatchInterface
         return $array;
     }
 
-    public function serialize(array $records, string $filename, $schema = null): void
+    public function openWriter(string $filename, array $schema): void {
+
+        $this->filename = $filename;
+        $this->xml_data = new \SimpleXMLElement('<?xml version="1.0"?><data></data>');
+    }
+
+    public function closeWriter(): void {
+        $this->xml_data->asXML($this->filename);
+    }
+
+    public function serialize(array $record): void
     {
-
-        $xml_data = new \SimpleXMLElement('<?xml version="1.0"?><data></data>');
-
-        $this->array_to_xml($records, $xml_data);
-
-        $result = $xml_data->asXML($filename);
+        $this->array_to_xml($record, $xml_data);
     }
 
     public function array_to_xml($data, &$xml_data)

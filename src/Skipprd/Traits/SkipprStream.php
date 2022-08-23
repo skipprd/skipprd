@@ -279,8 +279,8 @@ trait SkipprStream
         if ($current_index < $bytes) {
             $remainingData = substr($data, $current_index); // remaining bytes
 
-            SkipprLogger::info("Returning remaining data");
-            SkipprLogger::info($remainingData);
+//            SkipprLogger::info("Returning remaining data");
+//            SkipprLogger::info($remainingData);
             return $remainingData;
         } else {
             return '';

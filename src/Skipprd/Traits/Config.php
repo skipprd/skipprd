@@ -101,10 +101,10 @@ class Config
     public static $filters = false;
 
     public static $flushMemBufferBytes = 25000000;
-    public static $flushBufferBytes = 25000000;
+    public static $flushBufferBytes = 100000000;
 
-    public static $flushMemBufferSeconds = 60;
-    public static $flushBufferSeconds = 60;
+    public static $flushMemBufferSeconds = 300;
+    public static $flushBufferSeconds = 300;
 
     public static $flushMemBufferRecords = 1000000;
     public static $flushBufferRecords = 1000000;
