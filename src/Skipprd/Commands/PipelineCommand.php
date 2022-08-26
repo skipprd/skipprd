@@ -330,7 +330,9 @@ class PipelineCommand
                         sleep(Config::$pollIntervalSeconds ?? 1);
                     }
 
-                    SkipprLogger::info("Sync complete");
+                    SkipprLogger::info("Sync complete, waiting for output to finish");
+
+                    sleep(120);
 
                     $this->shutdown();
                 }
@@ -420,20 +422,24 @@ class PipelineCommand
 
                         if (Config::$analysing) {
                             SkipprLogger::info("In analysing mode, nothing for output to do. Did you mean to run an input?");
+                            sleep(Config::$maxDiscoverySeconds);
                             $this->shutdown();
                         }
+
+
+                        $this->outputPlugin->buffer->driver->unlockAll();
+
+                        $this->outputPlugin->sync();
+//                            $this->outputPlugin->buffer->flushFinalised();
+                        $this->processInputBuffers();
+                        $this->outputPlugin->sync();
+//                            $this->outputPlugin->buffer->driver->finaliseFileBuffers();
+//                            $this->outputPlugin->buffer->flushFinalised();
 
                         $this->host = Config::getenv('HOST', '0.0.0.0');
                         SkipprLogger::info("Listening on {$this->host}:{$this->port}");
 
                         $this->sock = $this->streamListen();
-
-                        $this->outputPlugin->buffer->driver->unlockAll();
-
-                        $this->outputPlugin->sync();
-                        $this->processInputBuffers();
-                        $this->outputPlugin->buffer->driver->finaliseFileBuffers();
-                        $this->outputPlugin->buffer->flushFinalised();
 
                         while (true) {
 
@@ -732,7 +738,7 @@ class PipelineCommand
 
                     $skipprPack = new SkipprPack();
                     $skipprPack->encode('input_buffer_flush', '');
-                    $this->streamSend($skipprPack);
+                    $this->streamSend($skipprPack, STREAM_OOB);
 
                     $this->offsetCommitRoutine(
                         $source_namespace,
@@ -762,7 +768,9 @@ class PipelineCommand
 
 //                if ($force || $this->outputPlugin->buffer->driver->checkFileBufferLimit($filename)) {
 
-                    if ($this->outputPlugin->buffer->driver->lock($filename)) { // acquire an exclusive lock
+                SkipprLogger::info("Processing input buffer file $filename");
+
+                    if ($this->outputPlugin->buffer->driver->lock($filename, false)) { // acquire an exclusive lock
 
                         $fpr = fopen($filename, 'rb');
 
@@ -805,7 +813,8 @@ class PipelineCommand
                                 }
 
                                 if ($result == 2) { // buffer was flushed
-                                    $this->outputPlugin->buffer->driver->finaliseFileBuffers();
+                                    // prevent output buffers bloating
+//                                    $this->outputPlugin->buffer->driver->finaliseFileBuffers();
                                 }
 
 //                                SkipprLogger::info("unpacking input buffer $record");
@@ -814,7 +823,11 @@ class PipelineCommand
                             }
                         }
 
+//                        $this->outputPlugin->buffer->flushAll(true);
+
                         fclose($fpr);
+
+                        $this->outputPlugin->buffer->flushAll(true); // don't leave anything hanging in memory
 
                         $this->outputPlugin->buffer->driver->destroy($filename);
 
@@ -825,15 +838,16 @@ class PipelineCommand
                 }
 //            }
         }
+
     }
 
     public function serialiseOutput(string $skipprPack): void
     {
 
-        $this->outputPlugin->buffer->flushFinalised();
+//        $this->outputPlugin->buffer->driver->finaliseFileBuffers();
         $this->processInputBuffers();
-        $this->outputPlugin->buffer->driver->finaliseFileBuffers();
-        $this->outputPlugin->buffer->flushFinalised();
+//        $this->outputPlugin->buffer->driver->finaliseFileBuffers();
+//        $this->outputPlugin->buffer->flushFinalised();
         $this->outputPlugin->sync();
         $this->scheduledStatusUpdate();
 
@@ -1404,7 +1418,6 @@ class PipelineCommand
                     // send shutdown signal to output
                     $skipprPack = new SkipprPack();
                     $skipprPack->encode('sync_complete', '');
-
                     $this->streamSend($skipprPack); // don't use STREAM_OOB, we want to ingest the whole TCP buffer
 
                     fclose($this->sock);
@@ -1454,9 +1467,10 @@ class PipelineCommand
                     SkipprLogger::info("Flushing output buffers to $outputPluginName destination.");
                     $this->outputPlugin->buffer->driver->unlockAll();
 
-                    $this->processInputBuffers(true);
-                    $this->outputPlugin->buffer->driver->finaliseFileBuffers(true);
-                    $this->outputPlugin->buffer->flushFinalised(true);
+//                    $this->processInputBuffers(true); // not a great idea to increase memory consumption on shutdown
+
+//                    $this->outputPlugin->buffer->driver->finaliseFileBuffers(true);
+//                    $this->outputPlugin->buffer->flushFinalised(true);
                     $this->outputPlugin->sync();
 
                     $this->outputPlugin->shutdown();

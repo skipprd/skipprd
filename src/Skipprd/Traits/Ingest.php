@@ -105,7 +105,6 @@ trait Ingest
                 Config::setConfig(true);
                 sleep(2);
                 Config::getConfig();
-//                $metadata = Config::$discoveredFieldOccurrence[$namespace]['fields'];
 
                 $this->flagEvolvedField = false;
 
@@ -113,15 +112,15 @@ trait Ingest
                 $skipprPack = new SkipprPack();
                 $skipprPack->encode('schema_update', '');
 
-                $this->streamSend($skipprPack);
+                $this->streamSend($skipprPack, STREAM_OOB);
 
                 // IMPORTANT to backoff here
-                sleep(10);
+//                sleep(10);
 
-                // Re-ingest message now we have discovered its schema
-//                return $this->fastPathIngest($sourceMessage, $namespace);
-//                return $this->slowPathIngest($sourceMessage, $namespace);
                 return $message;
+
+//                Config::$analysing = true;
+//                return false;
 
             }
             if (!$this->flagMsgDeadLetter

@@ -136,6 +136,26 @@ class AnalyseSchemaNumberTest extends TestCase
 
     }
 
+
+
+    public function testSetValueStringBeginsWithZero()
+    {
+
+        $container = Mockery::mock(PipelineCommand::class)->makePartial();
+        $container->shouldReceive('AnalyseSchema');
+
+        $value = '0233280319';
+        $field = 'foo';
+
+        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
+
+        $value = $container->setValue($dataType,  $field, $value);
+
+        $this->assertEquals('int', $dataType);
+        $this->assertSame('0233280319', $value);
+
+    }
+
     public function testSetValueLongString()
     {
 

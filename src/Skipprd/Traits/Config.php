@@ -100,7 +100,7 @@ class Config
 
     public static $filters = false;
 
-    public static $flushMemBufferBytes = 25000000;
+    public static $flushMemBufferBytes = 100000000;
     public static $flushBufferBytes = 100000000;
 
     public static $flushMemBufferSeconds = 300;

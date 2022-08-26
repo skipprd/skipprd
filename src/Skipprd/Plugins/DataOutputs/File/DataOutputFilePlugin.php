@@ -49,6 +49,7 @@ class DataOutputFilePlugin extends DataOutputPluginBase
                 @$this->buffer->driver->destroy($filename);
             } else {
                 SkipprLogger::error("Could not save buffer file $filename to output $path.");
+                $this->buffer->driver->unlock($filename);
             }
         }
     }

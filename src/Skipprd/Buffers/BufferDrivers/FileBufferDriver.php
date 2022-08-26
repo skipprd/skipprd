@@ -8,6 +8,8 @@ use Skipprd\Converters\AvroParquetSchemaConverter;
 use Skipprd\Converters\SkipprAvroSchemaConverter;
 use Skipprd\Helpers;
 use Skipprd\MachineToHuman\BytesToHuman;
+use Skipprd\Serders\Interfaces\SerderBatchInterface;
+use Skipprd\Serders\Interfaces\SerderStreamInterface;
 use Skipprd\Serders\SerdersFactory;
 use Skipprd\SkipprPack;
 use Skipprd\Traits\Config;
@@ -30,6 +32,7 @@ class FileBufferDriver implements BufferDriverInterface
 
     public $bufferDir = '';
 
+
     public $serde;
 
     public function __construct(string $bufferName)
@@ -49,6 +52,78 @@ class FileBufferDriver implements BufferDriverInterface
     public function setSerde(string $serde)
     {
         $this->serde = SerdersFactory::factory($serde);
+    }
+
+    /**
+     * @return string
+     */
+    public function flushSerialise(
+        array $memBuff,
+        string $chunkName,
+        string $namespace): void
+    {
+        $finalFilename = $this->bufferDir . '/' . $chunkName . '&complete=' . Helpers::randomPassword(32);
+
+        SkipprLogger::info("Serializing memory buffer $chunkName to " . Config::$outputFormat . " output format");
+
+        if (FileBufferDriver::lock($finalFilename)) { // acquire an exclusive lock
+
+//            $fpr = fopen($filename, 'rb');
+
+            if (in_array(Config::$outputFormat,
+                    Config::$batchFormats)
+                && Config::$enableDeadLetters) {
+
+//                                    gc_enable();
+
+                $this->serde->openWriter($finalFilename,
+                    Config::$outputSchemas[$namespace]);
+
+//                while (($buf = fgets($fpr)) !== false) {
+                foreach ($memBuff as $buf) {
+
+                    try {
+//                                            if ($payload = igbinary_unserialize($buf)) {
+//                                            if ($payload = msgpack_unpack($buf)) {
+                        if ($payload = json_decode($buf, true)) {
+                            if (is_array($payload)) {
+                                $this->serde->serialize($payload);
+                            }
+
+                        }
+
+                    } catch (\Exception $e) {
+                        // @todo !! don't long anywhere in event stream, we'll need to sample/limit these
+                        // Still possible the file has been deleted just before we stat the size
+//                                            SkipprLogger::error($e->getMessage());
+//                                            SkipprLogger::error($e->getTraceAsString());
+                    }
+
+                }
+
+                $this->serde->closeWriter();
+
+                unset($this->serde);
+
+                gc_collect_cycles();
+                gc_mem_caches();
+
+                $this->setSerde(Config::$outputFormat);
+//                                    gc_disable();
+
+
+            }
+//            $this->destroy($filename);
+            FileBufferDriver::unlock($finalFilename);
+
+            $updatedTime = filectime($finalFilename);
+            $updatedDelta = time() - $updatedTime;
+            $bytes = filesize($finalFilename);
+            $humanSize = BytesToHuman::toHuman($bytes,
+                true);
+
+            SkipprLogger::info("Output file $finalFilename finalised at $humanSize and age of $updatedDelta seconds");
+        }
     }
 
     public function flush(
@@ -336,7 +411,7 @@ class FileBufferDriver implements BufferDriverInterface
     {
 
         $filenames = glob(
-            $this->bufferDir . '/buffer=' . $this->bufferName . '*&finalised=*',
+            $this->bufferDir . '/buffer=' . $this->bufferName . '*&complete=*',
             GLOB_NOSORT
         );
 
@@ -359,7 +434,7 @@ class FileBufferDriver implements BufferDriverInterface
                     continue;
                 }
 
-                if (FileBufferDriver::lock($filename)) {
+                if (FileBufferDriver::lock($filename, false)) {
                     return $filename;
                 }
             } catch (\Exception $e) {
@@ -400,14 +475,21 @@ class FileBufferDriver implements BufferDriverInterface
 
         $file_list = glob($this->bufferDir . '/buffer=' . $this->bufferName . '*lock');
 
-        SkipprLogger::info("Removing all buffer locks: " . json_encode($file_list));
-
         if (!empty($file_list)) {
-            foreach ($file_list as $filename) {
+            foreach ($file_list as $lockFilename) {
 
                 try {
-                    SkipprLogger::debug("Unlocking file $filename");
-                    rmdir($filename);
+
+                    if (strpos($lockFilename, 'complete')) {
+                        $bufferFile = substr($lockFilename, 0, -5);
+                        $bytes = filesize($bufferFile);
+                        $humanSize = BytesToHuman::toHuman($bytes, true);
+                        SkipprLogger::debug("Removing incomplete output file of sie $humanSize $bufferFile");
+                        unlink($bufferFile); // remove locked file as we neven finished writing
+                    }
+
+                    SkipprLogger::debug("Unlocking file $lockFilename");
+                    rmdir($lockFilename);
                 } catch (\Exception $e) {
                     // Still possible the file has been deleted just before with stat the size
                     SkipprLogger::debug($e->getMessage());
@@ -614,14 +696,14 @@ class FileBufferDriver implements BufferDriverInterface
                         && !strpos($filename, '.lock') // ignore locked files
                     ) {
 
-                        if (FileBufferDriver::lock($filename)) { // acquire an exclusive lock
+                        if (FileBufferDriver::lock($filename, false)) { // acquire an exclusive lock
 //                            $finalFilename = str_replace(
 //                                    '&temp_part',
 //                                    '&finalised',
 //                                    $filename
 //                                ) . '=' . Helpers::randomPassword(32);
 
-                            $finalFilename = $this->bufferDir . '/' . $bucketName . '&finalised=' . Helpers::randomPassword(32);
+                            $finalFilename = $this->bufferDir . '/' . $bucketName . '&complete=' . Helpers::randomPassword(32);
 
                             SkipprLogger::info("Unpacking buffer file $filename and serializing to " . Config::$outputFormat . " output format");
 
@@ -633,6 +715,8 @@ class FileBufferDriver implements BufferDriverInterface
                                         Config::$batchFormats)
                                     && Config::$enableDeadLetters) {
 
+//                                    gc_enable();
+
                                     $this->serde->openWriter($finalFilename,
                                         Config::$outputSchemas[$namespace]);
 
@@ -643,9 +727,7 @@ class FileBufferDriver implements BufferDriverInterface
 //                                            if ($payload = msgpack_unpack($buf)) {
                                             if ($payload = json_decode($buf, true)) {
                                                 if (is_array($payload)) {
-                                                    $this->serde->serialize($payload,
-                                                        $finalFilename,
-                                                        Config::$outputSchemas[$namespace]);
+                                                    $this->serde->serialize($payload);
                                                 }
 
                                             }
@@ -660,6 +742,15 @@ class FileBufferDriver implements BufferDriverInterface
                                     }
 
                                     $this->serde->closeWriter();
+
+                                    unset($this->serde);
+
+                                    gc_collect_cycles();
+                                    gc_mem_caches();
+
+                                    $this->setSerde(Config::$outputFormat);
+//                                    gc_disable();
+
 
                                 } else {
 
@@ -698,6 +789,7 @@ class FileBufferDriver implements BufferDriverInterface
 
                             $this->destroy($filename);
                             FileBufferDriver::unlock($filename);
+
                         }
                     }
                 } catch

@@ -80,37 +80,44 @@ class ChunkedBuffer implements BufferInterface
 
         if ($this->checkFlushLimit($chunkName, $this->memBuffs[$chunkName])) {
             if (!empty($this->memBuffs[$chunkName]) && !empty($this->memBuffs[$chunkName]['buffer'])) {
-                $this->driver->flush($this->memBuffs[$chunkName]['buffer'], $chunkName, $namespace);
+
+                if ($this->bufferName == 'output') {
+                    $this->driver->flushSerialise($this->memBuffs[$chunkName]['buffer'],
+                        $chunkName, $namespace);
+                } else {
+                    $this->driver->flush($this->memBuffs[$chunkName]['buffer'],
+                        $chunkName, $namespace);
+                }
 
                 $return = self::BUFFER_APPENDED_FLUSHED;
 
 //                $this->memBuffs[$chunkName] = [];
                 unset($this->memBuffs[$chunkName]);
 
-//                gc_collect_cycles();
             }
         }
 
-//        if (Helpers::memLimitReached()) {
-//
-//            SkipprLogger::info("Rotating buffer as memory limit has low headroom at ". BytesToHuman::toHuman(memory_get_usage(true), true));
-//
-//            $carrySize = 0;
-//
-//            // ensure we flush at least the largest file
-//            foreach ($this->memBuffs as $name => $chunk) {
-//                if ($chunk['size'] > $carrySize) {
-//                    $carrySize = $chunk['size'];
-//                    $flushChunkName = $name;
-//                }
-//            }
-//
-//            $this->driver->flush($this->memBuffs[$flushChunkName]['buffer'], $flushChunkName, $namespace);
-//
-//            unset($this->memBuffs[$flushChunkName]);
-//
-//            $return = self::BUFFER_APPENDED_FLUSHED;
-//        }
+        if (Helpers::memLimitReached()) {
+
+            SkipprLogger::info("Rotating buffer as memory limit has low headroom at ". BytesToHuman::toHuman(memory_get_usage(true), true));
+
+            // ensure we flush at least the largest file
+            foreach ($this->memBuffs as $flushChunkName => $chunk) {
+                if ($this->bufferName == 'output') {
+                    $this->driver->flushSerialise($this->memBuffs[$chunkName]['buffer'],
+                        $chunkName, $namespace);
+                } else {
+                    $this->driver->flush($this->memBuffs[$flushChunkName]['buffer'],
+                        $flushChunkName, $namespace);
+                }
+
+                unset($this->memBuffs[$flushChunkName]);
+
+                $return = self::BUFFER_APPENDED_FLUSHED;
+            }
+
+
+        }
 
         return $return;
     }
@@ -125,7 +132,13 @@ class ChunkedBuffer implements BufferInterface
 
                 if (!empty($this->memBuffs[$chunkName]) && !empty($this->memBuffs[$chunkName]['buffer'])) {
 
-                    $this->driver->flush($this->memBuffs[$chunkName]['buffer'], $chunkName, $namespace, $finalize);
+                    if ($this->bufferName == 'output') {
+                        $this->driver->flushSerialise($this->memBuffs[$chunkName]['buffer'],
+                            $chunkName, $namespace);
+                    } else {
+                        $this->driver->flush($this->memBuffs[$chunkName]['buffer'],
+                            $chunkName, $namespace, $finalize);
+                    }
 
 //                    $this->memBuffs[$chunkName] = [];
 
