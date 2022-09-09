@@ -151,7 +151,7 @@ class AnalyseSchemaNumberTest extends TestCase
 
         $value = $container->setValue($dataType,  $field, $value);
 
-        $this->assertEquals('int', $dataType);
+        $this->assertEquals('string', $dataType);
         $this->assertSame('0233280319', $value);
 
     }
