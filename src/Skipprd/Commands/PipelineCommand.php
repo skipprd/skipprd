@@ -677,10 +677,10 @@ class PipelineCommand
         if ($isValid) {
 
             try {
-                $offset = $this->inputPlugin->offsets->getCurrentOffsets(
-                    $source_namespace,
-                    $source_partition
-                );
+//                $offset = $this->inputPlugin->offsets->getCurrentOffsets(
+//                    $source_namespace,
+//                    $source_partition
+//                );
 
 //                if (empty($offset)) {
 //                    SkipprLogger::info("Offset: $offset");
@@ -704,11 +704,11 @@ class PipelineCommand
 
 //                $this->streamSend($record, null);
 
-                $this->inputPlugin->offsets->setOffsets(
-                    $offset,
-                    $source_namespace,
-                    $source_partition
-                );
+//                $this->inputPlugin->offsets->setOffsets(
+//                    $offset,
+//                    $source_namespace,
+//                    $source_partition
+//                );
 
                 if (Config::$syncMode == 'sync') {
                     $result = $this->inputPlugin->buffer->append(
@@ -748,7 +748,7 @@ class PipelineCommand
 
             } catch (\Exception $e) {
                 SkipprLogger::error($e->getMessage());
-                SkipprLogger::error("serialised: $record offset:$offset");
+//                SkipprLogger::error("serialised: $record offset:$offset");
 //                SkipprLogger::error("Failed to output, no offset or payload");
 
             } catch (\TypeError $e) {
