@@ -177,7 +177,7 @@ trait SkipprStream
                 $readLen = $msgLen[1] + 4;
 
                 if ($i !== 0) { // ensure we read whole message inc length
-                    $i--;
+//                    $i--;
                 }
 
 //                if ($readLen > ($bytes - $current_index)) {
@@ -233,7 +233,7 @@ trait SkipprStream
                             SkipprLogger::info("Received schema update event from source stream");
 
                             Config::getConfig();
-
+                            break;
 //                            $this->connect();
 
                             //                        $this->shutdown(0);
