@@ -449,8 +449,7 @@ class PipelineCommand
                                 [$this->outputPlugin, 'sync']
                             );
 
-
-//                            sleep(10);
+                            sleep(1);
                         }
 
                         SkipprLogger::info("Finished reading from stream socket.");
@@ -738,7 +737,8 @@ class PipelineCommand
 
                     $skipprPack = new SkipprPack();
                     $skipprPack->encode('input_buffer_flush', '');
-                    $this->streamSend($skipprPack, STREAM_OOB);
+//                    $this->streamSend($skipprPack, STREAM_OOB);
+                    $this->streamSend($skipprPack);
 
                     $this->offsetCommitRoutine(
                         $source_namespace,

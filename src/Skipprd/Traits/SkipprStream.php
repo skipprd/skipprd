@@ -177,7 +177,7 @@ trait SkipprStream
                 $readLen = $msgLen[1] + 4;
 
                 if ($i !== 0) { // ensure we read whole message inc length
-//                    $i--;
+                    $i--;
                 }
 
 //                if ($readLen > ($bytes - $current_index)) {
@@ -246,9 +246,10 @@ trait SkipprStream
                             call_user_func($emitMessageCallback, $this->skipprPack);
                             break;
 
-//                        default:
-//                            call_user_func($emitMessageCallback, $this->skipprPack);
-//                            break;
+                        default:
+                            SkipprLogger::error("Unknown control message");
+                            SkipprLogger::error($record);
+                            break;
                     }
 
 
