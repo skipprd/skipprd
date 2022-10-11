@@ -13,6 +13,8 @@ class SerderParquet implements SerderBatchInterface
 
     private $parquet = false;
 
+    private $records = [];
+
     public function __construct()
     {
     }
@@ -34,8 +36,11 @@ class SerderParquet implements SerderBatchInterface
 
     public function closeWriter(): void {
 
+        $this->parquet->write($this->records);
+
         $this->parquet->close_writer();
 
+        unset($this->records);
         unset($this->parquet);
     }
 
@@ -44,16 +49,10 @@ class SerderParquet implements SerderBatchInterface
     {
 
         try {
-            $this->parquet->write([$record]);
+            $this->records[] = $record;
 
             unset($record);
         } catch (\Exception $exception) {
-//                        print("\n");
-
-//                        var_export($records);
-//                        print("\n");
-//            SkipprLogger::error("Parquet serialise error");
-//            SkipprLogger::error($exception->getMessage());
 
         }
     }
