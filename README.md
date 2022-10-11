@@ -81,7 +81,7 @@ AWS_PROFILE=skippr docker login --username AWS --password $(AWS_PROFILE=skippr a
 2. build with local tag
 
 ```
-docker build -f ./Dockerfile -t skipprd:build .
+docker build --platform=linux/arm64 -f ./Dockerfile -t skipprd:build .
 ```
 
 ```
@@ -92,7 +92,7 @@ docker buildx build --platform linux/amd64,linux/arm64 -f ./Dockerfile -t skippr
 (don't forget the timeout for shutdown function)
 
 ```
-
+docker-compose up --remove-orphans --timeout 120
 ```
 
 ## Integration Testing
