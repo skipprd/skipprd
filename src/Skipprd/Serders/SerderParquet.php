@@ -36,11 +36,13 @@ class SerderParquet implements SerderBatchInterface
 
     public function closeWriter(): void {
 
-        $this->parquet->write($this->records);
+        // @todo - can't bulk write else get errors like
+        // "Column 51 had 63784 while previous column had 1"
+//        $this->parquet->write($this->records);
 
         $this->parquet->close_writer();
 
-        unset($this->records);
+//        unset($this->records);
         unset($this->parquet);
     }
 
@@ -49,8 +51,8 @@ class SerderParquet implements SerderBatchInterface
     {
 
         try {
-            $this->records[] = $record;
-
+//            $this->records[] = $record;
+            $this->parquet->write([$record]);
             unset($record);
         } catch (\Exception $exception) {
 
