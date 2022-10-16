@@ -24,13 +24,6 @@ class SkipprFileOffsetDriver implements OffsetDriverInterface
 
         $offsets = $this->get();
 
-        if (!empty($offsets)) {
-            foreach ($offsets as $source_namespace => $offsetsParts) {
-                foreach ($offsetsParts as $source_partition => $offset) {
-                    $this->offsets[$source_namespace][$source_partition] = $offsets;
-                }
-            }
-        }
     }
 
     public function getOffset(string $namespace, string $partition = ''): array
@@ -38,8 +31,8 @@ class SkipprFileOffsetDriver implements OffsetDriverInterface
 
         $offsets = [];
 
-        if (!empty($this->offsets[$namespace][$partition])) {
-            $offsets = explode(' ', $this->offsets[$namespace][$partition]);
+        if (!empty($this->committedOffsets[$namespace][$partition])) {
+            $offsets = explode(' ', $this->committedOffsets[$namespace][$partition]);
         }
 
 
