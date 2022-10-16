@@ -112,7 +112,7 @@ trait Ingest
                 $skipprPack = new SkipprPack();
                 $skipprPack->encode('schema_update', '');
 
-                $this->streamSend($skipprPack, STREAM_OOB);
+                $this->streamSend($skipprPack);
 
                 // IMPORTANT to backoff here
 //                sleep(10);
