@@ -113,7 +113,7 @@ class PipelineCommand
 
     public $lastStatusUpdate = 0;
 
-    public $statusUpdateIntervalSeconds = 60;
+    public $statusUpdateIntervalSeconds = 10;
 
     /**
      * @var \Skipprd\Plugins\DataSources\DataSourcePluginBase
@@ -330,9 +330,12 @@ class PipelineCommand
                         sleep(Config::$pollIntervalSeconds ?? 1);
                     }
 
-                    SkipprLogger::info("Sync complete, waiting for output to finish");
+                    if (!Config::$analysing) {
 
-                    sleep(120);
+                        SkipprLogger::info("Sync complete, waiting for output to finish");
+
+                        sleep(120);
+                    }
 
                     $this->shutdown();
                 }
@@ -372,7 +375,7 @@ class PipelineCommand
                     SkipprLogger::info("Resetting config, offsets and buffers");
                     $this->inputPlugin->buffer->driver->unlockAll();
                     $this->inputPlugin->buffer->driver->destroyAll();
-                    $this->resetSourceOffsets();
+                    $this->offsetClient->resetSourceOffsets();
 
                     sleep(120); // wait for output to complete
                     $this->shutdown();
@@ -740,7 +743,7 @@ class PipelineCommand
 //                    $this->streamSend($skipprPack, STREAM_OOB);
                     $this->streamSend($skipprPack);
 
-                    $this->offsetCommitRoutine(
+                    $this->offsetCommitLatest(
                         $source_namespace,
                         $source_partition
                     );
@@ -959,44 +962,41 @@ class PipelineCommand
         }
     }
 
-    public function offsetCommitRoutine(
+    public function offsetCommitLatest(
         string $source_namespace,
         string $source_partition
     ): void {
-        if (!Config::$analysing) { // should never be here on analyse schema, but just in case of code error
-            $offset = $this->inputPlugin->offsets->getCurrentOffsets(
-                $source_namespace,
-                $source_partition
-            );
 
-            SkipprLogger::info("Committing offset for Namespace: $source_namespace Partition: $source_partition Offset: $offset");
+        // Input plugin buffers to namespace chunks, a buffer flush to disk always
+        // flushes all offsets, up-to the current high watermark.
+        SkipprLogger::info("Committing offset for Namespace: $source_namespace");
 
-            $this->offsetClient->sync($source_namespace, $source_partition, $offset);
-        }
-    }
-
-    public function resetSourceOffsets(): void
-    {
+        // get high watermarks
         $offsets = $this->inputPlugin->offsets->getAll();
 
-        foreach ($offsets as $source_namespace => $partitionArr) {
-            foreach ($partitionArr as $source_partition => $offset) {
-                SkipprLogger::info("Resetting offset for Namespace: $source_namespace Partition: $source_partition from current offset $offset to ''");
-                $this->inputPlugin->offsets->setOffsets('', $source_namespace, $source_partition);
-                $this->offsetClient->sync($source_namespace, $source_partition, '');
-            }
-        }
+        // Commit all offsets for this namespace
+        $offsetsToCommit[$source_namespace] = $offsets[$source_namespace];
+        $this->offsetClient->offsetCommitAll($offsetsToCommit);
+
+
+//        if (!Config::$analysing) { // should never be here on analyse schema, but just in case of code error
+//            $offset = $this->inputPlugin->offsets->getCurrentOffsets(
+//                $source_namespace,
+//                $source_partition
+//            );
+//
+//            SkipprLogger::info("Committing offset for Namespace: $source_namespace Partition: $source_partition Offset: $offset");
+//
+//            $this->offsetClient->sync($source_namespace, $source_partition, $offset);
+//        }
     }
+
+
     public function offsetCommitAll(): void
     {
         $offsets = $this->inputPlugin->offsets->getAll();
 
-        foreach ($offsets as $source_namespace => $partitionArr) {
-            foreach ($partitionArr as $source_partition => $offset) {
-                SkipprLogger::info("Committing offset for Namespace: $source_namespace Partition: $source_partition Offset: $offset");
-                $this->offsetClient->sync($source_namespace, $source_partition, $offset);
-            }
-        }
+        $this->offsetClient->offsetCommitAll($offsets);
     }
 
     public function readFile(
@@ -1274,19 +1274,6 @@ class PipelineCommand
         if (!empty($this->inputPlugin)) {
             $type = Config::getenv('OFFSET_DRIVER', 'skippr_file');
             $this->offsetClient = OffsetDriverFactory::factory($type);
-            $offsets = $this->offsetClient->get();
-
-            if (!empty($offsets)) {
-                foreach ($offsets as $source_namespace => $offsetsParts) {
-                    foreach ($offsetsParts as $source_partition => $offset) {
-                        $this->inputPlugin->offsets->setOffsets(
-                            $offset,
-                            $source_namespace,
-                            $source_partition
-                        );
-                    }
-                }
-            }
 
             $this->inputPlugin->connect();
             $this->inputPlugin->buffer->flushAll();
@@ -1300,20 +1287,6 @@ class PipelineCommand
         if (!empty($this->outputPlugin)) {
             $type = Config::getenv('OFFSET_DRIVER', 'skippr_file');
             $this->offsetClient = OffsetDriverFactory::factory($type);
-            $offsets = $this->offsetClient->get();
-
-            if (!empty($offsets)) {
-                foreach ($offsets as $source_namespace => $offsetsParts) {
-                    foreach ($offsetsParts as $source_partition => $offset) {
-                        $this->outputPlugin->offsets->setOffsets(
-                            $offset,
-                            $source_namespace,
-                            $source_partition
-                        );
-                    }
-                }
-            }
-
 
             $this->outputPlugin->connect();
 

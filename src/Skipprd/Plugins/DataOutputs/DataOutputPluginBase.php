@@ -3,6 +3,7 @@
 namespace Skipprd\Plugins\DataOutputs;
 
 use Skipprd\Buffers\BufferInterface;
+use Skipprd\Plugins\OffsetDrivers\OffsetDriverFactory;
 use Skipprd\Plugins\Offsets;
 use Skipprd\Plugins\ValidationResponse;
 use Skipprd\Traits\Config;
@@ -27,7 +28,9 @@ class DataOutputPluginBase implements DataOutputPluginInterface
     {
         $this->tenantId = getenv('TENANT_ID');
         $this->pipelineName = getenv('PIPELINE_NAME');
-        $this->offsets = new Offsets();
+        $type = Config::getenv('OFFSET_DRIVER', 'skippr_file');
+        $offsetClient = OffsetDriverFactory::factory($type);
+        $this->offsets = new Offsets($offsetClient);
         $this->buffer = $buffer;
         $this->config = $config;
     }

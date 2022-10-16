@@ -43,7 +43,7 @@ class DataSourceFilePlugin extends DataSourcePluginBase
             $offsetTimestamp = 0;
             $offsetLine = 0;
 
-            $offset = $this->offsets->getOffsets($path);
+            $offset = $this->offsets->getOffset($path);
 
             if (isset($offset[0])) {
                 $offsetTimestamp = $offset[0];

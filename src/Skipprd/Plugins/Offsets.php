@@ -4,6 +4,7 @@
 namespace Skipprd\Plugins;
 
 use Skipprd\InternalFields;
+use Skipprd\Plugins\OffsetDrivers\OffsetDriverInterface;
 use Skipprd\Traits\SkipprLogger;
 
 class Offsets
@@ -11,10 +12,35 @@ class Offsets
 
     protected array $offsets = [];
 
+    public OffsetDriverInterface $offsetClient;
+
+    public function __construct(OffsetDriverInterface $client)
+    {
+        $this->offsetClient = $client;
+    }
+
     public function getAll(): array
     {
 
         return $this->offsets;
+    }
+
+    public function getOffset(string $namespace, string $partition = ''): array
+    {
+
+        $offsets = [];
+
+        // get latest high watermark from offset
+        if (!empty($this->offsets[$namespace][$partition])) {
+            $offsets = explode(' ', $this->offsets[$namespace][$partition]);
+
+            // else get last committed offset
+        } else {
+            $offsets = $this->offsetClient->getOffset($namespace, $partition);
+            $this->offsets[$namespace][$partition] = $offsets;
+        }
+
+        return $offsets;
     }
 
     public function setOffsets(string $offsets, string $namespace, string $partition = ''): void
@@ -29,23 +55,6 @@ class Offsets
         }
     }
 
-    public function getOffsets(string $namespace, string $partition = ''): array
-    {
-
-        $offsets = [];
-        
-        if (!empty($this->offsets[$namespace][$partition])) {
-            $offsets = explode(' ', $this->offsets[$namespace][$partition]);
-        }
-
-
-        if (empty($offsets[0])) {
-            $offsets[0] = '';
-        }
-
-        return $offsets;
-    }
-
     public function getCurrentOffsets(string $namespace, string $partition = ''): string
     {
         return $this->offsets[$namespace][$partition] ?? '';
@@ -57,7 +66,7 @@ class Offsets
         //        $offsets = $this->getOffsets();
         //        return bccomp($args, $offsets, 5) == 1;
         
-        $offsets = $this->getOffsets($namespace, $partition);
+        $offsets = $this->offsetClient->getOffset($namespace, $partition);
 
         $args = explode(' ', $args);
 

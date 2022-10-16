@@ -4,8 +4,10 @@ namespace Skipprd\Plugins\DataSources;
 
 use Monolog\Registry;
 use Skipprd\Buffers\BufferInterface;
+use Skipprd\Plugins\OffsetDrivers\OffsetDriverFactory;
 use Skipprd\Plugins\Offsets;
 use Skipprd\Plugins\ValidationResponse;
+use Skipprd\Traits\Config;
 use Skipprd\Traits\SkipprLogger;
 
 class DataSourcePluginBase implements DataSourcePluginInterface
@@ -31,7 +33,9 @@ class DataSourcePluginBase implements DataSourcePluginInterface
         $this->tenantId = getenv('TENANT_ID');
         $this->pipelineName = getenv('PIPELINE_NAME');
         $this->buffer = $buffer;
-        $this->offsets = new Offsets();
+        $type = Config::getenv('OFFSET_DRIVER', 'skippr_file');
+        $offsetClient = OffsetDriverFactory::factory($type);
+        $this->offsets = new Offsets($offsetClient);
         $this->config = $config;
     }
 

@@ -14,11 +14,55 @@ class SkipprFileOffsetDriver implements OffsetDriverInterface
      */
     private $committedOffsets = [];
 
+    private $offsets = [];
+
     protected $pipelineName = '';
 
     public function __construct()
     {
         $this->pipelineName = Config::getPipelineName();
+
+        $offsets = $this->get();
+
+        if (!empty($offsets)) {
+            foreach ($offsets as $source_namespace => $offsetsParts) {
+                foreach ($offsetsParts as $source_partition => $offset) {
+                    $this->offsets[$source_namespace][$source_partition] = $offsets;
+                }
+            }
+        }
+    }
+
+    public function getOffset(string $namespace, string $partition = ''): array
+    {
+
+        $offsets = [];
+
+        if (!empty($this->offsets[$namespace][$partition])) {
+            $offsets = explode(' ', $this->offsets[$namespace][$partition]);
+        }
+
+
+        if (empty($offsets[0])) {
+            $offsets[0] = '';
+        }
+
+        return $offsets;
+    }
+
+    public function offsetCommitAll(array $offsets): void
+    {
+        foreach ($offsets as $source_namespace => $partitionArr) {
+            foreach ($partitionArr as $source_partition => $offset) {
+                SkipprLogger::info("Committing offset for Namespace: $source_namespace Partition: $source_partition Offset: $offset");
+                $this->sync($source_namespace, $source_partition, $offset);
+            }
+        }
+    }
+
+    public function resetSourceOffsets(): void
+    {
+        $this->client('PUT', []);
     }
 
     public function get(): array
