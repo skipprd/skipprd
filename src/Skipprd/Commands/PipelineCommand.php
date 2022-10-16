@@ -791,7 +791,7 @@ class PipelineCommand
                                 $source_namespace = $payload['source_namespace'];
                                 $source_partition = $payload['source_partition'];
                                 $namespace = $payload['skpr_namespace'];
-                                $partition = $payload['skpr_partition'];
+                                $partition = $payload['skpr_partition'] ?? '';
                                 // @todo - empty() performance
 //                $partition = InternalFields::parsePartitionField($payload, $source_partition);
 
