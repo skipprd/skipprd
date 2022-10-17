@@ -35,7 +35,7 @@ class Config
 
     public static $dataDir = '/data';
 
-    public static $containerMem = '/data';
+    public static $containerMem = 0;
 
     public static $pipelineName = '';
 

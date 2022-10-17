@@ -104,8 +104,8 @@ class ChunkedBuffer implements BufferInterface
             // ensure we flush at least the largest file
             foreach ($this->memBuffs as $flushChunkName => $chunk) {
                 if ($this->bufferName == 'output') {
-                    $this->driver->flushSerialise($this->memBuffs[$chunkName]['buffer'],
-                        $chunkName, $namespace);
+                    $this->driver->flushSerialise($this->memBuffs[$flushChunkName]['buffer'],
+                        $flushChunkName, $namespace);
                 } else {
                     $this->driver->flush($this->memBuffs[$flushChunkName]['buffer'],
                         $flushChunkName, $namespace);

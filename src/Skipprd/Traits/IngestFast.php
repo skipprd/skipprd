@@ -2,7 +2,6 @@
 
 namespace Skipprd\Traits;
 
-use _PHPStan_76800bfb5\Nette\Neon\Exception;
 use Skipprd\Helpers;
 
 trait IngestFast
