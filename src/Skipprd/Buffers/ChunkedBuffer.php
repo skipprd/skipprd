@@ -199,7 +199,7 @@ class ChunkedBuffer implements BufferInterface
             $time = (time() - $chunk['time']);
             $count = $chunk['count'];
 
-            SkipprLogger::debug("Rotating memory buffer $chunkName of $size, $count records and age of $time seconds to disk");
+            SkipprLogger::info("Rotating memory buffer $chunkName of $size, $count records and age of $time seconds to disk");
 
             $tenantId = Config::$tenantId;
             $pipelineName = Config::$pipelineName;

@@ -12,18 +12,18 @@ FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v3.0.0 as bu
 ##
 #ADD https://github.com/mlocati/docker-php-extension-installer/releases/latest/download/install-php-extensions /usr/local/bin/
 
-RUN apt-get update -y && apt-get install -y netbase git openssh-client
+RUN apt-get update -y && apt-get install -y php-msgpack php-igbinary
 
 #RUN chmod +x /usr/local/bin/install-php-extensions \
 #    && sync
 #    && install-php-extensions gd xdebug zip
 
-ARG SSH_PRIVATE_KEY
-RUN mkdir -p ~/.ssh
-RUN echo "${SSH_PRIVATE_KEY}" > /root/.ssh/id_rsa
-RUN chmod 700 ~/.ssh && chmod -R 600 ~/.ssh/*
-RUN ssh-keyscan github.com >> ~/.ssh/known_hosts && chmod 644 ~/.ssh/known_hosts
-RUN ssh-keyscan gitlab.com >> ~/.ssh/known_hosts && chmod 644 ~/.ssh/known_hosts
+#ARG SSH_PRIVATE_KEY
+#RUN mkdir -p ~/.ssh
+#RUN echo "${SSH_PRIVATE_KEY}" > /root/.ssh/id_rsa
+#RUN chmod 700 ~/.ssh && chmod -R 600 ~/.ssh/*
+#RUN ssh-keyscan github.com >> ~/.ssh/known_hosts && chmod 644 ~/.ssh/known_hosts
+#RUN ssh-keyscan gitlab.com >> ~/.ssh/known_hosts && chmod 644 ~/.ssh/known_hosts
 
 #RUN install-php-extensions @composer
 RUN wget -O composer-setup.php https://getcomposer.org/installer \
@@ -137,7 +137,7 @@ RUN ioncube/ioncube_encoder.sh --activate && \
       --obfuscation-key "5L5GRWyUcVRljrWGJhSj4SJI3Uxb9Emx" \
       # copy by default, then only encode specific dirs
       --copy "@/*/" \
-      --encode "src/Skipprd/Buffers/" \
+#      --encode "src/Skipprd/Buffers/" \
       --encode "src/Skipprd/Commands/" \
       --encode "src/Skipprd/Converters/" \
       --encode "src/Skipprd/Serders/" \
@@ -152,8 +152,8 @@ RUN ioncube/ioncube_encoder.sh --activate && \
 #      --deactivate
 
 
-RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Buffers/BufferDrivers/FileBufferDriver.php
-RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Buffers/ChunkedBuffer.php
+RUN #grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Buffers/BufferDrivers/FileBufferDriver.php
+RUN #grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Buffers/ChunkedBuffer.php
 
 RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Commands/PipelineCommand.php
 
@@ -186,7 +186,7 @@ FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v3.0.0 as fi
 #FROM skippr-php:ubuntu as final
 #FROM skippr-php:zts as final
 
-RUN apt-get update -y && apt-get install -y php-msgpack php-igbinary
+RUN apt-get update -y && apt-get install -y php-msgpack php-igbinary sqlite3 libsqlite3-dev php-sqlite3
 
 ARG SKIPPR_BUILD_VERSION
 RUN echo "export SKIPPR_BUILD_VERSION=${SKIPPR_BUILD_VERSION}" > /etc/profile.d/skpr_version.sh
