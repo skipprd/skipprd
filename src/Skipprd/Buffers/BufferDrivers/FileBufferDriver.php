@@ -194,7 +194,7 @@ class FileBufferDriver implements BufferDriverInterface
                     fputs($fh, implode("\n", $memBuff) . "\n");
 //                fputs($fh, $memBuff);
                 }
-                fflush($fh);
+//                fflush($fh);
                 fclose($fh);
 
                 FileBufferDriver::unlock($filename);
