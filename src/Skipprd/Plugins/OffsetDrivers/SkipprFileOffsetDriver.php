@@ -14,7 +14,6 @@ class SkipprFileOffsetDriver implements OffsetDriverInterface
      */
     private $committedOffsets = [];
 
-    private $offsets = [];
 
     protected $pipelineName = '';
 
@@ -24,6 +23,10 @@ class SkipprFileOffsetDriver implements OffsetDriverInterface
 
         $offsets = $this->get();
 
+    }
+
+    public function getOffsets(string $namespace, array $partitions): array {
+        throw new \Exception("Method not implemented, did you mean to configure another offset driver?");
     }
 
     public function getOffset(string $namespace, string $partition = ''): array

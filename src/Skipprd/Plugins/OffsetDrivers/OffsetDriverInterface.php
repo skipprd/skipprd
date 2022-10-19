@@ -7,13 +7,15 @@ interface OffsetDriverInterface
 
     public function get() : array;
 
-    public function sync(string $namespace, string $partition, string $offset) : void;
+    function sync(string $namespace, string $partition, string $offset) : void;
 
-    public function getOffset(string $namespace, string $partition = ''): array;
+    function getOffsets(string $namespace, array $partitions): array;
 
-    public function resetSourceOffsets(): void;
+    function getOffset(string $namespace, string $partition = ''): array;
 
-    public function offsetCommitAll(array $offsets): void;
+    function resetSourceOffsets(): void;
 
-//    public function syncAll(array $offsets) : void;
+    function offsetCommitAll(array $offsets): void;
+
+//    function syncAll(array $offsets) : void;
 }
