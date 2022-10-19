@@ -113,7 +113,7 @@ class PipelineCommand
 
     public $lastStatusUpdate = 0;
 
-    public $statusUpdateIntervalSeconds = 10;
+    public $statusUpdateIntervalSeconds = 60;
 
     /**
      * @var \Skipprd\Plugins\DataSources\DataSourcePluginBase
