@@ -1436,15 +1436,17 @@ class PipelineCommand
                 }
 
                 if (!empty($this->outputPlugin)) {
-                    $outputPluginName = Config::getenv('DATA_OUTPUT_PLUGIN_NAME');
-                    SkipprLogger::info("Flushing output buffers to $outputPluginName destination.");
-                    $this->outputPlugin->buffer->driver->unlockAll();
+                    if (Config::$runMode === Config::RUN_MODE_SYNC) {
+                        $outputPluginName = Config::getenv('DATA_OUTPUT_PLUGIN_NAME');
+                        SkipprLogger::info("Flushing output buffers to $outputPluginName destination.");
+                        $this->outputPlugin->buffer->driver->unlockAll();
 
 //                    $this->processInputBuffers(true); // not a great idea to increase memory consumption on shutdown
 
 //                    $this->outputPlugin->buffer->driver->finaliseFileBuffers(true);
 //                    $this->outputPlugin->buffer->flushFinalised(true);
-                    $this->outputPlugin->sync();
+                        $this->outputPlugin->sync();
+                    }
 
                     $this->outputPlugin->shutdown();
                 }
