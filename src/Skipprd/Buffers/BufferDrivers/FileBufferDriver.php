@@ -57,7 +57,8 @@ class FileBufferDriver implements BufferDriverInterface
     protected function getPool(): void {
         if (self::$pool === null) {
             self::$pool = Pool::create()
-            ->concurrency(1);
+            ->concurrency(1)
+            ->timeout(600);
         }
     }
 
@@ -81,6 +82,9 @@ class FileBufferDriver implements BufferDriverInterface
         if (!empty($file_list)) {
             foreach ($file_list as $bufferFile) {
 
+                if (strpos($bufferFile, '.lock')) continue;
+                if (strpos($bufferFile, '.checkpoint')) continue;
+
                 $finalFilename = $this->bufferDir . '/' . $chunkName . '&complete=' . Helpers::randomPassword(32);
 
                 if (FileBufferDriver::lock($finalFilename)) {
@@ -100,7 +104,6 @@ class FileBufferDriver implements BufferDriverInterface
                     ) {
 
                         $fpr = fopen($bufferFile, 'rb');
-
 
                         $serde->openWriter($finalFilename, $schema);
 
@@ -127,22 +130,33 @@ class FileBufferDriver implements BufferDriverInterface
 
                         $serde->closeWriter();
 
-                        return $finalFilename;
+                        fclose($fpr);
 
-                    })
-                    ->then(function (string $finalFilename) use ($bufferFile) {
+                        unlink($bufferFile);
 
                         FileBufferDriver::unlock($finalFilename);
                         FileBufferDriver::unlock($bufferFile);
-                        SkipprLogger::info("Flushed output file $finalFilename");
-                    })->catch(function (\Exception $e) use ($finalFilename, $bufferFile) {
-                        SkipprLogger::error($e->getMessage());
-                        FileBufferDriver::unlock($finalFilename);
-                        FileBufferDriver::unlock($bufferFile);
+                        echo "Flushed output file $finalFilename";
+//                        SkipprLogger::info("Flushed output file $finalFilename");
+
+//                        return $finalFilename;
+
                     });
+//                    ->then(function (string $finalFilename) use ($bufferFile) {
+//
+//                        FileBufferDriver::unlock($finalFilename);
+//                        FileBufferDriver::unlock($bufferFile);
+//                        SkipprLogger::info("Flushed output file $finalFilename");
+//                    })->catch(function (\Exception $e) use ($finalFilename, $bufferFile) {
+//                        SkipprLogger::error($e->getMessage());
+//                        FileBufferDriver::unlock($finalFilename);
+//                        FileBufferDriver::unlock($bufferFile);
+//                    });
 
                     SkipprLogger::info("Async flushing output file $bufferFile");
 
+                    // wait for process to complete, as processInputBuffers() is
+                    // holding input buffer open till it completes
                     self::$pool->wait();
                 }
             }
@@ -193,6 +207,7 @@ class FileBufferDriver implements BufferDriverInterface
 
             echo $e->getTraceAsString();
 
+            FileBufferDriver::unlock($filename);
             FileBufferDriver::unlock($filename);
 
             throw $e;
