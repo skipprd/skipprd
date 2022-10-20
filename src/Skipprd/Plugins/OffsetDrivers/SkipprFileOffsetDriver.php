@@ -46,14 +46,16 @@ class SkipprFileOffsetDriver implements OffsetDriverInterface
         return $offsets;
     }
 
-    public function offsetCommitAll(array $offsets): void
+    public function offsetCommitAll(array $offsets): array
     {
         foreach ($offsets as $source_namespace => $partitionArr) {
             foreach ($partitionArr as $source_partition => $offset) {
                 SkipprLogger::info("Committing offset for Namespace: $source_namespace Partition: $source_partition Offset: $offset");
-                $this->sync($source_namespace, $source_partition, implode(' ', $offsets));
+                $this->sync($source_namespace, $source_partition, $offset);
             }
         }
+
+        return $offsets[$source_namespace];
     }
 
     public function resetSourceOffsets(): void

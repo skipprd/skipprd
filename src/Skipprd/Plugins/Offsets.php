@@ -55,6 +55,21 @@ class Offsets
         }
     }
 
+    public function offsetCommitLatest(
+        string $source_namespace
+    ): void {
+
+        // Input plugin buffers to namespace chunks, a buffer flush to disk always
+        // flushes all offsets, up-to the current high watermark.
+        SkipprLogger::info("Committing offset for Namespace: $source_namespace");
+
+        // Commit all offsets for this namespace
+        $toCommit[$source_namespace] = $this->offsets[$source_namespace];
+        $this->offsets[$source_namespace] = $this->offsetClient->offsetCommitAll($toCommit);
+
+
+    }
+
     public function getCurrentOffsets(string $namespace, string $partition = ''): string
     {
         return $this->offsets[$namespace][$partition] ?? '';

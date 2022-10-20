@@ -15,7 +15,7 @@ interface OffsetDriverInterface
 
     function resetSourceOffsets(): void;
 
-    function offsetCommitAll(array $offsets): void;
+    function offsetCommitAll(array $offsets): array;
 
 //    function syncAll(array $offsets) : void;
 }

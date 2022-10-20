@@ -135,7 +135,7 @@ class SkipprSqliteOffsetDriver implements OffsetDriverInterface
         return $offsets;
     }
 
-    public function offsetCommitAll(array $offsets): void
+    public function offsetCommitAll(array $offsets): array
     {
 
         $sql = <<<EOF
@@ -169,7 +169,7 @@ EOF;
 
         $this->pdo->commit();
 
-        SkipprLogger::info("Committed offsets");
+        return [];
 
     }
 

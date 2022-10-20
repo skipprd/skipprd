@@ -969,26 +969,12 @@ class PipelineCommand
 
         // Input plugin buffers to namespace chunks, a buffer flush to disk always
         // flushes all offsets, up-to the current high watermark.
-        SkipprLogger::info("Committing offset for Namespace: $source_namespace");
-
-        // get high watermarks
-        $offsets = $this->inputPlugin->offsets->getAll();
 
         // Commit all offsets for this namespace
-        $offsetsToCommit[$source_namespace] = $offsets[$source_namespace];
-        $this->offsetClient->offsetCommitAll($offsetsToCommit);
+        $this->inputPlugin->offsets->offsetCommitLatest($source_namespace);
 
+        SkipprLogger::info("Committed offsets");
 
-//        if (!Config::$analysing) { // should never be here on analyse schema, but just in case of code error
-//            $offset = $this->inputPlugin->offsets->getCurrentOffsets(
-//                $source_namespace,
-//                $source_partition
-//            );
-//
-//            SkipprLogger::info("Committing offset for Namespace: $source_namespace Partition: $source_partition Offset: $offset");
-//
-//            $this->offsetClient->sync($source_namespace, $source_partition, $offset);
-//        }
     }
 
 
