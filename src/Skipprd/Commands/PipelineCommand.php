@@ -675,66 +675,34 @@ class PipelineCommand
         $partition = (string) $payload['skpr_partition'] ?? $isValid = false;
 
 
-//        if (!empty($payload) && !empty($offset)) {
+        // 1.4m
+
         if ($isValid) {
 
             try {
-//                $offset = $this->inputPlugin->offsets->getCurrentOffsets(
-//                    $source_namespace,
-//                    $source_partition
-//                );
 
-//                if (empty($offset)) {
-//                    SkipprLogger::info("Offset: $offset");
-//                }
-            } catch (\TypeError $e) {
-                // Sometimes get empty messages
-                SkipprLogger::error($e->getMessage());
-            }
-
-            try {
-//                $record = igbinary_serialize($payload);
-//                $record = msgpack_pack($payload);
+                // -100K
                 $record = json_encode($payload);
-                //            $serialised = pack("c*", $payload);
 
-//                $this->skipprPack->encode($record, $offset);
-//                $record = $this->skipprPack->string();
-//                $offset = $this->skipprPack->decodeOffset();
-//                $sizeBytes = $this->skipprPack->length();
+                // -/+0
                 $sizeBytes = strlen($record);
 
-//                $this->streamSend($record, null);
+                // -100K
+//                if (Config::$syncMode === Config::RUN_MODE_SYNC) {
 
-//                $this->inputPlugin->offsets->setOffsets(
-//                    $offset,
-//                    $source_namespace,
-//                    $source_partition
-//                );
+                // 985K   962K   1M
+                $result = $this->inputPlugin->buffer->append(
+                    $record,
+                    $sizeBytes,
+                    0,
+                    $namespace,
+                    $partition
+                );
 
-                if (Config::$syncMode == 'sync') {
-                    $result = $this->inputPlugin->buffer->append(
-                        $record,
-                        $sizeBytes,
-                        0,
-                        $namespace,
-                        $partition
-                    );
-
-                }
-//                elseif (Config::$syncMode == 'async') {
-//                    $result = $this->inputPlugin->buffer->append(
-//                        $record,
-//                        $sizeBytes,
-//                        $eventTime,
-//                        $namespace,
-//                        $partition
-//                    );
-//                }
+                // -100K
+//                $this->dataReadBytes += $sizeBytes;
 //
-                $this->dataReadBytes += $sizeBytes;
-
-                if ($result == 2) { // buffer was flushed
+                if ($result === 2) { // buffer was flushed
 
 //                    $this->inputPlugin->buffer->driver->finaliseFileBuffers();
 
@@ -804,7 +772,7 @@ class PipelineCommand
 //                    $source_partition
 //                );
 
-                                if (Config::$syncMode == 'sync') {
+                                if (Config::$syncMode === Config::RUN_MODE_SYNC) {
                                     $result = $this->outputPlugin->buffer->append(
                                         $record,
                                         strlen($record),
