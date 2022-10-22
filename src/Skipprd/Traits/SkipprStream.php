@@ -223,7 +223,7 @@ trait SkipprStream
                     $current_index = $i;
                     $read = '';
 
-                    switch ($record) {
+                    switch (trim($record)) {
                         case 'sync_complete':
                             SkipprLogger::info("Received sync complete event from source stream");
                             $this->shutdown(0);
