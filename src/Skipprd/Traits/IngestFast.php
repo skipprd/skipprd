@@ -36,10 +36,11 @@ trait IngestFast
         $this->incrementNamespacesCount($namespace);
         $this->currentEntries++;
         $this->fastPath++;
+
         unset($unwrappedMessage);
-//            $this->outputEmit($message);
 
         return $message;
+
     }
 
     /**
@@ -48,7 +49,7 @@ trait IngestFast
      * @param $value string -  the actual field value
      * @return mixed|null - value data type on success or null on error
      */
-    public function fastSetValue(string $dataType, string $field, $value, array $metadata = null)
+    protected static function fastSetValue(string $dataType, string $field, $value, array $metadata = null)
     {
 
         try {
@@ -63,7 +64,7 @@ trait IngestFast
 
                             $clean_sub_field = Helpers::cleanFieldName($sub_field);
 
-                            $newValue[$clean_sub_field] = $this->fastSetValue(
+                            $newValue[$clean_sub_field] = self::fastSetValue(
                                 $metadata[$field]['fields'][$sub_field]['determined_type'],
                                 $sub_field,
                                 $sub_value,
@@ -78,7 +79,7 @@ trait IngestFast
                     if ($dataType === 'map') {
                         foreach ($value as $key => $val) {
                             if ($val !== null) {
-                                $value[$key] = $this->fastSetValue(
+                                $value[$key] = self::fastSetValue(
                                     $metadata[$field]['determined_type_values'],
                                     $key,
                                     $val,
@@ -89,7 +90,7 @@ trait IngestFast
                         if ($dataType === 'array') {
                             foreach ($value as $key => $val) {
                                 if ($value !== null) {
-                                    $value[$key] = $this->fastSetValue(
+                                    $value[$key] = self::fastSetValue(
                                         $metadata[$field]['determined_type_values'],
                                         $key,
                                         $val
