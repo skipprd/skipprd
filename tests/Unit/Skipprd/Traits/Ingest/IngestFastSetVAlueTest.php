@@ -44,7 +44,7 @@ class IngestFastSetVAlueTest extends TestCase
          * analyse
          */
         Config::$discoveredFieldOccurrence['foo_namespace']['fields'] = [];
-        $container->analysePayload($message, Config::$discoveredFieldOccurrence['foo_namespace']['fields']);
+        AnalyseSchema::analysePayload($message, Config::$discoveredFieldOccurrence['foo_namespace']['fields']);
 //        $container->determineFieldTypes(Config::$discoveredFieldOccurrence['foo_namespace']['fields']);
         foreach (Config::$discoveredFieldOccurrence as $namespace => $metadata) {
             $container->determineFieldTypes(Config::$discoveredFieldOccurrence[$namespace]['fields']);

@@ -2,8 +2,9 @@
 ## Builder
 ###
 
-FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v3.0.0 as builder
-#FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:arm64 as builder
+FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v4.0.0 as builder
+#FROM skippr-php:arm64 as builder
+#FROM skippr-php:latest as builder
 #FROM skippr-php:ubuntu as builder
 #FROM skippr-php:zts as builder
 
@@ -12,7 +13,7 @@ FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v3.0.0 as bu
 ##
 #ADD https://github.com/mlocati/docker-php-extension-installer/releases/latest/download/install-php-extensions /usr/local/bin/
 
-RUN apt-get update -y && apt-get install -y php-msgpack php-igbinary
+#RUN apt-get update -y && apt-get install -y php-msgpack php-igbinary
 
 #RUN chmod +x /usr/local/bin/install-php-extensions \
 #    && sync
@@ -37,7 +38,7 @@ COPY ./composer.lock ./
 #COPY --from=encoder /usr/src/encoded-app ./
 #WORKDIR /usr/src/app
 
-RUN #composer install
+#RUN composer install
 # parallel download and install of dependencies
 #RUN composer global require hirak/prestissimo
 RUN composer check-platform-reqs --no-dev --lock --no-interaction --no-ansi --no-cache
@@ -52,12 +53,14 @@ RUN rm composer.*
 ##
 # performance testing
 ##
-FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v3.0.0 as perf
-#FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:arm64 as perf
+FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v4.0.0 as perf
+#FROM skippr-php:arm64 as perf
+#FROM skippr-php:latest as perf
+#FROM skippr-php:x86_64 as perf
 #FROM skippr-php:ubuntu as perf
 #FROM skippr-php:zts as perf
 
-RUN apt-get update -y && apt-get install -y php-msgpack php-igbinary
+RUN #apt-get update -y && apt-get install -y php-msgpack php-igbinary
 
 ARG SKIPPR_BUILD_VERSION
 RUN echo "export SKIPPR_BUILD_VERSION=${SKIPPR_BUILD_VERSION}" > /etc/profile.d/skpr_version.sh
@@ -93,7 +96,11 @@ CMD ["src/run.sh"]
 # encoder
 ##
 #FROM php:7.4-cli as encoder
+#FROM --platform=linux/amd64 ubuntu:22.04 as encoder
 FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v3.0.0 as encoder
+#FROM skippr-php:latest as encoder
+#FROM skippr-php:latest as encoder
+#FROM skippr-php:x86_64 as encoder
 #FROM skippr-php:ubuntu as encoder
 #FROM skippr-php:zts as encoder
 
@@ -118,9 +125,10 @@ COPY --from=builder /usr/src/app .
 #RUN mkdir -p /usr/src/encoded-modules
 
 #--copy "@/*/" \
+
 RUN ioncube/ioncube_encoder.sh --activate && \
     ioncube/ioncube_encoder.sh \
-      -72 \
+      -81 \
       --binary \
       --optimise "max" \
       --allow-reflection \
@@ -182,11 +190,23 @@ RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skippr
 #RUN grep -q --binary-files=text extension_loaded /usr/src/encoded-app/src/Skipprd/Services/AvroSubPub/MessageSerializer.php
 
 
-FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v3.0.0 as final
+FROM 536671797322.dkr.ecr.eu-west-2.amazonaws.com/skippr-php:ubuntu-v4.0.0 as final
+#FROM skippr-php:arm64 as final
+#FROM skippr-php:latest as final
+#FROM skippr-php:x86_64 as final
+
 #FROM skippr-php:ubuntu as final
 #FROM skippr-php:zts as final
 
-RUN apt-get update -y && apt-get install -y php-msgpack php-igbinary sqlite3 libsqlite3-dev php-sqlite3
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update -y && apt-get install -y \
+#    php-msgpack \
+#    php-igbinary  \
+    sqlite3  \
+    libsqlite3-dev
+#    php-sqlite3
+
 
 ARG SKIPPR_BUILD_VERSION
 RUN echo "export SKIPPR_BUILD_VERSION=${SKIPPR_BUILD_VERSION}" > /etc/profile.d/skpr_version.sh
@@ -194,6 +214,7 @@ RUN echo "export SKIPPR_BUILD_VERSION=${SKIPPR_BUILD_VERSION}" > /etc/profile.d/
 WORKDIR /usr/src/app
 
 COPY --from=encoder /usr/src/encoded-app .
+#COPY --from=builder /usr/src/app .
 
 COPY ./composer.json ./
 COPY ./composer.lock ./

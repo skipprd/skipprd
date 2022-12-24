@@ -3,6 +3,7 @@
 
 namespace Skipprd\Traits;
 
+use Skipprd\SkipprLogger;
 use Skipprd\SkipprPack;
 
 trait SkipprStream
@@ -226,7 +227,7 @@ trait SkipprStream
                     switch (trim($record)) {
                         case 'sync_complete':
                             SkipprLogger::info("Received sync complete event from source stream");
-                            $this->shutdown(0);
+                            $this->shutdown();
                             break;
 
                         case 'schema_update':

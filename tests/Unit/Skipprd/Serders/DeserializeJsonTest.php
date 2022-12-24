@@ -158,7 +158,7 @@ class DeserializeJsonTest extends TestCase
 
 
         $this->assertEquals('#', $msg[0]['status']);
-        $this->assertNotContains('2605', $msg[0]['status']);
+        $this->assertStringNotContainsString('2605', $msg[0]['status']);
 
     }
 

@@ -38,7 +38,7 @@ class AnalyseSchemaNumberTest extends TestCase
         $value = 2147483647;
         $field = 'foo';
 
-        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
+        $dataType = AnalyseSchema::getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         $value = $container->setValue($dataType,  $field, $value);
 
@@ -55,7 +55,7 @@ class AnalyseSchemaNumberTest extends TestCase
         $value = 2147483647;
         $field = 'foo';
 
-        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
+        $dataType = AnalyseSchema::getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         $value = 0;
         
@@ -74,7 +74,7 @@ class AnalyseSchemaNumberTest extends TestCase
         $value = '8598265768';
         $field = 'foo';
 
-        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
+        $dataType = AnalyseSchema::getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         $value = $container->setValue($dataType,  $field, $value);
 
@@ -91,7 +91,7 @@ class AnalyseSchemaNumberTest extends TestCase
         $value = 123456;
         $field = 'foo';
 
-        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
+        $dataType = AnalyseSchema::getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         $value = $container->setValue($dataType,  $field, $value);
         
@@ -109,7 +109,7 @@ class AnalyseSchemaNumberTest extends TestCase
         $value = '123456';
         $field = 'foo';
 
-        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
+        $dataType = AnalyseSchema::getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         $value = $container->setValue($dataType,  $field, $value);
 
@@ -127,7 +127,7 @@ class AnalyseSchemaNumberTest extends TestCase
         $value = 853386065604908;
         $field = 'foo';
 
-        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
+        $dataType = AnalyseSchema::getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         $value = $container->setValue($dataType,  $field, $value);
 
@@ -147,7 +147,7 @@ class AnalyseSchemaNumberTest extends TestCase
         $value = '0233280319';
         $field = 'foo';
 
-        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
+        $dataType = AnalyseSchema::getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         $value = $container->setValue($dataType,  $field, $value);
 
@@ -165,7 +165,7 @@ class AnalyseSchemaNumberTest extends TestCase
         $value = '853386065604908';
         $field = 'foo';
 
-        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
+        $dataType = AnalyseSchema::getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         $value = $container->setValue($dataType,  $field, $value);
 
@@ -183,7 +183,7 @@ class AnalyseSchemaNumberTest extends TestCase
         $value = 2147483647000;
         $field = 'foo';
 
-        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
+        $dataType = AnalyseSchema::getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         $value = $container->setValue($dataType,  $field, $value);
         
@@ -201,7 +201,7 @@ class AnalyseSchemaNumberTest extends TestCase
         $value = '2147483647000';
         $field = 'foo';
 
-        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
+        $dataType = AnalyseSchema::getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         $value = $container->setValue($dataType,  $field, $value);
         

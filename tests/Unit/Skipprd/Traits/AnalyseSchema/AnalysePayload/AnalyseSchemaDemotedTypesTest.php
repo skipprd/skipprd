@@ -60,7 +60,7 @@ class AnalyseSchemaDemotedTypesTest extends TestCase
             ]
         ];
 
-        $container->analysePayload($field, Config::$discoveredFieldOccurrence['foo_namespace']['fields']);
+        AnalyseSchema::analysePayload($field, Config::$discoveredFieldOccurrence['foo_namespace']['fields']);
 
         $container->determineFieldTypes(Config::$discoveredFieldOccurrence['foo_namespace']['fields']);
 

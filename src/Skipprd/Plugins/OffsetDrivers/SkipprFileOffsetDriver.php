@@ -3,7 +3,7 @@
 namespace Skipprd\Plugins\OffsetDrivers;
 
 use Skipprd\Traits\Config;
-use Skipprd\Traits\SkipprLogger;
+use Skipprd\SkipprLogger;
 
 class SkipprFileOffsetDriver implements OffsetDriverInterface
 {

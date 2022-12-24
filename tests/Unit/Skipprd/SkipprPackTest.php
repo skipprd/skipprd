@@ -3,7 +3,7 @@
 namespace Skipprd;
 
 use PHPUnit\Framework\TestCase;
-use Skipprd\Traits\SkipprLogger;
+use Skipprd\SkipprLogger;
 
 class SkipprPackTest extends TestCase
 {
@@ -97,7 +97,7 @@ class SkipprPackTest extends TestCase
         $spw = new SkipprPack();
         $spr = new SkipprPack();
 
-        $spw->encode(msgpack_pack($array), $offset);
+        $spw->encode(json_encode($array), $offset);
 //        $spw->encode(serialize($array), $offset);
         $skipprPack = $spw->string();
 
@@ -120,7 +120,7 @@ class SkipprPackTest extends TestCase
 
         try {
             $spr->create($line);
-            $record = msgpack_unpack($spr->decodeRecord());
+            $record = json_decode($spr->decodeRecord(), true);
 //            $record = msgpack_unpack($spr->decodeRecord());
             $offset = $spr->decodeOffset();
             $sizeBytes = $spr->length();

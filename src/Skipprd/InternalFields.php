@@ -4,7 +4,7 @@ namespace Skipprd;
 
 use Carbon\Carbon;
 use Skipprd\Traits\Config;
-use Skipprd\Traits\SkipprLogger;
+use Skipprd\SkipprLogger;
 
 global $parseNamespaceCache;
 
@@ -12,6 +12,7 @@ class InternalFields
 {
 
     protected static $parseNamespaceCache;
+
     /**
      * @param array $message - payload being ingested from the source system
      * @param string $partition - partition defined by the semantics of the source system.

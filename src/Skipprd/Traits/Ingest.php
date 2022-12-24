@@ -10,6 +10,7 @@ namespace Skipprd\Traits;
 
 use Carbon\Carbon;
 use Skipprd\Helpers;
+use Skipprd\SkipprLogger;
 use Skipprd\SkipprPack;
 
 trait Ingest
@@ -51,7 +52,7 @@ trait Ingest
     public function ingestPayload(array $sourceMessage, array &$metadata, string $namespace)
     {
 
-        $this->i++;
+        AnalyseSchema::$i++;
 
         if (!empty($sourceMessage)) {
             if (!empty($this->defaultMsgs[$namespace])) {
@@ -69,7 +70,7 @@ trait Ingest
                 // only ingest fields enabled to sync to output
                 // or that are unknown, therefore we want to discover their schema
                 if (empty($metadata[$field]) || $metadata[$field]['enabled'] === true) {
-                    if ($this->i == 1) {
+                    if (AnalyseSchema::$i == 1) {
                         SkipprLogger::debug("Ingesting field: $field");
                     }
                     $this->ingestField($field, $value, $metadata, $message);
@@ -108,11 +109,15 @@ trait Ingest
 
                 $this->flagEvolvedField = false;
 
-                // send schema update signal to output
-                $skipprPack = new SkipprPack();
-                $skipprPack->encode('schema_update', '');
+                if (!empty(Config::getenv('DATA_OUTPUT_PLUGIN_NAME'))) {
 
-                $this->streamSend($skipprPack);
+                    // send schema update signal to output
+                    $skipprPack = new SkipprPack();
+                    $skipprPack->encode('schema_update', '');
+
+                    $this->streamSend($skipprPack);
+
+                }
 
                 // IMPORTANT to backoff here
 //                sleep(10);
@@ -224,7 +229,7 @@ trait Ingest
 
                 // discover schema for new fields
 //                $dataType = $this->resolveFieldType($metadata, $field, $value);
-                $this->analyseField($field, $value, $metadata);
+                AnalyseSchema::analyseField($field, $value, $metadata);
                 $dataType = $metadata[$field]['determined_type'];
 
 //            if (empty($metadata[$field])) {
@@ -431,7 +436,7 @@ trait Ingest
             }
         } catch (\Exception $e) {
             if ($allowFallback) {
-                $this->handleValueError($field, $value, $fieldOccurrence);
+                AnalyseSchema::handleValueError($field, $value, $fieldOccurrence);
             }
 
             return $value;

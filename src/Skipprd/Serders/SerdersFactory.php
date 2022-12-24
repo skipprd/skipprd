@@ -8,6 +8,7 @@
 
 namespace Skipprd\Serders;
 
+use Skipprd\SkipprLogger;
 use Skipprd\Str;
 
 class SerdersFactory

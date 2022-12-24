@@ -5,7 +5,7 @@ namespace Skipprd\Plugins\DataSources\File;
 use Skipprd\Plugins\DataSources\DataSourcePluginBase;
 use Skipprd\Buffers\BufferInterface;
 use Skipprd\Plugins\ValidationResponse;
-use Skipprd\Traits\SkipprLogger;
+use Skipprd\SkipprLogger;
 
 class DataSourceFilePlugin extends DataSourcePluginBase
 {

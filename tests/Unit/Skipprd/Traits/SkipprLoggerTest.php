@@ -4,6 +4,7 @@ namespace Skipprd\Traits;
 
 use Monolog\Registry;
 use PHPUnit\Framework\TestCase;
+use Skipprd\SkipprLogger;
 
 class SkipprLoggerTest extends TestCase
 {

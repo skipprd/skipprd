@@ -37,7 +37,7 @@ class AnalyseSchemaFloatTest extends TestCase
 
         $value = 1.234;
         $field = 'foo';
-        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
+        $dataType = AnalyseSchema::getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         $value = $container->setValue($dataType,  $field, $value);
 
@@ -54,7 +54,7 @@ class AnalyseSchemaFloatTest extends TestCase
 
         $value = 0.0;
         $field = 'foo';
-        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
+        $dataType = AnalyseSchema::getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         $value = $container->setValue($dataType,  $field, $value);
 
@@ -71,7 +71,7 @@ class AnalyseSchemaFloatTest extends TestCase
 
         $value = -1.234;
         $field = 'foo';
-        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
+        $dataType = AnalyseSchema::getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         $value = $container->setValue($dataType,  $field, $value);
 
@@ -88,7 +88,7 @@ class AnalyseSchemaFloatTest extends TestCase
 
         $value = '1.234';
         $field = 'foo';
-        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
+        $dataType = AnalyseSchema::getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         $value = $container->setValue($dataType,  $field, $value);
 
@@ -105,7 +105,7 @@ class AnalyseSchemaFloatTest extends TestCase
 
         $value = 1.234386065604908;
         $field = 'foo';
-        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
+        $dataType = AnalyseSchema::getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         $value = $container->setValue($dataType,  $field, $value);
 
@@ -122,7 +122,7 @@ class AnalyseSchemaFloatTest extends TestCase
 
         $value = '1.234386065604908';
         $field = 'foo';
-        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
+        $dataType = AnalyseSchema::getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         $value = $container->setValue($dataType,  $field, $value);
 
@@ -139,7 +139,7 @@ class AnalyseSchemaFloatTest extends TestCase
 
         $value = 3.1415926535897932384626433832795;
         $field = 'foo';
-        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
+        $dataType = AnalyseSchema::getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         $value = $container->setValue($dataType,  $field, $value);
 
@@ -156,7 +156,7 @@ class AnalyseSchemaFloatTest extends TestCase
 
         $value = '3.1415926535897932384626433832795';
         $field = 'foo';
-        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
+        $dataType = AnalyseSchema::getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         $value = $container->setValue($dataType,  $field, $value);
 

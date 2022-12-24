@@ -4,6 +4,9 @@ namespace Skipprd\Serders\Interfaces;
 
 interface SerderBatchInterface
 {
+    const VALUE_COMPRESSION = 'value_compression';
+    const FILE_COMPRESSION = 'file_compression';
+    const NO_COMPRESSION = 'no_compression';
 
     public function __construct();
 

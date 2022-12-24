@@ -24,28 +24,6 @@ class AnalyseSchemaDateTest extends TestCase
         Config::$discoveredFieldOccurrence['foo']['fields'] = [];
     }
 
-    public function testSetValueDate()
-    {
-
-        $container = Mockery::mock(PipelineCommand::class)->makePartial();
-        $container->shouldReceive('AnalyseSchema');
-
-        $container->dateFieldvalidationMminSample = 1;
-
-        $value = "2019-08-30T14:09:51.807Z";
-        $field = 'foo';
-        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence['foo']['fields']);
-
-        $value = $container->setValue($dataType,  $field, $value);
-
-        $container->finaliseFieldCandidates();
-        $dateCandidates = Config::$discoveredFieldOccurrence['foo']['date_field_candidates'];
-        $this->assertArrayHasKey($field, $dateCandidates);
-        
-        $this->assertEquals('date', $dataType);
-        $this->assertEquals('2019-08-30T14:09:51.807Z', $value);
-
-    }
 
     public function testMaxDateCandidatesDateCheck()
     {
@@ -58,7 +36,7 @@ class AnalyseSchemaDateTest extends TestCase
         Config::$discoveredFieldOccurrence[$field]['date_candidate']['check_count'] = 100;
         Config::$discoveredFieldOccurrence[$field]['date_candidate']['valid_count'] = 100;
 
-        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
+        $dataType = AnalyseSchema::getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
         
         $this->assertArrayHasKey('date_candidate', Config::$discoveredFieldOccurrence[$field]);
 
@@ -77,7 +55,7 @@ class AnalyseSchemaDateTest extends TestCase
         $field = 'foo';
         Config::$discoveredFieldOccurrence[$field]['date_candidate']['check_count'] = 99;
 
-        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
+        $dataType = AnalyseSchema::getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
         
         $this->assertArrayHasKey('date_candidate', Config::$discoveredFieldOccurrence[$field]);
 
@@ -96,10 +74,10 @@ class AnalyseSchemaDateTest extends TestCase
         $field = 'foo';
         Config::$discoveredFieldOccurrence[$field]['date_candidate']['check_count'] = 99;
 
-        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
+        $dataType = AnalyseSchema::getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         // Second check (101) should skip
-        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
+        $dataType = AnalyseSchema::getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
         
         $this->assertArrayHasKey('date_candidate', Config::$discoveredFieldOccurrence[$field]);
 
@@ -133,7 +111,7 @@ class AnalyseSchemaDateTest extends TestCase
 
         $value = "2015-03-23";
         $field = 'foo';
-        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
+        $dataType = AnalyseSchema::getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         $value = $container->setValue($dataType,  $field, $value);
         
@@ -152,7 +130,7 @@ class AnalyseSchemaDateTest extends TestCase
 
         $value = 1567174191;
         $field = 'foo';
-        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
+        $dataType = AnalyseSchema::getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         $value = $container->setValue($dataType,  $field, $value);
 
@@ -171,7 +149,7 @@ class AnalyseSchemaDateTest extends TestCase
 
         $value = 1567174191000;
         $field = 'foo';
-        $dataType = $container->getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
+        $dataType = AnalyseSchema::getLogicalType($field, $value, Config::$discoveredFieldOccurrence);
 
         $value = $container->setValue($dataType,  $field, $value);
 

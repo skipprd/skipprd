@@ -7,14 +7,12 @@
  */
 
 namespace Skipprd\Traits;
-
 use Skipprd\Converters\SkipprAvroSchemaConverter;
 use Skipprd\Helpers;
+use Skipprd\SkipprLogger;
 
 class Config
 {
-
-    use RecordFilter;
 
     // input an output plugin run modes
     public const RUN_MODE_SYNC = 'sync';
@@ -100,14 +98,14 @@ class Config
 
     public static $filters = false;
 
-    public static $flushMemBufferBytes = 100000000;
-    public static $flushBufferBytes = 100000000;
+    public static $flushMemBufferBytes = 200000000;
+    public static $flushBufferBytes = 200000000;
 
     public static $flushMemBufferSeconds = 300;
     public static $flushBufferSeconds = 300;
 
-    public static $flushMemBufferRecords = 1000000;
-    public static $flushBufferRecords = 1000000;
+    public static $flushMemBufferRecords = 5000000;
+    public static $flushBufferRecords = 5000000;
 
     public static $eventTimeBucketDurationSeconds = false;
 
@@ -176,7 +174,8 @@ class Config
         'parquet',
         'csv',
         'xml',
-        'avro_file'
+        'avro_file',
+        'json_file'
     ];
 
     public static function getenv(string $name, $default = '')
@@ -229,7 +228,7 @@ class Config
         self::$flattenEvents = Config::getenv('DATA_SOURCE_FLATTEN_EVENTS', self::$flattenEvents);
 
         self::$taskId = Config::getenv('TASK_ID');
-            
+
         $avroArr = [];
 //        self::$mapping = [];
         self::$discoveredFieldOccurrence = [];
@@ -250,7 +249,7 @@ class Config
 
         $uri = self::getenv('SKIPPR_API_ENDPOINT');
 
-        if (!empty($uri)) {
+        if (!empty($uri) && empty(Config::$discoveredFieldOccurrence)) {
             SkipprLogger::info("Skippr API endpoint configured to $uri");
             
             // Get Mapping
@@ -298,7 +297,7 @@ class Config
 //            } catch (\Exception $e) {
 //                SkipprLogger::error($e->getMessage());
 //            }
-        } else {
+        } elseif (empty(Config::$discoveredFieldOccurrence)) {
             if (file_exists(self::$dataDir . '/skippr-state.json')) {
                 try {
                     SkipprLogger::info('Found existing ' . self::$dataDir . '/skippr-state.json');
@@ -327,7 +326,7 @@ class Config
 //
 //        self::$schema['fields'] = (empty($avroArr)) ? [] : $avroArr;
 
-        self::$eventPath = self::getenv('DATA_SOURCE_EVENT_PATH');
+        self::$eventPath = self::getenv('DATA_SOURCE_EVENT_PATH', self::$eventPath);
 
         self::$sourceFormat = self::getenv('DATA_SOURCE_FORMAT', '');
         self::$outputFormat = self::getenv('DATA_OUTPUT_FORMAT', 'json');
@@ -382,7 +381,7 @@ class Config
 
                     self::$outputSchemas[$namespace] = $converter->convert(self::$avroSchemas[$namespace]);
                 } else {
-                    self::$outputSchemas[$namespace] = self::$avroSchemas[$namespace];
+                    self::$outputSchemas[$namespace] = self::$schema[$namespace];
                 }
             }
         }
@@ -570,6 +569,8 @@ class Config
 
                 $data = [
                     'response' => $response,
+                    'pipeline_id' => Config::$pipelineId,
+                    'sync_mode' => Config::$syncMode,
                     'task_id' => Config::$taskId,
                     'logs' => $logs,
                 ];

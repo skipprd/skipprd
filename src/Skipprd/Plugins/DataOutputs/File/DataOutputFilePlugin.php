@@ -6,7 +6,7 @@ use Skipprd\Plugins\DataOutputs\DataOutputPluginBase;
 use Skipprd\Buffers\BufferInterface;
 use Monolog\Registry;
 use Skipprd\Plugins\ValidationResponse;
-use Skipprd\Traits\SkipprLogger;
+use Skipprd\SkipprLogger;
 
 class DataOutputFilePlugin extends DataOutputPluginBase
 {

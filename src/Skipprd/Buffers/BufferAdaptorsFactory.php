@@ -3,7 +3,7 @@
 
 namespace Skipprd\Buffers;
 
-trait BufferAdaptorsFactory
+class BufferAdaptorsFactory
 {
 
     static function getAdaptor(string $bufferName, string $driverType) : BufferInterface

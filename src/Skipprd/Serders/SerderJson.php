@@ -6,13 +6,24 @@ namespace Skipprd\Serders;
 use Skipprd\Serders\Interfaces\SerderStreamInterface;
 use Skipprd\Traits\AnalyseSchema;
 use Skipprd\Traits\Config;
-use Skipprd\Traits\SkipprLogger;
+use Skipprd\SkipprLogger;
 
 class SerderJson implements SerderStreamInterface
 {
 
+    public $supportedCompressionTypes = [
+        self::VALUE_COMPRESSION,
+        self::NO_COMPRESSION
+    ];
+
+    public $compressonType = '';
+
+    protected $fh;
+    protected $records;
+
     public function __construct()
     {
+        $this->compressonType = self::NO_COMPRESSION;
     }
 
     public function deserialize(string $record): array
@@ -55,9 +66,30 @@ class SerderJson implements SerderStreamInterface
         return $messages;
     }
 
-    public function serialize(array $record, $schema = null): string
+    public function openWriter(string $filename, array $schema): void {
+
+        $this->fh = fopen($filename, 'a+');
+
+    }
+
+    public function closeWriter(): void {
+
+        foreach ($this->records as $data) {
+
+            if ($this->compressonType === self::VALUE_COMPRESSION) {
+                fputs($this->fh, gzcompress($data, -6));
+            } elseif ($this->compressonType === self::NO_COMPRESSION) {
+                fputs($this->fh, $data);
+            }
+        }
+
+        fclose($this->fh);
+
+    }
+
+    public function serialize(array $record, array $schema = null): void
     {
-        return json_encode($record);
+        $this->records[] = json_encode($record);
     }
 
     public function jsonDecode(string $string)

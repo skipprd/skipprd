@@ -13,6 +13,7 @@ use Skipprd\InternalFields;
 use Skipprd\MachineToHuman\BytesToHuman;
 use Skipprd\MachineToHuman\NumberToHuman;
 use Skipprd\MachineToHuman\TimeToHuman;
+use Skipprd\Metrics;
 use Skipprd\Plugins\OffsetDrivers\OffsetDriverFactory;
 use Skipprd\Arr;
 use Skipprd\Buffers\BufferAdaptorsFactory;
@@ -22,6 +23,7 @@ use Skipprd\Helpers;
 use Skipprd\Serders\SerderAvroRecord;
 use Skipprd\Serders\SerderParquet;
 use Skipprd\SkipprPack;
+use Skipprd\StatTimer;
 use Skipprd\Str;
 use Skipprd\Serders\SerdersFactory;
 use League\StatsD\Client as Statsd;
@@ -33,7 +35,7 @@ use Skipprd\Traits\Ingest;
 use Skipprd\Traits\IngestFast;
 use Skipprd\Traits\LicenseChecker;
 use Skipprd\Traits\RecordFilter;
-use Skipprd\Traits\SkipprLogger;
+use Skipprd\SkipprLogger;
 use Skipprd\Traits\SkipprStream;
 use Skipprd\Traits\TaskResponse;
 
@@ -43,13 +45,9 @@ class PipelineCommand
 //    use Dispatchable, InteractsWithQueue, Queueable;
 //SerializesModels;
 
-    use AnalyseSchema;
     use IngestFast;
     use Ingest;
-    use BufferAdaptorsFactory;
     use LicenseChecker;
-    use SkipprLogger;
-    use RecordFilter;
     use SkipprStream;
     use TaskResponse;
 
@@ -157,29 +155,6 @@ class PipelineCommand
     protected function setPlugin()
     {
 
-//        $bufferDriver = 'file';
-//
-//        if (!empty(Config::$timeFields) || !empty(Config::$entityNames)) {
-//            $bufferDriver = 'chunked';
-//        }
-
-        // always used chunked buffer as we partition by data source partition
-        // (table, topic, etc)
-        $bufferDriver = 'file';
-
-        //@todo - set $this->buffer->flushBytes in the output plugin
-        $this->inputBuffer = BufferAdaptorsFactory::getAdaptor(
-            'input',
-            $bufferDriver
-        );
-        $this->outputBuffer = BufferAdaptorsFactory::getAdaptor(
-            'output',
-            $bufferDriver
-        );
-        $this->deadletterBuffer = BufferAdaptorsFactory::getAdaptor(
-            'deadletter',
-            $bufferDriver
-        );
 
         /**
          * Dead Letter Plugin
@@ -298,6 +273,26 @@ class PipelineCommand
             ); // Call $this->shutdown() on SIGTERM
 
 
+            SkipprLogger::debug('000-ak');
+
+            $this->getLicense();
+
+            if (!$this->licenseIsValid) {
+                SkipprLogger::info('Please validate license to continue using Skippr');
+
+                $this->shutdown();
+            }
+
+            SkipprLogger::debug('000-al');
+
+            $this->setPlugin();
+
+            SkipprLogger::debug('000-am');
+
+            $this->connect();
+
+            SkipprLogger::debug('000-an');
+
 //        if (Config::$analysing) {
 //            Config::$mode = 'sync';
 //        }
@@ -306,24 +301,37 @@ class PipelineCommand
                 SkipprLogger::info('Reprocessing dead letters');
             }
 
+            SkipprLogger::debug('000-ao');
+
             if (!empty($this->inputPlugin)) {
                 $ran = false;
 
-                $this->inputSerder = SerdersFactory::factory(Config::$sourceFormat);
+                SkipprLogger::debug('000-ap');
 
                 if (Config::$runMode == Config::RUN_MODE_SYNC) {
 
-                    $this->inputPlugin->buffer->driver->unlockAll();
+
+                    SkipprLogger::debug('000-q');
+
+                    $this->inputBuffer->driver->unlockAll();
+
+                    SkipprLogger::debug('000-ar');
 
                     if (!Config::$analysing) {
                         $conn = $this->streamConnect();
                     }
 
+                    SkipprLogger::debug('000-s');
+
                     $ran = false;
                     while (!$ran || !empty(Config::$pollIntervalSeconds)) {
                         $ran = true;
 
+                        SkipprLogger::debug('111-b');
+
                         $this->inputPlugin->sync();
+
+                        SkipprLogger::debug('111-c');
 
                         $this->scheduledStatusUpdate();
 
@@ -373,8 +381,8 @@ class PipelineCommand
 
                 if (Config::$runMode == Config::RUN_MODE_RESET_SOURCE_OFFSETS) {
                     SkipprLogger::info("Resetting config, offsets and buffers");
-                    $this->inputPlugin->buffer->driver->unlockAll();
-                    $this->inputPlugin->buffer->driver->destroyAll();
+                    $this->inputBuffer->driver->unlockAll();
+                    $this->inputBuffer->driver->destroyAll();
                     $this->offsetClient->resetSourceOffsets();
 
                     sleep(120); // wait for output to complete
@@ -542,13 +550,17 @@ class PipelineCommand
 
         if ($force || $this->lastStatusUpdate < time() - $this->statusUpdateIntervalSeconds) {
 
+            $this->lastStatusUpdate = time();
+
 //            if (extension_loaded('newrelic')) {
 //                newrelic_ignore_transaction();
 //            }
 
+            \Skipprd\StatTimer::parse();
+
             SkipprLogger::info("Memory used ". BytesToHuman::toHuman(memory_get_usage(true), true));
 
-            if (!empty($this->inputPlugin)) {
+            if (!empty(Config::getenv('DATA_SOURCE_PLUGIN_NAME'))) {
                 SkipprLogger::info("Total messages " . NumberToHuman::toHuman($this->totalEntries));
                 SkipprLogger::info("Rejected source messages " . NumberToHuman::toHuman($this->rejectedSrcMesgCount));
                 SkipprLogger::info("Ingested messages " . NumberToHuman::toHuman($this->currentEntries));
@@ -556,9 +568,20 @@ class PipelineCommand
                 SkipprLogger::info("Slow Path messages " . NumberToHuman::toHuman($this->slowPath));
                 SkipprLogger::info("Ingested Bytes " . BytesToHuman::toHuman($this->dataReadBytes,
                         true));
-                SkipprLogger::info("Runtime " . TimeToHuman::toHuman(Carbon::now()->timestamp - $this->startTimestamp,
-                        true));
+//                SkipprLogger::info("Runtime " . TimeToHuman::toHuman(Carbon::now()->timestamp - $this->startTimestamp,
+//                        true));
 
+//                SkipprLogger::info("CSV Lines " . Config::$taskLogs['csv_line']);
+//                SkipprLogger::info("Inventory Files " . Config::$taskLogs['inventory_file']);
+//                SkipprLogger::info("Inventory Size " . Config::$taskLogs['inventory_size']);
+//                SkipprLogger::info("Inventory Lines " . Config::$taskLogs['inventory_lines']);
+//                SkipprLogger::info("Inventory Messages " . Config::$taskLogs['inventory_mesgs']);
+//
+//                unset(Config::$taskLogs['csv_line']);
+//                unset(Config::$taskLogs['inventory_file']);
+//                unset(Config::$taskLogs['inventory_size']);
+//                unset(Config::$taskLogs['inventory_lines']);
+//                unset(Config::$taskLogs['inventory_mesgs']);
             }
 
             $resp = $this->getResponse();
@@ -572,7 +595,6 @@ class PipelineCommand
             $this->slowPath = 0;
             $this->dataReadBytes = 0;
 
-            $this->lastStatusUpdate = time();
         }
     }
 
@@ -581,6 +603,8 @@ class PipelineCommand
      */
     public function init()
     {
+
+        StatTimer::start(Metrics::TOTAL);
 
         $this->statsd = new Statsd();
 
@@ -597,8 +621,7 @@ class PipelineCommand
 
 //        if (extension_loaded('newrelic')) { // Ensure PHP agent is available
 //            newrelic_ignore_transaction();
-//        }
-
+//
         // setup global monolog
 //        $application = new Logger('skipprd');
 //        Registry::addLogger($application);
@@ -613,26 +636,60 @@ class PipelineCommand
 //        $config = [];
 //        $this->getConfig($config);
 
-        $this->setPlugin();
+        SkipprLogger::debug('000-ac');
+
+        $type = Config::getenv('OFFSET_DRIVER', 'skippr_file');
+        $this->offsetClient = OffsetDriverFactory::factory($type);
+
+        SkipprLogger::debug('000-ad');
+
+        $this->inputSerder = SerdersFactory::factory(Config::$sourceFormat);
+
+        SkipprLogger::debug('000-ae');
+
+
+//        $bufferDriver = 'file';
+//
+//        if (!empty(Config::$timeFields) || !empty(Config::$entityNames)) {
+//            $bufferDriver = 'chunked';
+//        }
+
+        // always used chunked buffer as we partition by data source partition
+        // (table, topic, etc)
+        $bufferDriver = 'file';
+
+        SkipprLogger::debug('000-af');
+
+        //@todo - set $this->buffer->flushBytes in the output plugin
+        $this->inputBuffer = BufferAdaptorsFactory::getAdaptor(
+            'input',
+            $bufferDriver
+        );
+        $this->outputBuffer = BufferAdaptorsFactory::getAdaptor(
+            'output',
+            $bufferDriver
+        );
+        $this->deadletterBuffer = BufferAdaptorsFactory::getAdaptor(
+            'deadletter',
+            $bufferDriver
+        );
+
+        SkipprLogger::debug('000-ag');
 
         $serde = SerdersFactory::factory(Config::$outputFormat);
-//        $serde = SerdersFactory::factory('parquet');
+
+        SkipprLogger::debug('000-ah');
 
         foreach (Config::$schema as $namespace => $schema) {
             $this->defaultMsgs[$namespace] = $serde->defaultMessage($schema);
         }
 
+        SkipprLogger::debug('000-ai');
+
         $this->startTimestamp = Carbon::now()->timestamp;
 
-        $this->getLicense();
 
-        if (!$this->licenseIsValid) {
-            SkipprLogger::info('Please validate license to continue using Skippr');
 
-            $this->shutdown();
-        }
-
-        $this->connect();
 
 //        $this->shutdown();
     }
@@ -649,7 +706,7 @@ class PipelineCommand
         $lines = '';
         $i = 0;
 
-        while (($line = $this->inputPlugin->buffer->stream()) !== false) {
+        while (($line = $this->inputBuffer->stream()) !== false) {
             $i++;
             $lines .= $line;
 
@@ -691,7 +748,7 @@ class PipelineCommand
 //                if (Config::$syncMode === Config::RUN_MODE_SYNC) {
 
                 // 985K   962K   1M
-                $result = $this->inputPlugin->buffer->append(
+                $result = $this->inputBuffer->append(
                     $record,
                     $sizeBytes,
                     0,
@@ -704,17 +761,20 @@ class PipelineCommand
 //
                 if ($result === 2) { // buffer was flushed
 
-//                    $this->inputPlugin->buffer->driver->finaliseFileBuffers();
+//                    $this->inputBuffer->driver->finaliseFileBuffers();
 
-                    $skipprPack = new SkipprPack();
-                    $skipprPack->encode('input_buffer_flush', '');
+                    if (!empty(Config::getenv('DATA_OUTPUT_PLUGIN_NAME'))) {
+
+                        $skipprPack = new SkipprPack();
+                        $skipprPack->encode('input_buffer_flush', '');
 //                    $this->streamSend($skipprPack, STREAM_OOB);
-                    $this->streamSend($skipprPack);
+                        $this->streamSend($skipprPack);
+                    }
 
-                    $this->offsetCommitLatest(
-                        $source_namespace,
-                        $source_partition
-                    );
+//                    $this->offsetCommitLatest(
+//                        $source_namespace,
+//                        $source_partition
+//                    );
                 }
 
             } catch (\Exception $e) {
@@ -764,7 +824,7 @@ class PipelineCommand
                                 $namespace = $payload['skpr_namespace'];
                                 $partition = $payload['skpr_partition'] ?? '';
                                 // @todo - empty() performance
-//                $partition = InternalFields::parsePartitionField($payload, $source_partition);
+                $partition = InternalFields::parsePartitionField($payload, $source_partition);
 
 //                $this->outputPlugin->offsets->setOffsets(
 //                    $offset,
@@ -865,9 +925,9 @@ class PipelineCommand
         } else {
             SkipprLogger::error('Schema not valid for events in dead letter queue');
 
-//            $this->inputPlugin->buffer->unlockAll('deadletter');
-//            $this->inputPlugin->buffer->flush("deadletter");
-//            $this->inputPlugin->buffer->finalise("deadletter", true);
+//            $this->inputBuffer->unlockAll('deadletter');
+//            $this->inputBuffer->flush("deadletter");
+//            $this->inputBuffer->finalise("deadletter", true);
 
             $this->shutdown();
 
@@ -884,16 +944,16 @@ class PipelineCommand
 
 
         if (!empty($payload) && !empty($offset)) {
-            if ($this->inputPlugin->offsets->validateOffset(
-                $offset,
-                $source_namespace,
-                $source_partition
-            )) {
-                $this->inputPlugin->offsets->setOffsets(
-                    $offset,
-                    $source_namespace,
-                    $source_partition
-                );
+//            if ($this->inputPlugin->offsets->validateOffset(
+//                $offset,
+//                $source_namespace,
+//                $source_partition
+//            )) {
+//                $this->inputPlugin->offsets->setOffsets(
+//                    $offset,
+//                    $source_namespace,
+//                    $source_partition
+//                );
                 
                 if (Config::$syncMode == 'sync') {
                     if (!Config::$enableDeadLetters) {
@@ -913,19 +973,19 @@ class PipelineCommand
 
                     // Limit input buffer size to prevent flooding disk
                     // and allow ingest threads to catch up
-//            while($this->inputPlugin->buffer->bufferGetSize('input') > $this->inputBuffMaxBytes) {
-//            while($this->inputPlugin->buffer->bufferGetSize('input') > count($this->threadPool)) {
+//            while($this->inputBuffer->bufferGetSize('input') > $this->inputBuffMaxBytes) {
+//            while($this->inputBuffer->bufferGetSize('input') > count($this->threadPool)) {
 //                sleep(1);
 //            }
 
-                    $this->inputPlugin->buffer->append(
+                    $this->inputBuffer->append(
                         $payload,
                         strlen($payload),
                         0,
                         $source_namespace,
                         $source_partition
                     );
-                }
+//                }
             }
         }
     }
@@ -1066,6 +1126,8 @@ class PipelineCommand
 //            newrelic_name_transaction('input');
 //        }
 
+//        SkipprLogger::info('emit: ' . $payload);
+
         if ($payload != '') {
             if (Config::$syncMode == 'sync') {
                 if (!Config::$enableDeadLetters) {
@@ -1074,6 +1136,8 @@ class PipelineCommand
                     $payload = $sp->decodeRecord();
 //                $offset = $sp->decodeOffset();
                 }
+
+
 
                 $sourceMessages = $this->inputSerder->deserialize($payload);
 
@@ -1099,7 +1163,11 @@ class PipelineCommand
     ): void
     {
 
+//        SkipprLogger::info('payload: ' . json_encode($payload));
+
         $unwrappedMessages = $this->unwrapEventPath($payload);
+
+//        SkipprLogger::info('unwrapped: ' . json_encode($payload));
 
         // @todo - investigate why messages are always wrapped in an array... indeed, are they!?
         if ($unwrappedMessages) {
@@ -1110,8 +1178,55 @@ class PipelineCommand
                     // Sometimes get empty messages
                     $this->rejectedSrcMesgCount++;
 //                    SkipprLogger::error($e->getMessage());
+
+                    if ($this->rejectedSrcMesgCount < 3) {
+                        SkipprLogger::info("Rejected source message ". json_encode($unwrappedMessage));
+                        SkipprLogger::error($e->getMessage());
+//            $this->shutdown(1);
+                    }
+
                 }
             }
+        }
+
+    }
+
+    /**
+     * @param array $sourceMessage - the source message
+     * @param string $namespace
+     * @return void
+     */
+    public function analyse(array $sourceMessage, string $namespace): void
+    {
+        if (empty(Config::$discoveredFieldOccurrence[$namespace])) {
+            Config::$discoveredFieldOccurrence[$namespace] = [
+                'enabled' => true,
+                'fields' => [],
+            ];
+        }
+
+        if (is_array($sourceMessage)) {
+            AnalyseSchema::analysePayload(
+                $sourceMessage,
+                Config::$discoveredFieldOccurrence[$namespace]['fields']
+            );
+        }
+
+        if (AnalyseSchema::$i > Config::$minDiscoveryRecords
+            || (Carbon::now()->timestamp - $this->startTimestamp) > Config::$maxDiscoverySeconds) {
+
+            SkipprLogger::info("Finished discovering schema of " . AnalyseSchema::$i . " message of $namespace record type");
+
+            AnalyseSchema::$i = 0;
+
+            AnalyseSchema::$continue[$namespace] = false;
+
+            // @todo - wont analyse all namespaces (tables, topics, paths, etc)
+            // if we exit here.
+            // The trouble with ->continue['part'] above is that it only exits if another
+            // record is found in the source. Else the source hangs till new data arrives.
+            // We need a way to force the source to the next namespace
+            $this->shutdown();
         }
     }
 
@@ -1136,7 +1251,8 @@ class PipelineCommand
 //                }
         }
 
-        if (Config::$analysing && $this->inputPlugin->ingestNamespace($namespace) === true) {
+        if (Config::$analysing && AnalyseSchema::ingestNamespace($namespace,
+                $this->inputPlugin) === true) {
 
             $this->analyse($payload, $namespace);
 
@@ -1226,11 +1342,11 @@ class PipelineCommand
 //        $this->inputPlugin->commit(Config::$offsets);
 
         if (!empty($this->inputPlugin)) {
-            $type = Config::getenv('OFFSET_DRIVER', 'skippr_file');
-            $this->offsetClient = OffsetDriverFactory::factory($type);
+//            $type = Config::getenv('OFFSET_DRIVER', 'skippr_file');
+//            $this->offsetClient = OffsetDriverFactory::factory($type);
 
             $this->inputPlugin->connect();
-            $this->inputPlugin->buffer->flushAll();
+            $this->inputBuffer->flushAll();
         }
 
         if (!empty($this->deadletterPlugin)) {
@@ -1239,8 +1355,8 @@ class PipelineCommand
         }
 
         if (!empty($this->outputPlugin)) {
-            $type = Config::getenv('OFFSET_DRIVER', 'skippr_file');
-            $this->offsetClient = OffsetDriverFactory::factory($type);
+//            $type = Config::getenv('OFFSET_DRIVER', 'skippr_file');
+//            $this->offsetClient = OffsetDriverFactory::factory($type);
 
             $this->outputPlugin->connect();
 
@@ -1353,9 +1469,9 @@ class PipelineCommand
         }
 
 //        if (Config::$syncMode == 'async') {
-//            $this->inputPlugin->buffer->driver->unlockAll();
-////            $this->inputPlugin->buffer->flush("input");
-//            $this->inputPlugin->buffer->flushAll(true);
+//            $this->inputBuffer->driver->unlockAll();
+////            $this->inputBuffer->flush("input");
+//            $this->inputBuffer->flushAll(true);
 //
 //            if ($this->threadPool !== null) {
 //                foreach ($this->threadPool as $thread) {
@@ -1382,8 +1498,8 @@ class PipelineCommand
         if (Config::$syncMode == 'sync') {
             if (!Config::$analysing) {
                 if (!empty($this->inputPlugin)) {
-                    $this->inputPlugin->buffer->driver->unlockAll();
-                    $this->inputPlugin->buffer->flushAll(true);
+                    $this->inputBuffer->driver->unlockAll();
+                    $this->inputBuffer->flushAll(true);
                     $this->offsetCommitAll();
                     SkipprLogger::info("Ingested " . $this->currentEntries . " messages");
                     SkipprLogger::info("Dead Letters " . $this->deadLetters . " dead letters");

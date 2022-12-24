@@ -13,7 +13,7 @@ use Skipprd\MachineToHuman\BytesToHuman;
 use Skipprd\SkipprPack;
 use Skipprd\Str;
 use Skipprd\Traits\Config;
-use Skipprd\Traits\SkipprLogger;
+use Skipprd\SkipprLogger;
 
 class ChunkedBuffer implements BufferInterface
 {

@@ -4,9 +4,10 @@
 namespace Skipprd\Traits;
 
 use Skipprd\Arr;
+use Skipprd\SkipprLogger;
 use Skipprd\Str;
 
-trait RecordFilter
+class RecordFilter
 {
 
     private static $actions = [

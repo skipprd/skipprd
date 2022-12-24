@@ -3,6 +3,7 @@
 namespace Skipprd\Traits;
 
 use Monolog\Registry;
+use Skipprd\SkipprLogger;
 
 trait LicenseChecker
 {

@@ -2,12 +2,13 @@
 
 namespace Skipprd\Buffers\BufferDrivers;
 
+use Carbon\Carbon;
 use Skipprd\Helpers;
 use Skipprd\MachineToHuman\BytesToHuman;
 use Skipprd\Serders\SerdersFactory;
 use Skipprd\SkipprPack;
 use Skipprd\Traits\Config;
-use Skipprd\Traits\SkipprLogger;
+use Skipprd\SkipprLogger;
 use Spatie\Async\Pool;
 
 class FileBufferDriver implements BufferDriverInterface
@@ -62,6 +63,7 @@ class FileBufferDriver implements BufferDriverInterface
         }
     }
 
+
     /**
      * @return string
      */
@@ -87,9 +89,9 @@ class FileBufferDriver implements BufferDriverInterface
 
                 $finalFilename = $this->bufferDir . '/' . $chunkName . '&complete=' . Helpers::randomPassword(32);
 
-                if (FileBufferDriver::lock($finalFilename)) {
+                if ($this->lock($finalFilename)) {
 
-                    FileBufferDriver::lock($bufferFile);
+                    $this->lock($bufferFile);
 
                     $serde = $this->serde;
 
@@ -134,8 +136,8 @@ class FileBufferDriver implements BufferDriverInterface
 
                         unlink($bufferFile);
 
-                        FileBufferDriver::unlock($finalFilename);
-                        FileBufferDriver::unlock($bufferFile);
+                        $this->unlock($finalFilename);
+                        $this->unlock($bufferFile);
                         echo "Flushed output file $finalFilename";
 //                        SkipprLogger::info("Flushed output file $finalFilename");
 
@@ -144,16 +146,16 @@ class FileBufferDriver implements BufferDriverInterface
                     });
 //                    ->then(function (string $finalFilename) use ($bufferFile) {
 //
-//                        FileBufferDriver::unlock($finalFilename);
-//                        FileBufferDriver::unlock($bufferFile);
+//                        $this->unlock($finalFilename);
+//                        $this->unlock($bufferFile);
 //                        SkipprLogger::info("Flushed output file $finalFilename");
 //                    })->catch(function (\Exception $e) use ($finalFilename, $bufferFile) {
 //                        SkipprLogger::error($e->getMessage());
-//                        FileBufferDriver::unlock($finalFilename);
-//                        FileBufferDriver::unlock($bufferFile);
+//                        $this->unlock($finalFilename);
+//                        $this->unlock($bufferFile);
 //                    });
 
-                    SkipprLogger::info("Async flushing output file $bufferFile");
+//                    SkipprLogger::info("Async flushing output file $bufferFile");
 
                     // wait for process to complete, as processInputBuffers() is
                     // holding input buffer open till it completes
@@ -182,7 +184,7 @@ class FileBufferDriver implements BufferDriverInterface
 
 //            SkipprLogger::debug("Requesting lock on $filename");
 
-            if (FileBufferDriver::lock($filename)) { // acquire an exclusive lock
+            if ($this->lock($filename)) { // acquire an exclusive lock
 
                 SkipprLogger::info("Flushing memory buffer $chunkName to disk");
 
@@ -197,7 +199,7 @@ class FileBufferDriver implements BufferDriverInterface
                 fflush($fh);
                 fclose($fh);
 
-                FileBufferDriver::unlock($filename);
+                $this->unlock($filename);
 
                 SkipprLogger::debug("Flushed buffer chunk $chunkName to disk");
 
@@ -207,8 +209,8 @@ class FileBufferDriver implements BufferDriverInterface
 
             echo $e->getTraceAsString();
 
-            FileBufferDriver::unlock($filename);
-            FileBufferDriver::unlock($filename);
+            $this->unlock($filename);
+            $this->unlock($filename);
 
             throw $e;
         }
@@ -472,7 +474,7 @@ class FileBufferDriver implements BufferDriverInterface
                     continue;
                 }
 
-                if (FileBufferDriver::lock($filename, false)) {
+                if ($this->lock($filename, false)) {
                     return $filename;
                 }
             } catch (\Exception $e) {
@@ -734,7 +736,7 @@ class FileBufferDriver implements BufferDriverInterface
                         && !strpos($filename, '.lock') // ignore locked files
                     ) {
 
-                        if (FileBufferDriver::lock($filename, false)) { // acquire an exclusive lock
+                        if ($this->lock($filename, false)) { // acquire an exclusive lock
 //                            $finalFilename = str_replace(
 //                                    '&temp_part',
 //                                    '&finalised',
@@ -745,7 +747,7 @@ class FileBufferDriver implements BufferDriverInterface
 
                             SkipprLogger::info("Unpacking buffer file $filename and serializing to " . Config::$outputFormat . " output format");
 
-                            if (FileBufferDriver::lock($finalFilename)) { // acquire an exclusive lock
+                            if ($this->lock($finalFilename)) { // acquire an exclusive lock
 
                                 $fpr = fopen($filename, 'rb');
 
@@ -822,11 +824,11 @@ class FileBufferDriver implements BufferDriverInterface
 
                                 SkipprLogger::info("Output file $finalFilename finalised at $humanSize and age of $updatedDelta seconds");
 
-                                FileBufferDriver::unlock($finalFilename);
+                                $this->unlock($finalFilename);
                             }
 
                             $this->destroy($filename);
-                            FileBufferDriver::unlock($filename);
+                            $this->unlock($filename);
 
                         }
                     }

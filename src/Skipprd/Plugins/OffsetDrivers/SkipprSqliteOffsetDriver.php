@@ -3,7 +3,7 @@
 namespace Skipprd\Plugins\OffsetDrivers;
 
 use Skipprd\Traits\Config;
-use Skipprd\Traits\SkipprLogger;
+use Skipprd\SkipprLogger;
 use function Skipprd\value;
 
 
@@ -92,17 +92,32 @@ class SkipprSqliteOffsetDriver implements OffsetDriverInterface
         $offsets = [];
 
         $inPartitions  = str_repeat('?,', count($partitions) - 1) . '?';
-        $sql = "SELECT offset FROM offsets WHERE namespace=? AND partition IN ($inPartitions)";
+        $sql = "SELECT namespace, partition, offset FROM offsets WHERE namespace=? AND partition IN ($inPartitions)";
         $stm = $this->pdo->prepare($sql);
         $params = array_merge([$namespace], $partitions);
         $stm->execute($params);
-        $offsets = $stm->fetchAll();
+        $offsetsResult = $stm->fetchAll();
 
         $this->pdo->commit();
 
-        if (empty($offsets[0])) {
-            $offsets[0] = '';
+        foreach ($offsetsResult as $val) {
+
+            if (!isset($offsets[$val['namespace']])) {
+                $offsets[$val['namespace']] = [];
+            }
+
+            if (!isset($offsets[$val['namespace']][$val['partition']])) {
+                $offsets[$val['namespace']][$val['partition']] = explode(' ', $val['offset']);
+            }
+
+//            foreach ($partitions as $partition => $offset) {
+//                $offsets[$namespace][$partition] = $offset;
+//            }
         }
+
+//        if (empty($offsets[0])) {
+//            $offsets[0] = '';
+//        }
 
         return $offsets;
 
@@ -149,6 +164,7 @@ EOF;
         $statement = $this->pdo->prepare($sql);
 
         $namespace = key($offsets);
+
         foreach(array_chunk($offsets, 2) as $chunk) {
 
             foreach($chunk as $arr) {
@@ -179,11 +195,13 @@ EOF;
         $this->waitTransation();
 
         $this->pdo->beginTransaction();
-        $sql = 'TRUNCATE TABLE offsets';
+        $sql = 'DROP TABLE IF EXISTS offsets';
 
         $stmt = $this->pdo->prepare($sql);
 
         $stmt->execute();
+
+        $this->pdo->exec('CREATE TABLE IF NOT EXISTS offsets (namespace string, partition string, offset string, UNIQUE (namespace, partition))');
 
         $this->pdo->commit();
 

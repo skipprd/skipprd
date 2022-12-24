@@ -9,7 +9,7 @@ use Skipprd\Services\AvroSubPub\MessageSerializer;
 use Skipprd\SkipprPack;
 use Skipprd\Traits\Config;
 use Skipprd\Traits\Ingest;
-use Skipprd\Traits\SkipprLogger;
+use Skipprd\SkipprLogger;
 
 class ValidateSchemaFile
 {

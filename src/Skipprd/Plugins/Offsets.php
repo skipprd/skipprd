@@ -5,7 +5,7 @@ namespace Skipprd\Plugins;
 
 use Skipprd\InternalFields;
 use Skipprd\Plugins\OffsetDrivers\OffsetDriverInterface;
-use Skipprd\Traits\SkipprLogger;
+use Skipprd\SkipprLogger;
 
 class Offsets
 {

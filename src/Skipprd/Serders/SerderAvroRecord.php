@@ -4,10 +4,12 @@ namespace Skipprd\Serders;
 
 use Skipprd\Serders\Interfaces\SerderStreamInterface;
 use Skipprd\Traits\Config;
-use Skipprd\Traits\SkipprLogger;
+use Skipprd\SkipprLogger;
 
 class SerderAvroRecord implements SerderStreamInterface
 {
+
+    public $compressionType = self::NO_COMPRESSION;
 
     public function __construct()
     {
@@ -30,7 +32,7 @@ class SerderAvroRecord implements SerderStreamInterface
         return $data;
     }
 
-    public function serialize(array $record, $schema = null) : string
+    public function serialize(array $record, $schema = null): void
     {
 
         try {
@@ -43,7 +45,8 @@ class SerderAvroRecord implements SerderStreamInterface
 
             $data_writer->close();
 
-            return $io->string();
+            throw new \Exception("Not implemented yet");
+//            return $io->string();
         } catch (\Exception $e) {
             throw $e;
         }

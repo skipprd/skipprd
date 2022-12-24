@@ -8,6 +8,7 @@ use Mockery;
 use Skipprd\Converters\SkipprAvroSchemaConverter;
 use Skipprd\Serders\SerderJson;
 use Skipprd\Serders\SerdersFactory;
+use Skipprd\Traits\AnalyseSchema;
 use Skipprd\Traits\Config;
 use Skipprd\Traits\Ingest;
 
@@ -65,7 +66,7 @@ class DefaultMessageTest extends TestCase
             ],
         ];
 
-        $container->analysePayload($field, Config::$discoveredFieldOccurrence['foo_namespace']);
+        AnalyseSchema::analysePayload($field, Config::$discoveredFieldOccurrence['foo_namespace']);
 
         $container->determineFieldTypes(Config::$discoveredFieldOccurrence['foo_namespace']);
 

@@ -1,7 +1,7 @@
 <?php
 
 
-namespace Skipprd\Traits;
+namespace Skipprd;
 
 use Carbon\Carbon;
 use Monolog\Formatter\JsonFormatter;
@@ -9,8 +9,9 @@ use Monolog\Formatter\LineFormatter;
 use Monolog\Handler\StreamHandler;
 use Monolog\Logger;
 use Monolog\Registry;
+use Skipprd\Traits\Config;
 
-trait SkipprLogger
+class SkipprLogger
 {
 
     private static $jsonFormatter;

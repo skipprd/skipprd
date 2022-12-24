@@ -8,7 +8,7 @@ use Skipprd\Plugins\OffsetDrivers\OffsetDriverFactory;
 use Skipprd\Plugins\Offsets;
 use Skipprd\Plugins\ValidationResponse;
 use Skipprd\Traits\Config;
-use Skipprd\Traits\SkipprLogger;
+use Skipprd\SkipprLogger;
 
 class DataSourcePluginBase implements DataSourcePluginInterface
 {
@@ -57,23 +57,6 @@ class DataSourcePluginBase implements DataSourcePluginInterface
 
     public function sync()
     {
-    }
-
-    /**
-     * Hack used when discovering schema. true on an array key indicates that namespace
-     * has finished discovering and should consume no more data.
-     * @param $namespace
-     * @return mixed
-     * @todo - need a better way (threading per namespace/partition? multiple container workers?)
-     */
-    public function ingestNamespace($namespace)
-    {
-
-        if (!isset($this->continue[$namespace])) {
-            $this->continue[$namespace] = true;
-        }
-
-        return $this->continue[$namespace];
     }
 
     public function doValidateConnection(): ValidationResponse

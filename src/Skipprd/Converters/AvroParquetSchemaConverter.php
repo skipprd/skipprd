@@ -3,6 +3,10 @@
 
 namespace Skipprd\Converters;
 
+use codename\parquet\data\DataColumn;
+use codename\parquet\data\DataField;
+use codename\parquet\data\Schema;
+
 /**
  * A bad attempt a porting https://github.com/apache/parquet-mr/blob/ee30b13bb5c3f6848c76641d3b93c9858e6746cb/parquet-avro/src/main/java/org/apache/parquet/avro/AvroSchemaConverter.java#L156
  */
@@ -25,9 +29,12 @@ class AvroParquetSchemaConverter implements SchemaConverterInterface
     private const REPEATED = 2;
 
 
-    private const BOOLEAN = 'bool';
-    private const INT32 = 'int32';
-    private const INT64 = 'int64';
+//    private const BOOLEAN = 'bool';
+    private const BOOLEAN = 'boolean';
+//    private const INT32 = 'int32';
+//    private const INT64 = 'int64';
+    private const INT32 = 'integer';
+    private const INT64 = 'long';
     private const INT96 = 'int96';  // deprecated, only used by legacy implementations.
     private const FLOAT = 'float';
     private const DOUBLE = 'double';
@@ -36,18 +43,6 @@ class AvroParquetSchemaConverter implements SchemaConverterInterface
 
     public function convert($avroSchema): array
     {
-//        if (get_class($avroSchema) != \AvroSchema::class
-//            || !$avroSchema->type() == \AvroSchema::RECORD_SCHEMA
-//        ) {
-//
-//            throw new \AvroException("Avro schema must be a record.");
-//        }
-
-//        return [
-//            'name' => $avroSchema->attribute('name'),
-//            'name' => $avroSchema->fullname(),
-//            'fields' => $this->convertFields($avroSchema),
-//        ];
         return $this->convertFields($avroSchema);
     }
 
@@ -107,7 +102,7 @@ class AvroParquetSchemaConverter implements SchemaConverterInterface
     private function convertField(string $fieldName, \AvroSchema $schema, $repetition)
     {
 
-        $parquetField = ['name' => $fieldName,];
+        $parquetField = ['name' => $fieldName];
 
         $type = $schema->type();
         $logicalType = $schema->type();
@@ -115,6 +110,7 @@ class AvroParquetSchemaConverter implements SchemaConverterInterface
         if ($parquetType = $this->convertPrimitiveType($type)) {
             $parquetField['type'] = $parquetType;
             $parquetField['repeat'] = $repetition;
+
         } elseif ($type == \AvroSchema::RECORD_SCHEMA) {
             $parquetField['type'] = 'group';
             $parquetField['repeat'] = $repetition;

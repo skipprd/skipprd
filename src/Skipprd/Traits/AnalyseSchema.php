@@ -9,20 +9,25 @@
 namespace Skipprd\Traits;
 
 use Carbon\Carbon;
+use Skipprd\Plugins\DataSources\DataSourcePluginBase;
+use Skipprd\SkipprLogger;
 use Skipprd\Str;
 use Skipprd\Helpers;
 
-trait AnalyseSchema
+
+class AnalyseSchema
 {
 
     /**
      * @var int The count of processed messages
      */
-    public $i = 0;
+    public static $i = 0;
 
 //    protected $discoveredFieldOccurrence = [];
 
-    public $dateFieldvalidationMminSample = 100;
+    public static $dateFieldvalidationMminSample = 100;
+
+    public static $continue = [];
 
     static $dataTypeMasks = [
         'boolean' => false,
@@ -113,76 +118,37 @@ trait AnalyseSchema
 //        ]
     ];
 
-    /**
-     * @param array $sourceMessage - the source message
-     * @param string $namespace
-     * @return void
-     */
-    public function analyse(array $sourceMessage, string $namespace): void
+    public static function analysePayload(array $message, array &$metadata)
     {
-        if (empty(Config::$discoveredFieldOccurrence[$namespace])) {
-            Config::$discoveredFieldOccurrence[$namespace] = [
-                'enabled' => true,
-                'fields' => [],
-            ];
-        }
 
-        if (is_array($sourceMessage)) {
-            $this->analysePayload(
-                $sourceMessage,
-                Config::$discoveredFieldOccurrence[$namespace]['fields']
-            );
-        }
-
-        if ($this->i > Config::$minDiscoveryRecords
-            || (Carbon::now()->timestamp - $this->startTimestamp) > Config::$maxDiscoverySeconds) {
-
-            SkipprLogger::info("Finished discovering schema of {$this->i} message of $namespace record type");
-
-            $this->i = 0;
-
-            $this->inputPlugin->continue[$namespace] = false;
-
-            // @todo - wont analyse all namespaces (tables, topics, paths, etc)
-            // if we exit here.
-            // The trouble with ->continue['part'] above is that it only exits if another
-            // record is found in the source. Else the source hangs till new data arrives.
-            // We need a way to force the source to the next namespace
-            $this->shutdown();
-        }
-    }
-
-    public function analysePayload(array $message, array &$metadata)
-    {
-        
-        $this->i++;
+        self::$i++;
 
         foreach ($message as $field => $value) {
             $field = Helpers::cleanFieldName($field);
-            
-            $this->analyseField($field, $value, $metadata);
+
+            self::analyseField($field, $value, $metadata);
         }
     }
 
-    public function analyseField($field, $value, &$fieldOccurrence)
+    public static function analyseField($field, $value, &$fieldOccurrence)
     {
 //        $field = Helpers::cleanFieldName($field);
 
-        $this->initDiscoveredType($fieldOccurrence, $field);
+        self::initDiscoveredType($fieldOccurrence, $field);
 
         // Build mapping/Schema
         if ($fieldOccurrence[$field]['count'] < Config::$minDiscoveryRecords) {
             $fieldOccurrence[$field]['count']++;
 
-            $this->resolveFieldType($fieldOccurrence, $field, $value);
+            self::resolveFieldType($fieldOccurrence, $field, $value);
 
-//                                    $dataType = $this->getLogicalType($field, $value);
-//                                    $this->setDiscoveredOccurrence($field, $dataType, $value);
+//                                    $dataType = self::getLogicalType($field, $value);
+//                                    self::setDiscoveredOccurrence($field, $dataType, $value);
 
-//                                    if ($fieldOccurrence[$field]['count'] >= $this->minSample) {
+//                                    if ($fieldOccurrence[$field]['count'] >= self::minSample) {
 //
 //                                        // @todo - improve performance by passing specific field
-//                                        $this->determineFieldTypes($field);
+//                                        self::determineFieldTypes($field);
 //
 //
 //                                    }
@@ -190,7 +156,7 @@ trait AnalyseSchema
 
         if (is_array($value) && !empty($value)) {
             foreach ($value as $sub_field => $sub_value) {
-                $this->analyseField($sub_field, $sub_value, $fieldOccurrence[$field]['fields']);
+                self::analyseField($sub_field, $sub_value, $fieldOccurrence[$field]['fields']);
             }
         }
 
@@ -200,11 +166,11 @@ trait AnalyseSchema
 //                                }
     }
 
-    public function resolveFieldType(&$array, $field, $value, $parentType = null)
+    public static function resolveFieldType(&$metadata, $field, $value, $parentType = null)
     {
-        $dataType = $this->getLogicalType($field, $value, $array);
+        $dataType = self::getLogicalType($field, $value, $metadata);
 
-        $this->initDiscoveredType($array, $field);
+        self::initDiscoveredType($metadata, $field);
 
         if ($dataType == 'array') {
             $typeCount = [];
@@ -212,7 +178,7 @@ trait AnalyseSchema
             $isSequential = Helpers::isSequentialArrayKeys($value);
 
             foreach ($value as $sub_field => $sub_value) {
-                $logicalType = $this->getLogicalType($sub_field, $sub_value, $array, false);
+                $logicalType = self::getLogicalType($sub_field, $sub_value, $metadata, false);
 
                 $typeCount[$logicalType] = 'hit';
 
@@ -247,12 +213,12 @@ trait AnalyseSchema
             }
         }
 
-        $this->setDiscoveredOccurrence($array, $field, $dataType, $value);
+        self::setDiscoveredOccurrence($metadata, $field, $dataType, $value);
 
         return $dataType;
     }
 
-    public function getLogicalType(string $field, $value, array &$metadata, bool $allowDate = true)
+    public static function getLogicalType(string $field, $value, array &$metadata, bool $allowDate = true): string
     {
 
         $dataType = gettype($value);
@@ -275,13 +241,12 @@ trait AnalyseSchema
                 }
 
                 if ($validTimestamp) {
-                    $this->setDateFieldCandidate($field, $metadata);
+                    self::setDateFieldCandidate($field, $metadata);
 
-                    $this->incrementDateFieldCandidateCount($field, $metadata);
+                    self::incrementDateFieldCandidateCount($field, $metadata);
                 }
             }
 
-//            if (is_float($value + 0) && (float) $value == $value) {
             if (AnalyseSchema::isFloat($value)) {
                 if (filter_var($value, FILTER_VALIDATE_FLOAT)) {
                     $dataType = 'double';
@@ -291,17 +256,17 @@ trait AnalyseSchema
 
         if ($dataType == 'string' && $allowDate) {
             // Limit number of check type attempts for data as expensive operation.
-            if (empty($metadata[$field]['date_candidate']['check_count']) || $metadata[$field]['date_candidate']['check_count'] < $this->dateFieldvalidationMminSample) {
+            if (empty($metadata[$field]['date_candidate']['check_count']) || $metadata[$field]['date_candidate']['check_count'] < self::$dateFieldvalidationMminSample) {
                 if ($format = AnalyseSchema::isValidDate($value)) {
                     $dataType = 'date';
-                    $this->setDateFieldCandidate($field, $metadata, $format);
+                    self::setDateFieldCandidate($field, $metadata, $format);
                 }
 
-                $this->incrementDateFieldCandidateCount($field, $metadata);
+                self::incrementDateFieldCandidateCount($field, $metadata);
 
                 // Already hit date field check limit. Force set type if valid date field.
             } elseif (!empty($metadata[$field]['date_candidate']['valid_count'])
-                && $metadata[$field]['date_candidate']['valid_count'] >= $this->dateFieldvalidationMminSample) {
+                && $metadata[$field]['date_candidate']['valid_count'] >= self::$dateFieldvalidationMminSample) {
                 $dataType = 'date';
             }
         }
@@ -349,7 +314,7 @@ trait AnalyseSchema
         return $dataType;
     }
 
-    function incrementDateFieldCandidateCount(string $field, array &$metadata)
+    public static function incrementDateFieldCandidateCount(string $field, array &$metadata)
     {
 
         if (empty($metadata[$field]['date_candidate']['check_count'])) {
@@ -359,7 +324,7 @@ trait AnalyseSchema
         }
     }
 
-    function setDateFieldCandidate(string $field, array &$metadata, string $format = '')
+    public static function setDateFieldCandidate(string $field, array &$metadata, string $format = '')
     {
 
         if (empty($metadata[$field]['date_candidate']['valid_count'])) {
@@ -368,7 +333,7 @@ trait AnalyseSchema
             $metadata[$field]['date_candidate']['valid_count']++;
         }
 
-        if ($metadata[$field]['date_candidate']['valid_count'] >= $this->dateFieldvalidationMminSample) {
+        if ($metadata[$field]['date_candidate']['valid_count'] >= self::$dateFieldvalidationMminSample) {
             $metadata[$field]['date_candidate']['field'] = $field;
 
             // save the format, else calls to setValue() often hit Carbon::createFromFormat causing memory explosion
@@ -433,10 +398,10 @@ trait AnalyseSchema
     {
         if (is_numeric($timestamp) && strtotime(date(
             'd-m-Y H:i:s',
-            $timestamp
+                    (int) $timestamp
         )) === (int) $timestamp
         ) {
-            $date = strtotime(date('d-m-Y H:i:s', $timestamp));
+            $date = strtotime(date('d-m-Y H:i:s', (int) $timestamp));
 
             if ($date >= strtotime('1970-01-01') && $date <= strtotime('+20 years')) {
                 return $timestamp;
@@ -451,8 +416,8 @@ trait AnalyseSchema
 
         $validFormats = [
             DATE_ATOM,
-            "Y-m-d\TH:i:s.vP",
-            "Y-m-d\TH:i:s.uP",
+//            "Y-m-d\TH:i:s.vP",
+//            "Y-m-d\TH:i:s.uP",
 //            DATE_RFC3339_EXTENDED,
             DATE_COOKIE,
             DATE_ISO8601,
@@ -500,7 +465,7 @@ trait AnalyseSchema
         return false;
     }
 
-    public function applyEvolutionFactory(
+    public static function applyEvolutionFactory(
         &$field,
         $value,
         $evolution,
@@ -511,14 +476,14 @@ trait AnalyseSchema
         switch ($evolution) {
             case 'cast':
                 $dataType = $newValue;
-//                $value = $this->setValue($newValue, $field, $value);
+//                $value = self::setValue($newValue, $field, $value);
                 break;
             case 'new':
                 $field = $newValue;
                 break;
             case 'rename':
                 $field = $newValue;
-//                $value = $this->setValue($dataType, $field, $value);
+//                $value = self::setValue($dataType, $field, $value);
                 break;
             case 'merge':
                 $field = $newValue;
@@ -526,35 +491,28 @@ trait AnalyseSchema
 //            case 'transform':
 //                $transformation = $newValue;
 //
-//                $this->applyTransformationFactory($field, $value, $transformation, $dataType);
+//                self::applyTransformationFactory($field, $value, $transformation, $dataType);
 //                break;
             case 'default':
                 break;
         }
     }
 
-    public function handleValueError(&$field, $value, $fieldOccurrence)
+    public static function handleValueError(&$field, $value, $fieldOccurrence)
     {
 
-        $dataType = $this->getLogicalType($field, $value, $fieldOccurrence, false);
-
-
-//        SkipprLogger::debug("Resolving type: $dataType for field: $field value: $value");
+        $dataType = self::getLogicalType($field, $value, $fieldOccurrence, false);
 
 //        // Evolution
         if (!empty($fieldOccurrence[$field]['evolution'][$dataType]['new_value'])) {
             $evolution = $fieldOccurrence[$field]['evolution'][$dataType]['type'];
             $newValue = $fieldOccurrence[$field]['evolution'][$dataType]['new_value'];
 
-//            SkipprLogger::debug("Resolving with: $evolution to $newValue");
-
-            $this->applyEvolutionFactory($field, $value, $evolution, $dataType, $newValue);
+            self::applyEvolutionFactory($field, $value, $evolution, $dataType, $newValue);
         }
-//
-//        return $value;
     }
 
-    public function initDiscoveredType(&$array, $field)
+    public static function initDiscoveredType(&$array, $field)
     {
 
         if (empty($array[$field]['count'])) {
@@ -567,7 +525,7 @@ trait AnalyseSchema
         }
     }
 
-    public function setDiscoveredOccurrence(&$array, $field, $dataType, $value)
+    public static function setDiscoveredOccurrence(&$array, $field, $dataType, $value)
     {
 
         # handy to display example value to user
@@ -597,19 +555,19 @@ trait AnalyseSchema
 
         // Timestamps possibly just plain old ints/longs
 //        if ($dataType == 'timestamp') {
-//            $this->setDiscoveredOccurrence($array, $field, 'integer', $value);
+//            self::setDiscoveredOccurrence($array, $field, 'integer', $value);
 //        } elseif ($dataType == 'timestamp_milli') {
-//            $this->setDiscoveredOccurrence($array, $field, 'long', $value);
+//            self::setDiscoveredOccurrence($array, $field, 'long', $value);
 //        }
         if ($dataType == 'integer') {
-            $validTimestamp = $this->isValidTimeStamp($value);
+            $validTimestamp = self::isValidTimeStamp($value);
             if ($validTimestamp) {
-                $this->setDiscoveredOccurrence($array, $field, 'timestamp', $value);
+                self::setDiscoveredOccurrence($array, $field, 'timestamp', $value);
             }
         } elseif ($dataType == 'long') {
-            $validTimestamp = $this->isValidTimeStamp($value / 1000);
+            $validTimestamp = self::isValidTimeStamp($value / 1000);
             if ($validTimestamp) {
-                $this->setDiscoveredOccurrence($array, $field, 'timestamp_milli', $value);
+                self::setDiscoveredOccurrence($array, $field, 'timestamp_milli', $value);
             }
         }
 
@@ -620,5 +578,24 @@ trait AnalyseSchema
 //            $types[$dataType]++;
 //        }
 //        Config::$discoveredFieldOccurrence = array_add(Config::$discoveredFieldOccurrence, "$field.type", $types);
+    }
+
+    /**
+     * Hack used when discovering schema. true on an array key indicates that namespace
+     * has finished discovering and should consume no more data.
+     * @param $namespace
+     * @param DataSourcePluginBase $instance
+     * @return mixed
+     * @todo - need a better way (threading per namespace/partition? multiple container workers?)
+     */
+    public static function ingestNamespace(
+        $namespace,
+    ) {
+
+        if (!isset($instance->continue[$namespace])) {
+            self::$continue[$namespace] = true;
+        }
+
+        return self::$continue[$namespace];
     }
 }

@@ -6,6 +6,7 @@ namespace Feature\Skipprd;
 use Skipprd\Commands\PipelineCommand;
 use Skipprd\Converters\SkipprAvroSchemaConverter;
 use Skipprd\Helpers;
+use Skipprd\Traits\AnalyseSchema;
 use Skipprd\Traits\Config;
 use Symfony\Component\Yaml\Yaml;
 use Tests\TestCase;
@@ -34,7 +35,7 @@ class DiscoverSchemaTest extends TestCase
 
 //        $container->serder = 'json';
 //        $container->schema(json_encode($payload));
-        $container->analysePayload($payload, Config::$discoveredFieldOccurrence);
+        AnalyseSchema::analysePayload($payload, Config::$discoveredFieldOccurrence);
 
         $container->determineFieldTypes(Config::$discoveredFieldOccurrence);
 

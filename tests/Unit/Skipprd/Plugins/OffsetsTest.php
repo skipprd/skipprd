@@ -3,6 +3,8 @@
 namespace Unit\Skipprd\Plugins;
 
 use PHPUnit\Framework\TestCase;
+use Skipprd\Plugins\OffsetDrivers\OffsetDriverFactory;
+use Skipprd\Plugins\OffsetDrivers\OffsetDriverInterface;
 use Skipprd\Plugins\Offsets;
 
 class OffsetsTest extends TestCase
@@ -22,16 +24,27 @@ class OffsetsTest extends TestCase
 //
 //    }
 
+    /**
+     * @var \Skipprd\Plugins\OffsetDrivers\OffsetDriverInterface
+     */
+    protected OffsetDriverInterface $driver;
+
+    public function setup(): void {
+        parent::setup();
+
+        $this->driver = OffsetDriverFactory::factory('skippr_file');
+    }
+
     public function testParseOffsets()
     {
 
         $namespace = 'table_a';
         $partition = 'shard_1';
 
-        $offsets = new Offsets();
+        $offsets = new Offsets($this->driver);
         $offsets->setOffsets('123 123', $namespace, $partition);
 
-        $commits = $offsets->getOffsets($namespace, $partition);
+        $commits = $offsets->getOffset($namespace, $partition);
 
         self::assertEquals([123, 123], $commits);
 
@@ -43,10 +56,10 @@ class OffsetsTest extends TestCase
         $namespace = 'table_a';
         $partition = 'shard_1';
 
-        $offsets = new Offsets();
+        $offsets = new Offsets($this->driver);
         $offsets->setOffsets('123', $namespace, $partition);
 
-        $commits = $offsets->getOffsets($namespace, $partition);
+        $commits = $offsets->getOffset($namespace, $partition);
 
         self::assertEquals([123], $commits);
 
@@ -62,8 +75,9 @@ class OffsetsTest extends TestCase
         $namespace = 'table_a';
         $partition = 'shard_1';
 
-        $offsets = new Offsets();
+        $offsets = new Offsets($this->driver);
         $offsets->setOffsets(' 123 12', $namespace, $partition);
+        $offsets->offsetCommitLatest($namespace);
 
         $valid = $offsets->validateOffset(' 123 4', $namespace, $partition);
 
@@ -77,8 +91,9 @@ class OffsetsTest extends TestCase
         $namespace = 'table_a';
         $partition = 'shard_1';
 
-        $offsets = new Offsets();
+        $offsets = new Offsets($this->driver);
         $offsets->setOffsets(' 123 4', $namespace, $partition);
+        $offsets->offsetCommitLatest($namespace);
 
         $valid = $offsets->validateOffset(' 123 12', $namespace, $partition);
 
@@ -92,8 +107,9 @@ class OffsetsTest extends TestCase
         $namespace = 'table_a';
         $partition = 'shard_1';
 
-        $offsets = new Offsets();
+        $offsets = new Offsets($this->driver);
         $offsets->setOffsets(' 123 123', $namespace, $partition);
+        $offsets->offsetCommitLatest($namespace);
 
         $valid = $offsets->validateOffset(' 122 122', $namespace, $partition);
 
@@ -107,8 +123,9 @@ class OffsetsTest extends TestCase
         $namespace = 'table_a';
         $partition = 'shard_1';
 
-        $offsets = new Offsets();
+        $offsets = new Offsets($this->driver);
         $offsets->setOffsets(' 123 123', $namespace, $partition);
+        $offsets->offsetCommitLatest($namespace);
 
         $valid = $offsets->validateOffset(' 123 122', $namespace, $partition);
 
@@ -122,8 +139,9 @@ class OffsetsTest extends TestCase
         $namespace = 'table_a';
         $partition = 'shard_1';
 
-        $offsets = new Offsets();
+        $offsets = new Offsets($this->driver);
         $offsets->setOffsets(' 123 123', $namespace, $partition);
+        $offsets->offsetCommitLatest($namespace);
 
         $valid = $offsets->validateOffset(' 122 123', $namespace, $partition);
 
@@ -137,8 +155,9 @@ class OffsetsTest extends TestCase
         $namespace = 'table_a';
         $partition = 'shard_1';
 
-        $offsets = new Offsets();
+        $offsets = new Offsets($this->driver);
         $offsets->setOffsets(' 123 123', $namespace, $partition);
+        $offsets->offsetCommitLatest($namespace);
 
         $valid = $offsets->validateOffset(' 123 123', $namespace, $partition);
 
@@ -152,8 +171,9 @@ class OffsetsTest extends TestCase
         $namespace = 'table_a';
         $partition = 'shard_1';
 
-        $offsets = new Offsets();
+        $offsets = new Offsets($this->driver);
         $offsets->setOffsets(' 123 123', $namespace, $partition);
+        $offsets->offsetCommitLatest($namespace);
 
         $valid = $offsets->validateOffset(' 124 124', $namespace, $partition);
 
@@ -167,8 +187,9 @@ class OffsetsTest extends TestCase
         $namespace = 'table_a';
         $partition = 'shard_1';
 
-        $offsets = new Offsets();
+        $offsets = new Offsets($this->driver);
         $offsets->setOffsets(' 123 123', $namespace, $partition);
+        $offsets->offsetCommitLatest($namespace);
 
         $valid = $offsets->validateOffset(' 123 124', $namespace, $partition);
 
@@ -182,8 +203,9 @@ class OffsetsTest extends TestCase
         $namespace = 'table_a';
         $partition = 'shard_1';
 
-        $offsets = new Offsets();
+        $offsets = new Offsets($this->driver);
         $offsets->setOffsets(' 123 123', $namespace, $partition);
+        $offsets->offsetCommitLatest($namespace);
 
         $valid = $offsets->validateOffset(' 124 123', $namespace, $partition);
 

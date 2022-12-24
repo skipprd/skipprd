@@ -71,8 +71,8 @@ class AnalyseSchemaComplexTypesTestComplexTypesTest extends TestCase
                 ],
             ],
         ];
-        
-        $container->analysePayload($field, Config::$discoveredFieldOccurrence['foo_namespace']['fields']);
+
+        AnalyseSchema::analysePayload($field, Config::$discoveredFieldOccurrence['foo_namespace']['fields']);
         
 //        $this->assertEquals(1, Config::$discoveredFieldOccurrence['foo']['type']['record']);
 //        $this->assertEquals(1, Config::$discoveredFieldOccurrence['foo']['fields']['sheep']['type']['string']);

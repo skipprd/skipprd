@@ -6,10 +6,12 @@ namespace Skipprd\Serders;
 use Skipprd\Serders\Interfaces\SerderBatchInterface;
 use Skipprd\Traits\AnalyseSchema;
 use Skipprd\Traits\Config;
-use Skipprd\Traits\SkipprLogger;
+use Skipprd\SkipprLogger;
 
 class SerderXml implements SerderBatchInterface
 {
+
+    public $compressionType = self::FILE_COMPRESSION;
 
     protected $xml_data;
     protected $filename;

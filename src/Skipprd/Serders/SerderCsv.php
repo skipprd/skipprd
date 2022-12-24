@@ -7,10 +7,12 @@ use Skipprd\Serders\Interfaces\SerderBatchInterface;
 use Skipprd\Traits\AnalyseSchema;
 use Skipprd\Traits\Config;
 use Skipprd\Traits\Ingest;
-use Skipprd\Traits\SkipprLogger;
+use Skipprd\SkipprLogger;
 
 class SerderCsv implements SerderBatchInterface
 {
+
+    public $compressionType = self::FILE_COMPRESSION;
 
     protected $fh;
     protected $records;

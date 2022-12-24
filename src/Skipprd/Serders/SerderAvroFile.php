@@ -4,10 +4,12 @@ namespace Skipprd\Serders;
 
 use Skipprd\Serders\Interfaces\SerderBatchInterface;
 use Skipprd\Traits\Config;
-use Skipprd\Traits\SkipprLogger;
+use Skipprd\SkipprLogger;
 
 class SerderAvroFile implements SerderBatchInterface
 {
+
+    public $supportedCompressionTypes = [];
 
     protected $data_writer;
 

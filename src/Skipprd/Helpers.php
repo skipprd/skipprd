@@ -4,7 +4,7 @@
 namespace Skipprd;
 
 use Skipprd\Traits\Config;
-use Skipprd\Traits\SkipprLogger;
+use Skipprd\SkipprLogger;
 
 class Helpers
 {

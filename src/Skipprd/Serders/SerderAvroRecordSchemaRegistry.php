@@ -7,10 +7,12 @@ use Skipprd\Services\AvroSubPub\CachedSchemaRegistryClient;
 use Skipprd\Services\AvroSubPub\MessageSerializer;
 use Skipprd\Str;
 use Skipprd\Traits\Config;
-use Skipprd\Traits\SkipprLogger;
+use Skipprd\SkipprLogger;
 
 class SerderAvroRecordSchemaRegistry implements SerderStreamInterface
 {
+
+    public $compressionType = self::NO_COMPRESSION;
 
     protected $tenantId = '';
 
@@ -37,7 +39,7 @@ class SerderAvroRecordSchemaRegistry implements SerderStreamInterface
         return $datum;
     }
 
-    public function serialize(array $record, $schema = null) : string
+    public function serialize(array $record, $schema = null) : void
     {
 
         $recordsWithSchema = false;
@@ -55,7 +57,7 @@ class SerderAvroRecordSchemaRegistry implements SerderStreamInterface
             throw $e;
         }
 
-        return $recordsWithSchema;
+//        return $recordsWithSchema;
     }
 
     /**

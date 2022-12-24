@@ -15,6 +15,7 @@ use Skipprd\Serders\SerderCsv;
 use Skipprd\Serders\SerderJson;
 use Skipprd\Serders\SerdersFactory;
 use Skipprd\Serders\SerderXml;
+use Skipprd\Traits\AnalyseSchema;
 use Skipprd\Traits\Config;
 use Skipprd\Traits\Ingest;
 
@@ -26,13 +27,13 @@ class IngestTest extends TestCase
 
     private $buffer;
 
-    public function setUp() {
+    public function setUp(): void {
 
         parent::setUp();
 
     }
 
-    public function tearDown()
+    public function tearDown(): void
     {
 
         array_map('unlink', glob($this->buffer->driver->bufferDir . '/*'));
@@ -461,7 +462,7 @@ class IngestTest extends TestCase
         }
 
         foreach ($fields as $field) {
-            $container->analysePayload($field, Config::$discoveredFieldOccurrence['foo_namespace']);
+            AnalyseSchema::analysePayload($field, Config::$discoveredFieldOccurrence['foo_namespace']);
         }
 
         $container->determineFieldTypes(Config::$discoveredFieldOccurrence['foo_namespace']);
@@ -504,7 +505,7 @@ class IngestTest extends TestCase
             $message = $container->ingestPayload($field, Config::$discoveredFieldOccurrence['foo_namespace'], 'foo_namespace');
 
 //            if (!empty($message)) {
-                $this->buffer->append(msgpack_pack($message), strlen(serialize($message)), false, 0, 'foo_namespace');
+                $this->buffer->append(json_encode($message), strlen(json_encode($message)), false, 'foo_namespace');
 //            }
             
 //            break;

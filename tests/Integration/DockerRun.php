@@ -19,7 +19,7 @@ use Skipprd\Converters\AvroParquetSchemaConverter;
 use Skipprd\Helpers;
 use Skipprd\Serders\SerderAvroFile;
 use Skipprd\Traits\Config;
-use Skipprd\Traits\SkipprLogger;
+use Skipprd\SkipprLogger;
 
 class DockerRun extends TestCase
 {

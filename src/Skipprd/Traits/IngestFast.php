@@ -3,6 +3,7 @@
 namespace Skipprd\Traits;
 
 use Skipprd\Helpers;
+use Skipprd\SkipprLogger;
 
 trait IngestFast
 {
