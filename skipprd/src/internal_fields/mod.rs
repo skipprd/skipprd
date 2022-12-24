@@ -1,0 +1,133 @@
+use std::collections::HashMap;
+// mod arr;
+use crate::arr::Arr;
+// mod helpers;
+use crate::helpers::Helpers;
+
+pub struct InternalFields<'a> {
+    pub parse_namespace_cache: HashMap<&'a str, bool>,
+}
+
+impl InternalFields {
+
+    pub fn parse_partition_field<'a>(message: &mut HashMap<String, String>, partition: &'a str) -> &'a str {
+        let mut partition = partition.to_string();
+
+        let mut helpers = Helpers { clean_field_cache: Default::default() };
+
+        // default to data source partition (table, topic, queue, file dir, etc)
+        partition = helpers.clean_field_name(&mut partition).parse().unwrap();
+
+        // optional: partition by composite key
+        if Config::partition_by_fields.len() > 0 {
+            partition = "".to_string();
+
+            for entity_field_dot in Config::partition_by_fields.iter() {
+                if let Some(entity_value) = message.get(entity_field_dot) {
+                    let clean_entity_field_name = helpers.clean_field_name(entity_field_dot);
+                    let clean_entity_field_value = helpers.clean_field_name(entity_value);
+                    partition.push_str(&format!("-{}={}", clean_entity_field_name, clean_entity_field_value));
+                }
+            }
+        }
+
+        let partition = partition.to_lowercase();
+        let partition = partition.trim_start_matches('-');
+        let partition = partition.trim_end_matches('-');
+
+        message.insert("skpr_partition".to_string(), partition.to_string());
+
+        partition
+    }
+
+    pub fn parse_source_partition(partition: &str) -> &str {
+        let end = partition.find('-');
+
+        match end {
+            Some(end) => &partition[..end],
+            None => partition,
+        }
+    }
+
+    pub fn parse_namespace_field(&mut self,
+                                 message: &mut HashMap<String, String>,
+                                 namespace: &str,
+    ) -> &str {
+        let mut clean_namespace = namespace;
+
+        let mut helpers = Helpers { clean_field_cache: Default::default() };
+
+        if !self.parse_namespace_cache.contains_key(&namespace)
+            || *self.parse_namespace_cache.get(&namespace).unwrap()
+        {
+            // default to data source partition (table, topic, queue, file dir, etc)
+            clean_namespace = &*helpers.clean_field_name(namespace);
+
+            // optional: partition by composite key
+            if !Config::event_type_fields.is_empty() {
+                let mut namespaces = vec![];
+
+                for entity_field_dot in Config::event_type_fields {
+                    if let Some(entity_value) = message.get(&entity_field_dot) {
+                        namespaces.push(helpers.clean_field_name(entity_value));
+                    }
+                }
+
+                clean_namespace = &*namespaces.join("_");
+
+                clean_namespace = &*clean_namespace.trim_matches('-').to_lowercase();
+            }
+        }
+
+        if clean_namespace != namespace {
+            self.parse_namespace_cache.insert(namespace, true);
+        }
+        else {
+            self.parse_namespace_cache.insert(namespace, false);
+        }
+
+        message.insert("skpr_namespace".to_string(), clean_namespace.to_string());
+
+        clean_namespace
+    }
+
+    pub fn parse_source_namespace(namespace: &str) -> &str {
+        let end = namespace.find('-');
+
+        match end {
+            Some(end) => &namespace[..end],
+            None => namespace,
+        }
+    }
+
+    pub fn parse_time_field(message: &mut HashMap<String, String>) -> i64 {
+        // default to beginning of epoch.
+        message.insert("skpr_event_ts".to_string(), "0".to_string());
+
+        if let Some(time_fields) = Config::time_fields() {
+            // Support nested time fields via array dot notation
+            // For user confirmed event time fields, use the first one that matches
+            for field_dot in time_fields {
+                if let Some(time_value) = message.get(&field_dot) {
+                    message.insert("skpr_event_ts".to_string(), time_value.to_string());
+                    break;
+                }
+            }
+
+            // Handle millisecond timestamps
+            if message.get("skpr_event_ts").unwrap().len() == 13 {
+                let time_value = message.get("skpr_event_ts").unwrap().parse::<i64>().unwrap();
+                message.insert("skpr_event_ts".to_string(), (time_value / 1000).to_string());
+            }
+
+            // Handle datetime strings
+            if message.get("skpr_event_ts").unwrap().len() > 13 {
+                let time_value = message.get("skpr_event_ts").unwrap().parse::<i64>().unwrap();
+                message.insert("skpr_event_ts".to_string(), time_value.to_string());
+            }
+        }
+
+        message.get("skpr_event_ts").unwrap().parse::<i64>().unwrap()
+    }
+
+}
