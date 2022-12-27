@@ -1,20 +1,20 @@
-use std::any::TypeId;
+
 use std::collections::HashMap;
 use regex::Regex;
 use std::env;
 use memory_stats::memory_stats;
-use std::fs::File;
-use std::io::prelude::*;
-use std::io::BufReader;
-use std::path::Path;
-use std::process::Command;
+
+
+
+
+
 use std::str;
-use rand::distributions::uniform::SampleRange;
+
 use rand::Rng;
 use serde_json::Value;
 
 mod configuration;
-use crate::helpers::configuration::Config;
+
 
 pub struct Helpers {
     pub(crate) clean_field_cache: HashMap<String, bool>,
@@ -38,7 +38,7 @@ impl Helpers {
 
     // pub fn is_sequential_array_keys(arr: &[i32]) -> bool {
     pub fn is_sequential_array_keys(arr: &Vec<Value>) -> bool {
-        let mut arr = arr.to_vec();
+        let arr = arr.to_vec();
         // arr.sort();
         // if arr.first() != Some(&0) && arr.is_empty() {
         //     return false;

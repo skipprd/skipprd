@@ -1,19 +1,19 @@
-use std::borrow::Borrow;
-use std::fmt::Debug;
-use std::ops::Deref;
-use std::slice;
-use std::slice::SliceIndex;
+
+
+
+
+
 
 const FILTER_FLAG_ALLOW_THOUSAND: bool = false;
 
 
 #[cfg(test)]
 mod tests {
-    use icu::plurals::rules::reference::ast::RangeListItem::Value;
-    use schemars::JsonSchema;
-    use serde_json::map::Values;
+    
+    
+    
     use crate::discover::get_type;
-    use super::*;
+    
 
 
 
@@ -125,7 +125,7 @@ mod tests {
 
 pub fn parse_float(value: &mut String) -> Option<f64> {
 
-        let mut len = value.len();
+        let len = value.len();
         // let mut len = value.chars().count();
         // let mut str = value.as_ptr() as usize;
         let mut str = 0;

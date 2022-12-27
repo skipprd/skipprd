@@ -5,7 +5,7 @@ pub fn php_filter_parse_int(str: String, ret: &mut i64) -> bool {
     let mut sign: bool = false;
     let mut digit: i32 = 0;
 
-    let mut str_len = str.len();
+    let str_len = str.len();
     let mut n = 0;
     let end = str_len;
 
@@ -56,7 +56,7 @@ pub fn php_filter_parse_int(str: String, ret: &mut i64) -> bool {
             n += 1;
             if (!sign) && ctx_value <= (std::i64::MAX - digit as i64) / 10 {
                 ctx_value = (ctx_value * 10) + digit as i64;
-            } else if ( sign && ctx_value >= (std::i64::MIN + digit as i64) / 10) {
+            } else if sign && ctx_value >= (std::i64::MIN + digit as i64) / 10 {
                 ctx_value = (ctx_value * 10) - digit as i64;
             } else {
                 return false;
@@ -116,7 +116,7 @@ fn test_php_filter_parse_int() {
     assert_eq!(php_filter_parse_int("-9223372036854775809".to_string(), &mut ret), false);
     assert_eq!(ret, -9223372036854775808);
 
-    use serde_json::{Result, Value};
+    use serde_json::{Value};
 
     let data = r#"
         {

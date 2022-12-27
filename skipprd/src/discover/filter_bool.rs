@@ -1,11 +1,11 @@
 
 #[cfg(test)]
 mod tests {
-    use icu::plurals::rules::reference::ast::RangeListItem::Value;
-    use schemars::JsonSchema;
-    use serde_json::map::Values;
+    
+    
+    
     use crate::discover::get_type;
-    use super::*;
+    
 
 
     #[test]
@@ -65,8 +65,8 @@ mod tests {
     }
 }
 
-pub fn parse_bool(value: &mut String) -> Result<(bool), (i32)> {
-    let mut len = value.len();
+pub fn parse_bool(value: &mut String) -> Result<bool, i32> {
+    let len = value.len();
     let str = value;
     let mut ret: i32 = -1;
 

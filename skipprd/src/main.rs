@@ -1,12 +1,12 @@
 mod arr;
 
-use std::any::Any;
+
 use std::collections::HashMap;
-use crate::arr::Arr;
+
 mod helpers;
-use crate::helpers::Helpers;
+
 mod metrics;
-use crate::metrics::Metrics;
+
 mod discover;
 use crate::discover::AnalyseSchema;
 use crate::discover::Metadata;
@@ -16,7 +16,7 @@ use crate::discover::Metadata;
 // use crate::helpers::Config
 
 
-use serde_json::{Result, Value};
+use serde_json::{Value};
 
 
 pub fn untyped_example() -> HashMap<String, Metadata> {
@@ -89,7 +89,7 @@ pub fn untyped_example() -> HashMap<String, Metadata> {
 
     // let mut newMeta: &mut Option<HashMap<String, &mut Metadata>> = &mut None;
 
-    let mut newMeta =  Metadata {
+    let newMeta =  Metadata {
         count: 0,
         types: HashMap::new(),
         parent_type: "".to_string(),

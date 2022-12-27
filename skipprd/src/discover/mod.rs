@@ -1,27 +1,27 @@
-use std::any::Any;
-use std::borrow::{Borrow, BorrowMut};
+
+
 use std::collections::HashMap;
-use std::collections::HashSet;
-use std::io::Read;
-use std::option::Iter;
+
+
+
 // use std::fs::{Metadata as OtherMetadata, Metadata};
 use chrono::{DateTime, TimeZone, Utc};
-use icu::list::Error::Data;
-use icu::plurals::rules::reference::ast::RangeListItem;
+
+
 use serde_json::Value;
-use crate::arr::Arr;
+
 
 // use std::simd::usizex2;
-use crate::helpers;
+
 use crate::helpers::Helpers;
 mod date_formats;
 use crate::discover::date_formats::DateFormats;
 mod filter_float;
-use crate::discover::filter_float::parse_float;
+
 mod filter_bool;
 use crate::discover::filter_bool::parse_bool;
 mod filter_parse_int;
-use crate::discover::filter_parse_int::php_filter_parse_int;
+
 
 #[derive(Default)]
 #[derive(Clone)]
@@ -160,8 +160,8 @@ impl AnalyseSchema {
         }
 
         if value.is_object() {
-            for (sub_field, mut sub_value) in value.as_object().unwrap() {
-                let sf = sub_field.as_str();
+            for (sub_field, sub_value) in value.as_object().unwrap() {
+                let _sf = sub_field.as_str();
                 let mut sv = sub_value.clone();
                 // let mut svv: Value = serde_json::from_str(sv.unwrap()).unwrap();
                 self.analyse_field(sub_field, &mut sv, metadata.get_mut(field).unwrap().fields.as_mut());
@@ -468,7 +468,7 @@ impl AnalyseSchema {
 
     fn init_discovered_type(&self, metadata: &mut HashMap<String, Metadata>, field: &String) {
        if metadata.get(field).is_none() {
-            let mut newMeta = Metadata {
+            let newMeta = Metadata {
                 count: 0,
                 types: HashMap::new(),
                 parent_type: "".to_string(),
