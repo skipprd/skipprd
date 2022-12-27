@@ -13,7 +13,7 @@ use crate::discover::Metadata;
 // mod converters;
 // use self::converters::avro_parquet::AvroSchema;
 
-
+// use crate::helpers::Config
 
 
 use serde_json::{Result, Value};
@@ -108,8 +108,8 @@ pub fn untyped_example() -> HashMap<String, Metadata> {
 
     println!("Rider is types: {:?}", newMeta.get_mut("rider_id").unwrap().types);
     println!("last_crank is types: {:?}", newMeta.get_mut("last_crank").unwrap().types);
-    println!("Hardware is types: {:?}", newMeta.get_mut("hardware").unwrap().types);
-    println!("Hardware.maintenance is types: {:?}", newMeta.get_mut("hardware").unwrap().fields.get_mut("maintenance").unwrap().types);
+    println!("Hardware is types: {:?}", newMeta.get_mut("metadata").unwrap().types);
+    println!("Hardware.maintenance is types: {:?}", newMeta.get_mut("metadata").unwrap().fields.get_mut("maintenance").unwrap().types);
     println!("Metadata is types: {:?}", newMeta.get_mut("metadata").unwrap().types);
     println!("Metadata.rcvd_time is types: {:?}", newMeta.get_mut("metadata").unwrap().fields.get_mut("rcvd_time").unwrap().types);
     println!("Metadata.tags is types: {:?}", newMeta.get_mut("metadata").unwrap().fields.get_mut("tags").unwrap().types);

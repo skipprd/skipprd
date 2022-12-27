@@ -13,12 +13,14 @@ use rand::distributions::uniform::SampleRange;
 use rand::Rng;
 use serde_json::Value;
 
+mod configuration;
+use crate::helpers::configuration::Config;
+
 pub struct Helpers {
-    pub clean_field_cache: HashMap<String, bool>,
+    pub(crate) clean_field_cache: HashMap<String, bool>,
 }
 
 impl Helpers {
-
     // pub fn explode_field(field: &str) -> Vec<&str> {
     //     let mut field_haystack: Vec<&str> = Vec::new();
     //
