@@ -183,9 +183,9 @@ impl SerderJson {
 
                         // Eagerly and perhaps over zealously glob any json we can find by stripping any
                         // remaining non-json from beginning of source data strings.
-                        let json_start = string.find("[\"");
+                        let mut json_start = string.find("[");
                         if json_start.is_none() {
-                            let json_start = string.find("{\"");
+                            json_start = string.find("{");
                         }
 
                         if json_start.is_some() {
