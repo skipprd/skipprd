@@ -13,6 +13,10 @@ use crate::discover::Metadata;
 // mod converters;
 // use self::converters::avro_parquet::AvroSchema;
 
+mod serdes;
+use crate::serdes::json::SerderJson;
+
+
 // use crate::helpers::Config
 
 
