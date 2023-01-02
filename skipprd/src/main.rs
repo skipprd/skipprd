@@ -2,6 +2,18 @@ mod arr;
 
 
 use std::collections::HashMap;
+use std::fs::File;
+use std::io;
+use std::io::prelude::*;
+use std::ops::{Add, Sub};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::thread::sleep;
+use std::time::{Duration, Instant};
+use flate2::read::GzDecoder;
+use futures::executor::block_on;
+use glob::glob_with;
+use glob::MatchOptions;
 
 mod helpers;
 
@@ -16,6 +28,8 @@ use crate::discover::Metadata;
 mod serdes;
 use crate::serdes::json::SerderJson;
 
+mod plugins;
+use crate::plugins::s3_inventory::DataSourceS3InventoryPlugin;
 
 // use crate::helpers::Config
 
@@ -76,7 +90,8 @@ pub fn untyped_example() -> HashMap<String, Metadata> {
     //     }"#;
 
     // Parse the string of data into serde_json::Value.
-    let mut v: Value = serde_json::from_str(data).unwrap();
+    // let mut v: Value = serde_json::from_str(data).unwrap();
+    let mut vs: Vec<Value> = SerderJson::deserialize(data.to_string());
 
     let mut foo: AnalyseSchema = AnalyseSchema { i: 0};
 
@@ -108,15 +123,17 @@ pub fn untyped_example() -> HashMap<String, Metadata> {
     metadata.insert("skpr-time".to_string(), newMeta);
     let mut newMeta: &mut HashMap<String, Metadata> = &mut metadata;
 
-    AnalyseSchema::analyse_payload(&mut foo, &mut v, &mut newMeta);
+    for mut v in vs {
+        // AnalyseSchema::analyse_payload(&mut foo, &mut v, &mut newMeta);
+    }
 
-    println!("Rider is types: {:?}", newMeta.get_mut("rider_id").unwrap().types);
-    println!("last_crank is types: {:?}", newMeta.get_mut("last_crank").unwrap().types);
-    println!("Hardware is types: {:?}", newMeta.get_mut("metadata").unwrap().types);
-    println!("Hardware.maintenance is types: {:?}", newMeta.get_mut("metadata").unwrap().fields.get_mut("maintenance").unwrap().types);
-    println!("Metadata is types: {:?}", newMeta.get_mut("metadata").unwrap().types);
-    println!("Metadata.rcvd_time is types: {:?}", newMeta.get_mut("metadata").unwrap().fields.get_mut("rcvd_time").unwrap().types);
-    println!("Metadata.tags is types: {:?}", newMeta.get_mut("metadata").unwrap().fields.get_mut("tags").unwrap().types);
+    // println!("Rider is types: {:?}", newMeta.get_mut("rider_id").unwrap().types);
+    // println!("last_crank is types: {:?}", newMeta.get_mut("last_crank").unwrap().types);
+    // println!("Hardware is types: {:?}", newMeta.get_mut("hardware").unwrap().types);
+    // println!("Hardware.maintenance is types: {:?}", newMeta.get_mut("hardware").unwrap().fields.get_mut("maintenance").unwrap().types);
+    // println!("Metadata is types: {:?}", newMeta.get_mut("metadata").unwrap().types);
+    // println!("Metadata.rcvd_time is types: {:?}", newMeta.get_mut("metadata").unwrap().fields.get_mut("rcvd_time").unwrap().types);
+    // println!("Metadata.tags is types: {:?}", newMeta.get_mut("metadata").unwrap().fields.get_mut("tags").unwrap().types);
 
     return newMeta.clone();
 
@@ -139,9 +156,79 @@ fn test_untyped_example() {
     assert_eq!(untyped_example().get_mut("phones").unwrap().determined_type, "".to_string());
 }
 
+
 fn main() {
 
-    untyped_example();
+
+    let now = Instant::now();
+
+    // for x in 1..20000 {
+    //     untyped_example();
+    // }
+    blah();
+
+    println!("Runtime: {} seconds", now.elapsed().as_secs());
+}
+
+#[tokio::main]
+async fn blah() -> Result<(), String> {
+
+    let ingestMsgCount = Arc::new(Mutex::new(0));
+    let ingestMsgCountClone = ingestMsgCount.clone();
+
+    use std::time::Duration;
+
+    let mut planner = periodic::Planner::new();
+    planner.add(move||
+                    {
+                        let mut counter_lock = ingestMsgCount.lock().unwrap();
+                        println!("Ingested Messages: {}", *counter_lock);
+                        *counter_lock = 0;
+                    },
+        periodic::Every::new(Duration::from_secs(10)),
+    );
+    planner.start();
+
+    thread::spawn(move|| {
+
+        let options = MatchOptions {
+            case_sensitive: false,
+            require_literal_separator: false,
+            require_literal_leading_dot: false,
+        };
+
+        while true {
+            for entry in glob_with("/tmp/ddd/s3-*", options).expect("Failed to read glob pattern") {
+                match entry {
+                    Ok(path) => {
+                        // println!("{}", path.display());
+                        let mut stdin = File::open(path).unwrap();
+
+                        let d = GzDecoder::new(stdin);
+                        // .expect("couldn't decode gzip stream");
+
+                        for line in io::BufReader::new(d).lines() {
+                            // println!("{}", line.unwrap());
+                            let mut counter_lock = ingestMsgCountClone.lock().unwrap();
+
+                            *counter_lock = *counter_lock + 1;
+                        }
+                    },
+                    Err(e) => println!("{:?}", e),
+                }
+            }
+            sleep(Duration::from_secs(1));
+        }
+
+    });
+
+    let mut ds3 = block_on(DataSourceS3InventoryPlugin::new());
+
+    println!("1");
+    ds3.sync().await;
+    // sleep(Duration::from_secs(30));
+    Ok(())
+
 }
 
 // fn skippr_emit(

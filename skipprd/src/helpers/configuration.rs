@@ -132,7 +132,7 @@ impl Config {
     }
 
     pub fn getenv(name: &str, default: &str) -> String {
-        match std::env::var(name) {
+        match std::env::var(name.to_uppercase()) {
             Ok(val) => val,
             Err(_e) => default.to_string(),
         }

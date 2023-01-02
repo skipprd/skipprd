@@ -13,7 +13,7 @@ use std::str;
 use rand::Rng;
 use serde_json::Value;
 
-mod configuration;
+pub mod configuration;
 
 
 pub struct Helpers {

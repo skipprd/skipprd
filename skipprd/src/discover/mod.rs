@@ -299,7 +299,7 @@ impl AnalyseSchema {
         data_type
     }
 
-    fn check_string_or_int(&self, value: &mut String) -> String {
+    pub fn check_string_or_int(&self, value: &mut String) -> String {
         let mut data_type = get_type(value);
 
         if value.parse::<i32>().is_ok() && (&mut value.parse::<i32>().unwrap().to_string() == value) {

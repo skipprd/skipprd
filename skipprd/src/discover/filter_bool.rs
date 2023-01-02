@@ -128,11 +128,11 @@ pub fn parse_bool(value: &mut String) -> Result<bool, i32> {
     if ret == -1 {
         Err(ret)
     } else {
-        return Ok(castToBool(ret))
+        return Ok(cast_to_bool(ret))
     }
 }
 
-fn castToBool(num: i32) -> bool {
+fn cast_to_bool(num: i32) -> bool {
 
     return num.to_string().parse::<bool>().is_ok();
 

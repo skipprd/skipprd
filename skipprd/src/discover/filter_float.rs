@@ -232,7 +232,7 @@ pub fn parse_float(value: &mut String) -> Option<f64> {
 
 }
 
-fn castToFloat(num: String) -> f64 {
+fn cast_to_float(num: String) -> f64 {
 
     return num.parse::<f64>().unwrap();
 
