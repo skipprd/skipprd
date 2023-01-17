@@ -1,15 +1,25 @@
 mod arr;
 
-
-use std::collections::HashMap;
-use std::fs::File;
-use std::io;
+use std::any::Any;
+use std::borrow::BorrowMut;
+use arrow::datatypes::{Schema, SchemaRef};
+use arrow::error::ArrowError;
+use arrow::json::ReaderBuilder;
+use arrow::record_batch::{RecordBatch, RecordBatchOptions};
+use std::collections::{HashMap, HashSet};
+use std::fmt::Debug;
+use std::fs::{create_dir, File, OpenOptions};
+use std::{fs, io};
 use std::io::prelude::*;
+use std::io::{BufReader, BufWriter, IoSlice};
 use std::ops::{Add, Sub};
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+use std::process::exit;
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
+
 use flate2::read::GzDecoder;
 use futures::executor::block_on;
 use glob::glob_with;
@@ -24,141 +34,33 @@ use crate::discover::AnalyseSchema;
 use crate::discover::Metadata;
 // mod converters;
 // use self::converters::avro_parquet::AvroSchema;
+mod cli;
+use crate::cli::Cli;
+use clap::{Args, Parser, Subcommand};
+use parquet::arrow::ArrowWriter;
+
+mod ingest;
+use crate::ingest::ingest_fast::{fast_path_ingest, fast_path_ingest_buf, IngestRecord};
 
 mod serdes;
-use crate::serdes::json::SerderJson;
+use crate::serdes::json::SerdeJson;
+use crate::serdes::parquet::SerdeParquet;
 
 mod plugins;
 use crate::plugins::s3_inventory::DataSourceS3InventoryPlugin;
 
 // use crate::helpers::Config
 
-
-use serde_json::{Value};
-
-
-pub fn untyped_example() -> HashMap<String, Metadata> {
-    // Some JSON input data as a &str. Maybe this comes from the user.
-    let data = r#"
-    {
-        "rider_id":"10e974bf-4a43-305a-9e39-1636c43cb22a",
-        "bike_id":"8b86f753-05f8-3254-aba6-739188a3c0b6",
-        "isbn":"9407496597",
-        "trip":{
-            "start_temprature":0,
-            "end_temprature":2
-            },
-        "last_crank":[2,15,33,45,56,57,47,36,19,5],
-        "crank_torques":[[2,15,33,45,56,57,47,36,19,5],[1,13,33,48,56,58,45,35,15,6]],
-        "hardware":{
-            "manufacturer":"Beier, Emmerich and Rutherford",
-            "model":"synergize ubiquitous e-commerce",
-            "maintenance":{
-                "last_rebuild":"20\/04\/2010",
-                "last_service":"12\/07\/1973"
-            }
-        },
-        "metadata":{
-            "rcvd_time":1615474895,
-            "sent_time":1615474930,
-            "prcd_micro_time":1615474853.999185,
-            "tags":[
-                {
-                    "name":"type",
-                    "value":"trip"
-                },
-                {
-                    "name":"auto",
-                    "value":false
-                }
-            ]
-        }
-    }
-    "#;
-
-    // let data = r#"
-    //     {
-    //         "name": "John Doe",
-    //         "age": 43,
-    //         "phones": [
-    //             "+44 1234567",
-    //             "+44 2345678"
-    //         ],
-    //         "metadata": {
-    //             "tags": [],
-    //         }
-    //     }"#;
-
-    // Parse the string of data into serde_json::Value.
-    // let mut v: Value = serde_json::from_str(data).unwrap();
-    let mut vs: Vec<Value> = SerderJson::deserialize(data.to_string());
-
-    let mut foo: AnalyseSchema = AnalyseSchema { i: 0};
-
-    // let mut newMeta = Metadata {
-    //     count: 0,
-    //     types: HashMap::new(),
-    //     parent_type: "".to_string(),
-    //     fields: Box::new(Default::default()),
-    //     date_candidate: None,
-    //     evolution: Box::new(Default::default()),
-    //     enabled: true,
-    //     determined_type: "".to_string(),
-    // };
-
-    // let mut newMeta: &mut Option<HashMap<String, &mut Metadata>> = &mut None;
-
-    let newMeta =  Metadata {
-        count: 0,
-        types: HashMap::new(),
-        parent_type: "".to_string(),
-        fields: Box::new(Default::default()),
-        date_candidate: None,
-        evolution: Box::new(Default::default()),
-        enabled: true,
-        determined_type: "".to_string(),
-    };
-
-    let mut metadata = HashMap::new();
-    metadata.insert("skpr-time".to_string(), newMeta);
-    let mut newMeta: &mut HashMap<String, Metadata> = &mut metadata;
-
-    for mut v in vs {
-        // AnalyseSchema::analyse_payload(&mut foo, &mut v, &mut newMeta);
-    }
-
-    // println!("Rider is types: {:?}", newMeta.get_mut("rider_id").unwrap().types);
-    // println!("last_crank is types: {:?}", newMeta.get_mut("last_crank").unwrap().types);
-    // println!("Hardware is types: {:?}", newMeta.get_mut("hardware").unwrap().types);
-    // println!("Hardware.maintenance is types: {:?}", newMeta.get_mut("hardware").unwrap().fields.get_mut("maintenance").unwrap().types);
-    // println!("Metadata is types: {:?}", newMeta.get_mut("metadata").unwrap().types);
-    // println!("Metadata.rcvd_time is types: {:?}", newMeta.get_mut("metadata").unwrap().fields.get_mut("rcvd_time").unwrap().types);
-    // println!("Metadata.tags is types: {:?}", newMeta.get_mut("metadata").unwrap().fields.get_mut("tags").unwrap().types);
-
-    return newMeta.clone();
-
-    // println!("Phones is a array {}", v["phones"].is_array());
-    // println!("Phone is a array {}", v["phones"][0].is_array());
-    // println!("Phones is a string {}", v["phones"].is_string());
-    // println!("Phone is a string {}", v["phones"][0].is_string());
-
-    // Access parts of the data by indexing with square brackets.
-    // println!("Age as a Rust String {}", v["age"].to_string());
-    // println!("Phones as a Rust String {}", v["phones"].to_string());
-    // println!("Phone as a Rust String {}", v["phones"][0].to_string());
-    // println!("Name as a Rust String {}", v["name"].to_string());
-
-    // Ok(())
-}
-
-#[test]
-fn test_untyped_example() {
-    assert_eq!(untyped_example().get_mut("phones").unwrap().determined_type, "".to_string());
-}
-
+use crate::discover::arrow_schema::convert_skippr_to_arrow;
+use crate::helpers::configuration::Config;
+use crate::helpers::Helpers;
+use serde_json::Value;
+use tokio::fs::{remove_file};
 
 fn main() {
+    Config::init();
 
+    // let args = Cli::parse();
 
     let now = Instant::now();
 
@@ -170,26 +72,224 @@ fn main() {
     println!("Runtime: {} seconds", now.elapsed().as_secs());
 }
 
+
 #[tokio::main]
 async fn blah() -> Result<(), String> {
+    // let default_messages = Arc::new(Mutex::new(HashMap::new()));
 
     let ingestMsgCount = Arc::new(Mutex::new(0));
     let ingestMsgCountClone = ingestMsgCount.clone();
 
+    let mut counter_lock = ingestMsgCountClone.lock().unwrap();
+
+
+    let mut newMeta: HashMap<String, Metadata> = match File::open("metadata.json") {
+        Ok(schema_file) => {
+
+            println!("Found Skippr metadata");
+
+            let file = File::open("metadata.json").unwrap();
+            let reader = BufReader::new(file);
+
+            let u = serde_json::from_reader(reader).unwrap();
+
+            u
+        },
+        Err(e) => {
+
+            println!("Analysing data and generating Skippr metadata");
+
+            let analyseThread = thread::spawn(move || {
+                let options = MatchOptions {
+                    case_sensitive: false,
+                    require_literal_separator: false,
+                    require_literal_leading_dot: false,
+                };
+
+                let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
+
+                let mut hasAnalysed = false;
+
+                let mut newMeta: HashMap<String, Metadata> = HashMap::new();
+
+                let mut arrowSchema: Result<Schema, ArrowError> = Ok(Schema::empty());
+
+                let mut schema_ref = Arc::new(Schema::empty());
+
+                while !hasAnalysed {
+                    for entry in glob_with("/tmp/ddd/s3-*", options).expect("Failed to read glob pattern") {
+                        if !hasAnalysed {
+                            match entry {
+                                Ok(path) => {
+                                    let mut input_file = File::open(path.clone()).unwrap();
+
+                                    println!("Anakysing path: {}", path.to_str().unwrap());
+
+                                    let mut buf_reader = BufReader::new(input_file);
+
+                                    newMeta = AnalyseSchema::infer_json_schema(&mut foo, &mut buf_reader, Some(3)).unwrap();
+
+                                    // println!("Skippr schema: {:?}", newMeta);
+
+                                    arrowSchema = convert_skippr_to_arrow(&mut newMeta.get_mut(&"example_ns".to_string()).unwrap().fields);
+
+                                    // let json = serde_json::to_string_pretty(&arrowSchema).unwrap();
+                                    // eprintln!("Schema:");
+                                    // println!("{}", json);
+
+                                    println!("Arrow schema: {:?}", arrowSchema);
+
+                                    // let schema_ref = Arc::new(arrowSchema.unwrap());
+                                    schema_ref = Arc::new(arrowSchema.unwrap());
+                                    // schema_ref = arrowSchema.unwrap();
+
+                                    hasAnalysed = true;
+                                },
+                                Err(e) => println!("{:?}", e),
+                            }
+                        }
+                    }
+
+                    sleep(Duration::from_secs(1));
+                }
+
+
+                let file = OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .append(true)
+                    .open(&"metadata.json".to_string())
+                    .unwrap();
+
+                let writer = BufWriter::new(file);
+
+                let u = serde_json::to_writer(writer, &newMeta);
+
+                newMeta
+            });
+
+            analyseThread.join().unwrap()
+        }
+    };
+
+
+    let mut newMetaThread2 = newMeta.clone();
+
+
+
     use std::time::Duration;
 
     let mut planner = periodic::Planner::new();
-    planner.add(move||
-                    {
-                        let mut counter_lock = ingestMsgCount.lock().unwrap();
-                        println!("Ingested Messages: {}", *counter_lock);
-                        *counter_lock = 0;
-                    },
+    planner.add(
+        move || {
+            let mut counter_lock = ingestMsgCount.lock().unwrap();
+            println!("Ingested Messages: {}", *counter_lock);
+            *counter_lock = 0;
+        },
         periodic::Every::new(Duration::from_secs(10)),
     );
     planner.start();
 
-    thread::spawn(move|| {
+
+
+    thread::spawn(move || {
+
+        let options = MatchOptions {
+            case_sensitive: false,
+            require_literal_separator: false,
+            require_literal_leading_dot: false,
+        };
+
+        let mut output_files: HashMap<String, File> = HashMap::new();
+        let mut output_buf: HashMap<String, IoSlice> = HashMap::new();
+
+        let mut write_len: usize = 0;
+
+        while true {
+            for entry in glob_with("/tmp/ddd/s3-*", options).expect("Failed to read glob pattern") {
+                match entry {
+                    Ok(path) => {
+                        // println!("{}", path.display());
+
+                        let mut input_file = File::open(path.clone()).unwrap();
+
+                        let mut buf_reader = BufReader::new(input_file);
+
+                        let value_iter = fast_path_ingest_buf(&mut buf_reader);
+
+                        for record in value_iter {
+
+                            // println!("record: {:?}", &record.unwrap());
+
+                            match record {
+                                Ok(record) => {
+
+                                    // let mut ingest_record = IngestRecord {
+                                    //     source_namespace: "".to_string(),
+                                    //     source_partition: "".to_string(),
+                                    //     skpr_event_ts: 0,
+                                    //     skpr_namespace: "example_ns".to_string(),
+                                    //     skpr_partition: "".to_string(),
+                                    //     record: Value::Null,
+                                    // };
+
+                                    if output_files.get_mut(&"example_ns".to_string()).is_none() {
+                                        let f = OpenOptions::new()
+                                            .create(true)
+                                            .write(true)
+                                            .append(true)
+                                            .open(&"output/example_ns".to_string())
+                                            .unwrap();
+
+                                        output_files.insert("example_ns".to_string(), f);
+                                    }
+
+                                    let msg = fast_path_ingest(&record, &mut newMeta.get_mut(&"example_ns".to_string()).unwrap().fields);
+
+                                    let buf_str = msg.to_string() + "\n";
+
+                                    write_len += output_files.get_mut(&"example_ns".to_string()).unwrap().write(&buf_str.as_bytes()).unwrap();
+
+                                    if write_len > 1024 * 1024 * 10 {
+                                        write_len = 0;
+
+                                        // output_files.get(&"example_ns".to_string()).unwrap().flush();
+                                        output_files.remove(&"example_ns".to_string()).unwrap(); // close
+
+                                        fs::rename(&"output/example_ns".to_string(), "output/example_ns_done_".to_string() + &Helpers::random_str(12)).unwrap();
+                                    }
+
+                                },
+                                Err(error) => println!("Error in record: {:?}", error)
+                            }
+                        }
+
+                        std::fs::remove_file(path).unwrap();
+                    },
+                    Err(e) => println!("{:?}", e),
+                }
+
+                // for (k, mut file) in &output_files {
+                    // println!("Flushing file");
+                    // file.flush().unwrap();
+                // }
+            }
+            sleep(Duration::from_secs(1));
+        }
+
+
+    });
+
+
+    thread::spawn(move || {
+
+        let mut arrowSchema: Result<Schema, ArrowError> = Ok(Schema::empty());
+
+        let mut schema_ref = Arc::new(Schema::empty());
+
+        arrowSchema = convert_skippr_to_arrow(&mut newMetaThread2.get_mut(&"example_ns".to_string()).unwrap().fields);
+
+        schema_ref = Arc::new(arrowSchema.unwrap());
 
         let options = MatchOptions {
             case_sensitive: false,
@@ -198,45 +298,32 @@ async fn blah() -> Result<(), String> {
         };
 
         while true {
-            for entry in glob_with("/tmp/ddd/s3-*", options).expect("Failed to read glob pattern") {
+            for entry in glob_with("output/*done*", options).expect("Failed to read glob pattern") {
                 match entry {
                     Ok(path) => {
-                        // println!("{}", path.display());
-                        let mut stdin = File::open(path).unwrap();
+                        println!("Finalising output file {}", path.display());
 
-                        let d = GzDecoder::new(stdin);
-                        // .expect("couldn't decode gzip stream");
+                        schema_ref = SerdeParquet::serialize(path.clone(), schema_ref);
 
-                        for line in io::BufReader::new(d).lines() {
-                            // println!("{}", line.unwrap());
-                            let mut counter_lock = ingestMsgCountClone.lock().unwrap();
-
-                            *counter_lock = *counter_lock + 1;
-                        }
+                        std::fs::remove_file(path).unwrap();
                     },
                     Err(e) => println!("{:?}", e),
+
                 }
             }
             sleep(Duration::from_secs(1));
         }
-
     });
+        // .join()
+        // .expect("Buffer thread failed");
+
 
     let mut ds3 = block_on(DataSourceS3InventoryPlugin::new());
 
-    println!("1");
     ds3.sync().await;
-    // sleep(Duration::from_secs(30));
+    // sleep(Duration::from_secs(60));
+
     Ok(())
 
 }
-
-// fn skippr_emit(
-//     payload: char,
-//     offset: char,
-//     namespace: char,
-//     partition: char
-// ) {
-//
-// }
 

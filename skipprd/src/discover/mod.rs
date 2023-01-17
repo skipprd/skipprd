@@ -1,14 +1,22 @@
+use std::any::Any;
+use std::borrow::BorrowMut;
+use std::collections::{BTreeMap, HashMap};
+use std::fs::{File, metadata};
+use std::io::{Read, BufReader};
+use std::sync::Arc;
+use arrow::array::BinaryArray;
+use arrow::datatypes::{Schema};
+use arrow::error::ArrowError;
+use arrow::json::reader::ValueIter;
+use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 
 
-use std::collections::HashMap;
-
-
-
-// use std::fs::{Metadata as OtherMetadata, Metadata};
 use chrono::{DateTime, TimeZone, Utc};
+use serde_derive::{Deserialize, Serialize};
 
 
 use serde_json::Value;
+use tokio::count;
 
 
 // use std::simd::usizex2;
@@ -22,9 +30,13 @@ mod filter_bool;
 use crate::discover::filter_bool::parse_bool;
 mod filter_parse_int;
 
+pub mod arrow_schema;
+use crate::discover::arrow_schema::convert_skippr_to_arrow;
+use crate::ingest::ingest_fast::IngestRecord;
+use crate::serdes::json::SerdeJson;
 
-#[derive(Default)]
-#[derive(Clone)]
+
+#[derive(Default, Debug, Clone, Deserialize, Serialize)]
 pub struct DateCandidate {
     check_count: i32,
     valid_count: i32,
@@ -32,14 +44,18 @@ pub struct DateCandidate {
     format: String
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Evolution {
     type_string: String,
     new_value: String,
     sovled: bool,
 }
 
-#[derive(Clone)]
+pub struct Iter {
+    next: Option<Metadata>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Metadata {
     pub(crate) count: i32,
     pub(crate) types: HashMap<String, u32>,
@@ -48,7 +64,43 @@ pub struct Metadata {
     pub(crate) date_candidate: Option<DateCandidate>,
     pub(crate) evolution: Box<HashMap<String, Evolution>>,
     pub(crate) enabled: bool,
-    pub(crate) determined_type: String
+    pub(crate) determined_type: String,
+    pub(crate) determined_type_values: String
+}
+
+
+impl Iterator for Iter  {
+    type Item= &'a Metadata;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next.take().map(|node| {
+            self.next = node.next.as_deref_mut();
+            &mut node.elem
+        })
+    }
+}
+
+impl Metadata {
+    #[inline]
+    #[must_use]
+    pub fn new() -> Result<Self, String> {
+        Ok(Self {
+            count: 0,
+            types: Default::default(),
+            parent_type: "".to_string(),
+            fields: Box::new(Default::default()),
+            date_candidate: None,
+            evolution: Box::new(Default::default()),
+            enabled: true,
+            determined_type: "".to_string(),
+            determined_type_values: "".to_string(),
+        })
+    }
+
+    pub fn iter_mut(&self) -> IterMut<'_> {
+        IterMut { next: self.head.as_deref_mut() }
+    }
+
 }
 
 pub struct AnalyseSchema {
@@ -65,14 +117,14 @@ const DATE_FIELD_VALIDATION_MIN_SAMPLE: i32 = 100;
 fn get_type(value: &mut String) -> String {
 
     match value.parse::<i32>() {
-        Ok(bool) => {
+        Ok(_bool) => {
             return "integer".to_string();
         },
         Err(..) => {}
     }
 
     match value.parse::<i64>() {
-        Ok(bool) => {
+        Ok(_bool) => {
             return "long".to_string();
         },
         Err(..) => {}
@@ -80,24 +132,24 @@ fn get_type(value: &mut String) -> String {
 
     let v: Value = serde_json::from_str(value).unwrap_or_default();
     match v.is_array().then_some(true) {
-        Some(bool) => {
+        Some(_bool) => {
             return "array".to_string();
         },
         None => {}
     }
 
     match v.is_object().then_some(true) {
-        Some(bool) => {
+        Some(_bool) => {
             return "array".to_string();
         },
         None => {}
     }
 
     match parse_bool(value) {
-        Err(i32) => {
+        Err(_i32) => {
             // println!("Not float");
         }
-        Ok(bool) => {
+        Ok(_bool) => {
             // println!("Is float");
             return "bool".to_string();
         }
@@ -105,26 +157,131 @@ fn get_type(value: &mut String) -> String {
     }
 
     match value.parse::<String>() {
-        Ok(bool) => {
+        Ok(_bool) => {
             return "string".to_string();
         },
-        Err(String) => {}
+        Err(_String) => {}
     }
 
     "unknown".to_string()
 
+
 }
+
 
 const min_discovery_records: i32 = 100;
 
 impl AnalyseSchema {
 
+    // pub fn validate_schema<R: Read>(
+    //     &mut self,
+    //     reader: &mut BufReader<R>,
+    //     schema_ref: Arc<Schema>,
+    // )
+    // // -> Result<bool, String> {
+    // {
+    //     let value_iter = ValueIter::new(reader, Some(0));
+    //
+    //     for record in value_iter {
+    //
+    //
+    //         let batch = RecordBatch::try_new_with_options(
+    //             schema_ref,
+    //             vec![Arc::new(BinaryArray::from(record.unwrap().to_string().as_bytes().to_vec()))],
+    //             &RecordBatchOptions::new().with_match_field_names(true)
+    //         ).unwrap();
+    //
+    //         // match batch.t {
+    //         //
+    //         // }
+    //
+    //
+    //         // let mut vs: Vec<Value> = SerdeJson::deserialize(record.unwrap().to_string());
+    //         // // let mut vs: Vec<Value> = serde_json::from_str(&line.unwrap()).unwrap();
+    //         //
+    //         // for mut v in vs {
+    //         //     println!("Discovering schema for {}", v);
+    //         // }
+    //     }
+    //
+    // }
+
+    pub fn infer_json_schema<R: Read>(
+        &mut self,
+        reader: &mut BufReader<R>,
+        max_read_records: Option<usize>,
+    ) -> Result<HashMap<std::string::String, Metadata>, ArrowError> {
+        self.infer_json_schema_from_iterator(ValueIter::new(reader, max_read_records))
+    }
+
+    pub fn infer_json_schema_from_iterator<I>(&mut self, value_iter: I) -> Result<HashMap<std::string::String, Metadata>, ArrowError>
+        where
+            I: Iterator<Item = Result<Value, ArrowError>>,
+    {
+
+        let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
+
+        let newMeta = Metadata::new().unwrap();
+
+        let mut metadata = HashMap::new();
+        // metadata.insert("skpr-time".to_string(), newMeta);
+        metadata.insert("example_ns".to_string(), newMeta);
+        let mut newMeta: &mut HashMap<String, Metadata> = &mut metadata;
+
+
+        for record in value_iter {
+
+            let string = record.unwrap().to_string();
+
+            let mut vs: Vec<Value> = SerdeJson::deserialize(string);
+            // let mut vs: Vec<Value> = serde_json::from_str(&line.unwrap()).unwrap();
+
+            for mut v in vs {
+
+                // println!("Discovering schema for {}", v);
+
+                match v.type_id() {
+                    Value => {
+                        let mut ingest_record = IngestRecord {
+                            source_namespace: "".to_string(),
+                            source_partition: "".to_string(),
+                            skpr_event_ts: 0,
+                            skpr_namespace: "example_ns".to_string(),
+                            skpr_partition: "".to_string(),
+                            record: v,
+                        };
+
+                        AnalyseSchema::analyse_payload(
+                            &mut foo,
+                            &mut ingest_record.record,
+                            &mut newMeta
+                                .get_mut(&ingest_record.skpr_namespace)
+                                .unwrap()
+                                .fields,
+                        );
+                    }
+                    value => {
+                        return Err(ArrowError::ParseError(format!(
+                            "Expected serde Value, found {:?}",
+                            value
+                        )));
+                    }
+                };
+            }
+        }
+
+        AnalyseSchema::determine_field_types(&mut newMeta.get_mut(&"example_ns".to_string()).unwrap().fields, None);
+
+        // let metadata = newMeta.clone();
+
+        Ok(newMeta.clone())
+    }
 
     // pub fn analyse_payload(&mut self, message: &HashMap<String, String>, metadata: &mut HashMap<String, Metadata>) {
     pub fn analyse_payload(&mut self, message: &Value, metadata: &mut HashMap<String, Metadata>) {
         self.i += 1;
 
-        let mut helpers = Helpers { clean_field_cache: Default::default() };
+        // let mut helpers = Helpers { clean_field_cache: Default::default() };
 
         for (field, value ) in message.as_object().unwrap() {
             self.init_discovered_type(metadata, field);
@@ -141,7 +298,7 @@ impl AnalyseSchema {
                 }
             }
 
-            let field = helpers.clean_field_name(field.to_string());
+            let field = Helpers::clean_field_name(field.to_string());
 
             self.analyse_field(&field, &mut jsonValue, metadata);
         }
@@ -161,11 +318,19 @@ impl AnalyseSchema {
 
         if value.is_object() {
             for (sub_field, sub_value) in value.as_object().unwrap() {
-                let _sf = sub_field.as_str();
                 let mut sv = sub_value.clone();
                 // let mut svv: Value = serde_json::from_str(sv.unwrap()).unwrap();
                 self.analyse_field(sub_field, &mut sv, metadata.get_mut(field).unwrap().fields.as_mut());
             }
+        }
+
+        if value.is_array() {
+            let mut i = 0;
+                for sub_value in value.as_array().unwrap() {
+                    let mut sv = sub_value.clone();
+                    self.analyse_field(&i.to_string(), &mut sv, metadata.get_mut(field).unwrap().fields.as_mut());
+                    i += 1;
+                }
         }
 
 
@@ -186,44 +351,57 @@ impl AnalyseSchema {
         let mut data_type = self.get_logical_type(field, value, metadata, true);
 
         if data_type == "array" && value.is_array() {
-            let mut type_count = HashMap::new();
 
+            // let is_sequential = Helpers::is_sequential_array_keys(value.as_array().unwrap());
             let is_sequential = Helpers::is_sequential_array_keys(value.as_array().unwrap());
 
-            if value.as_object().is_some() {
-                for (sub_field, sub_value) in value.as_object().unwrap() {
-                    let mut sv: Value = serde_json::from_str(sub_field).unwrap();
-                    let logical_type = self.get_logical_type(sub_field, &mut sv, metadata, false);
+            println!("{} is {} sequential: {:?}", field, is_sequential, value);
 
-                    type_count.insert(logical_type, "hit");
+            data_type = "array".to_string();
 
-                    // Special handling of bools in array/map of ints
-                    // [1,2,3] may discover as schema [bool, int, int] and therefore
-                    // parent field resolve type as `record`.
-                    // When in fact we'd want to discover schema as [int, int, int] and
-                    // parent field resolve as `array`.
-                    if type_count.len() == 2 {
-                        if type_count.contains_key("integer") && type_count.contains_key("boolean") {
-                            type_count.remove("boolean");
+            // if is_sequential {
+            //     // array of sequential int keys is an avro array
+            //     data_type = "array".to_string();
+            // } else if !is_sequential {
+            //     // associative array is an avro map
+            //     data_type = "map".to_string();
+            // }
+        } else {
+            if data_type == "array" && value.is_object() {
+                let mut type_count = HashMap::new();
+
+                if value.as_object().is_some() {
+                    for (sub_field, sub_value) in value.as_object().unwrap() {
+                        let mut sv: Value = serde_json::from_str(&sub_value.to_string()).unwrap();
+                        let logical_type = self.get_logical_type(sub_field, &mut sv, metadata, false);
+
+                        type_count.insert(logical_type, "hit");
+
+                        // Special handling of bools in array/map of ints
+                        // [1,2,3] may discover as schema [bool, int, int] and therefore
+                        // parent field resolve type as `record`.
+                        // When in fact we'd want to discover schema as [int, int, int] and
+                        // parent field resolve as `array`.
+                        if type_count.len() == 2 {
+                            if type_count.contains_key("integer") && type_count.contains_key("boolean") {
+                                type_count.remove("boolean");
+                            }
                         }
                     }
                 }
-            }
 
-            // Multiple type within array values?
-            // Must be a record then.
-            if type_count.len() > 1 {
-                data_type = "record".to_string();
+                // Multiple type within array values?
+                // Must be a record then.
+                if type_count.len() > 1 {
+                    data_type = "record".to_string();
 
-                // Array of Arrays? Use a Record for the parent.
-            } else if type_count.contains_key("array") {
-                data_type = "record".to_string();
-            } else if is_sequential {
-                // array of sequential int keys is an avro array
-                data_type = "array".to_string();
-            } else if !is_sequential {
-                // associative array is an avro map
-                data_type = "map".to_string();
+                    // Array of Arrays? Use a Record for the parent.
+                } else if type_count.contains_key("array") {
+                    data_type = "record".to_string();
+                } else {
+                    // associative array is an avro map
+                    data_type = "map".to_string();
+                }
             }
         }
 
@@ -240,16 +418,16 @@ impl AnalyseSchema {
 
         let mut data_type = get_type(value);
 
-        if data_type == "string" || data_type == "integer" || data_type == "double" {
+        if data_type == "string".to_string() || data_type == "integer".to_string() || data_type == "double".to_string() {
             // String really an int?
             data_type = self.check_string_or_int(value);
 
             if allow_date {
                 let mut valid_timestamp = false;
 
-                if data_type == "integer" {
+                if data_type == "integer".to_string() {
                     valid_timestamp = self.is_valid_timestamp(value);
-                } else if data_type == "long" {
+                } else if data_type == "long".to_string() {
                     valid_timestamp = self.is_valid_timestamp(value);
                 }
 
@@ -266,7 +444,7 @@ impl AnalyseSchema {
             // }
         }
 
-        if data_type == "string" && allow_date {
+        if data_type == "string".to_string() && allow_date {
             // Limit number of check type attempts for data as expensive operation.
 
             if metadata.get_mut(field).unwrap().date_candidate.as_mut().is_some() {
@@ -291,7 +469,7 @@ impl AnalyseSchema {
         //     data_type = "boolean".to_string();
         // }
 
-        if data_type == "NULL" { // most systems won't support null
+        if data_type == "NULL".to_string() { // most systems won't support null
             data_type = "string".to_string();
         }
         // @todo - logical interpretation based on field name
@@ -431,7 +609,7 @@ impl AnalyseSchema {
     pub fn apply_evolution_factory(
         &self,
         field: &mut std::string::String,
-        value: &mut String,
+        _value: &mut String,
         evolution: String,
         data_type: &mut String,
         new_value: String,
@@ -468,16 +646,7 @@ impl AnalyseSchema {
 
     fn init_discovered_type(&self, metadata: &mut HashMap<String, Metadata>, field: &String) {
        if metadata.get(field).is_none() {
-            let newMeta = Metadata {
-                count: 0,
-                types: HashMap::new(),
-                parent_type: "".to_string(),
-                fields: Box::new(Default::default()),
-                date_candidate: None,
-                evolution: Box::new(Default::default()),
-                enabled: true,
-                determined_type: "".to_string(),
-            };
+            let newMeta = Metadata::new().unwrap();
 
             metadata.insert(field.clone(), newMeta);
         }
@@ -539,4 +708,230 @@ impl AnalyseSchema {
         }
     }
 
+    pub fn determine_field_types(metadata: &mut HashMap<String, Metadata>, parent_type: Option<String>) {
+        let demoted_types = vec!["boolean", "date", "timestamp", "timestamp_milli"];
+
+        for (field_name, field) in metadata.iter_mut() {
+            // Useful for field evolution logic for maps, which only support one sub-field type
+            if let Some(parent_type) = parent_type {
+                *field.parent_type = parent_type.to_string();
+            }
+
+            if field.determined_type == "".to_string() {
+                let mut highest_type = "".to_string();
+                let mut highest_count = 0;
+
+                if field.types.len() != 0 {
+                    // Don't allow NULL type if we discovered any other types
+                    if field.types.len() > 1 {
+                        field.types.remove("NULL");
+                    }
+
+                    // force to record type over map or array if ever present
+                    if field.types.contains_key("record") {
+                        *field.determined_type = "record".to_string();
+                    } else {
+                        for (data_type, data_type_count) in field.types.iter() {
+                            if highest_count < *data_type_count {
+                                // Prefer primitive types to logical types or types
+                                // that cause frequent false positives (demoted types).
+                                // - if there's multiple discovered types
+                                // - and the most common type is a demoted type
+                                // - select the next most common, non-date type
+                                if field.types.len() == 1
+                                    || (field.types.len() > 1 && !demoted_types.contains(&data_type.as_str())) {
+                                    highest_type = data_type.to_string();
+                                    highest_count = *data_type_count;
+                                }
+                            }
+                        }
+
+                        *field.determined_type = highest_type;
+                    }
+                }
+            }
+
+            if field.determined_type != ""
+                && vec!["map", "array", "record"].contains(&field.determined_type.as_str()) {
+                if !field.fields.len() > 0 {
+                    if field.determined_type == "array"
+                        || field.determined_type == "map" {
+
+                        *field.determined_type_values = "".to_string();
+
+                        // Ignore sub-fields for Avro array, the values are just enumerated, their not fields themselves.
+                        // Else we'd create a field list with string keys for each array value
+                        // e.g. [1,5,3,7,4,3,5]
+                        // would incorrectly become ['a0' => 1, 'a1' => 5, ...]
+
+                        let mut type_count = BTreeMap::new();
+
+                        // @todo - not intended to build avro type array here
+                        //         however, 'array' type is a special case... how to handle?
+
+                        // Get avro arrays items primitive data type
+                        for (sub_field, sub_value) in field.fields.iter() {
+                            for (data_type, data_type_count) in sub_value.types.iter() {
+                                // Prefer primitive types to logical types or types
+                                // that cause frequent false positives (demoted types).
+                                // - if there's multiple discovered types
+                                // - and the most common type is a demoted type
+                                // - select the next most common, non-date type
+//                                if (!in_array($dataType, $demotedTypes)) {
+                                if type_count.len() <= 1
+                                    || (type_count.len() > 1 && !demoted_types.contains(&data_type.as_str())) {
+                                    if type_count.get(data_type).is_none() {
+                                        type_count.insert(data_type.to_string(), *data_type_count);
+                                    } else {
+                                        *type_count.get_mut(data_type).unwrap() += data_type_count;
+                                    }
+                                }
+                            }
+                        }
+
+                        let mut values_type = type_count
+                            .iter()
+                            .max_by(|a, b| a.1.cmp(&b.1))
+                            .map(|(k, _v)| k)
+                            .unwrap();
+
+                        println!("HIGHEST TYPE: {}", values_type);
+
+                        *field.determined_type_values = values_type.to_string();
+
+                        if field.determined_type == "array".to_string() {
+                            field.fields.clear();
+                        }
+
+                    }
+
+                    println!("Field {} determined type is {}", field_name, field.determined_type);
+
+                    if field.determined_type != "array".to_string() {
+                        let fo = "";
+                        AnalyseSchema::determine_field_types(
+                            &mut field.fields,
+                            Some(&field.determined_type)
+                        );
+                    }
+                }
+
+
+            }
+
+
+        }
+
+        // println!("Metadata {:?}", metadata);
+
+    }
+}
+
+
+
+#[cfg(test)]
+mod tests {
+
+    use std::fs::{File, OpenOptions};
+    use std::io::{BufReader, Seek, Write};
+    use std::ops::Index;
+    use parquet::data_type::AsBytes;
+    use serde_json::{Value};
+    use crate::discover::AnalyseSchema;
+
+    #[test]
+    fn test_discover_arrays_maps() {
+
+        let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
+
+        let field = r#"
+        {
+                "abc1": [2, 3, 4, 6, 7, 4, 3, 6, 7, 9]
+        }"#;
+
+        // let field = r#"
+        // {
+        //         "abc1": [2, 3, 4, 6, 7, 4, 3, 6, 7, 9],
+        //         "abc2": ["a", "b", "c"],
+        //         "abc3": {"0": "a", "1": "b", "2": "c"},
+        //         "abc4": {"1": "a", "0": "b", "2": "c"},
+        //         "abc5": {"a": 123, "b": 456, "c": 789},
+        //         "abc6": ["abc", 123, null, 123.456]
+        // }"#;
+
+        let json: Value = serde_json::from_str(field).unwrap();
+
+        let record_line = serde_json::to_string(&json).unwrap();
+
+        let mut test_file = File::create("test-file").unwrap();
+
+        test_file.write(&record_line.as_bytes()).unwrap();
+
+        test_file.rewind().unwrap();
+
+        let mut in_file = File::open("test-file").unwrap();
+
+        let mut buf_reader = BufReader::new(in_file);
+
+        let newMeta = AnalyseSchema::infer_json_schema(&mut foo, &mut buf_reader, Some(1)).unwrap();
+
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc1").unwrap().determined_type, "array");
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc1").unwrap().determined_type_values, "integer");
+        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc2").unwrap().determined_type, "array");
+        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc3").unwrap().determined_type, "array");
+        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc4").unwrap().determined_type, "array");
+        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc5").unwrap().determined_type, "map");
+        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc5").unwrap().determined_type_values, "integer");
+        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc6").unwrap().determined_type, "record");
+
+    }
+
+    #[test]
+    fn test_discover_demoted_types() {
+
+        let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
+
+        let field = r#"
+        {
+                "boolean": [1, 0, 1, 1],
+                "boolean2": [false],
+                "date": ["2022-08-08", "2022-08-09"],
+                "timestamp": [1660331829, 1660331829],
+                "timestamp_milli": [1660331874804, 1660331874805],
+                "abc3": [0, 1, 2, 3, 4],
+                "abc4": [0, 1, 2, 3]
+        }"#;
+
+        let json: Value = serde_json::from_str(field).unwrap();
+
+        let record_line = serde_json::to_string(&json).unwrap();
+
+        let mut test_file = File::create("test-file").unwrap();
+
+        test_file.write(&record_line.as_bytes()).unwrap();
+
+        test_file.rewind().unwrap();
+
+        let mut in_file = File::open("test-file").unwrap();
+
+        let mut buf_reader = BufReader::new(in_file);
+
+        let newMeta = AnalyseSchema::infer_json_schema(&mut foo, &mut buf_reader, Some(1)).unwrap();
+
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("boolean").unwrap().determined_type, "array");
+        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("boolean").unwrap().determined_type_values, "boolean");
+        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("boolean2").unwrap().determined_type, "array");
+        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("boolean2").unwrap().determined_type_values, "boolean");
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("date").unwrap().determined_type, "array");
+        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("date").unwrap().determined_type_values, "date");
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("timestamp").unwrap().determined_type, "array");
+        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("timestamp").unwrap().determined_type_values, "timestamp");
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("timestamp_milli").unwrap().determined_type, "array");
+        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("timestamp_milli").unwrap().determined_type_values, "timestamp_milli");
+        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc3").unwrap().determined_type, "array");
+        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc3").unwrap().determined_type_values, "integer");
+        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc4").unwrap().determined_type, "array");
+        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc4").unwrap().determined_type_values, "integer");
+
+    }
 }

@@ -137,13 +137,13 @@ pub fn parse_float(value: &mut String) -> Option<f64> {
         let end = str + len;
 
         // let mut decimal: *const c_char = ptr::null();
-        let mut decimal_set = 0;
-        let mut decimal_len = 0;
+        let _decimal_set = 0;
+        let _decimal_len = 0;
         // let mut dec_sep = '.' as c_char;
 
         // let mut thousand: *const c_char = ptr::null();
-        let mut thousand_set = 0;
-        let mut thousand_len = 0;
+        let _thousand_set = 0;
+        let _thousand_len = 0;
         // let mut tsd_sep: *const c_char = ptr::null();
 
         // let mut lval: zend_long = 0;
@@ -154,10 +154,10 @@ pub fn parse_float(value: &mut String) -> Option<f64> {
         // let mut max_range_set = 0;
 
         let mut first = 0;
-        let mut n = 0;
+        let _n = 0;
 
         let mut num = String::new();
-        let mut p = 0;
+        let _p = 0;
         if str < end && (value.chars().nth(str) == Some('+') || value.chars().nth(str) == Some('-')) {
             num.push(value.chars().nth(str).unwrap());
             str += 1;
@@ -211,7 +211,7 @@ pub fn parse_float(value: &mut String) -> Option<f64> {
             }
 
             if str == end {
-                return Some(castToFloat(num))
+                return Some(cast_to_float(num))
                 // return Some(num)
             }
         }
@@ -221,7 +221,7 @@ pub fn parse_float(value: &mut String) -> Option<f64> {
 
 
     if num.len() > 0 {
-        return Some(castToFloat(num))
+        return Some(cast_to_float(num))
     }
 
     return None

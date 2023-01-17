@@ -1,9 +1,15 @@
-
+use yaml_rust::{YamlLoader, YamlEmitter};
 use std::collections::HashMap;
-use std::fs::create_dir;
+use std::fs::{create_dir, File};
+use std::io::Read;
+use aws_config::load_from_env;
+use clap::builder::Str;
+// use aws_config::profile::profile_file::ProfileFileKind::Config;
 use serde_derive::{Deserialize};
+use serde_yaml::Value;
 
 use crate::helpers::Helpers;
+
 
 #[non_exhaustive]
 struct RunModes;
@@ -91,25 +97,41 @@ impl Config {
             pipeline_id: String::from(""),
             tenant_id: String::from(""),
             task_id: 0,
-            task_logs: Vec::new(),
-            exit_code: 0,
+            system_user_api_token: String::new(),
+            enable_dead_letters: true,
+            poll_interval_seconds: 0,
+
+            source_format: None,
+            filters: false,
+            partition_by_fields: false,
+            event_path: false,
+
+            output_format: None,
+            flatten_events: false,
+
+            analysing: true,
             sync_mode: String::from("sync"),
             mutable_mode_strict: String::from("strict"),
             mutable_mode_resolve: String::from("resolve"),
             mutable_mode_evolve: String::from("evolve"),
             mutable_mode: MutableModes::MUTABLE_MODE_STRICT.to_string(),
             run_mode: RunModes::RUN_MODE_SYNC.to_string(),
+
             offsets: Vec::new(),
-            source_format: None,
-            output_format: None,
-            analysing: true,
-            min_discovery_records: 10000,
-            max_discovery_seconds: 300,
+            task_logs: Vec::new(),
+            exit_code: 0,
             id_fields: Vec::new(),
+            event_type_fields: Vec::new(),
+            time_fields: false,
             date_field_candidates: vec![],
             discovered_field_occurrence: vec![],
             schema: vec![],
-            filters: false,
+            avro_schemas: Vec::new(),
+            output_schemas: Vec::new(),
+            config_updated_time: 0,
+
+            min_discovery_records: 10000,
+            max_discovery_seconds: 300,
             flush_mem_buffer_bytes: 200000000,
             flush_buffer_bytes: 200000000,
             flush_mem_buffer_seconds: 300,
@@ -117,17 +139,6 @@ impl Config {
             flush_mem_buffer_records: 5000000,
             flush_buffer_records: 5000000,
             event_time_bucket_duration_seconds: 0,
-            poll_interval_seconds: 0,
-            avro_schemas: Vec::new(),
-            output_schemas: Vec::new(),
-            partition_by_fields: false,
-            event_type_fields: Vec::new(),
-            event_path: false,
-            flatten_events: false,
-            time_fields: false,
-            system_user_api_token: String::new(),
-            enable_dead_letters: true,
-            config_updated_time: 0,
         }
     }
 
@@ -139,23 +150,54 @@ impl Config {
     }
 
     pub fn get_pipeline_name() -> String {
-        let mut helpers = Helpers { clean_field_cache: Default::default() };
+        // let mut helpers = Helpers { clean_field_cache: Default::default() };
 
-        let input_plugin_name = helpers.clean_field_name(Config::getenv("DATA_SOURCE_PLUGIN_NAME", ""));
-        let output_plugin_name = helpers.clean_field_name(Config::getenv("DATA_OUTPUT_PLUGIN_NAME", ""));
+        let input_plugin_name = Helpers::clean_field_name(Config::getenv("DATA_SOURCE_PLUGIN_NAME", ""));
+        let output_plugin_name = Helpers::clean_field_name(Config::getenv("DATA_OUTPUT_PLUGIN_NAME", ""));
         let default_pipeline_name = format!("{}to{}", input_plugin_name, output_plugin_name);
         let pipeline_name = Config::getenv("PIPELINE_NAME", default_pipeline_name.as_str());
 
         pipeline_name
     }
 
+    fn load_file() {
+        let mut file = File::open("config/connections.yml").expect("Unable to open file");
+        let mut contents = String::new();
+
+        file.read_to_string(&mut contents)
+            .expect("Unable to read file");
+
+        let docs = YamlLoader::load_from_str(&contents).unwrap();
+
+        // println!("{:?}", docs);
+        let doc = &docs[0];
+        // println!("{:?}", doc["sources"]["S3"]);
+
+        // return doc;
+    }
+
     pub fn get_config() -> Config {
         let mut config = Config::new();
 
-        config = envy::from_env::<Config>()
-            .expect("Please provide env vars");
+        config = match envy::from_env::<Config>() {
+            Err(_) => config,
+            Ok(config) => config,
+        };
+            // .expect("Please provide env vars");
 
-        println!("{:#?}", config);
+        // println!("{:#?}", config);
+
+        // let file_config = Self::load_file();
+
+        // config.
+        // println!("{:#?}", config);
+        // let config_file = File::open("config/connections.yml").unwrap();
+        //
+        // let yaml_str: String = serde_yaml::from_reader(config_file).unwrap();
+        //
+        // let configuration: Value = serde_yaml::from_str(&yaml_str).unwrap();
+        // println!("{:#?}", configuration);
+
 
         // config.pipeline_id = Config::getenv("PIPELINE_ID", "");
         //
@@ -185,7 +227,7 @@ impl Config {
         //
         // config.task_id = Config::getenv("TASK_ID", "") as i64;
 
-        let avro_arr: HashMap<String, String> = HashMap::new();
+        let _avro_arr: HashMap<String, String> = HashMap::new();
 
         config.discovered_field_occurrence = Vec::new();
 
@@ -195,13 +237,13 @@ impl Config {
 
         config.tenant_id = Config::getenv("TENANT_ID", Helpers::random_str(16).as_str());
 
-        // let data_dir = Config::getenv("DATA_DIR", "");
-        // if data_dir != "" {
-        //     config.data_dir = data_dir;
-        // }
+        let data_dir = Config::getenv("DATA_DIR", "");
+        if data_dir != "" {
+            config.data_dir = data_dir;
+        }
 
 
-        let uri = Config::getenv("SKIPPR_API_ENDPOINT", "");
+        let _uri = Config::getenv("SKIPPR_API_ENDPOINT", "");
 
         config
     }

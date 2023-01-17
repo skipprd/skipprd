@@ -15,12 +15,24 @@ use serde_json::Value;
 
 pub mod configuration;
 
+// let clean_field_cache = Arc::new(Mutex::new(HashMap<String, bool> = HashMap::new()));
+
+use once_cell::sync::Lazy;
+use std::sync::Mutex;
+
+// static clean_field_cache: Lazy<Mutex<i64>> = Lazy::new(|| Mutex::new(1));
+static clean_field_cache: Lazy<Mutex<HashMap<String, bool>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+
 
 pub struct Helpers {
-    pub(crate) clean_field_cache: HashMap<String, bool>,
+
 }
 
 impl Helpers {
+
+    // let clean_field_cache: HashMap<String, bool> = HashMap::new();
+    // pub(crate) clean_field_cache: HashMap<String, bool> = HashMap::new();
+
     // pub fn explode_field(field: &str) -> Vec<&str> {
     //     let mut field_haystack: Vec<&str> = Vec::new();
     //
@@ -45,13 +57,15 @@ impl Helpers {
         // }
 
         // arr.iter().enumerate().all(|(i, &v)| v == i as i32)
-        arr.iter().enumerate().all(|(i, v)| v.is_u64())
+        arr.iter().enumerate().all(|(_i, v)| v.is_u64())
     }
 
-    pub fn clean_field_name<'a>(&mut self, field: String) -> String {
+    pub fn clean_field_name<'a>(field: String) -> String {
         let mut clean = field.to_string();
 
-        if !self.clean_field_cache.contains_key(&field) || self.clean_field_cache[&field] {
+        let mut clean_field_cache_lock = &mut *clean_field_cache.lock().unwrap();
+
+        if !clean_field_cache_lock.contains_key(&field) || clean_field_cache_lock[&field] == true {
             if field.parse::<i32>().is_ok() {
                 clean = "item_".to_string() + &field;
             }
@@ -76,7 +90,11 @@ impl Helpers {
             // clean = trim(clean, '_');
 
             if clean != field {
-                self.clean_field_cache.insert(field.parse().unwrap(), true);
+                // println!("Cleaned {} field to {}", field, clean);
+                clean_field_cache_lock.insert(field, true);
+            } else {
+                // println!("Not cleaned {} field to {}", field, clean);
+                clean_field_cache_lock.insert(field, false);
             }
         }
 

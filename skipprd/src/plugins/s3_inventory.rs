@@ -1,6 +1,6 @@
 use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
-use crate::serdes::json::SerderJson;
+use crate::serdes::json::SerdeJson;
 use aws_sdk_s3::types::AggregatedBytes;
 use aws_sdk_s3::{Client, Region};
 use aws_types::credentials::ProvideCredentials;
@@ -12,13 +12,14 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::fs::File;
 use std::future::Future;
-use std::io::{BufRead, BufReader, BufWriter, Read, Seek, Write};
+use std::io::{BufRead, BufReader, BufWriter, Cursor, Read, Seek, Write};
 use std::path::Path;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use futures::future::join_all;
+
 
 pub struct DataSourceS3InventoryPlugin {
     // config: HashMap<String, String>,
@@ -72,7 +73,7 @@ impl DataSourceS3InventoryPlugin {
         }
     }
 
-    pub async fn sync(&mut self) -> bool {
+    pub async fn sync(&mut self) {
 
         let mut outputs = Vec::new();
 
@@ -126,7 +127,7 @@ impl DataSourceS3InventoryPlugin {
 
                                 let object_content: AggregatedBytes =
                                     inventory_manifest.unwrap().body.collect().await.unwrap();
-                                let manifest = SerderJson::deserialize(
+                                let manifest = SerdeJson::deserialize(
                                     String::from_utf8(object_content.into_bytes().to_vec())
                                         .unwrap(),
                                 );
@@ -260,13 +261,13 @@ impl DataSourceS3InventoryPlugin {
 
         // join_all(outputs).await;
 
-        true
+        // true
     }
 
     pub async fn get_object(&self, source_bucket: String, key: String) {
 
         // println!("Async getting {}", &key);
-        let tmp_file_content = self
+        let data = self
             .s3_client
             .get_object()
             .bucket(source_bucket)
@@ -283,9 +284,32 @@ impl DataSourceS3InventoryPlugin {
 
         // println!("Got {}", &key);
 
-        let mut tmpfile =
-            File::create(self.temp_dir.to_string() + "/ddd/s3-" + &Helpers::random_str(10)).unwrap();
-        tmpfile.write_all(&tmp_file_content);
+
+
+        let out_filename = self.temp_dir.to_string() + "/ddd/s3-" + &Helpers::random_str(10);
+
+        // Something that implements `std::io::Read`
+        let c = Cursor::new(data);
+
+        // A dummy output
+        let mut out_file = File::create(out_filename).unwrap();
+
+        // Using the raw data would look like this:
+        // std::io::copy(&mut c, &mut out_file).unwrap();
+
+        // To inflate on the fly, "pipe" the data through the decoder, i.e. wrap the reader
+        let mut stream = GzDecoder::new(c);
+
+        // Consume the `Read`er somehow
+        std::io::copy(&mut stream, &mut out_file).unwrap();
+
+        // let mut buf: Vec<u8> = vec![0];
+        // stream.read_to_end(&mut buf);
+        // buf
+
+        // let mut tmpfile =
+        //     File::create(self.temp_dir.to_string() + "/ddd/s3-" + &Helpers::random_str(10)).unwrap();
+        // tmpfile.write_all(&tmp_file_content);
 
         // println!("Downloaded {}", &key);
     }

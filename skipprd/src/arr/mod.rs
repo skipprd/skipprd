@@ -5,7 +5,7 @@ pub struct Arr {}
 
 impl Arr {
 
-    pub fn get<'a, T>(array: &'a HashMap<String, T>, key: &str, default: &str) -> (&'static str, &'a HashMap<String, T>) {
+    pub fn get<'a, T>(array: &'a HashMap<String, T>, _key: &str, _default: &str) -> (&'static str, &'a HashMap<String, T>) {
 
         // @todo - field value may be a string or a nested complex type
         ("", array)

@@ -10,16 +10,16 @@ use crate::discover::AnalyseSchema;
 
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct SerderJson {
+pub struct SerdeJson {
     pub supported_compression_types: Vec<String>,
     pub compression_type: String,
     pub fh: String,
     pub records: Vec<String>,
 }
 
-impl SerderJson {
-    pub fn new() -> SerderJson {
-        SerderJson {
+impl SerdeJson {
+    pub fn new() -> SerdeJson {
+        SerdeJson {
             supported_compression_types: vec![String::from("VALUE_COMPRESSION"), String::from("NO_COMPRESSION")],
             compression_type: String::from("NO_COMPRESSION"),
             fh: String::from(""),
@@ -60,7 +60,7 @@ impl SerderJson {
         // if array of json objects
         let mut analyise_schema = AnalyseSchema { i: 0 };
 
-        let mut line: Vec<Value> = SerderJson::json_decode(data);
+        let mut line: Vec<Value> = SerdeJson::json_decode(data);
 
         if !line.is_empty() {
 
@@ -74,7 +74,10 @@ impl SerderJson {
 
             for item in line {
                 if item.is_string() {
-                    message = serde_json::from_str(&item.as_str().unwrap()).unwrap();
+                    match serde_json::from_str(&item.as_str().unwrap_or_default()) {
+                        Ok(message) => message,
+                        Err(e) => println!("Couldn't deserialise message {}", e)
+                    }
 
                     messages.append(&mut message);
                 } else {
@@ -103,7 +106,7 @@ impl SerderJson {
     }
 
     pub fn serialize(&mut self, record: Vec<Value>, schema: Vec<Value>) {
-        self.records.push(serde_json::to_string(&record).unwrap());
+        self.records.push(serde_json::to_string(&record).unwrap_or_default());
     }
 
     // The output is wrapped in a Result to allow matching on errors
@@ -126,7 +129,7 @@ impl SerderJson {
         };
 
         if line.is_array() {
-            let lines: Vec<Value> = serde_json::from_str(&string).unwrap();
+            let lines: Vec<Value> = serde_json::from_str(&string).unwrap_or_default();
             for data in lines.iter() {
                 message.push(data.clone());
             }
@@ -149,7 +152,7 @@ impl SerderJson {
             // fputs($fp, $string);
             // rewind($fp);
 
-            let lines = SerderJson::read_lines("/tmp/foo");
+            let lines = SerdeJson::read_lines("/tmp/foo");
 
             if lines.is_ok() {
                 for line in lines.unwrap() {
@@ -208,20 +211,20 @@ impl SerderJson {
                                 if i == 1 {
                                     let mut record = record.to_string();
                                     record.push('}');
-                                    message.push(serde_json::from_str(&record).unwrap());
+                                    message.push(serde_json::from_str(&record).unwrap_or_default());
                                 }
 
                                 if i > 1 && i < count {
                                     let mut record = record.to_string();
                                     record.insert(0, '{');
                                     record.push('}');
-                                    message.push(serde_json::from_str(&record).unwrap());
+                                    message.push(serde_json::from_str(&record).unwrap_or_default());
                                 }
 
                                 if i == count {
                                     let mut record = record.to_string();
                                     record.insert(0, '{');
-                                    message.push(serde_json::from_str(&record).unwrap());
+                                    message.push(serde_json::from_str(&record).unwrap_or_default());
                                 }
 
                                 i += 1;
@@ -241,14 +244,14 @@ impl SerderJson {
 #[test]
 fn test_basic_valid_json() {
     let record: String = r#"{"status": "200"}"#.to_string();
-    let msg = SerderJson::deserialize(record);
+    let msg = SerdeJson::deserialize(record);
     assert_eq!(msg.first().unwrap()["status"], "200");
 }
 
 #[test]
 fn test_nested_valid_json() {
     let record: String = r#"{"status": "200", "items": {"foo": "bar"}}"#.to_string();
-    let msg = SerderJson::deserialize(record);
+    let msg = SerdeJson::deserialize(record);
     assert_eq!(msg.first().unwrap()["status"], "200");
     assert_eq!(msg.first().unwrap()["items"]["foo"], "bar");
 }
@@ -256,7 +259,7 @@ fn test_nested_valid_json() {
 #[test]
 fn test_nested_array_valid_json() {
     let record: String = r#"{"status": "200", "items": [{"foo": "bar"}]}"#.to_string();
-    let msg = SerderJson::deserialize(record);
+    let msg = SerdeJson::deserialize(record);
     assert_eq!(msg.first().unwrap()["status"], "200");
     assert_eq!(msg.first().unwrap()["items"][0]["foo"], "bar");
 }
@@ -264,14 +267,14 @@ fn test_nested_array_valid_json() {
 #[test]
 fn test_escaped_json() {
     let record: String = r#"{\"status\": \"200\"}"#.to_string();
-    let msg = SerderJson::deserialize(record);
+    let msg = SerdeJson::deserialize(record);
     assert_eq!( msg.first().unwrap()["status"], "200");
 }
 
 #[test]
 fn test_double_escaped_json() {
     let record: String = r#"{\\\"time\\\":{\\\"start_time\\\":\\\"273.046328210292\\\",\\\"end_time\\\":\\\"16182\\\"},\\\"bike_id\\\":\\\"0.579087190592872\\\",\\\"location\\\":{\\\"start\\\":\\\"0.620131100002421\\\",\\\"end\\\":null}}"#.to_string();
-    let msg = SerderJson::deserialize(record);
+    let msg = SerdeJson::deserialize(record);
     assert_eq!( msg.first().unwrap()["bike_id"], "0.579087190592872");
     assert_eq!( msg.first().unwrap()["time"]["start_time"], "273.046328210292");
 }
@@ -279,7 +282,7 @@ fn test_double_escaped_json() {
 #[test]
 fn test_null_value_valid_json() {
     let record: String = r#"{"start":"0.620131100002421","end":null}"#.to_string();
-    let msg = SerderJson::deserialize(record);
+    let msg = SerdeJson::deserialize(record);
     assert_eq!( msg.first().unwrap()["start"], "0.620131100002421");
     assert_eq!( msg.first().unwrap()["end"], Null);
 }
@@ -287,14 +290,14 @@ fn test_null_value_valid_json() {
 #[test]
 fn test_signle_quote_strings_json() {
     let record: String = r#"{'status': '200'}"#.to_string();
-    let msg = SerderJson::deserialize(record);
+    let msg = SerdeJson::deserialize(record);
     assert_eq!( msg.first().unwrap()["status"], "200");
 }
 
 #[test]
 fn test_string_before_escaped_json() {
     let record: String = r#"some, string, that exists)/ 20080808115538 {\"status\":\"200\",\"length\":\"4742\",\"mime\":\"text/html\",\"offset\":\"16518203\"}"#.to_string();
-    let msg = SerderJson::deserialize(record);
+    let msg = SerdeJson::deserialize(record);
     assert_eq!( msg.first().unwrap()["status"], "200");
     // assert!(msg.first().unwrap().get("some, string").is_none());
 }
@@ -302,14 +305,14 @@ fn test_string_before_escaped_json() {
 #[test]
 fn test_unicode_string_json() {
     let record: String = r#"{u'status': u'200'}"#.to_string();
-    let msg = SerderJson::deserialize(record);
+    let msg = SerdeJson::deserialize(record);
     assert_eq!( msg.first().unwrap()["status"], "200");
 }
 
 #[test]
 fn test_unicode_string_value_json() {
     let record: String = r#"{"status": "\u0023"}"#.to_string();
-    let msg = SerderJson::deserialize(record);
+    let msg = SerdeJson::deserialize(record);
     assert_eq!( msg.first().unwrap()["status"], "#");
     assert_ne!( msg.first().unwrap()["status"], 2605);
 }
@@ -317,7 +320,7 @@ fn test_unicode_string_value_json() {
 #[test]
 fn test_multi_record_array_json() {
     let record: String = r#"[{"status": "200"},{"status": "500"}]"#.to_string();
-    let msg = SerderJson::deserialize(record);
+    let msg = SerdeJson::deserialize(record);
     assert_eq!( msg.first().unwrap()["status"], "200");
     assert_eq!( msg.last().unwrap()["status"], "500");
 }
@@ -325,7 +328,7 @@ fn test_multi_record_array_json() {
 #[test]
 fn test_valid_multi_line_json() {
     let record: String = "{\"status\": \"200\"}\n{\"status\": \"500\"}".to_string();
-    let msg = SerderJson::deserialize(record);
+    let msg = SerdeJson::deserialize(record);
     assert_eq!( msg.first().unwrap()["status"], "200");
     assert_eq!( msg.last().unwrap()["status"], "500");
 }
@@ -333,7 +336,7 @@ fn test_valid_multi_line_json() {
 #[test]
 fn test_valid_multi_line_with_multi_record_arrays_json() {
     let record: String = "[{\"status\": \"200\"},{\"status\": \"201\"}]\n[{\"status\": \"202\"},{\"status\": \"203\"}]".to_string();
-    let msg = SerderJson::deserialize(record);
+    let msg = SerdeJson::deserialize(record);
     assert_eq!( msg.first().unwrap()[0]["status"], "200");
     assert_eq!( msg.first().unwrap()[1]["status"], "201");
     assert_eq!( msg.last().unwrap()[0]["status"], "202");
@@ -346,7 +349,7 @@ fn test_valid_multi_line_with_multi_record_arrays_json() {
 #[test]
 fn test_single_line_objects_json() {
     let record: String = r#"{"foo": {"nest": "bar"}}{"foo": {"nest": "baz"}}{"foo": {"nest": "boo"}}"#.to_string();
-    let msg = SerderJson::deserialize(record);
+    let msg = SerdeJson::deserialize(record);
     // assert!( msg.first().unwrap().is_array());
     assert_eq!(msg[0]["foo"]["nest"], "bar");
     assert_eq!(msg[1]["foo"]["nest"], "baz");

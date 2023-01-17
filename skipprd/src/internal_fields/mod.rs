@@ -13,10 +13,11 @@ impl InternalFields {
     pub fn parse_partition_field<'a>(message: &mut HashMap<String, String>, partition: &'a str) -> &'a str {
         let mut partition = partition.to_string();
 
-        let mut helpers = Helpers { clean_field_cache: Default::default() };
+        // let mut helpers = Helpers { clean_field_cache: Default::default() };
+        let mut clean_field_cache_lock = *clean_field_cache.lock().unwrap();
 
         // default to data source partition (table, topic, queue, file dir, etc)
-        partition = helpers.clean_field_name(&mut partition).parse().unwrap();
+        partition = clean_field_cache_lock(&mut partition).parse().unwrap();
 
         // optional: partition by composite key
         if Config::partition_by_fields.len() > 0 {
@@ -24,8 +25,8 @@ impl InternalFields {
 
             for entity_field_dot in Config::partition_by_fields.iter() {
                 if let Some(entity_value) = message.get(entity_field_dot) {
-                    let clean_entity_field_name = helpers.clean_field_name(entity_field_dot);
-                    let clean_entity_field_value = helpers.clean_field_name(entity_value);
+                    let clean_entity_field_name = clean_field_cache_lock(entity_field_dot);
+                    let clean_entity_field_value = clean_field_cache_lock(entity_value);
                     partition.push_str(&format!("-{}={}", clean_entity_field_name, clean_entity_field_value));
                 }
             }
@@ -55,13 +56,14 @@ impl InternalFields {
     ) -> &str {
         let mut clean_namespace = namespace;
 
-        let mut helpers = Helpers { clean_field_cache: Default::default() };
+        // let mut helpers = Helpers { clean_field_cache: Default::default() };
+        let mut clean_field_cache_lock = *clean_field_cache.lock().unwrap();
 
         if !self.parse_namespace_cache.contains_key(&namespace)
             || *self.parse_namespace_cache.get(&namespace).unwrap()
         {
             // default to data source partition (table, topic, queue, file dir, etc)
-            clean_namespace = &*helpers.clean_field_name(namespace);
+            clean_namespace = clean_field_cache_lock(namespace);
 
             // optional: partition by composite key
             if !Config::event_type_fields.is_empty() {
@@ -69,7 +71,7 @@ impl InternalFields {
 
                 for entity_field_dot in Config::event_type_fields {
                     if let Some(entity_value) = message.get(&entity_field_dot) {
-                        namespaces.push(helpers.clean_field_name(entity_value));
+                        namespaces.push(clean_field_cache_lock(entity_value));
                     }
                 }
 

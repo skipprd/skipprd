@@ -9,3 +9,5 @@ coverage
 clover.xml
 /test-tmp/
 /skipprd/target/
+/skipprd/finalised/
+/skipprd/output/
