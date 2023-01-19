@@ -1,17 +1,32 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
-#[command(propagate_version = true)]
 pub struct Cli {
-    #[command(subcommand)]
-    command: Commands,
+
+    /// What mode to run the program in
+    #[arg(value_enum)]
+    pub(crate) mode: Mode,
 }
 
-#[derive(Subcommand)]
-pub enum Commands {
-    Ingest {
-        input_plugin: Option<String>,
-        input_serde: Option<String>,
-    },
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+pub(crate) enum Mode {
+    Discover,
+    Sync,
 }
+
+// #[derive(Subcommand)]
+// pub enum SyncCommand {
+//     Sync {
+//         // input_plugin: Option<String>,
+//         // input_serde: Option<String>,
+//     }
+// }
+//
+// #[derive(Subcommand)]
+// pub enum DiscoverCommand {
+//     Discover {
+//         // input_plugin: Option<String>,
+//         // input_serde: Option<String>,
+//     }
+// }

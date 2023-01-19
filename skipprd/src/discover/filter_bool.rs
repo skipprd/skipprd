@@ -10,7 +10,7 @@ mod tests {
 
     #[test]
     fn test_get_type_int() {
-        let expected_type = "bool".to_string();
+        let expected_type = "boolean".to_string();
 
         let subject = 123;
         assert_ne!(get_type(&mut String::from(subject.to_string())), expected_type);
@@ -18,7 +18,7 @@ mod tests {
 
     #[test]
     fn test_get_type_true_int() {
-        let expected_type = "bool".to_string();
+        let expected_type = "boolean".to_string();
 
         let subject = 1;
         assert_eq!(get_type(&mut String::from(subject.to_string())), expected_type);
@@ -26,7 +26,7 @@ mod tests {
 
     #[test]
     fn test_get_type_false_int() {
-        let expected_type = "bool".to_string();
+        let expected_type = "boolean".to_string();
 
         let subject = 0;
         assert_eq!(get_type(&mut String::from(subject.to_string())), expected_type);
@@ -34,7 +34,7 @@ mod tests {
 
     #[test]
     fn test_get_type_true_bool() {
-        let expected_type = "bool".to_string();
+        let expected_type = "boolean".to_string();
 
         let subject = true;
         assert_eq!(get_type(&mut String::from(subject.to_string())), expected_type);
@@ -42,7 +42,7 @@ mod tests {
 
     #[test]
     fn test_get_type_false_bool() {
-        let expected_type = "bool".to_string();
+        let expected_type = "boolean".to_string();
 
         let subject = false;
         assert_eq!(get_type(&mut String::from(subject.to_string())), expected_type);
@@ -50,7 +50,7 @@ mod tests {
 
     #[test]
     fn test_get_type_true_str() {
-        let expected_type = "bool".to_string();
+        let expected_type = "boolean".to_string();
 
         let subject = "true";
         assert_eq!(get_type(&mut String::from(subject.to_string())), expected_type);
@@ -58,7 +58,7 @@ mod tests {
 
     #[test]
     fn test_get_type_false_str() {
-        let expected_type = "bool".to_string();
+        let expected_type = "boolean".to_string();
 
         let subject = "false";
         assert_eq!(get_type(&mut String::from(subject.to_string())), expected_type);
@@ -66,7 +66,7 @@ mod tests {
 }
 
 pub fn parse_bool(value: &mut String) -> Result<bool, i32> {
-    let len = value.len();
+    let len = value.chars().count();
     let str = value;
     let mut ret: i32 = -1;
 

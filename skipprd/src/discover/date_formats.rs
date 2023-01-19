@@ -14,6 +14,8 @@ pub enum DateFormats {
     Rfc3339,
     Rss,
     W3c,
+    Mysql,
+    DateOnly,
 }
 
 impl DateFormats {
@@ -31,6 +33,8 @@ impl DateFormats {
             DateFormats::Rfc7231 => "D, d M Y H:i:s \\G\\M\\T",
             DateFormats::Rss => "D, d M Y H:i:s O",
             DateFormats::W3c => "Y-m-d\\TH:i:sP",
+            DateFormats::Mysql => "Y-m-d H:i:s",
+            DateFormats::DateOnly => "%Y-%m-%d",
         }
     }
 }

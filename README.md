@@ -144,3 +144,44 @@ docker run --platform=linux/amd64  -d --name newrelic-php-daemon --network newre
 docker run --platform=linux/amd64 --network newrelic-php-test  skipprd_with_newrelic
 ```
 
+
+
+AWS_PROFILE=cloudcycle \
+DATA_SOURCE_PLUGIN_NAME='S3' \
+DATA_SOURCE_S3_BUCKET='dev-datastorage-stack-cubeevents9ad2ae37-ufazj652azlb' \
+DATA_SOURCE_S3_REGION='eu-west-1' \
+DATA_SOURCE_AWS_ACCESS_ID='AKIAUMVJ62V6IYOWXF56' \
+DATA_SOURCE_AWS_SECRET_KEY='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' \
+DATA_SOURCE_S3_PREFIX='' \
+DATA_SOURCE_EVENT_TYPE_FIELDS='detail-type' \
+DATA_SOURCE_FORMAT='json' \
+DATA_SOURCE_MUTABLE_MODE='evolve' \
+RUN_MODE='sync' \
+HOST='172.21.0.3' \
+DATA_DIR='/data' \
+TENANT_ID='skippr' \
+PIPELINE_NAME='sample' \
+PIPELINE_ID='1' \
+LICENSE_KEY='97d8afc1-6712-439b-9016-eee4ad6f37cc' \
+LOG_LEVEL='INFO' \
+APP_ENV='dev' \
+php run.php
+
+
+AWS_PROFILE=cloudcycle \
+DATA_SOURCE_PLUGIN_NAME='S3' \
+DATA_SOURCE_S3_BUCKET='dev-datastorage-stack-cubeevents9ad2ae37-ufazj652azlb' \
+DATA_SOURCE_S3_PREFIX='' \
+DATA_SOURCE_EVENT_TYPE_FIELDS='detail-type' \
+DATA_SOURCE_FORMAT='json' \
+DATA_SOURCE_MUTABLE_MODE='evolve' \
+RUN_MODE='sync' \
+HOST='172.21.0.3' \
+DATA_DIR='/data' \
+TENANT_ID='skippr' \
+PIPELINE_NAME='sample' \
+PIPELINE_ID='1' \
+LICENSE_KEY='97d8afc1-6712-439b-9016-eee4ad6f37cc' \
+LOG_LEVEL='INFO' \
+APP_ENV='dev' \
+cargo run

@@ -35,8 +35,12 @@ use crate::discover::Metadata;
 // mod converters;
 // use self::converters::avro_parquet::AvroSchema;
 mod cli;
-use crate::cli::Cli;
-use clap::{Args, Parser, Subcommand};
+use crate::cli::{Cli, Mode};
+
+extern crate clap;
+use clap::{Parser, Subcommand};
+
+
 use parquet::arrow::ArrowWriter;
 
 mod ingest;
@@ -57,35 +61,146 @@ use crate::helpers::Helpers;
 use serde_json::Value;
 use tokio::fs::{remove_file};
 
+
 fn main() {
     Config::init();
 
-    // let args = Cli::parse();
-
     let now = Instant::now();
+
+    let cli = Cli::parse();
+
+    match cli.mode {
+        Mode::Sync => {
+            println!("Command sync.");
+            sync();
+        },
+        Mode::Discover => {
+            println!("Command discover.");
+            discover();
+        },
+    }
 
     // for x in 1..20000 {
     //     untyped_example();
     // }
-    blah();
+    // blah();
 
     println!("Runtime: {} seconds", now.elapsed().as_secs());
 }
 
+#[tokio::main]
+async fn discover() {
+
+
+    println!("Analysing data and generating Skippr metadata");
+
+    thread::spawn(move || {
+        let options = MatchOptions {
+            case_sensitive: false,
+            require_literal_separator: false,
+            require_literal_leading_dot: false,
+        };
+
+        let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
+
+        let mut hasAnalysed = false;
+
+        // let mut newMeta: HashMap<String, Metadata> = HashMap::new();
+
+        // Get existing metadata
+        let mut newMeta: HashMap<String, Metadata> = match File::open("metadata.json") {
+            Ok(file) => {
+                let reader = BufReader::new(file);
+                return match serde_json::from_reader(reader) {
+                    Ok(metadata) => {
+                        metadata
+                    },
+                    Err(e) => {
+                        println!("No existing metadata {}", e);
+                        HashMap::new()
+                    },
+                };
+            },
+            Err(e) => {
+                println!("No existing metadata {}", e);
+                HashMap::new()
+            },
+        };
+
+
+        let mut arrowSchema: Result<Schema, ArrowError> = Ok(Schema::empty());
+
+        let mut schema_ref = Arc::new(Schema::empty());
+
+        let mut analyseCount = 0;
+
+        while !hasAnalysed && analyseCount < 10 {
+
+            analyseCount += 1;
+
+            for entry in glob_with("/tmp/ddd/s3-*", options).expect("Failed to read glob pattern") {
+                if !hasAnalysed {
+                    match entry {
+                        Ok(path) => {
+                            let mut input_file = File::open(path.clone()).unwrap();
+
+                            println!("Analysing path: {}", path.to_str().unwrap());
+
+                            let mut buf_reader = BufReader::new(input_file);
+
+                            newMeta = AnalyseSchema::infer_json_schema(&mut foo, &mut buf_reader, Some(1000)).unwrap();
+
+                            // println!("Skippr schema: {:?}", newMeta);
+
+                            arrowSchema = convert_skippr_to_arrow(&mut newMeta.get_mut(&"example_ns".to_string()).unwrap().fields);
+
+                            // let json = serde_json::to_string_pretty(&arrowSchema).unwrap();
+                            // eprintln!("Schema:");
+                            // println!("{}", json);
+
+                            println!("Arrow schema: {:?}", arrowSchema);
+
+                            // let schema_ref = Arc::new(arrowSchema.unwrap());
+                            schema_ref = Arc::new(arrowSchema.unwrap());
+                            // schema_ref = arrowSchema.unwrap();
+
+                            hasAnalysed = true;
+                        },
+                        Err(e) => println!("{:?}", e),
+                    }
+                }
+            }
+
+            sleep(Duration::from_secs(1));
+        }
+
+
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(true)
+            .open(&"metadata.json".to_string())
+            .unwrap();
+
+        let writer = BufWriter::new(file);
+
+        let u = serde_json::to_writer(writer, &newMeta);
+
+        newMeta
+    }).join().unwrap();
+
+}
+
 
 #[tokio::main]
-async fn blah() -> Result<(), String> {
+async fn sync() {
     // let default_messages = Arc::new(Mutex::new(HashMap::new()));
 
     let ingestMsgCount = Arc::new(Mutex::new(0));
     let ingestMsgCountClone = ingestMsgCount.clone();
 
-    let mut counter_lock = ingestMsgCountClone.lock().unwrap();
-
-
     let mut newMeta: HashMap<String, Metadata> = match File::open("metadata.json") {
         Ok(schema_file) => {
-
             println!("Found Skippr metadata");
 
             let file = File::open("metadata.json").unwrap();
@@ -96,81 +211,105 @@ async fn blah() -> Result<(), String> {
             u
         },
         Err(e) => {
-
-            println!("Analysing data and generating Skippr metadata");
-
-            let analyseThread = thread::spawn(move || {
-                let options = MatchOptions {
-                    case_sensitive: false,
-                    require_literal_separator: false,
-                    require_literal_leading_dot: false,
-                };
-
-                let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
-
-                let mut hasAnalysed = false;
-
-                let mut newMeta: HashMap<String, Metadata> = HashMap::new();
-
-                let mut arrowSchema: Result<Schema, ArrowError> = Ok(Schema::empty());
-
-                let mut schema_ref = Arc::new(Schema::empty());
-
-                while !hasAnalysed {
-                    for entry in glob_with("/tmp/ddd/s3-*", options).expect("Failed to read glob pattern") {
-                        if !hasAnalysed {
-                            match entry {
-                                Ok(path) => {
-                                    let mut input_file = File::open(path.clone()).unwrap();
-
-                                    println!("Anakysing path: {}", path.to_str().unwrap());
-
-                                    let mut buf_reader = BufReader::new(input_file);
-
-                                    newMeta = AnalyseSchema::infer_json_schema(&mut foo, &mut buf_reader, Some(3)).unwrap();
-
-                                    // println!("Skippr schema: {:?}", newMeta);
-
-                                    arrowSchema = convert_skippr_to_arrow(&mut newMeta.get_mut(&"example_ns".to_string()).unwrap().fields);
-
-                                    // let json = serde_json::to_string_pretty(&arrowSchema).unwrap();
-                                    // eprintln!("Schema:");
-                                    // println!("{}", json);
-
-                                    println!("Arrow schema: {:?}", arrowSchema);
-
-                                    // let schema_ref = Arc::new(arrowSchema.unwrap());
-                                    schema_ref = Arc::new(arrowSchema.unwrap());
-                                    // schema_ref = arrowSchema.unwrap();
-
-                                    hasAnalysed = true;
-                                },
-                                Err(e) => println!("{:?}", e),
-                            }
-                        }
-                    }
-
-                    sleep(Duration::from_secs(1));
-                }
-
-
-                let file = OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .append(true)
-                    .open(&"metadata.json".to_string())
-                    .unwrap();
-
-                let writer = BufWriter::new(file);
-
-                let u = serde_json::to_writer(writer, &newMeta);
-
-                newMeta
-            });
-
-            analyseThread.join().unwrap()
+            println!("Could not find Skippr metadata, perhaps run `skippr discover`?");
+            exit(1);
         }
     };
+
+
+    // let mut newMeta: HashMap<String, Metadata> = match File::open("metadata.json") {
+    //     Ok(schema_file) => {
+    //
+    //         println!("Found Skippr metadata");
+    //
+    //         let file = File::open("metadata.json").unwrap();
+    //         let reader = BufReader::new(file);
+    //
+    //         let u = serde_json::from_reader(reader).unwrap();
+    //
+    //         u
+    //     },
+    //     Err(e) => {
+    //
+    //         println!("Analysing data and generating Skippr metadata");
+    //
+    //         let analyseThread = thread::spawn(move || {
+    //             let options = MatchOptions {
+    //                 case_sensitive: false,
+    //                 require_literal_separator: false,
+    //                 require_literal_leading_dot: false,
+    //             };
+    //
+    //             let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
+    //
+    //             let mut hasAnalysed = false;
+    //
+    //             let mut newMeta: HashMap<String, Metadata> = HashMap::new();
+    //
+    //             let mut arrowSchema: Result<Schema, ArrowError> = Ok(Schema::empty());
+    //
+    //             let mut schema_ref = Arc::new(Schema::empty());
+    //
+    //             let mut analyseCount = 0;
+    //
+    //             while !hasAnalysed && analyseCount < 10 {
+    //
+    //                 analyseCount += 1;
+    //
+    //                 for entry in glob_with("/tmp/ddd/s3-*", options).expect("Failed to read glob pattern") {
+    //                     if !hasAnalysed {
+    //                         match entry {
+    //                             Ok(path) => {
+    //                                 let mut input_file = File::open(path.clone()).unwrap();
+    //
+    //                                 println!("Anakysing path: {}", path.to_str().unwrap());
+    //
+    //                                 let mut buf_reader = BufReader::new(input_file);
+    //
+    //                                 newMeta = AnalyseSchema::infer_json_schema(&mut foo, &mut buf_reader, Some(3)).unwrap();
+    //
+    //                                 // println!("Skippr schema: {:?}", newMeta);
+    //
+    //                                 arrowSchema = convert_skippr_to_arrow(&mut newMeta.get_mut(&"example_ns".to_string()).unwrap().fields);
+    //
+    //                                 // let json = serde_json::to_string_pretty(&arrowSchema).unwrap();
+    //                                 // eprintln!("Schema:");
+    //                                 // println!("{}", json);
+    //
+    //                                 println!("Arrow schema: {:?}", arrowSchema);
+    //
+    //                                 // let schema_ref = Arc::new(arrowSchema.unwrap());
+    //                                 schema_ref = Arc::new(arrowSchema.unwrap());
+    //                                 // schema_ref = arrowSchema.unwrap();
+    //
+    //                                 hasAnalysed = true;
+    //                             },
+    //                             Err(e) => println!("{:?}", e),
+    //                         }
+    //                     }
+    //                 }
+    //
+    //                 sleep(Duration::from_secs(1));
+    //             }
+    //
+    //
+    //             let file = OpenOptions::new()
+    //                 .create(true)
+    //                 .write(true)
+    //                 .append(true)
+    //                 .open(&"metadata.json".to_string())
+    //                 .unwrap();
+    //
+    //             let writer = BufWriter::new(file);
+    //
+    //             let u = serde_json::to_writer(writer, &newMeta);
+    //
+    //             newMeta
+    //         });
+    //
+    //         analyseThread.join().unwrap()
+    //     }
+    // };
 
 
     let mut newMetaThread2 = newMeta.clone();
@@ -186,7 +325,7 @@ async fn blah() -> Result<(), String> {
             println!("Ingested Messages: {}", *counter_lock);
             *counter_lock = 0;
         },
-        periodic::Every::new(Duration::from_secs(10)),
+        periodic::Every::new(Duration::from_secs(60)),
     );
     planner.start();
 
@@ -246,11 +385,18 @@ async fn blah() -> Result<(), String> {
 
                                     let msg = fast_path_ingest(&record, &mut newMeta.get_mut(&"example_ns".to_string()).unwrap().fields);
 
+                                    let mut counter_lock = ingestMsgCountClone.lock().unwrap();
+
+                                    *counter_lock += 1;
+
+                                    // let msg = record;
+                                    // println!("{:?}", msg);
+
                                     let buf_str = msg.to_string() + "\n";
 
                                     write_len += output_files.get_mut(&"example_ns".to_string()).unwrap().write(&buf_str.as_bytes()).unwrap();
 
-                                    if write_len > 1024 * 1024 * 10 {
+                                    if write_len > 1024 * 1024 * 100 {
                                         write_len = 0;
 
                                         // output_files.get(&"example_ns".to_string()).unwrap().flush();
@@ -283,11 +429,28 @@ async fn blah() -> Result<(), String> {
 
     thread::spawn(move || {
 
+        let file = File::open("metadata.json").unwrap();
+        let reader = BufReader::new(file);
+
+        let mut newMeta: HashMap<String, Metadata> = serde_json::from_reader(reader).unwrap();
+
+
+        // let mut iterCount = 0;
+        //
+        // while newMetaThread2.get_mut(&"example_ns".to_string()).is_none() && iterCount < 10 {
+        //     iterCount += 1;
+        //     println!("waiting for metatdata {}", iterCount);
+        //     sleep(Duration::from_secs(1));
+        // }
+
         let mut arrowSchema: Result<Schema, ArrowError> = Ok(Schema::empty());
 
         let mut schema_ref = Arc::new(Schema::empty());
 
+        // arrowSchema = convert_skippr_to_arrow(&mut newMetaThread2.get_mut(&"example_ns".to_string()).unwrap().fields);
         arrowSchema = convert_skippr_to_arrow(&mut newMetaThread2.get_mut(&"example_ns".to_string()).unwrap().fields);
+
+        println!("Arrow Schema: {:?}", arrowSchema);
 
         schema_ref = Arc::new(arrowSchema.unwrap());
 
@@ -301,7 +464,7 @@ async fn blah() -> Result<(), String> {
             for entry in glob_with("output/*done*", options).expect("Failed to read glob pattern") {
                 match entry {
                     Ok(path) => {
-                        println!("Finalising output file {}", path.display());
+                        // println!("Finalising output file {}", path.display());
 
                         schema_ref = SerdeParquet::serialize(path.clone(), schema_ref);
 
@@ -320,10 +483,8 @@ async fn blah() -> Result<(), String> {
 
     let mut ds3 = block_on(DataSourceS3InventoryPlugin::new());
 
-    ds3.sync().await;
-    // sleep(Duration::from_secs(60));
-
-    Ok(())
+    // ds3.sync().await;
+    sleep(Duration::from_secs(60));
 
 }
 

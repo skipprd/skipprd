@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use std::fs::{create_dir, File};
 use std::io::Read;
 use aws_config::load_from_env;
-use clap::builder::Str;
 // use aws_config::profile::profile_file::ProfileFileKind::Config;
 use serde_derive::{Deserialize};
 use serde_yaml::Value;

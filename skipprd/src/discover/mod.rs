@@ -11,7 +11,8 @@ use arrow::json::reader::ValueIter;
 use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 
 
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+use icu::datetime::options::length::Date;
 use serde_derive::{Deserialize, Serialize};
 
 
@@ -51,10 +52,6 @@ pub struct Evolution {
     sovled: bool,
 }
 
-pub struct Iter {
-    next: Option<Metadata>,
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Metadata {
     pub(crate) count: i32,
@@ -68,17 +65,24 @@ pub struct Metadata {
     pub(crate) determined_type_values: String
 }
 
+// pub struct IterMut<'a, Met> {
+//     obj: &'a mut Metadata,
+//     cursor: usize,
+// }
+//
+//
+// impl<'a, T> Iterator for IterMut<'a, T> {
+//     // type Item = &'a T;
+//     type Item = &'a mut T;
+//
+//     fn next(&mut self) -> Option<Self::Item> {
+//         self.next.take().map(|node| {
+//             self.next = node.next.as_deref_mut();
+//             &mut node.elem
+//         })
+//     }
+// }
 
-impl Iterator for Iter  {
-    type Item= &'a Metadata;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.next.take().map(|node| {
-            self.next = node.next.as_deref_mut();
-            &mut node.elem
-        })
-    }
-}
 
 impl Metadata {
     #[inline]
@@ -97,9 +101,15 @@ impl Metadata {
         })
     }
 
-    pub fn iter_mut(&self) -> IterMut<'_> {
-        IterMut { next: self.head.as_deref_mut() }
-    }
+    // pub fn iter_mut(&mut self) -> IterMut<'_, T> {
+    //     IterMut { next: self.head.as_deref_mut() }
+    // }
+
+    // pub fn iter_mut(&self) -> IterMut<'_> {
+    //
+    //     IterMut { next: self.head.as_deref_mut()
+    //     }
+    // }
 
 }
 
@@ -115,6 +125,18 @@ pub struct AnalyseSchema {
 const DATE_FIELD_VALIDATION_MIN_SAMPLE: i32 = 100;
 
 fn get_type(value: &mut String) -> String {
+
+    let foo = "";
+    match parse_bool(value) {
+        Err(_i32) => {
+            // println!("Not float");
+        }
+        Ok(_bool) => {
+            // println!("Is float");
+            return "boolean".to_string();
+        }
+
+    }
 
     match value.parse::<i32>() {
         Ok(_bool) => {
@@ -143,17 +165,6 @@ fn get_type(value: &mut String) -> String {
             return "array".to_string();
         },
         None => {}
-    }
-
-    match parse_bool(value) {
-        Err(_i32) => {
-            // println!("Not float");
-        }
-        Ok(_bool) => {
-            // println!("Is float");
-            return "bool".to_string();
-        }
-
     }
 
     match value.parse::<String>() {
@@ -357,15 +368,15 @@ impl AnalyseSchema {
 
             println!("{} is {} sequential: {:?}", field, is_sequential, value);
 
-            data_type = "array".to_string();
+            // data_type = "array".to_string();
 
-            // if is_sequential {
-            //     // array of sequential int keys is an avro array
-            //     data_type = "array".to_string();
-            // } else if !is_sequential {
-            //     // associative array is an avro map
-            //     data_type = "map".to_string();
-            // }
+            if is_sequential {
+                // array of sequential int keys is an avro array
+                data_type = "array".to_string();
+            } else if !is_sequential {
+                // associative array is an avro map
+                data_type = "map".to_string();
+            }
         } else {
             if data_type == "array" && value.is_object() {
                 let mut type_count = HashMap::new();
@@ -373,7 +384,14 @@ impl AnalyseSchema {
                 if value.as_object().is_some() {
                     for (sub_field, sub_value) in value.as_object().unwrap() {
                         let mut sv: Value = serde_json::from_str(&sub_value.to_string()).unwrap();
+
                         let logical_type = self.get_logical_type(sub_field, &mut sv, metadata, false);
+
+                        if (field == "trip") {
+                            println!("#### trip sub_field NAME {:?}", sub_field);
+                            println!("#### trip sub field value {}", sv);
+                            println!("#### trip sub field value type {}", logical_type);
+                        }
 
                         type_count.insert(logical_type, "hit");
 
@@ -390,11 +408,17 @@ impl AnalyseSchema {
                     }
                 }
 
+                if (field == "trip") {
+                    println!("#### trip type len is {}", type_count.len());
+                    println!("#### trip types {:?}", type_count);
+                    println!("#### trip type count is {}", type_count.iter().count());
+                }
+
                 // Multiple type within array values?
                 // Must be a record then.
                 if type_count.len() > 1 {
                     data_type = "record".to_string();
-
+                    // Array of Arrays? Use a Record for the parent.
                     // Array of Arrays? Use a Record for the parent.
                 } else if type_count.contains_key("array") {
                     data_type = "record".to_string();
@@ -447,8 +471,8 @@ impl AnalyseSchema {
         if data_type == "string".to_string() && allow_date {
             // Limit number of check type attempts for data as expensive operation.
 
-            if metadata.get_mut(field).unwrap().date_candidate.as_mut().is_some() {
-                if metadata.get_mut(field).unwrap().date_candidate.as_mut().unwrap().check_count < DATE_FIELD_VALIDATION_MIN_SAMPLE {
+            if metadata.get_mut(field).unwrap().date_candidate.as_mut().is_none() ||
+                metadata.get_mut(field).unwrap().date_candidate.as_mut().unwrap().check_count < DATE_FIELD_VALIDATION_MIN_SAMPLE {
                     if let Some(format) = self.is_valid_date(value) {
                         data_type = "date".to_string();
                         // self.set_date_field_candidate(field, metadata, &format);
@@ -461,10 +485,21 @@ impl AnalyseSchema {
                 } else if metadata.get_mut(field).unwrap().date_candidate.as_mut().unwrap().valid_count >= DATE_FIELD_VALIDATION_MIN_SAMPLE {
                     data_type = "date".to_string();
                 }
-            }
         }
 
         // @todo
+        if data_type == "integer".to_string() {
+            match parse_bool(value) {
+                Err(_i32) => {
+                    // println!("Not float");
+                }
+                Ok(_bool) => {
+                    // println!("Is float");
+                    return "boolean".to_string();
+                }
+
+            }
+        }
         // if data_type != "double" && is_bool(filter_var(value, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE)) {
         //     data_type = "boolean".to_string();
         // }
@@ -594,12 +629,18 @@ impl AnalyseSchema {
             DateFormats::Rfc3339,
             DateFormats::Rss,
             DateFormats::W3c,
+            DateFormats::Mysql,
+            DateFormats::DateOnly
         ];
 
         for format in valid_formats.iter() {
-            match DateTime::parse_from_str(value, format.as_str()) {
+
+            match DateTime::parse_from_str(value.as_str(), format.as_str()) {
                 Ok(_) => return Some(format.as_str().to_string()),
-                Err(_) => continue,
+                Err(_) => match NaiveDate::parse_from_str(value.as_str(), format.as_str()) {
+                    Ok(_) => return Some(format.as_str().to_string()),
+                    Err(_) => continue,
+                },
             }
         }
 
@@ -708,13 +749,13 @@ impl AnalyseSchema {
         }
     }
 
-    pub fn determine_field_types(metadata: &mut HashMap<String, Metadata>, parent_type: Option<String>) {
+    pub fn determine_field_types(metadata: &mut HashMap<String, Metadata>, parent_type: Option<&String>) {
         let demoted_types = vec!["boolean", "date", "timestamp", "timestamp_milli"];
 
         for (field_name, field) in metadata.iter_mut() {
             // Useful for field evolution logic for maps, which only support one sub-field type
             if let Some(parent_type) = parent_type {
-                *field.parent_type = parent_type.to_string();
+                field.parent_type = parent_type.to_string();
             }
 
             if field.determined_type == "".to_string() {
@@ -729,7 +770,7 @@ impl AnalyseSchema {
 
                     // force to record type over map or array if ever present
                     if field.types.contains_key("record") {
-                        *field.determined_type = "record".to_string();
+                        field.determined_type = "record".to_string();
                     } else {
                         for (data_type, data_type_count) in field.types.iter() {
                             if highest_count < *data_type_count {
@@ -746,7 +787,7 @@ impl AnalyseSchema {
                             }
                         }
 
-                        *field.determined_type = highest_type;
+                        field.determined_type = highest_type;
                     }
                 }
             }
@@ -757,7 +798,7 @@ impl AnalyseSchema {
                     if field.determined_type == "array"
                         || field.determined_type == "map" {
 
-                        *field.determined_type_values = "".to_string();
+                        field.determined_type_values = "".to_string();
 
                         // Ignore sub-fields for Avro array, the values are just enumerated, their not fields themselves.
                         // Else we'd create a field list with string keys for each array value
@@ -797,7 +838,7 @@ impl AnalyseSchema {
 
                         println!("HIGHEST TYPE: {}", values_type);
 
-                        *field.determined_type_values = values_type.to_string();
+                        field.determined_type_values = values_type.to_string();
 
                         if field.determined_type == "array".to_string() {
                             field.fields.clear();
@@ -844,20 +885,21 @@ mod tests {
 
         let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
 
-        let field = r#"
-        {
-                "abc1": [2, 3, 4, 6, 7, 4, 3, 6, 7, 9]
-        }"#;
-
         // let field = r#"
         // {
-        //         "abc1": [2, 3, 4, 6, 7, 4, 3, 6, 7, 9],
-        //         "abc2": ["a", "b", "c"],
-        //         "abc3": {"0": "a", "1": "b", "2": "c"},
-        //         "abc4": {"1": "a", "0": "b", "2": "c"},
-        //         "abc5": {"a": 123, "b": 456, "c": 789},
-        //         "abc6": ["abc", 123, null, 123.456]
+        //        "abc3": {"0": "a", "1": "b", "2": "c"}
         // }"#;
+
+        let field = r#"
+        {
+                "abc1": [2, 3, 4, 6, 7, 4, 3, 6, 7, 9],
+                "abc2": ["a", "b", "c"],
+                "abc3": {"0": "a", "1": "b", "2": "c"},
+                "abc4": {"1": "a", "0": "b", "2": "c"},
+                "abc5": {"a": 123, "b": 456, "c": 789},
+                "abc6": ["abc", 123, null, 123.456],
+                "abc7": {"a": "abc", "b": 456, "c": 4.4}
+        }"#;
 
         let json: Value = serde_json::from_str(field).unwrap();
 
@@ -875,14 +917,23 @@ mod tests {
 
         let newMeta = AnalyseSchema::infer_json_schema(&mut foo, &mut buf_reader, Some(1)).unwrap();
 
+        // println!("{:?}", newMeta.get("example_ns").unwrap());
+        // println!("{:?}", newMeta.get("example_ns").unwrap().fields);
+        // println!("{:?}", newMeta.get("example_ns").unwrap().fields.get("abc1").unwrap());
+        // println!("{:?}", newMeta.get("example_ns").unwrap().fields.get("abc1").unwrap().determined_type);
+
         assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc1").unwrap().determined_type, "array");
         assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc1").unwrap().determined_type_values, "integer");
-        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc2").unwrap().determined_type, "array");
-        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc3").unwrap().determined_type, "array");
-        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc4").unwrap().determined_type, "array");
-        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc5").unwrap().determined_type, "map");
-        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc5").unwrap().determined_type_values, "integer");
-        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc6").unwrap().determined_type, "record");
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc2").unwrap().determined_type, "array");
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc2").unwrap().determined_type_values, "string");
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc3").unwrap().determined_type, "map");
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc3").unwrap().determined_type_values, "string");
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc4").unwrap().determined_type, "map");
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc4").unwrap().determined_type_values, "string");
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc5").unwrap().determined_type, "map");
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc5").unwrap().determined_type_values, "integer");
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc6").unwrap().determined_type, "array");
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc7").unwrap().determined_type, "record");
 
     }
 
@@ -890,6 +941,11 @@ mod tests {
     fn test_discover_demoted_types() {
 
         let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
+
+        // let field = r#"
+        // {
+        //         "boolean": [1, 0, 1, 1]
+        // }"#;
 
         let field = r#"
         {
@@ -919,19 +975,19 @@ mod tests {
         let newMeta = AnalyseSchema::infer_json_schema(&mut foo, &mut buf_reader, Some(1)).unwrap();
 
         assert_eq!(newMeta.get("example_ns").unwrap().fields.get("boolean").unwrap().determined_type, "array");
-        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("boolean").unwrap().determined_type_values, "boolean");
-        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("boolean2").unwrap().determined_type, "array");
-        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("boolean2").unwrap().determined_type_values, "boolean");
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("date").unwrap().determined_type, "array");
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("boolean").unwrap().determined_type_values, "boolean");
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("boolean2").unwrap().determined_type, "array");
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("boolean2").unwrap().determined_type_values, "boolean");
+        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("date").unwrap().determined_type, "array");
         // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("date").unwrap().determined_type_values, "date");
         assert_eq!(newMeta.get("example_ns").unwrap().fields.get("timestamp").unwrap().determined_type, "array");
         // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("timestamp").unwrap().determined_type_values, "timestamp");
         assert_eq!(newMeta.get("example_ns").unwrap().fields.get("timestamp_milli").unwrap().determined_type, "array");
         // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("timestamp_milli").unwrap().determined_type_values, "timestamp_milli");
-        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc3").unwrap().determined_type, "array");
-        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc3").unwrap().determined_type_values, "integer");
-        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc4").unwrap().determined_type, "array");
-        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc4").unwrap().determined_type_values, "integer");
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc3").unwrap().determined_type, "array");
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc3").unwrap().determined_type_values, "integer");
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc4").unwrap().determined_type, "array");
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc4").unwrap().determined_type_values, "integer");
 
     }
 }

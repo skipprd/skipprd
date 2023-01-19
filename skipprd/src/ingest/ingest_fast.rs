@@ -2,7 +2,6 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::io::{BufReader, Read};
 use arrow::json::reader::ValueIter;
-use clap::builder::Str;
 use serde_json::{Value, Map};
 use crate::discover::Metadata;
 use crate::helpers::Helpers;
@@ -158,40 +157,53 @@ fn fast_set_value(data_type: String, field: &str, value: &Value, metadata: &mut 
                 }
             } else {
                 if data_type == "array" {
+                    for (val) in value.as_array().unwrap() {
+                        // println!("map value is {:?} key is {:?}", val, key);
+                        if Some(val) != None {
+                            new_value = val.to_owned();
+                            // new_value[key] = fast_set_value(
+                            //     metadata.get_mut(field).unwrap().determined_type_values.clone(),
+                            //     key,
+                            //     val,
+                            //     &mut metadata.get_mut(field).unwrap().fields,
+                            // );
+                            // println!("new_value is {:?}", new_value);
+                        }
+                    }
 
                     // println!("\n\nField: {} array value is {:?}", field, value);
 
                     // new_value[field] = Value::Array(Vec::new());
 
-                    let mut b = Vec::new();
-
-                    let mut i = 0;
-
-                    for val in value.as_array().unwrap() {
-                        if Some(value) != None {
-
-                            // println!("field is {:?}", field);
-                            // println!("array val is {:?}", val);
-                            // println!("array val data_types is {:?}", metadata.get_mut(field).unwrap().determined_type_values.clone());
-
-                            let new_v = fast_set_value(
-                                metadata.get_mut(field).unwrap().determined_type_values.clone(),
-                                &i.to_string(),
-                                val,
-                                &mut metadata.get_mut(field).unwrap().fields,
-                            );
-
-                            i += 1;
-
-
-                            // println!("array new_v is {:?}\n\n\n", new_v);
-
-                            b.push(new_v);
-
-                        }
-                    }
-
-                    new_value[field] = Value::from(b);
+                    // let mut b = Vec::new();
+                    //
+                    // let mut i = 0;
+                    //
+                    // for val in value.as_array().unwrap() {
+                    //     if Some(val) != None {
+                    //
+                    //         println!("field is {:?}", field);
+                    //         println!("array val is {:?}", val);
+                    //         println!("array val data_types is {:?}", metadata.get_mut(field).unwrap().determined_type_values.clone());
+                    //
+                    //         let new_v = fast_set_value(
+                    //             metadata.get_mut(field).unwrap().determined_type_values.clone(),
+                    //             &i.to_string(),
+                    //             val,
+                    //             &mut metadata.get_mut(field).unwrap().fields,
+                    //         );
+                    //
+                    //         i += 1;
+                    //
+                    //
+                    //         // println!("array new_v is {:?}\n\n\n", new_v);
+                    //
+                    //         b.push(new_v);
+                    //
+                    //     }
+                    // }
+                    //
+                    // new_value[field] = Value::from(b);
 
                     // println!("new_value is {:?}", new_value[field]);
 

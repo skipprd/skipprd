@@ -56,8 +56,14 @@ impl Helpers {
         //     return false;
         // }
 
-        // arr.iter().enumerate().all(|(i, &v)| v == i as i32)
-        arr.iter().enumerate().all(|(_i, v)| v.is_u64())
+        // for (k, v) in arr.iter().enumerate() {
+        //     if k.parse::<i32>().is_ok() {
+        //
+        //     }
+        // }
+
+        arr.iter().enumerate().all(|(i, v)| &arr[i] == v)
+        // arr.iter().enumerate().all(|(i, v)| i as i32 == v)
     }
 
     pub fn clean_field_name<'a>(field: String) -> String {
@@ -82,7 +88,7 @@ impl Helpers {
             // clean = preg_replace(pattern, "_", field);
 
             let x: &[_] = &['1', '2', '3', '4', '5', '6', '7', '8', '9'];
-            clean = clean.trim_matches(x).to_string();
+            clean = clean.trim_start_matches(x).to_string();
             // clean = ltrim(clean, "0123456789");
 
             // '_' at the beginning is common and probably allowable
