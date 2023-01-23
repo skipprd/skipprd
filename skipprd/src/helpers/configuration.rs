@@ -3,9 +3,22 @@ use std::collections::HashMap;
 use std::fs::{create_dir, File};
 use std::io::Read;
 use aws_config::load_from_env;
+use futures::executor::block_on;
+use reqwest::RequestBuilder;
 // use aws_config::profile::profile_file::ProfileFileKind::Config;
-use serde_derive::{Deserialize};
+use serde_derive::{Deserialize, Serialize};
 use serde_yaml::Value;
+use yaml_rust::yaml::Hash;
+
+use serde_json::json;
+
+use reqwest::Client;
+use reqwest::header::HeaderMap;
+use reqwest::header::HeaderValue;
+use reqwest::header::AUTHORIZATION;
+use tokio::task::spawn_blocking;
+
+use crate::discover::Metadata;
 
 use crate::helpers::Helpers;
 
@@ -247,6 +260,109 @@ impl Config {
         config
     }
 
+    pub async fn set_config(metadata: &HashMap<String, Metadata>, evolved: bool) {
+
+        let pipeline_id = Config::getenv("PIPELINE_ID", "");
+
+
+        // let uri = Config::getenv("SKIPPR_API_ENDPOINT", "");
+        let uri = "https://console.skippr.io";
+            let token = Config::getenv("SKIPPR_API_TOKEN", "");
+
+            let mut headers = HeaderMap::new();
+            headers.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", token)).unwrap());
+
+        // let client = reqwest::Client::new();
+
+
+
+        let client = Client::builder()
+                .default_headers(headers)
+                .build().unwrap();
+
+            let path = "ingest-job/update-mapping";
+
+            let data = json!({
+                "id": pipeline_id,
+                "mapping": metadata,
+                "evolved": evolved,
+            });
+
+        // println!("Posting data: {:?}", data);
+
+            let mut response = client.post(&format!("{}/{}", uri, path))
+                .json(&data)
+                .send()
+                .await;
+
+        match response {
+            Ok(resp) => {
+                println!("Metadata HTTP Success: {:?}", resp);
+            }
+            Err(err) => {
+                println!("Metadata HTTP Error: {:?}", err);
+            }
+        }
+
+        println!("Updated pipeline metadata in Skippr SaaS");
+
+    }
+
+    pub(crate) async fn set_status(metrics: &Metrics, exit_code: Option<i8>) {
+
+        let pipeline_id = Config::getenv("PIPELINE_ID", "");
+
+        let uri = "https://console.skippr.io";
+        let token = Config::getenv("SKIPPR_API_TOKEN", "");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", token)).unwrap());
+
+        // let client = reqwest::Client::new();
+
+
+
+        let client = Client::builder()
+            .default_headers(headers)
+            .build().unwrap();
+
+        let path = "tasks/set-status'";
+
+        let logs: HashMap<i16, String> = HashMap::new();
+
+        let data = json!({
+            "response": {
+                "msgs_total": metrics.msgs_total,
+                "msgs_current": metrics.msgs_current,
+                "run_time_seconds": metrics.run_time_seconds,
+            },
+            "pipeline_id": pipeline_id,
+            "sync_mode": "sync",
+            "task_id": 5319,
+            "logs": logs,
+            "exit_code": exit_code
+        });
+
+        println!("Posting data: {:?}", data);
+
+        let mut response = client.post(&format!("{}/{}", uri, path))
+            .json(&data)
+            .send()
+            .await;
+
+        match response {
+            Ok(resp) => {
+                println!("Status HTTP Success: {:?}", resp);
+            }
+            Err(err) => {
+                println!("Status HTTP Error: {:?}", err);
+            }
+        }
+
+        println!("Notified task status API");
+
+    }
+
     pub fn init() {
         let config: Config = Config::get_config();
         create_dir(config.data_dir);
@@ -254,6 +370,23 @@ impl Config {
 
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct Metrics {
+    pub(crate) msgs_total: i64,
+    pub(crate) msgs_current: i64,
+    pub(crate) run_time_seconds: i64,
+}
+impl Metrics {
+    #[inline]
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            msgs_total: 0,
+            msgs_current: 0,
+            run_time_seconds: 0,
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
