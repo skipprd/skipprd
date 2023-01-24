@@ -125,7 +125,7 @@ impl SerdeJson {
         // let line: Value = serde_json::from_str(&string).unwrap_or_default();
         let line: Value = match serde_json::from_str(&string) {
             Ok(message) => message,
-            Err(err) => Null
+            Err(err) => Null // @todo - we don't really want nulls in the data, do nothing
         };
 
         if line.is_array() {
@@ -186,14 +186,16 @@ impl SerdeJson {
 
                         // Eagerly and perhaps over zealously glob any json we can find by stripping any
                         // remaining non-json from beginning of source data strings.
-                        let mut json_start = string.find("[");
-                        if json_start.is_none() {
-                            json_start = string.find("{");
-                        }
+                        // let mut json_start = string.find("[");
+                        // if json_start.is_none() {
+                        //     json_start = string.find("{");
+                        // }
+                        //
+                        // if json_start.is_some() {
+                        //     string = string.replace(string.get(0..json_start.unwrap()).unwrap(), "");
+                        // }
 
-                        if json_start.is_some() {
-                            string = string.replace(string.get(0..json_start.unwrap()).unwrap(), "");
-                        }
+                        // println!("record: {:?}", string);
 
                         message.push(serde_json::from_str(&string).unwrap_or_default());
 

@@ -21,6 +21,7 @@ use tokio::count;
 
 
 // use std::simd::usizex2;
+use crate::internalfields::InternalFields;
 
 use crate::helpers::Helpers;
 mod date_formats;
@@ -217,17 +218,20 @@ impl AnalyseSchema {
     //
     // }
 
-    pub fn infer_json_schema<R: Read>(
+    pub fn infer_json_schema(
         &mut self,
-        reader: &mut BufReader<R>,
+        input_file: File,
         max_read_records: Option<usize>,
     ) -> Result<HashMap<std::string::String, Metadata>, ArrowError> {
-        self.infer_json_schema_from_iterator(ValueIter::new(reader, max_read_records))
+        // self.infer_json_schema_from_iterator(ValueIter::new(reader, max_read_records))
+        self.infer_json_schema_from_iterator(input_file)
     }
 
-    pub fn infer_json_schema_from_iterator<I>(&mut self, value_iter: I) -> Result<HashMap<std::string::String, Metadata>, ArrowError>
-        where
-            I: Iterator<Item = Result<Value, ArrowError>>,
+    // pub fn infer_json_schema_from_iterator<I>(&mut self, value_iter: I) -> Result<HashMap<std::string::String, Metadata>, ArrowError>
+    //     where
+    //         I: Iterator<Item = Result<Value, ArrowError>>,
+    // {
+    pub fn infer_json_schema_from_iterator(&mut self, mut input_file: File) -> Result<HashMap<std::string::String, Metadata>, ArrowError>
     {
 
         let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
@@ -239,16 +243,28 @@ impl AnalyseSchema {
         metadata.insert("example_ns".to_string(), newMeta);
         let mut newMeta: &mut HashMap<String, Metadata> = &mut metadata;
 
+        let str: &mut String = &mut "".to_string();
+        input_file.read_to_string(str);
 
-        for record in value_iter {
+        let mut records: Vec<Value> = SerdeJson::deserialize(str.clone());
 
-            let string = record.unwrap().to_string();
+        for v in records {
 
-            let mut vs: Vec<Value> = SerdeJson::deserialize(string);
+            // let string = record.unwrap().to_string();
+
+            // println!("record: {:?}", v);
+
+            if v.is_null() {
+                continue;
+            }
+
             // let mut vs: Vec<Value> = serde_json::from_str(&line.unwrap()).unwrap();
 
-            for mut v in vs {
+            // let b = InternalFields;
+            //
+            // InternalFields::parse_namespace_field(vs, "example");
 
+            // for mut v in vs {
                 // println!("Discovering schema for {}", v);
 
                 match v.type_id() {
@@ -278,7 +294,7 @@ impl AnalyseSchema {
                         )));
                     }
                 };
-            }
+            // }
         }
 
         AnalyseSchema::determine_field_types(&mut newMeta.get_mut(&"example_ns".to_string()).unwrap().fields, None);
@@ -366,7 +382,7 @@ impl AnalyseSchema {
             // let is_sequential = Helpers::is_sequential_array_keys(value.as_array().unwrap());
             let is_sequential = Helpers::is_sequential_array_keys(value.as_array().unwrap());
 
-            println!("{} is {} sequential: {:?}", field, is_sequential, value);
+            // println!("{} is {} sequential: {:?}", field, is_sequential, value);
 
             // data_type = "array".to_string();
 
@@ -388,9 +404,9 @@ impl AnalyseSchema {
                         let logical_type = self.get_logical_type(sub_field, &mut sv, metadata, false);
 
                         if (field == "trip") {
-                            println!("#### trip sub_field NAME {:?}", sub_field);
-                            println!("#### trip sub field value {}", sv);
-                            println!("#### trip sub field value type {}", logical_type);
+                            // println!("#### trip sub_field NAME {:?}", sub_field);
+                            // println!("#### trip sub field value {}", sv);
+                            // println!("#### trip sub field value type {}", logical_type);
                         }
 
                         type_count.insert(logical_type, "hit");
@@ -409,9 +425,9 @@ impl AnalyseSchema {
                 }
 
                 if (field == "trip") {
-                    println!("#### trip type len is {}", type_count.len());
-                    println!("#### trip types {:?}", type_count);
-                    println!("#### trip type count is {}", type_count.iter().count());
+                    // println!("#### trip type len is {}", type_count.len());
+                    // println!("#### trip types {:?}", type_count);
+                    // println!("#### trip type count is {}", type_count.iter().count());
                 }
 
                 // Multiple type within array values?
@@ -773,6 +789,9 @@ impl AnalyseSchema {
                         field.determined_type = "record".to_string();
                     } else {
                         for (data_type, data_type_count) in field.types.iter() {
+
+                            // println!("eavluating type {} with count {}", data_type, data_type_count);
+
                             if highest_count < *data_type_count {
                                 // Prefer primitive types to logical types or types
                                 // that cause frequent false positives (demoted types).
@@ -830,13 +849,17 @@ impl AnalyseSchema {
                             }
                         }
 
-                        let mut values_type = type_count
-                            .iter()
-                            .max_by(|a, b| a.1.cmp(&b.1))
-                            .map(|(k, _v)| k)
-                            .unwrap();
+                        let mut values_type: &String = &"".to_string();
 
-                        println!("HIGHEST TYPE: {}", values_type);
+                        if type_count.len() > 1 {
+                            values_type = type_count
+                                .iter()
+                                .max_by(|a, b| a.1.cmp(&b.1))
+                                .map(|(k, _v)| k)
+                                .unwrap();
+                        }
+
+                        // println!("HIGHEST TYPE: {}", values_type);
 
                         field.determined_type_values = values_type.to_string();
 
@@ -846,7 +869,7 @@ impl AnalyseSchema {
 
                     }
 
-                    println!("Field {} determined type is {}", field_name, field.determined_type);
+                    // println!("Field {} determined type is {}", field_name, field.determined_type);
 
                     if field.determined_type != "array".to_string() {
                         let fo = "";

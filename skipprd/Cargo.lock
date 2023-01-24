@@ -2474,6 +2474,7 @@ dependencies = [
  "icu",
  "indexmap",
  "io",
+ "lazy_static",
  "memory-stats",
  "once_cell",
  "parquet",

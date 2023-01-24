@@ -1,7 +1,7 @@
 use yaml_rust::{YamlLoader, YamlEmitter};
 use std::collections::HashMap;
-use std::fs::{create_dir, File};
-use std::io::Read;
+use std::fs::{create_dir, File, OpenOptions};
+use std::io::{BufWriter, Read};
 use aws_config::load_from_env;
 use futures::executor::block_on;
 use reqwest::RequestBuilder;
@@ -262,6 +262,20 @@ impl Config {
 
     pub async fn set_config(metadata: &HashMap<String, Metadata>, evolved: bool) {
 
+
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&"metadata.json".to_string())
+            .unwrap();
+
+        let writer = BufWriter::new(file);
+
+        serde_json::to_writer(writer, &metadata).unwrap();
+
+        ///////////
+
         let pipeline_id = Config::getenv("PIPELINE_ID", "");
 
 
@@ -297,10 +311,10 @@ impl Config {
 
         match response {
             Ok(resp) => {
-                println!("Metadata HTTP Success: {:?}", resp);
+                // println!("Metadata HTTP Success: {:?}", resp);
             }
             Err(err) => {
-                println!("Metadata HTTP Error: {:?}", err);
+                // println!("Metadata HTTP Error: {:?}", err);
             }
         }
 
@@ -343,7 +357,7 @@ impl Config {
             "exit_code": exit_code
         });
 
-        println!("Posting data: {:?}", data);
+        // println!("Posting data: {:?}", data);
 
         let mut response = client.post(&format!("{}/{}", uri, path))
             .json(&data)
@@ -352,10 +366,10 @@ impl Config {
 
         match response {
             Ok(resp) => {
-                println!("Status HTTP Success: {:?}", resp);
+                // println!("Status HTTP Success: {:?}", resp);
             }
             Err(err) => {
-                println!("Status HTTP Error: {:?}", err);
+                // println!("Status HTTP Error: {:?}", err);
             }
         }
 

@@ -16,7 +16,7 @@ use std::io::{BufRead, BufReader, BufWriter, Cursor, Read, Seek, Write};
 use std::path::Path;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use std::thread;
+use std::{fs, thread};
 use std::time::Duration;
 use futures::future::join_all;
 
@@ -34,6 +34,11 @@ impl DataSourceS3InventoryPlugin {
     pub async fn new() -> DataSourceS3InventoryPlugin {
         let mut s3_config = aws_config::from_env().load().await;
         let temp_dir = "/tmp".to_string();
+
+        match fs::create_dir(temp_dir.to_string() + "/skippr") {
+            Ok(g) => {},
+            Err(_err) => {}
+        }
 
         // if let Some(s3_region) = config.get("s3_region") {
         // s3_config.region(Region::from_static(s3_region));
@@ -78,8 +83,9 @@ impl DataSourceS3InventoryPlugin {
         let mut outputs = Vec::new();
 
         let inventory_bucket = Config::getenv("s3_bucket", "");
+        let inventory_prefix = Config::getenv("s3_prefix", "");
 
-        println!("Syncing from bucket: {}", inventory_bucket.clone());
+        println!("Syncing inventory from bucket: {} and prefix {}", inventory_bucket.clone(), inventory_prefix);
         // let mut params = vec![
         //     ("Bucket".to_string(), inventory_bucket.to_string()),
         // ];
@@ -92,12 +98,14 @@ impl DataSourceS3InventoryPlugin {
             .s3_client
             .list_objects()
             .bucket(inventory_bucket.clone())
+            .prefix(inventory_prefix)
             .send()
             .await;
 
         match results {
-            Err(..) => println!("S3 Error {}", results.err().unwrap()),
+            Err(err) => println!("S3 Error {}", err),
             Ok(..) => {
+
                 for result in results {
                     let objects = result.contents().unwrap();
 
@@ -286,29 +294,46 @@ impl DataSourceS3InventoryPlugin {
 
 
 
-        let out_filename = self.temp_dir.to_string() + "/ddd/s3-" + &Helpers::random_str(10);
+        let out_filename = self.temp_dir.to_string() + "/skippr/s3-" + &Helpers::random_str(10);
 
-        // Something that implements `std::io::Read`
-        let c = Cursor::new(data);
 
         // A dummy output
         let mut out_file = File::create(out_filename).unwrap();
 
+        if key.contains(".gz") {
+
+            // Something that implements `std::io::Read`
+            let c = Cursor::new(data);
+
+            // To inflate on the fly, "pipe" the data through the decoder, i.e. wrap the reader
+            let mut stream = GzDecoder::new(c);
+
+            // Consume the `Read`er somehow
+            std::io::copy(&mut stream, &mut out_file).unwrap();
+
+        } else {
+
+            let mut c = Cursor::new(data);
+
+            // let mut stream = BufReader::new(data);
+
+            // Consume the `Read`er somehow
+            std::io::copy(&mut c, &mut out_file).unwrap();
+
+        }
         // Using the raw data would look like this:
         // std::io::copy(&mut c, &mut out_file).unwrap();
 
-        // To inflate on the fly, "pipe" the data through the decoder, i.e. wrap the reader
-        let mut stream = GzDecoder::new(c);
 
-        // Consume the `Read`er somehow
-        std::io::copy(&mut stream, &mut out_file).unwrap();
+
+
 
         // let mut buf: Vec<u8> = vec![0];
         // stream.read_to_end(&mut buf);
         // buf
 
         // let mut tmpfile =
-        //     File::create(self.temp_dir.to_string() + "/ddd/s3-" + &Helpers::random_str(10)).unwrap();
+        //     File::create(self.temp_dir.to_string() + "/skippr/s3-" + &Helpers::random_str(10)).unwrap();
         // tmpfile.write_all(&tmp_file_content);
 
         // println!("Downloaded {}", &key);
