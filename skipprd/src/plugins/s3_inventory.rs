@@ -246,17 +246,26 @@ impl DataSourceS3InventoryPlugin {
 
                                                 // println!("Getting {}", target_key);
 
-                                                outputs.push(self.get_object(target_bucket, target_key));
+                                                outputs.push(self.get_object(target_bucket, urldecode::decode(target_key)));
 
                                                 i += 1;
+
+                                                // println!("{} of {}", i, records_total);
 
                                                 if i > 60 {
                                                     join_all(outputs).await;
                                                     outputs = Vec::new();
                                                     i = 0;
                                                 }
+                                                // else if i >= records_total {
+                                                //     join_all(outputs).await;
+                                                //     outputs = Vec::new();
+                                                //     i = 0;
+                                                // }
                                             }
-
+                                            join_all(outputs).await;
+                                            outputs = Vec::new();
+                                            i = 0;
                                         }
                                     };
                                 }
