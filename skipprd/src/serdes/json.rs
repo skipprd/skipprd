@@ -7,6 +7,7 @@ use std::io::{Read, Seek, Write, BufReader, Lines, Result, BufRead};
 use std::ops::Index;
 use serde_json::Value::Null;
 use crate::discover::AnalyseSchema;
+use crate::helpers::configuration::Config;
 
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -142,8 +143,10 @@ impl SerdeJson {
             message = vec![];
 
             // mocking a stream is best way to deal with new line chars
+            let data_dir= Config::get_data_dir();
+            let temp_file = &format!("{}/json-serde-tmp", data_dir);
 
-            let mut file = File::create("/tmp/foo").unwrap();
+            let mut file = File::create(temp_file).unwrap();
             file.write_all(string.as_bytes());
             file.rewind();
 
@@ -152,7 +155,7 @@ impl SerdeJson {
             // fputs($fp, $string);
             // rewind($fp);
 
-            let lines = SerdeJson::read_lines("/tmp/foo");
+            let lines = SerdeJson::read_lines(temp_file);
 
             if lines.is_ok() {
                 for line in lines.unwrap() {

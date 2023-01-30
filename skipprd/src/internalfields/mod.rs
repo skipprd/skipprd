@@ -55,13 +55,14 @@ impl InternalFields {
     }
 
     // pub fn parse_namespace_field(&mut self,
-    //                              message: &mut HashMap<String, String>,
-    //                              namespace: &str,
+    //     message: &mut HashMap<String, String>,
+    //     namespace: &str,
+    //     parse_namespace_cache: HashMap<String, String>
     // ) -> &str {
     //     let mut clean_namespace = namespace;
     //
     //     // let mut helpers = Helpers { clean_field_cache: Default::default() };
-    //     let mut clean_field_cache_lock = self.parse_namespace_cache.lock().unwrap();
+    //     let mut clean_field_cache_lock = parse_namespace_cache;
     //
     //     if !clean_field_cache_lock.contains_key(namespace)
     //         || *clean_field_cache_lock.get(namespace).unwrap() == "yes"

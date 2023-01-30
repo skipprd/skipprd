@@ -33,9 +33,11 @@ impl DataSourceS3InventoryPlugin {
     // pub async fn new(config: HashMap<String, String>, buffer: Sender<String>) -> DataSourceS3InventoryPlugin {
     pub async fn new() -> DataSourceS3InventoryPlugin {
         let mut s3_config = aws_config::from_env().load().await;
-        let temp_dir = "/tmp".to_string();
 
-        match fs::create_dir(temp_dir.to_string() + "/skippr") {
+        let data_dir= Config::get_data_dir();
+        let temp_dir = &format!("{}", data_dir);
+
+        match fs::create_dir(format!("{}/source_buffer", temp_dir)) {
             Ok(g) => {},
             Err(_err) => {}
         }
@@ -74,7 +76,7 @@ impl DataSourceS3InventoryPlugin {
             // buffer,
             s3_client,
             source_bucket: String::new(),
-            temp_dir,
+            temp_dir: temp_dir.to_string(),
         }
     }
 
@@ -82,8 +84,8 @@ impl DataSourceS3InventoryPlugin {
 
         let mut outputs = Vec::new();
 
-        let inventory_bucket = Config::getenv("s3_bucket", "");
-        let inventory_prefix = Config::getenv("s3_prefix", "");
+        let inventory_bucket = Config::getenv("S3_BUCKET", "");
+        let inventory_prefix = Config::getenv("S3_PREFIX", "");
 
         println!("Syncing inventory from bucket: {} and prefix {}", inventory_bucket.clone(), inventory_prefix);
         // let mut params = vec![
@@ -120,8 +122,8 @@ impl DataSourceS3InventoryPlugin {
                             let timestamp = object.last_modified().unwrap().secs();
 
                             if object_key.contains(&"manifest.json") {
-                                println!("Processing S3 manifest {}", object_key);
-                                // SkipprLogger::debug("Processing S3 manifest $objectKey");
+
+                                // println!("Processing S3 manifest {}", object_key);
 
                                 let inventory_manifest = self
                                     .s3_client
@@ -157,7 +159,6 @@ impl DataSourceS3InventoryPlugin {
                                         file_key,
                                         inventory_bucket.clone()
                                     );
-                                    // SkipprLogger::info("Loading {$file['key']} manifest");
 
                                     let tmp_file = self
                                         .s3_client
@@ -193,13 +194,14 @@ impl DataSourceS3InventoryPlugin {
                                                 .to_vec();
 
                                             let mut tmpfile = File::create(
-                                                self.temp_dir.to_string() + "/s3-inventory-temp",
+                                                self.temp_dir.to_string() + "/s3-inventory-temp.csv.gz",
                                             )
                                             .unwrap();
+
                                             tmpfile.write_all(&tmp_file_content);
 
                                             let file = File::open(
-                                                self.temp_dir.to_string() + "/s3-inventory-temp",
+                                                self.temp_dir.to_string() + "/s3-inventory-temp.csv.gz",
                                             )
                                             .unwrap();
                                             let file = BufReader::new(file);
@@ -218,6 +220,8 @@ impl DataSourceS3InventoryPlugin {
                                             // let inventorys = vec![];
 
                                             let mut i = 0;
+
+                                            // let records_total = rdr.records().count();
 
                                             while let Some(result) = rdr.records().next() {
                                                 let record = result.unwrap();
@@ -284,6 +288,7 @@ impl DataSourceS3InventoryPlugin {
     pub async fn get_object(&self, source_bucket: String, key: String) {
 
         // println!("Async getting {}", &key);
+
         let data = self
             .s3_client
             .get_object()
@@ -303,7 +308,7 @@ impl DataSourceS3InventoryPlugin {
 
 
 
-        let out_filename = self.temp_dir.to_string() + "/skippr/s3-" + &Helpers::random_str(10);
+        let out_filename = self.temp_dir.to_string() + "/source_buffer/" + &Helpers::random_str(10);
 
 
         // A dummy output

@@ -15,12 +15,14 @@ use serde_json::Value::{Array, Null};
 use serde_json::{Map, Value};
 use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
+use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Lines, Read, Seek, Write};
 use std::ops::Index;
 use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::sync::{Arc, Mutex};
+use crate::helpers::configuration::Config;
 
 // #[derive(clap::ValueEnum, Clone)]
 // #[allow(non_camel_case_types, clippy::upper_case_acronyms)]
@@ -244,11 +246,29 @@ impl SerdeParquet {
         //
         // std::io::copy(&mut input_file, &mut output).unwrap();
 
+        let data_dir= Config::get_data_dir();
+
+        let mut skpr_namespace: String = "".to_string();
+        if let Some((a, b)) = path.display().to_string().split_once("done/") {
+            if let Some((hash, namespace_part)) = b.to_string().split_once("-") {
+                skpr_namespace = namespace_part.to_string()
+            }
+        }
+
+        let output_dir = &format!("{}/finalised/{}", data_dir, skpr_namespace);
+
+        match fs::create_dir(output_dir) {
+            Ok(g) => {},
+            Err(_err) => {}
+        }
+
+        let output_file_path = &format!("{}/{}.parquet", output_dir, Helpers::random_str(12).as_str());
+
         let output = OpenOptions::new()
             .create(true)
             .write(true)
             .append(true)
-            .open("finalised/".to_string() + Helpers::random_str(12).as_str() + ".parquet")
+            .open(output_file_path)
             // .open("parquet")
             .unwrap();
 
@@ -267,6 +287,8 @@ impl SerdeParquet {
 
 
         // let output = File::create("./foo/".to_string() + &Helpers::random_str(10)).unwrap();
+
+        println!("Serialising to parquet file: {}", output_file_path);
 
         let mut writer = ArrowWriter::try_new(output, reader.schema(), Some(props.build())).unwrap();
 

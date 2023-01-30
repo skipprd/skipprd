@@ -161,6 +161,12 @@ impl Config {
         }
     }
 
+    pub fn get_data_dir() -> String {
+        let mut data_dir = Config::getenv("DATA_DIR", "./");
+        if data_dir.ends_with('/') { data_dir.pop(); }
+        data_dir
+    }
+
     pub fn get_pipeline_name() -> String {
         // let mut helpers = Helpers { clean_field_cache: Default::default() };
 
@@ -249,7 +255,7 @@ impl Config {
 
         config.tenant_id = Config::getenv("TENANT_ID", Helpers::random_str(16).as_str());
 
-        let data_dir = Config::getenv("DATA_DIR", "");
+        let data_dir= Config::get_data_dir();
         if data_dir != "" {
             config.data_dir = data_dir;
         }
@@ -263,11 +269,14 @@ impl Config {
     pub async fn set_config(metadata: &HashMap<String, Metadata>, evolved: bool) {
 
 
+        let data_dir= Config::get_data_dir();
+        let metadata_file = format!("{}/metadata.json", data_dir);
+
         let file = OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)
-            .open(&"metadata.json".to_string())
+            .open(metadata_file)
             .unwrap();
 
         let writer = BufWriter::new(file);

@@ -80,11 +80,11 @@ fn main() {
 
     match cli.mode {
         Mode::Sync => {
-            println!("Command sync.");
+            // println!("Command sync");
             sync();
         }
         Mode::Discover => {
-            println!("Command discover.");
+            // println!("Command discover");
             discover();
         }
     }
@@ -113,8 +113,11 @@ async fn discover() {
 
     // let mut newMeta: HashMap<String, Metadata> = HashMap::new();
 
+    let data_dir= Config::get_data_dir();
+    let metadata_file = format!("{}/metadata.json", data_dir);
+
     // Get existing metadata
-    let mut newMeta: HashMap<String, Metadata> = match File::open("metadata.json") {
+    let mut newMeta: HashMap<String, Metadata> = match File::open(metadata_file) {
         Ok(file) => {
             let reader = BufReader::new(file);
             match serde_json::from_reader(reader) {
@@ -126,7 +129,7 @@ async fn discover() {
             }
         }
         Err(e) => {
-            println!("No existing metadata {}", e);
+            // println!("No existing metadata {}", e);
             HashMap::new()
         }
     };
@@ -137,10 +140,15 @@ async fn discover() {
 
     let mut analyseCount = 0;
 
+    let data_dir= Config::get_data_dir();
+    let pattern = &format!("{}/source_buffer/*", data_dir);
+
     while !hasAnalysed && analyseCount < 10 {
         analyseCount += 1;
 
-        for entry in glob_with("/tmp/skippr/s3-*", options).expect("Failed to read glob pattern") {
+        let data_dir= Config::get_data_dir();
+
+        for entry in glob_with(pattern, options).expect("Failed to read glob pattern") {
             if !hasAnalysed {
                 match entry {
                     Ok(path) => {
@@ -160,7 +168,7 @@ async fn discover() {
                         // println!("Skippr schema: {:?}", newMeta);
 
                         arrowSchema = convert_skippr_to_arrow(
-                            &mut newMeta.get_mut(&"example_ns".to_string()).unwrap().fields,
+                            newMeta.get(&"example_ns".to_string()).unwrap().fields.clone(),
                         );
 
                         // let json = serde_json::to_string_pretty(&arrowSchema).unwrap();
@@ -200,18 +208,84 @@ async fn discover() {
     // }).join().unwrap();
 }
 
+pub fn parse_namespace_field(
+    message: &mut Value,
+    namespace: String,
+    parse_namespace_cache: &mut HashMap<String, String>
+) -> String {
+    let mut clean_namespace = namespace.clone();
+
+    // let mut helpers = Helpers { clean_field_cache: Default::default() };
+    // let mut clean_field_cache_lock = parse_namespace_cache;
+
+    if !parse_namespace_cache.contains_key(&namespace)
+        || parse_namespace_cache.get(&namespace).unwrap() == "yes"
+    {
+        // default to data source partition (table, topic, queue, file dir, etc)
+        // clean_namespace = namespace.clone();
+
+        // optional: partition by composite key
+        if Config::getenv("DATA_SOURCE_EVENT_TYPE_FIELDS", "") != "" {
+            // let mut namespaces = vec![];
+            let mut namespaces = vec!["".to_string()];
+            // let mut namespaces = Vec("");
+            // let mut namespace: HashMap<String, String>;
+
+            for entity_field_dot in Config::getenv("DATA_SOURCE_EVENT_TYPE_FIELDS", "").split(",") {
+
+                // for entity_value in entity_field_dot {
+                //     Some(entity_value) => {
+                //     println!("event tupe: {}", entity_value);
+
+
+                match message.get(entity_field_dot) {
+                    Some(entity_value) => {
+                        namespaces.push(entity_value.as_str().unwrap().to_string());
+                    },
+                    None => ()
+                }
+            }
+
+            clean_namespace = namespaces.join("_");
+
+            clean_namespace = clean_namespace.trim_matches('_').to_lowercase();
+
+        }
+    }
+
+    if clean_namespace != namespace {
+        // *clean_field_cache_lock.get_mut(namespace).unwrap() = "yes".to_string();
+        parse_namespace_cache.insert(namespace.to_string(), "yes".to_string());
+    }
+    else {
+        parse_namespace_cache.insert(namespace.to_string(), "no".to_string());
+    }
+
+    // message.insert("skpr_namespace".to_string(), clean_namespace.to_string());
+
+    clean_namespace
+}
+
 #[tokio::main]
 async fn sync() {
     // let default_messages = Arc::new(Mutex::new(HashMap::new()));
 
-    let now = Arc::new(Mutex::new(Instant::now()));
+    // let emptyMeta = Metadata::new().unwrap();
+    // let mut metadata = HashMap::new();
+    // metadata.insert("example_ns".to_string(), emptyMeta);
+    // Config::set_config(&metadata, true).await;
+    // exit(0);
 
+    let now = Arc::new(Mutex::new(Instant::now()));
 
     let ingestMsgTotal = Arc::new(Mutex::new(0));
     let ingestMsgCount = Arc::new(Mutex::new(0));
     let ingestMsgCountClone = ingestMsgCount.clone();
 
-    let mut newMeta: HashMap<String, Metadata> = match File::open("metadata.json") {
+    let data_dir= Config::get_data_dir();
+    let metadata_file = format!("{}/metadata.json", data_dir);
+
+    let mut newMeta: HashMap<String, Metadata> = match File::open(metadata_file.clone()) {
         Ok(schema_file) => {
             println!("Found Skippr metadata");
 
@@ -223,14 +297,14 @@ async fn sync() {
             u
         }
         Err(e) => {
-            println!("Could not find Skippr metadata, perhaps run `skippr discover`?");
+            println!("Could not find Skippr metadata, will disover and evolve schemas as we sync.");
             let emptyMeta = Metadata::new().unwrap();
 
             let mut metadata = HashMap::new();
-            // metadata.insert("skpr-time".to_string(), newMeta);
-            metadata.insert("example_ns".to_string(), emptyMeta);
-            let newMeta: HashMap<String, Metadata> = metadata;
-            newMeta
+            // metadata.insert("example_ns".to_string(), emptyMeta);
+            // let newMeta: HashMap<String, Metadata> = metadata;
+            // newMeta
+            metadata
 
 
             // exit(1);
@@ -245,8 +319,6 @@ async fn sync() {
         }
     };
 
-
-    let mut newMetaThread2 = newMeta.clone();
 
     use std::time::Duration;
 
@@ -281,6 +353,9 @@ async fn sync() {
     planner.start();
 
     thread::spawn(move || {
+
+        let mut parse_namespace_cache: HashMap<String, String> = HashMap::new();
+
         let options = MatchOptions {
             case_sensitive: false,
             require_literal_separator: false,
@@ -292,20 +367,34 @@ async fn sync() {
 
         let mut write_len: usize = 0;
 
-        match fs::create_dir(&"output".to_string()) {
+        let data_dir= Config::get_data_dir();
+
+        let output_dir = &format!("{}/output", data_dir);
+        let finalised_dir = &format!("{}/finalised", data_dir);
+
+        match fs::create_dir(output_dir) {
             Ok(g) => {},
             Err(_err) => {}
         }
-        match fs::create_dir(&"finalised".to_string()) {
+        match fs::create_dir(format!("{}/done", output_dir)) {
+            Ok(g) => {},
+            Err(_err) => {}
+        }
+        match fs::create_dir(finalised_dir) {
             Ok(g) => {},
             Err(_err) => {}
         }
 
+        let pattern = format!("{}/source_buffer/*", data_dir);
+
+        let mut updatedSchema: String = "no".to_string();
+
         while true {
-            for entry in glob_with("/tmp/skippr/s3-*", options).expect("Failed to read glob pattern") {
+
+            for entry in glob_with(&pattern, options).expect("Failed to read glob pattern") {
+
                 match entry {
                     Ok(path) => {
-                        // println!("{}", path.display());
 
                         let mut input_file = File::open(path.clone()).unwrap();
 
@@ -331,7 +420,7 @@ async fn sync() {
 
                             // let mut records: Vec<Value> = SerdeJson::deserialize(string);
 
-                            for record in records {
+                            for mut record in records {
 
                                 if record.is_null() {
                                     continue;
@@ -354,23 +443,36 @@ async fn sync() {
                                     //     record: Value::Null,
                                     // };
 
-                                    if output_files.get_mut(&"example_ns".to_string()).is_none() {
+
+                                let source_namespace = Config::getenv("S3_BUCKET", "");
+                                let skpr_namespace = parse_namespace_field(&mut record, source_namespace, &mut parse_namespace_cache);
+
+
+                                if newMeta.get(&skpr_namespace).is_none() {
+                                    newMeta.insert(skpr_namespace.clone(), Metadata::new().unwrap());
+                                }
+
+                                let output_file = format!("{}/{}", output_dir, &skpr_namespace);
+
+                                    if output_files.get_mut(&skpr_namespace).is_none() {
+
                                         let f = OpenOptions::new()
                                             .create(true)
                                             .write(true)
                                             .append(true)
-                                            .open(&"output/example_ns".to_string())
+                                            .open(output_file)
                                             .unwrap();
 
-                                        output_files.insert("example_ns".to_string(), f);
+                                        output_files.insert(skpr_namespace.clone(), f);
                                     }
 
                                     let msg = fast_path_ingest(
                                         &record,
                                         &mut newMeta
-                                            .get_mut(&"example_ns".to_string())
+                                            .get_mut(&skpr_namespace)
                                             .unwrap()
                                             .fields,
+                                            &mut updatedSchema
                                     );
 
                                     let mut counter_lock = ingestMsgCountClone.lock().unwrap();
@@ -383,7 +485,7 @@ async fn sync() {
                                     let buf_str = msg.to_string() + "\n";
 
                                     write_len += output_files
-                                        .get_mut(&"example_ns".to_string())
+                                        .get_mut(&skpr_namespace)
                                         .unwrap()
                                         .write(&buf_str.as_bytes())
                                         .unwrap();
@@ -392,14 +494,15 @@ async fn sync() {
                                         write_len = 0;
 
                                         // output_files.get(&"example_ns".to_string()).unwrap().flush();
-                                        output_files.remove(&"example_ns".to_string()).unwrap(); // close
+                                        output_files.remove(&skpr_namespace).unwrap(); // close
 
                                         fs::rename(
-                                            &"output/example_ns".to_string(),
-                                            "output/example_ns_done_".to_string()
-                                                + &Helpers::random_str(12),
-                                        )
-                                            .unwrap();
+                                            format!("{}/{}", output_dir, &skpr_namespace),
+                                            format!("{}/done/{}-{}", output_dir, &Helpers::random_str(12), &skpr_namespace),
+                                        ).unwrap();
+
+                                        outputSync(newMeta.clone());
+
                                     }
                             //     }
                             //     Err(error) => println!("Error in record: {:?}", error),
@@ -407,6 +510,23 @@ async fn sync() {
                         // }
 
                         std::fs::remove_file(path).unwrap();
+
+                        if updatedSchema == "yes".to_string() {
+
+                            // println!("{:?}", metadata);
+
+                            tokio::runtime::Builder::new_multi_thread()
+                                .enable_all()
+                                .build()
+                                .unwrap()
+                                .block_on(async {
+                                    // @todo - need to pass metadata WTIH namespace here
+                                    Config::set_config(&newMeta, true).await;
+                                });
+
+                            updatedSchema = "no".to_string();
+                        }
+
                     }
                     Err(e) => println!("{:?}", e),
                 }
@@ -420,44 +540,29 @@ async fn sync() {
         }
     });
 
+    // .join()
+    // .expect("Buffer thread failed");
+
+    let mut ds3 = block_on(DataSourceS3InventoryPlugin::new());
+
+    ds3.sync().await;
+    // sleep(Duration::from_secs(125));
+
+    // let now_lock = now.lock().unwrap();
+    //
+    // println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
+
+}
+
+fn outputSync(
+    metadata: HashMap<String, Metadata>
+) {
     thread::spawn(move || {
-        let mut newMeta: HashMap<String, Metadata> = match File::open("metadata.json") {
-            Ok(file) => {
-                let reader = BufReader::new(file);
-                serde_json::from_reader(reader).unwrap()
-            },
-           Err(e) => {
-               // wait until schema is discoovere and try again
-               // We really can't proceed to output without a schema, so allow to error
-               sleep(Duration::from_secs(10));
-               let file = File::open("metadata.json").unwrap();
-               let reader = BufReader::new(file);
-               serde_json::from_reader(reader).unwrap()
-           }
-        };
-
-        // let mut iterCount = 0;
-        //
-        // while newMetaThread2.get_mut(&"example_ns".to_string()).is_none() && iterCount < 10 {
-        //     iterCount += 1;
-        //     println!("waiting for metatdata {}", iterCount);
-        //     sleep(Duration::from_secs(1));
-        // }
-
-        // let mut arrowSchema: Result<Schema, ArrowError> = Ok(Schema::empty());
-        //
-        // let mut schema_ref = Arc::new(Schema::empty());
-        //
-        // // arrowSchema = convert_skippr_to_arrow(&mut newMetaThread2.get_mut(&"example_ns".to_string()).unwrap().fields);
-        // arrowSchema = convert_skippr_to_arrow(
-        //     &mut newMetaThread2
-        //         .get_mut(&"example_ns".to_string())
-        //         .unwrap()
-        //         .fields,
-        // );
 
         // println!("Arrow Schema: {:?}", arrowSchema);
 
+        let data_dir= Config::get_data_dir();
+        let output_dir = &format!("{}/output", data_dir);
 
         let options = MatchOptions {
             case_sensitive: false,
@@ -465,8 +570,8 @@ async fn sync() {
             require_literal_leading_dot: false,
         };
 
-        while true {
-            for entry in glob_with("output/*done*", options).expect("Failed to read glob pattern") {
+        // while true {
+            for entry in glob_with(&format!("{}/done/*", output_dir), options).expect("Failed to read glob pattern") {
                 match entry {
                     Ok(path) => {
                         // println!("Finalising output file {}", path.display());
@@ -474,11 +579,23 @@ async fn sync() {
                         // alwasy regenerate arrow schema incase updated skippr metadata, e.g. discovered a new field
                         let mut arrowSchema: Result<Schema, ArrowError> = Ok(Schema::empty());
                         let mut schema_ref = Arc::new(Schema::empty());
+
+                        let mut skpr_namespace: String = "".to_string();
+                        if let Some((a, b)) = path.display().to_string().split_once("done/") {
+                            if let Some((hash, namespace_part)) = b.to_string().split_once("-") {
+                                skpr_namespace = namespace_part.to_string()
+                            }
+                        }
+
+                        // if metadata.get(&skpr_namespace).is_none() {
+                        //     metadata.insert(skpr_namespace.clone(), Metadata::new().unwrap());
+                        // }
+
                         arrowSchema = convert_skippr_to_arrow(
-                            &mut newMetaThread2
-                                .get_mut(&"example_ns".to_string())
+                            metadata
+                                .get(&skpr_namespace)
                                 .unwrap()
-                                .fields,
+                                .fields.clone(),
                         );
 
                         schema_ref = Arc::new(arrowSchema.unwrap());
@@ -491,19 +608,7 @@ async fn sync() {
                     Err(e) => println!("{:?}", e),
                 }
             }
-            sleep(Duration::from_secs(1));
-        }
+            // sleep(Duration::from_secs(1));
+        // }
     });
-    // .join()
-    // .expect("Buffer thread failed");
-
-    let mut ds3 = block_on(DataSourceS3InventoryPlugin::new());
-
-    ds3.sync().await;
-    // sleep(Duration::from_secs(60));
-
-    // let now_lock = now.lock().unwrap();
-    //
-    // println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
-
 }

@@ -33,9 +33,8 @@ pub fn fast_path_ingest_buf<R: Read>(reader: &mut BufReader<R>) -> ValueIter<R> 
 pub fn fast_path_ingest(
     unwrapped_message: &Value,
     metadata: &mut HashMap<String, Metadata>,
+    updatedSchema: &mut String,
 ) -> Value {
-
-    let mut updatedSchema: String = "no".to_string();
 
     // let mut helpers = Helpers { clean_field_cache: Default::default() };
 
@@ -50,13 +49,18 @@ pub fn fast_path_ingest(
 
         // println!("Ingesting field: {:?}", field);
 
+
+
         // if special_fields.contains_key(field) {
         //     message.insert(field.to_string(), value.to_string());
         // } else {
         //         let resolved_value = Value::Null;
 
         let field_data_type = match metadata.get_mut(&field) {
-            Some(data_type) => data_type.determined_type.clone(),
+            Some(data_type) => {
+                // println!("{:?}",  data_type.determined_type.clone());
+                data_type.determined_type.clone()
+            },
             None => "".to_string()
         };
 
@@ -65,7 +69,7 @@ pub fn fast_path_ingest(
             &field,
             value,
             metadata,
-            &mut updatedSchema
+            updatedSchema
         );
 
         // println!("Setting message with field: {:?}", resolved_value);
@@ -89,19 +93,6 @@ pub fn fast_path_ingest(
         }
         // let bar = message;
         // }
-    }
-
-    if updatedSchema == "yes".to_string() {
-
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
-                Config::set_config(&metadata, true).await;
-            });
-
-        updatedSchema = "no".to_string();
     }
 
     // total_entries += 1;

@@ -128,19 +128,19 @@ fn convert_skippr_type_to_arrow_data_type(skippr_type: &str) -> Result<DataType,
     }
 }
 
-pub fn convert_skippr_to_arrow(metadata: &mut HashMap<String, Metadata>) -> Result<Schema, ArrowError> {
+pub fn convert_skippr_to_arrow(metadata: Box<HashMap<String, Metadata>>) -> Result<Schema, ArrowError> {
 
-    let mut field_types: HashMap<String, InferredType> = convert_skippr_to_arrow_field_types(metadata).unwrap();
+    let mut field_types: HashMap<String, InferredType> = convert_skippr_to_arrow_field_types(&metadata).unwrap();
 
     generate_schema(field_types)
 
 }
 
-fn convert_skippr_to_arrow_field_types(metadata: &mut HashMap<String, Metadata>) -> Result<HashMap<String, InferredType>, ArrowError> {
+fn convert_skippr_to_arrow_field_types(metadata: &HashMap<String, Metadata>) -> Result<HashMap<String, InferredType>, ArrowError> {
 
     let mut field_types: HashMap<String, InferredType> = HashMap::new();
 
-    for (k, v) in metadata.iter_mut() {
+    for (k, v) in metadata.iter() {
         let foo = &*v.determined_type;
 
         match &*v.determined_type {
@@ -230,7 +230,7 @@ fn convert_skippr_to_arrow_field_types(metadata: &mut HashMap<String, Metadata>)
 
 
                 field_types.insert(k.to_string(), InferredType::Object(
-                    convert_skippr_to_arrow_field_types(&mut v.fields).unwrap()
+                    convert_skippr_to_arrow_field_types(&v.fields).unwrap()
                 )
                 );
                 // match field_types.get_mut(k).unwrap() {
