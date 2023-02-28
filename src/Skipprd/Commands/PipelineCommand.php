@@ -283,15 +283,9 @@ class PipelineCommand
                 $this->shutdown();
             }
 
-            SkipprLogger::debug('000-al');
-
             $this->setPlugin();
 
-            SkipprLogger::debug('000-am');
-
             $this->connect();
-
-            SkipprLogger::debug('000-an');
 
 //        if (Config::$analysing) {
 //            Config::$mode = 'sync';
@@ -301,37 +295,22 @@ class PipelineCommand
                 SkipprLogger::info('Reprocessing dead letters');
             }
 
-            SkipprLogger::debug('000-ao');
-
             if (!empty($this->inputPlugin)) {
                 $ran = false;
 
-                SkipprLogger::debug('000-ap');
-
                 if (Config::$runMode == Config::RUN_MODE_SYNC) {
 
-
-                    SkipprLogger::debug('000-q');
-
                     $this->inputBuffer->driver->unlockAll();
-
-                    SkipprLogger::debug('000-ar');
 
                     if (!Config::$analysing) {
                         $conn = $this->streamConnect();
                     }
 
-                    SkipprLogger::debug('000-s');
-
                     $ran = false;
                     while (!$ran || !empty(Config::$pollIntervalSeconds)) {
                         $ran = true;
 
-                        SkipprLogger::debug('111-b');
-
                         $this->inputPlugin->sync();
-
-                        SkipprLogger::debug('111-c');
 
                         $this->scheduledStatusUpdate();
 
