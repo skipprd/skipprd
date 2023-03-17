@@ -444,7 +444,8 @@ async fn sync() {
                                     // };
 
 
-                                let source_namespace = Config::getenv("S3_BUCKET", "");
+                                // let source_namespace = Config::getenv("S3_BUCKET", "");
+                                let source_namespace = "example_ns".to_string();
                                 let skpr_namespace = parse_namespace_field(&mut record, source_namespace, &mut parse_namespace_cache);
 
 
@@ -463,6 +464,7 @@ async fn sync() {
                                             .open(output_file)
                                             .unwrap();
 
+                                        write_len += f.metadata().unwrap().len() as usize;
                                         output_files.insert(skpr_namespace.clone(), f);
                                     }
 
@@ -490,7 +492,7 @@ async fn sync() {
                                         .write(&buf_str.as_bytes())
                                         .unwrap();
 
-                                    if write_len > 1024 * 1024 * 100 {
+                                    if write_len > 1024 * 1024 * 10 {
                                         write_len = 0;
 
                                         // output_files.get(&"example_ns".to_string()).unwrap().flush();

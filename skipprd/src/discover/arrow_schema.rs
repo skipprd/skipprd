@@ -152,8 +152,35 @@ fn convert_skippr_to_arrow_field_types(metadata: &HashMap<String, Metadata>) -> 
                         HashSet::new(),
                     ))),
                 );
+
+                // DataType::List(Box::new(Field::new(
+                //     "item",
+                //     convert_skippr_type_to_arrow_data_type(&v.determined_type_values)?,
+                //     true,
+                // )));
+
+                // field_types.insert(
+                //     k.to_string(),
+                //     InferredType::Array(
+                //         convert_skippr_to_arrow_field_types(&v.fields).unwrap()
+                //     ));
+
             }
             "map" => {
+
+                field_types.insert(
+                    k.to_string(),
+                    InferredType::Object(
+                        convert_skippr_to_arrow_field_types(&v.fields).unwrap()
+                ));
+
+
+                // field_types.insert(
+                //     k.to_string(),
+                //     InferredType::Array(Box::new(InferredType::Scalar(
+                //         HashSet::new(),
+                //     ))),
+                // );
 
 
                 // field_types.insert(
@@ -162,14 +189,6 @@ fn convert_skippr_to_arrow_field_types(metadata: &HashMap<String, Metadata>) -> 
                 //         HashMap::new(),
                 //     ))),
                 // );
-
-                field_types.insert(
-                    k.to_string(),
-                    InferredType::Array(Box::new(InferredType::Scalar(
-                        HashSet::new(),
-                    ))),
-                );
-
                 // let stocks_field = Field::new(
                 //     &k.to_string(),
                 //     DataType::Map(

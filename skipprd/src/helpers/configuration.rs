@@ -170,9 +170,9 @@ impl Config {
     pub fn get_pipeline_name() -> String {
         // let mut helpers = Helpers { clean_field_cache: Default::default() };
 
-        let input_plugin_name = Helpers::clean_field_name(Config::getenv("DATA_SOURCE_PLUGIN_NAME", ""));
-        let output_plugin_name = Helpers::clean_field_name(Config::getenv("DATA_OUTPUT_PLUGIN_NAME", ""));
-        let default_pipeline_name = format!("{}to{}", input_plugin_name, output_plugin_name);
+        let input_plugin_name = Helpers::clean_field_name(Config::getenv("DATA_SOURCE_PLUGIN_NAME", "unknown"));
+        let output_plugin_name = Helpers::clean_field_name(Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "unknown"));
+        let default_pipeline_name = format!("{} to {}", input_plugin_name, output_plugin_name);
         let pipeline_name = Config::getenv("PIPELINE_NAME", default_pipeline_name.as_str());
 
         pipeline_name
@@ -422,6 +422,6 @@ mod tests {
 
     #[test]
     fn test_get_pipeline_name() {
-        assert_eq!(Config::get_pipeline_name(), "test");
+        assert_eq!(Config::get_pipeline_name(), "unknown to unknown");
     }
 }

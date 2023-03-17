@@ -10,6 +10,8 @@ use std::io::{BufReader, Read};
 use std::process::exit;
 use arrow::datatypes::DataType::Duration;
 use futures::executor::block_on;
+use futures::stream::iter;
+use futures::{StreamExt, TryFutureExt};
 use tokio::task::spawn_blocking;
 use crate::discover::arrow_schema::convert_skippr_to_arrow;
 use crate::helpers::configuration::Config;
@@ -149,49 +151,111 @@ fn fast_set_value(
 
                 let mut m = Map::new();
 
-                for (sub_field, sub_value) in value.as_object().unwrap() {
 
-                    match metadata
-                        .get(field)
-                        .unwrap()
-                        .fields
-                        .get(sub_field) {
+                if value.is_object() {
 
-                        Some(t) => (),
-                        None => {
-                           discoverIngest(field, value, metadata, updatedSchema);
-                        }
-                    }
+                    for (sub_field, sub_value) in value.as_object().unwrap() {
 
-                    // only ingest fields enabled to sync to output
-                    if metadata
-                        .get_mut(field)
-                        .unwrap()
-                        .fields
-                        .get_mut(sub_field)
-                        .unwrap()
-                        .enabled
-                        == true
-                    {
                         let clean_sub_field = Helpers::clean_field_name(sub_field.to_string());
 
-                        let newval = fast_set_value(
-                            metadata
-                                .get_mut(field)
-                                .unwrap()
-                                .fields
-                                .get_mut(sub_field)
-                                .unwrap()
-                                .determined_type
-                                .clone(),
-                            sub_field,
-                            // &mut sub_value.as_str().unwrap_or(&value.to_string()), // pass string val or string representation of map/array, etc
-                            sub_value,
-                            &mut metadata.get_mut(field).unwrap().fields,
-                            updatedSchema
-                        );
+                        match metadata
+                            .get(field)
+                            .unwrap()
+                            .fields
+                            .get(sub_field) {
 
-                        m.insert(clean_sub_field.to_string(), newval.into());
+                            Some(t) => (),
+                            None => {
+                                discoverIngest(field, value, metadata, updatedSchema);
+                            }
+                        }
+
+                        // only ingest fields enabled to sync to output
+                        if metadata
+                            .get_mut(field)
+                            .unwrap()
+                            .fields
+                            .get_mut(sub_field)
+                            .unwrap()
+                            .enabled
+                            == true
+                        {
+
+                            let newval = fast_set_value(
+                                metadata
+                                    .get_mut(field)
+                                    .unwrap()
+                                    .fields
+                                    .get_mut(sub_field)
+                                    .unwrap()
+                                    .determined_type
+                                    .clone(),
+                                sub_field,
+                                // &mut sub_value.as_str().unwrap_or(&value.to_string()), // pass string val or string representation of map/array, etc
+                                sub_value,
+                                &mut metadata.get_mut(field).unwrap().fields,
+                                updatedSchema
+                            );
+
+                            m.insert(clean_sub_field.to_string(), newval.into());
+                        }
+                    }
+                }
+
+                // terrible duplication.
+                // We determine that arrays containing arrays are record types
+                // So we'll sometimes end up here
+                if value.is_array() {
+
+                    let mut i = 0;
+                    for sub_value in value.as_array().unwrap() {
+
+                        let clean_sub_field = Helpers::clean_field_name(i.to_string());
+
+                        match metadata
+                            .get(field)
+                            .unwrap()
+                            .fields
+                            .get(&clean_sub_field) {
+
+                            Some(t) => (),
+                            None => {
+                                discoverIngest(field, value, metadata, updatedSchema);
+                            }
+                        }
+
+                        // only ingest fields enabled to sync to output
+                        if metadata
+                            .get_mut(field)
+                            .unwrap()
+                            .fields
+                            .get_mut(&clean_sub_field)
+                            .unwrap()
+                            .enabled
+                            == true
+                        {
+
+
+                            let newval = fast_set_value(
+                                metadata
+                                    .get_mut(field)
+                                    .unwrap()
+                                    .fields
+                                    .get_mut(&clean_sub_field)
+                                    .unwrap()
+                                    .determined_type
+                                    .clone(),
+                                &clean_sub_field,
+                                // &mut sub_value.as_str().unwrap_or(&value.to_string()), // pass string val or string representation of map/array, etc
+                                sub_value,
+                                &mut metadata.get_mut(field).unwrap().fields,
+                                updatedSchema
+                            );
+
+                            m.insert(clean_sub_field.to_string(), newval.into());
+                        }
+
+                        i += 1;
                     }
                 }
 

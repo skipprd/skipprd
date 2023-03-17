@@ -34,6 +34,7 @@ mod filter_parse_int;
 
 pub mod arrow_schema;
 use crate::discover::arrow_schema::convert_skippr_to_arrow;
+use crate::helpers::configuration::Config;
 use crate::ingest::ingest_fast::IngestRecord;
 use crate::serdes::json::SerdeJson;
 
@@ -153,6 +154,13 @@ fn get_type(value: &mut String) -> String {
         Err(..) => {}
     }
 
+    match value.parse::<f32>() {
+        Ok(_bool) => {
+            return "float".to_string();
+        },
+        Err(..) => {}
+    }
+
     let v: Value = serde_json::from_str(value).unwrap_or_default();
     match v.is_array().then_some(true) {
         Some(_bool) => {
@@ -248,8 +256,15 @@ impl AnalyseSchema {
 
         let mut records: Vec<Value> = SerdeJson::deserialize(str.clone());
 
+        let mut i = 0;
+
         for v in records {
 
+            i += 1;
+
+            if i >= min_discovery_records {
+                break;
+            }
             // let string = record.unwrap().to_string();
 
             // println!("record: {:?}", v);
@@ -267,7 +282,9 @@ impl AnalyseSchema {
             // for mut v in vs {
                 // println!("Discovering schema for {}", v);
 
-                match v.type_id() {
+            let source_namespace = Config::getenv("S3_BUCKET", "");
+
+            match v.type_id() {
                     Value => {
                         let mut ingest_record = IngestRecord {
                             source_namespace: "".to_string(),
@@ -311,7 +328,10 @@ impl AnalyseSchema {
         // let mut helpers = Helpers { clean_field_cache: Default::default() };
 
         for (field, value ) in message.as_object().unwrap() {
-            self.init_discovered_type(metadata, field);
+
+            let field = Helpers::clean_field_name(field.to_string());
+
+            self.init_discovered_type(metadata, &field);
 
             let mut jsonValue: Value;
 
@@ -324,8 +344,6 @@ impl AnalyseSchema {
                     }
                 }
             }
-
-            let field = Helpers::clean_field_name(field.to_string());
 
             self.analyse_field(&field, &mut jsonValue, metadata);
         }
@@ -345,9 +363,12 @@ impl AnalyseSchema {
 
         if value.is_object() {
             for (sub_field, sub_value) in value.as_object().unwrap() {
+
+                let sub_field = Helpers::clean_field_name(sub_field.to_string());
+
                 let mut sv = sub_value.clone();
                 // let mut svv: Value = serde_json::from_str(sv.unwrap()).unwrap();
-                self.analyse_field(sub_field, &mut sv, metadata.get_mut(field).unwrap().fields.as_mut());
+                self.analyse_field(&sub_field, &mut sv, metadata.get_mut(field).unwrap().fields.as_mut());
             }
         }
 
@@ -355,7 +376,7 @@ impl AnalyseSchema {
             let mut i = 0;
                 for sub_value in value.as_array().unwrap() {
                     let mut sv = sub_value.clone();
-                    self.analyse_field(&i.to_string(), &mut sv, metadata.get_mut(field).unwrap().fields.as_mut());
+                    self.analyse_field(&Helpers::clean_field_name(i.to_string()), &mut sv, metadata.get_mut(field).unwrap().fields.as_mut());
                     i += 1;
                 }
         }
@@ -377,72 +398,109 @@ impl AnalyseSchema {
 
         let mut data_type = self.get_logical_type(field, value, metadata, true);
 
-        if data_type == "array" && value.is_array() {
+        if data_type == "array"
+            // && value.as_array().is_some()
+            // && value.is_array()
+        {
 
-            // let is_sequential = Helpers::is_sequential_array_keys(value.as_array().unwrap());
-            let is_sequential = Helpers::is_sequential_array_keys(value.as_array().unwrap());
+            let mut is_sequential = false;
+            if value.as_array().is_some() {
+                // let is_sequential = Helpers::is_sequential_array_keys(value.as_array().unwrap());
+                is_sequential = Helpers::is_sequential_array_keys(value.as_array().unwrap());
+            }
 
-            // println!("{} is {} sequential: {:?}", field, is_sequential, value);
+            let mut type_count = HashMap::new();
 
-            // data_type = "array".to_string();
+            if value.as_object().is_some() {
 
-            if is_sequential {
+                println!("{:?} as object", field);
+
+                for (sub_field, sub_value) in value.as_object().unwrap() {
+                    let mut sv: Value = serde_json::from_str(&sub_value.to_string()).unwrap();
+
+                    let logical_type = self.get_logical_type(sub_field, &mut sv, metadata, false);
+
+                    // if (field == "trip") {
+                    // println!("#### trip sub_field NAME {:?}", sub_field);
+                    // println!("#### trip sub field value {}", sv);
+                    // println!("#### trip sub field value type {}", logical_type);
+                    // }
+
+                    type_count.insert(logical_type, "hit");
+
+                    // Special handling of bools in array/map of ints
+                    // [1,2,3] may discover as schema [bool, int, int] and therefore
+                    // parent field resolve type as `record`.
+                    // When in fact we'd want to discover schema as [int, int, int] and
+                    // parent field resolve as `array`.
+                    if type_count.len() == 2 {
+                        if type_count.contains_key("integer") && type_count.contains_key("boolean") {
+                            type_count.remove("boolean");
+                        }
+                    }
+                }
+            }
+
+            if value.as_array().is_some() {
+
+                println!("{:?} as array", field);
+
+                let mut i = 0;
+
+                for (sub_value) in value.as_array().unwrap() {
+                    let mut sv: Value = serde_json::from_str(&sub_value.to_string()).unwrap();
+
+                    let logical_type = self.get_logical_type(&i.to_string(), &mut sv, metadata, false);
+
+                    i += 1;
+                    // if (field == "trip") {
+                    // println!("#### trip sub_field NAME {:?}", sub_field);
+                    // println!("#### trip sub field value {}", sv);
+                    // println!("#### trip sub field value type {}", logical_type);
+                    // }
+
+                    type_count.insert(logical_type, "hit");
+
+                    // Special handling of bools in array/map of ints
+                    // [1,2,3] may discover as schema [bool, int, int] and therefore
+                    // parent field resolve type as `record`.
+                    // When in fact we'd want to discover schema as [int, int, int] and
+                    // parent field resolve as `array`.
+                    if type_count.len() == 2 {
+                        if type_count.contains_key("integer") && type_count.contains_key("boolean") {
+                            type_count.remove("boolean");
+                        }
+                    }
+                }
+            }
+
+            // if is_sequential {
+            //     // array of sequential int keys is an avro array
+            //     data_type = "array".to_string();
+            // } else if !is_sequential {
+            //     // associative array is an avro map
+            //     data_type = "map".to_string();
+            // }
+
+
+
+            // Multiple type within array values?
+            // Must be a record then.
+            if type_count.len() > 1 {
+                data_type = "record".to_string();
+                // Array of Arrays? Use a Record for the parent.
+            } else if type_count.contains_key("array") {
+                data_type = "record".to_string();
+            } else if is_sequential {
                 // array of sequential int keys is an avro array
                 data_type = "array".to_string();
             } else if !is_sequential {
                 // associative array is an avro map
                 data_type = "map".to_string();
             }
-        } else {
-            if data_type == "array" && value.is_object() {
-                let mut type_count = HashMap::new();
 
-                if value.as_object().is_some() {
-                    for (sub_field, sub_value) in value.as_object().unwrap() {
-                        let mut sv: Value = serde_json::from_str(&sub_value.to_string()).unwrap();
-
-                        let logical_type = self.get_logical_type(sub_field, &mut sv, metadata, false);
-
-                        if (field == "trip") {
-                            // println!("#### trip sub_field NAME {:?}", sub_field);
-                            // println!("#### trip sub field value {}", sv);
-                            // println!("#### trip sub field value type {}", logical_type);
-                        }
-
-                        type_count.insert(logical_type, "hit");
-
-                        // Special handling of bools in array/map of ints
-                        // [1,2,3] may discover as schema [bool, int, int] and therefore
-                        // parent field resolve type as `record`.
-                        // When in fact we'd want to discover schema as [int, int, int] and
-                        // parent field resolve as `array`.
-                        if type_count.len() == 2 {
-                            if type_count.contains_key("integer") && type_count.contains_key("boolean") {
-                                type_count.remove("boolean");
-                            }
-                        }
-                    }
-                }
-
-                if (field == "trip") {
-                    // println!("#### trip type len is {}", type_count.len());
-                    // println!("#### trip types {:?}", type_count);
-                    // println!("#### trip type count is {}", type_count.iter().count());
-                }
-
-                // Multiple type within array values?
-                // Must be a record then.
-                if type_count.len() > 1 {
-                    data_type = "record".to_string();
-                    // Array of Arrays? Use a Record for the parent.
-                    // Array of Arrays? Use a Record for the parent.
-                } else if type_count.contains_key("array") {
-                    data_type = "record".to_string();
-                } else {
-                    // associative array is an avro map
-                    data_type = "map".to_string();
-                }
-            }
+            println!("{:?}", field);
+            println!("{:?}", data_type);
         }
 
         self.set_discovered_occurrence(metadata, field, &data_type, &mut value.to_string());
@@ -769,6 +827,11 @@ impl AnalyseSchema {
         let demoted_types = vec!["boolean", "date", "timestamp", "timestamp_milli"];
 
         for (field_name, field) in metadata.iter_mut() {
+
+            if field_name == "abc2" {
+                let fo = "";
+            }
+
             // Useful for field evolution logic for maps, which only support one sub-field type
             if let Some(parent_type) = parent_type {
                 field.parent_type = parent_type.to_string();
@@ -851,7 +914,7 @@ impl AnalyseSchema {
 
                         let mut values_type: &String = &"".to_string();
 
-                        if type_count.len() > 1 {
+                        if type_count.len() >= 1 {
                             values_type = type_count
                                 .iter()
                                 .max_by(|a, b| a.1.cmp(&b.1))
@@ -896,14 +959,19 @@ impl AnalyseSchema {
 #[cfg(test)]
 mod tests {
 
-    use std::fs::{File, OpenOptions};
+    use serial_test::serial;
+    use std::fs::{File, OpenOptions, remove_file};
     use std::io::{BufReader, Seek, Write};
     use std::ops::Index;
+    use std::path::Path;
     use parquet::data_type::AsBytes;
+    use rand::Rng;
     use serde_json::{Value};
     use crate::discover::AnalyseSchema;
+    use crate::helpers::configuration::Config;
 
     #[test]
+    #[serial]
     fn test_discover_arrays_maps() {
 
         let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
@@ -928,22 +996,37 @@ mod tests {
 
         let record_line = serde_json::to_string(&json).unwrap();
 
-        let mut test_file = File::create("test-file").unwrap();
+        let data_dir= Config::get_data_dir();
+
+        let mut rng = rand::thread_rng();
+        let random_tmp_file_name = rng.gen::<i32>();
+
+        let mut test_file = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .create_new(true)
+            .open(format!("./{}", random_tmp_file_name))
+            .unwrap();
+
+        // let mut test_file = File::create_new(format!("./{}", random_tmp_file_name)).unwrap();
 
         test_file.write(&record_line.as_bytes()).unwrap();
 
         test_file.rewind().unwrap();
 
-        let mut in_file = File::open("test-file").unwrap();
+        // let mut in_file = MemFile::create(rng.gen::<i32>(), CreateOptions::new()).unwrap();
+        let mut in_file = File::open(format!("./{}", random_tmp_file_name)).unwrap();
 
-        let mut buf_reader = BufReader::new(in_file);
+        // let mut buf_reader = BufReader::new(in_file);
 
-        let newMeta = AnalyseSchema::infer_json_schema(&mut foo, &mut buf_reader, Some(1)).unwrap();
+        let newMeta = AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1)).unwrap();
+
 
         // println!("{:?}", newMeta.get("example_ns").unwrap());
         // println!("{:?}", newMeta.get("example_ns").unwrap().fields);
-        // println!("{:?}", newMeta.get("example_ns").unwrap().fields.get("abc1").unwrap());
-        // println!("{:?}", newMeta.get("example_ns").unwrap().fields.get("abc1").unwrap().determined_type);
+        // println!("{:?}", newMeta.get("example_ns").unwrap().fields.get("abc2").unwrap());
+        // println!("{:?}", newMeta.get("example_ns").unwrap().fields.get("abc2").unwrap().determined_type);
+        // println!("{:?}", newMeta.get("example_ns").unwrap().fields.get("abc2").unwrap().determined_type_values);
 
         assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc1").unwrap().determined_type, "array");
         assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc1").unwrap().determined_type_values, "integer");
@@ -955,12 +1038,14 @@ mod tests {
         assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc4").unwrap().determined_type_values, "string");
         assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc5").unwrap().determined_type, "map");
         assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc5").unwrap().determined_type_values, "integer");
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc6").unwrap().determined_type, "array");
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc6").unwrap().determined_type, "record");
         assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc7").unwrap().determined_type, "record");
 
+        remove_file(Path::new(&format!("./{}", random_tmp_file_name))).unwrap();
     }
 
     #[test]
+    #[serial]
     fn test_discover_demoted_types() {
 
         let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
@@ -985,17 +1070,28 @@ mod tests {
 
         let record_line = serde_json::to_string(&json).unwrap();
 
-        let mut test_file = File::create("test-file").unwrap();
+        let mut rng = rand::thread_rng();
+        let random_tmp_file_name = rng.gen::<i32>();
+
+        let mut test_file = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .create_new(true)
+            .open(format!("./{}", random_tmp_file_name))
+            .unwrap();
+
+        // let mut test_file = MemFile::create(rng.gen::<i32>(), CreateOptions::new()).unwrap();
 
         test_file.write(&record_line.as_bytes()).unwrap();
 
         test_file.rewind().unwrap();
 
-        let mut in_file = File::open("test-file").unwrap();
+        let mut in_file = File::open(format!("./{}", random_tmp_file_name)).unwrap();
+        // let mut in_file = MemFile::create(rng.gen::<i32>(), CreateOptions::new()).unwrap();
 
-        let mut buf_reader = BufReader::new(in_file);
+        // let mut buf_reader = BufReader::new(in_file);
 
-        let newMeta = AnalyseSchema::infer_json_schema(&mut foo, &mut buf_reader, Some(1)).unwrap();
+        let newMeta = AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1)).unwrap();
 
         assert_eq!(newMeta.get("example_ns").unwrap().fields.get("boolean").unwrap().determined_type, "array");
         assert_eq!(newMeta.get("example_ns").unwrap().fields.get("boolean").unwrap().determined_type_values, "boolean");
@@ -1012,5 +1108,127 @@ mod tests {
         assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc4").unwrap().determined_type, "array");
         assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc4").unwrap().determined_type_values, "integer");
 
+        remove_file(Path::new(&format!("./{}", random_tmp_file_name)));
+    }
+
+    #[test]
+    #[serial]
+    fn test_discover_complex_types() {
+
+        let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
+
+        let field = r#"
+        {
+            "sheep": "dog",
+            "arable": false,
+               "crank": {
+                "voltage": [2, 3, 4, 6, 7, 4, 3, 6, 7, 9],
+                "start_temprature": 5,
+                "end_temprature": 7,
+                "engine": {
+                    "details": {
+                        "manufacturer": "General Electric",
+                        "model": "PZ - 09 - 126178"
+                    },
+                    "rebuild_dates": [
+                        "01/02/19/85",
+                        "15/06/19/2005"
+                    ]
+                }
+            },
+            "crank_torques": [
+                [2, 15, 33, 45, 56, 57, 47, 36, 19, 5],
+                [1, 13, 33, 48, 56, 58, 45, 35, 15, 6]
+            ],
+            "hardware": {
+                "maintenance": {
+                  "last_rebuild": "20/04/2010",
+                  "last_service": "12/07/1973"
+                },
+                "manufacturer": "Beier, Emmerich and Rutherford",
+                "model": "synergize ubiquitous e-commerce"
+            },
+            "isbn": "9407496597",
+            "last_crank": [2, 15, 33, 45, 56, 57, 47, 36, 19, 5],
+            "metadata": {
+                "prcd_micro_time": 1615474853.999185,
+                "rcvd_time": 1615474895,
+                "sent_time": 1615474930,
+                "tags": [
+                    {
+                        "name": "type",
+                        "value": "trip"
+                    },
+                    {
+                        "name": "auto",
+                        "value": false
+                    }
+                ]
+            },
+            "rider_id": "10e974bf-4a43-305a-9e39-1636c43cb22a",
+            "trip": {
+                "end_temprature": 2,
+                "start_temprature": 0
+            }
+        }"#;
+
+        let json: Value = serde_json::from_str(field).unwrap();
+
+        let record_line = serde_json::to_string(&json).unwrap();
+
+        let mut rng = rand::thread_rng();
+        let random_tmp_file_name = rng.gen::<i32>();
+
+        let mut test_file = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .create_new(true)
+            .open(format!("./{}", random_tmp_file_name))
+            .unwrap();
+        // let mut test_file = MemFile::create(rng.gen::<i32>(), CreateOptions::new()).unwrap();
+
+        test_file.write(&record_line.as_bytes()).unwrap();
+
+        test_file.rewind().unwrap();
+
+        let mut in_file = File::open(format!("./{}", random_tmp_file_name)).unwrap();
+        // let mut in_file = MemFile::create(rng.gen::<i32>(), CreateOptions::new()).unwrap();
+
+        let newMeta = AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1)).unwrap();
+
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("sheep").unwrap().determined_type, "string");
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("arable").unwrap().determined_type, "boolean");
+
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("crank").unwrap().determined_type, "record");
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("crank").unwrap().fields.get("voltage").unwrap().determined_type, "array");
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("crank").unwrap().fields.get("voltage").unwrap().determined_type_values, "integer");
+
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("crank").unwrap().fields.get("engine").unwrap().determined_type, "record");
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("crank").unwrap().fields.get("engine").unwrap().fields.get("rebuild_dates").unwrap().determined_type, "array");
+
+        // println!("{:?}", newMeta.get("example_ns").unwrap().fields.get("crank_torques").unwrap());
+
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("crank_torques").unwrap().determined_type, "record");
+
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("crank_torques").unwrap().fields.get("item_0").unwrap().determined_type, "array");
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("crank_torques").unwrap().fields.get("item_0").unwrap().determined_type_values, "integer");
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("crank_torques").unwrap().fields.get("item_1").unwrap().determined_type, "array");
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("crank_torques").unwrap().fields.get("item_1").unwrap().determined_type_values, "integer");
+
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("metadata").unwrap().fields.get("tags").unwrap().determined_type, "record");
+        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("metadata").unwrap().fields.get("tags").unwrap().fields.get("item_0").unwrap().determined_type, "map");
+
+        // // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("date").unwrap().determined_type, "array");
+        // // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("date").unwrap().determined_type_values, "date");
+        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("timestamp").unwrap().determined_type, "array");
+        // // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("timestamp").unwrap().determined_type_values, "timestamp");
+        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("timestamp_milli").unwrap().determined_type, "array");
+        // // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("timestamp_milli").unwrap().determined_type_values, "timestamp_milli");
+        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc3").unwrap().determined_type, "array");
+        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc3").unwrap().determined_type_values, "integer");
+        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc4").unwrap().determined_type, "array");
+        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc4").unwrap().determined_type_values, "integer");
+
+        remove_file(Path::new(&format!("./{}", random_tmp_file_name)));
     }
 }

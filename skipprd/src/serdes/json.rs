@@ -1,10 +1,12 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::{File, remove_file};
 use std::path::Path;
 use std::io::{Read, Seek, Write, BufReader, Lines, Result, BufRead};
 use std::ops::Index;
+use futures::TryFutureExt;
+use rand::{random, Rng};
 use serde_json::Value::Null;
 use crate::discover::AnalyseSchema;
 use crate::helpers::configuration::Config;
@@ -144,18 +146,18 @@ impl SerdeJson {
 
             // mocking a stream is best way to deal with new line chars
             let data_dir= Config::get_data_dir();
-            let temp_file = &format!("{}/json-serde-tmp", data_dir);
+
+            let mut rng = rand::thread_rng();
+            let random_tmp_file_name = rng.gen::<i32>();
+
+            let temp_file = &format!("{}/{}", data_dir, random_tmp_file_name);
 
             let mut file = File::create(temp_file).unwrap();
             file.write_all(string.as_bytes());
             file.rewind();
 
-
-            // let mut fp = String::from("php://temp");
-            // fputs($fp, $string);
-            // rewind($fp);
-
             let lines = SerdeJson::read_lines(temp_file);
+            remove_file(Path::new(&temp_file)).unwrap();
 
             if lines.is_ok() {
                 for line in lines.unwrap() {
@@ -189,14 +191,14 @@ impl SerdeJson {
 
                         // Eagerly and perhaps over zealously glob any json we can find by stripping any
                         // remaining non-json from beginning of source data strings.
-                        // let mut json_start = string.find("[");
-                        // if json_start.is_none() {
-                        //     json_start = string.find("{");
-                        // }
-                        //
-                        // if json_start.is_some() {
-                        //     string = string.replace(string.get(0..json_start.unwrap()).unwrap(), "");
-                        // }
+                        let mut json_start = string.find("[");
+                        if json_start.is_none() {
+                            json_start = string.find("{");
+                        }
+
+                        if json_start.is_some() {
+                            string = string.replace(string.get(0..json_start.unwrap()).unwrap(), "");
+                        }
 
                         // println!("record: {:?}", string);
 
