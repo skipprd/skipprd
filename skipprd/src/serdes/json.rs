@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::fs::{File, remove_file};
+use std::fs::{File, OpenOptions, remove_file};
 use std::path::Path;
 use std::io::{Read, Seek, Write, BufReader, Lines, Result, BufRead};
 use std::ops::Index;
@@ -152,9 +152,16 @@ impl SerdeJson {
 
             let temp_file = &format!("{}/{}", data_dir, random_tmp_file_name);
 
-            let mut file = File::create(temp_file).unwrap();
-            file.write_all(string.as_bytes());
-            file.rewind();
+            let mut file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .append(true)
+                .open(temp_file)
+                .unwrap();
+
+            // let mut file = File::create(temp_file).unwrap();
+            file.write_all(string.as_bytes()).expect("Failed to create temp file while deserializing json");
+            file.rewind().expect("Failed to write to temp file with deserializing json");
 
             let lines = SerdeJson::read_lines(temp_file);
             remove_file(Path::new(&temp_file)).unwrap();
@@ -192,15 +199,13 @@ impl SerdeJson {
                         // Eagerly and perhaps over zealously glob any json we can find by stripping any
                         // remaining non-json from beginning of source data strings.
                         let mut json_start = string.find("[");
-                        if json_start.is_none() {
+                        if json_start.is_none() || json_start.unwrap() > 0 {
                             json_start = string.find("{");
                         }
 
-                        if json_start.is_some() {
+                        if json_start.is_some() && json_start.unwrap() > 0 {
                             string = string.replace(string.get(0..json_start.unwrap()).unwrap(), "");
                         }
-
-                        // println!("record: {:?}", string);
 
                         message.push(serde_json::from_str(&string).unwrap_or_default());
 

@@ -1,5 +1,6 @@
 use yaml_rust::{YamlLoader, YamlEmitter};
 use std::collections::HashMap;
+use std::fs;
 use std::fs::{create_dir, File, OpenOptions};
 use std::io::{BufWriter, Read};
 use aws_config::load_from_env;
@@ -103,7 +104,7 @@ impl Config {
         Config {
             anonymous_metrics: true,
             log_level: String::from("INFO"),
-            data_dir: String::from("/data"),
+            data_dir: String::from(""),
             container_mem: 0,
             pipeline_name: String::from(""),
             pipeline_id: String::from(""),
@@ -162,8 +163,14 @@ impl Config {
     }
 
     pub fn get_data_dir() -> String {
-        let mut data_dir = Config::getenv("DATA_DIR", "./");
+        let mut data_dir = Config::getenv("DATA_DIR", "./skippr_data_tmp");
         if data_dir.ends_with('/') { data_dir.pop(); }
+
+        match fs::create_dir(format!("{}", data_dir)) {
+            Ok(g) => {},
+            Err(_err) => {}
+        }
+
         data_dir
     }
 

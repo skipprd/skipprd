@@ -19,7 +19,7 @@ mod tests {
 
     #[test]
     fn test_get_type_int() {
-        let expected_type = "float".to_string();
+        let expected_type = "double".to_string();
 
         let subject = 123;
         assert_ne!(get_type(&mut String::from(subject.to_string())), expected_type);
@@ -27,7 +27,7 @@ mod tests {
 
     #[test]
     fn test_get_bool_true() {
-        let expected_type = "float".to_string();
+        let expected_type = "double".to_string();
 
         let subject = true;
         assert_ne!(get_type(&mut String::from(subject.to_string())), expected_type);
@@ -35,7 +35,7 @@ mod tests {
 
     #[test]
     fn test_get_type_bool_false() {
-        let expected_type = "float".to_string();
+        let expected_type = "double".to_string();
 
         let subject = false;
         assert_ne!(get_type(&mut String::from(subject.to_string())), expected_type);
@@ -43,7 +43,7 @@ mod tests {
 
     #[test]
     fn test_get_type_bool_true_1() {
-        let expected_type = "float".to_string();
+        let expected_type = "double".to_string();
 
         let subject = 1;
         assert_ne!(get_type(&mut String::from(subject.to_string())), expected_type);
@@ -51,7 +51,7 @@ mod tests {
 
     #[test]
     fn test_get_type_bool_false_0() {
-        let expected_type = "float".to_string();
+        let expected_type = "double".to_string();
 
         let subject = 0;
         assert_ne!(get_type(&mut String::from(subject.to_string())), expected_type);
@@ -59,7 +59,7 @@ mod tests {
 
     #[test]
     fn test_get_type_string() {
-        let expected_type = "float".to_string();
+        let expected_type = "double".to_string();
 
         let subject = "sd";
         assert_ne!(get_type(&mut String::from(subject.to_string())), expected_type);
@@ -67,7 +67,7 @@ mod tests {
 
     #[test]
     fn test_get_type_float_1() {
-        let expected_type = "float".to_string();
+        let expected_type = "double".to_string();
 
         let subject = 1.2;
         assert_eq!(get_type(&mut String::from(subject.to_string())), expected_type);
@@ -75,7 +75,7 @@ mod tests {
 
     #[test]
     fn test_get_type_float_2() {
-        let expected_type = "float".to_string();
+        let expected_type = "double".to_string();
 
         let subject = 0.2;
         assert_eq!(get_type(&mut String::from(subject.to_string())), expected_type);
@@ -83,7 +83,7 @@ mod tests {
 
     // #[test]
     // fn test_get_type_float_3() {
-    //     let expected_type = "float".to_string();
+    //     let expected_type = "double".to_string();
     //
     //     let subject = 2.0;
     //     assert_eq!(get_type(&mut String::from(subject.to_string())), expected_type);
@@ -91,7 +91,7 @@ mod tests {
 
     #[test]
     fn test_get_type_float_4() {
-        let expected_type = "float".to_string();
+        let expected_type = "double".to_string();
 
         let subject = "0.0";
         assert_eq!(get_type(&mut String::from(subject.to_string())), expected_type);
@@ -99,7 +99,7 @@ mod tests {
 
     #[test]
     fn test_get_type_float_5() {
-        let expected_type = "float".to_string();
+        let expected_type = "double".to_string();
 
         let subject = "-0.1";
         assert_eq!(get_type(&mut String::from(subject.to_string())), expected_type);
@@ -107,7 +107,7 @@ mod tests {
 
     #[test]
     fn test_get_type_float_6() {
-        let expected_type = "float".to_string();
+        let expected_type = "double".to_string();
 
         let subject = "+0.1";
         assert_eq!(get_type(&mut String::from(subject.to_string())), expected_type);
@@ -115,7 +115,7 @@ mod tests {
 
     // #[test]
     // fn test_get_type_float_7() {
-    //     let expected_type = "float".to_string();
+    //     let expected_type = "double".to_string();
     //
     //     let subject = 0.0;
     //     assert_eq!(get_type(&mut String::from(subject.to_string())), expected_type);

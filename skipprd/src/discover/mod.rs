@@ -156,7 +156,7 @@ fn get_type(value: &mut String) -> String {
 
     match value.parse::<f32>() {
         Ok(_bool) => {
-            return "float".to_string();
+            return "double".to_string();
         },
         Err(..) => {}
     }
