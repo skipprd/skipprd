@@ -2,7 +2,7 @@ use crate::discover::{AnalyseSchema, Metadata};
 use crate::helpers::Helpers;
 use crate::serdes::parquet::{Message, SerdeParquet};
 use arrow::json::reader::ValueIter;
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use std::any::Any;
 use std::borrow::{Borrow, BorrowMut};
 use std::collections::HashMap;
@@ -133,7 +133,8 @@ fn fast_set_value(
         None => ""
     };
 
-    if data_type != "" || parent_type == "map" {
+    // if data_type != "" || parent_type == "map" {
+    if data_type != "" {
 
         // let data_type: &str = &metadata.get_mut(field).unwrap().determined_type;
         // let data_type = "record";
@@ -261,6 +262,9 @@ fn fast_set_value(
 
                 x = m.into();
                 new_value = x;
+
+                // println!("record new_value is {:?}", new_value);
+
             } else {
                 if data_type == "map" {
                     for (key, val) in value.as_object().unwrap() {
@@ -277,24 +281,26 @@ fn fast_set_value(
                                 &mut metadata.get_mut(field).unwrap().fields,
                                 updatedSchema
                             );
-                            // println!("new_value is {:?}", new_value);
                         }
                     }
+                    // println!("map new_value is {:?}", new_value);
+
                 } else {
                     if data_type == "array" {
-                        for (val) in value.as_array().unwrap() {
-                            // println!("map value is {:?} key is {:?}", val, key);
-                            if Some(val) != None {
-                                new_value = val.to_owned();
-                                // new_value[key] = fast_set_value(
-                                //     metadata.get_mut(field).unwrap().determined_type_values.clone(),
-                                //     key,
-                                //     val,
-                                //     &mut metadata.get_mut(field).unwrap().fields,
-                                // );
-                                // println!("new_value is {:?}", new_value);
-                            }
-                        }
+                        new_value = value.to_owned();
+                        // for (val) in value.as_array().unwrap() {
+                        //     println!("array value is {:?}", val);
+                        //     if Some(val) != None {
+                        //         new_value = val.to_owned();
+                        //         // new_value[key] = fast_set_value(
+                        //         //     metadata.get_mut(field).unwrap().determined_type_values.clone(),
+                        //         //     key,
+                        //         //     val,
+                        //         //     &mut metadata.get_mut(field).unwrap().fields,
+                        //         // );
+                        //         // println!("new_value is {:?}", new_value);
+                        //     }
+                        // }
 
                         // println!("\n\nField: {} array value is {:?}", field, value);
 
@@ -330,7 +336,7 @@ fn fast_set_value(
                         //
                         // new_value[field] = Value::from(b);
 
-                        // println!("new_value is {:?}", new_value[field]);
+                        // println!("array new_value is {:?}", new_value);
                     } else {
                         if data_type == "string" || data_type == "date" {
                             // value += "";
@@ -411,9 +417,28 @@ fn discoverIngest(
 ) -> String {
     let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
 
-    // AnalyseSchema::resolve_field_type(&foo, metadata, &field.to_string(), value.clone().borrow_mut());
-    AnalyseSchema::analyse_field(&foo, &field.to_string(), value.clone().borrow_mut(), metadata);
 
+    /////
+
+    // let mut jsonValue: Value;
+    //
+    // jsonValue = value.clone();
+    //
+    // if value.as_str().is_some() {
+    //     if serde_json::from_str(value.as_str().unwrap()).unwrap_or(false) {
+    //         if serde_json::from_str(value.as_str().unwrap()).unwrap() {
+    //             jsonValue = serde_json::from_str(value.as_str().unwrap()).unwrap();
+    //         }
+    //     }
+    // }
+
+    // AnalyseSchema::analyse_payload(&mut foo, &mut jsonValue, metadata);
+
+    // AnalyseSchema::analyse_field(&foo, &field.to_string(), &mut jsonValue, metadata);
+
+    ////
+
+    AnalyseSchema::analyse_field(&foo, &field.to_string(), value.clone().borrow_mut(), metadata);
 
     AnalyseSchema::determine_field_types(metadata, None);
 
@@ -438,5 +463,133 @@ fn discoverIngest(
 
     discoverd_data_type.clone()
 
+}
 
+
+
+#[cfg(test)]
+mod tests {
+
+    use serial_test::serial;
+    use std::fs::{File, OpenOptions, remove_file};
+    use std::io::{BufReader, Seek, Write};
+    use std::ops::Index;
+    use std::path::Path;
+    use parquet::data_type::AsBytes;
+    use rand::Rng;
+    use serde::de::Unexpected::Str;
+    use serde_json::{Value};
+    use yaml_rust::Yaml::String;
+    use crate::discover::AnalyseSchema;
+    use crate::helpers::configuration::Config;
+    use crate::ingest::ingest_fast::fast_path_ingest;
+    use crate::serdes::json::SerdeJson;
+
+
+    #[test]
+    #[serial]
+    fn test_discover_complex_types() {
+
+        let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
+
+        let field = r#"
+        {
+            "sheep": "dog",
+            "arable": false,
+               "crank": {
+                "voltage": [2, 3, 4, 6, 7, 4, 3, 6, 7, 9],
+                "start_temprature": 5,
+                "end_temprature": 7,
+                "engine": {
+                    "details": {
+                        "manufacturer": "General Electric",
+                        "model": "PZ - 09 - 126178"
+                    },
+                    "rebuild_dates": [
+                        "01/02/19/85",
+                        "15/06/19/2005"
+                    ]
+                }
+            },
+            "crank_torques": [
+                [2, 15, 33, 45, 56, 57, 47, 36, 19, 5],
+                [1, 13, 33, 48, 56, 58, 45, 35, 15, 6]
+            ],
+            "hardware": {
+                "maintenance": {
+                  "last_rebuild": "20/04/2010",
+                  "last_service": "12/07/1973"
+                },
+                "manufacturer": "Beier, Emmerich and Rutherford",
+                "model": "synergize ubiquitous e-commerce"
+            },
+            "isbn": "9407496597",
+            "last_crank": [2, 15, 33, 45, 56, 57, 47, 36, 19, 5],
+            "metadata": {
+                "prcd_micro_time": 1615474853.999185,
+                "rcvd_time": 1615474895,
+                "sent_time": 1615474930,
+                "tags": [
+                    {
+                        "name": "type",
+                        "value": "trip"
+                    },
+                    {
+                        "name": "auto",
+                        "value": false
+                    }
+                ]
+            },
+            "rider_id": "10e974bf-4a43-305a-9e39-1636c43cb22a",
+            "trip": {
+                "end_temprature": 2,
+                "start_temprature": 0
+            }
+        }"#;
+
+        let json: Value = serde_json::from_str(field).unwrap();
+
+        let record_line = serde_json::to_string(&json).unwrap();
+
+        let mut rng = rand::thread_rng();
+        let random_tmp_file_name = rng.gen::<i32>();
+
+        let mut test_file = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .create_new(true)
+            .open(format!("./{}", random_tmp_file_name))
+            .unwrap();
+        // let mut test_file = MemFile::create(rng.gen::<i32>(), CreateOptions::new()).unwrap();
+
+        test_file.write(&record_line.as_bytes()).unwrap();
+
+        test_file.rewind().unwrap();
+
+        let mut in_file = File::open(format!("./{}", random_tmp_file_name)).unwrap();
+        // let mut in_file = MemFile::create(rng.gen::<i32>(), CreateOptions::new()).unwrap();
+
+        let mut newMeta = AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1)).unwrap();
+
+        let str = r#"{"rider_id":"10e974bf-4a43-305a-9e39-1636c43cb22a","bike_id":"8b86f753-05f8-3254-aba6-739188a3c0b6","isbn":"9407496597","trip":{"start_temprature":0,"end_temprature":2},"last_crank":[2,15,33,45,56,57,47,36,19,5],"crank_torques":[[2,15,33,45,56,57,47,36,19,5],[1,13,33,48,56,58,45,35,15,6]],"hardware":{"manufacturer":"Beier, Emmerich and Rutherford","model":"synergize ubiquitous e-commerce","maintenance":{"last_rebuild":"20\/04\/2010","last_service":"12\/07\/1973"}},"metadata":{"rcvd_time":1615474895,"sent_time":1615474930,"prcd_micro_time":1615474853.999185,"tags":[{"name":"type","value":"trip"},{"name":"auto","value":false}]}}"#;
+
+        let mut records: Vec<Value> = SerdeJson::deserialize(str.to_string());
+
+        let mut updatedSchema = "no".to_string();
+
+        // NOTE: This schema is assert tested in discovery
+        let ingestValue = fast_path_ingest(
+            records.first().unwrap(),
+            &mut newMeta
+                .get_mut("example_ns")
+                .unwrap()
+                .fields,
+            &mut updatedSchema
+        );
+
+        let f = [2,15,33,45,56,57,47,36,19,5];
+        let v = ingestValue.get("last_crank").unwrap().as_array().unwrap();
+
+        remove_file(Path::new(&format!("./{}", random_tmp_file_name)));
+    }
 }

@@ -1,10 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use crate::discover::Metadata;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::error::ArrowError;
-use arrow::json::reader::infer_json_schema_from_iterator;
-use icu::plurals::rules::reference::ast::Operand::N;
-use crate::arr::Arr;
-use crate::discover::Metadata;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
 enum InferredType {
@@ -54,9 +51,7 @@ fn generate_datatype(t: &InferredType) -> Result<DataType, ArrowError> {
     })
 }
 
-fn generate_fields(
-    spec: &HashMap<String, InferredType>,
-) -> Result<Vec<Field>, ArrowError> {
+fn generate_fields(spec: &HashMap<String, InferredType>) -> Result<Vec<Field>, ArrowError> {
     spec.iter()
         .map(|(k, types)| Ok(Field::new(k, generate_datatype(types)?, true)))
         .collect()
@@ -67,17 +62,16 @@ fn generate_schema(spec: HashMap<String, InferredType>) -> Result<Schema, ArrowE
     Ok(Schema::new(generate_fields(&spec)?))
 }
 
-
 fn set_object_scalar_field_type(
     field_types: &mut HashMap<String, InferredType>,
     key: &str,
     ftype: DataType,
-) -> Result<(), arrow::error::ArrowError>{
+) -> Result<(), arrow::error::ArrowError> {
     field_types.insert(key.to_string(), InferredType::Scalar(HashSet::new()));
     match field_types.get_mut(key).unwrap() {
         InferredType::Scalar(hs) => {
             hs.insert(ftype);
-        },
+        }
         InferredType::Array(_) => {
             return Err(ArrowError::JsonError(format!(
                 "Only Scala possible found Array instead of Scalar"
@@ -98,46 +92,34 @@ fn set_object_scalar_field_type(
 }
 
 fn convert_skippr_type_to_arrow_data_type(skippr_type: &str) -> Result<DataType, ArrowError> {
-
     return match skippr_type {
-
-        "boolean" => {
-            Ok(DataType::Boolean)
-        }
-        "NULL" => {
-            Ok(DataType::Null)
-        }
-        "integer" => {
-            Ok(DataType::Int32)
-        }
-        "long" => {
-            Ok(DataType::Int64)
-        }
-        "double" => {
-            Ok(DataType::Float64)
-        }
-        "string" => {
-            Ok(DataType::Utf8)
-        }
+        "boolean" => Ok(DataType::Boolean),
+        "NULL" => Ok(DataType::Null),
+        "integer" => Ok(DataType::Int32),
+        "long" => Ok(DataType::Int64),
+        "double" => Ok(DataType::Float64),
+        "string" => Ok(DataType::Utf8),
         &_ => {
             Ok(DataType::Utf8)
             // return Err(ArrowError::JsonError(format!(
             //     "Only Scala possible found &_ instead of Scalar: {}", skippr_type
             // )));
         }
-    }
+    };
 }
 
-pub fn convert_skippr_to_arrow(metadata: Box<HashMap<String, Metadata>>) -> Result<Schema, ArrowError> {
-
-    let mut field_types: HashMap<String, InferredType> = convert_skippr_to_arrow_field_types(&metadata).unwrap();
+pub fn convert_skippr_to_arrow(
+    metadata: Box<HashMap<String, Metadata>>,
+) -> Result<Schema, ArrowError> {
+    let mut field_types: HashMap<String, InferredType> =
+        convert_skippr_to_arrow_field_types(&metadata).unwrap();
 
     generate_schema(field_types)
-
 }
 
-fn convert_skippr_to_arrow_field_types(metadata: &HashMap<String, Metadata>) -> Result<HashMap<String, InferredType>, ArrowError> {
-
+fn convert_skippr_to_arrow_field_types(
+    metadata: &HashMap<String, Metadata>,
+) -> Result<HashMap<String, InferredType>, ArrowError> {
     let mut field_types: HashMap<String, InferredType> = HashMap::new();
 
     for (k, v) in metadata.iter() {
@@ -146,86 +128,22 @@ fn convert_skippr_to_arrow_field_types(metadata: &HashMap<String, Metadata>) -> 
         match &*v.determined_type {
             // Value::Array(array) => {
             "array" => {
+                let mut field = HashSet::new();
+                let dataType = convert_skippr_type_to_arrow_data_type(&v.determined_type_values).unwrap();
+                field.insert(dataType);
+
                 field_types.insert(
                     k.to_string(),
                     InferredType::Array(Box::new(InferredType::Scalar(
-                        HashSet::new(),
-                    ))),
-                );
-
-                // DataType::List(Box::new(Field::new(
-                //     "item",
-                //     convert_skippr_type_to_arrow_data_type(&v.determined_type_values)?,
-                //     true,
-                // )));
-
-                // field_types.insert(
-                //     k.to_string(),
-                //     InferredType::Array(
-                //         convert_skippr_to_arrow_field_types(&v.fields).unwrap()
-                //     ));
-
+                        field
+                     )),
+                ));
             }
             "map" => {
-
                 field_types.insert(
                     k.to_string(),
-                    InferredType::Object(
-                        convert_skippr_to_arrow_field_types(&v.fields).unwrap()
-                ));
-
-
-                // field_types.insert(
-                //     k.to_string(),
-                //     InferredType::Array(Box::new(InferredType::Scalar(
-                //         HashSet::new(),
-                //     ))),
-                // );
-
-
-                // field_types.insert(
-                //     k.to_string(),
-                //     InferredType::Array(Box::new(InferredType::Object(
-                //         HashMap::new(),
-                //     ))),
-                // );
-                // let stocks_field = Field::new(
-                //     &k.to_string(),
-                //     DataType::Map(
-                //         Box::new(Field::new("entries", entries_struct_type.clone(), false)),
-                //         false,
-                //     ),
-                //     true,
-                // );
-                //
-                // field_types.insert(
-                //     k.to_string(),
-                //     DataType::Map(
-                //         Box::new(Field::new("entries", entries_struct_type.clone(), false)),
-                //         false,
-                //     )
-                // );
-
-                // set_object_scalar_field_type(&mut field_types, k, DataType::Map(
-                //     Box::new(Field::new(
-                //         &k.to_string(),
-                //         DataType::Map(
-                //             Box::new(
-                //                 Field::new("entries", convert_skippr_type_to_arrow_data_type(&v.determined_type_values))
-                //             ),
-                //         true,
-                //     )),
-                //     false,
-                // ));
-
-                // set_object_scalar_field_type(&mut field_types, k, DataType::Map(
-                //     Box::new(Field::new(
-                //         "entries",
-                //         convert_skippr_type_to_arrow_data_type(&v.determined_type_values)?,
-                //         true,
-                //     )),
-                //     false,
-                // ));
+                    InferredType::Object(convert_skippr_to_arrow_field_types(&v.fields).unwrap()),
+                );
             }
             "boolean" => {
                 set_object_scalar_field_type(&mut field_types, k, DataType::Boolean);
@@ -246,69 +164,16 @@ fn convert_skippr_to_arrow_field_types(metadata: &HashMap<String, Metadata>) -> 
                 set_object_scalar_field_type(&mut field_types, k, DataType::Utf8);
             }
             "record" => {
-
-
-                field_types.insert(k.to_string(), InferredType::Object(
-                    convert_skippr_to_arrow_field_types(&v.fields).unwrap()
-                )
+                field_types.insert(
+                    k.to_string(),
+                    InferredType::Object(convert_skippr_to_arrow_field_types(&v.fields).unwrap()),
                 );
-                // match field_types.get_mut(k).unwrap() {
-                //     InferredType::Object(inner_field_types) => {
-                //         convert_skippr_to_arrow_field_types(&mut v.fields)?;
-                //     }
-                //     t => {
-                //         return Err(ArrowError::JsonError(format!(
-                //             "Expected object json type, found: {:?}",
-                //             t,
-                //         )));
-                //     }
-                // }
-
-                ////////////////
-
-                // field_types.insert(k.to_string(), InferredType::Object(HashMap::new()));
-                // match field_types.get_mut(k).unwrap() {
-                //     InferredType::Object(hs) => {
-                //     match convert_skippr_to_arrow_field_types(&mut v.fields) {
-                //         Ok(d) => {
-                //
-                //             println!("{:?}", d);
-                //             println!("{:?}", d);
-                //             field_types.insert(k.to_string(), d);
-                //
-                //             // match d.get(&k.to_string()) {
-                //             //     Some(e) => {
-                //             //         field_types.insert(k.to_string(), e.clone());
-                //             //     },
-                //             //     None => println!("Nothing found for {}", k.to_string())
-                //             // }
-                //         },
-                //         Err(e) => println!("Could not unwrap record field types {}", e)
-                //     };
-
-
-                //     }
-                //     InferredType::Scalar(_) => {
-                //         return Err(ArrowError::JsonError(format!(
-                //             "Only Scala possible found Scala instead of object"
-                //         )));
-                //     }
-                //     InferredType::Array(_) => {
-                //         return Err(ArrowError::JsonError(format!(
-                //             "Only Scala possible found Array instead of object"
-                //         )));
-                //     }
-                //     Any => {
-                //         return Err(ArrowError::JsonError(format!(
-                //             "Only Scala possible found Any instead of object"
-                //         )));
-                //     }
-                // }
             }
             "" => {}
             Any => {
                 return Err(ArrowError::JsonError(format!(
-                    "Only Scala possible found Any instead of determined_type string: {}", v.determined_type
+                    "Only Scala possible found Any instead of determined_type string: {}",
+                    v.determined_type
                 )));
             }
         }
@@ -316,3 +181,4 @@ fn convert_skippr_to_arrow_field_types(metadata: &HashMap<String, Metadata>) -> 
 
     Ok(field_types)
 }
+
