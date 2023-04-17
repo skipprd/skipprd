@@ -219,9 +219,9 @@ class ChunkedBuffer implements BufferInterface
 
         $bucketSeconds = false;
 
-        if (Config::$eventTimeBucketDurationSeconds) {
+        if (Config::$eventTimeBucketDuration) {
 
-            switch (Config::$eventTimeBucketDurationSeconds) {
+            switch (Config::$eventTimeBucketDuration) {
                 case 'year':
                     $bucketSeconds = 30240000;
                     break;
@@ -296,7 +296,7 @@ class ChunkedBuffer implements BufferInterface
         }
     }
 
-    public function decodeChunkTime($filename) : string
+    public function decodeFileTime($filename) : string
     {
 
         parse_str($filename, $array);

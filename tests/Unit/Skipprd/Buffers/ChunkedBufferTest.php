@@ -91,7 +91,7 @@ class ChunkedBufferTest extends TestCase
 
         $chunkName = $chunkedBuffer->encodeChunkName($namespace, $partition, $timeBucket);
 
-        $timePartition = $chunkedBuffer->decodeChunkTime($chunkName);
+        $timePartition = $chunkedBuffer->decodeFileTime($chunkName);
 
         $this->assertEquals('2022-05-30T09:19:13+00:00', $timePartition);
 

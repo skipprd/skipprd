@@ -22,7 +22,7 @@ interface BufferInterface
 
     public function getChunkName($filename) : array;
 
-    public function decodeChunkTime($filename) : string;
+    public function decodeFileTime($filename) : string;
 
     public function decodeFileNamespace($filename) : string;
 

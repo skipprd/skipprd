@@ -19,6 +19,7 @@ pub mod configuration;
 
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
+use crate::helpers::configuration::Config;
 
 // static clean_field_cache: Lazy<Mutex<i64>> = Lazy::new(|| Mutex::new(1));
 static clean_field_cache: Lazy<Mutex<HashMap<String, bool>>> = Lazy::new(|| Mutex::new(HashMap::new()));
@@ -172,5 +173,65 @@ impl Helpers {
 
         return false;
     }
+
+
+    pub fn parse_namespace_field(
+        message: & Value,
+        namespace: String,
+        parse_namespace_cache: &mut HashMap<String, String>
+    ) -> String {
+        let mut clean_namespace = namespace.clone();
+
+        // let mut helpers = Helpers { clean_field_cache: Default::default() };
+        // let mut clean_field_cache_lock = parse_namespace_cache;
+
+        if !parse_namespace_cache.contains_key(&namespace)
+            || parse_namespace_cache.get(&namespace).unwrap() == "yes"
+        {
+            // default to data source partition (table, topic, queue, file dir, etc)
+            // clean_namespace = namespace.clone();
+
+            // optional: partition by composite key
+            if Config::getenv("DATA_SOURCE_EVENT_TYPE_FIELDS", "") != "" {
+                // let mut namespaces = vec![];
+                let mut namespaces = vec!["".to_string()];
+                // let mut namespaces = Vec("");
+                // let mut namespace: HashMap<String, String>;
+
+                for entity_field_dot in Config::getenv("DATA_SOURCE_EVENT_TYPE_FIELDS", "").split(",") {
+
+                    // for entity_value in entity_field_dot {
+                    //     Some(entity_value) => {
+                    //     println!("event tupe: {}", entity_value);
+
+
+                    match message.get(entity_field_dot) {
+                        Some(entity_value) => {
+                            namespaces.push(entity_value.as_str().unwrap().to_string());
+                        },
+                        None => ()
+                    }
+                }
+
+                clean_namespace = namespaces.join("_");
+
+                clean_namespace = clean_namespace.trim_matches('_').to_lowercase();
+
+            }
+        }
+
+        if clean_namespace != namespace {
+            // *clean_field_cache_lock.get_mut(namespace).unwrap() = "yes".to_string();
+            parse_namespace_cache.insert(namespace.to_string(), "yes".to_string());
+        }
+        else {
+            parse_namespace_cache.insert(namespace.to_string(), "no".to_string());
+        }
+
+        // message.insert("skpr_namespace".to_string(), clean_namespace.to_string());
+
+        clean_namespace
+    }
+
 
 }

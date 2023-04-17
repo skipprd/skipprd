@@ -18,6 +18,7 @@ use serde_derive::{Deserialize, Serialize};
 
 use serde_json::Value;
 use tokio::count;
+use crate::buffer::BufferChunker;
 
 
 // use std::simd::usizex2;
@@ -230,26 +231,33 @@ impl AnalyseSchema {
         &mut self,
         input_file: File,
         max_read_records: Option<usize>,
+        newMeta: &mut HashMap<std::string::String, Metadata>
     ) -> Result<HashMap<std::string::String, Metadata>, ArrowError> {
         // self.infer_json_schema_from_iterator(ValueIter::new(reader, max_read_records))
-        self.infer_json_schema_from_iterator(input_file)
+        self.infer_json_schema_from_iterator(input_file, newMeta)
     }
 
     // pub fn infer_json_schema_from_iterator<I>(&mut self, value_iter: I) -> Result<HashMap<std::string::String, Metadata>, ArrowError>
     //     where
     //         I: Iterator<Item = Result<Value, ArrowError>>,
     // {
-    pub fn infer_json_schema_from_iterator(&mut self, mut input_file: File) -> Result<HashMap<std::string::String, Metadata>, ArrowError>
+    pub fn infer_json_schema_from_iterator(
+        &mut self,
+        mut input_file: File,
+        newMeta: &mut HashMap<std::string::String, Metadata>
+    ) -> Result<HashMap<std::string::String, Metadata>, ArrowError>
     {
 
+        let mut parse_namespace_cache: HashMap<String, String> = HashMap::new();
+
+        let mut skpr_namespace: String = "".to_string();
+
+        // let mut newMeta: &mut HashMap<String, Metadata>;
+        // let defaultMetadata = Metadata::new().unwrap();
+        // let mut metadata = HashMap::new();
+        // newMeta = &mut metadata;
+
         let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
-
-        let newMeta = Metadata::new().unwrap();
-
-        let mut metadata = HashMap::new();
-        // metadata.insert("skpr-time".to_string(), newMeta);
-        metadata.insert("example_ns".to_string(), newMeta);
-        let mut newMeta: &mut HashMap<String, Metadata> = &mut metadata;
 
         let str: &mut String = &mut "".to_string();
         input_file.read_to_string(str);
@@ -259,6 +267,18 @@ impl AnalyseSchema {
         let mut i = 0;
 
         for v in records {
+
+            let source_namespace = Config::getenv("S3_BUCKET", "");
+
+            // let source_namespace = BufferChunker::decode_file_namespace(path.to_str().unwrap());
+            // let source_partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
+            skpr_namespace = Helpers::parse_namespace_field(&v, source_namespace.clone(), &mut parse_namespace_cache);
+
+
+            if !newMeta.contains_key(&skpr_namespace) {
+                newMeta.insert(skpr_namespace.clone(),Metadata::new().unwrap());
+                // newMeta = &mut metadata.clone();
+            }
 
             i += 1;
 
@@ -282,15 +302,13 @@ impl AnalyseSchema {
             // for mut v in vs {
                 // println!("Discovering schema for {}", v);
 
-            let source_namespace = Config::getenv("S3_BUCKET", "");
-
             match v.type_id() {
                     Value => {
                         let mut ingest_record = IngestRecord {
-                            source_namespace: "".to_string(),
+                            source_namespace: source_namespace,
                             source_partition: "".to_string(),
                             skpr_event_ts: 0,
-                            skpr_namespace: "example_ns".to_string(),
+                            skpr_namespace: skpr_namespace.clone(),
                             skpr_partition: "".to_string(),
                             record: v,
                         };
@@ -314,7 +332,7 @@ impl AnalyseSchema {
             // }
         }
 
-        AnalyseSchema::determine_field_types(&mut newMeta.get_mut(&"example_ns".to_string()).unwrap().fields, None);
+        AnalyseSchema::determine_field_types(&mut newMeta.get_mut(&skpr_namespace).unwrap().fields, None);
 
         // let metadata = newMeta.clone();
 
@@ -413,7 +431,7 @@ impl AnalyseSchema {
 
             if value.as_object().is_some() {
 
-                println!("{:?} as object", field);
+                // println!("{:?} as object", field);
 
                 for (sub_field, sub_value) in value.as_object().unwrap() {
                     let mut sv: Value = serde_json::from_str(&sub_value.to_string()).unwrap();
@@ -443,7 +461,7 @@ impl AnalyseSchema {
 
             if value.as_array().is_some() {
 
-                println!("{:?} as array", field);
+                // println!("{:?} as array", field);
 
                 let mut i = 0;
 
@@ -499,8 +517,8 @@ impl AnalyseSchema {
                 data_type = "map".to_string();
             }
 
-            println!("{:?}", field);
-            println!("{:?}", data_type);
+            // println!("{:?}", field);
+            // println!("{:?}", data_type);
         }
 
         self.set_discovered_occurrence(metadata, field, &data_type, &mut value.to_string());

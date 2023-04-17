@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 use std::{fs, thread};
 use std::time::Duration;
 use futures::future::join_all;
+use crate::buffer::BufferChunker;
 
 
 pub struct DataSourceS3InventoryPlugin {
@@ -42,38 +43,9 @@ impl DataSourceS3InventoryPlugin {
             Err(_err) => {}
         }
 
-        // if let Some(s3_region) = config.get("s3_region") {
-        // s3_config.region(Region::from_static(s3_region));
-        // s3_config.insert("region".to_string(), Region::from_static(s3_region));
-        // }
-        //
-        // if let Some(aws_access_id) = config.get("aws_access_id") {
-        // s3_config.insert("credentials".to_string(), aws_access_id.to_string());
-        // }
-        //
-        // if let Some(aws_secret_key) = config.get("aws_secret_key") {
-        // s3_config.insert("credentials".to_string(), aws_secret_key.to_string());
-        // }
-        //
-        // if let Some(endpoint) = config.get("endpoint") {
-        //     s3_config.set_endpoint_resolver()
-        //     s3_config.insert("endpoint".to_string(), endpoint.to_string());
-        // }
-        //
-        // if let Some(role_arn) = config.get("role_arn") {
-        //     s3_config.insert("role_arn".to_string(), role_arn.to_string());
-        // }
-        //
-        // if let Some(role_session_name) = config.get("role_session_name") {
-        //     s3_config.insert("role_session_name".to_string(), role_session_name.to_string());
-        // }
-
         let s3_client = Client::new(&s3_config);
-        // let s3_helpers = AwsS3::new(s3_client);
 
         DataSourceS3InventoryPlugin {
-            // config,
-            // buffer,
             s3_client,
             source_bucket: String::new(),
             temp_dir: temp_dir.to_string(),
@@ -292,7 +264,7 @@ impl DataSourceS3InventoryPlugin {
         let data = self
             .s3_client
             .get_object()
-            .bucket(source_bucket)
+            .bucket(&source_bucket)
             .key(&key)
             .send()
             .await
@@ -306,9 +278,10 @@ impl DataSourceS3InventoryPlugin {
 
         // println!("Got {}", &key);
 
+        let file_name = BufferChunker::encode_chunk_name("source_buffer", Some(&source_bucket), None, None);
 
-
-        let out_filename = self.temp_dir.to_string() + "/source_buffer/" + &Helpers::random_str(10);
+        // let out_filename = self.temp_dir.to_string() + "/source_buffer/" + &Helpers::random_str(10);
+        let out_filename = self.temp_dir.to_string() + "/source_buffer/" + &file_name + "-" + &Helpers::random_str(10);
 
 
         // A dummy output

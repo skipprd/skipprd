@@ -25,6 +25,8 @@ use futures::executor::block_on;
 use glob::glob_with;
 use glob::MatchOptions;
 
+mod buffer;
+
 mod helpers;
 
 mod metrics;
@@ -63,6 +65,7 @@ use crate::helpers::configuration::{Config, Metrics};
 use crate::helpers::Helpers;
 use serde_json::Value;
 use tokio::fs::remove_file;
+use crate::buffer::BufferChunker;
 
 fn main() {
     Config::init();
@@ -116,6 +119,7 @@ async fn discover() {
     let data_dir= Config::get_data_dir();
     let metadata_file = format!("{}/metadata.json", data_dir);
 
+
     // Get existing metadata
     let mut newMeta: HashMap<String, Metadata> = match File::open(metadata_file) {
         Ok(file) => {
@@ -162,24 +166,27 @@ async fn discover() {
                         //     AnalyseSchema::infer_json_schema(&mut foo, &mut buf_reader, Some(1000))
                         //         .unwrap();
                         newMeta =
-                            AnalyseSchema::infer_json_schema(&mut foo, input_file, Some(1000))
+                            AnalyseSchema::infer_json_schema(&mut foo, input_file, Some(1000), &mut newMeta)
                                 .unwrap();
 
                         // println!("Skippr schema: {:?}", newMeta);
 
-                        arrowSchema = convert_skippr_to_arrow(
-                            newMeta.get(&"example_ns".to_string()).unwrap().fields.clone(),
-                        );
 
-                        // let json = serde_json::to_string_pretty(&arrowSchema).unwrap();
-                        // eprintln!("Schema:");
-                        // println!("{}", json);
 
-                        // println!("Arrow schema: {:?}", arrowSchema);
 
-                        // let schema_ref = Arc::new(arrowSchema.unwrap());
-                        schema_ref = Arc::new(arrowSchema.unwrap());
-                        // schema_ref = arrowSchema.unwrap();
+                        // arrowSchema = convert_skippr_to_arrow(
+                        //     newMeta.get(&"example_ns".to_string()).unwrap().fields.clone(),
+                        // );
+                        //
+                        // // let json = serde_json::to_string_pretty(&arrowSchema).unwrap();
+                        // // eprintln!("Schema:");
+                        // // println!("{}", json);
+                        //
+                        // // println!("Arrow schema: {:?}", arrowSchema);
+                        //
+                        // // let schema_ref = Arc::new(arrowSchema.unwrap());
+                        // schema_ref = Arc::new(arrowSchema.unwrap());
+                        // // schema_ref = arrowSchema.unwrap();
 
                         hasAnalysed = true;
                     }
@@ -206,64 +213,6 @@ async fn discover() {
 
     // newMeta
     // }).join().unwrap();
-}
-
-pub fn parse_namespace_field(
-    message: &mut Value,
-    namespace: String,
-    parse_namespace_cache: &mut HashMap<String, String>
-) -> String {
-    let mut clean_namespace = namespace.clone();
-
-    // let mut helpers = Helpers { clean_field_cache: Default::default() };
-    // let mut clean_field_cache_lock = parse_namespace_cache;
-
-    if !parse_namespace_cache.contains_key(&namespace)
-        || parse_namespace_cache.get(&namespace).unwrap() == "yes"
-    {
-        // default to data source partition (table, topic, queue, file dir, etc)
-        // clean_namespace = namespace.clone();
-
-        // optional: partition by composite key
-        if Config::getenv("DATA_SOURCE_EVENT_TYPE_FIELDS", "") != "" {
-            // let mut namespaces = vec![];
-            let mut namespaces = vec!["".to_string()];
-            // let mut namespaces = Vec("");
-            // let mut namespace: HashMap<String, String>;
-
-            for entity_field_dot in Config::getenv("DATA_SOURCE_EVENT_TYPE_FIELDS", "").split(",") {
-
-                // for entity_value in entity_field_dot {
-                //     Some(entity_value) => {
-                //     println!("event tupe: {}", entity_value);
-
-
-                match message.get(entity_field_dot) {
-                    Some(entity_value) => {
-                        namespaces.push(entity_value.as_str().unwrap().to_string());
-                    },
-                    None => ()
-                }
-            }
-
-            clean_namespace = namespaces.join("_");
-
-            clean_namespace = clean_namespace.trim_matches('_').to_lowercase();
-
-        }
-    }
-
-    if clean_namespace != namespace {
-        // *clean_field_cache_lock.get_mut(namespace).unwrap() = "yes".to_string();
-        parse_namespace_cache.insert(namespace.to_string(), "yes".to_string());
-    }
-    else {
-        parse_namespace_cache.insert(namespace.to_string(), "no".to_string());
-    }
-
-    // message.insert("skpr_namespace".to_string(), clean_namespace.to_string());
-
-    clean_namespace
 }
 
 #[tokio::main]
@@ -335,10 +284,10 @@ async fn sync() {
 
             *total_lock += *counter_lock;
 
-            // metrics.msgs_total = total_lock.clone();
-            // metrics.msgs_current = counter_lock.clone();
-            // metrics.run_time_seconds = now_lock.elapsed().as_secs().clone() as i64;
-            // Config::set_status(&metrics, None);
+            metrics.msgs_total = *total_lock;
+            metrics.msgs_current = *counter_lock;
+            metrics.run_time_seconds = now_lock.elapsed().as_secs().clone() as i64;
+            Config::set_status(&metrics, None);
 
             println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
             println!("Ingested Messages: {}", *counter_lock);
@@ -351,6 +300,8 @@ async fn sync() {
         periodic::Every::new(Duration::from_secs(60)),
     );
     planner.start();
+
+    // outputSync(newMeta.clone());
 
     thread::spawn(move || {
 
@@ -445,17 +396,20 @@ async fn sync() {
 
 
                                 // let source_namespace = Config::getenv("S3_BUCKET", "");
-                                let source_namespace = "example_ns".to_string();
-                                let skpr_namespace = parse_namespace_field(&mut record, source_namespace, &mut parse_namespace_cache);
+                                let source_namespace = BufferChunker::decode_file_namespace(path.to_str().unwrap());
+                                let source_partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
+
+                                let skpr_namespace = Helpers::parse_namespace_field(&record, source_namespace, &mut parse_namespace_cache);
 
 
                                 if newMeta.get(&skpr_namespace).is_none() {
                                     newMeta.insert(skpr_namespace.clone(), Metadata::new().unwrap());
                                 }
 
-                                let output_file = format!("{}/{}", output_dir, &skpr_namespace);
+                                let output_file_name = BufferChunker::encode_chunk_name("ingest", Some(&skpr_namespace), Some(&source_partition), Some(0));
+                                let output_file = format!("{}/{}", output_dir, &output_file_name);
 
-                                    if output_files.get_mut(&skpr_namespace).is_none() {
+                                    if output_files.get_mut(&output_file_name).is_none() {
 
                                         let f = OpenOptions::new()
                                             .create(true)
@@ -465,7 +419,7 @@ async fn sync() {
                                             .unwrap();
 
                                         write_len += f.metadata().unwrap().len() as usize;
-                                        output_files.insert(skpr_namespace.clone(), f);
+                                        output_files.insert(output_file_name.clone(), f);
                                     }
 
                                     let msg = fast_path_ingest(
@@ -487,7 +441,7 @@ async fn sync() {
                                     let buf_str = msg.to_string() + "\n";
 
                                     write_len += output_files
-                                        .get_mut(&skpr_namespace)
+                                        .get_mut(&output_file_name)
                                         .unwrap()
                                         .write(&buf_str.as_bytes())
                                         .unwrap();
@@ -496,11 +450,11 @@ async fn sync() {
                                         write_len = 0;
 
                                         // output_files.get(&"example_ns".to_string()).unwrap().flush();
-                                        output_files.remove(&skpr_namespace).unwrap(); // close
+                                        output_files.remove(&output_file_name).unwrap(); // close
 
                                         fs::rename(
-                                            format!("{}/{}", output_dir, &skpr_namespace),
-                                            format!("{}/done/{}-{}", output_dir, &Helpers::random_str(12), &skpr_namespace),
+                                            format!("{}/{}", output_dir, &output_file_name),
+                                            format!("{}/done/{}-{}", output_dir, &Helpers::random_str(12), &output_file_name),
                                         ).unwrap();
 
                                         outputSync(newMeta.clone());
@@ -511,7 +465,12 @@ async fn sync() {
                             }
                         // }
 
-                        std::fs::remove_file(path).unwrap();
+                        match std::fs::remove_file(path.clone()) {
+                            Ok(file) => {
+                                // println!("Deleted file: {}", path.to_str().unwrap())
+                            },
+                            Err(err) => println!("Failed deleting file: {}", err),
+                        }
 
                         if updatedSchema == "yes".to_string() {
 
@@ -522,7 +481,6 @@ async fn sync() {
                                 .build()
                                 .unwrap()
                                 .block_on(async {
-                                    // @todo - need to pass metadata WTIH namespace here
                                     Config::set_config(&newMeta, true).await;
                                 });
 
@@ -548,7 +506,9 @@ async fn sync() {
     let mut ds3 = block_on(DataSourceS3InventoryPlugin::new());
 
     ds3.sync().await;
+
     // sleep(Duration::from_secs(125));
+
 
     // let now_lock = now.lock().unwrap();
     //
@@ -582,16 +542,21 @@ fn outputSync(
                         let mut arrowSchema: Result<Schema, ArrowError> = Ok(Schema::empty());
                         let mut schema_ref = Arc::new(Schema::empty());
 
-                        let mut skpr_namespace: String = "".to_string();
-                        if let Some((a, b)) = path.display().to_string().split_once("done/") {
-                            if let Some((hash, namespace_part)) = b.to_string().split_once("-") {
-                                skpr_namespace = namespace_part.to_string()
-                            }
-                        }
+                        let skpr_namespace = BufferChunker::decode_file_namespace(path.to_str().unwrap());
+                        let skpr_partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
+
+                        // let mut skpr_namespace: String = "".to_string();
+                        // if let Some((a, b)) = path.display().to_string().split_once("done/") {
+                        //     if let Some((hash, namespace_part)) = b.to_string().split_once("-") {
+                        //         skpr_namespace = namespace_part.to_string()
+                        //     }
+                        // }
 
                         // if metadata.get(&skpr_namespace).is_none() {
                         //     metadata.insert(skpr_namespace.clone(), Metadata::new().unwrap());
                         // }
+
+                        // println!("getting schema: {} from file: {}", skpr_namespace, path.to_str().unwrap());
 
                         arrowSchema = convert_skippr_to_arrow(
                             metadata
@@ -605,7 +570,11 @@ fn outputSync(
 
                         schema_ref = SerdeParquet::serialize(path.clone(), schema_ref);
 
-                        std::fs::remove_file(path).unwrap();
+                        match std::fs::remove_file(path) {
+                            Ok(t) => {},
+                            Err(err) => println!("{:?}", err),
+
+                        }
                     }
                     Err(e) => println!("{:?}", e),
                 }

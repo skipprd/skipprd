@@ -33,9 +33,10 @@ parquet = "23.0.0"
 arrow = "23.0.0"
 arrow-schema = "30.0.0"
 indexmap = "1.9.2"
-reqwest = { version = "0.11.14", features = ["json"] }
+reqwest = { version = "0.11.16", features = ["blocking", "json"] }
 lazy_static = "1.4.0"
 urldecode = "0.1.1"
+url = "2.3.1"
 
 [dev-dependencies]
 serial_test = "1.0.0"

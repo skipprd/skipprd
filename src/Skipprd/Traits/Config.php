@@ -107,7 +107,7 @@ class Config
     public static $flushMemBufferRecords = 5000000;
     public static $flushBufferRecords = 5000000;
 
-    public static $eventTimeBucketDurationSeconds = false;
+    public static $eventTimeBucketDuration = false;
 
     public static $pollIntervalSeconds = null;
 
@@ -213,7 +213,7 @@ class Config
         self::$flushBufferSeconds = Config::getenv('DATA_OUTPUT_FLUSH_SECONDS', self::$flushBufferSeconds);
         self::$flushBufferRecords = Config::getenv('DATA_OUTPUT_FLUSH_RECORDS', self::$flushBufferRecords);
 
-        self::$eventTimeBucketDurationSeconds = Config::getenv('DATA_OUTPUT_TIME_BUCKET', false);
+        self::$eventTimeBucketDuration = Config::getenv('DATA_OUTPUT_TIME_BUCKET', false);
 
         self::$pollIntervalSeconds = Config::getenv('DATA_SOURCE_POLL_INTERVAL_SECONDS', self::$pollIntervalSeconds);
 

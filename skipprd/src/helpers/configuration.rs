@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::fs::{create_dir, File, OpenOptions};
 use std::io::{BufWriter, Read};
+use arrow_schema::DataType::Duration;
 use aws_config::load_from_env;
 use futures::executor::block_on;
 use reqwest::RequestBuilder;
@@ -85,7 +86,7 @@ pub struct Config {
     pub flush_buffer_seconds: i32,
     pub flush_mem_buffer_records: i32,
     pub flush_buffer_records: i32,
-    pub event_time_bucket_duration_seconds: i32,
+    pub event_time_bucket_duration: i32,
     pub poll_interval_seconds: i32,
     pub avro_schemas: Vec<String>,
     pub output_schemas: Vec<String>,
@@ -151,8 +152,12 @@ impl Config {
             flush_buffer_seconds: 300,
             flush_mem_buffer_records: 5000000,
             flush_buffer_records: 5000000,
-            event_time_bucket_duration_seconds: 0,
+            event_time_bucket_duration: 0,
         }
+    }
+
+    pub fn setenv(name: &str, value: &str) {
+        std::env::set_var(name, value);
     }
 
     pub fn getenv(name: &str, default: &str) -> String {
@@ -236,7 +241,7 @@ impl Config {
         // config.flush_buffer_seconds = Config::getenv("DATA_OUTPUT_FLUSH_SECONDS", config.flush_buffer_seconds);
         // config.flush_buffer_records = Config::getenv("DATA_OUTPUT_FLUSH_RECORDS", config.flush_buffer_records);
         //
-        // config.event_time_bucket_duration_seconds = Config::getenv("DATA_OUTPUT_TIME_BUCKET", false);
+        // config.event_time_bucket_duration = Config::getenv("DATA_OUTPUT_TIME_BUCKET", false);
         //
         // config.poll_interval_seconds = Config::getenv("DATA_SOURCE_POLL_INTERVAL_SECONDS", config.poll_interval_seconds);
         //
@@ -302,9 +307,6 @@ impl Config {
             let mut headers = HeaderMap::new();
             headers.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", token)).unwrap());
 
-        // let client = reqwest::Client::new();
-
-
 
         let client = Client::builder()
                 .default_headers(headers)
@@ -338,7 +340,7 @@ impl Config {
 
     }
 
-    pub(crate) async fn set_status(metrics: &Metrics, exit_code: Option<i8>) {
+    pub(crate) fn set_status(metrics: &Metrics, exit_code: Option<i8>) {
 
         let pipeline_id = Config::getenv("PIPELINE_ID", "");
 
@@ -348,13 +350,13 @@ impl Config {
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", token)).unwrap());
 
-        // let client = reqwest::Client::new();
-
-
-
-        let client = Client::builder()
-            .default_headers(headers)
+        let client = reqwest::blocking::Client::builder()
+            // .timeout(Duration::from_secs(10))
             .build().unwrap();
+
+        // let client = Client::builder()
+        //     .default_headers(headers)
+        //     .build().unwrap();
 
         let path = "tasks/set-status'";
 
@@ -377,8 +379,7 @@ impl Config {
 
         let mut response = client.post(&format!("{}/{}", uri, path))
             .json(&data)
-            .send()
-            .await;
+            .send();
 
         match response {
             Ok(resp) => {

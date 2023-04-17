@@ -447,7 +447,7 @@ fn discoverIngest(
 
     let discoverd_data_type = &metadata.get(field).unwrap().determined_type;
 
-    println!("Discovered new field: '{}' of type: '{}'", field, discoverd_data_type);
+    // println!("Discovered new field: '{}' of type: '{}'", field, discoverd_data_type);
 
     // let handle = tokio::runtime::Handle::current();
     // handle.enter();

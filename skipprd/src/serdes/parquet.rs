@@ -22,6 +22,7 @@ use std::ops::Index;
 use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::sync::{Arc, Mutex};
+use crate::buffer::BufferChunker;
 use crate::helpers::configuration::Config;
 
 // #[derive(clap::ValueEnum, Clone)]
@@ -248,21 +249,31 @@ impl SerdeParquet {
 
         let data_dir= Config::get_data_dir();
 
-        let mut skpr_namespace: String = "".to_string();
-        if let Some((a, b)) = path.display().to_string().split_once("done/") {
-            if let Some((hash, namespace_part)) = b.to_string().split_once("-") {
-                skpr_namespace = namespace_part.to_string()
-            }
-        }
+        // let mut skpr_namespace: String = "".to_string();
+        // if let Some((a, b)) = path.display().to_string().split_once("done/") {
+        //     if let Some((hash, namespace_part)) = b.to_string().split_once("-") {
+        //         skpr_namespace = namespace_part.to_string()
+        //     }
+        // }
+        // let source_namespace = Config::getenv("S3_BUCKET", "");
+        /////////////////
+        let source_namespace = BufferChunker::decode_file_namespace(path.to_str().unwrap());
+        let source_partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
+        let source_time = BufferChunker::decode_file_time(path.to_str().unwrap());
 
-        let output_dir = &format!("{}/finalised/{}", data_dir, skpr_namespace);
+        // let skpr_namespace = Helpers::parse_namespace_field(&record, source_namespace, &mut parse_namespace_cache);
+
+        let output_file_name = BufferChunker::encode_chunk_name("ingest", Some(&source_namespace), Some(&source_partition), Some(source_time));
+
+
+        let output_dir = &format!("{}/finalised", data_dir);
 
         match fs::create_dir(output_dir) {
             Ok(g) => {},
             Err(_err) => {}
         }
 
-        let output_file_path = &format!("{}/{}.parquet", output_dir, Helpers::random_str(12).as_str());
+        let output_file_path = &format!("{}/{}-{}.parquet", output_dir, output_file_name, Helpers::random_str(12).as_str());
 
         let output = OpenOptions::new()
             .create(true)
@@ -288,7 +299,7 @@ impl SerdeParquet {
 
         // let output = File::create("./foo/".to_string() + &Helpers::random_str(10)).unwrap();
 
-        println!("Serialising to parquet file: {}", output_file_path);
+        // println!("Serialising to parquet file: {}", output_file_path);
 
         let mut writer = ArrowWriter::try_new(output, reader.schema(), Some(props.build())).unwrap();
 
