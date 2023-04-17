@@ -205,12 +205,20 @@ impl Helpers {
                     //     println!("event tupe: {}", entity_value);
 
 
-                    match message.get(entity_field_dot) {
+                    // match message.get(entity_field_dot) {
+                    //     Some(entity_value) => {
+                    //         namespaces.push(entity_value.as_str().unwrap().to_string());
+                    //     },
+                    //     None => ()
+                    // }
+
+                    match Helpers::get_nested_value_from_dot_notation(message, entity_field_dot) {
                         Some(entity_value) => {
                             namespaces.push(entity_value.as_str().unwrap().to_string());
                         },
                         None => ()
                     }
+
                 }
 
                 clean_namespace = namespaces.join("_");
@@ -231,6 +239,91 @@ impl Helpers {
         // message.insert("skpr_namespace".to_string(), clean_namespace.to_string());
 
         clean_namespace
+    }
+
+    fn get_nested_value_from_dot_notation(json_value: &Value, field_str: &str) -> Option<Value> {
+        // Parse the JSON string into a serde_json Value object
+        // let json_value: Value = serde_json::from_str(json_str).ok()?;
+
+        // Split the dot notation string into individual field names
+        let fields: Vec<&str> = field_str.split('.').collect();
+
+        // Traverse the JSON object, following each field name in turn
+        let mut current_value: &Value = &json_value;
+        for field in fields {
+            if let Value::Object(map) = current_value {
+                if let Some(next_value) = map.get(field) {
+                    current_value = next_value;
+                } else {
+                    return None;
+                }
+            } else {
+                return None;
+            }
+        }
+
+        // Return the final value found at the end of the traversal
+        Some(current_value.clone())
+    }
+
+}
+
+
+#[cfg(test)]
+mod parse_namespace_field_tests {
+    use serde_json::json;
+    use super::*;
+
+    #[test]
+    fn test_parse_namespace_field_with_existing_namespace() {
+        let mut cache = HashMap::new();
+        cache.insert("my_namespace".to_string(), "yes".to_string());
+        let message = json!({"my_field": "my_value"});
+        let namespace = "my_namespace".to_string();
+        let result = Helpers::parse_namespace_field(&message, namespace, &mut cache);
+        assert_eq!(result, "my_namespace");
+        assert_eq!(cache.get("my_namespace"), Some(&"no".to_string()));
+    }
+
+    #[test]
+    fn test_parse_namespace_field_with_new_namespace() {
+        let mut cache = HashMap::new();
+        let message = json!({"my_field": "my_value"});
+        let namespace = "my_namespace".to_string();
+        let result = Helpers::parse_namespace_field(&message, namespace, &mut cache);
+        assert_eq!(result, "my_namespace");
+        assert_eq!(cache.get("my_namespace"), Some(&"no".to_string()));
+    }
+
+
+    #[test]
+    fn test_parse_namespace_field_with_composite_key() {
+        let mut cache = HashMap::new();
+        let message = json!({"entity_field_1": "entity_value_1","entity_field_2": "entity_value_2"});
+        let namespace = "my_namespace".to_string();
+        Config::setenv("DATA_SOURCE_EVENT_TYPE_FIELDS", "entity_field_1,entity_field_2");
+        let result = Helpers::parse_namespace_field(&message, namespace, &mut cache);
+        assert_eq!(result, "entity_value_1_entity_value_2");
+        assert_eq!(cache.get("my_namespace"), Some(&"yes".to_string()));
+        // assert_eq!(cache.get("entity_field_1,entity_field_2"), Some(&"yes".to_string()));
+    }
+
+    #[test]
+    fn test_parse_namespace_field_with_neasted_composite_key() {
+        let mut cache = HashMap::new();
+        let message = json!({
+            "entity_field_1": "entity_value_1",
+            "entity_field_2": "entity_value_2",
+            "entity_field_3": {
+                "entity_field_3a": "entity_value_3a",
+            }
+        });
+        let namespace = "my_namespace".to_string();
+        Config::setenv("DATA_SOURCE_EVENT_TYPE_FIELDS", "entity_field_1,entity_field_3.entity_field_3a");
+        let result = Helpers::parse_namespace_field(&message, namespace, &mut cache);
+        assert_eq!(result, "entity_value_1_entity_value_3a");
+        assert_eq!(cache.get("my_namespace"), Some(&"yes".to_string()));
+        // assert_eq!(cache.get("entity_field_1,entity_field_2"), Some(&"yes".to_string()));
     }
 
 
