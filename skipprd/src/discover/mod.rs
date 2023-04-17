@@ -976,7 +976,7 @@ impl AnalyseSchema {
 
 #[cfg(test)]
 mod tests {
-
+    use std::collections::HashMap;
     use serial_test::serial;
     use std::fs::{File, OpenOptions, remove_file};
     use std::io::{BufReader, Seek, Write};
@@ -1037,7 +1037,9 @@ mod tests {
 
         // let mut buf_reader = BufReader::new(in_file);
 
-        let newMeta = AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1)).unwrap();
+        let mut metadata = HashMap::new();
+
+        let newMeta = AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1), &mut metadata).unwrap();
 
 
         // println!("{:?}", newMeta.get("example_ns").unwrap());
@@ -1109,7 +1111,9 @@ mod tests {
 
         // let mut buf_reader = BufReader::new(in_file);
 
-        let newMeta = AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1)).unwrap();
+        let mut metadata = HashMap::new();
+
+        let newMeta = AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1), &mut metadata).unwrap();
 
         assert_eq!(newMeta.get("example_ns").unwrap().fields.get("boolean").unwrap().determined_type, "array");
         assert_eq!(newMeta.get("example_ns").unwrap().fields.get("boolean").unwrap().determined_type_values, "boolean");
@@ -1212,7 +1216,9 @@ mod tests {
         let mut in_file = File::open(format!("./{}", random_tmp_file_name)).unwrap();
         // let mut in_file = MemFile::create(rng.gen::<i32>(), CreateOptions::new()).unwrap();
 
-        let newMeta = AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1)).unwrap();
+        let mut metadata = HashMap::new();
+
+        let newMeta = AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1), &mut metadata).unwrap();
 
         assert_eq!(newMeta.get("example_ns").unwrap().fields.get("sheep").unwrap().determined_type, "string");
         assert_eq!(newMeta.get("example_ns").unwrap().fields.get("arable").unwrap().determined_type, "boolean");

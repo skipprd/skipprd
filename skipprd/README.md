@@ -36,3 +36,8 @@ DATA_DIR=./data \
 ```
 chmod 755 target/x86_64-apple-darwin/release/skipprd && cp target/x86_64-apple-darwin/release/skipprd ~/Downloads/skipprcli/skipprd
 ```
+
+
+# Configuration
+
+DATA_SOURCE_EVENT_TYPE_FIELDS="field_1,field_2.sub_field_2a"
