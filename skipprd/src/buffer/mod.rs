@@ -6,7 +6,9 @@ use regex::Regex;
 use std::{env, time};
 use memory_stats::memory_stats;
 
-
+use std::fs::{self, File};
+use std::io::ErrorKind;
+use std::path::Path;
 
 
 
@@ -226,6 +228,43 @@ impl BufferChunker {
         // println!("decoding buffer namespace {} from file {}", namespace, filename);
 
         namespace
+    }
+
+
+
+    pub fn next_file() -> Option<String> {
+        let pattern = "finalised/buffer=ingest*";
+        let mut filenames = glob::glob(&pattern)
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+
+        // filenames.sort_by(|a, b| fs::metadata(a).unwrap().modified().cmp(&fs::metadata(b).unwrap().modified()));
+
+        for filename in filenames {
+            // if filename.contains(".lock") || filename.contains(".checkpoint") {
+            //     continue;
+            // }
+
+            match File::open(&filename) {
+                Err(ref e) if e.kind() == ErrorKind::NotFound => {
+                    // File was removed by a competing thread
+                    continue;
+                }
+                Err(e) => {
+                    // Other errors
+                    println!("Error opening file {}: {}", filename.to_str().unwrap(), e);
+                    continue;
+                }
+                Ok(file) => {
+                    // if self.lock(&file, false) {
+                        return Some(filename.to_str().unwrap().to_string());
+                    // }
+                }
+            }
+        }
+
+        None
     }
 
 

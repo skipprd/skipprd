@@ -1,9 +1,8 @@
 use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
 use crate::serdes::json::SerdeJson;
-use aws_sdk_s3::types::AggregatedBytes;
-use aws_sdk_s3::{Client, Region};
-use aws_types::credentials::ProvideCredentials;
+pub use aws_smithy_http::byte_stream::AggregatedBytes;
+use aws_sdk_s3::{Client};
 use aws_types::SdkConfig;
 use csv::ReaderBuilder;
 use flate2::read::GzDecoder;

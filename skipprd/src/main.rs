@@ -56,6 +56,7 @@ use crate::serdes::json::SerdeJson;
 use crate::serdes::parquet::SerdeParquet;
 
 mod plugins;
+use crate::plugins::athena::DataOutputAwsAthenaPlugin;
 use crate::plugins::s3_inventory::DataSourceS3InventoryPlugin;
 
 // use crate::helpers::Config
