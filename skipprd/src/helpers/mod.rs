@@ -238,7 +238,7 @@ impl Helpers {
 
         // message.insert("skpr_namespace".to_string(), clean_namespace.to_string());
 
-        clean_namespace
+        Helpers::clean_field_name(clean_namespace)
     }
 
     fn get_nested_value_from_dot_notation(json_value: &Value, field_str: &str) -> Option<Value> {

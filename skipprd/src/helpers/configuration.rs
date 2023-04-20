@@ -19,10 +19,12 @@ use reqwest::header::HeaderMap;
 use reqwest::header::HeaderValue;
 use reqwest::header::AUTHORIZATION;
 use tokio::task::spawn_blocking;
+use crate::converters::skippr_hive::SkipprHive;
 
 use crate::discover::Metadata;
 
 use crate::helpers::Helpers;
+use crate::plugins::athena::AwsAthena;
 
 
 #[non_exhaustive]
@@ -280,6 +282,13 @@ impl Config {
 
     pub async fn set_config(metadata: &HashMap<String, Metadata>, evolved: bool) {
 
+        for (namespace, schema) in metadata.into_iter() {
+
+            println!("Updating Hive '{}' schema", namespace);
+
+            AwsAthena::create_or_update_schema(&namespace, &schema).await;
+
+        }
 
         let data_dir= Config::get_data_dir();
         let metadata_file = format!("{}/metadata.json", data_dir);
@@ -299,6 +308,11 @@ impl Config {
 
         let pipeline_id = Config::getenv("PIPELINE_ID", "");
 
+        if Config::getenv("DATA_OUTPUT_TIME_BUCKET", "") != "" {
+            if Config::getenv("DATA_OUTPUT_TIME_FIELDS", "") == "" {
+                println!("ERROR: Environment variable: 'DATA_OUTPUT_TIME_FIELDS' must be since you've set: 'DATA_OUTPUT_TIME_BUCKET'.");
+            }
+        }
 
         // let uri = Config::getenv("SKIPPR_API_ENDPOINT", "");
         let uri = "https://console.skippr.io";

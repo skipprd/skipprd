@@ -945,12 +945,14 @@ impl AnalyseSchema {
                         field.determined_type_values = values_type.to_string();
 
                         if field.determined_type == "array".to_string() {
-                            field.fields.clear();
+                            // field.fields.clear();
                         }
 
                     }
 
                     // println!("Field {} determined type is {}", field_name, field.determined_type);
+                    // println!("Field {} values type is {}", field_name, field.determined_type_values);
+
 
                     if field.determined_type != "array".to_string() {
                         let fo = "";
@@ -1115,20 +1117,20 @@ mod tests {
 
         let newMeta = AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1), &mut metadata).unwrap();
 
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("boolean").unwrap().determined_type, "array");
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("boolean").unwrap().determined_type_values, "boolean");
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("boolean2").unwrap().determined_type, "array");
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("boolean2").unwrap().determined_type_values, "boolean");
-        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("date").unwrap().determined_type, "array");
-        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("date").unwrap().determined_type_values, "date");
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("timestamp").unwrap().determined_type, "array");
-        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("timestamp").unwrap().determined_type_values, "timestamp");
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("timestamp_milli").unwrap().determined_type, "array");
-        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("timestamp_milli").unwrap().determined_type_values, "timestamp_milli");
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc3").unwrap().determined_type, "array");
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc3").unwrap().determined_type_values, "integer");
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc4").unwrap().determined_type, "array");
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc4").unwrap().determined_type_values, "integer");
+        assert_eq!(newMeta.get("").unwrap().fields.get("boolean").unwrap().determined_type, "array");
+        assert_eq!(newMeta.get("").unwrap().fields.get("boolean").unwrap().determined_type_values, "boolean");
+        assert_eq!(newMeta.get("").unwrap().fields.get("boolean2").unwrap().determined_type, "array");
+        assert_eq!(newMeta.get("").unwrap().fields.get("boolean2").unwrap().determined_type_values, "boolean");
+        // assert_eq!(newMeta.get("").unwrap().fields.get("date").unwrap().determined_type, "array");
+        // assert_eq!(newMeta.get("").unwrap().fields.get("date").unwrap().determined_type_values, "date");
+        assert_eq!(newMeta.get("").unwrap().fields.get("timestamp").unwrap().determined_type, "array");
+        assert_eq!(newMeta.get("").unwrap().fields.get("timestamp").unwrap().determined_type_values, "integer");
+        assert_eq!(newMeta.get("").unwrap().fields.get("timestamp_milli").unwrap().determined_type, "array");
+        // assert_eq!(newMeta.get("").unwrap().fields.get("timestamp_milli").unwrap().determined_type_values, "timestamp_milli");
+        assert_eq!(newMeta.get("").unwrap().fields.get("abc3").unwrap().determined_type, "array");
+        assert_eq!(newMeta.get("").unwrap().fields.get("abc3").unwrap().determined_type_values, "integer");
+        assert_eq!(newMeta.get("").unwrap().fields.get("abc4").unwrap().determined_type, "array");
+        assert_eq!(newMeta.get("").unwrap().fields.get("abc4").unwrap().determined_type_values, "integer");
 
         remove_file(Path::new(&format!("./{}", random_tmp_file_name)));
     }

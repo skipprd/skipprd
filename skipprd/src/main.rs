@@ -36,7 +36,7 @@ mod internalfields;
 mod discover;
 use crate::discover::AnalyseSchema;
 use crate::discover::Metadata;
-// mod converters;
+mod converters;
 // use self::converters::avro_parquet::AvroSchema;
 mod cli;
 use crate::cli::{Cli, Mode};
@@ -56,7 +56,7 @@ use crate::serdes::json::SerdeJson;
 use crate::serdes::parquet::SerdeParquet;
 
 mod plugins;
-use crate::plugins::athena::DataOutputAwsAthenaPlugin;
+use crate::plugins::athena::{AwsAthena, DataOutputAwsAthenaPlugin};
 use crate::plugins::s3_inventory::DataSourceS3InventoryPlugin;
 
 // use crate::helpers::Config
@@ -302,7 +302,8 @@ async fn sync() {
     );
     planner.start();
 
-    // outputSync(newMeta.clone());
+    let metedata_clone = newMeta.clone();
+    let newmeta_clone = newMeta.clone();
 
     thread::spawn(move || {
 
@@ -458,7 +459,8 @@ async fn sync() {
                                             format!("{}/done/{}-{}", output_dir, &Helpers::random_str(12), &output_file_name),
                                         ).unwrap();
 
-                                        outputSync(newMeta.clone());
+                                        // outputSync(newMeta.clone());
+
 
                                     }
                             //     }
@@ -504,9 +506,22 @@ async fn sync() {
     // .join()
     // .expect("Buffer thread failed");
 
-    let mut ds3 = block_on(DataSourceS3InventoryPlugin::new());
+    // let metadata_clone = newMeta.clone();
+    outputSync(newmeta_clone);
 
-    ds3.sync().await;
+
+    let future2 = async move {
+        let mut ds3 = block_on(DataSourceS3InventoryPlugin::new());
+        ds3.sync().await;
+    };
+
+
+    // let mut ds3 = block_on(DataSourceS3InventoryPlugin::new());
+    // ds3.sync().await;
+
+
+    let dataOutput = block_on(DataOutputAwsAthenaPlugin::new());
+    dataOutput.sync(metedata_clone).await
 
     // sleep(Duration::from_secs(125));
 
@@ -533,7 +548,7 @@ fn outputSync(
             require_literal_leading_dot: false,
         };
 
-        // while true {
+        while true {
             for entry in glob_with(&format!("{}/done/*", output_dir), options).expect("Failed to read glob pattern") {
                 match entry {
                     Ok(path) => {
@@ -580,7 +595,10 @@ fn outputSync(
                     Err(e) => println!("{:?}", e),
                 }
             }
-            // sleep(Duration::from_secs(1));
-        // }
+
+            sleep(Duration::from_secs(1));
+        }
+
+
     });
 }

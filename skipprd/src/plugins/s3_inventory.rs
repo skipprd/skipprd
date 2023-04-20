@@ -76,7 +76,7 @@ impl DataSourceS3InventoryPlugin {
             .await;
 
         match results {
-            Err(err) => println!("S3 Error {}", err),
+            Err(err) => println!("S3 Error {}", err.into_service_error()),
             Ok(..) => {
 
                 for result in results {

@@ -195,8 +195,8 @@ impl BufferChunker {
         let time = BufferChunker::get_file_time(filename);
 
         let date_string = if time != 0 {
-            let dt = DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp(time as i64, 0), Utc);
-            dt.to_rfc3339()
+            let dt = DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp(time as i64, 0), Utc).to_rfc3339();
+            dt
         } else {
             "".to_string()
         };
@@ -233,7 +233,9 @@ impl BufferChunker {
 
 
     pub fn next_file() -> Option<String> {
-        let pattern = "finalised/buffer=ingest*";
+        let data_dir = Config::get_data_dir();
+        let pattern = format!("{}/finalised/buffer=ingest*", data_dir);
+
         let mut filenames = glob::glob(&pattern)
             .unwrap()
             .filter_map(Result::ok)
