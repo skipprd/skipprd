@@ -527,10 +527,10 @@ impl AnalyseSchema {
     }
 
 
-    pub fn get_logical_type(&self, field: &String, josn_value: &mut Value, metadata: &mut HashMap<String, Metadata>, allow_date: bool) -> String {
+    pub fn get_logical_type(&self, field: &String, json_value: &mut Value, metadata: &mut HashMap<String, Metadata>, allow_date: bool) -> String {
 
-        // let value: &mut String = &mut josn_value.as_str().unwrap().to_string();
-        let value: &mut String = &mut josn_value.to_string();
+        // let value: &mut String = &mut json_value.as_str().unwrap().to_string();
+        let value: &mut String = &mut json_value.to_string();
 
         let mut data_type = get_type(value);
 
@@ -565,10 +565,19 @@ impl AnalyseSchema {
 
             if metadata.get_mut(field).unwrap().date_candidate.as_mut().is_none() ||
                 metadata.get_mut(field).unwrap().date_candidate.as_mut().unwrap().check_count < DATE_FIELD_VALIDATION_MIN_SAMPLE {
-                    if let Some(format) = self.is_valid_date(value) {
+
+                    // println!("Checking if {} is date type", field);
+
+                    let value_str = match json_value.as_str() {
+                        Some(val) => val,
+                        None => ""
+                    };
+
+                    if let Some(format) = self.is_valid_date(value_str) {
+                        println!("Value {} IS a date of format {}", value_str, format);
                         data_type = "date".to_string();
                         // self.set_date_field_candidate(field, metadata, &format);
-                        self.increment_date_field_candidate_count(field, metadata, &format);
+                        self.increment_date_field_candidate_count(field, metadata, &format.to_string());
                     }
 
 
@@ -708,9 +717,10 @@ impl AnalyseSchema {
         return false;
     }
 
-    fn is_valid_date(&self, value: &mut String) -> Option<String> {
+    fn is_valid_date(&self, value: &str) -> Option<&str> {
         let valid_formats = [
             DateFormats::Atom,
+            DateFormats::AtomZ,
             DateFormats::Cookie,
             DateFormats::Iso8601,
             DateFormats::Rfc822,
@@ -727,14 +737,31 @@ impl AnalyseSchema {
 
         for format in valid_formats.iter() {
 
-            match DateTime::parse_from_str(value.as_str(), format.as_str()) {
-                Ok(_) => return Some(format.as_str().to_string()),
-                Err(_) => match NaiveDate::parse_from_str(value.as_str(), format.as_str()) {
-                    Ok(_) => return Some(format.as_str().to_string()),
-                    Err(_) => continue,
+            let found_format = match DateTime::parse_from_str(value, format.as_str()) {
+                Ok(_) => {
+                    // println!("Value {} is format {}", value, format.as_str());
+                    return Some(format.name())
                 },
+                Err(_) => {
+                    match NaiveDate::parse_from_str(value, format.as_str()) {
+                        Ok(_) => {
+                            // println!("Value {} is naive format {}", value, format.as_str());
+                            return Some(format.name())
+                        },
+                        Err(_) => {
+                            // println!("Value {} is not a date of format {}: {}, trying naive", value.as_str(), format.name(), format.as_str());
+                            None
+                        },
+                    }
+                },
+            };
+
+            if found_format.is_some() {
+                return found_format;
             }
         }
+
+        // println!("Value {} is not a date of format that's known", value);
 
         None
     }
@@ -977,6 +1004,98 @@ impl AnalyseSchema {
 
 
 #[cfg(test)]
+mod is_valid_date_tests {
+    use chrono::{DateTime, NaiveDate};
+    use serde_json::Value;
+    use crate::discover::AnalyseSchema;
+
+    #[test]
+    fn test_valid_date_formats() {
+
+        let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
+
+        let mut date_str = "2022-01-07T08:28:07.000Z";
+        println!("str: {}", date_str);
+        let json_value: Value = date_str.into();
+        println!("json_value: {}", json_value);
+        let value= json_value.as_str().unwrap();
+        println!("value: {}", value);
+
+        assert_eq!(
+            Some("Iso8601"),
+            foo.is_valid_date(value)
+        );
+
+        let mut date_str = "2022-01-07T08:28:07Z";
+        assert_eq!(
+            Some("AtomZ"),
+            foo.is_valid_date( date_str)
+        );
+
+        let mut date_str = "2022-02-22T22:22:22";
+        assert_eq!(
+            Some("Atom"),
+            foo.is_valid_date( date_str)
+        );
+
+        let mut date_str = "2021-01-03 02:30:00";
+        assert_eq!(
+            Some("Mysql"),
+            foo.is_valid_date( date_str)
+        );
+
+        date_str = "Tue, 22 Feb 2022 22:22:22 GMT";
+        assert_eq!(
+            Some("Rfc850"),
+            foo.is_valid_date( date_str)
+        );
+
+        date_str = "2022-02-22";
+        assert_eq!(
+            Some("DateOnly"),
+            foo.is_valid_date( date_str)
+        );
+    }
+
+    #[test]
+    fn test_invalid_date_format() {
+        let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
+        let mut date_str = "2022-22-22";
+        assert_eq!(None, foo.is_valid_date( date_str));
+    }
+
+    #[test]
+    fn test_empty_date_string() {
+        let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
+        let mut date_str = "";
+        assert_eq!(None, foo.is_valid_date( date_str));
+    }
+
+    #[test]
+    fn test_non_date_string() {
+        let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
+        let mut date_str = "not a date";
+        assert_eq!(None, foo.is_valid_date( date_str));
+    }
+
+    #[test]
+    fn test_valid_date_time() {
+        let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
+        let mut date_str = "2022-02-22T22:22:22Z";
+        let dt = DateTime::parse_from_rfc3339(date_str).unwrap();
+        assert_eq!(Some("AtomZ"), foo.is_valid_date( date_str));
+    }
+
+    #[test]
+    fn test_valid_date() {
+        let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
+        let mut date_str = "2022-02-22";
+        let nd = NaiveDate::parse_from_str(date_str, "%Y-%m-%d").unwrap();
+        assert_eq!(Some("DateOnly"), foo.is_valid_date( date_str));
+    }
+}
+
+# [cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use serial_test::serial;

@@ -2,16 +2,19 @@
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DateFormats {
-    Atom,
-    Cookie,
     Iso8601,
+    Iso8601_2,
+    Rfc2822,
+    Rfc3339,
+    Atom,
+    AtomZ,
+    Asctime,
+    Cookie,
     Rfc822,
     Rfc850,
     Rfc1036,
     Rfc1123,
     Rfc7231,
-    Rfc2822,
-    Rfc3339,
     Rss,
     W3c,
     Mysql,
@@ -19,21 +22,46 @@ pub enum DateFormats {
 }
 
 impl DateFormats {
+    pub fn name(&self) -> &'static str {
+        match self {
+            DateFormats::Iso8601 => "Iso8601",
+            DateFormats::Iso8601_2 => "Iso8601",
+            DateFormats::Rfc2822 => "Rfc2822",
+            DateFormats::Rfc3339 => "Rfc3339",
+            DateFormats::Atom => "Atom",
+            DateFormats::AtomZ => "AtomZ",
+            DateFormats::Asctime => "Asctime",
+            DateFormats::Cookie => "Cookie",
+            DateFormats::Rfc822 => "Rfc822",
+            DateFormats::Rfc850 => "Rfc850",
+            DateFormats::Rfc1036 => "Rfc1036",
+            DateFormats::Rfc1123 => "Rfc1123",
+            DateFormats::Rfc7231 => "Rfc7231",
+            DateFormats::Rss => "Rss",
+            DateFormats::W3c => "W3c",
+            DateFormats::Mysql => "Mysql",
+            DateFormats::DateOnly => "DateOnly",
+        }
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
-            DateFormats::Atom => "Y-m-d\\TH:i:sP",
-            DateFormats::Cookie => "l, d-M-Y H:i:s T",
-            DateFormats::Iso8601 => "Y-m-d\\TH:i:sO",
-            DateFormats::Rfc822 => "D, d M y H:i:s O",
-            DateFormats::Rfc850 => "l, d-M-y H:i:s T",
-            DateFormats::Rfc1036 => "D, d M y H:i:s O",
-            DateFormats::Rfc1123 => "D, d M Y H:i:s O",
-            DateFormats::Rfc2822 => "D, d M Y H:i:s O",
-            DateFormats::Rfc3339 => "Y-m-d\\TH:i:sP",
-            DateFormats::Rfc7231 => "D, d M Y H:i:s \\G\\M\\T",
-            DateFormats::Rss => "D, d M Y H:i:s O",
-            DateFormats::W3c => "Y-m-d\\TH:i:sP",
-            DateFormats::Mysql => "Y-m-d H:i:s",
+            DateFormats::Iso8601 => "%Y-%m-%dT%H:%M:%S.%fZ",
+            DateFormats::Iso8601_2 => "%Y-%m-%dT%H:%M:%S%.3fZ",
+            DateFormats::Rfc2822 => "%a, %d %b %Y %T %z",
+            DateFormats::Rfc3339 => "%Y-%m-%dT%H:%M:%S%.f%:z",
+            DateFormats::Atom => "%Y-%m-%dT%H:%M:%S",
+            DateFormats::AtomZ => "%Y-%m-%dT%H:%M:%SZ",
+            DateFormats::Asctime => "%a %b %e %H:%M:%S %Y",
+            DateFormats::Cookie => "%A, %d-%b-%y %H:%M:%S %Z",
+            DateFormats::Rfc822 => "%a, %d %b %Y %H:%M:%S %z",
+            DateFormats::Rfc850 => "%a, %d %b %Y %H:%M:%S %Z",
+            DateFormats::Rfc1036 => "%a, %d %b %Y %H:%M:%S %z",
+            DateFormats::Rfc1123 => "%a, %d %b %Y %H:%M:%S  %Z",
+            DateFormats::Rfc7231 => "%a, %d %b %Y %H:%M:%S %Z",
+            DateFormats::Rss => "%a, %d %b %Y %H:%M:%S %z",
+            DateFormats::W3c => "%Y-%m-%dT%H:%M:%S%.fZ",
+            DateFormats::Mysql => "%Y-%m-%d %H:%M:%S",
             DateFormats::DateOnly => "%Y-%m-%d",
         }
     }
