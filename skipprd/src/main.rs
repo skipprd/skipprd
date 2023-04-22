@@ -510,18 +510,19 @@ async fn sync() {
     outputSync(newmeta_clone);
 
 
-    let future2 = async move {
-        let mut ds3 = block_on(DataSourceS3InventoryPlugin::new());
-        ds3.sync().await;
-    };
-
-
     // let mut ds3 = block_on(DataSourceS3InventoryPlugin::new());
     // ds3.sync().await;
 
 
     let dataOutput = block_on(DataOutputAwsAthenaPlugin::new());
-    dataOutput.sync(metedata_clone).await
+    dataOutput.sync(metedata_clone).await;
+
+
+    // let future2 = async move {
+        let mut ds3 = block_on(DataSourceS3InventoryPlugin::new());
+        ds3.sync().await;
+    // };
+
 
     // sleep(Duration::from_secs(125));
 
