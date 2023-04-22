@@ -1043,27 +1043,27 @@ mod tests {
 
         let newMeta = AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1), &mut metadata).unwrap();
 
-
-        // println!("{:?}", newMeta.get("example_ns").unwrap());
-        // println!("{:?}", newMeta.get("example_ns").unwrap().fields);
-        // println!("{:?}", newMeta.get("example_ns").unwrap().fields.get("abc2").unwrap());
-        // println!("{:?}", newMeta.get("example_ns").unwrap().fields.get("abc2").unwrap().determined_type);
-        // println!("{:?}", newMeta.get("example_ns").unwrap().fields.get("abc2").unwrap().determined_type_values);
-
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc1").unwrap().determined_type, "array");
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc1").unwrap().determined_type_values, "integer");
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc2").unwrap().determined_type, "array");
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc2").unwrap().determined_type_values, "string");
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc3").unwrap().determined_type, "map");
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc3").unwrap().determined_type_values, "string");
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc4").unwrap().determined_type, "map");
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc4").unwrap().determined_type_values, "string");
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc5").unwrap().determined_type, "map");
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc5").unwrap().determined_type_values, "integer");
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc6").unwrap().determined_type, "record");
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc7").unwrap().determined_type, "record");
-
         remove_file(Path::new(&format!("./{}", random_tmp_file_name))).unwrap();
+
+        // println!("{:?}", newMeta.get("").unwrap());
+        // println!("{:?}", newMeta.get("").unwrap().fields);
+        // println!("{:?}", newMeta.get("").unwrap().fields.get("abc2").unwrap());
+        // println!("{:?}", newMeta.get("").unwrap().fields.get("abc2").unwrap().determined_type);
+        // println!("{:?}", newMeta.get("").unwrap().fields.get("abc2").unwrap().determined_type_values);
+
+        assert_eq!(newMeta.get("").unwrap().fields.get("abc1").unwrap().determined_type, "array");
+        assert_eq!(newMeta.get("").unwrap().fields.get("abc1").unwrap().determined_type_values, "integer");
+        assert_eq!(newMeta.get("").unwrap().fields.get("abc2").unwrap().determined_type, "array");
+        assert_eq!(newMeta.get("").unwrap().fields.get("abc2").unwrap().determined_type_values, "string");
+        assert_eq!(newMeta.get("").unwrap().fields.get("abc3").unwrap().determined_type, "map");
+        assert_eq!(newMeta.get("").unwrap().fields.get("abc3").unwrap().determined_type_values, "string");
+        assert_eq!(newMeta.get("").unwrap().fields.get("abc4").unwrap().determined_type, "map");
+        assert_eq!(newMeta.get("").unwrap().fields.get("abc4").unwrap().determined_type_values, "string");
+        assert_eq!(newMeta.get("").unwrap().fields.get("abc5").unwrap().determined_type, "map");
+        assert_eq!(newMeta.get("").unwrap().fields.get("abc5").unwrap().determined_type_values, "integer");
+        assert_eq!(newMeta.get("").unwrap().fields.get("abc6").unwrap().determined_type, "record");
+        assert_eq!(newMeta.get("").unwrap().fields.get("abc7").unwrap().determined_type, "record");
+
     }
 
     #[test]
@@ -1117,6 +1117,8 @@ mod tests {
 
         let newMeta = AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1), &mut metadata).unwrap();
 
+        remove_file(Path::new(&format!("./{}", random_tmp_file_name)));
+
         assert_eq!(newMeta.get("").unwrap().fields.get("boolean").unwrap().determined_type, "array");
         assert_eq!(newMeta.get("").unwrap().fields.get("boolean").unwrap().determined_type_values, "boolean");
         assert_eq!(newMeta.get("").unwrap().fields.get("boolean2").unwrap().determined_type, "array");
@@ -1132,7 +1134,6 @@ mod tests {
         assert_eq!(newMeta.get("").unwrap().fields.get("abc4").unwrap().determined_type, "array");
         assert_eq!(newMeta.get("").unwrap().fields.get("abc4").unwrap().determined_type_values, "integer");
 
-        remove_file(Path::new(&format!("./{}", random_tmp_file_name)));
     }
 
     #[test]
@@ -1222,39 +1223,40 @@ mod tests {
 
         let newMeta = AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1), &mut metadata).unwrap();
 
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("sheep").unwrap().determined_type, "string");
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("arable").unwrap().determined_type, "boolean");
-
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("crank").unwrap().determined_type, "record");
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("crank").unwrap().fields.get("voltage").unwrap().determined_type, "array");
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("crank").unwrap().fields.get("voltage").unwrap().determined_type_values, "integer");
-
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("crank").unwrap().fields.get("engine").unwrap().determined_type, "record");
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("crank").unwrap().fields.get("engine").unwrap().fields.get("rebuild_dates").unwrap().determined_type, "array");
-
-        // println!("{:?}", newMeta.get("example_ns").unwrap().fields.get("crank_torques").unwrap());
-
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("crank_torques").unwrap().determined_type, "record");
-
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("crank_torques").unwrap().fields.get("item_0").unwrap().determined_type, "array");
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("crank_torques").unwrap().fields.get("item_0").unwrap().determined_type_values, "integer");
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("crank_torques").unwrap().fields.get("item_1").unwrap().determined_type, "array");
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("crank_torques").unwrap().fields.get("item_1").unwrap().determined_type_values, "integer");
-
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("metadata").unwrap().fields.get("tags").unwrap().determined_type, "record");
-        assert_eq!(newMeta.get("example_ns").unwrap().fields.get("metadata").unwrap().fields.get("tags").unwrap().fields.get("item_0").unwrap().determined_type, "map");
-
-        // // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("date").unwrap().determined_type, "array");
-        // // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("date").unwrap().determined_type_values, "date");
-        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("timestamp").unwrap().determined_type, "array");
-        // // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("timestamp").unwrap().determined_type_values, "timestamp");
-        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("timestamp_milli").unwrap().determined_type, "array");
-        // // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("timestamp_milli").unwrap().determined_type_values, "timestamp_milli");
-        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc3").unwrap().determined_type, "array");
-        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc3").unwrap().determined_type_values, "integer");
-        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc4").unwrap().determined_type, "array");
-        // assert_eq!(newMeta.get("example_ns").unwrap().fields.get("abc4").unwrap().determined_type_values, "integer");
-
         remove_file(Path::new(&format!("./{}", random_tmp_file_name)));
+
+        assert_eq!(newMeta.get("").unwrap().fields.get("sheep").unwrap().determined_type, "string");
+        assert_eq!(newMeta.get("").unwrap().fields.get("arable").unwrap().determined_type, "boolean");
+
+        assert_eq!(newMeta.get("").unwrap().fields.get("crank").unwrap().determined_type, "record");
+        assert_eq!(newMeta.get("").unwrap().fields.get("crank").unwrap().fields.get("voltage").unwrap().determined_type, "array");
+        assert_eq!(newMeta.get("").unwrap().fields.get("crank").unwrap().fields.get("voltage").unwrap().determined_type_values, "integer");
+
+        assert_eq!(newMeta.get("").unwrap().fields.get("crank").unwrap().fields.get("engine").unwrap().determined_type, "record");
+        assert_eq!(newMeta.get("").unwrap().fields.get("crank").unwrap().fields.get("engine").unwrap().fields.get("rebuild_dates").unwrap().determined_type, "array");
+
+        // println!("{:?}", newMeta.get("").unwrap().fields.get("crank_torques").unwrap());
+
+        assert_eq!(newMeta.get("").unwrap().fields.get("crank_torques").unwrap().determined_type, "record");
+
+        assert_eq!(newMeta.get("").unwrap().fields.get("crank_torques").unwrap().fields.get("item_0").unwrap().determined_type, "array");
+        assert_eq!(newMeta.get("").unwrap().fields.get("crank_torques").unwrap().fields.get("item_0").unwrap().determined_type_values, "integer");
+        assert_eq!(newMeta.get("").unwrap().fields.get("crank_torques").unwrap().fields.get("item_1").unwrap().determined_type, "array");
+        assert_eq!(newMeta.get("").unwrap().fields.get("crank_torques").unwrap().fields.get("item_1").unwrap().determined_type_values, "integer");
+
+        assert_eq!(newMeta.get("").unwrap().fields.get("metadata").unwrap().fields.get("tags").unwrap().determined_type, "record");
+        assert_eq!(newMeta.get("").unwrap().fields.get("metadata").unwrap().fields.get("tags").unwrap().fields.get("item_0").unwrap().determined_type, "map");
+
+        // // assert_eq!(newMeta.get("").unwrap().fields.get("date").unwrap().determined_type, "array");
+        // // assert_eq!(newMeta.get("").unwrap().fields.get("date").unwrap().determined_type_values, "date");
+        // assert_eq!(newMeta.get("").unwrap().fields.get("timestamp").unwrap().determined_type, "array");
+        // // assert_eq!(newMeta.get("").unwrap().fields.get("timestamp").unwrap().determined_type_values, "timestamp");
+        // assert_eq!(newMeta.get("").unwrap().fields.get("timestamp_milli").unwrap().determined_type, "array");
+        // // assert_eq!(newMeta.get("").unwrap().fields.get("timestamp_milli").unwrap().determined_type_values, "timestamp_milli");
+        // assert_eq!(newMeta.get("").unwrap().fields.get("abc3").unwrap().determined_type, "array");
+        // assert_eq!(newMeta.get("").unwrap().fields.get("abc3").unwrap().determined_type_values, "integer");
+        // assert_eq!(newMeta.get("").unwrap().fields.get("abc4").unwrap().determined_type, "array");
+        // assert_eq!(newMeta.get("").unwrap().fields.get("abc4").unwrap().determined_type_values, "integer");
+
     }
 }

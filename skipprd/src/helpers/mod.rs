@@ -189,7 +189,7 @@ impl Helpers {
             || parse_namespace_cache.get(&namespace).unwrap() == "yes"
         {
             // default to data source partition (table, topic, queue, file dir, etc)
-            // clean_namespace = namespace.clone();
+            clean_namespace = Helpers::clean_field_name(clean_namespace);
 
             // optional: partition by composite key
             if Config::getenv("DATA_SOURCE_EVENT_TYPE_FIELDS", "") != "" {
@@ -238,7 +238,8 @@ impl Helpers {
 
         // message.insert("skpr_namespace".to_string(), clean_namespace.to_string());
 
-        Helpers::clean_field_name(clean_namespace)
+        clean_namespace
+
     }
 
     fn get_nested_value_from_dot_notation(json_value: &Value, field_str: &str) -> Option<Value> {
@@ -271,25 +272,30 @@ impl Helpers {
 
 #[cfg(test)]
 mod parse_namespace_field_tests {
+    use serial_test::serial;
     use serde_json::json;
     use super::*;
 
     #[test]
+    #[serial]
     fn test_parse_namespace_field_with_existing_namespace() {
         let mut cache = HashMap::new();
         cache.insert("my_namespace".to_string(), "yes".to_string());
         let message = json!({"my_field": "my_value"});
         let namespace = "my_namespace".to_string();
+        Config::setenv("DATA_SOURCE_EVENT_TYPE_FIELDS", "");
         let result = Helpers::parse_namespace_field(&message, namespace, &mut cache);
         assert_eq!(result, "my_namespace");
         assert_eq!(cache.get("my_namespace"), Some(&"no".to_string()));
     }
 
     #[test]
+    #[serial]
     fn test_parse_namespace_field_with_new_namespace() {
         let mut cache = HashMap::new();
         let message = json!({"my_field": "my_value"});
         let namespace = "my_namespace".to_string();
+        Config::setenv("DATA_SOURCE_EVENT_TYPE_FIELDS", "");
         let result = Helpers::parse_namespace_field(&message, namespace, &mut cache);
         assert_eq!(result, "my_namespace");
         assert_eq!(cache.get("my_namespace"), Some(&"no".to_string()));
@@ -297,6 +303,7 @@ mod parse_namespace_field_tests {
 
 
     #[test]
+    #[serial]
     fn test_parse_namespace_field_with_composite_key() {
         let mut cache = HashMap::new();
         let message = json!({"entity_field_1": "entity_value_1","entity_field_2": "entity_value_2"});
@@ -309,6 +316,7 @@ mod parse_namespace_field_tests {
     }
 
     #[test]
+    #[serial]
     fn test_parse_namespace_field_with_neasted_composite_key() {
         let mut cache = HashMap::new();
         let message = json!({

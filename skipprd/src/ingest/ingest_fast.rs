@@ -583,7 +583,7 @@ mod tests {
         let ingestValue = fast_path_ingest(
             records.first().unwrap(),
             &mut newMeta
-                .get_mut("example_ns")
+                .get_mut("")
                 .unwrap()
                 .fields,
             &mut updatedSchema
