@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use regex::Regex;
 use std::env;
 use memory_stats::memory_stats;
+use chrono::{DateTime, Local, TimeZone, Utc};
 
 
 
@@ -241,6 +242,50 @@ impl Helpers {
         clean_namespace
 
     }
+
+
+    pub fn parse_time_field(
+        message: &Value,
+    ) -> Option<i64> {
+        // default to beginning of epoch.
+        let mut time_field_value: Option<i64> = None;
+
+        if !Config::getenv("DATA_OUTPUT_TIME_FIELDS", "").is_empty() {
+            // Support nested time fields via array dot notation
+            // For user confirmed event time fields, use the first one that matches
+            for field_dot in Config::getenv("DATA_OUTPUT_TIME_FIELDS", "").split(",") {
+                match Helpers::get_nested_value_from_dot_notation(message, field_dot) {
+                    Some(value) => {
+                        // Handle millisecond timestamps
+                        match value.as_i64() {
+                            Some(i64_val) => {
+                                if i64_val > 1000000000000 {
+                                    time_field_value = Some(i64_val / 1000)
+                                } else {
+                                    time_field_value = None
+                                }
+                            },
+                            None => time_field_value = None
+                        }
+
+                        // Handle datetime strings
+                        match value.as_str() {
+                            Some(val) => {
+                                if let Ok(dt) = DateTime::parse_from_rfc3339(val) {
+                                    time_field_value = Some(dt.with_timezone(&Utc).timestamp());
+                                }
+                            },
+                            None => { time_field_value = None; }
+                        };
+                    },
+                    None => { time_field_value = None; },
+                };
+            }
+        }
+
+        time_field_value
+    }
+
 
     fn get_nested_value_from_dot_notation(json_value: &Value, field_str: &str) -> Option<Value> {
         // Parse the JSON string into a serde_json Value object

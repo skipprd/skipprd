@@ -332,8 +332,6 @@ impl AnalyseSchema {
             // }
         }
 
-        AnalyseSchema::determine_field_types(&mut newMeta.get_mut(&skpr_namespace).unwrap().fields, None);
-
         // let metadata = newMeta.clone();
 
         Ok(newMeta.clone())
@@ -574,7 +572,6 @@ impl AnalyseSchema {
                     };
 
                     if let Some(format) = self.is_valid_date(value_str) {
-                        println!("Value {} IS a date of format {}", value_str, format);
                         data_type = "date".to_string();
                         // self.set_date_field_candidate(field, metadata, &format);
                         self.increment_date_field_candidate_count(field, metadata, &format.to_string());
@@ -873,10 +870,6 @@ impl AnalyseSchema {
 
         for (field_name, field) in metadata.iter_mut() {
 
-            if field_name == "abc2" {
-                let fo = "";
-            }
-
             // Useful for field evolution logic for maps, which only support one sub-field type
             if let Some(parent_type) = parent_type {
                 field.parent_type = parent_type.to_string();
@@ -1160,7 +1153,9 @@ mod tests {
 
         let mut metadata = HashMap::new();
 
-        let newMeta = AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1), &mut metadata).unwrap();
+        let mut newMeta = AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1), &mut metadata).unwrap();
+
+        AnalyseSchema::determine_field_types(&mut newMeta, None);
 
         remove_file(Path::new(&format!("./{}", random_tmp_file_name))).unwrap();
 
@@ -1234,7 +1229,9 @@ mod tests {
 
         let mut metadata = HashMap::new();
 
-        let newMeta = AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1), &mut metadata).unwrap();
+        let mut newMeta = AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1), &mut metadata).unwrap();
+
+        AnalyseSchema::determine_field_types(&mut newMeta, None);
 
         remove_file(Path::new(&format!("./{}", random_tmp_file_name)));
 
@@ -1340,7 +1337,9 @@ mod tests {
 
         let mut metadata = HashMap::new();
 
-        let newMeta = AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1), &mut metadata).unwrap();
+        let mut newMeta = AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1), &mut metadata).unwrap();
+
+        AnalyseSchema::determine_field_types(&mut newMeta, None);
 
         remove_file(Path::new(&format!("./{}", random_tmp_file_name)));
 

@@ -74,17 +74,17 @@ fn set_object_scalar_field_type(
         }
         InferredType::Array(_) => {
             return Err(ArrowError::JsonError(format!(
-                "Only Scala possible found Array instead of Scalar"
+                "Only Scalar possible found Array instead of Scalar"
             )));
         }
         InferredType::Object(_) => {
             return Err(ArrowError::JsonError(format!(
-                "Only Scala possible found Object instead of Scalar"
+                "Only Scalar possible found Object instead of Scalar"
             )));
         }
         Any => {
             return Err(ArrowError::JsonError(format!(
-                "Only Scala possible found Any instead of Scalar"
+                "Only Scalar possible found Any instead of Scalar"
             )));
         }
     }
@@ -163,6 +163,9 @@ fn convert_skippr_to_arrow_field_types(
             "string" => {
                 set_object_scalar_field_type(&mut field_types, k, DataType::Utf8);
             }
+            "date" => {
+                set_object_scalar_field_type(&mut field_types, k, DataType::Utf8);
+            }
             "record" => {
                 field_types.insert(
                     k.to_string(),
@@ -172,7 +175,7 @@ fn convert_skippr_to_arrow_field_types(
             "" => {}
             Any => {
                 return Err(ArrowError::JsonError(format!(
-                    "Only Scala possible found Any instead of determined_type string: {}",
+                    "Only Scalar possible found Any instead of determined_type string: {}",
                     v.determined_type
                 )));
             }

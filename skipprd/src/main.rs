@@ -43,6 +43,7 @@ use crate::cli::{Cli, Mode};
 
 extern crate clap;
 use clap::{Parser, Subcommand};
+use futures::future::join_all;
 use futures::TryFutureExt;
 use lazy_static::lazy_static;
 
@@ -151,8 +152,6 @@ async fn discover() {
     while !hasAnalysed && analyseCount < 10 {
         analyseCount += 1;
 
-        let data_dir= Config::get_data_dir();
-
         for entry in glob_with(pattern, options).expect("Failed to read glob pattern") {
             if !hasAnalysed {
                 match entry {
@@ -195,9 +194,9 @@ async fn discover() {
                 }
             }
         }
-
-        sleep(Duration::from_secs(1));
     }
+
+    AnalyseSchema::determine_field_types(&mut newMeta, None);
 
     Config::set_config(&newMeta, false).await;
 
@@ -305,7 +304,8 @@ async fn sync() {
     let metedata_clone = newMeta.clone();
     let newmeta_clone = newMeta.clone();
 
-    thread::spawn(move || {
+
+    let foo = thread::spawn(move || {
 
         let mut parse_namespace_cache: HashMap<String, String> = HashMap::new();
 
@@ -387,28 +387,38 @@ async fn sync() {
 
                                 // match record {
                             //     Ok(record) => {
-                                    // let mut ingest_record = IngestRecord {
-                                    //     source_namespace: "".to_string(),
-                                    //     source_partition: "".to_string(),
-                                    //     skpr_event_ts: 0,
-                                    //     skpr_namespace: "example_ns".to_string(),
-                                    //     skpr_partition: "".to_string(),
-                                    //     record: Value::Null,
-                                    // };
+
 
 
                                 // let source_namespace = Config::getenv("S3_BUCKET", "");
                                 let source_namespace = BufferChunker::decode_file_namespace(path.to_str().unwrap());
                                 let source_partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
+                                // let source_time = BufferChunker::decode_file_time(path.to_str().unwrap());
 
                                 let skpr_namespace = Helpers::parse_namespace_field(&record, source_namespace, &mut parse_namespace_cache);
+                                let skpr_time = Helpers::parse_time_field(&record);
 
+                                let mut skpr_time_bucket= 0;
+
+                                if skpr_time.is_some() {
+                                    skpr_time_bucket = BufferChunker::event_time_bucket(skpr_time.unwrap());
+                                }
+
+
+                                // let mut ingest_record = IngestRecord {
+                                //     source_namespace: source_namespace,
+                                //     source_partition: source_partition,
+                                //     skpr_event_ts: skpr_time,
+                                //     skpr_namespace: skpr_namespace,
+                                //     skpr_partition: "".to_string(),
+                                //     record: Value::Null,
+                                // };
 
                                 if newMeta.get(&skpr_namespace).is_none() {
                                     newMeta.insert(skpr_namespace.clone(), Metadata::new().unwrap());
                                 }
 
-                                let output_file_name = BufferChunker::encode_chunk_name("ingest", Some(&skpr_namespace), Some(&source_partition), Some(0));
+                                let output_file_name = BufferChunker::encode_chunk_name("ingest", Some(&skpr_namespace), Some(&source_partition), Some(skpr_time_bucket));
                                 let output_file = format!("{}/{}", output_dir, &output_file_name);
 
                                     if output_files.get_mut(&output_file_name).is_none() {
@@ -484,7 +494,7 @@ async fn sync() {
                                 .build()
                                 .unwrap()
                                 .block_on(async {
-                                    Config::set_config(&newMeta, true).await;
+                                    Config::set_config(&newMeta, updatedSchema == "yes".to_string()).await;
                                 });
 
                             updatedSchema = "no".to_string();
@@ -507,24 +517,26 @@ async fn sync() {
     // .expect("Buffer thread failed");
 
     // let metadata_clone = newMeta.clone();
-    outputSync(newmeta_clone);
-
+    let bar = thread::spawn(move || {
+        outputSync(newmeta_clone);
+    });
 
     // let mut ds3 = block_on(DataSourceS3InventoryPlugin::new());
     // ds3.sync().await;
 
-
-    let dataOutput = block_on(DataOutputAwsAthenaPlugin::new());
-    dataOutput.sync(metedata_clone).await;
-
-
     // let future2 = async move {
-        let mut ds3 = block_on(DataSourceS3InventoryPlugin::new());
-        ds3.sync().await;
+        let dataOutput = block_on(DataOutputAwsAthenaPlugin::new());
+        dataOutput.sync(metedata_clone).await;
     // };
 
 
-    // sleep(Duration::from_secs(125));
+    // let future2 = async move {
+    //     let mut ds3 = block_on(DataSourceS3InventoryPlugin::new());
+    //     ds3.sync().await;
+    // };
+
+
+    sleep(Duration::from_secs(125));
 
 
     // let now_lock = now.lock().unwrap();
@@ -560,7 +572,7 @@ fn outputSync(
                         let mut schema_ref = Arc::new(Schema::empty());
 
                         let skpr_namespace = BufferChunker::decode_file_namespace(path.to_str().unwrap());
-                        let skpr_partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
+                        // let skpr_partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
 
                         // let mut skpr_namespace: String = "".to_string();
                         // if let Some((a, b)) = path.display().to_string().split_once("done/") {

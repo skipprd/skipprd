@@ -273,7 +273,7 @@ impl SerdeParquet {
             Err(_err) => {}
         }
 
-        let output_file_path = &format!("{}/{}-{}.parquet", output_dir, output_file_name, Helpers::random_str(12).as_str());
+        let output_file_path = &format!("{}/{}&part={}.parquet", output_dir, output_file_name, Helpers::random_str(12).as_str());
 
         let output = OpenOptions::new()
             .create(true)

@@ -282,13 +282,12 @@ impl Config {
 
     pub async fn set_config(metadata: &HashMap<String, Metadata>, evolved: bool) {
 
-        for (namespace, schema) in metadata.into_iter() {
-
-            println!("Updating Hive '{}' schema", namespace);
-
-            AwsAthena::create_or_update_schema(&namespace, &schema).await;
-
-        }
+        // if evolved {
+            for (namespace, schema) in metadata.into_iter() {
+                println!("Updating Hive '{}' schema", namespace);
+                AwsAthena::create_or_update_schema(&namespace, &schema).await;
+            }
+        // }
 
         let data_dir= Config::get_data_dir();
         let metadata_file = format!("{}/metadata.json", data_dir);

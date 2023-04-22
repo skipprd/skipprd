@@ -475,7 +475,7 @@ impl AwsAthena {
                             partition_cache.push(md5_digest);
                         },
                         Err(err) => {
-                            println!("Failed to update Athena partition: {}", err);
+                            println!("Failed to update Athena partition: {}", err.into_service_error());
                         }
                     }
                 },
@@ -491,7 +491,7 @@ impl AwsAthena {
                             println!("Created new Athena partition");
                         },
                         Err(err) => {
-                            println!("Failed to create new Athena partition: {}", err);
+                            println!("Failed to create new Athena partition: {}", err.into_service_error());
                         }
                     }
                 }
@@ -553,7 +553,7 @@ impl DataOutputAwsAthenaPlugin {
                 full_key = format!("{}/{}", trimmed_key, namespace);
             }
             if !partition.is_empty() {
-                full_key = format!("{}/{}", trimmed_key, partition);
+                full_key = format!("{}/{}", full_key, partition);
             }
 
             let time_partition_str = BufferChunker::decode_chunk_time(&filename);
@@ -565,21 +565,43 @@ impl DataOutputAwsAthenaPlugin {
 
                 // let mut partition_params = vec![];
                 // let mut partition_values = vec![];
-                let mut partition_values : Vec<String>= vec![];
+                let mut partition_values: Vec<String> = vec![];
 
                 for granularity in GRANULARITIES.iter() {
-                    full_key = format!("{}/{}={}", full_key, granularity, date.format(granularity));
-                    partition_values.push(format!("{}", date.format(granularity)));
+                    let foo: u32 = match granularity {
+                        &"year" => {
+                            date.year() as u32
+                        },
+                        &"month" => {
+                            date.month()
+                        },
+                        &"day" => {
+                            date.day()
+                        },
+                        &"hour" => {
+                            date.hour()
+                        },
+                        &"minute" => {
+                            date.minute()
+                        },
+                        _ => {
+                            panic!("Did not reconise date granularity of {}", granularity);
+                        }
+                    };
+
+                    full_key = format!("{}/{}={}", full_key, granularity, foo);
+                    partition_values.push(format!("{}", foo));
 
                     if granularity == &granularity_target {
                         break;
                     }
                 }
 
-                // @todo
-                match AwsAthena::glue_create_partition(&namespace, partition_values, &key, &mut partition_cache, &metadata.get(&namespace).unwrap()).await {
-                    Ok(_) => {},
-                    Err(err) => {}
+                if !partition_values.is_empty() {
+                    match AwsAthena::glue_create_partition(&namespace, partition_values, &key, &mut partition_cache, &metadata.get(&namespace).unwrap()).await {
+                        Ok(_) => {},
+                        Err(err) => {}
+                    }
                 }
             }
 

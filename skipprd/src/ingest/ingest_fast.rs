@@ -394,6 +394,7 @@ fn fast_set_value(
         new_value
 
     } else {
+        println!("No data type");
 
         let discoverd_data_type = discoverIngest(field, value, metadata, updatedSchema);
 
@@ -447,7 +448,7 @@ fn discoverIngest(
 
     let discoverd_data_type = &metadata.get(field).unwrap().determined_type;
 
-    // println!("Discovered new field: '{}' of type: '{}'", field, discoverd_data_type);
+    println!("Discovered new field: '{}' of type: '{}'", field, discoverd_data_type);
 
     // let handle = tokio::runtime::Handle::current();
     // handle.enter();

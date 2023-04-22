@@ -70,7 +70,7 @@ impl BufferChunker {
         result
     }
 
-    fn event_time_bucket(event_time: i32) -> i32 {
+    pub fn event_time_bucket(event_time: i64) -> i64 {
 
         let datetime = Utc.timestamp_opt(event_time as i64, 0).unwrap();
 
@@ -119,7 +119,7 @@ impl BufferChunker {
 
         let bucket = if bucket_rounded_timestamp > 0 {
             // event_time - (event_time % bucket_seconds)
-            event_time - ((event_time).rem_euclid(bucket_rounded_timestamp as i32))
+            event_time - ((event_time).rem_euclid(bucket_rounded_timestamp))
             // event_time.div_euclid(bucket_seconds)
             // event_time.div_rem(bucket_seconds)
         } else {
@@ -129,7 +129,7 @@ impl BufferChunker {
         bucket
     }
 
-    pub fn encode_chunk_name(buffer_name: &str, namespace: Option<&str>, partition: Option<&str>, time_bucket: Option<i32>) -> String {
+    pub fn encode_chunk_name(buffer_name: &str, namespace: Option<&str>, partition: Option<&str>, time_bucket: Option<i64>) -> String {
         let string = time_bucket.unwrap_or_default().to_string();
         let mut chunks = vec![
             ("buffer", buffer_name),
@@ -155,7 +155,7 @@ impl BufferChunker {
     // }
 
 
-    fn get_file_time(filename: &str) -> i32 {
+    fn get_file_time(filename: &str) -> i64 {
 
         let mut time = 0;
 
@@ -165,7 +165,7 @@ impl BufferChunker {
         // Print each key-value pair
         for (key, value) in pairs {
             if key == "time" {
-                time = value.parse::<i32>().unwrap_or(0);
+                time = value.parse::<i64>().unwrap_or(0);
             }
         }
 
@@ -206,7 +206,7 @@ impl BufferChunker {
         date_string
     }
 
-    pub fn decode_file_time(filename: &str) -> i32 {
+    pub fn decode_file_time(filename: &str) -> i64 {
         BufferChunker::get_file_time(filename)
     }
 
