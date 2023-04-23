@@ -164,7 +164,7 @@ fn convert_skippr_to_arrow_field_types(
                 set_object_scalar_field_type(&mut field_types, k, DataType::Utf8);
             }
             "date" => {
-                set_object_scalar_field_type(&mut field_types, k, DataType::Utf8);
+                set_object_scalar_field_type(&mut field_types, k, DataType::Int64);
             }
             "record" => {
                 field_types.insert(

@@ -4,28 +4,20 @@ use crate::helpers::Helpers;
 use aws_sdk_athena::types::{
     EncryptionConfiguration, EncryptionOption, ResultConfiguration, Tag, WorkGroupConfiguration,
 };
-use aws_sdk_athena::{Client as AthenaClient, Error as AthenaError};
-use aws_sdk_glue::types::{Column, DatabaseInput, Partition, PartitionIndex, PartitionInput, PartitionValueList, SerDeInfo, StorageDescriptor, TableInput};
-use aws_sdk_glue::{Client as GlueClient, Error as GlueError};
+use aws_sdk_athena::{Client as AthenaClient};
+use aws_sdk_glue::types::{Column, DatabaseInput, PartitionIndex, PartitionInput, SchemaReference, SerDeInfo, StorageDescriptor, TableInput};
+use aws_sdk_glue::{Client as GlueClient};
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::{Client as S3Client, Error};
 use chrono::prelude::*;
-use chrono::prelude::*;
-use parquet::data_type::AsBytes;
 use std::collections::HashMap;
 use std::fs;
 use std::fs::{File};
 use std::io::{BufReader, Read};
 use std::path::Path;
-use std::path::PathBuf;
-use aws_smithy_http::result::SdkError;
-use clap::builder::Str;
-use indexmap::map;
 use md5::Digest;
-use serde::de::Unexpected::Option;
 use crate::converters::skippr_hive::SkipprHive;
 use crate::discover;
-use crate::discover::Metadata;
 
 
 pub struct DataOutputAwsAthenaPlugin {
@@ -459,7 +451,7 @@ impl AwsAthena {
             match glue_client.get_partition()
                 .database_name(&database)
                 .table_name(namespace)
-                .set_partition_values(Some(partition_values))
+                .set_partition_values(Some(partition_values.clone()))
                 .send().await
             {
                 Ok(_) => {
@@ -468,6 +460,7 @@ impl AwsAthena {
                         .database_name(database)
                         .table_name(namespace)
                         .partition_input(partition_conf)
+                        .set_partition_value_list(Some(partition_values))
                         .send().await
                     {
                         Ok(_) => {

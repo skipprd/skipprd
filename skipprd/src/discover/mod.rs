@@ -1,31 +1,22 @@
 use std::any::Any;
-use std::borrow::BorrowMut;
 use std::collections::{BTreeMap, HashMap};
-use std::fs::{File, metadata};
-use std::io::{Read, BufReader};
-use std::sync::Arc;
-use arrow::array::BinaryArray;
-use arrow::datatypes::{Schema};
+use std::fs::{File};
+use std::io::{Read};
 use arrow::error::ArrowError;
-use arrow::json::reader::ValueIter;
-use arrow::record_batch::{RecordBatch, RecordBatchOptions};
+use arrow::record_batch::{RecordBatchOptions};
 
 
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
-use icu::datetime::options::length::Date;
 use serde_derive::{Deserialize, Serialize};
 
 
 use serde_json::Value;
-use tokio::count;
-use crate::buffer::BufferChunker;
 
 
 // use std::simd::usizex2;
-use crate::internalfields::InternalFields;
 
 use crate::helpers::Helpers;
-mod date_formats;
+pub(crate) mod date_formats;
 use crate::discover::date_formats::DateFormats;
 mod filter_float;
 
@@ -34,7 +25,6 @@ use crate::discover::filter_bool::parse_bool;
 mod filter_parse_int;
 
 pub mod arrow_schema;
-use crate::discover::arrow_schema::convert_skippr_to_arrow;
 use crate::helpers::configuration::Config;
 use crate::ingest::ingest_fast::IngestRecord;
 use crate::serdes::json::SerdeJson;
@@ -45,7 +35,7 @@ pub struct DateCandidate {
     check_count: i32,
     valid_count: i32,
     field: String,
-    format: String
+    pub(crate) format: String
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -103,17 +93,6 @@ impl Metadata {
             determined_type_values: "".to_string(),
         })
     }
-
-    // pub fn iter_mut(&mut self) -> IterMut<'_, T> {
-    //     IterMut { next: self.head.as_deref_mut() }
-    // }
-
-    // pub fn iter_mut(&self) -> IterMut<'_> {
-    //
-    //     IterMut { next: self.head.as_deref_mut()
-    //     }
-    // }
-
 }
 
 pub struct AnalyseSchema {
@@ -995,12 +974,12 @@ impl AnalyseSchema {
 }
 
 
-
 #[cfg(test)]
 mod is_valid_date_tests {
-    use chrono::{DateTime, NaiveDate};
+    use chrono::{DateTime, NaiveDate, NaiveDateTime};
     use serde_json::Value;
     use crate::discover::AnalyseSchema;
+    use crate::discover::date_formats::DateFormats;
 
     #[test]
     fn test_valid_date_formats() {
@@ -1008,16 +987,26 @@ mod is_valid_date_tests {
         let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
 
         let mut date_str = "2022-01-07T08:28:07.000Z";
-        println!("str: {}", date_str);
         let json_value: Value = date_str.into();
-        println!("json_value: {}", json_value);
         let value= json_value.as_str().unwrap();
-        println!("value: {}", value);
 
         assert_eq!(
             Some("Iso8601"),
             foo.is_valid_date(value)
         );
+
+        let mut date_str = "2022-01-05T08:30:12.000Z";
+        assert_eq!(
+            Some("Iso8601"),
+            foo.is_valid_date( date_str)
+        );
+
+        let fmt = DateFormats::from_str("Iso8601").unwrap();
+        assert_eq!(
+           "%Y-%m-%dT%H:%M:%S.%fZ",
+            fmt.as_str()
+        );
+        NaiveDateTime::parse_from_str(date_str, fmt.as_str()).unwrap();
 
         let mut date_str = "2022-01-07T08:28:07Z";
         assert_eq!(
@@ -1159,9 +1148,9 @@ mod tests {
 
         remove_file(Path::new(&format!("./{}", random_tmp_file_name))).unwrap();
 
-        // println!("{:?}", newMeta.get("").unwrap());
+        // println!("{:?}", newMeta);
         // println!("{:?}", newMeta.get("").unwrap().fields);
-        // println!("{:?}", newMeta.get("").unwrap().fields.get("abc2").unwrap());
+        println!("{:?}", newMeta.get("").unwrap().fields.get("abc2").unwrap());
         // println!("{:?}", newMeta.get("").unwrap().fields.get("abc2").unwrap().determined_type);
         // println!("{:?}", newMeta.get("").unwrap().fields.get("abc2").unwrap().determined_type_values);
 

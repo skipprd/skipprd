@@ -1,20 +1,12 @@
 use crate::discover::{AnalyseSchema, Metadata};
 use crate::helpers::Helpers;
-use crate::serdes::parquet::{Message, SerdeParquet};
 use arrow::json::reader::ValueIter;
-use serde_json::{json, Map, Value};
-use std::any::Any;
-use std::borrow::{Borrow, BorrowMut};
+use serde_json::{Map, Value};
+use std::borrow::{BorrowMut};
 use std::collections::HashMap;
 use std::io::{BufReader, Read};
-use std::process::exit;
-use arrow::datatypes::DataType::Duration;
-use futures::executor::block_on;
-use futures::stream::iter;
-use futures::{StreamExt, TryFutureExt};
-use tokio::task::spawn_blocking;
-use crate::discover::arrow_schema::convert_skippr_to_arrow;
-use crate::helpers::configuration::Config;
+use chrono::{NaiveDateTime};
+use crate::discover::date_formats::DateFormats;
 
 #[derive(Default)]
 pub struct IngestRecord {
@@ -338,7 +330,36 @@ fn fast_set_value(
 
                         // println!("array new_value is {:?}", new_value);
                     } else {
-                        if data_type == "string" || data_type == "date" {
+                        if data_type == "date" { // Hive Timestamp doesn't support string dates
+
+                            new_value = match value.as_str() {
+                                Some(val) => {
+                                    let fmt = &metadata.get(field).unwrap().date_candidate.as_ref().unwrap().format;
+                                    match DateFormats::from_str(fmt) {
+                                        Ok(f) => {
+                                            match NaiveDateTime::parse_from_str(val, f.as_str()) {
+                                                Ok(date) => {
+                                                    let millis = date.timestamp() * 1000;
+                                                    millis.into()
+                                                },
+                                                Err(_) => {
+                                                    Value::Null
+                                                },
+                                            }
+                                        },
+                                        Err(err) => {
+                                            println!("Error date: {}", err);
+                                            Value::Null
+                                        }
+                                    }
+                                },
+                                None => {
+                                    println!("Could not format date to int using format");
+                                    Value::Null
+                                },
+                            };
+                        }
+                        if data_type == "string" {
                             // value += "";
 
                             // println!("string value is {:?}", value);

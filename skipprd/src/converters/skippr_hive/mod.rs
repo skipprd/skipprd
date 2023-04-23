@@ -132,25 +132,15 @@ impl SkipprHive {
             }
         }
 
+        Self::sort_fields(&mut field_types);
+
         Ok(field_types)
     }
 
+    fn sort_fields(vec: &mut Vec<Column>) {
 
-    // fn convert_skippr_type_to_arrow_data_type(skippr_type: &str) -> Result<DataType, ArrowError> {
-    //     return match skippr_type {
-    //         "boolean" => Ok(DataType::Boolean),
-    //         "NULL" => Ok(DataType::Null),
-    //         "integer" => Ok(DataType::Int32),
-    //         "long" => Ok(DataType::Int64),
-    //         "double" => Ok(DataType::Float64),
-    //         "string" => Ok(DataType::Utf8),
-    //         &_ => {
-    //             Ok(DataType::Utf8)
-    //             // return Err(ArrowError::JsonError(format!(
-    //             //     "Only Scala possible found &_ instead of Scalar: {}", skippr_type
-    //             // )));
-    //         }
-    //     };
-    // }
+        // Sort the map by the count of each Metadata in descending order
+        vec.sort_by(|col1, col2| col1.name.as_ref().unwrap().cmp(col2.name.as_ref().unwrap()));
+    }
 
 }
