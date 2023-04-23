@@ -117,10 +117,10 @@ fn fast_set_value(
     field: &str,
     value: &Value,
     metadata: &mut HashMap<String, Metadata>,
-    mut updatedSchema: &mut String
+    updatedSchema: &mut String
 ) -> Value {
 
-    let parent_type = match metadata.get_mut(field) {
+    let _parent_type = match metadata.get_mut(field) {
         Some(pt) => &pt.parent_type,
         None => ""
     };
@@ -157,7 +157,7 @@ fn fast_set_value(
                             .fields
                             .get(sub_field) {
 
-                            Some(t) => (),
+                            Some(_t) => (),
                             None => {
                                 discoverIngest(field, value, metadata, updatedSchema);
                             }
@@ -211,7 +211,7 @@ fn fast_set_value(
                             .fields
                             .get(&clean_sub_field) {
 
-                            Some(t) => (),
+                            Some(_t) => (),
                             None => {
                                 discoverIngest(field, value, metadata, updatedSchema);
                             }
@@ -435,9 +435,9 @@ fn discoverIngest(
     field: &str,
     value: &Value,
     metadata: &mut HashMap<String, Metadata>,
-    mut updatedSchema: &mut String
+    updatedSchema: &mut String
 ) -> String {
-    let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
+    let foo: AnalyseSchema = AnalyseSchema { i: 0 };
 
 
     /////
@@ -494,16 +494,16 @@ mod tests {
     use std::collections::HashMap;
     use serial_test::serial;
     use std::fs::{File, OpenOptions, remove_file};
-    use std::io::{BufReader, Seek, Write};
-    use std::ops::Index;
+    use std::io::{Seek, Write};
+    
     use std::path::Path;
     use parquet::data_type::AsBytes;
     use rand::Rng;
-    use serde::de::Unexpected::Str;
+    
     use serde_json::{Value};
-    use yaml_rust::Yaml::String;
+    
     use crate::discover::AnalyseSchema;
-    use crate::helpers::configuration::Config;
+    
     use crate::ingest::ingest_fast::fast_path_ingest;
     use crate::serdes::json::SerdeJson;
 
@@ -588,7 +588,7 @@ mod tests {
 
         test_file.rewind().unwrap();
 
-        let mut in_file = File::open(format!("./{}", random_tmp_file_name)).unwrap();
+        let in_file = File::open(format!("./{}", random_tmp_file_name)).unwrap();
         // let mut in_file = MemFile::create(rng.gen::<i32>(), CreateOptions::new()).unwrap();
 
         let mut metadata = HashMap::new();
@@ -597,7 +597,7 @@ mod tests {
 
         let str = r#"{"rider_id":"10e974bf-4a43-305a-9e39-1636c43cb22a","bike_id":"8b86f753-05f8-3254-aba6-739188a3c0b6","isbn":"9407496597","trip":{"start_temprature":0,"end_temprature":2},"last_crank":[2,15,33,45,56,57,47,36,19,5],"crank_torques":[[2,15,33,45,56,57,47,36,19,5],[1,13,33,48,56,58,45,35,15,6]],"hardware":{"manufacturer":"Beier, Emmerich and Rutherford","model":"synergize ubiquitous e-commerce","maintenance":{"last_rebuild":"20\/04\/2010","last_service":"12\/07\/1973"}},"metadata":{"rcvd_time":1615474895,"sent_time":1615474930,"prcd_micro_time":1615474853.999185,"tags":[{"name":"type","value":"trip"},{"name":"auto","value":false}]}}"#;
 
-        let mut records: Vec<Value> = SerdeJson::deserialize(str.to_string());
+        let records: Vec<Value> = SerdeJson::deserialize(str.to_string());
 
         let mut updatedSchema = "no".to_string();
 
@@ -611,8 +611,8 @@ mod tests {
             &mut updatedSchema
         );
 
-        let f = [2,15,33,45,56,57,47,36,19,5];
-        let v = ingestValue.get("last_crank").unwrap().as_array().unwrap();
+        let _f = [2,15,33,45,56,57,47,36,19,5];
+        let _v = ingestValue.get("last_crank").unwrap().as_array().unwrap();
 
         remove_file(Path::new(&format!("./{}", random_tmp_file_name)));
     }

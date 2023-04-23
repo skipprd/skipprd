@@ -1,27 +1,25 @@
-use crate::arr::Arr;
-use crate::discover::{AnalyseSchema, Metadata};
+
+use crate::discover::{Metadata};
 use crate::helpers::Helpers;
 use arrow::datatypes::Schema;
 // use clap::{Parser, ValueHint};
 use parquet::{
     arrow::ArrowWriter,
-    basic::{Compression, Encoding},
-    errors::ParquetError,
-    file::properties::{EnabledStatistics, WriterProperties},
+    file::properties::{WriterProperties},
 };
-use arrow::json::{Reader, ReaderBuilder, writer};
+use arrow::json::{ReaderBuilder};
 use serde::{Deserialize, Serialize};
-use serde_json::Value::{Array, Null};
-use serde_json::{Map, Value};
-use std::collections::hash_map::RandomState;
+
+
+
 use std::collections::HashMap;
 use std::fs;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Lines, Read, Seek, Write};
-use std::ops::Index;
-use std::path::{Path, PathBuf};
-use std::process::exit;
-use std::sync::{Arc, Mutex};
+use std::io::{Write};
+
+use std::path::{PathBuf};
+
+use std::sync::{Arc};
 use crate::buffer::BufferChunker;
 use crate::helpers::configuration::Config;
 
@@ -167,7 +165,7 @@ impl SerdeParquet {
         // let opts: Opts = Opts::parse();
 
         // let mut props = WriterProperties::builder().set_dictionary_enabled(opts.dictionary);
-        let mut props = WriterProperties::builder().set_dictionary_enabled(false);
+        let props = WriterProperties::builder().set_dictionary_enabled(false);
 
         // if let Some(statistics) = opts.statistics {
         //     let statistics = match statistics {
@@ -235,7 +233,7 @@ impl SerdeParquet {
         //     props = props.set_max_statistics_size(size);
         // }
 
-        let mut input_file = File::open(path.clone()).unwrap();
+        let input_file = File::open(path.clone()).unwrap();
         // let mut input_file = File::open("/tmp/ddd/s3-uewnxrmskf").unwrap();
 
         // let mut output = OpenOptions::new()
@@ -269,7 +267,7 @@ impl SerdeParquet {
         let output_dir = &format!("{}/finalised", data_dir);
 
         match fs::create_dir(output_dir) {
-            Ok(g) => {},
+            Ok(_g) => {},
             Err(_err) => {}
         }
 
@@ -316,7 +314,7 @@ impl SerdeParquet {
                     writer.write(&batch).unwrap()
                 }
                 // Err(error) => return Err(error.into()),
-                Err(error) => {
+                Err(_error) => {
                     println!("Failed writing batch");
                     // println!("{:?}", batch);
                     // AnalyseSchema::determine_field_types(&mut newMeta.get_mut(&ingest_record.skpr_namespace).unwrap().fields, None);

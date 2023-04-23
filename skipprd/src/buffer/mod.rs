@@ -1,28 +1,28 @@
-use chrono::{Datelike, DateTime, LocalResult, NaiveDateTime, Timelike, TimeZone, Utc};
-use url::{form_urlencoded, Url};
+use chrono::{Datelike, DateTime, NaiveDateTime, Timelike, TimeZone, Utc};
+use url::{form_urlencoded};
 
 use std::collections::HashMap;
-use regex::Regex;
-use std::{env, time};
-use memory_stats::memory_stats;
 
-use std::fs::{self, File};
+
+
+
+use std::fs::{File};
 use std::io::ErrorKind;
-use std::path::Path;
+
 
 
 
 use std::str;
 
-use rand::Rng;
-use serde_json::Value;
 
 
-use once_cell::sync::Lazy;
-use std::sync::Mutex;
-use std::time::SystemTime;
+
+
+
+
+
 use parquet::data_type::AsBytes;
-use tokio::time::Instant;
+
 use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
 
@@ -33,7 +33,7 @@ pub struct BufferChunker {
 
 impl BufferChunker {
 
-    pub fn check_flush_limit(chunk_name: &str, chunk: &HashMap<String, usize>) -> bool {
+    pub fn check_flush_limit(_chunk_name: &str, _chunk: &HashMap<String, usize>) -> bool {
 
         let mut result = false;
 
@@ -131,7 +131,7 @@ impl BufferChunker {
 
     pub fn encode_chunk_name(buffer_name: &str, namespace: Option<&str>, partition: Option<&str>, time_bucket: Option<i64>) -> String {
         let string = time_bucket.unwrap_or_default().to_string();
-        let mut chunks = vec![
+        let chunks = vec![
             ("buffer", buffer_name),
             ("namespace", namespace.unwrap_or("")),
             ("partition", partition.unwrap_or("")),
@@ -236,7 +236,7 @@ impl BufferChunker {
         let data_dir = Config::get_data_dir();
         let pattern = format!("{}/finalised/buffer=ingest*", data_dir);
 
-        let mut filenames = glob::glob(&pattern)
+        let filenames = glob::glob(&pattern)
             .unwrap()
             .filter_map(Result::ok)
             .collect::<Vec<_>>();
@@ -258,7 +258,7 @@ impl BufferChunker {
                     println!("Error opening file {}: {}", filename.to_str().unwrap(), e);
                     continue;
                 }
-                Ok(file) => {
+                Ok(_file) => {
                     // if self.lock(&file, false) {
                         return Some(filename.to_str().unwrap().to_string());
                     // }

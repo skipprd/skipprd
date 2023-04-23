@@ -82,7 +82,7 @@ fn set_object_scalar_field_type(
                 "Only Scalar possible found Object instead of Scalar"
             )));
         }
-        Any => {
+        _Any => {
             return Err(ArrowError::JsonError(format!(
                 "Only Scalar possible found Any instead of Scalar"
             )));
@@ -111,7 +111,7 @@ fn convert_skippr_type_to_arrow_data_type(skippr_type: &str) -> Result<DataType,
 pub fn convert_skippr_to_arrow(
     metadata: Box<HashMap<String, Metadata>>,
 ) -> Result<Schema, ArrowError> {
-    let mut field_types: HashMap<String, InferredType> =
+    let field_types: HashMap<String, InferredType> =
         convert_skippr_to_arrow_field_types(&metadata).unwrap();
 
     generate_schema(field_types)
@@ -123,7 +123,7 @@ fn convert_skippr_to_arrow_field_types(
     let mut field_types: HashMap<String, InferredType> = HashMap::new();
 
     for (k, v) in metadata.iter() {
-        let foo = &*v.determined_type;
+        let _foo = &*v.determined_type;
 
         match &*v.determined_type {
             // Value::Array(array) => {
@@ -173,7 +173,7 @@ fn convert_skippr_to_arrow_field_types(
                 );
             }
             "" => {}
-            Any => {
+            _Any => {
                 return Err(ArrowError::JsonError(format!(
                     "Only Scalar possible found Any instead of determined_type string: {}",
                     v.determined_type

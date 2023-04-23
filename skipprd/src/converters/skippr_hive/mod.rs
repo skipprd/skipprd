@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+
 use aws_sdk_glue::types::Column;
-use clap::builder;
-use icu::datetime::fields;
-use crate::discover::arrow_schema::convert_skippr_to_arrow;
+
+
+
 use crate::discover::Metadata;
 use phf::phf_map;
 
@@ -38,7 +38,7 @@ impl SkipprHive {
 
 
     pub fn convert_skippr_to_hive(metadata: &Metadata) -> Result<Vec<Column>, bool> {
-        let mut field_types: Result<Vec<Column>, bool> = SkipprHive::convert_skippr_to_hive_field_types(metadata);
+        let field_types: Result<Vec<Column>, bool> = SkipprHive::convert_skippr_to_hive_field_types(metadata);
         return field_types;
     }
 
@@ -80,7 +80,7 @@ impl SkipprHive {
                             None => v.determined_type_values.to_string()
                         };
 
-                        let mut type_str = format!("{}<string,{}>", field_type, value_type);
+                        let type_str = format!("{}<string,{}>", field_type, value_type);
 
                         field_types.push(
                             Column::builder()
@@ -102,7 +102,7 @@ impl SkipprHive {
                             None => v.determined_type_values.to_string()
                         };
 
-                        let mut type_str = format!("{}<{}>", field_type, value_type);
+                        let type_str = format!("{}<{}>", field_type, value_type);
 
                         field_types.push(
                             Column::builder()

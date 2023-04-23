@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::{File};
 use std::io::{Read};
 use arrow::error::ArrowError;
-use arrow::record_batch::{RecordBatchOptions};
+
 
 
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
@@ -108,7 +108,7 @@ const DATE_FIELD_VALIDATION_MIN_SAMPLE: i32 = 100;
 
 fn get_type(value: &mut String) -> String {
 
-    let foo = "";
+    let _foo = "";
     match parse_bool(value) {
         Err(_i32) => {
             // println!("Not float");
@@ -209,7 +209,7 @@ impl AnalyseSchema {
     pub fn infer_json_schema(
         &mut self,
         input_file: File,
-        max_read_records: Option<usize>,
+        _max_read_records: Option<usize>,
         newMeta: &mut HashMap<std::string::String, Metadata>
     ) -> Result<HashMap<std::string::String, Metadata>, ArrowError> {
         // self.infer_json_schema_from_iterator(ValueIter::new(reader, max_read_records))
@@ -241,7 +241,7 @@ impl AnalyseSchema {
         let str: &mut String = &mut "".to_string();
         input_file.read_to_string(str);
 
-        let mut records: Vec<Value> = SerdeJson::deserialize(str.clone());
+        let records: Vec<Value> = SerdeJson::deserialize(str.clone());
 
         let mut i = 0;
 
@@ -282,7 +282,7 @@ impl AnalyseSchema {
                 // println!("Discovering schema for {}", v);
 
             match v.type_id() {
-                    Value => {
+                    _Value => {
                         let mut ingest_record = IngestRecord {
                             source_namespace: source_namespace,
                             source_partition: "".to_string(),
@@ -442,7 +442,7 @@ impl AnalyseSchema {
 
                 let mut i = 0;
 
-                for (sub_value) in value.as_array().unwrap() {
+                for sub_value in value.as_array().unwrap() {
                     let mut sv: Value = serde_json::from_str(&sub_value.to_string()).unwrap();
 
                     let logical_type = self.get_logical_type(&i.to_string(), &mut sv, metadata, false);
@@ -847,7 +847,7 @@ impl AnalyseSchema {
     pub fn determine_field_types(metadata: &mut HashMap<String, Metadata>, parent_type: Option<&String>) {
         let demoted_types = vec!["boolean", "date", "timestamp", "timestamp_milli"];
 
-        for (field_name, field) in metadata.iter_mut() {
+        for (_field_name, field) in metadata.iter_mut() {
 
             // Useful for field evolution logic for maps, which only support one sub-field type
             if let Some(parent_type) = parent_type {
@@ -910,7 +910,7 @@ impl AnalyseSchema {
                         //         however, 'array' type is a special case... how to handle?
 
                         // Get avro arrays items primitive data type
-                        for (sub_field, sub_value) in field.fields.iter() {
+                        for (_sub_field, sub_value) in field.fields.iter() {
                             for (data_type, data_type_count) in sub_value.types.iter() {
                                 // Prefer primitive types to logical types or types
                                 // that cause frequent false positives (demoted types).
@@ -954,7 +954,7 @@ impl AnalyseSchema {
 
 
                     if field.determined_type != "array".to_string() {
-                        let fo = "";
+                        let _fo = "";
                         AnalyseSchema::determine_field_types(
                             &mut field.fields,
                             Some(&field.determined_type)
@@ -984,9 +984,9 @@ mod is_valid_date_tests {
     #[test]
     fn test_valid_date_formats() {
 
-        let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
+        let foo: AnalyseSchema = AnalyseSchema { i: 0 };
 
-        let mut date_str = "2022-01-07T08:28:07.000Z";
+        let date_str = "2022-01-07T08:28:07.000Z";
         let json_value: Value = date_str.into();
         let value= json_value.as_str().unwrap();
 
@@ -995,7 +995,7 @@ mod is_valid_date_tests {
             foo.is_valid_date(value)
         );
 
-        let mut date_str = "2022-01-05T08:30:12.000Z";
+        let date_str = "2022-01-05T08:30:12.000Z";
         assert_eq!(
             Some("Iso8601"),
             foo.is_valid_date( date_str)
@@ -1008,13 +1008,13 @@ mod is_valid_date_tests {
         );
         NaiveDateTime::parse_from_str(date_str, fmt.as_str()).unwrap();
 
-        let mut date_str = "2022-01-07T08:28:07Z";
+        let date_str = "2022-01-07T08:28:07Z";
         assert_eq!(
             Some("AtomZ"),
             foo.is_valid_date( date_str)
         );
 
-        let mut date_str = "2022-02-22T22:22:22";
+        let date_str = "2022-02-22T22:22:22";
         assert_eq!(
             Some("Atom"),
             foo.is_valid_date( date_str)
@@ -1041,38 +1041,38 @@ mod is_valid_date_tests {
 
     #[test]
     fn test_invalid_date_format() {
-        let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
-        let mut date_str = "2022-22-22";
+        let foo: AnalyseSchema = AnalyseSchema { i: 0 };
+        let date_str = "2022-22-22";
         assert_eq!(None, foo.is_valid_date( date_str));
     }
 
     #[test]
     fn test_empty_date_string() {
-        let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
-        let mut date_str = "";
+        let foo: AnalyseSchema = AnalyseSchema { i: 0 };
+        let date_str = "";
         assert_eq!(None, foo.is_valid_date( date_str));
     }
 
     #[test]
     fn test_non_date_string() {
-        let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
-        let mut date_str = "not a date";
+        let foo: AnalyseSchema = AnalyseSchema { i: 0 };
+        let date_str = "not a date";
         assert_eq!(None, foo.is_valid_date( date_str));
     }
 
     #[test]
     fn test_valid_date_time() {
-        let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
-        let mut date_str = "2022-02-22T22:22:22Z";
-        let dt = DateTime::parse_from_rfc3339(date_str).unwrap();
+        let foo: AnalyseSchema = AnalyseSchema { i: 0 };
+        let date_str = "2022-02-22T22:22:22Z";
+        let _dt = DateTime::parse_from_rfc3339(date_str).unwrap();
         assert_eq!(Some("AtomZ"), foo.is_valid_date( date_str));
     }
 
     #[test]
     fn test_valid_date() {
-        let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
-        let mut date_str = "2022-02-22";
-        let nd = NaiveDate::parse_from_str(date_str, "%Y-%m-%d").unwrap();
+        let foo: AnalyseSchema = AnalyseSchema { i: 0 };
+        let date_str = "2022-02-22";
+        let _nd = NaiveDate::parse_from_str(date_str, "%Y-%m-%d").unwrap();
         assert_eq!(Some("DateOnly"), foo.is_valid_date( date_str));
     }
 }
@@ -1082,8 +1082,8 @@ mod tests {
     use std::collections::HashMap;
     use serial_test::serial;
     use std::fs::{File, OpenOptions, remove_file};
-    use std::io::{BufReader, Seek, Write};
-    use std::ops::Index;
+    use std::io::{Seek, Write};
+    
     use std::path::Path;
     use parquet::data_type::AsBytes;
     use rand::Rng;
@@ -1117,7 +1117,7 @@ mod tests {
 
         let record_line = serde_json::to_string(&json).unwrap();
 
-        let data_dir= Config::get_data_dir();
+        let _data_dir= Config::get_data_dir();
 
         let mut rng = rand::thread_rng();
         let random_tmp_file_name = rng.gen::<i32>();
@@ -1136,7 +1136,7 @@ mod tests {
         test_file.rewind().unwrap();
 
         // let mut in_file = MemFile::create(rng.gen::<i32>(), CreateOptions::new()).unwrap();
-        let mut in_file = File::open(format!("./{}", random_tmp_file_name)).unwrap();
+        let in_file = File::open(format!("./{}", random_tmp_file_name)).unwrap();
 
         // let mut buf_reader = BufReader::new(in_file);
 
@@ -1211,7 +1211,7 @@ mod tests {
 
         test_file.rewind().unwrap();
 
-        let mut in_file = File::open(format!("./{}", random_tmp_file_name)).unwrap();
+        let in_file = File::open(format!("./{}", random_tmp_file_name)).unwrap();
         // let mut in_file = MemFile::create(rng.gen::<i32>(), CreateOptions::new()).unwrap();
 
         // let mut buf_reader = BufReader::new(in_file);
@@ -1321,7 +1321,7 @@ mod tests {
 
         test_file.rewind().unwrap();
 
-        let mut in_file = File::open(format!("./{}", random_tmp_file_name)).unwrap();
+        let in_file = File::open(format!("./{}", random_tmp_file_name)).unwrap();
         // let mut in_file = MemFile::create(rng.gen::<i32>(), CreateOptions::new()).unwrap();
 
         let mut metadata = HashMap::new();

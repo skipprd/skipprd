@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use regex::Regex;
 use std::env;
 use memory_stats::memory_stats;
-use chrono::{DateTime, Local, TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 
 
 
@@ -71,7 +71,7 @@ impl Helpers {
     pub fn clean_field_name<'a>(field: String) -> String {
         let mut clean = field.to_string();
 
-        let mut clean_field_cache_lock = &mut *clean_field_cache.lock().unwrap();
+        let clean_field_cache_lock = &mut *clean_field_cache.lock().unwrap();
 
         if !clean_field_cache_lock.contains_key(&field) || clean_field_cache_lock[&field] == true {
             if field.parse::<i32>().is_ok() {

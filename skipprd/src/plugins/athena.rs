@@ -5,7 +5,7 @@ use aws_sdk_athena::types::{
     EncryptionConfiguration, EncryptionOption, ResultConfiguration, Tag, WorkGroupConfiguration,
 };
 use aws_sdk_athena::{Client as AthenaClient};
-use aws_sdk_glue::types::{Column, DatabaseInput, PartitionIndex, PartitionInput, SchemaReference, SerDeInfo, StorageDescriptor, TableInput};
+use aws_sdk_glue::types::{Column, DatabaseInput, PartitionIndex, PartitionInput, SerDeInfo, StorageDescriptor, TableInput};
 use aws_sdk_glue::{Client as GlueClient};
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::{Client as S3Client, Error};
@@ -49,7 +49,7 @@ impl AwsAthena {
         match AwsAthena::get_work_group().await {
             Ok(true) => {},
             Ok(false) => {},
-            Err(err) => {
+            Err(_err) => {
                 match AwsAthena::create_workgroup(namespace).await {
                     Ok(_) => {},
                     Err(err) => {  println!("ERROR: {}", err); }
@@ -60,7 +60,7 @@ impl AwsAthena {
         match AwsAthena::glue_get_database().await {
             Ok(true) => {},
             Ok(false) => {},
-            Err(err) => {
+            Err(_err) => {
                 match AwsAthena::glue_create_database(namespace).await {
                     Ok(_) => {},
                     Err(err) => {  println!("ERROR: {}", err); }
@@ -76,7 +76,7 @@ impl AwsAthena {
                 }
             },
             Ok(false) => {},
-            Err(err) => {
+            Err(_err) => {
                 match AwsAthena::glue_create_table(namespace, schema).await {
                     Ok(_) => {},
                     Err(err) => {  println!("ERROR: {}", err); }
@@ -88,7 +88,7 @@ impl AwsAthena {
 
     pub async fn get_work_group() -> Result<bool, String> {
         let workgroup = Config::getenv("ATHENA_WORKGROUP_NAME", "");
-        let mut aws_config = aws_config::from_env().load().await;
+        let aws_config = aws_config::from_env().load().await;
 
         let athena_client = AthenaClient::new(&aws_config);
 
@@ -118,7 +118,7 @@ impl AwsAthena {
     pub async fn glue_get_database() -> Result<bool, String> {
         let database_name = Config::getenv("GLUE_DATABASE_NAME", "");
 
-        let mut aws_config = aws_config::from_env().load().await;
+        let aws_config = aws_config::from_env().load().await;
 
         let glue_client = GlueClient::new(&aws_config);
 
@@ -137,7 +137,7 @@ impl AwsAthena {
     pub async fn glue_get_table(namespace: &str) -> Result<bool, String> {
         let database_name = Config::getenv("GLUE_DATABASE_NAME", "");
 
-        let mut aws_config = aws_config::from_env().load().await;
+        let aws_config = aws_config::from_env().load().await;
 
         let glue_client = GlueClient::new(&aws_config);
 
@@ -159,13 +159,13 @@ impl AwsAthena {
         }
     }
 
-    pub async fn create_workgroup(namespace: &str) -> Result<bool, String> {
+    pub async fn create_workgroup(_namespace: &str) -> Result<bool, String> {
         let workgroup = Config::getenv("ATHENA_WORKGROUP_NAME", "");
         let bucket = Config::getenv("DATA_OUTPUT_S3_BUCKET", "");
         let path = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
         let path = path.trim_start_matches('/');
 
-        let mut aws_config = aws_config::from_env().load().await;
+        let aws_config = aws_config::from_env().load().await;
 
         let glue_client = AthenaClient::new(&aws_config);
 
@@ -195,20 +195,20 @@ impl AwsAthena {
             .send()
             .await
         {
-            Ok(output) => {
+            Ok(_output) => {
                 return Ok(true);
             }
             Err(err) => return Err(err.into_service_error().to_string()),
         }
     }
 
-    pub async fn glue_create_database(namespace: &str) -> Result<bool, String> {
+    pub async fn glue_create_database(_namespace: &str) -> Result<bool, String> {
         let database = Config::getenv("GLUE_DATABASE_NAME", "");
         let bucket = Config::getenv("DATA_OUTPUT_S3_BUCKET", "");
         let path = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
         let path = path.trim_start_matches('/');
 
-        let mut aws_config = aws_config::from_env().load().await;
+        let aws_config = aws_config::from_env().load().await;
 
         let glue_client = GlueClient::new(&aws_config);
 
@@ -224,7 +224,7 @@ impl AwsAthena {
             .send()
             .await
         {
-            Ok(output) => {
+            Ok(_output) => {
                 return Ok(true);
             }
             Err(err) => return Err(err.into_service_error().to_string()),
@@ -273,7 +273,7 @@ impl AwsAthena {
         // schema.insert(namespace.to_string(), metadata.clone());
         let columns = SkipprHive::convert_skippr_to_hive(&metadata).unwrap();
 
-        let mut aws_config = aws_config::from_env().load().await;
+        let aws_config = aws_config::from_env().load().await;
 
         let glue_client = GlueClient::new(&aws_config);
 
@@ -310,7 +310,7 @@ impl AwsAthena {
             .send()
             .await
         {
-            Ok(output) => {
+            Ok(_output) => {
                 return Ok(true);
             }
             Err(err) => return Err(err.into_service_error().to_string()),
@@ -357,13 +357,13 @@ impl AwsAthena {
             }
         }
 
-        use crate::converters;
+        
 
         // let mut schema: HashMap<String, Metadata> = HashMap::new();
         // schema.insert(namespace.to_string(), metadata.clone());
         let columns = SkipprHive::convert_skippr_to_hive(&metadata).unwrap();
 
-        let mut aws_config = aws_config::from_env().load().await;
+        let aws_config = aws_config::from_env().load().await;
 
         let glue_client = GlueClient::new(&aws_config);
 
@@ -400,14 +400,14 @@ impl AwsAthena {
             .send()
             .await
         {
-            Ok(output) => {
+            Ok(_output) => {
                 return Ok(true);
             }
             Err(err) => return Err(err.into_service_error().to_string()),
         }
     }
 
-    pub async fn glue_create_partition(namespace: &str, partition_values: Vec<String>, key: &str, partition_cache: &mut Vec<Digest>, metadata: &discover::Metadata) -> Result<bool, Error> {
+    pub async fn glue_create_partition(namespace: &str, partition_values: Vec<String>, _key: &str, partition_cache: &mut Vec<Digest>, metadata: &discover::Metadata) -> Result<bool, Error> {
         let database = Config::getenv("GLUE_DATABASE_NAME", "");
         let bucket = Config::getenv("DATA_OUTPUT_S3_BUCKET", "");
 
@@ -421,7 +421,7 @@ impl AwsAthena {
         // schema.insert(namespace.to_string(), metadata.clone());
         let columns = SkipprHive::convert_skippr_to_hive(&metadata).unwrap();
 
-        let mut aws_config = aws_config::from_env().load().await;
+        let aws_config = aws_config::from_env().load().await;
 
         let glue_client = GlueClient::new(&aws_config);
 
@@ -472,7 +472,7 @@ impl AwsAthena {
                         }
                     }
                 },
-                Err(err) => {
+                Err(_err) => {
                     // partition does not exist, create it
                     match glue_client.create_partition()
                         .database_name(database)
@@ -503,7 +503,7 @@ const GRANULARITIES: [&str; 5] = ["year", "month", "day", "hour", "minute"];
 
 impl DataOutputAwsAthenaPlugin {
     pub async fn new() -> DataOutputAwsAthenaPlugin {
-        let mut aws_config = aws_config::from_env().load().await;
+        let aws_config = aws_config::from_env().load().await;
 
         let s3_client = S3Client::new(&aws_config);
         let athena_client = AthenaClient::new(&aws_config);
@@ -531,12 +531,12 @@ impl DataOutputAwsAthenaPlugin {
             let mut contents = Vec::new();
             file.read_to_end(&mut contents).unwrap();
 
-            let bucket = &self.s3_bucket;
-            let mut key = &self.s3_prefix;
+            let _bucket = &self.s3_bucket;
+            let key = &self.s3_prefix;
 
             let namespace = BufferChunker::decode_file_namespace(&filename);
             let partition = BufferChunker::decode_file_partition(&filename);
-            let time_partition = BufferChunker::decode_file_time(&filename);
+            let _time_partition = BufferChunker::decode_file_time(&filename);
 
             let trimmed_key = &key.trim_start_matches("/").to_string();
 
@@ -593,7 +593,7 @@ impl DataOutputAwsAthenaPlugin {
                 if !partition_values.is_empty() {
                     match AwsAthena::glue_create_partition(&namespace, partition_values, &key, &mut partition_cache, &metadata.get(&namespace).unwrap()).await {
                         Ok(_) => {},
-                        Err(err) => {}
+                        Err(_err) => {}
                     }
                 }
             }
@@ -641,7 +641,7 @@ impl DataOutputAwsAthenaPlugin {
                     .send()
                     .await
                 {
-                    Ok(resp) => {
+                    Ok(_resp) => {
                         // println!("Upload success. Version: {:?}", resp.version_id);
                         fs::remove_file(Path::new(&filename)).unwrap();
                     }

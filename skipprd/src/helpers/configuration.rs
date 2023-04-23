@@ -1,16 +1,16 @@
-use yaml_rust::{YamlLoader, YamlEmitter};
+use yaml_rust::{YamlLoader};
 use std::collections::HashMap;
 use std::fs;
 use std::fs::{create_dir, File, OpenOptions};
 use std::io::{BufWriter, Read};
-use arrow_schema::DataType::Duration;
-use aws_config::load_from_env;
-use futures::executor::block_on;
-use reqwest::RequestBuilder;
+
+
+
+
 // use aws_config::profile::profile_file::ProfileFileKind::Config;
 use serde_derive::{Deserialize, Serialize};
-use serde_yaml::Value;
-use yaml_rust::yaml::Hash;
+
+
 
 use serde_json::json;
 
@@ -18,8 +18,8 @@ use reqwest::Client;
 use reqwest::header::HeaderMap;
 use reqwest::header::HeaderValue;
 use reqwest::header::AUTHORIZATION;
-use tokio::task::spawn_blocking;
-use crate::converters::skippr_hive::SkipprHive;
+
+
 
 use crate::discover::Metadata;
 
@@ -174,7 +174,7 @@ impl Config {
         if data_dir.ends_with('/') { data_dir.pop(); }
 
         match fs::create_dir(format!("{}", data_dir)) {
-            Ok(g) => {},
+            Ok(_g) => {},
             Err(_err) => {}
         }
 
@@ -202,7 +202,7 @@ impl Config {
         let docs = YamlLoader::load_from_str(&contents).unwrap();
 
         // println!("{:?}", docs);
-        let doc = &docs[0];
+        let _doc = &docs[0];
         // println!("{:?}", doc["sources"]["S3"]);
 
         // return doc;
@@ -335,16 +335,16 @@ impl Config {
 
         // println!("Posting data: {:?}", data);
 
-            let mut response = client.post(&format!("{}/{}", uri, path))
+            let response = client.post(&format!("{}/{}", uri, path))
                 .json(&data)
                 .send()
                 .await;
 
         match response {
-            Ok(resp) => {
+            Ok(_resp) => {
                 // println!("Metadata HTTP Success: {:?}", resp);
             }
-            Err(err) => {
+            Err(_err) => {
                 // println!("Metadata HTTP Error: {:?}", err);
             }
         }
@@ -390,15 +390,15 @@ impl Config {
 
         // println!("Posting data: {:?}", data);
 
-        let mut response = client.post(&format!("{}/{}", uri, path))
+        let response = client.post(&format!("{}/{}", uri, path))
             .json(&data)
             .send();
 
         match response {
-            Ok(resp) => {
+            Ok(_resp) => {
                 // println!("Status HTTP Success: {:?}", resp);
             }
-            Err(err) => {
+            Err(_err) => {
                 // println!("Status HTTP Error: {:?}", err);
             }
         }

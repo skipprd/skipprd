@@ -1,12 +1,12 @@
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use std::collections::HashMap;
+use serde_json::{Value};
+
 use std::fs::{File, OpenOptions, remove_file};
 use std::path::Path;
-use std::io::{Read, Seek, Write, BufReader, Lines, Result, BufRead};
-use std::ops::Index;
-use futures::TryFutureExt;
-use rand::{random, Rng};
+use std::io::{Seek, Write, BufReader, Lines, Result, BufRead};
+
+
+use rand::{Rng};
 use serde_json::Value::Null;
 use crate::discover::AnalyseSchema;
 use crate::helpers::configuration::Config;
@@ -61,9 +61,9 @@ impl SerdeJson {
         // }
 
         // if array of json objects
-        let mut analyise_schema = AnalyseSchema { i: 0 };
+        let _analyise_schema = AnalyseSchema { i: 0 };
 
-        let mut line: Vec<Value> = SerdeJson::json_decode(data);
+        let line: Vec<Value> = SerdeJson::json_decode(data);
 
         if !line.is_empty() {
 
@@ -92,12 +92,12 @@ impl SerdeJson {
         messages
     }
 
-    pub fn open_writer(&mut self, filename: String, schema: Vec<Value>) {
+    pub fn open_writer(&mut self, filename: String, _schema: Vec<Value>) {
         self.fh = filename;
     }
 
     pub fn close_writer(&mut self) {
-        for data in self.records.iter() {
+        for _data in self.records.iter() {
             if self.compression_type == "VALUE_COMPRESSION" {
                 // fputs($this->fh, gzcompress($data, -6));
             } else if self.compression_type == "NO_COMPRESSION" {
@@ -108,7 +108,7 @@ impl SerdeJson {
         // fclose($this->fh);
     }
 
-    pub fn serialize(&mut self, record: Vec<Value>, schema: Vec<Value>) {
+    pub fn serialize(&mut self, record: Vec<Value>, _schema: Vec<Value>) {
         self.records.push(serde_json::to_string(&record).unwrap_or_default());
     }
 
@@ -128,7 +128,7 @@ impl SerdeJson {
         // let line: Value = serde_json::from_str(&string).unwrap_or_default();
         let line: Value = match serde_json::from_str(&string) {
             Ok(message) => message,
-            Err(err) => Null // @todo - we don't really want nulls in the data, do nothing
+            Err(_err) => Null // @todo - we don't really want nulls in the data, do nothing
         };
 
         if line.is_array() {

@@ -3,20 +3,20 @@ use crate::helpers::Helpers;
 use crate::serdes::json::SerdeJson;
 pub use aws_smithy_http::byte_stream::AggregatedBytes;
 use aws_sdk_s3::{Client};
-use aws_types::SdkConfig;
+
 use csv::ReaderBuilder;
 use flate2::read::GzDecoder;
 use regex::internal::Input;
-use std::any::Any;
+
 use std::collections::HashMap;
 use std::fs::File;
-use std::future::Future;
-use std::io::{BufRead, BufReader, BufWriter, Cursor, Read, Seek, Write};
-use std::path::Path;
-use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Mutex};
-use std::{fs, thread};
-use std::time::Duration;
+
+use std::io::{BufRead, BufReader, Cursor, Read, Write};
+
+
+
+use std::{fs};
+
 use futures::future::join_all;
 use crate::buffer::BufferChunker;
 
@@ -32,13 +32,13 @@ pub struct DataSourceS3InventoryPlugin {
 impl DataSourceS3InventoryPlugin {
     // pub async fn new(config: HashMap<String, String>, buffer: Sender<String>) -> DataSourceS3InventoryPlugin {
     pub async fn new() -> DataSourceS3InventoryPlugin {
-        let mut s3_config = aws_config::from_env().load().await;
+        let s3_config = aws_config::from_env().load().await;
 
         let data_dir= Config::get_data_dir();
         let temp_dir = &format!("{}", data_dir);
 
         match fs::create_dir(format!("{}/source_buffer", temp_dir)) {
-            Ok(g) => {},
+            Ok(_g) => {},
             Err(_err) => {}
         }
 
@@ -90,7 +90,7 @@ impl DataSourceS3InventoryPlugin {
                             // }
 
                             let object_key = object.key().unwrap();
-                            let timestamp = object.last_modified().unwrap().secs();
+                            let _timestamp = object.last_modified().unwrap().secs();
 
                             if object_key.contains(&"manifest.json") {
 
@@ -113,15 +113,15 @@ impl DataSourceS3InventoryPlugin {
                                         .unwrap(),
                                 );
 
-                                let mut source_bucket =
+                                let source_bucket =
                                     manifest.first().unwrap()["sourceBucket"].to_string();
                                 let headers_string: String =
                                     manifest.first().unwrap()["fileSchema"].to_string();
                                 let headers: Vec<_> = headers_string.split(",").collect();
 
-                                let bucket = source_bucket.to_string();
+                                let _bucket = source_bucket.to_string();
 
-                                let chunk_size = Config::getenv("DATA_SOURCE_BATCH_SIZE", "10");
+                                let _chunk_size = Config::getenv("DATA_SOURCE_BATCH_SIZE", "10");
 
                                 for file in manifest.first().unwrap()["files"].as_array() {
                                     let file_key = file.first().unwrap()["key"].as_str().unwrap();
@@ -178,7 +178,7 @@ impl DataSourceS3InventoryPlugin {
                                             let file = BufReader::new(file);
                                             let mut file = GzDecoder::new(file);
                                             let mut bytes = Vec::new();
-                                            let con = file.read_to_end(&mut bytes).unwrap();
+                                            let _con = file.read_to_end(&mut bytes).unwrap();
 
                                             let mut rdr = ReaderBuilder::new()
                                                 .delimiter(b',')

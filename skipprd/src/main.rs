@@ -1,26 +1,26 @@
 mod arr;
 
-use arrow::datatypes::{Schema, SchemaRef};
+use arrow::datatypes::{Schema};
 use arrow::error::ArrowError;
-use arrow::json::ReaderBuilder;
-use arrow::record_batch::{RecordBatch, RecordBatchOptions};
-use std::any::Any;
-use std::borrow::BorrowMut;
-use std::collections::{HashMap, HashSet};
-use std::fmt::Debug;
-use std::fs::{create_dir, metadata, File, OpenOptions};
+
+
+
+
+use std::collections::{HashMap};
+
+use std::fs::{File, OpenOptions};
 use std::io::prelude::*;
-use std::io::{BufReader, BufWriter, IoSlice};
-use std::ops::{Add, Sub};
-use std::path::PathBuf;
-use std::process::exit;
-use std::sync::{Arc, Mutex, RwLock};
+use std::io::{BufReader, IoSlice};
+use std::ops::{Add};
+
+
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
-use std::{fs, io};
+use std::{fs};
 
-use flate2::read::GzDecoder;
+
 use futures::executor::block_on;
 use glob::glob_with;
 use glob::MatchOptions;
@@ -42,23 +42,23 @@ mod cli;
 use crate::cli::{Cli, Mode};
 
 extern crate clap;
-use clap::{Parser, Subcommand};
-use futures::future::join_all;
-use futures::TryFutureExt;
-use lazy_static::lazy_static;
+use clap::{Parser};
 
-use parquet::arrow::ArrowWriter;
+
+
+
+
 
 mod ingest;
-use crate::ingest::ingest_fast::{fast_path_ingest, fast_path_ingest_buf, IngestRecord};
+use crate::ingest::ingest_fast::{fast_path_ingest};
 
 mod serdes;
 use crate::serdes::json::SerdeJson;
 use crate::serdes::parquet::SerdeParquet;
 
 mod plugins;
-use crate::plugins::athena::{AwsAthena, DataOutputAwsAthenaPlugin};
-use crate::plugins::s3_inventory::DataSourceS3InventoryPlugin;
+use crate::plugins::athena::{DataOutputAwsAthenaPlugin};
+
 
 // use crate::helpers::Config
 
@@ -66,7 +66,7 @@ use crate::discover::arrow_schema::convert_skippr_to_arrow;
 use crate::helpers::configuration::{Config, Metrics};
 use crate::helpers::Helpers;
 use serde_json::Value;
-use tokio::fs::remove_file;
+
 use crate::buffer::BufferChunker;
 
 fn main() {
@@ -128,21 +128,21 @@ async fn discover() {
             let reader = BufReader::new(file);
             match serde_json::from_reader(reader) {
                 Ok(metadata) => metadata,
-                Err(e) => {
+                Err(_e) => {
                     // println!("No existing metadata {}", e);
                     HashMap::new()
                 }
             }
         }
-        Err(e) => {
+        Err(_e) => {
             // println!("No existing metadata {}", e);
             HashMap::new()
         }
     };
 
-    let mut arrowSchema: Result<Schema, ArrowError> = Ok(Schema::empty());
+    let _arrowSchema: Result<Schema, ArrowError> = Ok(Schema::empty());
 
-    let mut schema_ref = Arc::new(Schema::empty());
+    let _schema_ref = Arc::new(Schema::empty());
 
     let mut analyseCount = 0;
 
@@ -156,7 +156,7 @@ async fn discover() {
             if !hasAnalysed {
                 match entry {
                     Ok(path) => {
-                        let mut input_file = File::open(path.clone()).unwrap();
+                        let input_file = File::open(path.clone()).unwrap();
 
                         println!("Analysing path: {}", path.to_str().unwrap());
 
@@ -245,11 +245,11 @@ async fn sync() {
 
             u
         }
-        Err(e) => {
+        Err(_e) => {
             println!("Could not find Skippr metadata, will disover and evolve schemas as we sync.");
-            let emptyMeta = Metadata::new().unwrap();
+            let _emptyMeta = Metadata::new().unwrap();
 
-            let mut metadata = HashMap::new();
+            let metadata = HashMap::new();
             // metadata.insert("example_ns".to_string(), emptyMeta);
             // let newMeta: HashMap<String, Metadata> = metadata;
             // newMeta
@@ -301,11 +301,11 @@ async fn sync() {
     );
     planner.start();
 
-    let mut metedata_clone = newMeta.clone();
+    let metedata_clone = newMeta.clone();
     let newmeta_clone = newMeta.clone();
 
 
-    let foo = thread::spawn(move || {
+    let _foo = thread::spawn(move || {
 
         let mut parse_namespace_cache: HashMap<String, String> = HashMap::new();
 
@@ -316,7 +316,7 @@ async fn sync() {
         };
 
         let mut output_files: HashMap<String, File> = HashMap::new();
-        let mut output_buf: HashMap<String, IoSlice> = HashMap::new();
+        let _output_buf: HashMap<String, IoSlice> = HashMap::new();
 
         let mut write_len: usize = 0;
 
@@ -326,15 +326,15 @@ async fn sync() {
         let finalised_dir = &format!("{}/finalised", data_dir);
 
         match fs::create_dir(output_dir) {
-            Ok(g) => {},
+            Ok(_g) => {},
             Err(_err) => {}
         }
         match fs::create_dir(format!("{}/done", output_dir)) {
-            Ok(g) => {},
+            Ok(_g) => {},
             Err(_err) => {}
         }
         match fs::create_dir(finalised_dir) {
-            Ok(g) => {},
+            Ok(_g) => {},
             Err(_err) => {}
         }
 
@@ -342,7 +342,7 @@ async fn sync() {
 
         let mut updatedSchema: String = "no".to_string();
 
-        while true {
+        loop {
 
             for entry in glob_with(&pattern, options).expect("Failed to read glob pattern") {
 
@@ -360,7 +360,7 @@ async fn sync() {
 
                         // println!("record: {:?}", str);
 
-                        let mut records: Vec<Value> = SerdeJson::deserialize(str.clone());
+                        let records: Vec<Value> = SerdeJson::deserialize(str.clone());
 
                         // println!("record: {:?}", records);
 
@@ -373,7 +373,7 @@ async fn sync() {
 
                             // let mut records: Vec<Value> = SerdeJson::deserialize(string);
 
-                            for mut record in records {
+                            for record in records {
 
                                 if record.is_null() {
                                     continue;
@@ -479,7 +479,7 @@ async fn sync() {
                         // }
 
                         match std::fs::remove_file(path.clone()) {
-                            Ok(file) => {
+                            Ok(_file) => {
                                 // println!("Deleted file: {}", path.to_str().unwrap())
                             },
                             Err(err) => println!("Failed deleting file: {}", err),
@@ -517,7 +517,7 @@ async fn sync() {
     // .expect("Buffer thread failed");
 
     // let metadata_clone = newMeta.clone();
-    let bar = thread::spawn(move || {
+    let _bar = thread::spawn(move || {
         // while true {
             outputSync(newmeta_clone.clone());
         // }
@@ -527,7 +527,7 @@ async fn sync() {
     // ds3.sync().await;
 
     // let future2 = async move {
-    while true {
+    loop {
         let dataOutput = block_on(DataOutputAwsAthenaPlugin::new());
         dataOutput.sync(metedata_clone.clone()).await;
         sleep(Duration::from_secs(5));
@@ -567,7 +567,7 @@ fn outputSync(
             require_literal_leading_dot: false,
         };
 
-        while true {
+        loop {
             for entry in glob_with(&format!("{}/done/*", output_dir), options).expect("Failed to read glob pattern") {
                 match entry {
                     Ok(path) => {
@@ -606,7 +606,7 @@ fn outputSync(
                         schema_ref = SerdeParquet::serialize(path.clone(), schema_ref);
 
                         match std::fs::remove_file(path) {
-                            Ok(t) => {},
+                            Ok(_t) => {},
                             Err(err) => println!("{:?}", err),
 
                         }
