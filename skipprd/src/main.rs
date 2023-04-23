@@ -301,7 +301,7 @@ async fn sync() {
     );
     planner.start();
 
-    let metedata_clone = newMeta.clone();
+    let mut metedata_clone = newMeta.clone();
     let newmeta_clone = newMeta.clone();
 
 
@@ -518,25 +518,31 @@ async fn sync() {
 
     // let metadata_clone = newMeta.clone();
     let bar = thread::spawn(move || {
-        outputSync(newmeta_clone);
+        // while true {
+            outputSync(newmeta_clone.clone());
+        // }
     });
 
     // let mut ds3 = block_on(DataSourceS3InventoryPlugin::new());
     // ds3.sync().await;
 
     // let future2 = async move {
+    while true {
         let dataOutput = block_on(DataOutputAwsAthenaPlugin::new());
-        dataOutput.sync(metedata_clone).await;
+        dataOutput.sync(metedata_clone.clone()).await;
+        sleep(Duration::from_secs(5));
+    }
     // };
 
 
     // let future2 = async move {
-    //     let mut ds3 = block_on(DataSourceS3InventoryPlugin::new());
-    //     ds3.sync().await;
+
+        // let mut ds3 = block_on(DataSourceS3InventoryPlugin::new());
+        // ds3.sync().await;
     // };
 
 
-    sleep(Duration::from_secs(125));
+    // sleep(Duration::from_secs(125));
 
 
     // let now_lock = now.lock().unwrap();
