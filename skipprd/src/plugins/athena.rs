@@ -29,17 +29,174 @@ pub struct DataOutputAwsAthenaPlugin {
     time_bucket: String,
 }
 
-// struct Config {
-// aws_region: S3Region,
-// aws_access_key: String,
-// aws_secret_key: String,
-// endpoint: Option<String>,
-// role_arn: Option<String>,
-// role_session_name: Option<String>,
-// s3_bucket: String,
-// s3_prefix: String,
-// time_bucket: String,
-// }
+const GRANULARITIES: [&str; 5] = ["year", "month", "day", "hour", "minute"];
+
+impl DataOutputAwsAthenaPlugin {
+    pub async fn new() -> DataOutputAwsAthenaPlugin {
+        let aws_config = aws_config::from_env().load().await;
+
+        let s3_client = S3Client::new(&aws_config);
+        let athena_client = AthenaClient::new(&aws_config);
+
+        let s3_bucket = Config::getenv("DATA_OUTPUT_S3_BUCKET", "");
+        let s3_prefix = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
+        let time_bucket = Config::getenv("DATA_OUTPUT_TIME_BUCKET", "");
+
+        Self {
+            s3_client,
+            athena_client,
+            s3_bucket,
+            s3_prefix,
+            time_bucket,
+        }
+    }
+
+    pub async fn sync(&self, metadata: HashMap<std::string::String, discover::Metadata>) {
+
+        let mut partition_cache :Vec<Digest> = vec![];
+
+        while let Some(filename) = BufferChunker::next_file() {
+            let mut file = BufReader::new(File::open(&filename).unwrap());
+
+            let mut contents = Vec::new();
+            file.read_to_end(&mut contents).unwrap();
+
+            let _bucket = &self.s3_bucket;
+            let key = &self.s3_prefix;
+
+            let namespace = BufferChunker::decode_file_namespace(&filename);
+            let partition = BufferChunker::decode_file_partition(&filename);
+            let _time_partition = BufferChunker::decode_file_time(&filename);
+
+            let trimmed_key = &key.trim_start_matches("/").to_string();
+
+            let mut full_key = "".to_string();
+            // key = trimmed_key;
+            if !namespace.is_empty() {
+                full_key = format!("{}/{}", trimmed_key, namespace);
+            }
+            if !partition.is_empty() {
+                full_key = format!("{}/{}", full_key, partition);
+            }
+
+            let time_partition_str = BufferChunker::decode_chunk_time(&filename);
+
+            if time_partition_str != "" {
+                let granularity_target = &self.time_bucket;
+
+                let date = DateTime::parse_from_rfc3339(&time_partition_str).unwrap();
+
+                // let mut partition_params = vec![];
+                // let mut partition_values = vec![];
+                let mut partition_values: Vec<String> = vec![];
+
+                for granularity in GRANULARITIES.iter() {
+                    let foo: u32 = match granularity {
+                        &"year" => {
+                            date.year() as u32
+                        },
+                        &"month" => {
+                            date.month()
+                        },
+                        &"day" => {
+                            date.day()
+                        },
+                        &"hour" => {
+                            date.hour()
+                        },
+                        &"minute" => {
+                            date.minute()
+                        },
+                        _ => {
+                            panic!("Did not reconise date granularity of {}", granularity);
+                        }
+                    };
+
+                    full_key = format!("{}/{}={}", full_key, granularity, foo);
+                    partition_values.push(format!("{}", foo));
+
+                    if granularity == &granularity_target {
+                        break;
+                    }
+                }
+
+                if !partition_values.is_empty() {
+                    match AwsAthena::glue_create_partition(&namespace, partition_values, &key, &mut partition_cache, &metadata.get(&namespace).unwrap()).await {
+                        Ok(_) => {},
+                        Err(_err) => {}
+                    }
+                }
+            }
+
+            let final_key = format!("{}/{}", full_key, Helpers::random_password(32));
+
+            DataOutputAwsAthenaPlugin::upload_object(
+                &self.s3_client,
+                &self.s3_bucket,
+                &final_key,
+                &filename,
+            )
+                .await
+                .unwrap();
+        }
+    }
+
+    // Upload a file to a bucket.
+    // snippet-start:[s3.rust.s3-helloworld]
+    async fn upload_object(
+        client: &S3Client,
+        bucket: &str,
+        key: &str,
+        filename: &str,
+    ) -> Result<(), Error> {
+        // let resp = client.list_buckets().send().await?;
+
+        // for bucket in resp.buckets().unwrap_or_default() {
+        //     println!("bucket: {:?}", bucket.name().unwrap_or_default())
+        // }
+
+        // println!();
+
+        let body = ByteStream::from_path(Path::new(filename)).await;
+
+        match body {
+            Ok(b) => {
+                // println!("Uploading file: {} to Bucket: {} and Prefix: {}", filename, bucket, key);
+
+                match client
+                    .put_object()
+                    .bucket(bucket)
+                    .key(key)
+                    .body(b)
+                    .send()
+                    .await
+                {
+                    Ok(_resp) => {
+                        // println!("Upload success. Version: {:?}", resp.version_id);
+                        fs::remove_file(Path::new(&filename)).unwrap();
+                    }
+                    Err(err) => {
+                        println!("Got an error uploading object:");
+                        println!("{:?}", err.into_service_error());
+                    }
+                }
+
+                // let resp = client.get_object().bucket(bucket).key(key).send().await?;
+                // println!("Response: {:?}", resp);
+
+                // let data = resp.body.collect().await;
+                // println!("data: {:?}", data.unwrap().into_bytes());
+            }
+            Err(e) => {
+                println!("Got an error parsing file:");
+                println!("{}", e);
+            }
+        }
+
+        Ok(())
+    }
+}
+
 
 pub struct AwsAthena {}
 
@@ -187,7 +344,7 @@ impl AwsAthena {
                                     .encryption_option(EncryptionOption::SseS3)
                                     .build(),
                             )
-                            .output_location(format!("s3://{}/{}", bucket, path))
+                            .output_location(format!("s3://{}/{}/query-results", bucket, path))
                             .build(),
                     )
                     .build(),
@@ -496,173 +653,5 @@ impl AwsAthena {
         }
 
         Ok(true)
-    }
-}
-
-const GRANULARITIES: [&str; 5] = ["year", "month", "day", "hour", "minute"];
-
-impl DataOutputAwsAthenaPlugin {
-    pub async fn new() -> DataOutputAwsAthenaPlugin {
-        let aws_config = aws_config::from_env().load().await;
-
-        let s3_client = S3Client::new(&aws_config);
-        let athena_client = AthenaClient::new(&aws_config);
-
-        let s3_bucket = Config::getenv("DATA_OUTPUT_S3_BUCKET", "");
-        let s3_prefix = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
-        let time_bucket = Config::getenv("DATA_OUTPUT_TIME_BUCKET", "");
-
-        Self {
-            s3_client,
-            athena_client,
-            s3_bucket,
-            s3_prefix,
-            time_bucket,
-        }
-    }
-
-    pub async fn sync(&self, metadata: HashMap<std::string::String, discover::Metadata>) {
-
-        let mut partition_cache :Vec<Digest> = vec![];
-
-        while let Some(filename) = BufferChunker::next_file() {
-            let mut file = BufReader::new(File::open(&filename).unwrap());
-
-            let mut contents = Vec::new();
-            file.read_to_end(&mut contents).unwrap();
-
-            let _bucket = &self.s3_bucket;
-            let key = &self.s3_prefix;
-
-            let namespace = BufferChunker::decode_file_namespace(&filename);
-            let partition = BufferChunker::decode_file_partition(&filename);
-            let _time_partition = BufferChunker::decode_file_time(&filename);
-
-            let trimmed_key = &key.trim_start_matches("/").to_string();
-
-            let mut full_key = "".to_string();
-            // key = trimmed_key;
-            if !namespace.is_empty() {
-                full_key = format!("{}/{}", trimmed_key, namespace);
-            }
-            if !partition.is_empty() {
-                full_key = format!("{}/{}", full_key, partition);
-            }
-
-            let time_partition_str = BufferChunker::decode_chunk_time(&filename);
-
-            if time_partition_str != "" {
-                let granularity_target = &self.time_bucket;
-
-                let date = DateTime::parse_from_rfc3339(&time_partition_str).unwrap();
-
-                // let mut partition_params = vec![];
-                // let mut partition_values = vec![];
-                let mut partition_values: Vec<String> = vec![];
-
-                for granularity in GRANULARITIES.iter() {
-                    let foo: u32 = match granularity {
-                        &"year" => {
-                            date.year() as u32
-                        },
-                        &"month" => {
-                            date.month()
-                        },
-                        &"day" => {
-                            date.day()
-                        },
-                        &"hour" => {
-                            date.hour()
-                        },
-                        &"minute" => {
-                            date.minute()
-                        },
-                        _ => {
-                            panic!("Did not reconise date granularity of {}", granularity);
-                        }
-                    };
-
-                    full_key = format!("{}/{}={}", full_key, granularity, foo);
-                    partition_values.push(format!("{}", foo));
-
-                    if granularity == &granularity_target {
-                        break;
-                    }
-                }
-
-                if !partition_values.is_empty() {
-                    match AwsAthena::glue_create_partition(&namespace, partition_values, &key, &mut partition_cache, &metadata.get(&namespace).unwrap()).await {
-                        Ok(_) => {},
-                        Err(_err) => {}
-                    }
-                }
-            }
-
-            let final_key = format!("{}/{}", full_key, Helpers::random_password(32));
-
-            DataOutputAwsAthenaPlugin::upload_object(
-                &self.s3_client,
-                &self.s3_bucket,
-                &final_key,
-                &filename,
-            )
-            .await
-            .unwrap();
-        }
-    }
-
-    // Upload a file to a bucket.
-    // snippet-start:[s3.rust.s3-helloworld]
-    async fn upload_object(
-        client: &S3Client,
-        bucket: &str,
-        key: &str,
-        filename: &str,
-    ) -> Result<(), Error> {
-        // let resp = client.list_buckets().send().await?;
-
-        // for bucket in resp.buckets().unwrap_or_default() {
-        //     println!("bucket: {:?}", bucket.name().unwrap_or_default())
-        // }
-
-        // println!();
-
-        let body = ByteStream::from_path(Path::new(filename)).await;
-
-        match body {
-            Ok(b) => {
-                // println!("Uploading file: {} to Bucket: {} and Prefix: {}", filename, bucket, key);
-
-                match client
-                    .put_object()
-                    .bucket(bucket)
-                    .key(key)
-                    .body(b)
-                    .send()
-                    .await
-                {
-                    Ok(_resp) => {
-                        // println!("Upload success. Version: {:?}", resp.version_id);
-                        fs::remove_file(Path::new(&filename)).unwrap();
-                    }
-                    Err(err) => {
-                        println!("Got an error uploading object:");
-                        println!("{:?}", err.into_service_error());
-                    }
-                }
-
-                // let resp = client.get_object().bucket(bucket).key(key).send().await?;
-                // println!("Response: {:?}", resp);
-
-                // let data = resp.body.collect().await;
-                // println!("data: {:?}", data.unwrap().into_bytes());
-            }
-            Err(e) => {
-                println!("Got an error parsing file:");
-                println!("{}", e);
-            }
-        }
-
-        Ok(())
     }
 }
