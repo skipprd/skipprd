@@ -191,7 +191,7 @@ impl BufferChunker {
 
     }
 
-    pub fn decode_chunk_time(filename: &str) -> String {
+    pub fn decode_file_time_to_datetime_string(filename: &str) -> String {
         let time = BufferChunker::get_file_time(filename);
 
         let date_string = if time != 0 {
@@ -279,19 +279,19 @@ mod decode_chunk_time_tests {
     #[test]
     fn test_get_file_chunk_time_with_valid_input() {
         let filename = "buffer=test_buffer&namespace=&partition=&time=1645296045";
-        assert_eq!(BufferChunker::decode_chunk_time(filename), "2022-02-19T18:40:45+00:00");
+        assert_eq!(BufferChunker::decode_file_time_to_datetime_string(filename), "2022-02-19T18:40:45+00:00");
     }
 
     #[test]
     fn test_get_file_chunk_time_with_missing_time_query_param() {
         let filename = "buffer=test_buffer&namespace=&partition=";
-        assert_eq!(BufferChunker::decode_chunk_time(filename), "");
+        assert_eq!(BufferChunker::decode_file_time_to_datetime_string(filename), "");
     }
 
     #[test]
     fn test_get_file_chunk_time_with_invalid_time_query_param() {
         let filename = "buffer=test_buffer&namespace=&partition=time=invalid";
-        assert_eq!(BufferChunker::decode_chunk_time(filename), "");
+        assert_eq!(BufferChunker::decode_file_time_to_datetime_string(filename), "");
     }
 }
 

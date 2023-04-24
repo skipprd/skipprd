@@ -66,7 +66,7 @@ impl DataOutputAwsAthenaPlugin {
 
             let namespace = BufferChunker::decode_file_namespace(&filename);
             let partition = BufferChunker::decode_file_partition(&filename);
-            let _time_partition = BufferChunker::decode_file_time(&filename);
+            // let _time_partition = BufferChunker::decode_file_time(&filename);
 
             let trimmed_key = &key.trim_start_matches("/").to_string();
 
@@ -79,7 +79,7 @@ impl DataOutputAwsAthenaPlugin {
                 full_key = format!("{}/{}", full_key, partition);
             }
 
-            let time_partition_str = BufferChunker::decode_chunk_time(&filename);
+            let time_partition_str = BufferChunker::decode_file_time_to_datetime_string(&filename);
 
             if time_partition_str != "" {
                 let granularity_target = &self.time_bucket;
