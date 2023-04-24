@@ -183,9 +183,6 @@ impl Helpers {
     ) -> String {
         let mut clean_namespace = namespace.clone();
 
-        // let mut helpers = Helpers { clean_field_cache: Default::default() };
-        // let mut clean_field_cache_lock = parse_namespace_cache;
-
         if !parse_namespace_cache.contains_key(&namespace)
             || parse_namespace_cache.get(&namespace).unwrap() == "yes"
         {
@@ -194,24 +191,10 @@ impl Helpers {
 
             // optional: partition by composite key
             if Config::getenv("DATA_SOURCE_EVENT_TYPE_FIELDS", "") != "" {
-                // let mut namespaces = vec![];
+
                 let mut namespaces = vec!["".to_string()];
-                // let mut namespaces = Vec("");
-                // let mut namespace: HashMap<String, String>;
 
                 for entity_field_dot in Config::getenv("DATA_SOURCE_EVENT_TYPE_FIELDS", "").split(",") {
-
-                    // for entity_value in entity_field_dot {
-                    //     Some(entity_value) => {
-                    //     println!("event tupe: {}", entity_value);
-
-
-                    // match message.get(entity_field_dot) {
-                    //     Some(entity_value) => {
-                    //         namespaces.push(entity_value.as_str().unwrap().to_string());
-                    //     },
-                    //     None => ()
-                    // }
 
                     match Helpers::get_nested_value_from_dot_notation(message, entity_field_dot) {
                         Some(entity_value) => {
@@ -230,14 +213,12 @@ impl Helpers {
         }
 
         if clean_namespace != namespace {
-            // *clean_field_cache_lock.get_mut(namespace).unwrap() = "yes".to_string();
+
             parse_namespace_cache.insert(namespace.to_string(), "yes".to_string());
         }
         else {
             parse_namespace_cache.insert(namespace.to_string(), "no".to_string());
         }
-
-        // message.insert("skpr_namespace".to_string(), clean_namespace.to_string());
 
         clean_namespace
 
