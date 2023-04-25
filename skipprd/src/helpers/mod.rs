@@ -176,6 +176,45 @@ impl Helpers {
     }
 
 
+    pub fn parse_partition_field(
+        message: & Value,
+    ) -> String {
+        let mut clean_partition: String = "".to_string();
+
+        // optional: partition by composite key
+        if Config::getenv("DATA_OUTPUT_PARTITION_BY_FIELDS", "") != "" {
+
+            let mut partitions = vec!["".to_string()];
+
+            for entity_field_dot in Config::getenv("DATA_OUTPUT_PARTITION_BY_FIELDS", "").split(",") {
+
+                match Helpers::get_nested_value_from_dot_notation(message, entity_field_dot) {
+                    Some(entity_value) => {
+                        let clean_entity_value = Helpers::clean_field_name(match entity_value.as_str() {
+                            Some(val) => val.to_string(),
+                            None => "".to_string()
+                        });
+                        let entity_name = match entity_field_dot.rfind('.') {
+                            Some(index) => &entity_field_dot[index+1..],
+                            None => entity_field_dot,
+                        };
+                        let clean_entity_name = Helpers::clean_field_name(entity_name.to_string());
+                        partitions.push(format!("{}={}", clean_entity_name, clean_entity_value));
+                    },
+                    None => ()
+                }
+
+            }
+
+            clean_partition = partitions.join("-");
+            clean_partition = clean_partition.trim_matches('-').to_lowercase();
+
+        }
+
+        clean_partition
+
+    }
+
     pub fn parse_namespace_field(
         message: & Value,
         namespace: String,
@@ -268,7 +307,7 @@ impl Helpers {
     }
 
 
-    fn get_nested_value_from_dot_notation(json_value: &Value, field_str: &str) -> Option<Value> {
+    pub fn get_nested_value_from_dot_notation(json_value: &Value, field_str: &str) -> Option<Value> {
         // Parse the JSON string into a serde_json Value object
         // let json_value: Value = serde_json::from_str(json_str).ok()?;
 
@@ -293,6 +332,50 @@ impl Helpers {
         Some(current_value.clone())
     }
 
+}
+
+
+#[cfg(test)]
+mod parse_partition_tests {
+    use serial_test::serial;
+    use serde_json::json;
+    use super::*;
+
+    #[test]
+    #[serial]
+    fn test_parse_partition_field_no_config() {
+        let message = json!({"foo": "bar", "abc1": "def"});
+        std::env::set_var("DATA_OUTPUT_PARTITION_BY_FIELDS", "");
+        let partition = Helpers::parse_partition_field(&message);
+        assert_eq!(partition, "");
+    }
+
+    #[test]
+    #[serial]
+    fn test_parse_partition_field_single_field() {
+        let message = json!({"foo": "bar", "abc1": "def"});
+        std::env::set_var("DATA_OUTPUT_PARTITION_BY_FIELDS", "foo");
+        let partition = Helpers::parse_partition_field(&message);
+        assert_eq!(partition, "foo=bar");
+    }
+
+    #[test]
+    #[serial]
+    fn test_parse_partition_field_composite_key() {
+        let message = json!({"foo": {"bar": "baz"}, "abc1": "def"});
+        std::env::set_var("DATA_OUTPUT_PARTITION_BY_FIELDS", "foo.bar");
+        let partition = Helpers::parse_partition_field(&message);
+        assert_eq!(partition, "bar=baz");
+    }
+
+    #[test]
+    #[serial]
+    fn test_parse_partition_field_several_composite_keys() {
+        let message = json!({"foo": {"bar": "baz"}, "abc1": "def"});
+        std::env::set_var("DATA_OUTPUT_PARTITION_BY_FIELDS", "foo.bar,abc1");
+        let partition = Helpers::parse_partition_field(&message);
+        assert_eq!(partition, "bar=baz-abc1=def");
+    }
 }
 
 

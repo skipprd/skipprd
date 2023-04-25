@@ -396,6 +396,7 @@ async fn sync() {
                                 // let source_time = BufferChunker::decode_file_time(path.to_str().unwrap());
 
                                 let skpr_namespace = Helpers::parse_namespace_field(&record, source_namespace, &mut parse_namespace_cache);
+                                let skpr_partition = Helpers::parse_partition_field(&record);
                                 let skpr_time = Helpers::parse_time_field(&record);
 
                                 let mut skpr_time_bucket= 0;
@@ -418,7 +419,7 @@ async fn sync() {
                                     newMeta.insert(skpr_namespace.clone(), Metadata::new().unwrap());
                                 }
 
-                                let output_file_name = BufferChunker::encode_chunk_name("ingest", Some(&skpr_namespace), Some(&source_partition), Some(skpr_time_bucket));
+                                let output_file_name = BufferChunker::encode_chunk_name("ingest", Some(&skpr_namespace), Some(&skpr_partition), Some(skpr_time_bucket));
                                 let output_file = format!("{}/{}", output_dir, &output_file_name);
 
                                     if output_files.get_mut(&output_file_name).is_none() {

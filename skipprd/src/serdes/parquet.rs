@@ -255,14 +255,13 @@ impl SerdeParquet {
         // }
         // let source_namespace = Config::getenv("S3_BUCKET", "");
         /////////////////
-        let source_namespace = BufferChunker::decode_file_namespace(path.to_str().unwrap());
-        let source_partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
+        let skpr_namespace = BufferChunker::decode_file_namespace(path.to_str().unwrap());
+        let skpr_partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
         let source_time = BufferChunker::decode_file_time(path.to_str().unwrap());
 
         // let skpr_namespace = Helpers::parse_namespace_field(&record, source_namespace, &mut parse_namespace_cache);
 
-        let output_file_name = BufferChunker::encode_chunk_name("ingest", Some(&source_namespace), Some(&source_partition), Some(source_time));
-
+        let output_file_name = BufferChunker::encode_chunk_name("ingest", Some(&skpr_namespace), Some(&skpr_partition), Some(source_time));
 
         let output_dir = &format!("{}/finalised", data_dir);
 

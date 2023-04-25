@@ -65,7 +65,6 @@ impl DataOutputAwsAthenaPlugin {
             let key = &self.s3_prefix;
 
             let namespace = BufferChunker::decode_file_namespace(&filename);
-            let partition = BufferChunker::decode_file_partition(&filename);
             // let _time_partition = BufferChunker::decode_file_time(&filename);
 
             let trimmed_key = &key.trim_start_matches("/").to_string();
@@ -75,8 +74,25 @@ impl DataOutputAwsAthenaPlugin {
             if !namespace.is_empty() {
                 full_key = format!("{}/{}", trimmed_key, namespace);
             }
+
+            // Partitioning
+            let mut partition_values: Vec<String> = vec![];
+
+            let partition = BufferChunker::decode_file_partition(&filename);
+
             if !partition.is_empty() {
-                full_key = format!("{}/{}", full_key, partition);
+                let parts = partition.split("-");
+                let collection: Vec<&str> = parts.collect();
+
+                for item in &collection {
+                    let value = item.rsplitn(1, '=').nth(0).unwrap();
+                    partition_values.push(format!("{}", value));
+                }
+
+                let path_parts = collection.join("/");
+
+                    // .collect().join("/")
+                full_key = format!("{}/{}", full_key, path_parts);
             }
 
             let time_partition_str = BufferChunker::decode_file_time_to_datetime_string(&filename);
@@ -85,10 +101,6 @@ impl DataOutputAwsAthenaPlugin {
                 let granularity_target = &self.time_bucket;
 
                 let date = DateTime::parse_from_rfc3339(&time_partition_str).unwrap();
-
-                // let mut partition_params = vec![];
-                // let mut partition_values = vec![];
-                let mut partition_values: Vec<String> = vec![];
 
                 for granularity in GRANULARITIES.iter() {
                     let foo: u32 = match granularity {
@@ -119,12 +131,12 @@ impl DataOutputAwsAthenaPlugin {
                         break;
                     }
                 }
+            }
 
-                if !partition_values.is_empty() {
-                    match AwsAthena::glue_create_partition(&namespace, partition_values, &key, &mut partition_cache, &metadata.get(&namespace).unwrap()).await {
-                        Ok(_) => {},
-                        Err(_err) => {}
-                    }
+            if !partition_values.is_empty() {
+                match AwsAthena::glue_create_partition(&namespace, partition_values, &key, &mut partition_cache, &metadata.get(&namespace).unwrap()).await {
+                    Ok(_) => {},
+                    Err(_err) => {}
                 }
             }
 
@@ -388,6 +400,30 @@ impl AwsAthena {
         }
     }
 
+    fn get_partition_by_fields(partitions: &mut Vec<Column>) {
+        let mut partition_values: Vec<String> = vec![];
+
+        let partition_config = Config::getenv("DATA_OUTPUT_PARTITION_BY_FIELDS", "");
+        let partition_fields: Vec<&str> = partition_config.split(",").collect();
+
+        if !partition_fields.is_empty() {
+
+            for field_dot in partition_fields.clone() {
+                let entity_name = match field_dot.rfind('.') {
+                    Some(index) => &field_dot[index+1..],
+                    None => field_dot,
+                };
+                let clean_field_name = Helpers::clean_field_name(entity_name.to_string());
+
+                partitions.push(
+                    Column::builder()
+                        .name(clean_field_name.to_string())
+                        .r#type("string")
+                        .build()
+                );
+            }
+        }
+    }
     pub async fn glue_create_table(namespace: &str, metadata: &discover::Metadata) -> Result<bool, String> {
         let database = Config::getenv("GLUE_DATABASE_NAME", "");
         let bucket = Config::getenv("DATA_OUTPUT_S3_BUCKET", "");
@@ -401,6 +437,9 @@ impl AwsAthena {
         let mut partition_indexes: Vec<PartitionIndex> = Vec::new();
         let mut partition_index_keys:  Vec<String> = Vec::new();
 
+        AwsAthena::get_partition_by_fields(&mut partitions);
+
+        // Time Partitioning
         if granularity_target != "" {
             for granularity in GRANULARITIES.iter() {
 
@@ -411,14 +450,16 @@ impl AwsAthena {
                         .build()
                 );
 
-                partition_index_keys.push(granularity.to_string());
+                if partition_index_keys.len() < 3 {
+                    partition_index_keys.push(granularity.to_string());
 
-                partition_indexes.push(
-                    PartitionIndex::builder()
-                        .index_name(granularity.to_string())
-                        .set_keys(Some(partition_index_keys.clone()))
-                        .build()
-                );
+                    partition_indexes.push(
+                        PartitionIndex::builder()
+                            .index_name(granularity.to_string())
+                            .set_keys(Some(partition_index_keys.clone()))
+                            .build()
+                    );
+                }
 
                 if granularity == &granularity_target {
                     break;
@@ -489,6 +530,9 @@ impl AwsAthena {
         // let mut partition_indexes: Vec<PartitionIndex> = Vec::new();
         // let mut partition_index_keys:  Vec<String> = Vec::new();
 
+        AwsAthena::get_partition_by_fields(&mut partitions);
+
+        // Time Partitioning
         if granularity_target != "" {
             for granularity in GRANULARITIES.iter() {
 
@@ -641,6 +685,8 @@ impl AwsAthena {
                             println!("Created new Athena partition");
                         },
                         Err(err) => {
+                            println!("{:?}", partition_values);
+                            println!("{}", path);
                             println!("Failed to create new Athena partition: {}", err.into_service_error());
                         }
                     }
