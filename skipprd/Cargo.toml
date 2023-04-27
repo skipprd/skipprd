@@ -42,6 +42,9 @@ aws-smithy-http = "0.55.1"
 aws-sdk-glue = "0.26.0"
 md5 = "0.7.0"
 phf = { version = "0.11.1", default-features = false, features = ["macros"] }
+sled = { version = "0.34.4" }
+zerocopy = "0.6.1"
+byteorder = "1.4.3"
 
 [dev-dependencies]
 serial_test = "1.0.0"

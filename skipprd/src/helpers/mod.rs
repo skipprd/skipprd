@@ -15,6 +15,7 @@ use rand::Rng;
 use serde_json::Value;
 
 pub mod configuration;
+pub mod offsets;
 
 // let clean_field_cache = Arc::new(Mutex::new(HashMap<String, bool> = HashMap::new()));
 

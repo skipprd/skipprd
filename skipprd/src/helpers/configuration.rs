@@ -170,15 +170,18 @@ impl Config {
     }
 
     pub fn get_data_dir() -> String {
-        let mut data_dir = Config::getenv("DATA_DIR", "./skippr_data_tmp");
+        let mut data_dir = Config::getenv("DATA_DIR", "./data");
         if data_dir.ends_with('/') { data_dir.pop(); }
+        let pipeline_name = Config::getenv("PIPELINE_NAME", "default");
 
-        match fs::create_dir(format!("{}", data_dir)) {
+        let data_dir =  format!("{}/{}", data_dir, pipeline_name);
+        match fs::create_dir(&data_dir) {
             Ok(_g) => {},
             Err(_err) => {}
         }
 
         data_dir
+
     }
 
     pub fn get_pipeline_name() -> String {
@@ -418,6 +421,7 @@ impl Config {
 pub(crate) struct Metrics {
     pub(crate) msgs_total: i64,
     pub(crate) msgs_current: i64,
+    pub(crate) deadletters_current: i64,
     pub(crate) run_time_seconds: i64,
 }
 impl Metrics {
@@ -427,6 +431,7 @@ impl Metrics {
         Self {
             msgs_total: 0,
             msgs_current: 0,
+            deadletters_current: 0,
             run_time_seconds: 0,
         }
     }
