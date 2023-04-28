@@ -45,6 +45,8 @@ phf = { version = "0.11.1", default-features = false, features = ["macros"] }
 sled = { version = "0.34.4" }
 zerocopy = "0.6.1"
 byteorder = "1.4.3"
+rusoto_core = "0.48.0"
+rusoto_s3 = "0.48.0"
 
 [dev-dependencies]
 serial_test = "1.0.0"

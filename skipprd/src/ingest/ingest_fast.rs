@@ -59,7 +59,7 @@ pub fn fast_path_ingest(
         };
 
         let resolved_value = fast_set_value(
-            field_data_type,
+            &field_data_type,
             &field,
             value,
             metadata,
@@ -113,17 +113,17 @@ pub fn fast_path_ingest(
  * @return mixed|null - value data type on success or null on error
  */
 fn fast_set_value(
-    data_type: String,
+    data_type: &str,
     field: &str,
     value: &Value,
     metadata: &mut HashMap<String, Metadata>,
     updatedSchema: &mut String
 ) -> Value {
 
-    let _parent_type = match metadata.get_mut(field) {
-        Some(pt) => &pt.parent_type,
-        None => ""
-    };
+    // let _parent_type = match metadata.get_mut(field) {
+    //     Some(pt) => &pt.parent_type,
+    //     None => ""
+    // };
 
     // if data_type != "" || parent_type == "map" {
     if data_type != "" {
@@ -175,7 +175,7 @@ fn fast_set_value(
                         {
 
                             let newval = fast_set_value(
-                                metadata
+                                &metadata
                                     .get_mut(field)
                                     .unwrap()
                                     .fields
@@ -230,7 +230,7 @@ fn fast_set_value(
 
 
                             let newval = fast_set_value(
-                                metadata
+                                &metadata
                                     .get_mut(field)
                                     .unwrap()
                                     .fields
@@ -255,80 +255,43 @@ fn fast_set_value(
                 x = m.into();
                 new_value = x;
 
-                // println!("record new_value is {:?}", new_value);
-
             } else {
+
                 if data_type == "map" {
-                    for (key, val) in value.as_object().unwrap() {
-                        // println!("map value is {:?} key is {:?}", val, key);
+                    let mut metadata_field = metadata.get_mut(field).unwrap();
+                    let determined_type_values = &metadata_field.determined_type_values;
+                    let fields = &mut metadata_field.fields;
+                    for (key, val) in value.as_object().unwrap().iter().filter_map(|(k, v)| Some((k, v)) ) {
                         if Some(val) != None {
                             new_value[key] = fast_set_value(
-                                metadata
-                                    .get_mut(field)
-                                    .unwrap()
-                                    .determined_type_values
-                                    .clone(),
-                                key,
-                                val,
-                                &mut metadata.get_mut(field).unwrap().fields,
+                                determined_type_values,
+                                &key,
+                                value,
+                                fields,
                                 updatedSchema
                             );
                         }
                     }
-                    // println!("map new_value is {:?}", new_value);
+                    // for (key, val) in value.as_object().unwrap() {
+                    //     if Some(val) != None {
+                    //         new_value[key] = fast_set_value(
+                    //             metadata
+                    //                 .get_mut(field)
+                    //                 .unwrap()
+                    //                 .determined_type_values
+                    //                 .clone(),
+                    //             key,
+                    //             val,
+                    //             &mut metadata.get_mut(field).unwrap().fields,
+                    //             updatedSchema
+                    //         );
+                    //     }
+                    // }
 
                 } else {
                     if data_type == "array" {
                         new_value = value.to_owned();
-                        // for (val) in value.as_array().unwrap() {
-                        //     println!("array value is {:?}", val);
-                        //     if Some(val) != None {
-                        //         new_value = val.to_owned();
-                        //         // new_value[key] = fast_set_value(
-                        //         //     metadata.get_mut(field).unwrap().determined_type_values.clone(),
-                        //         //     key,
-                        //         //     val,
-                        //         //     &mut metadata.get_mut(field).unwrap().fields,
-                        //         // );
-                        //         // println!("new_value is {:?}", new_value);
-                        //     }
-                        // }
 
-                        // println!("\n\nField: {} array value is {:?}", field, value);
-
-                        // new_value[field] = Value::Array(Vec::new());
-
-                        // let mut b = Vec::new();
-                        //
-                        // let mut i = 0;
-                        //
-                        // for val in value.as_array().unwrap() {
-                        //     if Some(val) != None {
-                        //
-                        //         println!("field is {:?}", field);
-                        //         println!("array val is {:?}", val);
-                        //         println!("array val data_types is {:?}", metadata.get_mut(field).unwrap().determined_type_values.clone());
-                        //
-                        //         let new_v = fast_set_value(
-                        //             metadata.get_mut(field).unwrap().determined_type_values.clone(),
-                        //             &i.to_string(),
-                        //             val,
-                        //             &mut metadata.get_mut(field).unwrap().fields,
-                        //         );
-                        //
-                        //         i += 1;
-                        //
-                        //
-                        //         // println!("array new_v is {:?}\n\n\n", new_v);
-                        //
-                        //         b.push(new_v);
-                        //
-                        //     }
-                        // }
-                        //
-                        // new_value[field] = Value::from(b);
-
-                        // println!("array new_value is {:?}", new_value);
                     } else {
                         if data_type == "date" { // Hive Timestamp doesn't support string dates
 
@@ -359,55 +322,49 @@ fn fast_set_value(
                                 },
                             };
                         }
-                        if data_type == "string" {
-                            // value += "";
 
-                            // println!("string value is {:?}", value);
+                        let new_value = match data_type {
+                            "string" => value.as_str().map(|s| Value::String(s.to_string())),
+                            "timestamp" | "timestamp_milli" | "int" | "integer" | "long" => value.as_i64().map(Value::from),
+                            "double" => value.as_f64().map(Value::from),
+                            "boolean" => value.as_bool().map(Value::from),
+                            _ => None,
+                        };
 
-                            new_value = match value.as_str() {
-                                Some(val) => Value::String(val.to_string()),
-                                None => Value::Null,
-                            };
+                        new_value.unwrap_or(Value::Null);
 
-                            // println!("string new_value is {:?}", new_value);
-                        } else if data_type == "timestamp" || data_type == "timestamp_milli" {
-                            new_value = match value.as_i64() {
-                                Some(val) => Value::from(val),
-                                None => Value::Null,
-                            }
-                            // value = (int) value + 0; // force string to int
-                            //            } elseif ($dataType === 'date') {
-                            //                $value = (int) $value + 0; // force string to int
-                        } else if data_type == "int" || data_type == "integer" {
-                            // println!("number value is {:?}", value);
-
-                            new_value = match value.as_i64() {
-                                Some(val) => Value::from(val),
-                                None => Value::Null,
-                            };
-
-                            // println!("number new_value is {:?}", new_value);
-
-                            // value = (int) value + 0; // force string to int
-                        } else if data_type == "long" {
-                            new_value = match value.as_i64() {
-                                Some(val) => Value::from(val),
-                                None => Value::Null,
-                            }
-                            // value = (int) value + 0; // force strings to long
-                        } else if data_type == "double" {
-                            new_value = match value.as_f64() {
-                                Some(val) => Value::from(val),
-                                None => Value::Null,
-                            }
-                            // value = (float) sprintf("%.2f", value);
-                        } else if data_type == "boolean" {
-                            new_value = match value.as_bool() {
-                                Some(val) => Value::from(val),
-                                None => Value::Null,
-                            }
-                            // value = (bool) value;
-                        }
+                        // if data_type == "string" {
+                        //     new_value = match value.as_str() {
+                        //         Some(val) => Value::String(val.to_string()),
+                        //         None => Value::Null,
+                        //     };
+                        // } else if data_type == "timestamp" || data_type == "timestamp_milli" {
+                        //     new_value = match value.as_i64() {
+                        //         Some(val) => Value::from(val),
+                        //         None => Value::Null,
+                        //     }
+                        // } else if data_type == "int" || data_type == "integer" {
+                        //     new_value = match value.as_i64() {
+                        //         Some(val) => Value::from(val),
+                        //         None => Value::Null,
+                        //     };
+                        //
+                        // } else if data_type == "long" {
+                        //     new_value = match value.as_i64() {
+                        //         Some(val) => Value::from(val),
+                        //         None => Value::Null,
+                        //     }
+                        // } else if data_type == "double" {
+                        //     new_value = match value.as_f64() {
+                        //         Some(val) => Value::from(val),
+                        //         None => Value::Null,
+                        //     }
+                        // } else if data_type == "boolean" {
+                        //     new_value = match value.as_bool() {
+                        //         Some(val) => Value::from(val),
+                        //         None => Value::Null,
+                        //     }
+                        // }
                     }
                 }
             }
@@ -420,7 +377,7 @@ fn fast_set_value(
         let discoverd_data_type = discoverIngest(field, value, metadata, updatedSchema);
 
         return fast_set_value(
-            discoverd_data_type.clone(),
+            &discoverd_data_type,
             &field,
             value,
             metadata,
@@ -597,7 +554,7 @@ mod tests {
 
         let str = r#"{"rider_id":"10e974bf-4a43-305a-9e39-1636c43cb22a","bike_id":"8b86f753-05f8-3254-aba6-739188a3c0b6","isbn":"9407496597","trip":{"start_temprature":0,"end_temprature":2},"last_crank":[2,15,33,45,56,57,47,36,19,5],"crank_torques":[[2,15,33,45,56,57,47,36,19,5],[1,13,33,48,56,58,45,35,15,6]],"hardware":{"manufacturer":"Beier, Emmerich and Rutherford","model":"synergize ubiquitous e-commerce","maintenance":{"last_rebuild":"20\/04\/2010","last_service":"12\/07\/1973"}},"metadata":{"rcvd_time":1615474895,"sent_time":1615474930,"prcd_micro_time":1615474853.999185,"tags":[{"name":"type","value":"trip"},{"name":"auto","value":false}]}}"#;
 
-        let records: Vec<Value> = SerdeJson::deserialize(str.to_string());
+        let records: Vec<Value> = SerdeJson::deserialize(&str.to_string());
 
         let mut updatedSchema = "no".to_string();
 

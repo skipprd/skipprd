@@ -55,6 +55,7 @@ ATHENA_WORKGROUP_NAME
 # Demo
 
 ```bash
+AWS_PROFILE=cloudcycle \
 S3_BUCKET=production-datastorage-stack-cubeevents9ad2ae37-ots21z45kn3g \
 S3_PREFIX=inventory/production-datastorage-stack-cubeevents9ad2ae37-ots21z45kn3g \
 DATA_SOURCE_EVENT_TYPE_FIELDS='detail-type' \
@@ -69,5 +70,18 @@ PIPELINE_ID=69 \
 SKIPPR_API_TOKEN=kfI5drp8VhsFgeRfPYBRvMoto7aChpb95UuoxNNC \
 DATA_DIR=./data \
 cargo run sync
+```
 
+```bash
+AWS_PROFILE=skippr \
+S3_BUCKET=skpr-sample-data-output \
+S3_PREFIX=skpr-sample-data/smail-files \
+DATA_OUTPUT_S3_BUCKET=production-datalake-stac-datalakeskipprbucket4a91-db0ekzd8fkz0 \
+DATA_OUTPUT_S3_PREFIX=bikehire \
+GLUE_DATABASE_NAME=bikehire \
+ATHENA_WORKGROUP_NAME=bikehire \
+PIPELINE_ID=69 \
+SKIPPR_API_TOKEN=kfI5drp8VhsFgeRfPYBRvMoto7aChpb95UuoxNNC \
+DATA_DIR=./data \
+cargo run sync
 ```

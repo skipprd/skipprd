@@ -4,6 +4,9 @@ use arrow::datatypes::{Schema};
 use arrow::error::ArrowError;
 
 
+// mod thread_pool;
+// use thread_pool::ThreadPool;
+mod ingest_work;
 
 
 use std::collections::{HashMap};
@@ -48,7 +51,6 @@ use clap::{Parser};
 
 
 
-
 mod ingest;
 use crate::ingest::ingest_fast::{fast_path_ingest};
 
@@ -68,6 +70,7 @@ use crate::helpers::Helpers;
 use serde_json::Value;
 
 use crate::buffer::BufferChunker;
+use crate::plugins::s3_inventory::DataSourceS3InventoryPlugin;
 
 fn main() {
     Config::init();
@@ -116,14 +119,14 @@ async fn discover() {
 
     let mut hasAnalysed = false;
 
-    // let mut newMeta: HashMap<String, Metadata> = HashMap::new();
+    // let mut skipprMetadata: HashMap<String, Metadata> = HashMap::new();
 
     let data_dir= Config::get_data_dir();
     let metadata_file = format!("{}/metadata.json", data_dir);
 
 
     // Get existing metadata
-    let mut newMeta: HashMap<String, Metadata> = match File::open(metadata_file) {
+    let mut skipprMetadata: HashMap<String, Metadata> = match File::open(metadata_file) {
         Ok(file) => {
             let reader = BufReader::new(file);
             match serde_json::from_reader(reader) {
@@ -162,20 +165,20 @@ async fn discover() {
 
                         // let mut buf_reader = BufReader::new(input_file);
 
-                        // newMeta =
+                        // skipprMetadata =
                         //     AnalyseSchema::infer_json_schema(&mut foo, &mut buf_reader, Some(1000))
                         //         .unwrap();
-                        newMeta =
-                            AnalyseSchema::infer_json_schema(&mut foo, input_file, Some(1000), &mut newMeta)
+                        skipprMetadata =
+                            AnalyseSchema::infer_json_schema(&mut foo, input_file, Some(1000), &mut skipprMetadata)
                                 .unwrap();
 
-                        // println!("Skippr schema: {:?}", newMeta);
+                        // println!("Skippr schema: {:?}", skipprMetadata);
 
 
 
 
                         // arrowSchema = convert_skippr_to_arrow(
-                        //     newMeta.get(&"example_ns".to_string()).unwrap().fields.clone(),
+                        //     skipprMetadata.get(&"example_ns".to_string()).unwrap().fields.clone(),
                         // );
                         //
                         // // let json = serde_json::to_string_pretty(&arrowSchema).unwrap();
@@ -196,9 +199,9 @@ async fn discover() {
         }
     }
 
-    AnalyseSchema::determine_field_types(&mut newMeta, None);
+    AnalyseSchema::determine_field_types(&mut skipprMetadata, None);
 
-    Config::set_config(&newMeta, false).await;
+    Config::set_config(&skipprMetadata, false).await;
 
     // let file = OpenOptions::new()
     //     .create(true)
@@ -209,9 +212,9 @@ async fn discover() {
     //
     // let writer = BufWriter::new(file);
     //
-    // serde_json::to_writer(writer, &newMeta).unwrap();
+    // serde_json::to_writer(writer, &skipprMetadata).unwrap();
 
-    // newMeta
+    // skipprMetadata
     // }).join().unwrap();
 }
 
@@ -227,14 +230,18 @@ async fn sync() {
 
     let now = Arc::new(Mutex::new(Instant::now()));
 
-    let ingestMsgTotal = Arc::new(Mutex::new(0));
-    let ingestMsgCount = Arc::new(Mutex::new(0));
-    let ingestMsgCountClone = ingestMsgCount.clone();
+    // let ingestMsgTotal = Arc::new(Mutex::new(0));
+    // let ingestMsgCount = Arc::new(Mutex::new(0));
+    // let ingestMsgCountClone = ingestMsgCount.clone();
+    let mut metrics: Arc<Mutex<Metrics>> = Arc::new(Mutex::new(Metrics::new()));
 
     let data_dir= Config::get_data_dir();
     let metadata_file = format!("{}/metadata.json", data_dir);
 
-    let mut newMeta: HashMap<String, Metadata> = match File::open(metadata_file.clone()) {
+    // let mut skipprMetadata = Arc::new(Mutex::new(HashMap::new()));
+
+    let mut skipprMetadata = Arc::new(Mutex::new(match File::open(metadata_file.clone()) {
+    // let mut skipprMetadata: HashMap<String, Metadata> = match File::open(metadata_file.clone()) {
         Ok(schema_file) => {
             println!("Found Skippr metadata");
 
@@ -251,8 +258,8 @@ async fn sync() {
 
             let metadata = HashMap::new();
             // metadata.insert("example_ns".to_string(), emptyMeta);
-            // let newMeta: HashMap<String, Metadata> = metadata;
-            // newMeta
+            // let skipprMetadata: HashMap<String, Metadata> = metadata;
+            // skipprMetadata
             metadata
 
 
@@ -266,274 +273,250 @@ async fn sync() {
             //
             // u
         }
-    };
+    }));
 
+    // let mut pool = ThreadPool::new(4, skipprMetadata.clone());
 
     use std::time::Duration;
 
     let mut planner = periodic::Planner::new();
 
+    let metricsClone = metrics.clone();
+
     planner.add(
         move || {
-            let mut metrics: Metrics = Metrics::new();
+            // let mut metrics: Metrics = Metrics::new();
+            let mut metrics_lock = metricsClone.lock().unwrap();
 
-
-            let mut counter_lock = ingestMsgCount.lock().unwrap();
-            let mut total_lock = ingestMsgTotal.lock().unwrap();
+            // let mut counter_lock = ingestMsgCount.lock().unwrap();
+            // let mut total_lock = ingestMsgTotal.lock().unwrap();
             let now_lock = now.lock().unwrap();
 
-            *total_lock += *counter_lock;
+            metrics_lock.msgs_total += metrics_lock.msgs_current;
 
-            metrics.msgs_total = *total_lock;
-            metrics.msgs_current = *counter_lock;
-            metrics.run_time_seconds = now_lock.elapsed().as_secs().clone() as i64;
-            Config::set_status(&metrics, None);
+            // metrics.msgs_total = *total_lock;
+            // metrics.msgs_current = *counter_lock;
+            metrics_lock.run_time_seconds = now_lock.elapsed().as_secs().clone() as i64;
+            Config::set_status(&metrics_lock, None);
 
             println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
-            println!("Ingested Messages: {}", *counter_lock);
-            println!("Total Messages: {}", *total_lock);
+            println!("Deadletters Messages: {}", metrics_lock.deadletters_current);
+            println!("Ingested Messages: {}", metrics_lock.msgs_current);
+            println!("Total Messages: {}", metrics_lock.msgs_total);
 
-            *counter_lock = 0;
-
+            metrics_lock.msgs_current = 0;
 
         },
         periodic::Every::new(Duration::from_secs(60)),
     );
     planner.start();
 
-    let metedata_clone = newMeta.clone();
-    let newmeta_clone = newMeta.clone();
 
-
-    let _foo = thread::spawn(move || {
-
-        let mut parse_namespace_cache: HashMap<String, String> = HashMap::new();
-
-        let options = MatchOptions {
-            case_sensitive: false,
-            require_literal_separator: false,
-            require_literal_leading_dot: false,
-        };
-
-        let mut output_files: HashMap<String, File> = HashMap::new();
-        let _output_buf: HashMap<String, IoSlice> = HashMap::new();
-
-        let mut write_len: usize = 0;
-
-        let data_dir= Config::get_data_dir();
-
-        let output_dir = &format!("{}/output", data_dir);
-        let finalised_dir = &format!("{}/finalised", data_dir);
-
-        match fs::create_dir(output_dir) {
-            Ok(_g) => {},
-            Err(_err) => {}
-        }
-        match fs::create_dir(format!("{}/done", output_dir)) {
-            Ok(_g) => {},
-            Err(_err) => {}
-        }
-        match fs::create_dir(finalised_dir) {
-            Ok(_g) => {},
-            Err(_err) => {}
-        }
-
-        let pattern = format!("{}/source_buffer/*", data_dir);
-
-        let mut updatedSchema: String = "no".to_string();
-
-        loop {
-
-            for entry in glob_with(&pattern, options).expect("Failed to read glob pattern") {
-
-                match entry {
-                    Ok(path) => {
-
-                        let mut input_file = File::open(path.clone()).unwrap();
-
-                        // let mut buf_reader = BufReader::new(input_file);
-
-                        let str: &mut String = &mut "".to_string();
-
-                        // input_file.rewind();
-                        input_file.read_to_string(str).unwrap();
-
-                        // println!("record: {:?}", str);
-
-                        let records: Vec<Value> = SerdeJson::deserialize(str.clone());
-
-                        // println!("record: {:?}", records);
-
-
-                        // let value_iter = fast_path_ingest_buf(&mut buf_reader);
-                        //
-                        // for recordVal in value_iter {
-                        //
-                        //     let string = recordVal.unwrap().to_string();
-
-                            // let mut records: Vec<Value> = SerdeJson::deserialize(string);
-
-                            for record in records {
-
-                                if record.is_null() {
-                                    continue;
-                                }
-
-                                // println!("record: {:?}", record);
-
-                                // println!("{:?}", record);
-                                // exit(0);
-
-
-                                // match record {
-                            //     Ok(record) => {
-
-
-
-                                // let source_namespace = Config::getenv("S3_BUCKET", "");
-                                let source_namespace = BufferChunker::decode_file_namespace(path.to_str().unwrap());
-                                let source_partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
-                                // let source_time = BufferChunker::decode_file_time(path.to_str().unwrap());
-
-                                let skpr_namespace = Helpers::parse_namespace_field(&record, source_namespace, &mut parse_namespace_cache);
-                                let skpr_partition = Helpers::parse_partition_field(&record);
-                                let skpr_time = Helpers::parse_time_field(&record);
-
-                                let mut skpr_time_bucket= 0;
-
-                                if skpr_time.is_some() {
-                                    skpr_time_bucket = BufferChunker::event_time_bucket(skpr_time.unwrap());
-                                }
-
-
-                                // let mut ingest_record = IngestRecord {
-                                //     source_namespace: source_namespace,
-                                //     source_partition: source_partition,
-                                //     skpr_event_ts: skpr_time,
-                                //     skpr_namespace: skpr_namespace,
-                                //     skpr_partition: "".to_string(),
-                                //     record: Value::Null,
-                                // };
-
-                                if newMeta.get(&skpr_namespace).is_none() {
-                                    newMeta.insert(skpr_namespace.clone(), Metadata::new().unwrap());
-                                }
-
-                                let output_file_name = BufferChunker::encode_chunk_name("ingest", Some(&skpr_namespace), Some(&skpr_partition), Some(skpr_time_bucket));
-                                let output_file = format!("{}/{}", output_dir, &output_file_name);
-
-                                    if output_files.get_mut(&output_file_name).is_none() {
-
-                                        let f = OpenOptions::new()
-                                            .create(true)
-                                            .write(true)
-                                            .append(true)
-                                            .open(output_file)
-                                            .unwrap();
-
-                                        write_len += f.metadata().unwrap().len() as usize;
-                                        output_files.insert(output_file_name.clone(), f);
-                                    }
-
-                                    let msg = fast_path_ingest(
-                                        &record,
-                                        &mut newMeta
-                                            .get_mut(&skpr_namespace)
-                                            .unwrap()
-                                            .fields,
-                                            &mut updatedSchema
-                                    );
-
-                                    let mut counter_lock = ingestMsgCountClone.lock().unwrap();
-
-                                    *counter_lock += 1;
-
-                                    // let msg = record;
-                                    // println!("{:?}", msg);
-
-                                    let buf_str = msg.to_string() + "\n";
-
-                                    write_len += output_files
-                                        .get_mut(&output_file_name)
-                                        .unwrap()
-                                        .write(&buf_str.as_bytes())
-                                        .unwrap();
-
-                                    if write_len > 1024 * 1024 * 10 {
-                                        write_len = 0;
-
-                                        // output_files.get(&"example_ns".to_string()).unwrap().flush();
-                                        output_files.remove(&output_file_name).unwrap(); // close
-
-                                        fs::rename(
-                                            format!("{}/{}", output_dir, &output_file_name),
-                                            format!("{}/done/{}-{}", output_dir, &Helpers::random_str(12), &output_file_name),
-                                        ).unwrap();
-
-                                        // outputSync(newMeta.clone());
-
-
-                                    }
-                            //     }
-                            //     Err(error) => println!("Error in record: {:?}", error),
-                            }
-                        // }
-
-                        match std::fs::remove_file(path.clone()) {
-                            Ok(_file) => {
-                                // println!("Deleted file: {}", path.to_str().unwrap())
-                            },
-                            Err(err) => println!("Failed deleting file: {}", err),
-                        }
-
-                        if updatedSchema == "yes".to_string() {
-
-                            // println!("{:?}", metadata);
-
-                            tokio::runtime::Builder::new_multi_thread()
-                                .enable_all()
-                                .build()
-                                .unwrap()
-                                .block_on(async {
-                                    Config::set_config(&newMeta, updatedSchema == "yes".to_string()).await;
-                                });
-
-                            updatedSchema = "no".to_string();
-                        }
-
-                    }
-                    Err(e) => println!("{:?}", e),
-                }
-
-                // for (k, mut file) in &output_files {
-                // println!("Flushing file");
-                // file.flush().unwrap();
-                // }
-            }
-            sleep(Duration::from_secs(1));
-        }
-    });
-
-    // .join()
-    // .expect("Buffer thread failed");
-
-    // let metadata_clone = newMeta.clone();
-    let _bar = thread::spawn(move || {
-        // while true {
-            outputSync(newmeta_clone.clone());
-        // }
-    });
-
-    // let mut ds3 = block_on(DataSourceS3InventoryPlugin::new());
-    // ds3.sync().await;
-
-    // let future2 = async move {
-    loop {
-        let dataOutput = block_on(DataOutputAwsAthenaPlugin::new());
-        dataOutput.sync(metedata_clone.clone()).await;
-        sleep(Duration::from_secs(5));
+    let inputMetadataClone = skipprMetadata.clone();
+
+    let mut out_pnanner = periodic::Planner::new();
+    out_pnanner.add( move || {
+        outputSync(inputMetadataClone.lock().unwrap().clone());
+        // let dataOutput = block_on(DataOutputAwsAthenaPlugin::new());
+        // dataOutput.sync(inputMetadataClone.lock().unwrap().clone()).await;
+    },periodic::Every::new(Duration::from_secs(60))
+    );
+    out_pnanner.start();
+
+
+
+    let inputMetadataClone = skipprMetadata.clone();
+
+    // @todo - share across s3 ingests
+    let mut parse_namespace_cache: HashMap<String, String> = HashMap::new();
+    let mut output_files: HashMap<String, File> = HashMap::new();
+    let options = MatchOptions {
+        case_sensitive: false,
+        require_literal_separator: false,
+        require_literal_leading_dot: false,
+    };
+    let data_dir= Config::get_data_dir();
+    let output_dir = &format!("{}/output", data_dir);
+    let finalised_dir = &format!("{}/finalised", data_dir);
+    match fs::create_dir(output_dir) {
+        Ok(_g) => {},
+        Err(_err) => {}
     }
-    // };
+    match fs::create_dir(format!("{}/done", output_dir)) {
+        Ok(_g) => {},
+        Err(_err) => {}
+    }
+    match fs::create_dir(finalised_dir) {
+        Ok(_g) => {},
+        Err(_err) => {}
+    }
+
+    let metricsClone = metrics.clone();
+
+    let mut ds3 = block_on(DataSourceS3InventoryPlugin::new());
+    ds3.sync(
+        // &mut pool,
+        inputMetadataClone,
+        metricsClone
+    ).await;
+
+    // let metedata_clone = skipprMetadata.clone();
+    //
+    // pool.execute(move || {
+    //     let mut newMeta = metedata_clone.lock().unwrap();
+    //
+    // // let _foo = thread::spawn(move || {
+    //
+    //     let mut parse_namespace_cache: HashMap<String, String> = HashMap::new();
+    //
+    //     let options = MatchOptions {
+    //         case_sensitive: false,
+    //         require_literal_separator: false,
+    //         require_literal_leading_dot: false,
+    //     };
+    //
+    //     let mut output_files: HashMap<String, File> = HashMap::new();
+    //     let _output_buf: HashMap<String, IoSlice> = HashMap::new();
+    //
+    //     let mut write_len: usize = 0;
+    //
+    //     let data_dir= Config::get_data_dir();
+    //
+    //     let output_dir = &format!("{}/output", data_dir);
+    //     let finalised_dir = &format!("{}/finalised", data_dir);
+    //
+    //     match fs::create_dir(output_dir) {
+    //         Ok(_g) => {},
+    //         Err(_err) => {}
+    //     }
+    //     match fs::create_dir(format!("{}/done", output_dir)) {
+    //         Ok(_g) => {},
+    //         Err(_err) => {}
+    //     }
+    //     match fs::create_dir(finalised_dir) {
+    //         Ok(_g) => {},
+    //         Err(_err) => {}
+    //     }
+    //
+    //     let pattern = format!("{}/source_buffer/*", data_dir);
+    //
+    //     let mut updatedSchema: String = "no".to_string();
+    //
+    //     loop {
+    //
+    //         for entry in glob_with(&pattern, options).expect("Failed to read glob pattern") {
+    //
+    //             match entry {
+    //                 Ok(path) => {
+    //
+    //                     let mut input_file = File::open(path.clone()).unwrap();
+    //
+    //                     let str: &mut String = &mut "".to_string();
+    //
+    //                     input_file.read_to_string(str).unwrap();
+    //
+    //                     let records: Vec<Value> = SerdeJson::deserialize(str.clone());
+    //
+    //                         for record in records {
+    //
+    //                             if record.is_null() {
+    //                                 continue;
+    //                             }
+    //
+    //                             // let source_namespace = Config::getenv("S3_BUCKET", "");
+    //                             let source_namespace = BufferChunker::decode_file_namespace(path.to_str().unwrap());
+    //                             let source_partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
+    //
+    //                             let skpr_namespace = Helpers::parse_namespace_field(&record, source_namespace, &mut parse_namespace_cache);
+    //                             let skpr_partition = Helpers::parse_partition_field(&record);
+    //                             let skpr_time = Helpers::parse_time_field(&record);
+    //
+    //                             let mut skpr_time_bucket= 0;
+    //
+    //                             if skpr_time.is_some() {
+    //                                 skpr_time_bucket = BufferChunker::event_time_bucket(skpr_time.unwrap());
+    //                             }
+    //
+    //                             if newMeta.get(&skpr_namespace).is_none() {
+    //                                 newMeta.insert(skpr_namespace.clone(), Metadata::new().unwrap());
+    //                             }
+    //
+    //                             let output_file_name = BufferChunker::encode_chunk_name("ingest", Some(&skpr_namespace), Some(&skpr_partition), Some(skpr_time_bucket));
+    //                             let output_file = format!("{}/{}", output_dir, &output_file_name);
+    //
+    //                                 if output_files.get_mut(&output_file_name).is_none() {
+    //
+    //                                     let f = OpenOptions::new()
+    //                                         .create(true)
+    //                                         .write(true)
+    //                                         .append(true)
+    //                                         .open(output_file)
+    //                                         .unwrap();
+    //
+    //                                     write_len += f.metadata().unwrap().len() as usize;
+    //                                     output_files.insert(output_file_name.clone(), f);
+    //                                 }
+    //
+    //                                 let msg = fast_path_ingest(
+    //                                     &record,
+    //                                     &mut newMeta
+    //                                         .get_mut(&skpr_namespace)
+    //                                         .unwrap()
+    //                                         .fields,
+    //                                         &mut updatedSchema
+    //                                 );
+    //
+    //                                 let mut counter_lock = ingestMsgCountClone.lock().unwrap();
+    //
+    //                                 *counter_lock += 1;
+    //
+    //                                 let buf_str = msg.to_string() + "\n";
+    //
+    //                                 write_len += output_files
+    //                                     .get_mut(&output_file_name)
+    //                                     .unwrap()
+    //                                     .write(&buf_str.as_bytes())
+    //                                     .unwrap();
+    //
+    //                                 if write_len > 1024 * 1024 * 10 {
+    //                                     write_len = 0;
+    //
+    //                                     output_files.remove(&output_file_name).unwrap(); // close
+    //
+    //                                     fs::rename(
+    //                                         format!("{}/{}", output_dir, &output_file_name),
+    //                                         format!("{}/done/{}-{}", output_dir, &Helpers::random_str(12), &output_file_name),
+    //                                     ).unwrap();
+    //                                 }
+    //                         }
+    //
+    //                     match std::fs::remove_file(path.clone()) {
+    //                         Ok(_file) => { },
+    //                         Err(err) => println!("Failed deleting file: {}", err),
+    //                     }
+    //
+    //                     if updatedSchema == "yes".to_string() {
+    //
+    //                         tokio::runtime::Builder::new_multi_thread()
+    //                             .enable_all()
+    //                             .build()
+    //                             .unwrap()
+    //                             .block_on(async {
+    //                                 Config::set_config(&newMeta, updatedSchema == "yes".to_string()).await;
+    //                             });
+    //
+    //                         updatedSchema = "no".to_string();
+    //                     }
+    //
+    //                 }
+    //                 Err(e) => println!("{:?}", e),
+    //             }
+    //         }
+    //         sleep(Duration::from_secs(1));
+    //     }
+    // });
+
+
 
 
     // let future2 = async move {
@@ -541,6 +524,32 @@ async fn sync() {
         // let mut ds3 = block_on(DataSourceS3InventoryPlugin::new());
         // ds3.sync().await;
     // };
+
+    let newmeta_clone = skipprMetadata.clone();
+
+    // pool.execute(move || {
+    //     let mut newMeta = newmeta_clone.lock().unwrap();
+    //
+    // // let metadata_clone = newMeta.clone();
+    // // let _bar = thread::spawn(move || {
+    //     // while true {
+    //         outputSync(newMeta.clone());
+    //
+    //     // }
+    // });
+
+    // let metedata_out_clone = skipprMetadata.clone();
+
+    // let future2 = async move {
+    // loop {
+    //     outputSync(newmeta_clone.lock().unwrap().clone());
+    //     let dataOutput = block_on(DataOutputAwsAthenaPlugin::new());
+    //     dataOutput.sync(metedata_out_clone.lock().unwrap().clone()).await;
+    //     sleep(Duration::from_secs(5));
+    // }
+    // };
+
+
 
 
     // sleep(Duration::from_secs(125));
@@ -568,7 +577,7 @@ fn outputSync(
             require_literal_leading_dot: false,
         };
 
-        loop {
+        // loop {
             for entry in glob_with(&format!("{}/done/*", output_dir), options).expect("Failed to read glob pattern") {
                 match entry {
                     Ok(path) => {
@@ -616,8 +625,8 @@ fn outputSync(
                 }
             }
 
-            sleep(Duration::from_secs(1));
-        }
+            // sleep(Duration::from_secs(1));
+        // }
 
 
     });

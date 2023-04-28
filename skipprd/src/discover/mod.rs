@@ -241,7 +241,7 @@ impl AnalyseSchema {
         let str: &mut String = &mut "".to_string();
         input_file.read_to_string(str);
 
-        let records: Vec<Value> = SerdeJson::deserialize(str.clone());
+        let records: Vec<Value> = SerdeJson::deserialize(&str);
 
         let mut i = 0;
 

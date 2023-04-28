@@ -3,8 +3,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::fs::{create_dir, File, OpenOptions};
 use std::io::{BufWriter, Read};
-
-
+use std::time::Duration;
 
 
 // use aws_config::profile::profile_file::ProfileFileKind::Config;
@@ -187,10 +186,10 @@ impl Config {
     pub fn get_pipeline_name() -> String {
         // let mut helpers = Helpers { clean_field_cache: Default::default() };
 
-        let input_plugin_name = Helpers::clean_field_name(Config::getenv("DATA_SOURCE_PLUGIN_NAME", "unknown"));
-        let output_plugin_name = Helpers::clean_field_name(Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "unknown"));
-        let default_pipeline_name = format!("{} to {}", input_plugin_name, output_plugin_name);
-        let pipeline_name = Config::getenv("PIPELINE_NAME", default_pipeline_name.as_str());
+        // let input_plugin_name = Helpers::clean_field_name(Config::getenv("DATA_SOURCE_PLUGIN_NAME", "unknown"));
+        // let output_plugin_name = Helpers::clean_field_name(Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "unknown"));
+        // let default_pipeline_name = format!("{} to {}", input_plugin_name, output_plugin_name);
+        let pipeline_name = Config::getenv("PIPELINE_NAME", "default");
 
         pipeline_name
     }
@@ -288,7 +287,7 @@ impl Config {
         // if evolved {
             for (namespace, schema) in metadata.into_iter() {
                 println!("Updating Hive '{}' schema", namespace);
-                AwsAthena::create_or_update_schema(&namespace, &schema).await;
+                // AwsAthena::create_or_update_schema(&namespace, &schema).await;
             }
         // }
 
@@ -338,19 +337,19 @@ impl Config {
 
         // println!("Posting data: {:?}", data);
 
-            let response = client.post(&format!("{}/{}", uri, path))
-                .json(&data)
-                .send()
-                .await;
+            // let response = client.post(&format!("{}/{}", uri, path))
+            //     .json(&data)
+            //     .send()
+            //     .await;
 
-        match response {
-            Ok(_resp) => {
+        // match response {
+        //     Ok(_resp) => {
                 // println!("Metadata HTTP Success: {:?}", resp);
-            }
-            Err(_err) => {
+            // }
+            // Err(_err) => {
                 // println!("Metadata HTTP Error: {:?}", err);
-            }
-        }
+            // }
+        // }
 
         println!("Updated pipeline metadata in Skippr SaaS");
 
@@ -418,11 +417,11 @@ impl Config {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub(crate) struct Metrics {
-    pub(crate) msgs_total: i64,
-    pub(crate) msgs_current: i64,
-    pub(crate) deadletters_current: i64,
-    pub(crate) run_time_seconds: i64,
+pub struct Metrics {
+    pub msgs_total: i64,
+    pub msgs_current: i64,
+    pub deadletters_current: i64,
+    pub run_time_seconds: i64,
 }
 impl Metrics {
     #[inline]
