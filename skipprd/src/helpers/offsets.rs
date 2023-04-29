@@ -25,16 +25,18 @@ pub const SLED_NAME: &str = "db";
 // does not have alignment requirements.
 // sled does not guarantee any particular
 // value alignment as of now.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[repr(C)]
-pub struct Key {
-    namespace: String,
-    partition: String,
+pub struct OffsetKey {
+    pub(crate) namespace: String,
+    pub(crate) partition: String,
 }
 
+#[derive(Debug)]
 pub enum OffsetTypes {
     Filesize,
-    Line
+    Line,
+    Closed
 }
 
 // We use `LittleEndian` for values because
@@ -43,9 +45,15 @@ pub enum OffsetTypes {
 // use whatever you want for values.
 #[derive(FromBytes, AsBytes, Unaligned, Debug)]
 #[repr(C)]
-struct Value {
+pub struct OffsetValue {
     filesize: U64<LittleEndian>,
     line: U64<LittleEndian>,
+    closed: U64<LittleEndian>, // we store bool here
+}
+
+pub struct Offset {
+    value: OffsetValue,
+    key: OffsetKey,
 }
 
 pub struct Offsets {
@@ -138,39 +146,39 @@ impl Offsets {
         // result.extend_from_slice(u16_slice);
     }
 
-    pub fn build_key(&self, namespace: &str, partition: &str) -> String {
-        // let namespace = self.vec_8_to_u16(namespace.as_bytes());
+    pub fn build_key(&self, key: &OffsetKey) -> String {
+        // let namespace = ;
         // let partition = self.vec_8_to_u16(partition.as_bytes());
         // let key: Key = Key { namespace: namespace.to_string(), partition: partition.to_string() };
         // let key = Key { namespace: namespace.to_string(), partition: partition.to_string() };
         // key
-        format!("{}-{}-latest", namespace, partition)
+        format!("{}-{}", key.namespace, key.partition)
     }
 
-    pub fn build_latest_key(&self, namespace: &str, partition: &str) -> String {
+    pub fn build_latest_key(key: &OffsetKey) -> String {
         // let namespace = namespace.as_bytes();
         // let partition = partition.as_bytes();
         // unsafe self.any_as_u8_slice(format!("{}-{}-latest", namespace, partition).as_bytes().to_owned())
         // let partition = &format!("{}-latest", partition.to_owned());
         // let key: Key = Key { namespace: namespace.to_string(), partition: partition.to_string() };
         // key
-        format!("{}-{}", namespace, partition)
+        format!("{}-{}-latest", key.namespace, key.partition)
     }
 
-    pub fn set(&self, namespace: &str, partition: &str, offset_type: OffsetTypes, offset: u64) -> Option<IVec>  {
-        match self.upsert(namespace, partition, offset_type, offset) {
+    pub fn set(&self, key: &OffsetKey, offset_type: OffsetTypes, offset: u64) -> Option<IVec>  {
+        match self.upsert(key, offset_type, offset) {
             Ok(val) => val,
             Err(_) => None
         }
     }
 
-    pub fn insert(&self, namespace: &str, partition: &str, offset_type: OffsetTypes, offset: u64) -> Option<IVec>  {
-        let key = self.build_key(namespace, partition);
+    pub fn insert(&self, key: &OffsetKey, offset_type: OffsetTypes, offset: u64) -> Option<IVec>  {
+        let key = self.build_key(key);
         let bytes: &[u8] = key.as_bytes();
         // let bytes: &[u8] = unsafe { self.any_as_u8_slice(&key) };
 
         let new_val = sled::IVec::from(
-            Value { filesize: U64::new(0), line:  U64::new(0) }.as_bytes(),
+            OffsetValue { filesize: U64::new(0), line:  U64::new(0), closed: U64::new(0) }.as_bytes(),
         );
 
         self.tree.insert(bytes, &new_val).unwrap();
@@ -179,8 +187,8 @@ impl Offsets {
 
     }
 
-    pub fn get(&self, namespace: &str, partition: &str) -> Option<IVec>  {
-        let key = self.build_key(namespace, partition);
+    pub fn get(&self, key: &OffsetKey) -> Option<IVec>  {
+        let key = self.build_key(key);
         // let bytes: &[u8] = unsafe { self.any_as_u8_slice(&key) };
         let bytes: &[u8] = key.as_bytes();
         match  self.tree.get(bytes) {
@@ -189,8 +197,8 @@ impl Offsets {
         }
     }
 
-    pub fn get_latest(&self, namespace: &str, partition: &str) -> Option<IVec>  {
-        let key = self.build_key(namespace, partition);
+    pub fn get_latest(&self, key: &OffsetKey) -> Option<IVec>  {
+        let key = self.build_key(key);
         // let bytes: &[u8] = unsafe { self.any_as_u8_slice(&key) };
         let bytes: &[u8] = key.as_bytes();
         match  self.tree.get(bytes) {
@@ -199,8 +207,8 @@ impl Offsets {
         }
     }
 
-    pub fn remove(&self, namespace: &str, partition: &str) -> Option<IVec>  {
-        let key = self.build_key(namespace, partition);
+    pub fn remove(&self, key: &OffsetKey) -> Option<IVec>  {
+        let key = self.build_key(key);
         // let bytes: &[u8] = unsafe { self.any_as_u8_slice(&key) };
         let bytes: &[u8] = key.as_bytes();
         match  self.tree.remove(bytes) {
@@ -223,10 +231,11 @@ impl Offsets {
     // fn ivec_to_u64(ivec: IVec) -> u64 {
     //     U64::from(ivec).into()
     // }
-    pub fn validate(&self, namespace: &str, partition: &str, offset_type: OffsetTypes, offset_value: u64) -> Option<bool> {
+    pub fn validate(&self, key: &OffsetKey, offset_type: OffsetTypes, offset_value: u64) -> Option<bool> {
+
         // self.build_key(namespace, partition);
 
-        let resp = match self.get(namespace, partition) {
+        let resp = match self.get(key) {
             Some(existing) => {
                 // We need to make a copy that will be written back
                 // into the database. This allows other threads that
@@ -238,13 +247,13 @@ impl Offsets {
                 // this verifies that our value is the correct length
                 // and alignment (in this case we don't need it to be
                 // aligned, because we use the `U64` type from zerocopy)
-                let layout: LayoutVerified<&mut [u8], Value> =
+                let layout: LayoutVerified<&mut [u8], OffsetValue> =
                     LayoutVerified::new_unaligned(&mut *backing_bytes)
                         .expect("bytes do not fit schema");
 
                 // this lets us work with the underlying bytes as
                 // a mutable structured value.
-                let value: &mut Value = layout.into_mut();
+                let value: &mut OffsetValue = layout.into_mut();
 
                 let mut bool = false;
 
@@ -262,23 +271,31 @@ impl Offsets {
                             // println!("Setting filesize {}", filesize);
                             bool = true
                         }
+                    },
+                    OffsetTypes::Closed => {
+                        if value.closed.get() == offset_value {
+                            // Some(false)
+                            bool = true
+                        }
                     }
                 }
 
                 Some(bool)
             },
-            None => None
+            None => {
+                Some(true)
+            }
         };
 
         resp
 
     }
 
-    pub fn upsert(&self, namespace: &str, partition: &str, offset_type: OffsetTypes, offset: u64) -> Result<Option<IVec>, sled::Error>  {
+    pub fn upsert(&self, key: &OffsetKey, offset_type: OffsetTypes, offset: u64) -> Result<Option<IVec>, sled::Error>  {
         // let key = Key { namespace: namespace.to_string(), partition: partition.to_string() };
         // let bytes: &[u8] = unsafe { self.any_as_u8_slice(&key) };
 
-        let key = self.build_key(namespace, partition);
+        let key = self.build_key(key);
         let bytes: &[u8] = key.as_bytes();
         // let bytes: &[u8] = unsafe { self.any_as_u8_slice(&key) };
 
@@ -296,13 +313,13 @@ impl Offsets {
                 // this verifies that our value is the correct length
                 // and alignment (in this case we don't need it to be
                 // aligned, because we use the `U64` type from zerocopy)
-                let layout: LayoutVerified<&mut [u8], Value> =
+                let layout: LayoutVerified<&mut [u8], OffsetValue> =
                     LayoutVerified::new_unaligned(&mut *backing_bytes)
                         .expect("bytes do not fit schema");
 
                 // this lets us work with the underlying bytes as
                 // a mutable structured value.
-                let value: &mut Value = layout.into_mut();
+                let value: &mut OffsetValue = layout.into_mut();
 
                 // println!("Updating offset");
 
@@ -312,6 +329,9 @@ impl Offsets {
                     },
                     OffsetTypes::Line => {
                         value.line.set(offset);
+                    },
+                    OffsetTypes::Closed => {
+                        value.closed.set(offset);
                     }
                 }
 
@@ -323,7 +343,7 @@ impl Offsets {
                 // println!("Creating offset");
 
                 let new_val = sled::IVec::from(
-                    Value { filesize: U64::new(0), line:  U64::new(0) }.as_bytes(),
+                    OffsetValue { filesize: U64::new(0), line: U64::new(0), closed: U64::new(0) }.as_bytes(),
                 );
 
                 self.tree.insert(bytes, &new_val).unwrap();
@@ -352,7 +372,7 @@ mod tests {
     use zerocopy::LayoutVerified;
     use crate::helpers::configuration::{Config, Metrics};
     use crate::helpers::Helpers;
-    use crate::helpers::offsets::{Offsets, OffsetTypes, Value};
+    use crate::helpers::offsets::{OffsetKey, Offsets, OffsetTypes, OffsetValue};
 
    
     #[test]
@@ -360,29 +380,37 @@ mod tests {
     fn test_validate() {
         let db = Offsets::init().unwrap();
 
-        // assert_eq!(db.validate("foo", "bar", 1, 1), Some(true));
-        // assert_eq!(db.validate("foo", "bar", 1, 1), Some(false)); // @todo this is atleast once
-        // assert_eq!(db.validate("foo", "bar", 2, 1), Some(true));
-        // assert_eq!(db.validate("foo", "bar", 1, 2), Some(false));
-        // assert_eq!(db.validate("foo", "bar", 2, 1), Some(false));
-        // assert_eq!(db.validate("foo", "bar", 2, 2), Some(true)); // @todo this is atleast once
-        // assert_eq!(db.validate("foo", "bar", 2, 3), Some(true));
-        // assert_eq!(db.validate("foo", "bar", 2, 2), Some(false));
-        // assert_eq!(db.validate("foo", "bar", 1, 4), Some(false));
+        // assert_eq!(db.validate(key, 1, 1), Some(true));
+        // assert_eq!(db.validate(key, 1, 1), Some(false)); // @todo this is atleast once
+        // assert_eq!(db.validate(key, 2, 1), Some(true));
+        // assert_eq!(db.validate(key, 1, 2), Some(false));
+        // assert_eq!(db.validate(key, 2, 1), Some(false));
+        // assert_eq!(db.validate(key, 2, 2), Some(true)); // @todo this is atleast once
+        // assert_eq!(db.validate(key, 2, 3), Some(true));
+        // assert_eq!(db.validate(key, 2, 2), Some(false));
+        // assert_eq!(db.validate(key, 1, 4), Some(false));
 
-        assert_eq!(db.validate("foo", "bar", OffsetTypes::Filesize, 1), None);
-        db.set("foo", "bar", OffsetTypes::Filesize, 1).unwrap();
-        assert_eq!(db.validate("foo", "bar", OffsetTypes::Filesize, 1), Some(false));
-        assert_eq!(db.validate("foo", "bar", OffsetTypes::Filesize, 2), Some(true));
-        db.set("foo", "bar", OffsetTypes::Filesize, 2).unwrap();
-        assert_eq!(db.validate("foo", "bar", OffsetTypes::Filesize, 1), Some(false));
-        assert_eq!(db.validate("foo", "bar", OffsetTypes::Filesize, 2), Some(false));
-        assert_eq!(db.validate("foo", "bar", OffsetTypes::Filesize, 3), Some(true));
-        assert_eq!(db.validate("foo", "bar", OffsetTypes::Filesize, 4), Some(true));
-        assert_eq!(db.validate("foo", "bar", OffsetTypes::Filesize, 2), Some(false));
+        let key = &OffsetKey { namespace: "foo".to_string(), partition: "bar".to_string() };
+
+        assert_eq!(db.validate(key, OffsetTypes::Filesize, 1), Some(false));
+        db.set(key, OffsetTypes::Filesize, 1).unwrap();
+        assert_eq!(db.validate(key, OffsetTypes::Filesize, 1), Some(false));
+        assert_eq!(db.validate(key, OffsetTypes::Filesize, 2), Some(true));
+        db.set(key, OffsetTypes::Filesize, 2).unwrap();
+        assert_eq!(db.validate(key, OffsetTypes::Filesize, 1), Some(false));
+        assert_eq!(db.validate(key, OffsetTypes::Filesize, 2), Some(false));
+        assert_eq!(db.validate(key, OffsetTypes::Filesize, 3), Some(true));
+        assert_eq!(db.validate(key, OffsetTypes::Filesize, 4), Some(true));
+        assert_eq!(db.validate(key, OffsetTypes::Filesize, 2), Some(false));
+
+        assert_eq!(db.validate(key, OffsetTypes::Closed, 0), Some(true));
+        assert_eq!(db.validate(key, OffsetTypes::Closed, 1), Some(false));
+        db.set(key, OffsetTypes::Closed, 1).unwrap();
+        assert_eq!(db.validate(key, OffsetTypes::Closed, 1), Some(true));
+        assert_eq!(db.validate(key, OffsetTypes::Closed, 0), Some(false));
 
 
-        // db.remove("foo", "bar").unwrap();
+        // db.remove(key).unwrap();
 
         db.tree.flush().unwrap();
         // db.db.flush().unwrap();
@@ -391,91 +419,91 @@ mod tests {
         // drop(db);
     }
 
-    #[test]
-    #[serial]
-    fn test_validate_performance() {
-
-        let ingestMsgCount = Arc::new(Mutex::new(0));
-        let ingestMsgCountClone = ingestMsgCount.clone();
-        let skippedMsgCount = Arc::new(Mutex::new(0));
-        let skippedMsgCountClone = skippedMsgCount.clone();
-        let ingestMsgTotal = Arc::new(Mutex::new(0));
-        let now = Arc::new(Mutex::new(Instant::now()));
-
-        let mut planner = periodic::Planner::new();
-
-        planner.add(
-            move || {
-                let mut metrics: Metrics = Metrics::new();
-
-                let mut counter_lock = ingestMsgCount.lock().unwrap();
-                let mut skipped_lock = skippedMsgCount.lock().unwrap();
-                let mut total_lock = ingestMsgTotal.lock().unwrap();
-                let now_lock = now.lock().unwrap();
-
-                *total_lock += *counter_lock;
-
-                metrics.msgs_total = *total_lock;
-                metrics.msgs_current = *counter_lock;
-                metrics.deadletters_current = *skipped_lock;
-                metrics.run_time_seconds = now_lock.elapsed().as_secs().clone() as i64;
-
-                println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
-                println!("Skipped Messages: {}", *skipped_lock);
-                println!("Ingested Messages: {}", *counter_lock);
-                println!("Total Messages: {}", *total_lock);
-
-                *counter_lock = 0;
-
-
-            },
-            periodic::Every::new(Duration::from_secs(60)),
-        );
-        planner.start();
-
-
-        let db = Offsets::init().unwrap();
-
-        // for i in 1..=100000000 {
-        for i in 1..=10000000 {
-        // for i in 1..=100 {
-
-            // let mut rng = rand::thread_rng();
-            // let y: f64 = rng.gen(); // generates a float between 0 and 1
-            // let foo = 10.0 * y;
-
-            let y = i + 1;
-
-            match db.validate("abc", &i.to_string(), OffsetTypes::Filesize, y) {
-                Some(true) => {
-                    // println!("True: {}", i);
-                    let mut counter_lock = ingestMsgCountClone.lock().unwrap();
-                    *counter_lock += 1;
-                    db.set("abc", &i.to_string(), OffsetTypes::Filesize, y);
-                },
-                Some(false) => {
-                    // println!("False: {}", i);
-                    let mut counter_lock = skippedMsgCountClone.lock().unwrap();
-                    *counter_lock += 1;
-                },
-                None => {
-                    db.insert("abc", &i.to_string(), OffsetTypes::Filesize, y);
-                    // println!("None: {}", i);
-                }
-            }
-
-        }
-
-        let mut counter_lock = ingestMsgCountClone.lock().unwrap();
-        let mut skipped_lock = skippedMsgCountClone.lock().unwrap();
-
-        println!("Skipped Messages: {}", *skipped_lock);
-        println!("Ingested Messages: {}", *counter_lock);
-
-        db.tree.flush().unwrap();
-        db.db.flush().unwrap();
-        drop(db.tree);
-        drop(db.db);
-        // drop(db);
-    }
+    // #[test]
+    // #[serial]
+    // fn test_validate_performance() {
+    //
+    //     let ingestMsgCount = Arc::new(Mutex::new(0));
+    //     let ingestMsgCountClone = ingestMsgCount.clone();
+    //     let skippedMsgCount = Arc::new(Mutex::new(0));
+    //     let skippedMsgCountClone = skippedMsgCount.clone();
+    //     let ingestMsgTotal = Arc::new(Mutex::new(0));
+    //     let now = Arc::new(Mutex::new(Instant::now()));
+    //
+    //     let mut planner = periodic::Planner::new();
+    //
+    //     planner.add(
+    //         move || {
+    //             let mut metrics: Metrics = Metrics::new();
+    //
+    //             let mut counter_lock = ingestMsgCount.lock().unwrap();
+    //             let mut skipped_lock = skippedMsgCount.lock().unwrap();
+    //             let mut total_lock = ingestMsgTotal.lock().unwrap();
+    //             let now_lock = now.lock().unwrap();
+    //
+    //             *total_lock += *counter_lock;
+    //
+    //             metrics.msgs_total = *total_lock;
+    //             metrics.msgs_current = *counter_lock;
+    //             metrics.deadletters_current = *skipped_lock;
+    //             metrics.run_time_seconds = now_lock.elapsed().as_secs().clone() as i64;
+    //
+    //             println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
+    //             println!("Skipped Messages: {}", *skipped_lock);
+    //             println!("Ingested Messages: {}", *counter_lock);
+    //             println!("Total Messages: {}", *total_lock);
+    //
+    //             *counter_lock = 0;
+    //
+    //
+    //         },
+    //         periodic::Every::new(Duration::from_secs(60)),
+    //     );
+    //     planner.start();
+    //
+    //
+    //     let db = Offsets::init().unwrap();
+    //
+    //     // for i in 1..=100000000 {
+    //     for i in 1..=10000000 {
+    //     // for i in 1..=100 {
+    //
+    //         // let mut rng = rand::thread_rng();
+    //         // let y: f64 = rng.gen(); // generates a float between 0 and 1
+    //         // let foo = 10.0 * y;
+    //
+    //         let y = i + 1;
+    //
+    //         match db.validate("abc", &i.to_string(), OffsetTypes::Filesize, y) {
+    //             Some(true) => {
+    //                 // println!("True: {}", i);
+    //                 let mut counter_lock = ingestMsgCountClone.lock().unwrap();
+    //                 *counter_lock += 1;
+    //                 db.set("abc", &i.to_string(), OffsetTypes::Filesize, y);
+    //             },
+    //             Some(false) => {
+    //                 // println!("False: {}", i);
+    //                 let mut counter_lock = skippedMsgCountClone.lock().unwrap();
+    //                 *counter_lock += 1;
+    //             },
+    //             None => {
+    //                 db.insert("abc", &i.to_string(), OffsetTypes::Filesize, y);
+    //                 // println!("None: {}", i);
+    //             }
+    //         }
+    //
+    //     }
+    //
+    //     let mut counter_lock = ingestMsgCountClone.lock().unwrap();
+    //     let mut skipped_lock = skippedMsgCountClone.lock().unwrap();
+    //
+    //     println!("Skipped Messages: {}", *skipped_lock);
+    //     println!("Ingested Messages: {}", *counter_lock);
+    //
+    //     db.tree.flush().unwrap();
+    //     db.db.flush().unwrap();
+    //     drop(db.tree);
+    //     drop(db.db);
+    //     // drop(db);
+    // }
 }

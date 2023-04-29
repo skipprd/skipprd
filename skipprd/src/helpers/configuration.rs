@@ -418,10 +418,10 @@ impl Config {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Metrics {
-    pub msgs_total: i64,
-    pub msgs_current: i64,
-    pub deadletters_current: i64,
-    pub run_time_seconds: i64,
+    pub msgs_total: u64,
+    pub msgs_current: u64,
+    pub deadletters_current: u64,
+    pub run_time_seconds: u64,
 }
 impl Metrics {
     #[inline]

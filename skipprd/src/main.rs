@@ -296,7 +296,7 @@ async fn sync() {
 
             // metrics.msgs_total = *total_lock;
             // metrics.msgs_current = *counter_lock;
-            metrics_lock.run_time_seconds = now_lock.elapsed().as_secs().clone() as i64;
+            metrics_lock.run_time_seconds = now_lock.elapsed().as_secs().clone() as u64;
             Config::set_status(&metrics_lock, None);
 
             println!("Runtime: {} seconds", now_lock.elapsed().as_secs());

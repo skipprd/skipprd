@@ -22,7 +22,6 @@ use std::error::Error;
 
 use crate::buffer::BufferChunker;
 use crate::discover::Metadata;
-use crate::ingest_work::ingest_file;
 use futures::future::join_all;
 use futures::StreamExt;
 use tokio::join;
@@ -33,13 +32,15 @@ use tokio::runtime::Runtime;
 use tokio::sync::mpsc::{channel, Receiver};
 use rusoto_core::Region;
 use rusoto_s3::{GetObjectRequest, S3Client, S3, GetObjectOutput};
+use crate::helpers::offsets::{OffsetKey, Offsets, OffsetTypes};
+use crate::ingest_work::{Ingest, IngestBatch};
 
 pub struct DataSourceS3InventoryPlugin {
     // config: HashMap<String, String>,
     // buffer: Sender<String>,
     s3_client: Client,
     s3_client_rusoto: S3Client,
-
+    ingest: Ingest,
     source_bucket: String,
     temp_dir: String,
 }
@@ -62,6 +63,7 @@ impl DataSourceS3InventoryPlugin {
         DataSourceS3InventoryPlugin {
             s3_client,
             s3_client_rusoto: S3Client::new(Region::default()),
+            ingest: Ingest::new(),
             source_bucket: String::new(),
             temp_dir: temp_dir.to_string(),
         }
@@ -76,7 +78,16 @@ impl DataSourceS3InventoryPlugin {
         let metadata = metadata.clone();
         let metrics = metrics.clone();
 
-        let s3_client = self.s3_client.clone();
+        let offsets =  Arc::new(Offsets::init().unwrap());
+
+        let offsets_clone = offsets.clone();
+
+        // let offset_key = OffsetKey { namespace: "foofg".to_string(), partition: "bar".to_string() };
+        //
+        // let res = offsets_clone.validate(&offset_key, OffsetTypes::Closed, 0);
+        // panic!("{:?}", res);
+
+            let s3_client = self.s3_client.clone();
         // let s3_client = s3_client.clone();
 
         // let s3_client = Arc::new(s3_client);
@@ -127,167 +138,190 @@ impl DataSourceS3InventoryPlugin {
                             if object_key.contains(&"manifest.json") {
                                 // println!("Processing S3 manifest {}", object_key);
 
-                                let inventory_manifest = self
-                                    .s3_client
-                                    .get_object()
-                                    .bucket(inventory_bucket.clone())
-                                    .key(object_key)
-                                    .send()
-                                    .await;
-
-                                // SkipprLogger::debug("Manifest json $inventoryManifest");
-
-                                let object_content: AggregatedBytes =
-                                    inventory_manifest.unwrap().body.collect().await.unwrap();
-                                let manifest = SerdeJson::deserialize(
-                                    &String::from_utf8(object_content.into_bytes().to_vec())
-                                        .unwrap(),
-                                );
-
-                                let source_bucket =
-                                    manifest.first().unwrap()["sourceBucket"].to_string();
-                                let headers_string: String =
-                                    manifest.first().unwrap()["fileSchema"].to_string();
-                                let headers: Vec<_> = headers_string.split(",").collect();
-
-                                let _bucket = source_bucket.to_string();
-
-                                let _chunk_size = Config::getenv("DATA_SOURCE_BATCH_SIZE", "10");
-
-                                for file in manifest.first().unwrap()["files"].as_array() {
-                                    let file_key = file.first().unwrap()["key"].as_str().unwrap();
-                                    println!(
-                                        "Loading {} manifest from bucket {}",
-                                        file_key,
-                                        inventory_bucket.clone()
-                                    );
-
-                                    let tmp_file = self
+                                let offset_key = OffsetKey { namespace: inventory_bucket.clone(), partition: object_key.to_string() };
+                                if Some(true) == offsets_clone.validate(&offset_key, OffsetTypes::Closed, 0) {
+                                    let inventory_manifest = self
                                         .s3_client
                                         .get_object()
                                         .bucket(inventory_bucket.clone())
-                                        .key(file_key)
+                                        .key(object_key)
                                         .send()
                                         .await;
 
-                                    match tmp_file {
-                                        Err(..) => println!(
-                                            "Get Object Error: {}",
-                                            String::from_utf8(
-                                                tmp_file
-                                                    .unwrap()
-                                                    .body
-                                                    .collect()
-                                                    .await
-                                                    .unwrap()
-                                                    .into_bytes()
-                                                    .to_vec()
-                                            )
-                                            .unwrap()
-                                        ),
-                                        Ok(..) => {
-                                            let tmp_file_content = tmp_file
-                                                .unwrap()
-                                                .body
-                                                .collect()
-                                                .await
-                                                .unwrap()
-                                                .into_bytes()
-                                                .to_vec();
+                                    // SkipprLogger::debug("Manifest json $inventoryManifest");
 
-                                            let mut tmpfile = File::create(
-                                                self.temp_dir.to_string()
-                                                    + "/s3-inventory-temp.csv.gz",
-                                            )
-                                            .unwrap();
+                                    let object_content: AggregatedBytes =
+                                        inventory_manifest.unwrap().body.collect().await.unwrap();
+                                    let manifest = SerdeJson::deserialize(
+                                        &String::from_utf8(object_content.into_bytes().to_vec())
+                                            .unwrap(),
+                                    );
 
-                                            tmpfile.write_all(&tmp_file_content);
+                                    let source_bucket =
+                                        manifest.first().unwrap()["sourceBucket"].to_string();
+                                    let headers_string: String =
+                                        manifest.first().unwrap()["fileSchema"].to_string();
+                                    let headers: Vec<_> = headers_string.split(",").collect();
 
-                                            let file = File::open(
-                                                self.temp_dir.to_string()
-                                                    + "/s3-inventory-temp.csv.gz",
-                                            )
-                                            .unwrap();
-                                            let file = BufReader::new(file);
-                                            let mut file = GzDecoder::new(file);
-                                            let mut bytes = Vec::new();
-                                            let _con = file.read_to_end(&mut bytes).unwrap();
+                                    let bucket = source_bucket.to_string();
 
-                                            let mut rdr = ReaderBuilder::new()
-                                                .delimiter(b',')
-                                                .double_quote(true)
-                                                .from_reader(bytes.as_slice());
+                                    let _chunk_size = Config::getenv("DATA_SOURCE_BATCH_SIZE", "10");
 
-                                            // let mut j = 0;
-                                            // let mut c = 0;
-                                            //
-                                            // let inventorys = vec![];
+                                    for file in manifest.first().unwrap()["files"].as_array() {
+                                        let file_key = file.first().unwrap()["key"].as_str().unwrap();
 
-                                            let mut i = 0;
+                                            println!(
+                                                "Loading {} manifest from bucket {}",
+                                                file_key,
+                                                inventory_bucket.clone()
+                                            );
 
-                                            // let records_total = rdr.records().count();
+                                            let tmp_file = self
+                                                .s3_client
+                                                .get_object()
+                                                .bucket(inventory_bucket.clone())
+                                                .key(file_key)
+                                                .send()
+                                                .await;
 
-                                            let mut datas: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+                                            match tmp_file {
+                                                Err(..) => println!(
+                                                    "Get Object Error: {}",
+                                                    String::from_utf8(
+                                                        tmp_file
+                                                            .unwrap()
+                                                            .body
+                                                            .collect()
+                                                            .await
+                                                            .unwrap()
+                                                            .into_bytes()
+                                                            .to_vec()
+                                                    )
+                                                        .unwrap()
+                                                ),
+                                                Ok(..) => {
+                                                    let tmp_file_content = tmp_file
+                                                        .unwrap()
+                                                        .body
+                                                        .collect()
+                                                        .await
+                                                        .unwrap()
+                                                        .into_bytes()
+                                                        .to_vec();
 
-                                            while let Some(result) = rdr.records().next() {
-                                                let record = result.unwrap();
+                                                    let mut tmpfile = File::create(
+                                                        self.temp_dir.to_string()
+                                                            + "/s3-inventory-temp.csv.gz",
+                                                    )
+                                                        .unwrap();
 
-                                                let mut inventory: HashMap<String, String> =
-                                                    HashMap::new();
+                                                    tmpfile.write_all(&tmp_file_content);
 
-                                                for i in 0..record.len() {
-                                                    // println!("Header {}: {}", headers[i].to_string().trim(), record.get(i).unwrap());
+                                                    let file = File::open(
+                                                        self.temp_dir.to_string()
+                                                            + "/s3-inventory-temp.csv.gz",
+                                                    )
+                                                        .unwrap();
+                                                    let file = BufReader::new(file);
+                                                    let mut file = GzDecoder::new(file);
+                                                    let mut bytes = Vec::new();
+                                                    let _con = file.read_to_end(&mut bytes).unwrap();
 
-                                                    // if headers[i].to_string().trim().eq(&"Key".to_string()) {
-                                                    //     println!("MATCH {}: {}", headers[i], record.get(i).unwrap());
-                                                    // }
-                                                    inventory.insert(
-                                                        headers[i].to_string().trim().to_string(),
-                                                        record.get(i).unwrap().to_string(),
-                                                    );
-                                                }
+                                                    let mut rdr = ReaderBuilder::new()
+                                                        .delimiter(b',')
+                                                        .double_quote(true)
+                                                        .from_reader(bytes.as_slice());
 
-                                                // if !inventory.get("Key").unwrap().is_some() {
-                                                // inventorys.push(inventory);
+                                                    // let mut j = 0;
+                                                    // let mut c = 0;
+                                                    //
+                                                    // let inventorys = vec![];
 
-                                                // let key = &inventory[&"Key".to_string()];
-                                                let target_key =
-                                                    inventory.get("Key").unwrap().to_string();
-                                                let target_bucket =
-                                                    inventory.get("\"Bucket").unwrap().to_string();
+                                                    let mut i = 0;
 
-                                                outputs.push(target_key);
+                                                    // let records_total = rdr.records().count();
 
-                                                i += 1;
+                                                    let mut datas: Vec<IngestBatch> = Vec::new();
 
-                                                if i >= 2 {
+                                                    while let Some(result) = rdr.records().next() {
 
-                                                    datas = Self::download_and_ingest(
-                                                        &mut self.s3_client_rusoto,
-                                                        &target_bucket,
-                                                        &outputs,
-                                                        &self.temp_dir,
-                                                        // &metadata,
-                                                        // &metrics
-                                                    ).await;
-                                                        // .expect("failed getting objects");
+                                                        let record = result.unwrap();
 
-                                                    if !datas.lock().unwrap().is_empty() {
-                                                        ingest_file(
-                                                            &datas,
-                                                            // pool,
-                                                            &metadata,
-                                                            &metrics
-                                                        );
+                                                        let mut inventory: HashMap<String, String> =
+                                                            HashMap::new();
+
+                                                        for i in 0..record.len() {
+                                                            // println!("Header {}: {}", headers[i].to_string().trim(), record.get(i).unwrap());
+
+                                                            // if headers[i].to_string().trim().eq(&"Key".to_string()) {
+                                                            //     println!("MATCH {}: {}", headers[i], record.get(i).unwrap());
+                                                            // }
+                                                            inventory.insert(
+                                                                headers[i].to_string().trim().to_string(),
+                                                                record.get(i).unwrap().to_string(),
+                                                            );
+                                                        }
+
+                                                        let target_key =
+                                                            inventory.get("Key").unwrap().to_string();
+                                                        let target_bucket =
+                                                            inventory.get("\"Bucket").unwrap().to_string();
+
+                                                        let offset_key = OffsetKey { namespace: target_bucket.clone(), partition: target_key.clone() };
+                                                        if Some(true) == offsets_clone.validate(&offset_key, OffsetTypes::Closed, 0) {
+
+
+
+                                                            // if !inventory.get("Key").unwrap().is_some() {
+                                                            // inventorys.push(inventory);
+
+                                                            // let key = &inventory[&"Key".to_string()];
+
+
+                                                            outputs.push(target_key);
+
+                                                            i += 1;
+
+                                                            if i >= 2 {
+                                                                datas = Self::download_and_ingest(
+                                                                    &mut self.s3_client_rusoto,
+                                                                    &target_bucket,
+                                                                    &outputs,
+                                                                    &self.temp_dir,
+                                                                    // &metadata,
+                                                                    // &metrics
+                                                                ).await;
+                                                                // .expect("failed getting objects");
+
+                                                                // if !datas. {
+                                                                self::Ingest::ingest_file(
+                                                                    datas,
+                                                                    // pool,
+                                                                    &metadata,
+                                                                    &metrics,
+                                                                    &offsets_clone
+                                                                );
+                                                                // }
+
+                                                                outputs = Vec::new();
+                                                                i = 0;
+                                                            }
+                                                        } else {
+                                                            // println!("Skipping object: {} already processed", file_key);
+                                                        }
                                                     }
-
-                                                    outputs = Vec::new();
-                                                    i = 0;
                                                 }
+                                            };
 
-                                            }
-                                        }
-                                    };
+
+                                    }
+
+                                    offsets.set(&OffsetKey { namespace: inventory_bucket.clone(), partition: object_key.to_string()}, OffsetTypes::Closed, 1);
+
+
+                                } else {
+                                    println!("Skipping inventory: {} already processed", object_key.to_string());
+
                                 }
                             }
                         }
@@ -312,7 +346,7 @@ impl DataSourceS3InventoryPlugin {
         // metadata: &Arc<Mutex<HashMap<String, Metadata>>>,
         // metrics: &Arc<Mutex<Metrics>>,
     // ) -> Result<(), bool> {
-    ) -> Arc<Mutex<Vec<String>>> {
+    ) -> Vec<IngestBatch> {
 
         // let rt = Runtime::new()
         //     .unwrap();
@@ -366,14 +400,17 @@ impl DataSourceS3InventoryPlugin {
                 })
                 .collect();
 
-        let mut datas: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let mut datas: Arc<Mutex<Vec<IngestBatch>>> = Arc::new(Mutex::new(Vec::new()));
 
             for thread in threads {
                 let mut download = thread.join().unwrap().await;
 
                 // let metadata = metadata.clone();
                 // let metrics = metrics.clone();
-                let mut datas = datas.clone();
+                let datas = datas.clone();
+
+                let bucket_name = bucket_name.clone();
 
                 thread::spawn(move || {
 
@@ -407,7 +444,13 @@ impl DataSourceS3InventoryPlugin {
                             let mut decompressed_data = String::new();
                             stream.read_to_string(&mut decompressed_data).unwrap();
 
-                            datas.lock().unwrap().push(decompressed_data);
+                            datas.lock().unwrap().push(IngestBatch {
+                                offset_key: OffsetKey {
+                                    namespace: bucket_name.to_string(),
+                                    partition: download.key
+                                },
+                                data: decompressed_data,
+                            });
 
                             // ingest_file(
                             //     decompressed_data,
@@ -426,7 +469,13 @@ impl DataSourceS3InventoryPlugin {
                             let mut str_data = String::new();
                             c.read_to_string(&mut str_data).unwrap();
 
-                            datas.lock().unwrap().push(str_data);
+                            datas.lock().unwrap().push(IngestBatch {
+                                offset_key: OffsetKey {
+                                    namespace: bucket_name.to_string(),
+                                    partition: download.key
+                                },
+                                data: str_data,
+                            });
 
                             // ingest_file(
                             //     str_data,
@@ -441,7 +490,9 @@ impl DataSourceS3InventoryPlugin {
 
         // println!("done");
 
-            datas
+        let ingest_batches: Vec<IngestBatch> = datas.lock().unwrap().to_vec();
+
+        ingest_batches
 
     }
 
