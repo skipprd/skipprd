@@ -283,7 +283,7 @@ impl Offsets {
                 Some(bool)
             },
             None => {
-                Some(true)
+                None
             }
         };
 
@@ -367,6 +367,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::thread::sleep;
     use std::time::{Duration, Instant};
+    use icu::plurals::rules::reference::ast::Operand::N;
     use rand::Rng;
     use serial_test::serial;
     use zerocopy::LayoutVerified;
@@ -392,7 +393,7 @@ mod tests {
 
         let key = &OffsetKey { namespace: "foo".to_string(), partition: "bar".to_string() };
 
-        assert_eq!(db.validate(key, OffsetTypes::Filesize, 1), Some(false));
+        assert_eq!(db.validate(key, OffsetTypes::Filesize, 1), None);
         db.set(key, OffsetTypes::Filesize, 1).unwrap();
         assert_eq!(db.validate(key, OffsetTypes::Filesize, 1), Some(false));
         assert_eq!(db.validate(key, OffsetTypes::Filesize, 2), Some(true));
@@ -403,8 +404,10 @@ mod tests {
         assert_eq!(db.validate(key, OffsetTypes::Filesize, 4), Some(true));
         assert_eq!(db.validate(key, OffsetTypes::Filesize, 2), Some(false));
 
-        assert_eq!(db.validate(key, OffsetTypes::Closed, 0), Some(true));
-        assert_eq!(db.validate(key, OffsetTypes::Closed, 1), Some(false));
+        let key = &OffsetKey { namespace: "foo".to_string(), partition: "bar2".to_string() };
+
+        assert_eq!(db.validate(key, OffsetTypes::Closed, 0), None);
+        assert_eq!(db.validate(key, OffsetTypes::Closed, 1), None);
         db.set(key, OffsetTypes::Closed, 1).unwrap();
         assert_eq!(db.validate(key, OffsetTypes::Closed, 1), Some(true));
         assert_eq!(db.validate(key, OffsetTypes::Closed, 0), Some(false));

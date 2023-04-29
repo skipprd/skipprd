@@ -139,7 +139,7 @@ impl DataSourceS3InventoryPlugin {
                                 // println!("Processing S3 manifest {}", object_key);
 
                                 let offset_key = OffsetKey { namespace: inventory_bucket.clone(), partition: object_key.to_string() };
-                                if Some(true) == offsets_clone.validate(&offset_key, OffsetTypes::Closed, 0) {
+                                if Some(true) != offsets_clone.validate(&offset_key, OffsetTypes::Closed, 1) {
                                     let inventory_manifest = self
                                         .s3_client
                                         .get_object()
@@ -165,7 +165,7 @@ impl DataSourceS3InventoryPlugin {
 
                                     let bucket = source_bucket.to_string();
 
-                                    let _chunk_size = Config::getenv("DATA_SOURCE_BATCH_SIZE", "10");
+                                    let chunk_size = Config::getenv("DATA_SOURCE_BATCH_SIZE", "10").parse::<i32>().unwrap();
 
                                     for file in manifest.first().unwrap()["files"].as_array() {
                                         let file_key = file.first().unwrap()["key"].as_str().unwrap();
@@ -268,7 +268,7 @@ impl DataSourceS3InventoryPlugin {
                                                             inventory.get("\"Bucket").unwrap().to_string();
 
                                                         let offset_key = OffsetKey { namespace: target_bucket.clone(), partition: target_key.clone() };
-                                                        if Some(true) == offsets_clone.validate(&offset_key, OffsetTypes::Closed, 0) {
+                                                        if Some(true) != offsets_clone.validate(&offset_key, OffsetTypes::Closed, 1) {
 
 
 
@@ -282,7 +282,7 @@ impl DataSourceS3InventoryPlugin {
 
                                                             i += 1;
 
-                                                            if i >= 2 {
+                                                            if i >= chunk_size {
                                                                 datas = Self::download_and_ingest(
                                                                     &mut self.s3_client_rusoto,
                                                                     &target_bucket,
@@ -369,7 +369,9 @@ impl DataSourceS3InventoryPlugin {
 
                                 // let mut response = s3_client.get_object(request).sync().unwrap();
 
-                                ////////
+                                 println!("getting object {}", object_key);
+
+                                 ////////
                                 let x_fut = s3_client
                                     .get_object(GetObjectRequest {
                                         bucket: bucket_name.clone(),
@@ -421,7 +423,7 @@ impl DataSourceS3InventoryPlugin {
                     let mut data = Vec::new();
                     let mut body = download.response.body.take().unwrap().into_blocking_read().read_to_end(&mut data);
                     // let data = download.response.body.take().unwrap().into_blocking_read();
-                    // println!("downloaded {}", download.key);
+                    println!("downloaded {}", download.key);
 
                     // let mut file = File::create(format!("{}/{}", temp_dir, download.key.replace("/", "-"))).unwrap();
                     // file.write(content.as_bytes()).unwrap();

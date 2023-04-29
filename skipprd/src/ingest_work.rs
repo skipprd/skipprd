@@ -71,6 +71,10 @@ impl Ingest {
             // println!("Ingesting");
             for ingest_batch in datas {
 
+                // have offsets, don't bother checking each line offset if not.
+                // relevant when processing a new file, which is most of the time
+                let has_offsets = offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Closed, 0);
+
                 let mut i = 1;
 
                 let mut output_files = &mut output_files_static.lock().unwrap();
@@ -84,7 +88,7 @@ impl Ingest {
                     if record.is_null() {
                         continue;
                     }
-                    if Some(true) == offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Line, i) {
+                    if None == has_offsets || Some(false) != offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Line, i) {
 
                         let skpr_namespace = Helpers::parse_namespace_field(&record, Config::get_pipeline_name(), &mut parse_namespace_cache.lock().unwrap());
                         let skpr_partition = Helpers::parse_partition_field(&record);
