@@ -357,9 +357,12 @@ impl DataSourceS3InventoryPlugin {
 
                         let s3_client = s3_client.clone();
                         let bucket_name = bucket_name.to_owned();
-                        thread::spawn(move || {
 
-                             async move {
+                        // thread::spawn(move || {
+
+                            tokio::spawn(async move {
+
+                                // async move {
 
                                 // let request = GetObjectRequest {
                                 //     bucket: bucket_name.clone(),
@@ -369,9 +372,9 @@ impl DataSourceS3InventoryPlugin {
 
                                 // let mut response = s3_client.get_object(request).sync().unwrap();
 
-                                 println!("getting object {}", object_key);
+                                // println!("getting object {}", object_key);
 
-                                 ////////
+                                ////////
                                 let x_fut = s3_client
                                     .get_object(GetObjectRequest {
                                         bucket: bucket_name.clone(),
@@ -394,9 +397,9 @@ impl DataSourceS3InventoryPlugin {
                                     response: response
                                 };
 
-                                 download
-
-                            }
+                                download
+                            // }
+                            // });
 
                         })
                 })
@@ -405,8 +408,12 @@ impl DataSourceS3InventoryPlugin {
 
         let mut datas: Arc<Mutex<Vec<IngestBatch>>> = Arc::new(Mutex::new(Vec::new()));
 
-            for thread in threads {
-                let mut download = thread.join().unwrap().await;
+        let foo = tokio::join!(join_all(threads)).0;
+
+            // for thread in threads {
+            for thread in foo {
+                // let mut download = thread.join().unwrap().await;
+                let mut download = thread.unwrap();
 
                 // let metadata = metadata.clone();
                 // let metrics = metrics.clone();
@@ -414,7 +421,8 @@ impl DataSourceS3InventoryPlugin {
 
                 let bucket_name = bucket_name.clone();
 
-                thread::spawn(move || {
+                // tokio::spawn(move || {
+               thread::spawn(move || {
 
                     let data_dir = Config::get_data_dir();
                     let temp_dir = &format!("{}/source_buffer", data_dir);
@@ -423,7 +431,7 @@ impl DataSourceS3InventoryPlugin {
                     let mut data = Vec::new();
                     let mut body = download.response.body.take().unwrap().into_blocking_read().read_to_end(&mut data);
                     // let data = download.response.body.take().unwrap().into_blocking_read();
-                    println!("downloaded {}", download.key);
+                    // println!("downloaded {}", download.key);
 
                     // let mut file = File::create(format!("{}/{}", temp_dir, download.key.replace("/", "-"))).unwrap();
                     // file.write(content.as_bytes()).unwrap();
@@ -486,7 +494,7 @@ impl DataSourceS3InventoryPlugin {
                             //     &metrics
                             // );
                         }
-                });
+                }).join().unwrap();
             }
 
 
@@ -494,6 +502,7 @@ impl DataSourceS3InventoryPlugin {
 
         let ingest_batches: Vec<IngestBatch> = datas.lock().unwrap().to_vec();
 
+        // println!("batch length {}", ingest_batches.len());
         ingest_batches
 
     }
