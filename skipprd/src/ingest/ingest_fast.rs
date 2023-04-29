@@ -372,7 +372,6 @@ fn fast_set_value(
         new_value
 
     } else {
-        println!("No data type");
 
         let discoverd_data_type = discoverIngest(field, value, metadata, updatedSchema);
 

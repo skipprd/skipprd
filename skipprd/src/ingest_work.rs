@@ -123,7 +123,7 @@ impl Ingest {
                         let msg = fast_path_ingest(
                             &record,
                             &mut meta.get_mut(&skpr_namespace).unwrap().fields,
-                            &mut *updated_schema_clone.lock().unwrap()
+                            &mut updated_schema_clone.lock().unwrap()
                         );
 
                         buf_str = msg.to_string() + "\n";
