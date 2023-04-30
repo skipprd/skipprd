@@ -300,7 +300,7 @@ impl DataSourceS3InventoryPlugin {
                                                                     &metadata,
                                                                     &metrics,
                                                                     &offsets_clone
-                                                                ).await;
+                                                                );
                                                                 // }
 
                                                                 outputs = Vec::new();

@@ -31,7 +31,7 @@ impl Ingest {
         Ingest {}
     }
 
-    pub async fn ingest_file(
+    pub fn ingest_file(
         datas: Vec<IngestBatch>,
         metadata: &Arc<Mutex<HashMap<String, Metadata>>>,
         metrics: &Arc<Mutex<Metrics>>,
