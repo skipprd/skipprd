@@ -45,11 +45,11 @@ impl Ingest {
         let data_dir = Config::get_data_dir();
         let output_dir = format!("{}/output", data_dir);
 
-        let mut updated_schema: Arc<Mutex<String>> = Arc::new(Mutex::new("no".to_string()));
+        let updated_schema: Arc<Mutex<String>> = Arc::new(Mutex::new("no".to_string()));
 
-        let mut updated_schema_clone = updated_schema.clone();
-        let mut metadata_clone = metadata.clone();
-        let mut metrcis_clone = metrics.clone();
+        let updated_schema_clone = updated_schema.clone();
+        let metadata_clone = metadata.clone();
+        let metrcis_clone = metrics.clone();
         let offset_db_clone = offset_db.clone();
 
         let mut bytes: u64 = 0;
@@ -63,7 +63,7 @@ impl Ingest {
 
                 let mut i = 1;
 
-                let mut output_files = &mut output_files_static.lock().unwrap();
+                let output_files = &mut output_files_static.lock().unwrap();
 
                 let mut buf_str: String = String::new();
 

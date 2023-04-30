@@ -258,7 +258,7 @@ fn fast_set_value(
             } else {
 
                 if data_type == "map" {
-                    let mut metadata_field = metadata.get_mut(field).unwrap();
+                    let metadata_field = metadata.get_mut(field).unwrap();
                     let determined_type_values = &metadata_field.determined_type_values;
                     let fields = &mut metadata_field.fields;
                     for (key, val) in value.as_object().unwrap().iter().filter_map(|(k, v)| Some((k, v)) ) {

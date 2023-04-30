@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::fs::{create_dir, File, OpenOptions};
 use std::io::{BufWriter, Read};
-use std::time::Duration;
-use std::sync::{Arc, Mutex, MutexGuard};
+
+use std::sync::{MutexGuard};
 
 
 // use aws_config::profile::profile_file::ProfileFileKind::Config;
@@ -24,7 +24,7 @@ use reqwest::header::AUTHORIZATION;
 use crate::discover::Metadata;
 
 use crate::helpers::Helpers;
-use crate::plugins::athena::AwsAthena;
+
 
 
 #[non_exhaustive]
@@ -286,7 +286,7 @@ impl Config {
     pub async fn set_config(metadata: &HashMap<String, Metadata>, evolved: bool) {
 
         // if evolved {
-            for (namespace, schema) in metadata.into_iter() {
+            for (namespace, _schema) in metadata.into_iter() {
                 println!("Updating Hive '{}' schema", namespace);
                 // AwsAthena::create_or_update_schema(&namespace, &schema).await;
             }
@@ -317,20 +317,20 @@ impl Config {
         }
 
         // let uri = Config::getenv("SKIPPR_API_ENDPOINT", "");
-        let uri = "https://console.skippr.io";
+        let _uri = "https://console.skippr.io";
             let token = Config::getenv("SKIPPR_API_TOKEN", "");
 
             let mut headers = HeaderMap::new();
             headers.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", token)).unwrap());
 
 
-        let client = Client::builder()
+        let _client = Client::builder()
                 .default_headers(headers)
                 .build().unwrap();
 
-            let path = "ingest-job/update-mapping";
+            let _path = "ingest-job/update-mapping";
 
-            let data = json!({
+            let _data = json!({
                 "id": pipeline_id,
                 "mapping": metadata,
                 "evolved": evolved,
@@ -401,10 +401,10 @@ impl Config {
             .send();
 
         match response {
-            Ok(resp) => {
+            Ok(_resp) => {
                 // println!("Status HTTP Success: {:?}", resp);
             }
-            Err(err) => {
+            Err(_err) => {
                 // println!("Status HTTP Error: {:?}", err);
             }
         }

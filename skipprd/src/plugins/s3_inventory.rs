@@ -1,5 +1,5 @@
 use crate::helpers::configuration::{Config, Metrics};
-use crate::helpers::Helpers;
+
 use crate::serdes::json::SerdeJson;
 use aws_sdk_s3::Client;
 pub use aws_smithy_http::byte_stream::AggregatedBytes;
@@ -15,21 +15,21 @@ use std::io::{BufRead, BufReader, Cursor, Read, Write};
 
 use std::future::Future;
 use std::sync::{Arc, Mutex};
-use std::thread::sleep;
-use std::time::Duration;
-use std::{fs, thread};
-use std::error::Error;
 
-use crate::buffer::BufferChunker;
+
+use std::{fs, thread};
+
+
+
 use crate::discover::Metadata;
 use futures::future::join_all;
 use futures::StreamExt;
-use tokio::join;
+
 // use crate::thread_pool::ThreadPool;
 
-use std::io::prelude::*;
-use tokio::runtime::Runtime;
-use tokio::sync::mpsc::{channel, Receiver};
+
+
+
 use rusoto_core::Region;
 use rusoto_s3::{GetObjectRequest, S3Client, S3, GetObjectOutput};
 use crate::helpers::offsets::{OffsetKey, Offsets, OffsetTypes};
@@ -87,7 +87,7 @@ impl DataSourceS3InventoryPlugin {
         // let res = offsets_clone.validate(&offset_key, OffsetTypes::Closed, 0);
         // panic!("{:?}", res);
 
-            let s3_client = self.s3_client.clone();
+            let _s3_client = self.s3_client.clone();
         // let s3_client = s3_client.clone();
 
         // let s3_client = Arc::new(s3_client);
@@ -163,7 +163,7 @@ impl DataSourceS3InventoryPlugin {
                                         manifest.first().unwrap()["fileSchema"].to_string();
                                     let headers: Vec<_> = headers_string.split(",").collect();
 
-                                    let bucket = source_bucket.to_string();
+                                    let _bucket = source_bucket.to_string();
 
                                     let chunk_size = Config::getenv("DATA_SOURCE_BATCH_SIZE", "10").parse::<i32>().unwrap();
 
@@ -342,7 +342,7 @@ impl DataSourceS3InventoryPlugin {
         s3_client: &mut S3Client,
         bucket_name: &String,
         object_keys: &Vec<String>,
-        output_dir: &String,
+        _output_dir: &String,
         // metadata: &Arc<Mutex<HashMap<String, Metadata>>>,
         // metrics: &Arc<Mutex<Metrics>>,
     // ) -> Result<(), bool> {
@@ -406,7 +406,7 @@ impl DataSourceS3InventoryPlugin {
                 .collect();
 
 
-        let mut datas: Arc<Mutex<Vec<IngestBatch>>> = Arc::new(Mutex::new(Vec::new()));
+        let datas: Arc<Mutex<Vec<IngestBatch>>> = Arc::new(Mutex::new(Vec::new()));
 
         let foo = tokio::join!(join_all(threads)).0;
 
@@ -425,11 +425,11 @@ impl DataSourceS3InventoryPlugin {
                thread::spawn(move || {
 
                     let data_dir = Config::get_data_dir();
-                    let temp_dir = &format!("{}/source_buffer", data_dir);
+                    let _temp_dir = &format!("{}/source_buffer", data_dir);
 
                     // let mut content = String::new();
                     let mut data = Vec::new();
-                    let mut body = download.response.body.take().unwrap().into_blocking_read().read_to_end(&mut data);
+                    let _body = download.response.body.take().unwrap().into_blocking_read().read_to_end(&mut data);
                     // let data = download.response.body.take().unwrap().into_blocking_read();
                     // println!("downloaded {}", download.key);
 

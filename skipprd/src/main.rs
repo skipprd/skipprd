@@ -11,16 +11,16 @@ mod ingest_work;
 
 use std::collections::{HashMap};
 
-use std::fs::{File, OpenOptions};
-use std::io::prelude::*;
-use std::io::{BufReader, IoSlice};
+use std::fs::{File};
+
+use std::io::{BufReader};
 use std::ops::{Add};
 
 
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::thread::sleep;
-use std::time::{Duration, Instant};
+
+use std::time::{Instant};
 use std::{fs};
 
 
@@ -52,22 +52,22 @@ use clap::{Parser};
 
 
 mod ingest;
-use crate::ingest::ingest_fast::{fast_path_ingest};
+
 
 mod serdes;
-use crate::serdes::json::SerdeJson;
+
 use crate::serdes::parquet::SerdeParquet;
 
 mod plugins;
-use crate::plugins::athena::{DataOutputAwsAthenaPlugin};
+
 
 
 // use crate::helpers::Config
 
 use crate::discover::arrow_schema::convert_skippr_to_arrow;
 use crate::helpers::configuration::{Config, Metrics};
-use crate::helpers::Helpers;
-use serde_json::Value;
+
+
 
 use crate::buffer::BufferChunker;
 use crate::plugins::s3_inventory::DataSourceS3InventoryPlugin;
@@ -233,14 +233,14 @@ async fn sync() {
     // let ingestMsgTotal = Arc::new(Mutex::new(0));
     // let ingestMsgCount = Arc::new(Mutex::new(0));
     // let ingestMsgCountClone = ingestMsgCount.clone();
-    let mut metrics: Arc<Mutex<Metrics>> = Arc::new(Mutex::new(Metrics::new()));
+    let metrics: Arc<Mutex<Metrics>> = Arc::new(Mutex::new(Metrics::new()));
 
     let data_dir= Config::get_data_dir();
     let metadata_file = format!("{}/metadata.json", data_dir);
 
     // let mut skipprMetadata = Arc::new(Mutex::new(HashMap::new()));
 
-    let mut skipprMetadata = Arc::new(Mutex::new(match File::open(metadata_file.clone()) {
+    let skipprMetadata = Arc::new(Mutex::new(match File::open(metadata_file.clone()) {
     // let mut skipprMetadata: HashMap<String, Metadata> = match File::open(metadata_file.clone()) {
         Ok(schema_file) => {
             println!("Found Skippr metadata");
@@ -332,9 +332,9 @@ async fn sync() {
     let inputMetadataClone = skipprMetadata.clone();
 
     // @todo - share across s3 ingests
-    let mut parse_namespace_cache: HashMap<String, String> = HashMap::new();
-    let mut output_files: HashMap<String, File> = HashMap::new();
-    let options = MatchOptions {
+    let _parse_namespace_cache: HashMap<String, String> = HashMap::new();
+    let _output_files: HashMap<String, File> = HashMap::new();
+    let _options = MatchOptions {
         case_sensitive: false,
         require_literal_separator: false,
         require_literal_leading_dot: false,
@@ -529,7 +529,7 @@ async fn sync() {
         // ds3.sync().await;
     // };
 
-    let newmeta_clone = skipprMetadata.clone();
+    let _newmeta_clone = skipprMetadata.clone();
 
     // pool.execute(move || {
     //     let mut newMeta = newmeta_clone.lock().unwrap();

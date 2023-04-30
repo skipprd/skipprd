@@ -401,7 +401,7 @@ impl AwsAthena {
     }
 
     fn get_partition_by_fields(partitions: &mut Vec<Column>) {
-        let mut partition_values: Vec<String> = vec![];
+        let _partition_values: Vec<String> = vec![];
 
         let partition_config = Config::getenv("DATA_OUTPUT_PARTITION_BY_FIELDS", "");
         let partition_fields: Vec<&str> = partition_config.split(",").collect();

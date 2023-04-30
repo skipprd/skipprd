@@ -1,16 +1,16 @@
 use sled;
 use Result;
-use std::borrow::Cow;
-use std::io::Read;
-use std::sync::Mutex;
-use arrow::compute::binary;
-use clap::builder::Str;
+
+
+
+
+
 use serde::__private::de::IdentifierDeserializer;
 use sled::IVec;
 use {
     byteorder::{BigEndian, LittleEndian},
     zerocopy::{
-        byteorder::U64, AsBytes, FromBytes, LayoutVerified, Unaligned, U16, U32,
+        byteorder::U64, AsBytes, FromBytes, LayoutVerified, Unaligned, U16,
     },
 };
 use crate::helpers::configuration::Config;
@@ -172,7 +172,7 @@ impl Offsets {
         }
     }
 
-    pub fn insert(&self, key: &OffsetKey, offset_type: OffsetTypes, offset: u64) -> Option<IVec>  {
+    pub fn insert(&self, key: &OffsetKey, _offset_type: OffsetTypes, _offset: u64) -> Option<IVec>  {
         let key = self.build_key(key);
         let bytes: &[u8] = key.as_bytes();
         // let bytes: &[u8] = unsafe { self.any_as_u8_slice(&key) };
