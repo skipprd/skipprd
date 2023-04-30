@@ -31,38 +31,21 @@ impl SerdeJson {
         }
     }
 
-    pub fn deserialize(record: &String) -> Vec<Value> {
-        let mut message: Vec<Value> = vec![];
-        let mut records: Vec<Value> = vec![];
-        let mut messages: Vec<Value> = vec![];
+    pub fn deserialize(record: &str) -> Vec<Value> {
+        let mut messages: Vec<Value> = Vec::new();
 
-        // deserialise handling multiline json
-        let data = record;
+        let line: Vec<Value> = SerdeJson::json_decode(record);
 
-        records = vec![];
-
-        // if array of json objects
-        let _analyise_schema = AnalyseSchema { i: 0 };
-
-        let line: Vec<Value> = SerdeJson::json_decode(data);
-
-        if !line.is_empty() {
-
-            for item in line {
-                if item.is_string() {
-                    match serde_json::from_str(&item.as_str().unwrap_or_default()) {
-                        Ok(message) => message,
-                        Err(e) => println!("Couldn't deserialise message {}", e)
-                    }
-
-                    messages.append(&mut message);
-                } else {
-                    messages.push(item);
+        for item in line {
+            if item.is_string() {
+                match serde_json::from_str::<Value>(&item.as_str().unwrap_or_default()) {
+                    Ok(message) => messages.push(message),
+                    Err(e) => println!("Couldn't deserialize message: {}", e),
                 }
+            } else {
+                messages.push(item);
             }
         }
-
-
 
         messages
     }
@@ -91,126 +74,71 @@ impl SerdeJson {
         Ok(BufReader::new(file).lines())
     }
 
-    pub fn json_decode(string: &String) -> Vec<Value> {
 
-        let mut message: Vec<Value> = vec![];
+    pub fn json_decode(string: &str) -> Vec<Value> {
+        let mut message: Vec<Value> = Vec::new();
 
-        let line: Value = match serde_json::from_str(&string) {
+        match serde_json::from_str::<Value>(string) {
             Ok(Value::Array(lines)) => {
-                for data in lines.into_iter() {
-                    message.push(data);
-                }
-                Null
-            },
-            Ok(line) => line,
-            Err(_) => Null,
-        };
+                message.extend(lines);
+            }
+            Ok(line) => {
+                message.push(line);
+            }
+            Err(_) => {
+                let lines = string
+                    .lines()
+                    .map(|line| {
+                        let mut cleaned_line = line
+                            .replace("\\", "")
+                            .replace("u'", "\"")
+                            .replace("'", "\"");
 
-        // @todo - match error above (trigger from last test)
-        if !line.is_null() {
-            message.push(line);
-        } else {
-            message = vec![];
+                        let valid_chars: String = cleaned_line
+                            .chars()
+                            .filter(|c| !c.is_ascii_control())
+                            .collect();
 
-            // mocking a stream is best way to deal with new line chars
-            let data_dir = Config::get_data_dir();
-
-            let mut rng = rand::thread_rng();
-            let random_tmp_file_name = rng.gen::<i32>();
-
-            let temp_file = &format!("{}/{}", data_dir, random_tmp_file_name);
-
-            let mut file = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .append(true)
-                .open(temp_file)
-                .unwrap();
-
-            file.write_all(string.as_bytes()).expect("Failed to create temp file while deserializing json");
-            file.rewind().expect("Failed to write to temp file with deserializing json");
-
-            let lines = SerdeJson::read_lines(temp_file);
-            remove_file(Path::new(&temp_file)).unwrap();
-
-            if lines.is_ok() {
-                for line in lines.unwrap() {
-                    if let Ok(mut string) = line {
-
-                        // Basic clean up
-                        // handle escaped json
-                        string = string.replace("\\", "");
-                        // and sometimes double escaped
-                        string = string.replace("\\", "");
-
-                        // handle python unicode strings
-                        // @todo - better way?
-                        string = string.replace("u'", "\"");
-
-                        // handle invalid single quotes
-                        string = string.replace("'", "\"");
-
-                        // This will remove unwanted control characters.
-                        for d in 0..=31 {
-                            string = string.replace(char::from_u32(d).unwrap(), "");
-                        }
-                        string = string.replace(char::from_u32(127).unwrap(), "");
-
-                        // Some file begins with 'efbbbf' to mark the beginning of the file. (binary level)
-                        // here we detect it and we remove it, basically it's the first 3 characters
-                        // see https://en.wikipedia.org/wiki/Byte_order_mark
-                        if string.starts_with("efbbbf") {
-                            string = string.replace("efbbbf", "");
+                        if valid_chars.starts_with("efbbbf") {
+                            cleaned_line = valid_chars.replace("efbbbf", "");
                         }
 
-                        // Eagerly and perhaps over zealously glob any json we can find by stripping any
-                        // remaining non-json from beginning of source data strings.
-                        let mut json_start = string.find("[");
-                        if json_start.is_none() || json_start.unwrap() > 0 {
-                            json_start = string.find("{");
+                        if let Some(json_start) = cleaned_line.find(|c| c == '[' || c == '{') {
+                            cleaned_line.drain(..json_start);
                         }
 
-                        if json_start.is_some() && json_start.unwrap() > 0 {
-                            string = string.replace(string.get(0..json_start.unwrap()).unwrap(), "");
-                        }
+                        cleaned_line
+                    })
+                    .collect::<Vec<_>>();
 
-                        message.push(serde_json::from_str(&string).unwrap_or_default());
+                let mut deserialized_lines: Vec<Value> = lines
+                    .iter()
+                    .map(|line| serde_json::from_str(&line).unwrap_or_default())
+                    .collect();
 
-                        if message.is_empty() || message.first().unwrap() == &Null {
-                            message = vec![];
+                if deserialized_lines.is_empty() || deserialized_lines.first().unwrap() == &Value::Null {
+                    deserialized_lines.clear();
 
-                            // Check for object concatinated into single line with no delemiter
-                            // e.g. as AWS Kinesis Firehose does
-                            let records: Vec<&str> = string.split("}{").collect();
+                    for line in lines {
+                        let records: Vec<&str> = line.split("}{").collect();
 
-                            let count = records.len();
-                            let mut i = 1;
+                        for (i, record) in records.iter().enumerate() {
+                            let mut record = record.to_string();
 
-                            for record in records {
-                                if i == 1 {
-                                    let mut record = record.to_string();
-                                    record.push('}');
-                                    message.push(serde_json::from_str(&record).unwrap_or_default());
-                                }
-
-                                if i > 1 && i < count {
-                                    let mut record = record.to_string();
-                                    record.insert(0, '{');
-                                    record.push('}');
-                                    message.push(serde_json::from_str(&record).unwrap_or_default());
-                                }
-
-                                if i == count {
-                                    let mut record = record.to_string();
-                                    record.insert(0, '{');
-                                    message.push(serde_json::from_str(&record).unwrap_or_default());
-                                }
-
-                                i += 1;
+                            if i != 0 {
+                                record.insert(0, '{');
                             }
+
+                            if i != records.len() - 1 {
+                                record.push('}');
+                            }
+
+                            deserialized_lines.push(serde_json::from_str(&record).unwrap_or_default());
                         }
                     }
                 }
+
+                message.extend(deserialized_lines);
             }
         }
 
