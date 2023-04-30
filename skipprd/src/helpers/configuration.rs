@@ -4,6 +4,7 @@ use std::fs;
 use std::fs::{create_dir, File, OpenOptions};
 use std::io::{BufWriter, Read};
 use std::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 
 // use aws_config::profile::profile_file::ProfileFileKind::Config;
@@ -355,7 +356,7 @@ impl Config {
 
     }
 
-    pub(crate) fn set_status(metrics: &Metrics, exit_code: Option<i8>) {
+    pub(crate) fn set_status(metrics: MutexGuard<Metrics>, exit_code: Option<i8>) {
 
         let pipeline_id = Config::getenv("PIPELINE_ID", "");
 
@@ -382,6 +383,9 @@ impl Config {
                 "msgs_total": metrics.msgs_total,
                 "msgs_current": metrics.msgs_current,
                 "run_time_seconds": metrics.run_time_seconds,
+                "deadletters_current": metrics.deadletters_current,
+                "bytes_current": metrics.bytes_current,
+                "bytes_total": metrics.bytes_total,
             },
             "pipeline_id": pipeline_id,
             "sync_mode": "sync",
@@ -397,10 +401,10 @@ impl Config {
             .send();
 
         match response {
-            Ok(_resp) => {
+            Ok(resp) => {
                 // println!("Status HTTP Success: {:?}", resp);
             }
-            Err(_err) => {
+            Err(err) => {
                 // println!("Status HTTP Error: {:?}", err);
             }
         }
@@ -422,6 +426,8 @@ pub struct Metrics {
     pub msgs_current: u64,
     pub deadletters_current: u64,
     pub run_time_seconds: u64,
+    pub bytes_current: u64,
+    pub bytes_total: u64,
 }
 impl Metrics {
     #[inline]
@@ -432,6 +438,8 @@ impl Metrics {
             msgs_current: 0,
             deadletters_current: 0,
             run_time_seconds: 0,
+            bytes_current: 0,
+            bytes_total: 0,
         }
     }
 }

@@ -66,6 +66,7 @@ impl Ingest {
         let mut metrcis_clone = metrics.clone();
         let offset_db_clone = offset_db.clone();
 
+        let mut bytes: u64 = 0;
 
         thread::spawn(move || {
             // println!("Ingesting");
@@ -88,7 +89,12 @@ impl Ingest {
                     if record.is_null() {
                         continue;
                     }
+
                     if None == has_offsets || Some(false) != offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Line, i) {
+
+                        let usize = serde_json::to_vec(&record).unwrap().len();
+                        let _bytes: u64 = usize.try_into().unwrap();
+                        bytes += _bytes;
 
                         let skpr_namespace = Helpers::parse_namespace_field(&record, Config::get_pipeline_name(), &mut parse_namespace_cache.lock().unwrap());
                         let skpr_partition = Helpers::parse_partition_field(&record);
@@ -159,6 +165,7 @@ impl Ingest {
                 let mut counter_lock = metrcis_clone.lock().unwrap();
 
                 counter_lock.msgs_current += i;
+                counter_lock.bytes_current += bytes;
 
             }
 

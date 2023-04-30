@@ -293,18 +293,22 @@ async fn sync() {
             let now_lock = now.lock().unwrap();
 
             metrics_lock.msgs_total += metrics_lock.msgs_current;
+            metrics_lock.bytes_total += metrics_lock.bytes_current;
 
             // metrics.msgs_total = *total_lock;
             // metrics.msgs_current = *counter_lock;
             metrics_lock.run_time_seconds = now_lock.elapsed().as_secs().clone() as u64;
-            Config::set_status(&metrics_lock, None);
 
             println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
             println!("Deadletters Messages: {}", metrics_lock.deadletters_current);
             println!("Ingested Messages: {}", metrics_lock.msgs_current);
             println!("Total Messages: {}", metrics_lock.msgs_total);
+            println!("Bytes: {}", metrics_lock.bytes_total);
 
             metrics_lock.msgs_current = 0;
+
+            Config::set_status(metrics_lock, None);
+
 
         },
         periodic::Every::new(Duration::from_secs(60)),
