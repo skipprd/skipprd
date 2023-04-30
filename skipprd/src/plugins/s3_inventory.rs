@@ -343,168 +343,100 @@ impl DataSourceS3InventoryPlugin {
         bucket_name: &String,
         object_keys: &Vec<String>,
         _output_dir: &String,
-        // metadata: &Arc<Mutex<HashMap<String, Metadata>>>,
-        // metrics: &Arc<Mutex<Metrics>>,
-    // ) -> Result<(), bool> {
     ) -> Vec<IngestBatch> {
+        let threads: Vec<_> = object_keys.clone()
+            .into_iter()
+            .map(|object_key| {
+                let s3_client = s3_client.clone();
+                let bucket_name = bucket_name.to_owned();
 
-        // let rt = Runtime::new()
-        //     .unwrap();
+                tokio::spawn(async move {
+                    let x_fut = s3_client
+                        .get_object(GetObjectRequest {
+                            bucket: bucket_name.clone(),
+                            key: object_key.to_string(),
+                            ..Default::default()
+                        });
 
-            let threads: Vec<_> = object_keys.clone()
-                .into_iter()
-                .map(|object_key| {
+                    let response = x_fut.await.expect(&format!("Failed getting object {}", object_key));
+                    // println!("got object {}", object_key);
 
-                        let s3_client = s3_client.clone();
-                        let bucket_name = bucket_name.to_owned();
+                    let download = Download {
+                        key: object_key,
+                        response: response,
+                    };
 
-                        // thread::spawn(move || {
-
-                            tokio::spawn(async move {
-
-                                // async move {
-
-                                // let request = GetObjectRequest {
-                                //     bucket: bucket_name.clone(),
-                                //     key: object_key.to_string(),
-                                //     ..Default::default()
-                                // };
-
-                                // let mut response = s3_client.get_object(request).sync().unwrap();
-
-                                // println!("getting object {}", object_key);
-
-                                ////////
-                                let x_fut = s3_client
-                                    .get_object(GetObjectRequest {
-                                        bucket: bucket_name.clone(),
-                                        key: object_key.to_string(),
-                                        ..Default::default()
-                                    });
-
-                                // let response = rt.block_on(x_fut).unwrap();
-                                let response =  x_fut.await.expect(&format!("Failed getting object {}", object_key));
-                                // println!("got object {}", object_key);
-
-                                ////////
-                                // let mut content = String::new();
-                                // let mut body = response.body.unwrap().into_async_read().poll_read("", &mut content);
-                                // let mut file = File::create(format!("{}.txt", object_key)).unwrap();
-                                // file.write(content.as_bytes());
-
-                                let download = Download {
-                                    key: object_key,
-                                    response: response
-                                };
-
-                                download
-                            // }
-                            // });
-
-                        })
+                    download
                 })
-                .collect();
+            })
+            .collect();
 
 
         let datas: Arc<Mutex<Vec<IngestBatch>>> = Arc::new(Mutex::new(Vec::new()));
 
         let foo = tokio::join!(join_all(threads)).0;
 
-            // for thread in threads {
-            for thread in foo {
-                // let mut download = thread.join().unwrap().await;
-                let mut download = thread.unwrap();
+        // for thread in threads {
+        for thread in foo {
+            let mut download = thread.unwrap();
 
-                // let metadata = metadata.clone();
-                // let metrics = metrics.clone();
-                let datas = datas.clone();
+            let datas = datas.clone();
 
-                let bucket_name = bucket_name.clone();
+            let bucket_name = bucket_name.clone();
 
-                // tokio::spawn(move || {
-               thread::spawn(move || {
+            thread::spawn(move || {
+                let data_dir = Config::get_data_dir();
+                let _temp_dir = &format!("{}/source_buffer", data_dir);
 
-                    let data_dir = Config::get_data_dir();
-                    let _temp_dir = &format!("{}/source_buffer", data_dir);
-
-                    // let mut content = String::new();
-                    let mut data = Vec::new();
-                    let _body = download.response.body.take().unwrap().into_blocking_read().read_to_end(&mut data);
-                    // let data = download.response.body.take().unwrap().into_blocking_read();
-                    // println!("downloaded {}", download.key);
-
-                    // let mut file = File::create(format!("{}/{}", temp_dir, download.key.replace("/", "-"))).unwrap();
-                    // file.write(content.as_bytes()).unwrap();
-
-                    // Ingest
-
-                    // let mut data = Vec::new();
-                    // file.read_to_end(&mut data);
-
-                        if download.key.contains(".gz") {
-                            // Something that implements `std::io::Read`
-                            let c = Cursor::new(data);
-
-                            // To inflate on the fly, "pipe" the data through the decoder, i.e. wrap the reader
-                            let mut stream = GzDecoder::new(c);
-
-                            // Consume the `Read`er somehow
-                            // std::io::copy(&mut stream, &mut file).unwrap();
-
-                            let mut decompressed_data = String::new();
-                            stream.read_to_string(&mut decompressed_data).unwrap();
-
-                            datas.lock().unwrap().push(IngestBatch {
-                                offset_key: OffsetKey {
-                                    namespace: bucket_name.to_string(),
-                                    partition: download.key
-                                },
-                                data: decompressed_data,
-                            });
-
-                            // ingest_file(
-                            //     decompressed_data,
-                            //     // pool,
-                            //     &metadata,
-                            //     &metrics
-                            // );
-                        } else {
-                            let mut c = Cursor::new(data);
-
-                            // let mut stream = BufReader::new(data);
-
-                            // Consume the `Read`er somehow
-                            // std::io::copy(&mut c, &mut file).unwrap();
-
-                            let mut str_data = String::new();
-                            c.read_to_string(&mut str_data).unwrap();
-
-                            datas.lock().unwrap().push(IngestBatch {
-                                offset_key: OffsetKey {
-                                    namespace: bucket_name.to_string(),
-                                    partition: download.key
-                                },
-                                data: str_data,
-                            });
-
-                            // ingest_file(
-                            //     str_data,
-                            //     // pool,
-                            //     &metadata,
-                            //     &metrics
-                            // );
-                        }
-                }).join().unwrap();
-            }
+                let mut data = Vec::new();
+                let _body = download.response.body.take().unwrap().into_blocking_read().read_to_end(&mut data);
 
 
-        // println!("done");
+                if download.key.contains(".gz") {
+                    // Something that implements `std::io::Read`
+                    let c = Cursor::new(data);
+
+                    // To inflate on the fly, "pipe" the data through the decoder, i.e. wrap the reader
+                    let mut stream = GzDecoder::new(c);
+
+                    // Consume the `Read`er somehow
+                    // std::io::copy(&mut stream, &mut file).unwrap();
+
+                    let mut decompressed_data = String::new();
+                    stream.read_to_string(&mut decompressed_data).unwrap();
+
+                    datas.lock().unwrap().push(IngestBatch {
+                        offset_key: OffsetKey {
+                            namespace: bucket_name.to_string(),
+                            partition: download.key,
+                        },
+                        data: decompressed_data,
+                    });
+                } else {
+                    let mut c = Cursor::new(data);
+
+                    // let mut stream = BufReader::new(data);
+
+                    // Consume the `Read`er somehow
+                    // std::io::copy(&mut c, &mut file).unwrap();
+
+                    let mut str_data = String::new();
+                    c.read_to_string(&mut str_data).unwrap();
+
+                    datas.lock().unwrap().push(IngestBatch {
+                        offset_key: OffsetKey {
+                            namespace: bucket_name.to_string(),
+                            partition: download.key,
+                        },
+                        data: str_data,
+                    });
+                }
+            }).join().unwrap();
+        }
 
         let ingest_batches: Vec<IngestBatch> = datas.lock().unwrap().to_vec();
 
-        // println!("batch length {}", ingest_batches.len());
         ingest_batches
-
     }
 
     // async fn download_and_ingest2(bucket: &str, keys: &Vec<&str>, output_dir: &str) {
