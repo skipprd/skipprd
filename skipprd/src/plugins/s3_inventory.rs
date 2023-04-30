@@ -300,7 +300,7 @@ impl DataSourceS3InventoryPlugin {
                                                                     &metadata,
                                                                     &metrics,
                                                                     &offsets_clone
-                                                                );
+                                                                ).await;
                                                                 // }
 
                                                                 outputs = Vec::new();
@@ -383,8 +383,8 @@ impl DataSourceS3InventoryPlugin {
                                     });
 
                                 // let response = rt.block_on(x_fut).unwrap();
-                                let response = x_fut.await.unwrap();
-
+                                let response =  x_fut.await.expect(&format!("Failed getting object {}", object_key));
+                                // println!("got object {}", object_key);
 
                                 ////////
                                 // let mut content = String::new();
