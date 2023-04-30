@@ -1,23 +1,17 @@
 use std::collections::HashMap;
 use std::{fs, thread};
 use std::fs::{File, OpenOptions};
-use std::io::{IoSlice, Write};
-use std::ops::Deref;
-use std::path::{PathBuf};
+use std::io::{Write};
 use std::sync::{Arc, Mutex};
-use futures::SinkExt;
-use glob::MatchOptions;
-use lazy_static::lazy_static;
 use once_cell::sync::Lazy;
 use serde_json::Value;
 use crate::buffer::BufferChunker;
 use crate::discover::Metadata;
 use crate::helpers::configuration::{Config, Metrics};
 use crate::helpers::Helpers;
-use crate::helpers::offsets::{OffsetKey, Offsets, OffsetTypes, OffsetValue};
+use crate::helpers::offsets::{OffsetKey, Offsets, OffsetTypes};
 use crate::ingest::ingest_fast::fast_path_ingest;
 use crate::serdes::json::SerdeJson;
-// use crate::thread_pool::ThreadPool;
 
 
 
@@ -35,11 +29,6 @@ pub struct Ingest {
 }
 
 
-// lazy_static! {
-    // static ref ARRAY: Mutex<Vec<u8>> = Mutex::new(vec![]);
-    // static ref parse_namespace_cache: HashMap<String, String> = HashMap::new();
-// }
-
 impl Ingest {
 
     pub fn new() -> Ingest{
@@ -49,12 +38,9 @@ impl Ingest {
 
     pub fn ingest_file(
         datas: Vec<IngestBatch>,
-        // pool: &ThreadPool,
         metadata: &Arc<Mutex<HashMap<String, Metadata>>>,
         metrics: &Arc<Mutex<Metrics>>,
         offset_db: &Arc<Offsets>,
-        // input_file: &mut File
-        // , path: PathBuf
     ) {
         let data_dir = Config::get_data_dir();
         let output_dir = format!("{}/output", data_dir);
@@ -69,7 +55,6 @@ impl Ingest {
         let mut bytes: u64 = 0;
 
         thread::spawn(move || {
-            // println!("Ingesting");
             for ingest_batch in datas {
 
                 // have offsets, don't bother checking each line offset if not.
@@ -112,7 +97,7 @@ impl Ingest {
                         if output_files.get_mut(&output_file_name).is_none() {
                             let f = OpenOptions::new()
                                 .create(true)
-                                // .write(true)
+                                .write(true)
                                 .append(true)
                                 .open(output_file)
                                 .unwrap();
@@ -148,18 +133,12 @@ impl Ingest {
 
                             output_files.remove(&output_file_name).unwrap();
                         }
-
-
                     }
-                    // else {
-                        // println!("Skipping batch: {}, line {}. Already processed", ingest_batch.offset_key.partition, i);
-                    // }
 
                     i += 1;
 
                 }
 
-                // println!("setting {:?}", ingest_batch.offset_key);
                 offset_db_clone.set(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
 
                 let mut counter_lock = metrcis_clone.lock().unwrap();
@@ -178,14 +157,9 @@ impl Ingest {
                         Config::set_config(&*metadata_clone.lock().unwrap(), *updated_schema_clone.lock().unwrap() == "yes".to_string()).await;
                     });
 
-                // Config::set_config(&metadata.lock().unwrap(), updated_schema == "yes".to_string()).await;
-
-
                 *updated_schema_clone.lock().unwrap() = "no".to_string();
             }
-            // println!("Ingested");
         });
-
 
     }
 
