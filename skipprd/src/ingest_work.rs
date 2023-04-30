@@ -125,7 +125,6 @@ impl Ingest {
 
                         if output_files.get(&output_file_name).unwrap().metadata().unwrap().len() > 1024 * 1024 * 10 {
 
-                            println!("flushing ingest buffer");
                             fs::rename(
                                 format!("{}/{}", output_dir, &output_file_name),
                                 format!("{}/done/{}-{}", output_dir, &Helpers::random_str(12), &output_file_name),
