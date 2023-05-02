@@ -47,6 +47,7 @@ zerocopy = "0.6.1"
 byteorder = "1.4.3"
 rusoto_core = "0.48.0"
 rusoto_s3 = "0.48.0"
+ctrlc = "3.2.5"
 
 [dev-dependencies]
 serial_test = "1.0.0"
