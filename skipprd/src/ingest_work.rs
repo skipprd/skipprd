@@ -50,7 +50,7 @@ impl Ingest {
 
         let mut bytes: u64 = 0;
 
-        thread::spawn(move || {
+        // thread::spawn(move || {
             for ingest_batch in datas {
                 let mut buf_str: String = String::new();
 
@@ -187,6 +187,6 @@ impl Ingest {
 
                 *updated_schema_clone.lock().unwrap() = "no".to_string();
             }
-        });
+        // });
     }
 }

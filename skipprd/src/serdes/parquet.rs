@@ -315,7 +315,7 @@ impl SerdeParquet {
                 // Err(error) => return Err(error.into()),
                 Err(_error) => {
                     println!("Failed writing batch");
-                    // println!("{:?}", batch);
+                    println!("{:?}", _error);
                     // AnalyseSchema::determine_field_types(&mut newMeta.get_mut(&ingest_record.skpr_namespace).unwrap().fields, None);
                     // println!("{:?}", newMeta);
                     // let arrowSchema = convert_skippr_to_arrow(&mut newMeta);

@@ -283,25 +283,26 @@ impl DataSourceS3InventoryPlugin {
                                                             i += 1;
 
                                                             if i >= chunk_size {
-                                                                datas = Self::download_and_ingest(
+                                                                // datas =
+                                                                    Self::download_and_ingest(
                                                                     &mut self.s3_client_rusoto,
                                                                     &target_bucket,
                                                                     &outputs,
                                                                     &self.temp_dir,
-                                                                    // &metadata,
-                                                                    // &metrics
-                                                                ).await;
-                                                                // .expect("failed getting objects");
-
-                                                                // if !datas. {
-                                                                self::Ingest::ingest_file(
-                                                                    datas,
-                                                                    // pool,
                                                                     &metadata,
                                                                     &metrics,
                                                                     &offsets_clone
-                                                                );
-                                                                // }
+                                                                ).await;
+                                                                // .expect("failed getting objects");
+
+
+                                                                // self::Ingest::ingest_file(
+                                                                //     datas,
+                                                                //     // pool,
+                                                                //     &metadata,
+                                                                //     &metrics,
+                                                                //     &offsets_clone
+                                                                // );
 
                                                                 outputs = Vec::new();
                                                                 i = 0;
@@ -343,8 +344,13 @@ impl DataSourceS3InventoryPlugin {
         bucket_name: &String,
         object_keys: &Vec<String>,
         _output_dir: &String,
-    ) -> Vec<IngestBatch> {
-        let threads: Vec<_> = object_keys.clone()
+        metadata: &Arc<Mutex<HashMap<String, Metadata>>>,
+        metrics: &Arc<Mutex<Metrics>>,
+        offsets_clone: &Arc<Offsets>,
+    )
+    // - > Vec<IngestBatch>
+    {
+        let futures: Vec<_> = object_keys.clone()
             .into_iter()
             .map(|object_key| {
                 let s3_client = s3_client.clone();
@@ -359,7 +365,6 @@ impl DataSourceS3InventoryPlugin {
                         });
 
                     let response = x_fut.await.expect(&format!("Failed getting object {}", object_key));
-                    // println!("got object {}", object_key);
 
                     let download = Download {
                         key: object_key,
@@ -374,23 +379,33 @@ impl DataSourceS3InventoryPlugin {
 
         let datas: Arc<Mutex<Vec<IngestBatch>>> = Arc::new(Mutex::new(Vec::new()));
 
-        let foo = tokio::join!(join_all(threads)).0;
+        let future_result = tokio::join!(join_all(futures)).0;
+
+        let mut threads: Vec<_> = Vec::new();
 
         // for thread in threads {
-        for thread in foo {
-            let mut download = thread.unwrap();
+        for future in future_result {
+            let mut download = future.unwrap();
 
             let datas = datas.clone();
 
             let bucket_name = bucket_name.clone();
+            let metrics = metrics.clone();
+            let metadata = metadata.clone();
+            let offsets_clone = offsets_clone.clone();
 
-            thread::spawn(move || {
+            threads.push(thread::spawn(move || {
                 let data_dir = Config::get_data_dir();
                 let _temp_dir = &format!("{}/source_buffer", data_dir);
 
                 let mut data = Vec::new();
-                let _body = download.response.body.take().unwrap().into_blocking_read().read_to_end(&mut data);
-
+                match download.response.body.take() {
+                    Some(body) => match body.into_blocking_read().read_to_end(&mut data) {
+                        Ok(_) => {},
+                        Err(err) => println!("{:?}", err)
+                    },
+                    None => println!("Empty S3 object body"),
+                };
 
                 if download.key.contains(".gz") {
                     // Something that implements `std::io::Read`
@@ -431,12 +446,28 @@ impl DataSourceS3InventoryPlugin {
                         data: str_data,
                     });
                 }
-            }).join().unwrap();
+
+                self::Ingest::ingest_file(
+                    datas.lock().unwrap().to_vec(),
+                    &metadata,
+                    &metrics,
+                    &offsets_clone
+                );
+            }));
+                // .join().unwrap();
         }
 
-        let ingest_batches: Vec<IngestBatch> = datas.lock().unwrap().to_vec();
 
-        ingest_batches
+        // Wait for all threads to finish, else we will stampead the data source
+        for handle in threads {
+            handle.join().unwrap();
+        }
+
+        // join_all(threads.into_iter().j);
+
+        // let ingest_batches: Vec<IngestBatch> = datas.lock().unwrap().to_vec();
+        //
+        // ingest_batches
     }
 }
 
