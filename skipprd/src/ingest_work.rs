@@ -19,6 +19,8 @@ pub struct IngestBatch {
     pub(crate) data: String,
 }
 
+const MAX_BUFFER_SIZE: u64 = 1024 * 1024 * 10;
+
 static parse_namespace_cache: Lazy<Mutex<HashMap<String, String>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 static output_files_static: Lazy<Mutex<HashMap<String, File>>> =
@@ -50,6 +52,8 @@ impl Ingest {
 
         let mut bytes: u64 = 0;
 
+        let output_files = &mut output_files_static.lock().unwrap();
+
         // thread::spawn(move || {
             for ingest_batch in datas {
                 let mut buf_str: String = String::new();
@@ -61,8 +65,6 @@ impl Ingest {
                     offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Closed, 0);
 
                 let mut i = 1;
-
-                let output_files = &mut output_files_static.lock().unwrap();
 
                 let records: Vec<Value> = SerdeJson::deserialize(&ingest_batch.data);
 
@@ -138,27 +140,6 @@ impl Ingest {
 
                         offset_db_clone.set(&ingest_batch.offset_key, OffsetTypes::Line, i);
 
-                        if output_files
-                            .get(&output_file_name)
-                            .unwrap()
-                            .metadata()
-                            .unwrap()
-                            .len()
-                            > 1024 * 1024 * 10
-                        {
-                            fs::rename(
-                                format!("{}/{}", output_dir, &output_file_name),
-                                format!(
-                                    "{}/done/{}-{}",
-                                    output_dir,
-                                    &Helpers::random_str(12),
-                                    &output_file_name
-                                ),
-                            )
-                            .unwrap();
-
-                            output_files.remove(&output_file_name).unwrap();
-                        }
                     }
 
                     i += 1;
@@ -167,12 +148,27 @@ impl Ingest {
                 offset_db_clone.set(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
 
                 let mut counter_lock = metrcis_clone.lock().unwrap();
-
                 counter_lock.msgs_current += i;
                 counter_lock.bytes_current += bytes;
+
             }
 
-            if *updated_schema_clone.lock().unwrap() == "yes".to_string() {
+        // Flush files reaching max buffer size
+        for (filename, file) in output_files.iter() {
+            if Ingest::is_file_size_exceeded(file) {
+                let new_filename = format!("{}/done/{}-{}", output_dir, Helpers::random_str(12), filename);
+                let old_path = format!("{}/{}", output_dir, filename);
+
+                fs::rename(old_path, new_filename).unwrap();
+            }
+        }
+
+        // Retain only items that didn't qualify for flushing
+        output_files.retain(|_filename, file| !Ingest::is_file_size_exceeded(file));
+
+
+
+        if *updated_schema_clone.lock().unwrap() == "yes".to_string() {
                 tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
                     .build()
@@ -188,5 +184,13 @@ impl Ingest {
                 *updated_schema_clone.lock().unwrap() = "no".to_string();
             }
         // });
+    }
+
+
+    fn is_file_size_exceeded(file: &fs::File) -> bool {
+        file.metadata()
+            .unwrap()
+            .len()
+            > MAX_BUFFER_SIZE
     }
 }
