@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 
 
 use std::{fs, thread};
-
+use std::time::Duration;
 
 
 use crate::discover::Metadata;
@@ -30,7 +30,7 @@ use futures::StreamExt;
 
 
 
-use rusoto_core::Region;
+use rusoto_core::{Region, RusotoError};
 use rusoto_s3::{GetObjectRequest, S3Client, S3, GetObjectOutput};
 use crate::helpers::offsets::{OffsetKey, Offsets, OffsetTypes};
 use crate::ingest_work::{Ingest, IngestBatch};
@@ -336,7 +336,42 @@ impl DataSourceS3InventoryPlugin {
         // true
     }
 
+    async fn download_s3_object_with_backoff(
+        s3_client: &S3Client,
+        bucket: &String,
+        key: &String,
+    ) -> Result<GetObjectOutput, RusotoError<rusoto_s3::GetObjectError>> {
+        let mut retries = 0;
+        let max_retries = 5;
+        let mut backoff_duration = Duration::from_secs(1);
 
+        loop {
+            let get_request = GetObjectRequest {
+                bucket: bucket.clone(),
+                key: key.clone(),
+                ..Default::default()
+            };
+
+            match s3_client.get_object(get_request).await {
+                Ok(result) => return Ok(result),
+                Err(err) => {
+                    retries += 1;
+
+                    let wait_time = backoff_duration.as_secs_f64() * 2.0_f64.powi(retries as i32);
+                    thread::sleep(Duration::from_secs_f64(wait_time));
+
+                    backoff_duration *= 2;
+
+                    println!("Failed to get object {}, retry back in {} seconds", key, backoff_duration.as_secs());
+
+                    if retries >= max_retries {
+                        return Err(err);
+                    }
+
+                }
+            }
+        }
+    }
 
 
     async fn download_and_ingest(
@@ -364,7 +399,8 @@ impl DataSourceS3InventoryPlugin {
                             ..Default::default()
                         });
 
-                    let response = x_fut.await.expect(&format!("Failed getting object {}", object_key));
+                    // let response = x_fut.await.expect(&format!("Failed getting object {}", object_key));
+                    let response = Self::download_s3_object_with_backoff(&s3_client, &bucket_name, &object_key).await.unwrap();
 
                     let download = Download {
                         key: object_key,
