@@ -285,7 +285,8 @@ async fn sync() {
     //         r.store(false, Ordering::SeqCst);
     //
     //         println!("Flushing ingest buffers");
-    //         Ingest::flush_buffers(true);
+    //         // @todo - implemnt Ingest{} build glob for existing files
+    //         Ingest::flush_buffers(true, output_files);
     //         println!("Flushing output buffers");
     //         outputSync(_newmeta_clone.lock().unwrap().clone());
     //     } else {

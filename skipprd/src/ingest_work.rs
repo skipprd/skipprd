@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::{fs, thread};
 
 #[derive(Clone, Debug)]
@@ -33,11 +33,12 @@ impl Ingest {
         Ingest {}
     }
 
-    pub fn flush_buffers(force: bool) {
+    pub fn flush_buffers(force: bool, output_files: &mut MutexGuard<HashMap<String, File>> ) {
         let data_dir = Config::get_data_dir();
         let output_dir = format!("{}/output", data_dir);
 
-        for (filename, file) in output_files_static.lock().unwrap().iter() {
+
+        for (filename, file) in output_files.iter() {
             if force || Ingest::is_file_size_exceeded(file) {
                 let new_filename = format!(
                     "{}/done/{}-{}",
@@ -165,7 +166,7 @@ impl Ingest {
             counter_lock.bytes_current += bytes;
         }
 
-        Self::flush_buffers(false);
+        Self::flush_buffers(false, output_files);
 
         // Retain only items that didn't qualify for flushing
         output_files.retain(|_filename, file| !Ingest::is_file_size_exceeded(file));
