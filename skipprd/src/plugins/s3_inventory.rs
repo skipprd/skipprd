@@ -270,20 +270,11 @@ impl DataSourceS3InventoryPlugin {
                                                         let offset_key = OffsetKey { namespace: target_bucket.clone(), partition: target_key.clone() };
                                                         if Some(true) != offsets_clone.validate(&offset_key, OffsetTypes::Closed, 1) {
 
-
-
-                                                            // if !inventory.get("Key").unwrap().is_some() {
-                                                            // inventorys.push(inventory);
-
-                                                            // let key = &inventory[&"Key".to_string()];
-
-
                                                             outputs.push(target_key);
 
                                                             i += 1;
 
                                                             if i >= chunk_size {
-                                                                // datas =
                                                                     Self::download_and_ingest(
                                                                     &mut self.s3_client_rusoto,
                                                                     &target_bucket,
@@ -293,16 +284,6 @@ impl DataSourceS3InventoryPlugin {
                                                                     &metrics,
                                                                     &offsets_clone
                                                                 ).await;
-                                                                // .expect("failed getting objects");
-
-
-                                                                // self::Ingest::ingest_file(
-                                                                //     datas,
-                                                                //     // pool,
-                                                                //     &metadata,
-                                                                //     &metrics,
-                                                                //     &offsets_clone
-                                                                // );
 
                                                                 outputs = Vec::new();
                                                                 i = 0;
@@ -330,10 +311,6 @@ impl DataSourceS3InventoryPlugin {
                 }
             }
         }
-
-        // join_all(outputs).await;
-
-        // true
     }
 
     async fn download_s3_object_with_backoff(
@@ -353,7 +330,12 @@ impl DataSourceS3InventoryPlugin {
             };
 
             match s3_client.get_object(get_request).await {
-                Ok(result) => return Ok(result),
+                Ok(result) => {
+                    if retries > 0 {
+                        println!("Successful retry of object {}", key);
+                    }
+                    return Ok(result)
+                },
                 Err(err) => {
                     retries += 1;
 
@@ -382,9 +364,7 @@ impl DataSourceS3InventoryPlugin {
         metadata: &Arc<Mutex<HashMap<String, Metadata>>>,
         metrics: &Arc<Mutex<Metrics>>,
         offsets_clone: &Arc<Offsets>,
-    )
-    // - > Vec<IngestBatch>
-    {
+    ) {
         let futures: Vec<_> = object_keys.clone()
             .into_iter()
             .map(|object_key| {
@@ -399,9 +379,8 @@ impl DataSourceS3InventoryPlugin {
                             ..Default::default()
                         });
 
-                    // let response = x_fut.await.expect(&format!("Failed getting object {}", object_key));
                     let response = Self::download_s3_object_with_backoff(&s3_client, &bucket_name, &object_key).await.unwrap();
-
+                    // println!("Got s3 object");
                     let download = Download {
                         key: object_key,
                         response: response,
@@ -419,10 +398,12 @@ impl DataSourceS3InventoryPlugin {
 
         let mut threads: Vec<_> = Vec::new();
 
+
+        let data_dir = Config::get_data_dir();
+        let _temp_dir = &format!("{}/source_buffer", data_dir);
+
         // for thread in threads {
         for future in future_result {
-            let mut download = future.unwrap();
-
             let datas = datas.clone();
 
             let bucket_name = bucket_name.clone();
@@ -431,13 +412,13 @@ impl DataSourceS3InventoryPlugin {
             let offsets_clone = offsets_clone.clone();
 
             threads.push(thread::spawn(move || {
-                let data_dir = Config::get_data_dir();
-                let _temp_dir = &format!("{}/source_buffer", data_dir);
+                let mut download = future.unwrap();
 
+                // println!("Downloading s3 object");
                 let mut data = Vec::new();
                 match download.response.body.take() {
                     Some(body) => match body.into_blocking_read().read_to_end(&mut data) {
-                        Ok(_) => {},
+                        Ok(_) => {}
                         Err(err) => println!("{:?}", err)
                     },
                     None => println!("Empty S3 object body"),
@@ -449,9 +430,6 @@ impl DataSourceS3InventoryPlugin {
 
                     // To inflate on the fly, "pipe" the data through the decoder, i.e. wrap the reader
                     let mut stream = GzDecoder::new(c);
-
-                    // Consume the `Read`er somehow
-                    // std::io::copy(&mut stream, &mut file).unwrap();
 
                     let mut decompressed_data = String::new();
                     stream.read_to_string(&mut decompressed_data).unwrap();
@@ -465,11 +443,6 @@ impl DataSourceS3InventoryPlugin {
                     });
                 } else {
                     let mut c = Cursor::new(data);
-
-                    // let mut stream = BufReader::new(data);
-
-                    // Consume the `Read`er somehow
-                    // std::io::copy(&mut c, &mut file).unwrap();
 
                     let mut str_data = String::new();
                     c.read_to_string(&mut str_data).unwrap();
@@ -487,10 +460,10 @@ impl DataSourceS3InventoryPlugin {
                     datas.lock().unwrap().to_vec(),
                     &metadata,
                     &metrics,
-                    &offsets_clone
+                    &offsets_clone,
                 );
+
             }));
-                // .join().unwrap();
         }
 
 
@@ -498,12 +471,6 @@ impl DataSourceS3InventoryPlugin {
         for handle in threads {
             handle.join().unwrap();
         }
-
-        // join_all(threads.into_iter().j);
-
-        // let ingest_batches: Vec<IngestBatch> = datas.lock().unwrap().to_vec();
-        //
-        // ingest_batches
     }
 }
 
