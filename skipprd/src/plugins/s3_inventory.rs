@@ -165,7 +165,7 @@ impl DataSourceS3InventoryPlugin {
 
                                     let _bucket = source_bucket.to_string();
 
-                                    let chunk_size = Config::getenv("DATA_SOURCE_BATCH_SIZE", "10").parse::<i32>().unwrap();
+                                    let chunk_size = Config::getenv("DATA_SOURCE_BATCH_SIZE_BYTES", "1024000").parse::<i64>().unwrap();
 
                                     for file in manifest.first().unwrap()["files"].as_array() {
                                         let file_key = file.first().unwrap()["key"].as_str().unwrap();
@@ -238,6 +238,7 @@ impl DataSourceS3InventoryPlugin {
                                                     // let inventorys = vec![];
 
                                                     let mut i = 0;
+                                                    let mut chunk_size_current = 0;
 
                                                     // let records_total = rdr.records().count();
 
@@ -272,9 +273,14 @@ impl DataSourceS3InventoryPlugin {
 
                                                             outputs.push(target_key);
 
+                                                            chunk_size_current += match inventory.get("Size").unwrap().parse::<i64>() {
+                                                                Ok(size) => size,
+                                                                Err(err) => 0
+                                                            };
+
                                                             i += 1;
 
-                                                            if i >= chunk_size {
+                                                            if i >= 20 || chunk_size_current >= chunk_size {
                                                                     Self::download_and_ingest(
                                                                     &mut self.s3_client_rusoto,
                                                                     &target_bucket,
@@ -287,9 +293,11 @@ impl DataSourceS3InventoryPlugin {
 
                                                                 outputs = Vec::new();
                                                                 i = 0;
+                                                                chunk_size_current = 0;
+
                                                             }
                                                         } else {
-                                                            // println!("Skipping object: {} already processed", file_key);
+                                                            // println!("Skipping object: {} already processed", target_key);
                                                         }
                                                     }
                                                 }
