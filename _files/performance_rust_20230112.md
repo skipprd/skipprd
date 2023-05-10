@@ -34,4 +34,15 @@ Ingested Messages: 102689
 optimisations to fast_ingest()
 Ingested Messages: 105549
 
-
+03f9804bc68e537d1dfb084a3c48d4bc30ac9f90
+Runtime: 60 seconds
+Deadletters Messages: 0
+Ingested Messages: 239772
+Total Messages: 239772
+Bytes: 64819032
+Notified task status API
+Runtime: 120 seconds
+Deadletters Messages: 0
+Ingested Messages: 403836
+Total Messages: 643608
+Bytes: 180364892
