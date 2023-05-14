@@ -14,8 +14,8 @@ use serde_derive::{Deserialize, Serialize};
 
 use serde_json::json;
 
-use reqwest::Client;
-use reqwest::header::HeaderMap;
+use reqwest::{Client, StatusCode};
+use reqwest::header::{HeaderMap, HeaderName};
 use reqwest::header::HeaderValue;
 use reqwest::header::AUTHORIZATION;
 
@@ -23,8 +23,9 @@ use reqwest::header::AUTHORIZATION;
 
 use crate::discover::Metadata;
 
-use crate::helpers::Helpers;
-
+use crate::helpers::{Helpers};
+use crate::helpers::license::LicenseChecker;
+use crate::plugins::athena::AwsAthena;
 
 
 #[non_exhaustive]
@@ -99,7 +100,6 @@ pub struct Config {
     pub time_fields: bool,
     pub system_user_api_token: String,
     pub enable_dead_letters: bool,
-    pub config_updated_time: i32,
 }
 
 impl Config {
@@ -144,7 +144,6 @@ impl Config {
             schema: vec![],
             avro_schemas: Vec::new(),
             output_schemas: Vec::new(),
-            config_updated_time: 0,
 
             min_discovery_records: 10000,
             max_discovery_seconds: 300,
@@ -184,6 +183,20 @@ impl Config {
 
     }
 
+    pub fn truth_value(condition: &str) -> bool {
+        match condition {
+            "true" => true,
+            "t" => true,
+            "false" => false,
+            "f" => false,
+            "yes" => true,
+            "no" => false,
+            "1" => true,
+            "0" => false,
+            _ => false
+        }
+    }
+
     pub fn get_pipeline_name() -> String {
         // let mut helpers = Helpers { clean_field_cache: Default::default() };
 
@@ -211,7 +224,7 @@ impl Config {
         // return doc;
     }
 
-    pub fn get_config() -> Config {
+    pub async fn get_config() -> Result<HashMap<String, Metadata>, bool> {
         let mut config = Config::new();
 
         config = match envy::from_env::<Config>() {
@@ -278,108 +291,171 @@ impl Config {
         }
 
 
-        let _uri = Config::getenv("SKIPPR_API_ENDPOINT", "");
+        let pipeline_name = Config::get_pipeline_name();
 
-        config
+        let env = Config::getenv("APP_ENV", "prod");
+        let uri = if env != "prod" {
+            format!("https://metadata.{}.api.skippr.io", env)
+        } else {
+            String::from("https://metadata.api.skippr.io")
+        };
+        let token = Config::getenv("SKIPPR_API_TOKEN", "");
+
+        let mut headers = HeaderMap::new();
+        let auth_header = HeaderName::from_static("x-api-key");
+        headers.insert(auth_header, HeaderValue::from_str(&token).unwrap());
+
+        let client = Client::builder()
+            .default_headers(headers)
+            .build().unwrap();
+
+        let path = format!("{}/{}", pipeline_name, "approved");
+
+        let response = client.get(&format!("{}/{}", uri, path))
+            .send()
+            .await;
+
+        let metadata: Result<HashMap<String, Metadata>, bool> = match response {
+            Ok(resp) => {
+                 match resp.status() {
+                    StatusCode::OK => {
+                        let metadata = resp.json::<HashMap<String, Metadata>>().await.unwrap();
+                        Ok(metadata)
+                    },
+                    err =>  {
+                        println!("Metadata HTTP Error: {:?}", err);
+                        Err(false)
+                    }
+                }
+
+            },
+            Err(err) => {
+                // println!("Metadata HTTP Error: {:?}", err);
+                Err(false)
+            }
+        };
+
+        metadata
     }
 
     pub async fn set_config(metadata: &HashMap<String, Metadata>, evolved: bool) {
 
-        // if evolved {
-            for (namespace, _schema) in metadata.into_iter() {
-                println!("Updating Hive '{}' schema", namespace);
-                // AwsAthena::create_or_update_schema(&namespace, &schema).await;
+        if evolved {
+            // for (namespace, schema) in metadata.into_iter() {
+            //     println!("Updating Hive '{}' schema", namespace);
+            //     AwsAthena::create_or_update_schema(&namespace, &schema).await;
+            // }
+
+            let data_dir = Config::get_data_dir();
+            let metadata_file = format!("{}/metadata.json", data_dir);
+
+            let file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(metadata_file)
+                .unwrap();
+
+            let writer = BufWriter::new(file);
+
+            serde_json::to_writer(writer, &metadata).unwrap();
+
+            ///////////
+
+            let pipeline_name = Config::get_pipeline_name();
+
+            if Config::getenv("DATA_OUTPUT_TIME_BUCKET", "") != "" {
+                if Config::getenv("DATA_OUTPUT_TIME_FIELDS", "") == "" {
+                    println!("ERROR: Environment variable: 'DATA_OUTPUT_TIME_FIELDS' must be since you've set: 'DATA_OUTPUT_TIME_BUCKET'.");
+                }
             }
-        // }
 
-        let data_dir= Config::get_data_dir();
-        let metadata_file = format!("{}/metadata.json", data_dir);
-
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(metadata_file)
-            .unwrap();
-
-        let writer = BufWriter::new(file);
-
-        serde_json::to_writer(writer, &metadata).unwrap();
-
-        ///////////
-
-        let pipeline_id = Config::getenv("PIPELINE_ID", "");
-
-        if Config::getenv("DATA_OUTPUT_TIME_BUCKET", "") != "" {
-            if Config::getenv("DATA_OUTPUT_TIME_FIELDS", "") == "" {
-                println!("ERROR: Environment variable: 'DATA_OUTPUT_TIME_FIELDS' must be since you've set: 'DATA_OUTPUT_TIME_BUCKET'.");
-            }
-        }
-
-        // let uri = Config::getenv("SKIPPR_API_ENDPOINT", "");
-        let _uri = "https://console.skippr.io";
+            // let uri = Config::getenv("SKIPPR_API_ENDPOINT", "");
+            let env = Config::getenv("APP_ENV", "prod");
+            let uri = if env != "prod" {
+                format!("https://metadata.{}.api.skippr.io", env)
+            } else {
+                String::from("https://metadata.api.skippr.io")
+            };
             let token = Config::getenv("SKIPPR_API_TOKEN", "");
 
             let mut headers = HeaderMap::new();
-            headers.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", token)).unwrap());
+            let auth_header = HeaderName::from_static("x-api-key");
 
+            headers.insert(auth_header, HeaderValue::from_str(&token).unwrap());
 
-        let _client = Client::builder()
+            let client = Client::builder()
                 .default_headers(headers)
                 .build().unwrap();
 
-            let _path = "ingest-job/update-mapping";
+            let path = "";
 
-            let _data = json!({
-                "id": pipeline_id,
-                "mapping": metadata,
-                "evolved": evolved,
+            let data = json!({
+                "namespace": pipeline_name,
+                "metadata": metadata,
+                "status": "approved",
             });
 
-        // println!("Posting data: {:?}", data);
+            // println!("Posting data: {:?}", data);
 
-            // let response = client.post(&format!("{}/{}", uri, path))
-            //     .json(&data)
-            //     .send()
-            //     .await;
+            let response = client.put(&format!("{}/{}", uri, path))
+                .json(&data)
+                .send()
+                .await;
 
-        // match response {
-        //     Ok(_resp) => {
-                // println!("Metadata HTTP Success: {:?}", resp);
-            // }
-            // Err(_err) => {
-                // println!("Metadata HTTP Error: {:?}", err);
-            // }
-        // }
 
-        println!("Updated pipeline metadata in Skippr SaaS");
+            match response {
+                Ok(resp) => {
+                    match resp.status() {
+                        StatusCode::OK => {
+                            // println!("Metadata HTTP resp: {:?}", resp);
+                        }
+                        err =>  println!("Metadata HTTP Error: {:?}", err),
+                    };
 
+                },
+                Err(err) => {
+                    println!("Metadata HTTP Error: {:?}", err);
+                }
+                // Ok(resp) => {
+                //     println!("Metadata HTTP Success: {:?}", resp);
+                // }
+                // Err(err) => {
+                //     println!("Metadata HTTP Error: {:?}", err);
+                // }
+            }
+
+            println!("Updated pipeline metadata in Skippr SaaS");
+        }
     }
 
     pub(crate) fn set_status(metrics: MutexGuard<Metrics>, exit_code: Option<i8>) {
 
-        let pipeline_id = Config::getenv("PIPELINE_ID", "");
+        let pipeline_name = Config::get_pipeline_name();
 
-        let uri = "https://console.skippr.io";
+        let env = Config::getenv("APP_ENV", "prod");
+        let uri = if env != "prod" {
+            format!("https://metrics.{}.api.skippr.io", env)
+        } else {
+            String::from("https://metrics.api.skippr.io")
+        };
         let token = Config::getenv("SKIPPR_API_TOKEN", "");
 
         let mut headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", token)).unwrap());
+        let auth_header = HeaderName::from_static("x-api-key");
+        headers.insert(auth_header, HeaderValue::from_str(&token).unwrap());
 
         let client = reqwest::blocking::Client::builder()
+            .default_headers(headers)
             // .timeout(Duration::from_secs(10))
             .build().unwrap();
 
-        // let client = Client::builder()
-        //     .default_headers(headers)
-        //     .build().unwrap();
-
-        let path = "tasks/set-status'";
+        let path = "";
 
         let logs: HashMap<i16, String> = HashMap::new();
 
         let data = json!({
-            "response": {
+            "metrics": {
                 "msgs_total": metrics.msgs_total,
                 "msgs_current": metrics.msgs_current,
                 "run_time_seconds": metrics.run_time_seconds,
@@ -387,25 +463,23 @@ impl Config {
                 "bytes_current": metrics.bytes_current,
                 "bytes_total": metrics.bytes_total,
             },
-            "pipeline_id": pipeline_id,
-            "sync_mode": "sync",
-            "task_id": 5319,
+            "pipeline_name": pipeline_name,
             "logs": logs,
             "exit_code": exit_code
         });
 
         // println!("Posting data: {:?}", data);
 
-        let response = client.post(&format!("{}/{}", uri, path))
+        let response = client.put(&format!("{}/{}", uri, path))
             .json(&data)
             .send();
 
         match response {
-            Ok(_resp) => {
+            Ok(resp) => {
                 // println!("Status HTTP Success: {:?}", resp);
             }
-            Err(_err) => {
-                // println!("Status HTTP Error: {:?}", err);
+            Err(err) => {
+                println!("Metrics HTTP Error: {:?}", err);
             }
         }
 
@@ -413,9 +487,13 @@ impl Config {
 
     }
 
-    pub fn init() {
-        let config: Config = Config::get_config();
-        create_dir(config.data_dir);
+    pub async fn init() {
+        let license = LicenseChecker::new();
+        license.unwrap().get_license().await.unwrap();
+
+        // let config: Config = Config::get_config().await;
+        // create_dir(Config::get_data_dir());
+
     }
 
 }

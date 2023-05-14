@@ -62,6 +62,8 @@ impl Ingest {
         let data_dir = Config::get_data_dir();
         let output_dir = format!("{}/output", data_dir);
 
+        let faltten_events = &Config::getenv("DATA_SOURCE_FLATTEN_EVENTS", "no");
+
         let updated_schema: Arc<Mutex<String>> = Arc::new(Mutex::new("no".to_string()));
 
         let updated_schema_clone = updated_schema.clone();
@@ -87,7 +89,7 @@ impl Ingest {
 
             let records: Vec<Value> = SerdeJson::deserialize(&ingest_batch.data);
 
-            for record in records {
+            for mut record in records {
                 if record.is_null() {
                     continue;
                 }
@@ -112,6 +114,10 @@ impl Ingest {
 
                     if skpr_time.is_some() {
                         skpr_time_bucket = BufferChunker::event_time_bucket(skpr_time.unwrap());
+                    }
+
+                    if (Config::truth_value(faltten_events)) {
+                        record = Helpers::flatten(&record);
                     }
 
                     let output_file_name = BufferChunker::encode_chunk_name(

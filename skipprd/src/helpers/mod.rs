@@ -5,15 +5,12 @@ use std::env;
 use memory_stats::memory_stats;
 use chrono::{DateTime, TimeZone, Utc};
 
-
-
-
-
 use std::str;
 
 use rand::Rng;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
+pub mod license;
 pub mod configuration;
 pub mod offsets;
 
@@ -144,22 +141,38 @@ impl Helpers {
         pass
     }
 
-    pub fn flatten(array: &HashMap<String, String>, delimiter: &str, prefix: &str) -> HashMap<String, String> {
-        let mut result: HashMap<String, String> = HashMap::new();
-        for (key, value) in array {
-            if value.contains("{") {
-                let mut new_prefix = prefix.to_string();
-                new_prefix.push_str(delimiter);
-                new_prefix.push_str(key);
-                result.extend(Self::flatten(array, delimiter, &new_prefix));
-            } else {
-                let mut new_prefix = prefix.to_string();
-                new_prefix.push_str(delimiter);
-                new_prefix.push_str(key);
-                result.insert(new_prefix, value.to_string());
-            }
+    fn flatten_internal(json: &Value, prefix: &str, result: &mut Map<String, Value>) {
+        match json {
+            Value::Object(map) => {
+                if map.is_empty() {
+                    result.insert(prefix.to_string(), json.clone());
+                } else {
+                    for (key, value) in map {
+                        let new_key = if prefix.is_empty() { key.clone() } else { format!("{}_{}", prefix, key) };
+                        Helpers::flatten_internal(value, &new_key, result);
+                    }
+                }
+            },
+            Value::Array(arr) => {
+                if arr.is_empty() {
+                    result.insert(prefix.to_string(), json.clone());
+                } else {
+                    for (index, value) in arr.iter().enumerate() {
+                        let new_key = format!("{}_{}", prefix, index);
+                        Helpers::flatten_internal(value, &new_key, result);
+                    }
+                }
+            },
+            _ => {
+                result.insert(prefix.to_string(), json.clone());
+            },
         }
-        result
+    }
+
+    pub fn flatten(json: &Value) -> Value {
+        let mut result = Map::new();
+        Helpers::flatten_internal(json, "", &mut result);
+        Value::Object(result)
     }
 
     pub fn mem_limit_reached() -> bool {
@@ -443,6 +456,49 @@ mod parse_namespace_field_tests {
         assert_eq!(cache.get("my_namespace"), Some(&"yes".to_string()));
         // assert_eq!(cache.get("entity_field_1,entity_field_2"), Some(&"yes".to_string()));
     }
+}
 
+#[cfg(test)]
+mod flattern_tests {
+    use super::*;
+    use serde_json::json;
 
+    #[test]
+    fn test_flatten() {
+        let input = json!({
+            "key1": "value1",
+            "key2": {
+                "key3": "value3",
+                "key4": {
+                    "key5": "value5"
+                }
+            },
+            "key6": ["value6", "value7", {
+                "key8": "value8"
+            }]
+        });
+        let expected_output = json!({
+            "key1": "value1",
+            "key2_key3": "value3",
+            "key2_key4_key5": "value5",
+            "key6_0": "value6",
+            "key6_1": "value7",
+            "key6_2_key8": "value8"
+        });
+        assert_eq!(Helpers::flatten(&input), expected_output);
+
+        let input = json!({
+            "empty_obj": {},
+            "empty_arr": [],
+            "empty_str": ""
+        });
+        let expected_output = json!({
+            "empty_obj": {},
+            "empty_arr": [],
+            "empty_str": ""
+        });
+        assert_eq!(Helpers::flatten(&input), expected_output);
+    }
+
+    // Additional tests can be written similarly...
 }

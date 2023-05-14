@@ -47,6 +47,8 @@ mod cli;
 use crate::cli::{Cli, Mode};
 
 extern crate clap;
+extern crate core;
+
 use clap::{Parser};
 
 
@@ -75,8 +77,9 @@ use crate::buffer::BufferChunker;
 use crate::ingest_work::Ingest;
 use crate::plugins::s3_inventory::DataSourceS3InventoryPlugin;
 
-fn main() {
-    Config::init();
+#[tokio::main]
+async fn main() {
+    Config::init().await;
 
     // let now = Instant::now();
 
@@ -92,11 +95,11 @@ fn main() {
     match cli.mode {
         Mode::Sync => {
             // println!("Command sync");
-            sync();
+            sync().await;
         }
         Mode::Discover => {
             // println!("Command discover");
-            discover();
+            discover().await;
         }
     }
 
@@ -107,7 +110,7 @@ fn main() {
 }
 
 
-#[tokio::main]
+
 async fn discover() {
     println!("Analysing data and generating Skippr metadata");
 
@@ -221,7 +224,6 @@ async fn discover() {
     // }).join().unwrap();
 }
 
-#[tokio::main]
 async fn sync() {
     // let default_messages = Arc::new(Mutex::new(HashMap::new()));
 
@@ -233,32 +235,33 @@ async fn sync() {
 
 
 
-    // let mut skipprMetadata = Arc::new(Mutex::new(HashMap::new()));
+    // let mut skippr_metadata = Arc::new(Mutex::new(HashMap::new()));
 
     let data_dir= Config::get_data_dir();
 
     let metadata_file = format!("{}/metadata.json", data_dir);
 
-    let skipprMetadata = Arc::new(Mutex::new(match File::open(metadata_file.clone()) {
-    // let mut skipprMetadata: HashMap<String, Metadata> = match File::open(metadata_file.clone()) {
-        Ok(schema_file) => {
+    // let skippr_metadata = Arc::new(Mutex::new(match File::open(metadata_file.clone()) {
+    let skippr_metadata = Arc::new(Mutex::new(match Config::get_config().await {
+    // let mut skippr_metadata: HashMap<String, Metadata> = match File::open(metadata_file.clone()) {
+        Ok(metadata) => {
             println!("Found Skippr metadata");
 
-            // let file = File::open("metadata.json").unwrap();
-            let reader = BufReader::new(schema_file);
+            // let reader = BufReader::new(schema_file);
 
-            let u = serde_json::from_reader(reader).unwrap();
+            // let u = serde_json::from_reader(reader).unwrap();
+            let u: HashMap<String, Metadata> = metadata;
 
             u
         }
         Err(_e) => {
             println!("Could not find Skippr metadata, will disover and evolve schemas as we sync.");
-            let _emptyMeta = Metadata::new().unwrap();
+            let empty_meta = Metadata::new().unwrap();
 
-            let metadata = HashMap::new();
-            // metadata.insert("example_ns".to_string(), emptyMeta);
-            // let skipprMetadata: HashMap<String, Metadata> = metadata;
-            // skipprMetadata
+            let mut metadata = HashMap::new();
+            // metadata.insert("example_ns".to_string(), empty_meta);
+            // let skippr_metadata: HashMap<String, Metadata> = metadata;
+            // skippr_metadata
             metadata
 
 
@@ -274,26 +277,28 @@ async fn sync() {
         }
     }));
 
-    let _newmeta_clone = skipprMetadata.clone();
+    let newmeta_clone = skippr_metadata.clone();
 
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
 
-    // ctrlc::set_handler(move || {
-    //     if r.load(Ordering::SeqCst) {
-    //         println!("Received Ctrl+C: Gracefully shutting down");
-    //         r.store(false, Ordering::SeqCst);
-    //
-    //         println!("Flushing ingest buffers");
-    //         // @todo - implemnt Ingest{} build glob for existing files
-    //         Ingest::flush_buffers(true, output_files);
-    //         println!("Flushing output buffers");
-    //         outputSync(_newmeta_clone.lock().unwrap().clone());
-    //     } else {
-    //         println!("Received another Ctrl+C signal - no worries, terminating immediately...");
-    //         std::process::exit(0);
-    //     }
-    // }).expect("Error during graceful shutdown");
+    ctrlc::set_handler(move || {
+        if r.load(Ordering::SeqCst) {
+            println!("Received Ctrl+C: Gracefully shutting down");
+            r.store(false, Ordering::SeqCst);
+
+            // Config::set_config(&newmeta_clone.lock().unwrap(),true);
+
+            // println!("Flushing ingest buffers");
+            // // @todo - implemnt Ingest{} build glob for existing files
+            // Ingest::flush_buffers(true, output_files);
+            // println!("Flushing output buffers");
+            // outputSync(_newmeta_clone.lock().unwrap().clone());
+        } else {
+            println!("Received another Ctrl+C signal - no worries, terminating immediately...");
+            std::process::exit(0);
+        }
+    }).expect("Error during graceful shutdown");
 
     while running.load(Ordering::SeqCst) {
 
@@ -301,7 +306,7 @@ async fn sync() {
 
         let metrics: Arc<Mutex<Metrics>> = Arc::new(Mutex::new(Metrics::new()));
 
-        // let mut pool = ThreadPool::new(4, skipprMetadata.clone());
+        // let mut pool = ThreadPool::new(4, skippr_metadata.clone());
 
         use std::time::Duration;
 
@@ -335,12 +340,12 @@ async fn sync() {
 
                 Config::set_status(metrics_lock, None);
             },
-            periodic::Every::new(Duration::from_secs(60)),
+            periodic::Every::new(Duration::from_secs(5)),
         );
         planner.start();
 
 
-        let inputMetadataClone = skipprMetadata.clone();
+        let inputMetadataClone = skippr_metadata.clone();
 
         let mut out_pnanner = periodic::Planner::new();
         out_pnanner.add(move || {
@@ -352,7 +357,7 @@ async fn sync() {
         out_pnanner.start();
 
 
-        let inputMetadataClone = skipprMetadata.clone();
+        let inputMetadataClone = skippr_metadata.clone();
 
         // @todo - share across s3 ingests
         let _parse_namespace_cache: HashMap<String, String> = HashMap::new();

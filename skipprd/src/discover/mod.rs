@@ -231,6 +231,8 @@ impl AnalyseSchema {
 
         let mut skpr_namespace: String = "".to_string();
 
+        let faltten_events = &Config::getenv("DATA_SOURCE_FLATTEN_EVENTS", "no");
+
         // let mut newMeta: &mut HashMap<String, Metadata>;
         // let defaultMetadata = Metadata::new().unwrap();
         // let mut metadata = HashMap::new();
@@ -245,7 +247,7 @@ impl AnalyseSchema {
 
         let mut i = 0;
 
-        for v in records {
+        for mut v in records {
 
             let source_namespace = Config::getenv("S3_BUCKET", "");
 
@@ -253,10 +255,13 @@ impl AnalyseSchema {
             // let source_partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
             skpr_namespace = Helpers::parse_namespace_field(&v, source_namespace.clone(), &mut parse_namespace_cache);
 
-
             if !newMeta.contains_key(&skpr_namespace) {
                 newMeta.insert(skpr_namespace.clone(),Metadata::new().unwrap());
                 // newMeta = &mut metadata.clone();
+            }
+
+            if (Config::truth_value(faltten_events)) {
+                v = Helpers::flatten(&v);
             }
 
             i += 1;
