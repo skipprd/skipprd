@@ -149,7 +149,7 @@ impl DataSourceS3Plugin {
 
                             let offset_key = OffsetKey {
                                 namespace: inventory_bucket.clone(),
-                                partition: object_key.clone().to_string(),
+                                partition: object_key.to_string(),
                             };
                             if Some(true)
                                 != offsets_clone.validate(&offset_key, OffsetTypes::Closed, 1)
