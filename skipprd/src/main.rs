@@ -75,6 +75,7 @@ use crate::helpers::configuration::{Config, Metrics};
 
 use crate::buffer::BufferChunker;
 use crate::ingest_work::Ingest;
+use crate::plugins::s3_input::DataSourceS3Plugin;
 use crate::plugins::s3_inventory::DataSourceS3InventoryPlugin;
 
 #[tokio::main]
@@ -340,7 +341,7 @@ async fn sync() {
 
                 Config::set_status(metrics_lock, None);
             },
-            periodic::Every::new(Duration::from_secs(5)),
+            periodic::Every::new(Duration::from_secs(60)),
         );
         planner.start();
 
@@ -385,12 +386,26 @@ async fn sync() {
 
         let metricsClone = metrics.clone();
 
-        let mut ds3 = block_on(DataSourceS3InventoryPlugin::new());
-        ds3.sync(
-            // &mut pool,
-            inputMetadataClone,
-            metricsClone
-        ).await;
+        match Config::getenv("DATA_SOURCE_PLUGIN_NAME", "").as_str() {
+            "s3" => {
+                let mut ds3 = block_on(DataSourceS3Plugin::new());
+                ds3.sync(
+                    // &m1ut pool,
+                    inputMetadataClone,
+                    metricsClone
+                ).await;
+            },
+            "s3_inventory" => {
+                let mut ds3 = block_on(DataSourceS3InventoryPlugin::new());
+                ds3.sync(
+                    // &mut pool,
+                    inputMetadataClone,
+                    metricsClone
+                ).await;
+            },
+            unknown => { println!("Plugin {} not supported", unknown); }
+        };
+
 
     }
 }
