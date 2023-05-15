@@ -372,7 +372,7 @@ impl SerdeParquet {
 
 #[derive(Clone)]
 pub struct Message {
-    pub message: Box<HashMap<String, Message>>, // pub message: Box<Value>
+    pub message: HashMap<String, Message>, // pub message: Box<Value>
 }
 
 impl Message {
