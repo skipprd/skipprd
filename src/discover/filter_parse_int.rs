@@ -83,61 +83,52 @@ fn cast_string_to_int(num: String) -> i64 {
 #[test]
 fn test_php_filter_parse_int() {
     let mut ret: i64 = 0;
-    assert_eq!(php_filter_parse_int("123".to_string(), &mut ret), true);
+    assert!(php_filter_parse_int("123".to_string(), &mut ret));
     assert_eq!(ret, 123);
-    assert_eq!(php_filter_parse_int("-123".to_string(), &mut ret), true);
+    assert!(php_filter_parse_int("-123".to_string(), &mut ret));
     assert_eq!(ret, -123);
-    assert_eq!(php_filter_parse_int("+123".to_string(), &mut ret), true);
+    assert!(php_filter_parse_int("+123".to_string(), &mut ret));
     assert_eq!(ret, 123);
-    assert_eq!(php_filter_parse_int("+0".to_string(), &mut ret), true);
+    assert!(php_filter_parse_int("+0".to_string(), &mut ret));
     assert_eq!(ret, 0);
-    assert_eq!(php_filter_parse_int("-0".to_string(), &mut ret), true);
+    assert!(php_filter_parse_int("-0".to_string(), &mut ret));
     assert_eq!(ret, 0);
-    assert_eq!(php_filter_parse_int("0".to_string(), &mut ret), true);
+    assert!(php_filter_parse_int("0".to_string(), &mut ret));
     assert_eq!(ret, 0);
-    assert_eq!(
-        php_filter_parse_int("2147483647".to_string(), &mut ret),
-        true
+    assert!(
+        php_filter_parse_int("2147483647".to_string(), &mut ret)
     );
     assert_eq!(ret, 2147483647);
-    assert_eq!(
-        php_filter_parse_int("2147483648".to_string(), &mut ret),
-        true
+    assert!(
+        php_filter_parse_int("2147483648".to_string(), &mut ret)
     );
     assert_eq!(ret, 2147483648);
-    assert_eq!(
-        php_filter_parse_int("-2147483648".to_string(), &mut ret),
-        true
+    assert!(
+        php_filter_parse_int("-2147483648".to_string(), &mut ret)
     );
     assert_eq!(ret, -2147483648);
-    assert_eq!(
-        php_filter_parse_int("-2147483649".to_string(), &mut ret),
-        true
+    assert!(
+        php_filter_parse_int("-2147483649".to_string(), &mut ret)
     );
     assert_eq!(ret, -2147483649);
-    assert_eq!(
-        php_filter_parse_int("9223372036854775807".to_string(), &mut ret),
-        true
+    assert!(
+        php_filter_parse_int("9223372036854775807".to_string(), &mut ret)
     );
     assert_eq!(ret, 9223372036854775807);
-    assert_eq!(
-        php_filter_parse_int("9223372036854775808".to_string(), &mut ret),
-        false
+    assert!(
+        !php_filter_parse_int("9223372036854775808".to_string(), &mut ret)
     );
     assert_eq!(ret, 9223372036854775807);
-    assert_eq!(
-        php_filter_parse_int("-9223372036854775807".to_string(), &mut ret),
-        true
+    assert!(
+        php_filter_parse_int("-9223372036854775807".to_string(), &mut ret)
     );
     assert_eq!(ret, -9223372036854775807);
-    assert_eq!(
-        php_filter_parse_int("-9223372036854775808".to_string(), &mut ret),
-        true
+    assert!(
+        php_filter_parse_int("-9223372036854775808".to_string(), &mut ret)
     );
     assert_eq!(ret, -9223372036854775808);
-    assert_eq!(
-        php_filter_parse_int("-9223372036854775809".to_string(), &mut ret),
-        false
+    assert!(
+        !php_filter_parse_int("-9223372036854775809".to_string(), &mut ret)
     );
     assert_eq!(ret, -9223372036854775808);
 
@@ -156,20 +147,18 @@ fn test_php_filter_parse_int() {
     // Parse the string of data into serde_json::Value.
     let v: Value = serde_json::from_str(data).unwrap();
 
-    assert_eq!(php_filter_parse_int(v["age"].to_string(), &mut ret), true);
+    assert!(php_filter_parse_int(v["age"].to_string(), &mut ret));
     assert_eq!(ret, 43);
     // print!("Return is {}", ret);
-    assert_eq!(
-        php_filter_parse_int(v["phones"][0].to_string(), &mut ret),
-        false
+    assert!(
+        !php_filter_parse_int(v["phones"][0].to_string(), &mut ret)
     );
-    assert_eq!(
-        php_filter_parse_int(v["phones"].to_string(), &mut ret),
-        false
+    assert!(
+        !php_filter_parse_int(v["phones"].to_string(), &mut ret)
     );
     // print!("Return is {}", ret);
     // assert_eq!(ret, "+44 1234567");
-    assert_eq!(php_filter_parse_int(v["name"].to_string(), &mut ret), false);
+    assert!(!php_filter_parse_int(v["name"].to_string(), &mut ret));
     // print!("Return is {}", ret);
     // assert_eq!(ret, "John Doe");
 }

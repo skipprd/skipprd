@@ -9,7 +9,7 @@ mod tests {
 
         let subject = 123;
         assert_ne!(
-            get_type(&mut String::from(subject.to_string())),
+            get_type(&mut subject.to_string()),
             expected_type
         );
     }
@@ -20,7 +20,7 @@ mod tests {
 
         let subject = 1;
         assert_eq!(
-            get_type(&mut String::from(subject.to_string())),
+            get_type(&mut subject.to_string()),
             expected_type
         );
     }
@@ -31,7 +31,7 @@ mod tests {
 
         let subject = 0;
         assert_eq!(
-            get_type(&mut String::from(subject.to_string())),
+            get_type(&mut subject.to_string()),
             expected_type
         );
     }
@@ -42,7 +42,7 @@ mod tests {
 
         let subject = true;
         assert_eq!(
-            get_type(&mut String::from(subject.to_string())),
+            get_type(&mut subject.to_string()),
             expected_type
         );
     }
@@ -53,7 +53,7 @@ mod tests {
 
         let subject = false;
         assert_eq!(
-            get_type(&mut String::from(subject.to_string())),
+            get_type(&mut subject.to_string()),
             expected_type
         );
     }
@@ -64,7 +64,7 @@ mod tests {
 
         let subject = "true";
         assert_eq!(
-            get_type(&mut String::from(subject.to_string())),
+            get_type(&mut subject.to_string()),
             expected_type
         );
     }
@@ -75,7 +75,7 @@ mod tests {
 
         let subject = "false";
         assert_eq!(
-            get_type(&mut String::from(subject.to_string())),
+            get_type(&mut subject.to_string()),
             expected_type
         );
     }

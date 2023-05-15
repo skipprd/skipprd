@@ -504,7 +504,7 @@ mod tests {
             .unwrap();
         // let mut test_file = MemFile::create(rng.gen::<i32>(), CreateOptions::new()).unwrap();
 
-        test_file.write(&record_line.as_bytes()).unwrap();
+        test_file.write(record_line.as_bytes()).unwrap();
 
         test_file.rewind().unwrap();
 
@@ -518,7 +518,7 @@ mod tests {
 
         let str = r#"{"rider_id":"10e974bf-4a43-305a-9e39-1636c43cb22a","bike_id":"8b86f753-05f8-3254-aba6-739188a3c0b6","isbn":"9407496597","trip":{"start_temprature":0,"end_temprature":2},"last_crank":[2,15,33,45,56,57,47,36,19,5],"crank_torques":[[2,15,33,45,56,57,47,36,19,5],[1,13,33,48,56,58,45,35,15,6]],"hardware":{"manufacturer":"Beier, Emmerich and Rutherford","model":"synergize ubiquitous e-commerce","maintenance":{"last_rebuild":"20\/04\/2010","last_service":"12\/07\/1973"}},"metadata":{"rcvd_time":1615474895,"sent_time":1615474930,"prcd_micro_time":1615474853.999185,"tags":[{"name":"type","value":"trip"},{"name":"auto","value":false}]}}"#;
 
-        let records: Vec<Value> = SerdeJson::deserialize(&str);
+        let records: Vec<Value> = SerdeJson::deserialize(str);
 
         let mut updatedSchema = "no".to_string();
 

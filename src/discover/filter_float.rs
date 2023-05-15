@@ -11,7 +11,7 @@ mod tests {
 
         let subject = 123;
         assert_ne!(
-            get_type(&mut String::from(subject.to_string())),
+            get_type(&mut subject.to_string()),
             expected_type
         );
     }
@@ -22,7 +22,7 @@ mod tests {
 
         let subject = true;
         assert_ne!(
-            get_type(&mut String::from(subject.to_string())),
+            get_type(&mut subject.to_string()),
             expected_type
         );
     }
@@ -33,7 +33,7 @@ mod tests {
 
         let subject = false;
         assert_ne!(
-            get_type(&mut String::from(subject.to_string())),
+            get_type(&mut subject.to_string()),
             expected_type
         );
     }
@@ -44,7 +44,7 @@ mod tests {
 
         let subject = 1;
         assert_ne!(
-            get_type(&mut String::from(subject.to_string())),
+            get_type(&mut subject.to_string()),
             expected_type
         );
     }
@@ -55,7 +55,7 @@ mod tests {
 
         let subject = 0;
         assert_ne!(
-            get_type(&mut String::from(subject.to_string())),
+            get_type(&mut subject.to_string()),
             expected_type
         );
     }
@@ -66,7 +66,7 @@ mod tests {
 
         let subject = "sd";
         assert_ne!(
-            get_type(&mut String::from(subject.to_string())),
+            get_type(&mut subject.to_string()),
             expected_type
         );
     }
@@ -77,7 +77,7 @@ mod tests {
 
         let subject = 1.2;
         assert_eq!(
-            get_type(&mut String::from(subject.to_string())),
+            get_type(&mut subject.to_string()),
             expected_type
         );
     }
@@ -88,7 +88,7 @@ mod tests {
 
         let subject = 0.2;
         assert_eq!(
-            get_type(&mut String::from(subject.to_string())),
+            get_type(&mut subject.to_string()),
             expected_type
         );
     }
@@ -107,7 +107,7 @@ mod tests {
 
         let subject = "0.0";
         assert_eq!(
-            get_type(&mut String::from(subject.to_string())),
+            get_type(&mut subject.to_string()),
             expected_type
         );
     }
@@ -118,7 +118,7 @@ mod tests {
 
         let subject = "-0.1";
         assert_eq!(
-            get_type(&mut String::from(subject.to_string())),
+            get_type(&mut subject.to_string()),
             expected_type
         );
     }
@@ -129,7 +129,7 @@ mod tests {
 
         let subject = "+0.1";
         assert_eq!(
-            get_type(&mut String::from(subject.to_string())),
+            get_type(&mut subject.to_string()),
             expected_type
         );
     }

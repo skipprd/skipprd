@@ -1166,7 +1166,7 @@ mod tests {
 
         // let mut test_file = File::create_new(format!("./{}", random_tmp_file_name)).unwrap();
 
-        test_file.write(&record_line.as_bytes()).unwrap();
+        test_file.write(record_line.as_bytes()).unwrap();
 
         test_file.rewind().unwrap();
 
@@ -1349,7 +1349,7 @@ mod tests {
 
         // let mut test_file = MemFile::create(rng.gen::<i32>(), CreateOptions::new()).unwrap();
 
-        test_file.write(&record_line.as_bytes()).unwrap();
+        test_file.write(record_line.as_bytes()).unwrap();
 
         test_file.rewind().unwrap();
 
@@ -1557,7 +1557,7 @@ mod tests {
             .unwrap();
         // let mut test_file = MemFile::create(rng.gen::<i32>(), CreateOptions::new()).unwrap();
 
-        test_file.write(&record_line.as_bytes()).unwrap();
+        test_file.write(record_line.as_bytes()).unwrap();
 
         test_file.rewind().unwrap();
 
