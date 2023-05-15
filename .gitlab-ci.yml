@@ -9,8 +9,8 @@ variables:
   AWS_ECR_REGISTRY: $ECR_HOST/$COMPONENT_NAME
 
 stages:
-  - test
   - lint
+  - test
   - build
   - dockerize
   - publish
@@ -22,7 +22,6 @@ before_script:
 cargo_test:
   stage: test
   script:
-    - cd ./skipprd
     - cargo test
   only:
     - master
@@ -33,7 +32,6 @@ cargo_lint:
   stage: lint
   script:
     - rustup component add clippy
-    - cd ./skipprd
     - cargo clippy -- -D warnings
   only:
     - master
@@ -42,14 +40,13 @@ cargo_lint:
 cargo_build:
   stage: build
   script:
-    - cd ./skipprd
     - rustup target add x86_64-unknown-linux-gnu aarch64-apple-darwin
     - cargo build --target x86_64-unknown-linux-gnu --release
     - cargo build --target aarch64-apple-darwin --release
   artifacts:
     paths:
-      - ./skipprd/target/x86_64-unknown-linux-gnu/release/
-      - ./skipprd/target/aarch64-apple-darwin/release/
+      - ./target/x86_64-unknown-linux-gnu/release/
+      - ./target/aarch64-apple-darwin/release/
   only:
     - master
     - tags
@@ -57,7 +54,6 @@ cargo_build:
 docker_build:
   stage: dockerize
   script:
-    - cd ./skipprd
     - docker build -t $CONTAINER_IMAGE -f Dockerfile .
     - docker build -t $CONTAINER_IMAGE -f Dockerfile.mac_arm .
     - docker build -t $CONTAINER_IMAGE -f Dockerfile.lambda .
