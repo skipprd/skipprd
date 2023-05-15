@@ -13,3 +13,7 @@ clover.xml
 /skipprd/output/
 skipprd/data
 skippr_data_tmp/
+/data/
+/target/
+/legacy/test-tmp/
+/legacy/test-data/
