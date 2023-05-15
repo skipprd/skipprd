@@ -1,19 +1,17 @@
-
 #[cfg(test)]
 mod tests {
-    
-    
-    
-    use crate::discover::get_type;
-    
 
+    use crate::discover::get_type;
 
     #[test]
     fn test_get_type_int() {
         let expected_type = "boolean".to_string();
 
         let subject = 123;
-        assert_ne!(get_type(&mut String::from(subject.to_string())), expected_type);
+        assert_ne!(
+            get_type(&mut String::from(subject.to_string())),
+            expected_type
+        );
     }
 
     #[test]
@@ -21,7 +19,10 @@ mod tests {
         let expected_type = "boolean".to_string();
 
         let subject = 1;
-        assert_eq!(get_type(&mut String::from(subject.to_string())), expected_type);
+        assert_eq!(
+            get_type(&mut String::from(subject.to_string())),
+            expected_type
+        );
     }
 
     #[test]
@@ -29,7 +30,10 @@ mod tests {
         let expected_type = "boolean".to_string();
 
         let subject = 0;
-        assert_eq!(get_type(&mut String::from(subject.to_string())), expected_type);
+        assert_eq!(
+            get_type(&mut String::from(subject.to_string())),
+            expected_type
+        );
     }
 
     #[test]
@@ -37,7 +41,10 @@ mod tests {
         let expected_type = "boolean".to_string();
 
         let subject = true;
-        assert_eq!(get_type(&mut String::from(subject.to_string())), expected_type);
+        assert_eq!(
+            get_type(&mut String::from(subject.to_string())),
+            expected_type
+        );
     }
 
     #[test]
@@ -45,7 +52,10 @@ mod tests {
         let expected_type = "boolean".to_string();
 
         let subject = false;
-        assert_eq!(get_type(&mut String::from(subject.to_string())), expected_type);
+        assert_eq!(
+            get_type(&mut String::from(subject.to_string())),
+            expected_type
+        );
     }
 
     #[test]
@@ -53,7 +63,10 @@ mod tests {
         let expected_type = "boolean".to_string();
 
         let subject = "true";
-        assert_eq!(get_type(&mut String::from(subject.to_string())), expected_type);
+        assert_eq!(
+            get_type(&mut String::from(subject.to_string())),
+            expected_type
+        );
     }
 
     #[test]
@@ -61,7 +74,10 @@ mod tests {
         let expected_type = "boolean".to_string();
 
         let subject = "false";
-        assert_eq!(get_type(&mut String::from(subject.to_string())), expected_type);
+        assert_eq!(
+            get_type(&mut String::from(subject.to_string())),
+            expected_type
+        );
     }
 }
 
@@ -128,12 +144,10 @@ pub fn parse_bool(value: &mut String) -> Result<bool, i32> {
     if ret == -1 {
         Err(ret)
     } else {
-        return Ok(cast_to_bool(ret))
+        return Ok(cast_to_bool(ret));
     }
 }
 
 fn cast_to_bool(num: i32) -> bool {
-
     return num.to_string().parse::<bool>().is_ok();
-
 }

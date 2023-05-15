@@ -129,15 +129,14 @@ fn convert_skippr_to_arrow_field_types(
             // Value::Array(array) => {
             "array" => {
                 let mut field = HashSet::new();
-                let dataType = convert_skippr_type_to_arrow_data_type(&v.determined_type_values).unwrap();
+                let dataType =
+                    convert_skippr_type_to_arrow_data_type(&v.determined_type_values).unwrap();
                 field.insert(dataType);
 
                 field_types.insert(
                     k.to_string(),
-                    InferredType::Array(Box::new(InferredType::Scalar(
-                        field
-                     )),
-                ));
+                    InferredType::Array(Box::new(InferredType::Scalar(field))),
+                );
             }
             "map" => {
                 field_types.insert(
@@ -184,4 +183,3 @@ fn convert_skippr_to_arrow_field_types(
 
     Ok(field_types)
 }
-

@@ -1,24 +1,25 @@
 use crate::buffer::BufferChunker;
+use crate::converters::skippr_hive::SkipprHive;
+use crate::discover;
 use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
 use aws_sdk_athena::types::{
     EncryptionConfiguration, EncryptionOption, ResultConfiguration, Tag, WorkGroupConfiguration,
 };
-use aws_sdk_athena::{Client as AthenaClient};
-use aws_sdk_glue::types::{Column, DatabaseInput, PartitionIndex, PartitionInput, SerDeInfo, StorageDescriptor, TableInput};
-use aws_sdk_glue::{Client as GlueClient};
+use aws_sdk_athena::Client as AthenaClient;
+use aws_sdk_glue::types::{
+    Column, DatabaseInput, PartitionIndex, PartitionInput, SerDeInfo, StorageDescriptor, TableInput,
+};
+use aws_sdk_glue::Client as GlueClient;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::{Client as S3Client, Error};
 use chrono::prelude::*;
+use md5::Digest;
 use std::collections::HashMap;
 use std::fs;
-use std::fs::{File};
+use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
-use md5::Digest;
-use crate::converters::skippr_hive::SkipprHive;
-use crate::discover;
-
 
 pub struct DataOutputAwsAthenaPlugin {
     s3_client: S3Client,
@@ -52,8 +53,7 @@ impl DataOutputAwsAthenaPlugin {
     }
 
     pub async fn sync(&self, metadata: HashMap<std::string::String, discover::Metadata>) {
-
-        let mut partition_cache :Vec<Digest> = vec![];
+        let mut partition_cache: Vec<Digest> = vec![];
 
         while let Some(filename) = BufferChunker::next_file() {
             let mut file = BufReader::new(File::open(&filename).unwrap());
@@ -91,7 +91,7 @@ impl DataOutputAwsAthenaPlugin {
 
                 let path_parts = collection.join("/");
 
-                    // .collect().join("/")
+                // .collect().join("/")
                 full_key = format!("{}/{}", full_key, path_parts);
             }
 
@@ -104,21 +104,11 @@ impl DataOutputAwsAthenaPlugin {
 
                 for granularity in GRANULARITIES.iter() {
                     let foo: u32 = match granularity {
-                        &"year" => {
-                            date.year() as u32
-                        },
-                        &"month" => {
-                            date.month()
-                        },
-                        &"day" => {
-                            date.day()
-                        },
-                        &"hour" => {
-                            date.hour()
-                        },
-                        &"minute" => {
-                            date.minute()
-                        },
+                        &"year" => date.year() as u32,
+                        &"month" => date.month(),
+                        &"day" => date.day(),
+                        &"hour" => date.hour(),
+                        &"minute" => date.minute(),
                         _ => {
                             panic!("Did not reconise date granularity of {}", granularity);
                         }
@@ -134,8 +124,16 @@ impl DataOutputAwsAthenaPlugin {
             }
 
             if !partition_values.is_empty() {
-                match AwsAthena::glue_create_partition(&namespace, partition_values, &key, &mut partition_cache, &metadata.get(&namespace).unwrap()).await {
-                    Ok(_) => {},
+                match AwsAthena::glue_create_partition(
+                    &namespace,
+                    partition_values,
+                    &key,
+                    &mut partition_cache,
+                    &metadata.get(&namespace).unwrap(),
+                )
+                .await
+                {
+                    Ok(_) => {}
                     Err(_err) => {}
                 }
             }
@@ -148,8 +146,8 @@ impl DataOutputAwsAthenaPlugin {
                 &final_key,
                 &filename,
             )
-                .await
-                .unwrap();
+            .await
+            .unwrap();
         }
     }
 
@@ -209,49 +207,49 @@ impl DataOutputAwsAthenaPlugin {
     }
 }
 
-
 pub struct AwsAthena {}
 
 impl AwsAthena {
-
     pub async fn create_or_update_schema(namespace: &str, schema: &discover::Metadata) {
         match AwsAthena::get_work_group().await {
-            Ok(true) => {},
-            Ok(false) => {},
-            Err(_err) => {
-                match AwsAthena::create_workgroup(namespace).await {
-                    Ok(_) => {},
-                    Err(err) => {  println!("ERROR: {}", err); }
+            Ok(true) => {}
+            Ok(false) => {}
+            Err(_err) => match AwsAthena::create_workgroup(namespace).await {
+                Ok(_) => {}
+                Err(err) => {
+                    println!("ERROR: {}", err);
                 }
             },
         }
 
         match AwsAthena::glue_get_database().await {
-            Ok(true) => {},
-            Ok(false) => {},
-            Err(_err) => {
-                match AwsAthena::glue_create_database(namespace).await {
-                    Ok(_) => {},
-                    Err(err) => {  println!("ERROR: {}", err); }
+            Ok(true) => {}
+            Ok(false) => {}
+            Err(_err) => match AwsAthena::glue_create_database(namespace).await {
+                Ok(_) => {}
+                Err(err) => {
+                    println!("ERROR: {}", err);
                 }
             },
         }
 
         match AwsAthena::glue_get_table(namespace).await {
-            Ok(true) => {
-                match AwsAthena::glue_update_table(namespace, schema).await {
-                    Ok(_) => {},
-                    Err(err) => {  println!("ERROR: {}", err); }
+            Ok(true) => match AwsAthena::glue_update_table(namespace, schema).await {
+                Ok(_) => {}
+                Err(err) => {
+                    println!("ERROR: {}", err);
                 }
             },
-            Ok(false) => {},
+            Ok(false) => {}
             Err(_err) => {
                 match AwsAthena::glue_create_table(namespace, schema).await {
-                    Ok(_) => {},
-                    Err(err) => {  println!("ERROR: {}", err); }
+                    Ok(_) => {}
+                    Err(err) => {
+                        println!("ERROR: {}", err);
+                    }
                 }
                 // println!("Create Hive Table Error: {}", err.into_service_error().to_string())
-            },
+            }
         }
     }
 
@@ -274,13 +272,13 @@ impl AwsAthena {
                 }
                 None => {
                     // println!("Did not find workgroup: {}", workgroup);
-                    return Ok(false)
-                },
+                    return Ok(false);
+                }
             },
             Err(_e) => {
                 // println!("Error getting workgroup: {}", &_e.into_service_error().to_string());
                 return Err(_e.into_service_error().to_string());
-            },
+            }
         }
     }
 
@@ -407,10 +405,9 @@ impl AwsAthena {
         let partition_fields: Vec<&str> = partition_config.split(",").collect();
 
         if !partition_fields.is_empty() {
-
             for field_dot in partition_fields.clone() {
                 let entity_name = match field_dot.rfind('.') {
-                    Some(index) => &field_dot[index+1..],
+                    Some(index) => &field_dot[index + 1..],
                     None => field_dot,
                 };
                 let clean_field_name = Helpers::clean_field_name(entity_name.to_string());
@@ -419,12 +416,15 @@ impl AwsAthena {
                     Column::builder()
                         .name(clean_field_name.to_string())
                         .r#type("string")
-                        .build()
+                        .build(),
                 );
             }
         }
     }
-    pub async fn glue_create_table(namespace: &str, metadata: &discover::Metadata) -> Result<bool, String> {
+    pub async fn glue_create_table(
+        namespace: &str,
+        metadata: &discover::Metadata,
+    ) -> Result<bool, String> {
         let database = Config::getenv("GLUE_DATABASE_NAME", "");
         let bucket = Config::getenv("DATA_OUTPUT_S3_BUCKET", "");
         let granularity_target = Config::getenv("DATA_OUTPUT_TIME_BUCKET", "");
@@ -435,19 +435,18 @@ impl AwsAthena {
 
         let mut partitions: Vec<Column> = Vec::new();
         let mut partition_indexes: Vec<PartitionIndex> = Vec::new();
-        let mut partition_index_keys:  Vec<String> = Vec::new();
+        let mut partition_index_keys: Vec<String> = Vec::new();
 
         AwsAthena::get_partition_by_fields(&mut partitions);
 
         // Time Partitioning
         if granularity_target != "" {
             for granularity in GRANULARITIES.iter() {
-
                 partitions.push(
                     Column::builder()
                         .name(granularity.to_string())
                         .r#type("int")
-                        .build()
+                        .build(),
                 );
 
                 if partition_index_keys.len() < 3 {
@@ -457,7 +456,7 @@ impl AwsAthena {
                         PartitionIndex::builder()
                             .index_name(granularity.to_string())
                             .set_keys(Some(partition_index_keys.clone()))
-                            .build()
+                            .build(),
                     );
                 }
 
@@ -515,9 +514,10 @@ impl AwsAthena {
         }
     }
 
-    pub async fn glue_update_table(namespace: &str, metadata: &discover::Metadata) -> Result<bool, String> {
-
-
+    pub async fn glue_update_table(
+        namespace: &str,
+        metadata: &discover::Metadata,
+    ) -> Result<bool, String> {
         let database = Config::getenv("GLUE_DATABASE_NAME", "");
         let bucket = Config::getenv("DATA_OUTPUT_S3_BUCKET", "");
         let granularity_target = Config::getenv("DATA_OUTPUT_TIME_BUCKET", "");
@@ -535,12 +535,11 @@ impl AwsAthena {
         // Time Partitioning
         if granularity_target != "" {
             for granularity in GRANULARITIES.iter() {
-
                 partitions.push(
                     Column::builder()
                         .name(granularity.to_string())
                         .r#type("int")
-                        .build()
+                        .build(),
                 );
 
                 // partition_index_keys.push(granularity.to_string());
@@ -557,8 +556,6 @@ impl AwsAthena {
                 }
             }
         }
-
-        
 
         // let mut schema: HashMap<String, Metadata> = HashMap::new();
         // schema.insert(namespace.to_string(), metadata.clone());
@@ -608,7 +605,13 @@ impl AwsAthena {
         }
     }
 
-    pub async fn glue_create_partition(namespace: &str, partition_values: Vec<String>, _key: &str, partition_cache: &mut Vec<Digest>, metadata: &discover::Metadata) -> Result<bool, Error> {
+    pub async fn glue_create_partition(
+        namespace: &str,
+        partition_values: Vec<String>,
+        _key: &str,
+        partition_cache: &mut Vec<Digest>,
+        metadata: &discover::Metadata,
+    ) -> Result<bool, Error> {
         let database = Config::getenv("GLUE_DATABASE_NAME", "");
         let bucket = Config::getenv("DATA_OUTPUT_S3_BUCKET", "");
 
@@ -616,7 +619,16 @@ impl AwsAthena {
         let path = path.trim_start_matches('/');
         let path = format!("{}/{}", path, namespace);
 
-        let md5_digest = md5::compute(serde_json::to_string(&format!("{}{}{}{:?}", namespace, bucket, path, &partition_values.clone())).unwrap());
+        let md5_digest = md5::compute(
+            serde_json::to_string(&format!(
+                "{}{}{}{:?}",
+                namespace,
+                bucket,
+                path,
+                &partition_values.clone()
+            ))
+            .unwrap(),
+        );
 
         // let mut schema: HashMap<String, Metadata> = HashMap::new();
         // schema.insert(namespace.to_string(), metadata.clone());
@@ -639,62 +651,74 @@ impl AwsAthena {
                         SerDeInfo::builder()
                             .name(format!("{}.{}", &database, namespace))
                             .parameters("serialization.format", "1")
-                            .serialization_library("org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe")
-                            .build()
+                            .serialization_library(
+                                "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe",
+                            )
+                            .build(),
                     )
                     .stored_as_sub_directories(true)
-                    .build()
+                    .build(),
             )
             .build();
 
-
         if !partition_cache.contains(&md5_digest) {
-            match glue_client.get_partition()
+            match glue_client
+                .get_partition()
                 .database_name(&database)
                 .table_name(namespace)
                 .set_partition_values(Some(partition_values.clone()))
-                .send().await
+                .send()
+                .await
             {
                 Ok(_) => {
                     // partition exists, update it
-                    match glue_client.update_partition()
+                    match glue_client
+                        .update_partition()
                         .database_name(database)
                         .table_name(namespace)
                         .partition_input(partition_conf)
                         .set_partition_value_list(Some(partition_values))
-                        .send().await
+                        .send()
+                        .await
                     {
                         Ok(_) => {
                             println!("Updated Athena partition");
                             partition_cache.push(md5_digest);
-                        },
-                        Err(err) => {
-                            println!("Failed to update Athena partition: {}", err.into_service_error());
                         }
-                    }
-                },
-                Err(_err) => {
-                    // partition does not exist, create it
-                    match glue_client.create_partition()
-                        .database_name(database)
-                        .table_name(namespace)
-                        .partition_input(partition_conf)
-                        .send().await
-                    {
-                        Ok(_) => {
-                            println!("Created new Athena partition");
-                        },
                         Err(err) => {
-                            println!("{:?}", partition_values);
-                            println!("{}", path);
-                            println!("Failed to create new Athena partition: {}", err.into_service_error());
+                            println!(
+                                "Failed to update Athena partition: {}",
+                                err.into_service_error()
+                            );
                         }
                     }
                 }
-                // ,
-                // Err(err) => {
-                //     println!("Failed to get Athena partition: {}", err);
-                // }
+                Err(_err) => {
+                    // partition does not exist, create it
+                    match glue_client
+                        .create_partition()
+                        .database_name(database)
+                        .table_name(namespace)
+                        .partition_input(partition_conf)
+                        .send()
+                        .await
+                    {
+                        Ok(_) => {
+                            println!("Created new Athena partition");
+                        }
+                        Err(err) => {
+                            println!("{:?}", partition_values);
+                            println!("{}", path);
+                            println!(
+                                "Failed to create new Athena partition: {}",
+                                err.into_service_error()
+                            );
+                        }
+                    }
+                } // ,
+                  // Err(err) => {
+                  //     println!("Failed to get Athena partition: {}", err);
+                  // }
             }
         }
 

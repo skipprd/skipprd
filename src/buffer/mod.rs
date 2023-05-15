@@ -1,40 +1,22 @@
-use chrono::{Datelike, DateTime, NaiveDateTime, Timelike, TimeZone, Utc};
-use url::{form_urlencoded};
+use chrono::{DateTime, Datelike, NaiveDateTime, TimeZone, Timelike, Utc};
+use url::form_urlencoded;
 
 use std::collections::HashMap;
 
-
-
-
-use std::fs::{File};
+use std::fs::File;
 use std::io::ErrorKind;
 
-
-
-
 use std::str;
-
-
-
-
-
-
-
 
 use parquet::data_type::AsBytes;
 
 use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
 
-
-pub struct BufferChunker {
-
-}
+pub struct BufferChunker {}
 
 impl BufferChunker {
-
     pub fn check_flush_limit(_chunk_name: &str, _chunk: &HashMap<String, usize>) -> bool {
-
         let mut result = false;
 
         if Helpers::mem_limit_reached() {
@@ -44,76 +26,73 @@ impl BufferChunker {
         }
 
         // if chunk.get("size").unwrap() > Config.flush_mem_buffer_bytes {
-            // SkipprLogger::debug(&format!("Rotating memory buffer with size {}", BytesToHuman::to_human(chunk.get("size").unwrap(), true)));
-            // result = true;
+        // SkipprLogger::debug(&format!("Rotating memory buffer with size {}", BytesToHuman::to_human(chunk.get("size").unwrap(), true)));
+        // result = true;
         // }
 
         // if (SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).expect("Time went backwards")
         //     .as_secs() - chunk.get("time").unwrap().as_i64()) > Config::FLUSH_MEM_BUFFER_SECONDS {
-         // SkipprLogger::debug(&format!("Rotating memory buffer with ttl {} seconds", time::now().to_timespec().sec - chunk.get("time").unwrap()));
-         //    result = true;
+        // SkipprLogger::debug(&format!("Rotating memory buffer with ttl {} seconds", time::now().to_timespec().sec - chunk.get("time").unwrap()));
+        //    result = true;
         // }
 
         // if chunk.get("count").unwrap() >= Config::FLUSH_MEM_BUFFER_RECORDS {
-            // SkipprLogger::debug(&format!("Rotating memory buffer of {} records", chunk.get("count").unwrap()));
-            // result = true;
+        // SkipprLogger::debug(&format!("Rotating memory buffer of {} records", chunk.get("count").unwrap()));
+        // result = true;
         // }
 
         // if result {
-            // let size = BytesToHuman::to_human(chunk.get("size").unwrap(), true);
-            // let time = time::now().to_timespec().sec - chunk.get("time").unwrap();
-            // let count = chunk.get("count").unwrap();
-            //
-            // SkipprLogger::info(&format!("Rotating memory buffer {} of {}, {} records and age of {} seconds to disk", chunk_name, size, count, time));
+        // let size = BytesToHuman::to_human(chunk.get("size").unwrap(), true);
+        // let time = time::now().to_timespec().sec - chunk.get("time").unwrap();
+        // let count = chunk.get("count").unwrap();
+        //
+        // SkipprLogger::info(&format!("Rotating memory buffer {} of {}, {} records and age of {} seconds to disk", chunk_name, size, count, time));
         // }
 
         result
     }
 
     pub fn event_time_bucket(event_time: i64) -> i64 {
-
         let datetime = Utc.timestamp_opt(event_time as i64, 0).unwrap();
 
         // let mut bucket_rounded_timestamp: DateTime<Utc> = Utc.ymd(datetime.year(), 1, 1).and_hms(0, 0, 0);
-        let mut bucket_rounded_timestamp= 0;
+        let mut bucket_rounded_timestamp = 0;
 
         if let config_duration = Config::getenv("DATA_OUTPUT_TIME_BUCKET", "") {
-
             bucket_rounded_timestamp = match config_duration.as_str() {
                 "year" => {
                     let year = datetime.year();
                     Utc.ymd(year, 1, 1).and_hms(0, 0, 0).timestamp()
-                },
+                }
                 "month" => {
                     let year = datetime.year();
                     let month = datetime.month();
                     Utc.ymd(year, month, 1).and_hms(0, 0, 0).timestamp()
-
-                },
+                }
                 "day" => {
                     let year = datetime.year();
                     let month = datetime.month();
                     let day = datetime.day();
                     Utc.ymd(year, month, day).and_hms(0, 0, 0).timestamp()
-
-                },
+                }
                 "hour" => {
                     let year = datetime.year();
                     let month = datetime.month();
                     let day = datetime.day();
                     let hour = datetime.hour();
                     Utc.ymd(year, month, day).and_hms(hour, 0, 0).timestamp()
-
-                },
+                }
                 "minute" => {
                     let year = datetime.year();
                     let month = datetime.month();
                     let day = datetime.day();
                     let hour = datetime.hour();
                     let minute = datetime.minute();
-                    Utc.ymd(year, month, day).and_hms(hour, minute, 0).timestamp()
-                },
-                _ => 0
+                    Utc.ymd(year, month, day)
+                        .and_hms(hour, minute, 0)
+                        .timestamp()
+                }
+                _ => 0,
             };
         }
 
@@ -129,13 +108,18 @@ impl BufferChunker {
         bucket
     }
 
-    pub fn encode_chunk_name(buffer_name: &str, namespace: Option<&str>, partition: Option<&str>, time_bucket: Option<i64>) -> String {
+    pub fn encode_chunk_name(
+        buffer_name: &str,
+        namespace: Option<&str>,
+        partition: Option<&str>,
+        time_bucket: Option<i64>,
+    ) -> String {
         let string = time_bucket.unwrap_or_default().to_string();
         let chunks = vec![
             ("buffer", buffer_name),
             ("namespace", namespace.unwrap_or("")),
             ("partition", partition.unwrap_or("")),
-            ("time", &string)
+            ("time", &string),
         ];
 
         let chunk_name = form_urlencoded::Serializer::new(String::new())
@@ -154,9 +138,7 @@ impl BufferChunker {
     //     encoded_name.split('-').map(|s| s.to_string()).collect()
     // }
 
-
     fn get_file_time(filename: &str) -> i64 {
-
         let mut time = 0;
 
         // Parse the query string into key-value pairs
@@ -170,11 +152,9 @@ impl BufferChunker {
         }
 
         time
-
     }
 
     fn get_file_part(filename: &str, part_name: &str) -> String {
-
         let mut part = "".to_string();
 
         // Parse the query string into key-value pairs
@@ -188,14 +168,14 @@ impl BufferChunker {
         }
 
         part
-
     }
 
     pub fn decode_file_time_to_datetime_string(filename: &str) -> String {
         let time = BufferChunker::get_file_time(filename);
 
         let date_string = if time != 0 {
-            let dt = DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp(time as i64, 0), Utc).to_rfc3339();
+            let dt = DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp(time as i64, 0), Utc)
+                .to_rfc3339();
             dt
         } else {
             "".to_string()
@@ -230,8 +210,6 @@ impl BufferChunker {
         namespace
     }
 
-
-
     pub fn next_file() -> Option<String> {
         let data_dir = Config::get_data_dir();
         let pattern = format!("{}/finalised/buffer=ingest*", data_dir);
@@ -260,7 +238,7 @@ impl BufferChunker {
                 }
                 Ok(_file) => {
                     // if self.lock(&file, false) {
-                        return Some(filename.to_str().unwrap().to_string());
+                    return Some(filename.to_str().unwrap().to_string());
                     // }
                 }
             }
@@ -268,8 +246,6 @@ impl BufferChunker {
 
         None
     }
-
-
 }
 
 #[cfg(test)]
@@ -279,22 +255,30 @@ mod decode_chunk_time_tests {
     #[test]
     fn test_get_file_chunk_time_with_valid_input() {
         let filename = "buffer=test_buffer&namespace=&partition=&time=1645296045";
-        assert_eq!(BufferChunker::decode_file_time_to_datetime_string(filename), "2022-02-19T18:40:45+00:00");
+        assert_eq!(
+            BufferChunker::decode_file_time_to_datetime_string(filename),
+            "2022-02-19T18:40:45+00:00"
+        );
     }
 
     #[test]
     fn test_get_file_chunk_time_with_missing_time_query_param() {
         let filename = "buffer=test_buffer&namespace=&partition=";
-        assert_eq!(BufferChunker::decode_file_time_to_datetime_string(filename), "");
+        assert_eq!(
+            BufferChunker::decode_file_time_to_datetime_string(filename),
+            ""
+        );
     }
 
     #[test]
     fn test_get_file_chunk_time_with_invalid_time_query_param() {
         let filename = "buffer=test_buffer&namespace=&partition=time=invalid";
-        assert_eq!(BufferChunker::decode_file_time_to_datetime_string(filename), "");
+        assert_eq!(
+            BufferChunker::decode_file_time_to_datetime_string(filename),
+            ""
+        );
     }
 }
-
 
 #[cfg(test)]
 mod get_file_chunk_time_tests {
@@ -318,7 +302,6 @@ mod get_file_chunk_time_tests {
         assert_eq!(BufferChunker::get_file_time(filename), 0);
     }
 }
-
 
 #[cfg(test)]
 mod event_time_bucket_tests {
@@ -429,7 +412,8 @@ mod encode_chunk_name_tests {
         let buffer_name = "test_buffer";
         let namespace = Some("test_namespace");
         let expected_chunk_name = "buffer=test_buffer&namespace=test_namespace&partition=&time=0";
-        let actual_chunk_name = BufferChunker::encode_chunk_name(buffer_name, namespace, None, None);
+        let actual_chunk_name =
+            BufferChunker::encode_chunk_name(buffer_name, namespace, None, None);
         assert_eq!(expected_chunk_name, actual_chunk_name);
     }
 
@@ -438,7 +422,8 @@ mod encode_chunk_name_tests {
         let buffer_name = "test_buffer";
         let partition = Some("test_partition");
         let expected_chunk_name = "buffer=test_buffer&namespace=&partition=test_partition&time=0";
-        let actual_chunk_name = BufferChunker::encode_chunk_name(buffer_name, None, partition, None);
+        let actual_chunk_name =
+            BufferChunker::encode_chunk_name(buffer_name, None, partition, None);
         assert_eq!(expected_chunk_name, actual_chunk_name);
     }
 
@@ -447,7 +432,8 @@ mod encode_chunk_name_tests {
         let buffer_name = "test_buffer";
         let time_bucket = Some(123);
         let expected_chunk_name = "buffer=test_buffer&namespace=&partition=&time=123";
-        let actual_chunk_name = BufferChunker::encode_chunk_name(buffer_name, None, None, time_bucket);
+        let actual_chunk_name =
+            BufferChunker::encode_chunk_name(buffer_name, None, None, time_bucket);
         assert_eq!(expected_chunk_name, actual_chunk_name);
     }
 
@@ -457,9 +443,10 @@ mod encode_chunk_name_tests {
         let namespace = Some("test_namespace");
         let partition = Some("test_partition");
         let time_bucket = Some(456);
-        let expected_chunk_name = "buffer=test_buffer&namespace=test_namespace&partition=test_partition&time=456";
-        let actual_chunk_name = BufferChunker::encode_chunk_name(buffer_name, namespace, partition, time_bucket);
+        let expected_chunk_name =
+            "buffer=test_buffer&namespace=test_namespace&partition=test_partition&time=456";
+        let actual_chunk_name =
+            BufferChunker::encode_chunk_name(buffer_name, namespace, partition, time_bucket);
         assert_eq!(expected_chunk_name, actual_chunk_name);
     }
-
 }

@@ -1,35 +1,31 @@
-
-use std::collections::HashMap;
-use regex::Regex;
-use std::env;
-use memory_stats::memory_stats;
 use chrono::{DateTime, TimeZone, Utc};
+use memory_stats::memory_stats;
+use regex::Regex;
+use std::collections::HashMap;
+use std::env;
 
 use std::str;
 
 use rand::Rng;
 use serde_json::{Map, Value};
 
-pub mod license;
 pub mod configuration;
+pub mod license;
 pub mod offsets;
 
 // let clean_field_cache = Arc::new(Mutex::new(HashMap<String, bool> = HashMap::new()));
 
+use crate::helpers::configuration::Config;
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
-use crate::helpers::configuration::Config;
 
 // static clean_field_cache: Lazy<Mutex<i64>> = Lazy::new(|| Mutex::new(1));
-static clean_field_cache: Lazy<Mutex<HashMap<String, bool>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static clean_field_cache: Lazy<Mutex<HashMap<String, bool>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
-
-pub struct Helpers {
-
-}
+pub struct Helpers {}
 
 impl Helpers {
-
     // let clean_field_cache: HashMap<String, bool> = HashMap::new();
     // pub(crate) clean_field_cache: HashMap<String, bool> = HashMap::new();
 
@@ -78,7 +74,9 @@ impl Helpers {
 
             clean = clean.to_lowercase();
 
-            let re = Regex::new(r"[^_0123456789_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ]").unwrap();
+            let re =
+                Regex::new(r"[^_0123456789_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ]")
+                    .unwrap();
             clean = re.replace_all(&clean, "_").to_string();
 
             // let pattern = "/[^" + preg_quote(
@@ -148,11 +146,15 @@ impl Helpers {
                     result.insert(prefix.to_string(), json.clone());
                 } else {
                     for (key, value) in map {
-                        let new_key = if prefix.is_empty() { key.clone() } else { format!("{}_{}", prefix, key) };
+                        let new_key = if prefix.is_empty() {
+                            key.clone()
+                        } else {
+                            format!("{}_{}", prefix, key)
+                        };
                         Helpers::flatten_internal(value, &new_key, result);
                     }
                 }
-            },
+            }
             Value::Array(arr) => {
                 if arr.is_empty() {
                     result.insert(prefix.to_string(), json.clone());
@@ -162,10 +164,10 @@ impl Helpers {
                         Helpers::flatten_internal(value, &new_key, result);
                     }
                 }
-            },
+            }
             _ => {
                 result.insert(prefix.to_string(), json.clone());
-            },
+            }
         }
     }
 
@@ -176,7 +178,10 @@ impl Helpers {
     }
 
     pub fn mem_limit_reached() -> bool {
-        let mem_limit = env::var("MEM_LIMIT").unwrap_or("0".to_string()).parse::<u32>().unwrap_or(0);
+        let mem_limit = env::var("MEM_LIMIT")
+            .unwrap_or("0".to_string())
+            .parse::<u32>()
+            .unwrap_or(0);
         let mut mem_usage = 0;
         if let Some(usage) = memory_stats() {
             mem_usage = usage.physical_mem as u32;
@@ -189,50 +194,44 @@ impl Helpers {
         return false;
     }
 
-
-    pub fn parse_partition_field(
-        message: & Value,
-    ) -> String {
+    pub fn parse_partition_field(message: &Value) -> String {
         let mut clean_partition: String = "".to_string();
 
         // optional: partition by composite key
         if Config::getenv("DATA_OUTPUT_PARTITION_BY_FIELDS", "") != "" {
-
             let mut partitions = vec!["".to_string()];
 
-            for entity_field_dot in Config::getenv("DATA_OUTPUT_PARTITION_BY_FIELDS", "").split(",") {
-
+            for entity_field_dot in Config::getenv("DATA_OUTPUT_PARTITION_BY_FIELDS", "").split(",")
+            {
                 match Helpers::get_nested_value_from_dot_notation(message, entity_field_dot) {
                     Some(entity_value) => {
-                        let clean_entity_value = Helpers::clean_field_name(match entity_value.as_str() {
-                            Some(val) => val.to_string(),
-                            None => "".to_string()
-                        });
+                        let clean_entity_value =
+                            Helpers::clean_field_name(match entity_value.as_str() {
+                                Some(val) => val.to_string(),
+                                None => "".to_string(),
+                            });
                         let entity_name = match entity_field_dot.rfind('.') {
-                            Some(index) => &entity_field_dot[index+1..],
+                            Some(index) => &entity_field_dot[index + 1..],
                             None => entity_field_dot,
                         };
                         let clean_entity_name = Helpers::clean_field_name(entity_name.to_string());
                         partitions.push(format!("{}={}", clean_entity_name, clean_entity_value));
-                    },
-                    None => ()
+                    }
+                    None => (),
                 }
-
             }
 
             clean_partition = partitions.join("-");
             clean_partition = clean_partition.trim_matches('-').to_lowercase();
-
         }
 
         clean_partition
-
     }
 
     pub fn parse_namespace_field(
-        message: & Value,
+        message: &Value,
         namespace: String,
-        parse_namespace_cache: &mut HashMap<String, String>
+        parse_namespace_cache: &mut HashMap<String, String>,
     ) -> String {
         let mut clean_namespace = namespace.clone();
 
@@ -244,43 +243,35 @@ impl Helpers {
 
             // optional: partition by composite key
             if Config::getenv("DATA_SOURCE_EVENT_TYPE_FIELDS", "") != "" {
-
                 let mut namespaces = vec!["".to_string()];
 
-                for entity_field_dot in Config::getenv("DATA_SOURCE_EVENT_TYPE_FIELDS", "").split(",") {
-
+                for entity_field_dot in
+                    Config::getenv("DATA_SOURCE_EVENT_TYPE_FIELDS", "").split(",")
+                {
                     match Helpers::get_nested_value_from_dot_notation(message, entity_field_dot) {
                         Some(entity_value) => {
                             namespaces.push(entity_value.as_str().unwrap().to_string());
-                        },
-                        None => ()
+                        }
+                        None => (),
                     }
-
                 }
 
                 clean_namespace = namespaces.join("_");
 
                 clean_namespace = clean_namespace.trim_matches('_').to_lowercase();
-
             }
         }
 
         if clean_namespace != namespace {
-
             parse_namespace_cache.insert(namespace.to_string(), "yes".to_string());
-        }
-        else {
+        } else {
             parse_namespace_cache.insert(namespace.to_string(), "no".to_string());
         }
 
         clean_namespace
-
     }
 
-
-    pub fn parse_time_field(
-        message: &Value,
-    ) -> Option<i64> {
+    pub fn parse_time_field(message: &Value) -> Option<i64> {
         // default to beginning of epoch.
         let mut time_field_value: Option<i64> = None;
 
@@ -298,8 +289,8 @@ impl Helpers {
                                 } else {
                                     time_field_value = None
                                 }
-                            },
-                            None => time_field_value = None
+                            }
+                            None => time_field_value = None,
                         }
 
                         // Handle datetime strings
@@ -308,11 +299,15 @@ impl Helpers {
                                 if let Ok(dt) = DateTime::parse_from_rfc3339(val) {
                                     time_field_value = Some(dt.with_timezone(&Utc).timestamp());
                                 }
-                            },
-                            None => { time_field_value = None; }
+                            }
+                            None => {
+                                time_field_value = None;
+                            }
                         };
-                    },
-                    None => { time_field_value = None; },
+                    }
+                    None => {
+                        time_field_value = None;
+                    }
                 };
             }
         }
@@ -320,8 +315,10 @@ impl Helpers {
         time_field_value
     }
 
-
-    pub fn get_nested_value_from_dot_notation(json_value: &Value, field_str: &str) -> Option<Value> {
+    pub fn get_nested_value_from_dot_notation(
+        json_value: &Value,
+        field_str: &str,
+    ) -> Option<Value> {
         // Parse the JSON string into a serde_json Value object
         // let json_value: Value = serde_json::from_str(json_str).ok()?;
 
@@ -345,15 +342,13 @@ impl Helpers {
         // Return the final value found at the end of the traversal
         Some(current_value.clone())
     }
-
 }
-
 
 #[cfg(test)]
 mod parse_partition_tests {
-    use serial_test::serial;
-    use serde_json::json;
     use super::*;
+    use serde_json::json;
+    use serial_test::serial;
 
     #[test]
     #[serial]
@@ -392,12 +387,11 @@ mod parse_partition_tests {
     }
 }
 
-
 #[cfg(test)]
 mod parse_namespace_field_tests {
-    use serial_test::serial;
-    use serde_json::json;
     use super::*;
+    use serde_json::json;
+    use serial_test::serial;
 
     #[test]
     #[serial]
@@ -424,14 +418,17 @@ mod parse_namespace_field_tests {
         assert_eq!(cache.get("my_namespace"), Some(&"no".to_string()));
     }
 
-
     #[test]
     #[serial]
     fn test_parse_namespace_field_with_composite_key() {
         let mut cache = HashMap::new();
-        let message = json!({"entity_field_1": "entity_value_1","entity_field_2": "entity_value_2"});
+        let message =
+            json!({"entity_field_1": "entity_value_1","entity_field_2": "entity_value_2"});
         let namespace = "my_namespace".to_string();
-        Config::setenv("DATA_SOURCE_EVENT_TYPE_FIELDS", "entity_field_1,entity_field_2");
+        Config::setenv(
+            "DATA_SOURCE_EVENT_TYPE_FIELDS",
+            "entity_field_1,entity_field_2",
+        );
         let result = Helpers::parse_namespace_field(&message, namespace, &mut cache);
         assert_eq!(result, "entity_value_1_entity_value_2");
         assert_eq!(cache.get("my_namespace"), Some(&"yes".to_string()));
@@ -450,7 +447,10 @@ mod parse_namespace_field_tests {
             }
         });
         let namespace = "my_namespace".to_string();
-        Config::setenv("DATA_SOURCE_EVENT_TYPE_FIELDS", "entity_field_1,entity_field_3.entity_field_3a");
+        Config::setenv(
+            "DATA_SOURCE_EVENT_TYPE_FIELDS",
+            "entity_field_1,entity_field_3.entity_field_3a",
+        );
         let result = Helpers::parse_namespace_field(&message, namespace, &mut cache);
         assert_eq!(result, "entity_value_1_entity_value_3a");
         assert_eq!(cache.get("my_namespace"), Some(&"yes".to_string()));

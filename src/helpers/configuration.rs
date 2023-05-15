@@ -1,32 +1,26 @@
-use yaml_rust::{YamlLoader};
 use std::collections::HashMap;
 use std::fs;
 use std::fs::{create_dir, File, OpenOptions};
 use std::io::{BufWriter, Read};
+use yaml_rust::YamlLoader;
 
-use std::sync::{MutexGuard};
-
+use std::sync::MutexGuard;
 
 // use aws_config::profile::profile_file::ProfileFileKind::Config;
 use serde_derive::{Deserialize, Serialize};
 
-
-
 use serde_json::json;
 
-use reqwest::{Client, StatusCode};
-use reqwest::header::{HeaderMap, HeaderName};
 use reqwest::header::HeaderValue;
 use reqwest::header::AUTHORIZATION;
-
-
+use reqwest::header::{HeaderMap, HeaderName};
+use reqwest::{Client, StatusCode};
 
 use crate::discover::Metadata;
 
-use crate::helpers::{Helpers};
 use crate::helpers::license::LicenseChecker;
+use crate::helpers::Helpers;
 use crate::plugins::athena::AwsAthena;
-
 
 #[non_exhaustive]
 struct RunModes;
@@ -170,17 +164,18 @@ impl Config {
 
     pub fn get_data_dir() -> String {
         let mut data_dir = Config::getenv("DATA_DIR", "./data");
-        if data_dir.ends_with('/') { data_dir.pop(); }
+        if data_dir.ends_with('/') {
+            data_dir.pop();
+        }
         let pipeline_name = Config::getenv("PIPELINE_NAME", "default");
 
-        let data_dir =  format!("{}/{}", data_dir, pipeline_name);
+        let data_dir = format!("{}/{}", data_dir, pipeline_name);
         match fs::create_dir(&data_dir) {
-            Ok(_g) => {},
+            Ok(_g) => {}
             Err(_err) => {}
         }
 
         data_dir
-
     }
 
     pub fn truth_value(condition: &str) -> bool {
@@ -193,7 +188,7 @@ impl Config {
             "no" => false,
             "1" => true,
             "0" => false,
-            _ => false
+            _ => false,
         }
     }
 
@@ -231,7 +226,7 @@ impl Config {
             Err(_) => config,
             Ok(config) => config,
         };
-            // .expect("Please provide env vars");
+        // .expect("Please provide env vars");
 
         // println!("{:#?}", config);
 
@@ -245,7 +240,6 @@ impl Config {
         //
         // let configuration: Value = serde_yaml::from_str(&yaml_str).unwrap();
         // println!("{:#?}", configuration);
-
 
         // config.pipeline_id = Config::getenv("PIPELINE_ID", "");
         //
@@ -285,11 +279,10 @@ impl Config {
 
         config.tenant_id = Config::getenv("TENANT_ID", Helpers::random_str(16).as_str());
 
-        let data_dir= Config::get_data_dir();
+        let data_dir = Config::get_data_dir();
         if data_dir != "" {
             config.data_dir = data_dir;
         }
-
 
         let pipeline_name = Config::get_pipeline_name();
 
@@ -305,29 +298,22 @@ impl Config {
         let auth_header = HeaderName::from_static("x-api-key");
         headers.insert(auth_header, HeaderValue::from_str(&token).unwrap());
 
-        let client = Client::builder()
-            .default_headers(headers)
-            .build().unwrap();
+        let client = Client::builder().default_headers(headers).build().unwrap();
 
         let path = format!("{}/{}", pipeline_name, "approved");
 
-        let response = client.get(&format!("{}/{}", uri, path))
-            .send()
-            .await;
+        let response = client.get(&format!("{}/{}", uri, path)).send().await;
 
         let metadata: Result<HashMap<String, Metadata>, bool> = match response {
-            Ok(resp) => {
-                 match resp.status() {
-                    StatusCode::OK => {
-                        let metadata = resp.json::<HashMap<String, Metadata>>().await.unwrap();
-                        Ok(metadata)
-                    },
-                    err =>  {
-                        println!("Metadata HTTP Error: {:?}", err);
-                        Err(false)
-                    }
+            Ok(resp) => match resp.status() {
+                StatusCode::OK => {
+                    let metadata = resp.json::<HashMap<String, Metadata>>().await.unwrap();
+                    Ok(metadata)
                 }
-
+                err => {
+                    println!("Metadata HTTP Error: {:?}", err);
+                    Err(false)
+                }
             },
             Err(err) => {
                 // println!("Metadata HTTP Error: {:?}", err);
@@ -339,7 +325,6 @@ impl Config {
     }
 
     pub async fn set_config(metadata: &HashMap<String, Metadata>, evolved: bool) {
-
         if evolved {
             // for (namespace, schema) in metadata.into_iter() {
             //     println!("Updating Hive '{}' schema", namespace);
@@ -384,9 +369,7 @@ impl Config {
 
             headers.insert(auth_header, HeaderValue::from_str(&token).unwrap());
 
-            let client = Client::builder()
-                .default_headers(headers)
-                .build().unwrap();
+            let client = Client::builder().default_headers(headers).build().unwrap();
 
             let path = "";
 
@@ -398,11 +381,11 @@ impl Config {
 
             // println!("Posting data: {:?}", data);
 
-            let response = client.put(&format!("{}/{}", uri, path))
+            let response = client
+                .put(&format!("{}/{}", uri, path))
                 .json(&data)
                 .send()
                 .await;
-
 
             match response {
                 Ok(resp) => {
@@ -410,19 +393,17 @@ impl Config {
                         StatusCode::OK => {
                             // println!("Metadata HTTP resp: {:?}", resp);
                         }
-                        err =>  println!("Metadata HTTP Error: {:?}", err),
+                        err => println!("Metadata HTTP Error: {:?}", err),
                     };
-
-                },
+                }
                 Err(err) => {
                     println!("Metadata HTTP Error: {:?}", err);
-                }
-                // Ok(resp) => {
-                //     println!("Metadata HTTP Success: {:?}", resp);
-                // }
-                // Err(err) => {
-                //     println!("Metadata HTTP Error: {:?}", err);
-                // }
+                } // Ok(resp) => {
+                  //     println!("Metadata HTTP Success: {:?}", resp);
+                  // }
+                  // Err(err) => {
+                  //     println!("Metadata HTTP Error: {:?}", err);
+                  // }
             }
 
             println!("Updated pipeline metadata in Skippr SaaS");
@@ -430,7 +411,6 @@ impl Config {
     }
 
     pub(crate) fn set_status(metrics: MutexGuard<Metrics>, exit_code: Option<i8>) {
-
         let pipeline_name = Config::get_pipeline_name();
 
         let env = Config::getenv("APP_ENV", "prod");
@@ -448,7 +428,8 @@ impl Config {
         let client = reqwest::blocking::Client::builder()
             .default_headers(headers)
             // .timeout(Duration::from_secs(10))
-            .build().unwrap();
+            .build()
+            .unwrap();
 
         let path = "";
 
@@ -470,9 +451,7 @@ impl Config {
 
         // println!("Posting data: {:?}", data);
 
-        let response = client.put(&format!("{}/{}", uri, path))
-            .json(&data)
-            .send();
+        let response = client.put(&format!("{}/{}", uri, path)).json(&data).send();
 
         match response {
             Ok(resp) => {
@@ -484,7 +463,6 @@ impl Config {
         }
 
         println!("Notified task status API");
-
     }
 
     pub async fn init() {
@@ -493,9 +471,7 @@ impl Config {
 
         // let config: Config = Config::get_config().await;
         // create_dir(Config::get_data_dir());
-
     }
-
 }
 
 #[derive(Debug, Deserialize, Serialize)]

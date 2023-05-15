@@ -1,19 +1,13 @@
 use sled;
 use Result;
 
-
-
-
-
+use crate::helpers::configuration::Config;
 use serde::__private::de::IdentifierDeserializer;
 use sled::IVec;
 use {
     byteorder::{BigEndian, LittleEndian},
-    zerocopy::{
-        byteorder::U64, AsBytes, FromBytes, LayoutVerified, Unaligned, U16,
-    },
+    zerocopy::{byteorder::U64, AsBytes, FromBytes, LayoutVerified, Unaligned, U16},
 };
-use crate::helpers::configuration::Config;
 
 pub const SLED_NAME: &str = "db";
 
@@ -36,7 +30,7 @@ pub struct OffsetKey {
 pub enum OffsetTypes {
     Filesize,
     Line,
-    Closed
+    Closed,
 }
 
 // We use `LittleEndian` for values because
@@ -64,9 +58,7 @@ pub struct Offsets {
     tree: sled::Tree,
 }
 
-
 impl Offsets {
-
     pub fn init() -> Result<Offsets, bool> {
         let db_path = format!("{}/{}", Config::get_data_dir(), SLED_NAME);
         let db = sled::open(&db_path).map_err(|e| format!("Failed opening DB at this location: {:?} . Is another instance of Atomic Server running? {}", &db_path, e)).unwrap();
@@ -118,10 +110,7 @@ impl Offsets {
         //     println!("Key: {:?}, Value: {:?}", key, value);
         // }
 
-        let store = Offsets {
-            db,
-            tree,
-        };
+        let store = Offsets { db, tree };
 
         Ok(store)
     }
@@ -165,63 +154,64 @@ impl Offsets {
         format!("{}-{}-latest", key.namespace, key.partition)
     }
 
-    pub fn set(&self, key: &OffsetKey, offset_type: OffsetTypes, offset: u64) -> Option<IVec>  {
+    pub fn set(&self, key: &OffsetKey, offset_type: OffsetTypes, offset: u64) -> Option<IVec> {
         match self.upsert(key, offset_type, offset) {
             Ok(val) => val,
-            Err(_) => None
+            Err(_) => None,
         }
     }
 
-    pub fn insert(&self, key: &OffsetKey, _offset_type: OffsetTypes, _offset: u64) -> Option<IVec>  {
+    pub fn insert(&self, key: &OffsetKey, _offset_type: OffsetTypes, _offset: u64) -> Option<IVec> {
         let key = self.build_key(key);
         let bytes: &[u8] = key.as_bytes();
         // let bytes: &[u8] = unsafe { self.any_as_u8_slice(&key) };
 
         let new_val = sled::IVec::from(
-            OffsetValue { filesize: U64::new(0), line:  U64::new(0), closed: U64::new(0) }.as_bytes(),
+            OffsetValue {
+                filesize: U64::new(0),
+                line: U64::new(0),
+                closed: U64::new(0),
+            }
+            .as_bytes(),
         );
 
         self.tree.insert(bytes, &new_val).unwrap();
 
         Some(new_val)
-
     }
 
-    pub fn get(&self, key: &OffsetKey) -> Option<IVec>  {
+    pub fn get(&self, key: &OffsetKey) -> Option<IVec> {
         let key = self.build_key(key);
         // let bytes: &[u8] = unsafe { self.any_as_u8_slice(&key) };
         let bytes: &[u8] = key.as_bytes();
-        match  self.tree.get(bytes) {
+        match self.tree.get(bytes) {
             Ok(val) => val,
-            Err(_) => None
+            Err(_) => None,
         }
     }
 
-    pub fn get_latest(&self, key: &OffsetKey) -> Option<IVec>  {
+    pub fn get_latest(&self, key: &OffsetKey) -> Option<IVec> {
         let key = self.build_key(key);
         // let bytes: &[u8] = unsafe { self.any_as_u8_slice(&key) };
         let bytes: &[u8] = key.as_bytes();
-        match  self.tree.get(bytes) {
+        match self.tree.get(bytes) {
             Ok(val) => val,
-            Err(_) => None
+            Err(_) => None,
         }
     }
 
-    pub fn remove(&self, key: &OffsetKey) -> Option<IVec>  {
+    pub fn remove(&self, key: &OffsetKey) -> Option<IVec> {
         let key = self.build_key(key);
         // let bytes: &[u8] = unsafe { self.any_as_u8_slice(&key) };
         let bytes: &[u8] = key.as_bytes();
-        match  self.tree.remove(bytes) {
+        match self.tree.remove(bytes) {
             Ok(val) => val,
-            Err(_) => None
+            Err(_) => None,
         }
     }
 
     unsafe fn any_as_u8_slice<T: Sized>(&self, p: &T) -> &[u8] {
-        ::core::slice::from_raw_parts(
-            (p as *const T) as *const u8,
-            ::core::mem::size_of::<T>(),
-        )
+        ::core::slice::from_raw_parts((p as *const T) as *const u8, ::core::mem::size_of::<T>())
     }
 
     fn u64_to_ivec(number: u64) -> IVec {
@@ -231,8 +221,12 @@ impl Offsets {
     // fn ivec_to_u64(ivec: IVec) -> u64 {
     //     U64::from(ivec).into()
     // }
-    pub fn validate(&self, key: &OffsetKey, offset_type: OffsetTypes, offset_value: u64) -> Option<bool> {
-
+    pub fn validate(
+        &self,
+        key: &OffsetKey,
+        offset_type: OffsetTypes,
+        offset_value: u64,
+    ) -> Option<bool> {
         // self.build_key(namespace, partition);
 
         let resp = match self.get(key) {
@@ -264,14 +258,14 @@ impl Offsets {
                             // println!("Setting filesize {}", filesize);
                             bool = true
                         }
-                    },
+                    }
                     OffsetTypes::Line => {
                         if value.line.get() < offset_value {
                             // Some(false)
                             // println!("Setting filesize {}", filesize);
                             bool = true
                         }
-                    },
+                    }
                     OffsetTypes::Closed => {
                         if value.closed.get() == offset_value {
                             // Some(false)
@@ -281,17 +275,19 @@ impl Offsets {
                 }
 
                 Some(bool)
-            },
-            None => {
-                None
             }
+            None => None,
         };
 
         resp
-
     }
 
-    pub fn upsert(&self, key: &OffsetKey, offset_type: OffsetTypes, offset: u64) -> Result<Option<IVec>, sled::Error>  {
+    pub fn upsert(
+        &self,
+        key: &OffsetKey,
+        offset_type: OffsetTypes,
+        offset: u64,
+    ) -> Result<Option<IVec>, sled::Error> {
         // let key = Key { namespace: namespace.to_string(), partition: partition.to_string() };
         // let bytes: &[u8] = unsafe { self.any_as_u8_slice(&key) };
 
@@ -325,16 +321,15 @@ impl Offsets {
 
                 match offset_type {
                     OffsetTypes::Filesize => {
-                         value.filesize.set(offset);
-                    },
+                        value.filesize.set(offset);
+                    }
                     OffsetTypes::Line => {
                         value.line.set(offset);
-                    },
+                    }
                     OffsetTypes::Closed => {
                         value.closed.set(offset);
                     }
                 }
-
 
                 Some(backing_bytes)
                 // Some(value)
@@ -343,39 +338,38 @@ impl Offsets {
                 // println!("Creating offset");
 
                 let new_val = sled::IVec::from(
-                    OffsetValue { filesize: U64::new(0), line: U64::new(0), closed: U64::new(0) }.as_bytes(),
+                    OffsetValue {
+                        filesize: U64::new(0),
+                        line: U64::new(0),
+                        closed: U64::new(0),
+                    }
+                    .as_bytes(),
                 );
 
                 self.tree.insert(bytes, &new_val).unwrap();
 
                 Some(new_val)
 
-
                 // Some(true)
             }
         })
-
     }
-
 }
-
-
 
 #[cfg(test)]
 mod tests {
+    use crate::helpers::configuration::{Config, Metrics};
+    use crate::helpers::offsets::{OffsetKey, OffsetTypes, OffsetValue, Offsets};
+    use crate::helpers::Helpers;
+    use icu::plurals::rules::reference::ast::Operand::N;
+    use rand::Rng;
+    use serial_test::serial;
     use std::mem::transmute;
     use std::sync::{Arc, Mutex};
     use std::thread::sleep;
     use std::time::{Duration, Instant};
-    use icu::plurals::rules::reference::ast::Operand::N;
-    use rand::Rng;
-    use serial_test::serial;
     use zerocopy::LayoutVerified;
-    use crate::helpers::configuration::{Config, Metrics};
-    use crate::helpers::Helpers;
-    use crate::helpers::offsets::{OffsetKey, Offsets, OffsetTypes, OffsetValue};
 
-   
     #[test]
     #[serial]
     fn test_validate() {
@@ -391,7 +385,10 @@ mod tests {
         // assert_eq!(db.validate(key, 2, 2), Some(false));
         // assert_eq!(db.validate(key, 1, 4), Some(false));
 
-        let key = &OffsetKey { namespace: "foo".to_string(), partition: "bar".to_string() };
+        let key = &OffsetKey {
+            namespace: "foo".to_string(),
+            partition: "bar".to_string(),
+        };
 
         assert_eq!(db.validate(key, OffsetTypes::Filesize, 1), None);
         db.set(key, OffsetTypes::Filesize, 1).unwrap();
@@ -404,14 +401,16 @@ mod tests {
         assert_eq!(db.validate(key, OffsetTypes::Filesize, 4), Some(true));
         assert_eq!(db.validate(key, OffsetTypes::Filesize, 2), Some(false));
 
-        let key = &OffsetKey { namespace: "foo".to_string(), partition: "bar2".to_string() };
+        let key = &OffsetKey {
+            namespace: "foo".to_string(),
+            partition: "bar2".to_string(),
+        };
 
         assert_eq!(db.validate(key, OffsetTypes::Closed, 0), None);
         assert_eq!(db.validate(key, OffsetTypes::Closed, 1), None);
         db.set(key, OffsetTypes::Closed, 1).unwrap();
         assert_eq!(db.validate(key, OffsetTypes::Closed, 1), Some(true));
         assert_eq!(db.validate(key, OffsetTypes::Closed, 0), Some(false));
-
 
         // db.remove(key).unwrap();
 

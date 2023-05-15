@@ -16,10 +16,8 @@ use std::io::{BufRead, BufReader, Cursor, Read, Write};
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 
-
-use std::{fs, thread};
 use std::time::Duration;
-
+use std::{fs, thread};
 
 use crate::discover::Metadata;
 use futures::future::join_all;
@@ -27,13 +25,10 @@ use futures::StreamExt;
 
 // use crate::thread_pool::ThreadPool;
 
-
-
-
-use rusoto_core::{Region, RusotoError};
-use rusoto_s3::{GetObjectRequest, S3Client, S3, GetObjectOutput};
-use crate::helpers::offsets::{OffsetKey, Offsets, OffsetTypes};
+use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::ingest_work::{Ingest, IngestBatch};
+use rusoto_core::{Region, RusotoError};
+use rusoto_s3::{GetObjectOutput, GetObjectRequest, S3Client, S3};
 
 pub struct DataSourceS3Plugin {
     // config: HashMap<String, String>,
@@ -78,7 +73,7 @@ impl DataSourceS3Plugin {
         let metadata = metadata.clone();
         let metrics = metrics.clone();
 
-        let offsets =  Arc::new(Offsets::init().unwrap());
+        let offsets = Arc::new(Offsets::init().unwrap());
 
         let offsets_clone = offsets.clone();
 
@@ -87,7 +82,7 @@ impl DataSourceS3Plugin {
         // let res = offsets_clone.validate(&offset_key, OffsetTypes::Closed, 0);
         // panic!("{:?}", res);
 
-            let _s3_client = self.s3_client.clone();
+        let _s3_client = self.s3_client.clone();
         // let s3_client = s3_client.clone();
 
         // let s3_client = Arc::new(s3_client);
@@ -135,9 +130,10 @@ impl DataSourceS3Plugin {
                             let object_key = object.key().unwrap();
                             let _timestamp = object.last_modified().unwrap().secs();
 
-
-                            let chunk_size = Config::getenv("DATA_SOURCE_BATCH_SIZE_BYTES", "1024000").parse::<i64>().unwrap();
-
+                            let chunk_size =
+                                Config::getenv("DATA_SOURCE_BATCH_SIZE_BYTES", "1024000")
+                                    .parse::<i64>()
+                                    .unwrap();
 
                             // let mut j = 0;
                             // let mut c = 0;
@@ -151,10 +147,13 @@ impl DataSourceS3Plugin {
 
                             let mut datas: Vec<IngestBatch> = Vec::new();
 
-
-                            let offset_key = OffsetKey { namespace: inventory_bucket.clone(), partition: object_key.clone().to_string() };
-                            if Some(true) != offsets_clone.validate(&offset_key, OffsetTypes::Closed, 1) {
-
+                            let offset_key = OffsetKey {
+                                namespace: inventory_bucket.clone(),
+                                partition: object_key.clone().to_string(),
+                            };
+                            if Some(true)
+                                != offsets_clone.validate(&offset_key, OffsetTypes::Closed, 1)
+                            {
                                 outputs.push(object_key.to_string());
 
                                 chunk_size_current += object.size();
@@ -162,20 +161,20 @@ impl DataSourceS3Plugin {
                                 i += 1;
 
                                 if i >= 20 || chunk_size_current >= chunk_size {
-                                        Self::download_and_ingest(
+                                    Self::download_and_ingest(
                                         &mut self.s3_client_rusoto,
                                         &inventory_bucket,
                                         &outputs,
                                         &self.temp_dir,
                                         &metadata,
                                         &metrics,
-                                        &offsets_clone
-                                    ).await;
+                                        &offsets_clone,
+                                    )
+                                    .await;
 
                                     outputs = Vec::new();
                                     i = 0;
                                     chunk_size_current = 0;
-
                                 }
                             } else {
                                 // println!("Skipping object: {} already processed", target_key);
@@ -208,8 +207,8 @@ impl DataSourceS3Plugin {
                     if retries > 0 {
                         println!("Successful retry of object {}", key);
                     }
-                    return Ok(result)
-                },
+                    return Ok(result);
+                }
                 Err(err) => {
                     retries += 1;
 
@@ -218,17 +217,19 @@ impl DataSourceS3Plugin {
 
                     backoff_duration *= 2;
 
-                    println!("Failed to get object {}, retry back in {} seconds", key, backoff_duration.as_secs());
+                    println!(
+                        "Failed to get object {}, retry back in {} seconds",
+                        key,
+                        backoff_duration.as_secs()
+                    );
 
                     if retries >= max_retries {
                         return Err(err);
                     }
-
                 }
             }
         }
     }
-
 
     async fn download_and_ingest(
         s3_client: &mut S3Client,
@@ -239,21 +240,27 @@ impl DataSourceS3Plugin {
         metrics: &Arc<Mutex<Metrics>>,
         offsets_clone: &Arc<Offsets>,
     ) {
-        let futures: Vec<_> = object_keys.clone()
+        let futures: Vec<_> = object_keys
+            .clone()
             .into_iter()
             .map(|object_key| {
                 let s3_client = s3_client.clone();
                 let bucket_name = bucket_name.to_owned();
 
                 tokio::spawn(async move {
-                    let x_fut = s3_client
-                        .get_object(GetObjectRequest {
-                            bucket: bucket_name.clone(),
-                            key: object_key.to_string(),
-                            ..Default::default()
-                        });
+                    let x_fut = s3_client.get_object(GetObjectRequest {
+                        bucket: bucket_name.clone(),
+                        key: object_key.to_string(),
+                        ..Default::default()
+                    });
 
-                    let response = Self::download_s3_object_with_backoff(&s3_client, &bucket_name, &object_key).await.unwrap();
+                    let response = Self::download_s3_object_with_backoff(
+                        &s3_client,
+                        &bucket_name,
+                        &object_key,
+                    )
+                    .await
+                    .unwrap();
                     // println!("Got s3 object");
                     let download = Download {
                         key: object_key,
@@ -265,13 +272,11 @@ impl DataSourceS3Plugin {
             })
             .collect();
 
-
         let datas: Arc<Mutex<Vec<IngestBatch>>> = Arc::new(Mutex::new(Vec::new()));
 
         let future_result = tokio::join!(join_all(futures)).0;
 
         let mut threads: Vec<_> = Vec::new();
-
 
         let data_dir = Config::get_data_dir();
         let _temp_dir = &format!("{}/source_buffer", data_dir);
@@ -293,7 +298,7 @@ impl DataSourceS3Plugin {
                 match download.response.body.take() {
                     Some(body) => match body.into_blocking_read().read_to_end(&mut data) {
                         Ok(_) => {}
-                        Err(err) => println!("{:?}", err)
+                        Err(err) => println!("{:?}", err),
                     },
                     None => println!("Empty S3 object body"),
                 };
@@ -336,10 +341,8 @@ impl DataSourceS3Plugin {
                     &metrics,
                     &offsets_clone,
                 );
-
             }));
         }
-
 
         // Wait for all threads to finish, else we will stampead the data source
         for handle in threads {
@@ -350,5 +353,5 @@ impl DataSourceS3Plugin {
 
 struct Download {
     key: String,
-    response: GetObjectOutput
+    response: GetObjectOutput,
 }

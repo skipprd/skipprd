@@ -33,10 +33,9 @@ impl Ingest {
         Ingest {}
     }
 
-    pub fn flush_buffers(force: bool, output_files: &mut MutexGuard<HashMap<String, File>> ) {
+    pub fn flush_buffers(force: bool, output_files: &mut MutexGuard<HashMap<String, File>>) {
         let data_dir = Config::get_data_dir();
         let output_dir = format!("{}/output", data_dir);
-
 
         for (filename, file) in output_files.iter() {
             if force || Ingest::is_file_size_exceeded(file) {
@@ -155,7 +154,8 @@ impl Ingest {
                     output_files
                         .get_mut(&output_file_name)
                         .unwrap()
-                        .write_all(&buf_str.as_bytes()).unwrap();
+                        .write_all(&buf_str.as_bytes())
+                        .unwrap();
 
                     buf_str.clear();
 

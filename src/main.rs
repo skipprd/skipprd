@@ -1,30 +1,26 @@
 mod arr;
 
-use arrow::datatypes::{Schema};
+use arrow::datatypes::Schema;
 use arrow::error::ArrowError;
-
 
 // mod thread_pool;
 // use thread_pool::ThreadPool;
 mod ingest_work;
 
+use std::collections::HashMap;
 
-use std::collections::{HashMap};
+use std::fs::File;
 
-use std::fs::{File};
-
-use std::io::{BufReader};
-use std::ops::{Add};
-
+use std::io::BufReader;
+use std::ops::Add;
 
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use std::time::{Instant};
-use std::{fs};
+use std::fs;
 use std::process::exit;
 use std::sync::atomic::{AtomicBool, Ordering};
-
+use std::time::Instant;
 
 use futures::executor::block_on;
 use glob::glob_with;
@@ -49,14 +45,9 @@ use crate::cli::{Cli, Mode};
 extern crate clap;
 extern crate core;
 
-use clap::{Parser};
-
-
-
-
+use clap::Parser;
 
 mod ingest;
-
 
 mod serdes;
 
@@ -64,14 +55,10 @@ use crate::serdes::parquet::SerdeParquet;
 
 mod plugins;
 
-
-
 // use crate::helpers::Config
 
 use crate::discover::arrow_schema::convert_skippr_to_arrow;
 use crate::helpers::configuration::{Config, Metrics};
-
-
 
 use crate::buffer::BufferChunker;
 use crate::ingest_work::Ingest;
@@ -89,7 +76,6 @@ async fn main() {
     //     static ref arrowSchema: Mutex<Result<Schema, ArrowError>> = Mutex::new(Ok(Schema::empty()));
     //     // static ref my_mutex: Mutex<i32> = Mutex::new(0i32);
     // }
-
 
     let cli = Cli::parse();
 
@@ -110,8 +96,6 @@ async fn main() {
     // blah();
 }
 
-
-
 async fn discover() {
     println!("Analysing data and generating Skippr metadata");
 
@@ -128,9 +112,8 @@ async fn discover() {
 
     // let mut skipprMetadata: HashMap<String, Metadata> = HashMap::new();
 
-    let data_dir= Config::get_data_dir();
+    let data_dir = Config::get_data_dir();
     let metadata_file = format!("{}/metadata.json", data_dir);
-
 
     // Get existing metadata
     let mut skipprMetadata: HashMap<String, Metadata> = match File::open(metadata_file) {
@@ -156,7 +139,7 @@ async fn discover() {
 
     let mut analyseCount = 0;
 
-    let data_dir= Config::get_data_dir();
+    let data_dir = Config::get_data_dir();
     let pattern = &format!("{}/source_buffer/*", data_dir);
 
     while !hasAnalysed && analyseCount < 10 {
@@ -175,14 +158,15 @@ async fn discover() {
                         // skipprMetadata =
                         //     AnalyseSchema::infer_json_schema(&mut foo, &mut buf_reader, Some(1000))
                         //         .unwrap();
-                        skipprMetadata =
-                            AnalyseSchema::infer_json_schema(&mut foo, input_file, Some(1000), &mut skipprMetadata)
-                                .unwrap();
+                        skipprMetadata = AnalyseSchema::infer_json_schema(
+                            &mut foo,
+                            input_file,
+                            Some(1000),
+                            &mut skipprMetadata,
+                        )
+                        .unwrap();
 
                         // println!("Skippr schema: {:?}", skipprMetadata);
-
-
-
 
                         // arrowSchema = convert_skippr_to_arrow(
                         //     skipprMetadata.get(&"example_ns".to_string()).unwrap().fields.clone(),
@@ -234,17 +218,15 @@ async fn sync() {
     // Config::set_config(&metadata, true).await;
     // exit(0);
 
-
-
     // let mut skippr_metadata = Arc::new(Mutex::new(HashMap::new()));
 
-    let data_dir= Config::get_data_dir();
+    let data_dir = Config::get_data_dir();
 
     let metadata_file = format!("{}/metadata.json", data_dir);
 
     // let skippr_metadata = Arc::new(Mutex::new(match File::open(metadata_file.clone()) {
     let skippr_metadata = Arc::new(Mutex::new(match Config::get_config().await {
-    // let mut skippr_metadata: HashMap<String, Metadata> = match File::open(metadata_file.clone()) {
+        // let mut skippr_metadata: HashMap<String, Metadata> = match File::open(metadata_file.clone()) {
         Ok(metadata) => {
             println!("Found Skippr metadata");
 
@@ -264,7 +246,6 @@ async fn sync() {
             // let skippr_metadata: HashMap<String, Metadata> = metadata;
             // skippr_metadata
             metadata
-
 
             // exit(1);
             // discover();
@@ -299,10 +280,10 @@ async fn sync() {
             println!("Received another Ctrl+C signal - no worries, terminating immediately...");
             std::process::exit(0);
         }
-    }).expect("Error during graceful shutdown");
+    })
+    .expect("Error during graceful shutdown");
 
     while running.load(Ordering::SeqCst) {
-
         let now = Arc::new(Mutex::new(Instant::now()));
 
         let metrics: Arc<Mutex<Metrics>> = Arc::new(Mutex::new(Metrics::new()));
@@ -345,18 +326,18 @@ async fn sync() {
         );
         planner.start();
 
-
         let inputMetadataClone = skippr_metadata.clone();
 
         let mut out_pnanner = periodic::Planner::new();
-        out_pnanner.add(move || {
-            outputSync(inputMetadataClone.lock().unwrap().clone());
-            // let dataOutput = block_on(DataOutputAwsAthenaPlugin::new());
-            // dataOutput.sync(inputMetadataClone.lock().unwrap().clone()).await;
-        }, periodic::Every::new(Duration::from_secs(60))
+        out_pnanner.add(
+            move || {
+                outputSync(inputMetadataClone.lock().unwrap().clone());
+                // let dataOutput = block_on(DataOutputAwsAthenaPlugin::new());
+                // dataOutput.sync(inputMetadataClone.lock().unwrap().clone()).await;
+            },
+            periodic::Every::new(Duration::from_secs(60)),
         );
         out_pnanner.start();
-
 
         let inputMetadataClone = skippr_metadata.clone();
 
@@ -372,15 +353,15 @@ async fn sync() {
         let output_dir = &format!("{}/output", data_dir);
         let finalised_dir = &format!("{}/finalised", data_dir);
         match fs::create_dir(output_dir) {
-            Ok(_g) => {},
+            Ok(_g) => {}
             Err(_err) => {}
         }
         match fs::create_dir(format!("{}/done", output_dir)) {
-            Ok(_g) => {},
+            Ok(_g) => {}
             Err(_err) => {}
         }
         match fs::create_dir(finalised_dir) {
-            Ok(_g) => {},
+            Ok(_g) => {}
             Err(_err) => {}
         }
 
@@ -392,32 +373,31 @@ async fn sync() {
                 ds3.sync(
                     // &m1ut pool,
                     inputMetadataClone,
-                    metricsClone
-                ).await;
-            },
+                    metricsClone,
+                )
+                .await;
+            }
             "s3_inventory" => {
                 let mut ds3 = block_on(DataSourceS3InventoryPlugin::new());
                 ds3.sync(
                     // &mut pool,
                     inputMetadataClone,
-                    metricsClone
-                ).await;
-            },
-            unknown => { println!("Plugin {} not supported", unknown); }
+                    metricsClone,
+                )
+                .await;
+            }
+            unknown => {
+                println!("Plugin {} not supported", unknown);
+            }
         };
-
-
     }
 }
 
-fn outputSync(
-    metadata: HashMap<String, Metadata>
-) {
+fn outputSync(metadata: HashMap<String, Metadata>) {
     thread::spawn(move || {
-
         // println!("Arrow Schema: {:?}", arrowSchema);
 
-        let data_dir= Config::get_data_dir();
+        let data_dir = Config::get_data_dir();
         let output_dir = &format!("{}/output", data_dir);
 
         let options = MatchOptions {
@@ -427,56 +407,52 @@ fn outputSync(
         };
 
         // loop {
-            for entry in glob_with(&format!("{}/done/*", output_dir), options).expect("Failed to read glob pattern") {
-                match entry {
-                    Ok(path) => {
-                        // println!("Finalising output file {}", path.display());
+        for entry in glob_with(&format!("{}/done/*", output_dir), options)
+            .expect("Failed to read glob pattern")
+        {
+            match entry {
+                Ok(path) => {
+                    // println!("Finalising output file {}", path.display());
 
-                        // alwasy regenerate arrow schema incase updated skippr metadata, e.g. discovered a new field
-                        let mut arrowSchema: Result<Schema, ArrowError> = Ok(Schema::empty());
-                        let mut schema_ref = Arc::new(Schema::empty());
+                    // alwasy regenerate arrow schema incase updated skippr metadata, e.g. discovered a new field
+                    let mut arrowSchema: Result<Schema, ArrowError> = Ok(Schema::empty());
+                    let mut schema_ref = Arc::new(Schema::empty());
 
-                        let skpr_namespace = BufferChunker::decode_file_namespace(path.to_str().unwrap());
-                        // let skpr_partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
+                    let skpr_namespace =
+                        BufferChunker::decode_file_namespace(path.to_str().unwrap());
+                    // let skpr_partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
 
-                        // let mut skpr_namespace: String = "".to_string();
-                        // if let Some((a, b)) = path.display().to_string().split_once("done/") {
-                        //     if let Some((hash, namespace_part)) = b.to_string().split_once("-") {
-                        //         skpr_namespace = namespace_part.to_string()
-                        //     }
-                        // }
+                    // let mut skpr_namespace: String = "".to_string();
+                    // if let Some((a, b)) = path.display().to_string().split_once("done/") {
+                    //     if let Some((hash, namespace_part)) = b.to_string().split_once("-") {
+                    //         skpr_namespace = namespace_part.to_string()
+                    //     }
+                    // }
 
-                        // if metadata.get(&skpr_namespace).is_none() {
-                        //     metadata.insert(skpr_namespace.clone(), Metadata::new().unwrap());
-                        // }
+                    // if metadata.get(&skpr_namespace).is_none() {
+                    //     metadata.insert(skpr_namespace.clone(), Metadata::new().unwrap());
+                    // }
 
-                        // println!("getting schema: {} from file: {}", skpr_namespace, path.to_str().unwrap());
+                    // println!("getting schema: {} from file: {}", skpr_namespace, path.to_str().unwrap());
 
-                        arrowSchema = convert_skippr_to_arrow(
-                            metadata
-                                .get(&skpr_namespace)
-                                .unwrap()
-                                .fields.clone(),
-                        );
+                    arrowSchema = convert_skippr_to_arrow(
+                        metadata.get(&skpr_namespace).unwrap().fields.clone(),
+                    );
 
-                        schema_ref = Arc::new(arrowSchema.unwrap());
+                    schema_ref = Arc::new(arrowSchema.unwrap());
 
+                    schema_ref = SerdeParquet::serialize(path.clone(), schema_ref);
 
-                        schema_ref = SerdeParquet::serialize(path.clone(), schema_ref);
-
-                        match std::fs::remove_file(path) {
-                            Ok(_t) => {},
-                            Err(err) => println!("{:?}", err),
-
-                        }
+                    match std::fs::remove_file(path) {
+                        Ok(_t) => {}
+                        Err(err) => println!("{:?}", err),
                     }
-                    Err(e) => println!("{:?}", e),
                 }
+                Err(e) => println!("{:?}", e),
             }
+        }
 
-            // sleep(Duration::from_secs(1));
+        // sleep(Duration::from_secs(1));
         // }
-
-
     });
 }

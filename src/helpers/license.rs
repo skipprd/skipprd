@@ -1,11 +1,11 @@
 extern crate reqwest;
 extern crate serde_json;
 
+use crate::helpers::configuration::Config;
+use reqwest::{header::HeaderName, Client, Response, Url};
 use std::collections::HashMap;
 use std::error::Error;
 use std::process::exit;
-use reqwest::{Client, Response, Url, header::HeaderName};
-use crate::helpers::configuration::Config;
 
 const API_KEY_ENV_VAR: &str = "SKIPPR_API_TOKEN";
 const APP_ENV: &str = "APP_ENV";
@@ -41,19 +41,22 @@ impl LicenseChecker {
 
         let auth_header = HeaderName::from_static("x-api-key");
 
-        let req = self.client.get(base_url)
+        let req = self
+            .client
+            .get(base_url)
             .header(auth_header, self.api_key.clone());
 
-        let response = req
-            .send()
-            .await?;
+        let response = req.send().await?;
 
         if response.status().is_success() {
             let body = response.json::<HashMap<String, String>>().await?;
             self.license = Some(body);
             // println!("{:?}", self.license);
 
-            self.license_is_valid = self.license.as_ref().map_or(false, |l| l.get("api_key") == Some(&self.api_key));
+            self.license_is_valid = self
+                .license
+                .as_ref()
+                .map_or(false, |l| l.get("api_key") == Some(&self.api_key));
         } else {
             self.license_is_valid = false;
             // println!("{:?}", response.json::<HashMap<String, String>>().await?);
@@ -63,7 +66,7 @@ impl LicenseChecker {
             true => {
                 println!("Found valid license");
                 Ok(())
-            },
+            }
             _false => {
                 println!("No valid license found for API Key");
                 exit(1);

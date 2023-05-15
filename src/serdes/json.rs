@@ -1,17 +1,14 @@
 use serde::{Deserialize, Serialize};
-use serde_json::{Value};
+use serde_json::Value;
 
-use std::fs::{File, OpenOptions, remove_file};
+use std::fs::{remove_file, File, OpenOptions};
+use std::io::{BufRead, BufReader, Lines, Result, Seek, Write};
 use std::path::Path;
-use std::io::{Seek, Write, BufReader, Lines, Result, BufRead};
 
-
-
-use rand::{Rng};
-use serde_json::Value::Null;
 use crate::discover::AnalyseSchema;
 use crate::helpers::configuration::Config;
-
+use rand::Rng;
+use serde_json::Value::Null;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SerdeJson {
@@ -24,7 +21,10 @@ pub struct SerdeJson {
 impl SerdeJson {
     pub fn new() -> SerdeJson {
         SerdeJson {
-            supported_compression_types: vec![String::from("VALUE_COMPRESSION"), String::from("NO_COMPRESSION")],
+            supported_compression_types: vec![
+                String::from("VALUE_COMPRESSION"),
+                String::from("NO_COMPRESSION"),
+            ],
             compression_type: String::from("NO_COMPRESSION"),
             fh: String::from(""),
             records: vec![],
@@ -63,17 +63,19 @@ impl SerdeJson {
     }
 
     pub fn serialize(&mut self, record: Vec<Value>, _schema: Vec<Value>) {
-        self.records.push(serde_json::to_string(&record).unwrap_or_default());
+        self.records
+            .push(serde_json::to_string(&record).unwrap_or_default());
     }
 
     // The output is wrapped in a Result to allow matching on errors
     // Returns an Iterator to the Reader of the lines of the file.
     pub fn read_lines<P>(filename: P) -> Result<Lines<BufReader<File>>>
-        where P: AsRef<Path>, {
+    where
+        P: AsRef<Path>,
+    {
         let file = File::open(filename)?;
         Ok(BufReader::new(file).lines())
     }
-
 
     pub fn json_decode(string: &str) -> Vec<Value> {
         let mut message: Vec<Value> = Vec::new();
@@ -116,7 +118,9 @@ impl SerdeJson {
                     .map(|line| serde_json::from_str(&line).unwrap_or_default())
                     .collect();
 
-                if deserialized_lines.is_empty() || deserialized_lines.first().unwrap() == &Value::Null {
+                if deserialized_lines.is_empty()
+                    || deserialized_lines.first().unwrap() == &Value::Null
+                {
                     deserialized_lines.clear();
 
                     for line in lines {
@@ -133,7 +137,8 @@ impl SerdeJson {
                                 record.push('}');
                             }
 
-                            deserialized_lines.push(serde_json::from_str(&record).unwrap_or_default());
+                            deserialized_lines
+                                .push(serde_json::from_str(&record).unwrap_or_default());
                         }
                     }
                 }
@@ -144,7 +149,6 @@ impl SerdeJson {
 
         message
     }
-
 }
 
 #[test]
@@ -184,7 +188,10 @@ fn test_json_serde() {
         let record: String = r#"{\\\"time\\\":{\\\"start_time\\\":\\\"273.046328210292\\\",\\\"end_time\\\":\\\"16182\\\"},\\\"bike_id\\\":\\\"0.579087190592872\\\",\\\"location\\\":{\\\"start\\\":\\\"0.620131100002421\\\",\\\"end\\\":null}}"#.to_string();
         let msg = SerdeJson::deserialize(&record);
         assert_eq!(msg.first().unwrap()["bike_id"], "0.579087190592872");
-        assert_eq!(msg.first().unwrap()["time"]["start_time"], "273.046328210292");
+        assert_eq!(
+            msg.first().unwrap()["time"]["start_time"],
+            "273.046328210292"
+        );
     }
 
     #[test]
@@ -256,7 +263,9 @@ fn test_json_serde() {
      */
     #[test]
     fn test_single_line_objects_json() {
-        let record: String = r#"{"foo": {"nest": "bar"}}{"foo": {"nest": "baz"}}{"foo": {"nest": "boo"}}"#.to_string();
+        let record: String =
+            r#"{"foo": {"nest": "bar"}}{"foo": {"nest": "baz"}}{"foo": {"nest": "boo"}}"#
+                .to_string();
         let msg = SerdeJson::deserialize(&record);
         // assert!( msg.first().unwrap().is_array());
         assert_eq!(msg[0]["foo"]["nest"], "bar");

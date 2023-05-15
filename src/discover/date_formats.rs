@@ -1,5 +1,3 @@
-
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DateFormats {
     Iso8601,
@@ -22,7 +20,6 @@ pub enum DateFormats {
 }
 
 impl DateFormats {
-
     pub fn name(&self) -> &'static str {
         match self {
             DateFormats::Iso8601 => "Iso8601",
@@ -69,28 +66,28 @@ impl DateFormats {
 
     pub fn from_str(input: &str) -> Result<DateFormats, bool> {
         match input {
-            "Iso8601"  => Ok(DateFormats::Iso8601),
-            "Iso8601_2"  => Ok(DateFormats::Iso8601_2),
-            "Rfc2822"  => Ok(DateFormats::Rfc2822),
-            "Rfc3339"  => Ok(DateFormats::Rfc3339),
-            "Atom"  => Ok(DateFormats::Atom),
-            "AtomZ"  => Ok(DateFormats::AtomZ),
-            "Asctime"  => Ok(DateFormats::Asctime),
-            "Cookie"  => Ok(DateFormats::Cookie),
-            "Rfc822"  => Ok(DateFormats::Rfc822),
-            "Rfc850"  => Ok(DateFormats::Rfc850),
-            "Rfc1036"  => Ok(DateFormats::Rfc1036),
-            "Rfc1123"  => Ok(DateFormats::Rfc1123),
-            "Rfc7231"  => Ok(DateFormats::Rfc7231),
-            "Rss"  => Ok(DateFormats::Rss),
-            "W3c"  => Ok(DateFormats::W3c),
-            "Mysql"  => Ok(DateFormats::Mysql),
-            "DateOnly"  => Ok(DateFormats::DateOnly),
-            _      => {
+            "Iso8601" => Ok(DateFormats::Iso8601),
+            "Iso8601_2" => Ok(DateFormats::Iso8601_2),
+            "Rfc2822" => Ok(DateFormats::Rfc2822),
+            "Rfc3339" => Ok(DateFormats::Rfc3339),
+            "Atom" => Ok(DateFormats::Atom),
+            "AtomZ" => Ok(DateFormats::AtomZ),
+            "Asctime" => Ok(DateFormats::Asctime),
+            "Cookie" => Ok(DateFormats::Cookie),
+            "Rfc822" => Ok(DateFormats::Rfc822),
+            "Rfc850" => Ok(DateFormats::Rfc850),
+            "Rfc1036" => Ok(DateFormats::Rfc1036),
+            "Rfc1123" => Ok(DateFormats::Rfc1123),
+            "Rfc7231" => Ok(DateFormats::Rfc7231),
+            "Rss" => Ok(DateFormats::Rss),
+            "W3c" => Ok(DateFormats::W3c),
+            "Mysql" => Ok(DateFormats::Mysql),
+            "DateOnly" => Ok(DateFormats::DateOnly),
+            _ => {
                 println!("Don't know this date format: {}", input);
                 Err(false)
                 // Err(Error)
-            },
+            }
         }
     }
 }

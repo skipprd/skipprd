@@ -1,27 +1,21 @@
-
-use crate::discover::{Metadata};
+use crate::discover::Metadata;
 use crate::helpers::Helpers;
 use arrow::datatypes::Schema;
 // use clap::{Parser, ValueHint};
-use parquet::{
-    arrow::ArrowWriter,
-    file::properties::{WriterProperties},
-};
-use arrow::json::{ReaderBuilder};
+use arrow::json::ReaderBuilder;
+use parquet::{arrow::ArrowWriter, file::properties::WriterProperties};
 use serde::{Deserialize, Serialize};
-
-
 
 use std::collections::HashMap;
 use std::fs;
 use std::fs::{File, OpenOptions};
-use std::io::{Write};
+use std::io::Write;
 
-use std::path::{PathBuf};
+use std::path::PathBuf;
 
-use std::sync::{Arc};
 use crate::buffer::BufferChunker;
 use crate::helpers::configuration::Config;
+use std::sync::Arc;
 
 // #[derive(clap::ValueEnum, Clone)]
 // #[allow(non_camel_case_types, clippy::upper_case_acronyms)]
@@ -158,7 +152,7 @@ impl SerdeParquet {
     // }
 
     pub fn serialize(path: PathBuf, mut schema_ref: Arc<Schema>) -> Arc<Schema> {
-    // pub fn serialize(path: PathBuf, mut schema_ref: Schema) -> Schema {
+        // pub fn serialize(path: PathBuf, mut schema_ref: Schema) -> Schema {
 
         // println!("Arrow schema: {:?}", schema_ref);
 
@@ -245,7 +239,7 @@ impl SerdeParquet {
         //
         // std::io::copy(&mut input_file, &mut output).unwrap();
 
-        let data_dir= Config::get_data_dir();
+        let data_dir = Config::get_data_dir();
 
         // let mut skpr_namespace: String = "".to_string();
         // if let Some((a, b)) = path.display().to_string().split_once("done/") {
@@ -261,16 +255,26 @@ impl SerdeParquet {
 
         // let skpr_namespace = Helpers::parse_namespace_field(&record, source_namespace, &mut parse_namespace_cache);
 
-        let output_file_name = BufferChunker::encode_chunk_name("ingest", Some(&skpr_namespace), Some(&skpr_partition), Some(source_time));
+        let output_file_name = BufferChunker::encode_chunk_name(
+            "ingest",
+            Some(&skpr_namespace),
+            Some(&skpr_partition),
+            Some(source_time),
+        );
 
         let output_dir = &format!("{}/finalised", data_dir);
 
         match fs::create_dir(output_dir) {
-            Ok(_g) => {},
+            Ok(_g) => {}
             Err(_err) => {}
         }
 
-        let output_file_path = &format!("{}/{}&part={}.parquet", output_dir, output_file_name, Helpers::random_str(12).as_str());
+        let output_file_path = &format!(
+            "{}/{}&part={}.parquet",
+            output_dir,
+            output_file_name,
+            Helpers::random_str(12).as_str()
+        );
 
         let output = OpenOptions::new()
             .create(true)
@@ -290,15 +294,14 @@ impl SerdeParquet {
 
         // println!("\n{:?}\n\n", reader.schema());
 
-
         schema_ref = reader.schema();
-
 
         // let output = File::create("./foo/".to_string() + &Helpers::random_str(10)).unwrap();
 
         // println!("Serialising to parquet file: {}", output_file_path);
 
-        let mut writer = ArrowWriter::try_new(output, reader.schema(), Some(props.build())).unwrap();
+        let mut writer =
+            ArrowWriter::try_new(output, reader.schema(), Some(props.build())).unwrap();
 
         for batch in reader {
             // for i in batch.iter() {

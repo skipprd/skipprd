@@ -3,7 +3,6 @@ use clap::{Parser, ValueEnum};
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
-
     /// What mode to run the program in
     #[arg(value_enum)]
     pub(crate) mode: Mode,

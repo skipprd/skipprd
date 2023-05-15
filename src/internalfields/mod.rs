@@ -1,19 +1,15 @@
-
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 // mod arr;
 
-
 // mod helpers;
-
 
 pub struct InternalFields {
     pub parse_namespace_cache: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl InternalFields {
-
     // pub fn parse_partition_field<'a>(message: &mut HashMap<String, String>, partition: &'a str) -> &'a str {
     //     let mut partition = partition.to_string();
     //
@@ -137,5 +133,4 @@ impl InternalFields {
     //
     //     message.get("skpr_event_ts").unwrap().parse::<i64>().unwrap()
     // }
-
 }
