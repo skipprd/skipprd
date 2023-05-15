@@ -37,7 +37,7 @@ pub fn php_filter_parse_int(str: String, ret: &mut i64) -> bool {
             signed_unsigned_int = 1;
         }
         ctx_value =
-            signed_unsigned_int * ((cast_char_to_int(str.chars().nth(n).unwrap()) - 0) as i64);
+            signed_unsigned_int * cast_char_to_int(str.chars().nth(n).unwrap());
 
         n += 1;
     } else {
@@ -54,7 +54,7 @@ pub fn php_filter_parse_int(str: String, ret: &mut i64) -> bool {
 
     while n < end {
         if str.chars().nth(n) >= Some('0') && str.chars().nth(n) <= Some('9') {
-            digit = (cast_char_to_int(str.chars().nth(n).unwrap()) - 0) as i32;
+            digit = cast_char_to_int(str.chars().nth(n).unwrap()) as i32;
             n += 1;
             if (!sign) && ctx_value <= (std::i64::MAX - digit as i64) / 10 {
                 ctx_value = (ctx_value * 10) + digit as i64;
@@ -69,15 +69,15 @@ pub fn php_filter_parse_int(str: String, ret: &mut i64) -> bool {
     }
 
     *ret = ctx_value;
-    return true;
+    true
 }
 
 fn cast_char_to_int(num: char) -> i64 {
-    return num.to_string().parse::<i64>().unwrap();
+    num.to_string().parse::<i64>().unwrap()
 }
 
 fn cast_string_to_int(num: String) -> i64 {
-    return num.parse::<i64>().unwrap();
+    num.parse::<i64>().unwrap()
 }
 
 #[test]

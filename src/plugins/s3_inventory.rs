@@ -48,7 +48,7 @@ impl DataSourceS3InventoryPlugin {
         let data_dir = Config::get_data_dir();
         let temp_dir = &format!("{}/source_buffer", data_dir);
 
-        match fs::create_dir(format!("{}", temp_dir)) {
+        match fs::create_dir(temp_dir) {
             Ok(_g) => {}
             Err(_err) => {}
         }
@@ -130,7 +130,7 @@ impl DataSourceS3InventoryPlugin {
                             let object_key = object.key().unwrap();
                             let _timestamp = object.last_modified().unwrap().secs();
 
-                            if object_key.contains(&"manifest.json") {
+                            if object_key.contains("manifest.json") {
                                 // println!("Processing S3 manifest {}", object_key);
 
                                 let offset_key = OffsetKey {
@@ -161,7 +161,7 @@ impl DataSourceS3InventoryPlugin {
                                         manifest.first().unwrap()["sourceBucket"].to_string();
                                     let headers_string: String =
                                         manifest.first().unwrap()["fileSchema"].to_string();
-                                    let headers: Vec<_> = headers_string.split(",").collect();
+                                    let headers: Vec<_> = headers_string.split(',').collect();
 
                                     let _bucket = source_bucket.to_string();
 
@@ -246,7 +246,7 @@ impl DataSourceS3InventoryPlugin {
 
                                                 // let records_total = rdr.records().count();
 
-                                                let mut datas: Vec<IngestBatch> = Vec::new();
+                                                let _datas: Vec<IngestBatch> = Vec::new();
 
                                                 while let Some(result) = rdr.records().next() {
                                                     let record = result.unwrap();
@@ -295,7 +295,7 @@ impl DataSourceS3InventoryPlugin {
                                                             .parse::<i64>()
                                                         {
                                                             Ok(size) => size,
-                                                            Err(err) => 0,
+                                                            Err(_err) => 0,
                                                         };
 
                                                         i += 1;
@@ -337,7 +337,7 @@ impl DataSourceS3InventoryPlugin {
                                 } else {
                                     println!(
                                         "Skipping inventory: {} already processed",
-                                        object_key.to_string()
+                                        object_key
                                     );
                                 }
                             }
@@ -374,7 +374,7 @@ impl DataSourceS3InventoryPlugin {
                 Err(err) => {
                     retries += 1;
 
-                    let wait_time = backoff_duration.as_secs_f64() * 2.0_f64.powi(retries as i32);
+                    let wait_time = backoff_duration.as_secs_f64() * 2.0_f64.powi(retries);
                     thread::sleep(Duration::from_secs_f64(wait_time));
 
                     backoff_duration *= 2;
@@ -410,7 +410,7 @@ impl DataSourceS3InventoryPlugin {
                 let bucket_name = bucket_name.to_owned();
 
                 tokio::spawn(async move {
-                    let x_fut = s3_client.get_object(GetObjectRequest {
+                    let _x_fut = s3_client.get_object(GetObjectRequest {
                         bucket: bucket_name.clone(),
                         key: object_key.to_string(),
                         ..Default::default()
@@ -424,12 +424,12 @@ impl DataSourceS3InventoryPlugin {
                     .await
                     .unwrap();
                     // println!("Got s3 object");
-                    let download = Download {
-                        key: object_key,
-                        response: response,
-                    };
+                    
 
-                    download
+                    Download {
+                        key: object_key,
+                        response,
+                    }
                 })
             })
             .collect();

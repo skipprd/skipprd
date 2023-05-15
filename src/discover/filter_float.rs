@@ -250,11 +250,11 @@ pub fn parse_float(value: &mut String) -> Option<f64> {
         return None;
     }
 
-    if num.len() > 0 {
+    if !num.is_empty() {
         return Some(cast_to_float(num));
     }
 
-    return None;
+    None
 
     // } else {
     //     return None;
@@ -262,5 +262,5 @@ pub fn parse_float(value: &mut String) -> Option<f64> {
 }
 
 fn cast_to_float(num: String) -> f64 {
-    return num.parse::<f64>().unwrap();
+    num.parse::<f64>().unwrap()
 }

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::fs::{create_dir, File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read};
 use yaml_rust::YamlLoader;
 
@@ -12,7 +12,7 @@ use serde_derive::{Deserialize, Serialize};
 use serde_json::json;
 
 use reqwest::header::HeaderValue;
-use reqwest::header::AUTHORIZATION;
+
 use reqwest::header::{HeaderMap, HeaderName};
 use reqwest::{Client, StatusCode};
 
@@ -20,7 +20,7 @@ use crate::discover::Metadata;
 
 use crate::helpers::license::LicenseChecker;
 use crate::helpers::Helpers;
-use crate::plugins::athena::AwsAthena;
+
 
 #[non_exhaustive]
 struct RunModes;
@@ -198,9 +198,9 @@ impl Config {
         // let input_plugin_name = Helpers::clean_field_name(Config::getenv("DATA_SOURCE_PLUGIN_NAME", "unknown"));
         // let output_plugin_name = Helpers::clean_field_name(Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "unknown"));
         // let default_pipeline_name = format!("{} to {}", input_plugin_name, output_plugin_name);
-        let pipeline_name = Config::getenv("PIPELINE_NAME", "default");
+        
 
-        pipeline_name
+        Config::getenv("PIPELINE_NAME", "default")
     }
 
     fn load_file() {
@@ -280,7 +280,7 @@ impl Config {
         config.tenant_id = Config::getenv("TENANT_ID", Helpers::random_str(16).as_str());
 
         let data_dir = Config::get_data_dir();
-        if data_dir != "" {
+        if !data_dir.is_empty() {
             config.data_dir = data_dir;
         }
 
@@ -315,7 +315,7 @@ impl Config {
                     Err(false)
                 }
             },
-            Err(err) => {
+            Err(_err) => {
                 // println!("Metadata HTTP Error: {:?}", err);
                 Err(false)
             }
@@ -349,10 +349,8 @@ impl Config {
 
             let pipeline_name = Config::get_pipeline_name();
 
-            if Config::getenv("DATA_OUTPUT_TIME_BUCKET", "") != "" {
-                if Config::getenv("DATA_OUTPUT_TIME_FIELDS", "") == "" {
-                    println!("ERROR: Environment variable: 'DATA_OUTPUT_TIME_FIELDS' must be since you've set: 'DATA_OUTPUT_TIME_BUCKET'.");
-                }
+            if !Config::getenv("DATA_OUTPUT_TIME_BUCKET", "").is_empty() && Config::getenv("DATA_OUTPUT_TIME_FIELDS", "").is_empty() {
+                println!("ERROR: Environment variable: 'DATA_OUTPUT_TIME_FIELDS' must be since you've set: 'DATA_OUTPUT_TIME_BUCKET'.");
             }
 
             // let uri = Config::getenv("SKIPPR_API_ENDPOINT", "");
@@ -451,10 +449,10 @@ impl Config {
 
         // println!("Posting data: {:?}", data);
 
-        let response = client.put(&format!("{}/{}", uri, path)).json(&data).send();
+        let response = client.put(format!("{}/{}", uri, path)).json(&data).send();
 
         match response {
-            Ok(resp) => {
+            Ok(_resp) => {
                 // println!("Status HTTP Success: {:?}", resp);
             }
             Err(err) => {

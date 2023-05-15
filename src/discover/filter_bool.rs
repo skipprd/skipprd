@@ -105,32 +105,32 @@ pub fn parse_bool(value: &mut String) -> Result<bool, i32> {
             }
         }
         2 => {
-            if (str.to_lowercase() == "on") == true {
+            if str.to_lowercase() == "on" {
                 ret = 1;
-            } else if (str.to_lowercase() == "no") == true {
+            } else if str.to_lowercase() == "no" {
                 ret = 0;
             } else {
                 ret = -1;
             }
         }
         3 => {
-            if (str.to_lowercase() == "yes") == true {
+            if str.to_lowercase() == "yes" {
                 ret = 1;
-            } else if (str.to_lowercase() == "off") == true {
+            } else if str.to_lowercase() == "off" {
                 ret = 0;
             } else {
                 ret = -1;
             }
         }
         4 => {
-            if (str.to_lowercase() == "true") == true {
+            if str.to_lowercase() == "true" {
                 ret = 1;
             } else {
                 ret = -1;
             }
         }
         5 => {
-            if (str.to_lowercase() == "false") == true {
+            if str.to_lowercase() == "false" {
                 ret = 0;
             } else {
                 ret = -1;
@@ -144,10 +144,10 @@ pub fn parse_bool(value: &mut String) -> Result<bool, i32> {
     if ret == -1 {
         Err(ret)
     } else {
-        return Ok(cast_to_bool(ret));
+        Ok(cast_to_bool(ret))
     }
 }
 
 fn cast_to_bool(num: i32) -> bool {
-    return num.to_string().parse::<bool>().is_ok();
+    num.to_string().parse::<bool>().is_ok()
 }

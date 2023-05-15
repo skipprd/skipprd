@@ -67,7 +67,7 @@ impl Helpers {
 
         let clean_field_cache_lock = &mut *clean_field_cache.lock().unwrap();
 
-        if !clean_field_cache_lock.contains_key(&field) || clean_field_cache_lock[&field] == true {
+        if !clean_field_cache_lock.contains_key(&field) || clean_field_cache_lock[&field] {
             if field.parse::<i32>().is_ok() {
                 clean = "item_".to_string() + &field;
             }
@@ -90,7 +90,7 @@ impl Helpers {
             // clean = ltrim(clean, "0123456789");
 
             // '_' at the beginning is common and probably allowable
-            clean = clean.trim_start_matches("_").to_string();
+            clean = clean.trim_start_matches('_').to_string();
             // clean = trim(clean, '_');
 
             if clean != field {
@@ -102,7 +102,7 @@ impl Helpers {
             }
         }
 
-        clean.to_string()
+        clean
     }
 
     // pub fn clean_array_field_names<T>(mut self, mut array: HashMap<String, T>) {
@@ -191,17 +191,17 @@ impl Helpers {
             return true;
         }
 
-        return false;
+        false
     }
 
     pub fn parse_partition_field(message: &Value) -> String {
         let mut clean_partition: String = "".to_string();
 
         // optional: partition by composite key
-        if Config::getenv("DATA_OUTPUT_PARTITION_BY_FIELDS", "") != "" {
+        if !Config::getenv("DATA_OUTPUT_PARTITION_BY_FIELDS", "").is_empty() {
             let mut partitions = vec!["".to_string()];
 
-            for entity_field_dot in Config::getenv("DATA_OUTPUT_PARTITION_BY_FIELDS", "").split(",")
+            for entity_field_dot in Config::getenv("DATA_OUTPUT_PARTITION_BY_FIELDS", "").split(',')
             {
                 match Helpers::get_nested_value_from_dot_notation(message, entity_field_dot) {
                     Some(entity_value) => {
@@ -242,11 +242,11 @@ impl Helpers {
             clean_namespace = Helpers::clean_field_name(clean_namespace);
 
             // optional: partition by composite key
-            if Config::getenv("DATA_SOURCE_EVENT_TYPE_FIELDS", "") != "" {
+            if !Config::getenv("DATA_SOURCE_EVENT_TYPE_FIELDS", "").is_empty() {
                 let mut namespaces = vec!["".to_string()];
 
                 for entity_field_dot in
-                    Config::getenv("DATA_SOURCE_EVENT_TYPE_FIELDS", "").split(",")
+                    Config::getenv("DATA_SOURCE_EVENT_TYPE_FIELDS", "").split(',')
                 {
                     match Helpers::get_nested_value_from_dot_notation(message, entity_field_dot) {
                         Some(entity_value) => {
@@ -263,9 +263,9 @@ impl Helpers {
         }
 
         if clean_namespace != namespace {
-            parse_namespace_cache.insert(namespace.to_string(), "yes".to_string());
+            parse_namespace_cache.insert(namespace, "yes".to_string());
         } else {
-            parse_namespace_cache.insert(namespace.to_string(), "no".to_string());
+            parse_namespace_cache.insert(namespace, "no".to_string());
         }
 
         clean_namespace
@@ -278,7 +278,7 @@ impl Helpers {
         if !Config::getenv("DATA_OUTPUT_TIME_FIELDS", "").is_empty() {
             // Support nested time fields via array dot notation
             // For user confirmed event time fields, use the first one that matches
-            for field_dot in Config::getenv("DATA_OUTPUT_TIME_FIELDS", "").split(",") {
+            for field_dot in Config::getenv("DATA_OUTPUT_TIME_FIELDS", "").split(',') {
                 match Helpers::get_nested_value_from_dot_notation(message, field_dot) {
                     Some(value) => {
                         // Handle millisecond timestamps
@@ -326,7 +326,7 @@ impl Helpers {
         let fields: Vec<&str> = field_str.split('.').collect();
 
         // Traverse the JSON object, following each field name in turn
-        let mut current_value: &Value = &json_value;
+        let mut current_value: &Value = json_value;
         for field in fields {
             if let Value::Object(map) = current_value {
                 if let Some(next_value) = map.get(field) {

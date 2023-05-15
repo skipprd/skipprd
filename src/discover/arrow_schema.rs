@@ -73,26 +73,20 @@ fn set_object_scalar_field_type(
             hs.insert(ftype);
         }
         InferredType::Array(_) => {
-            return Err(ArrowError::JsonError(format!(
-                "Only Scalar possible found Array instead of Scalar"
-            )));
+            return Err(ArrowError::JsonError("Only Scalar possible found Array instead of Scalar".to_string()));
         }
         InferredType::Object(_) => {
-            return Err(ArrowError::JsonError(format!(
-                "Only Scalar possible found Object instead of Scalar"
-            )));
+            return Err(ArrowError::JsonError("Only Scalar possible found Object instead of Scalar".to_string()));
         }
         _Any => {
-            return Err(ArrowError::JsonError(format!(
-                "Only Scalar possible found Any instead of Scalar"
-            )));
+            return Err(ArrowError::JsonError("Only Scalar possible found Any instead of Scalar".to_string()));
         }
     }
     Ok(())
 }
 
 fn convert_skippr_type_to_arrow_data_type(skippr_type: &str) -> Result<DataType, ArrowError> {
-    return match skippr_type {
+    match skippr_type {
         "boolean" => Ok(DataType::Boolean),
         "NULL" => Ok(DataType::Null),
         "integer" => Ok(DataType::Int32),
@@ -105,7 +99,7 @@ fn convert_skippr_type_to_arrow_data_type(skippr_type: &str) -> Result<DataType,
             //     "Only Scala possible found &_ instead of Scalar: {}", skippr_type
             // )));
         }
-    };
+    }
 }
 
 pub fn convert_skippr_to_arrow(

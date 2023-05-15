@@ -67,7 +67,7 @@ impl DataOutputAwsAthenaPlugin {
             let namespace = BufferChunker::decode_file_namespace(&filename);
             // let _time_partition = BufferChunker::decode_file_time(&filename);
 
-            let trimmed_key = &key.trim_start_matches("/").to_string();
+            let trimmed_key = &key.trim_start_matches('/').to_string();
 
             let mut full_key = "".to_string();
             // key = trimmed_key;
@@ -81,12 +81,12 @@ impl DataOutputAwsAthenaPlugin {
             let partition = BufferChunker::decode_file_partition(&filename);
 
             if !partition.is_empty() {
-                let parts = partition.split("-");
+                let parts = partition.split('-');
                 let collection: Vec<&str> = parts.collect();
 
                 for item in &collection {
-                    let value = item.rsplitn(1, '=').nth(0).unwrap();
-                    partition_values.push(format!("{}", value));
+                    let value = item.rsplitn(1, '=').next().unwrap();
+                    partition_values.push(value.to_string());
                 }
 
                 let path_parts = collection.join("/");
@@ -97,7 +97,7 @@ impl DataOutputAwsAthenaPlugin {
 
             let time_partition_str = BufferChunker::decode_file_time_to_datetime_string(&filename);
 
-            if time_partition_str != "" {
+            if !time_partition_str.is_empty() {
                 let granularity_target = &self.time_bucket;
 
                 let date = DateTime::parse_from_rfc3339(&time_partition_str).unwrap();
@@ -127,9 +127,9 @@ impl DataOutputAwsAthenaPlugin {
                 match AwsAthena::glue_create_partition(
                     &namespace,
                     partition_values,
-                    &key,
+                    key,
                     &mut partition_cache,
-                    &metadata.get(&namespace).unwrap(),
+                    metadata.get(&namespace).unwrap(),
                 )
                 .await
                 {
@@ -268,16 +268,16 @@ impl AwsAthena {
             Ok(result) => match result.work_group {
                 Some(work_group) => {
                     // println!("Found workgroup: {}", workgroup);
-                    return Ok(work_group.name.unwrap_or_default() == workgroup);
+                    Ok(work_group.name.unwrap_or_default() == workgroup)
                 }
                 None => {
                     // println!("Did not find workgroup: {}", workgroup);
-                    return Ok(false);
+                    Ok(false)
                 }
             },
             Err(_e) => {
                 // println!("Error getting workgroup: {}", &_e.into_service_error().to_string());
-                return Err(_e.into_service_error().to_string());
+                Err(_e.into_service_error().to_string())
             }
         }
     }
@@ -292,12 +292,12 @@ impl AwsAthena {
         match glue_client.get_database().name(&database_name).send().await {
             Ok(output) => {
                 if let Some(database) = output.database {
-                    return Ok(database.name.unwrap() == database_name);
+                    Ok(database.name.unwrap() == database_name)
                 } else {
-                    return Ok(false);
+                    Ok(false)
                 }
             }
-            Err(err) => return Err(err.into_service_error().to_string()),
+            Err(err) => Err(err.into_service_error().to_string()),
         }
     }
 
@@ -319,10 +319,10 @@ impl AwsAthena {
                 if let Some(table) = output.table() {
                     return Ok(table.name().unwrap() == namespace);
                 } else {
-                    return Ok(false);
+                    Ok(false)
                 }
             }
-            Err(err) => return Err(err.into_service_error().to_string()),
+            Err(err) => Err(err.into_service_error().to_string()),
         }
     }
 
@@ -363,9 +363,9 @@ impl AwsAthena {
             .await
         {
             Ok(_output) => {
-                return Ok(true);
+                Ok(true)
             }
-            Err(err) => return Err(err.into_service_error().to_string()),
+            Err(err) => Err(err.into_service_error().to_string()),
         }
     }
 
@@ -392,9 +392,9 @@ impl AwsAthena {
             .await
         {
             Ok(_output) => {
-                return Ok(true);
+                Ok(true)
             }
-            Err(err) => return Err(err.into_service_error().to_string()),
+            Err(err) => Err(err.into_service_error().to_string()),
         }
     }
 
@@ -402,7 +402,7 @@ impl AwsAthena {
         let _partition_values: Vec<String> = vec![];
 
         let partition_config = Config::getenv("DATA_OUTPUT_PARTITION_BY_FIELDS", "");
-        let partition_fields: Vec<&str> = partition_config.split(",").collect();
+        let partition_fields: Vec<&str> = partition_config.split(',').collect();
 
         if !partition_fields.is_empty() {
             for field_dot in partition_fields.clone() {
@@ -440,7 +440,7 @@ impl AwsAthena {
         AwsAthena::get_partition_by_fields(&mut partitions);
 
         // Time Partitioning
-        if granularity_target != "" {
+        if !granularity_target.is_empty() {
             for granularity in GRANULARITIES.iter() {
                 partitions.push(
                     Column::builder()
@@ -468,7 +468,7 @@ impl AwsAthena {
 
         // let mut schema: HashMap<String, Metadata> = HashMap::new();
         // schema.insert(namespace.to_string(), metadata.clone());
-        let columns = SkipprHive::convert_skippr_to_hive(&metadata).unwrap();
+        let columns = SkipprHive::convert_skippr_to_hive(metadata).unwrap();
 
         let aws_config = aws_config::from_env().load().await;
 
@@ -508,9 +508,9 @@ impl AwsAthena {
             .await
         {
             Ok(_output) => {
-                return Ok(true);
+                Ok(true)
             }
-            Err(err) => return Err(err.into_service_error().to_string()),
+            Err(err) => Err(err.into_service_error().to_string()),
         }
     }
 
@@ -533,7 +533,7 @@ impl AwsAthena {
         AwsAthena::get_partition_by_fields(&mut partitions);
 
         // Time Partitioning
-        if granularity_target != "" {
+        if !granularity_target.is_empty() {
             for granularity in GRANULARITIES.iter() {
                 partitions.push(
                     Column::builder()
@@ -559,7 +559,7 @@ impl AwsAthena {
 
         // let mut schema: HashMap<String, Metadata> = HashMap::new();
         // schema.insert(namespace.to_string(), metadata.clone());
-        let columns = SkipprHive::convert_skippr_to_hive(&metadata).unwrap();
+        let columns = SkipprHive::convert_skippr_to_hive(metadata).unwrap();
 
         let aws_config = aws_config::from_env().load().await;
 
@@ -599,9 +599,9 @@ impl AwsAthena {
             .await
         {
             Ok(_output) => {
-                return Ok(true);
+                Ok(true)
             }
-            Err(err) => return Err(err.into_service_error().to_string()),
+            Err(err) => Err(err.into_service_error().to_string()),
         }
     }
 
@@ -632,7 +632,7 @@ impl AwsAthena {
 
         // let mut schema: HashMap<String, Metadata> = HashMap::new();
         // schema.insert(namespace.to_string(), metadata.clone());
-        let columns = SkipprHive::convert_skippr_to_hive(&metadata).unwrap();
+        let columns = SkipprHive::convert_skippr_to_hive(metadata).unwrap();
 
         let aws_config = aws_config::from_env().load().await;
 

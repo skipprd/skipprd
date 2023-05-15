@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use std::fs;
-use std::process::exit;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
@@ -61,7 +61,7 @@ use crate::discover::arrow_schema::convert_skippr_to_arrow;
 use crate::helpers::configuration::{Config, Metrics};
 
 use crate::buffer::BufferChunker;
-use crate::ingest_work::Ingest;
+
 use crate::plugins::s3_input::DataSourceS3Plugin;
 use crate::plugins::s3_inventory::DataSourceS3InventoryPlugin;
 
@@ -222,7 +222,7 @@ async fn sync() {
 
     let data_dir = Config::get_data_dir();
 
-    let metadata_file = format!("{}/metadata.json", data_dir);
+    let _metadata_file = format!("{}/metadata.json", data_dir);
 
     // let skippr_metadata = Arc::new(Mutex::new(match File::open(metadata_file.clone()) {
     let skippr_metadata = Arc::new(Mutex::new(match Config::get_config().await {
@@ -239,13 +239,13 @@ async fn sync() {
         }
         Err(_e) => {
             println!("Could not find Skippr metadata, will disover and evolve schemas as we sync.");
-            let empty_meta = Metadata::new().unwrap();
+            let _empty_meta = Metadata::new().unwrap();
 
-            let mut metadata = HashMap::new();
+            
             // metadata.insert("example_ns".to_string(), empty_meta);
             // let skippr_metadata: HashMap<String, Metadata> = metadata;
             // skippr_metadata
-            metadata
+            HashMap::new()
 
             // exit(1);
             // discover();
@@ -259,7 +259,7 @@ async fn sync() {
         }
     }));
 
-    let newmeta_clone = skippr_metadata.clone();
+    let _newmeta_clone = skippr_metadata.clone();
 
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
@@ -310,7 +310,7 @@ async fn sync() {
 
                 // metrics.msgs_total = *total_lock;
                 // metrics.msgs_current = *counter_lock;
-                metrics_lock.run_time_seconds = now_lock.elapsed().as_secs().clone() as u64;
+                metrics_lock.run_time_seconds = now_lock.elapsed().as_secs();
 
                 println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
                 println!("Deadletters Messages: {}", metrics_lock.deadletters_current);

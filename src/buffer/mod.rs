@@ -53,7 +53,7 @@ impl BufferChunker {
     }
 
     pub fn event_time_bucket(event_time: i64) -> i64 {
-        let datetime = Utc.timestamp_opt(event_time as i64, 0).unwrap();
+        let datetime = Utc.timestamp_opt(event_time, 0).unwrap();
 
         // let mut bucket_rounded_timestamp: DateTime<Utc> = Utc.ymd(datetime.year(), 1, 1).and_hms(0, 0, 0);
         let mut bucket_rounded_timestamp = 0;
@@ -96,16 +96,16 @@ impl BufferChunker {
             };
         }
 
-        let bucket = if bucket_rounded_timestamp > 0 {
+        
+
+        if bucket_rounded_timestamp > 0 {
             // event_time - (event_time % bucket_seconds)
             event_time - ((event_time).rem_euclid(bucket_rounded_timestamp))
             // event_time.div_euclid(bucket_seconds)
             // event_time.div_rem(bucket_seconds)
         } else {
             0
-        };
-
-        bucket
+        }
     }
 
     pub fn encode_chunk_name(
@@ -173,17 +173,17 @@ impl BufferChunker {
     pub fn decode_file_time_to_datetime_string(filename: &str) -> String {
         let time = BufferChunker::get_file_time(filename);
 
-        let date_string = if time != 0 {
-            let dt = DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp(time as i64, 0), Utc)
-                .to_rfc3339();
-            dt
-        } else {
-            "".to_string()
-        };
+        
 
         // println!("decoding buffer time {} file {}", date_string, filename);
 
-        date_string
+        if time != 0 {
+            
+            DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp(time, 0), Utc)
+                .to_rfc3339()
+        } else {
+            "".to_string()
+        }
     }
 
     pub fn decode_file_time(filename: &str) -> i64 {
@@ -193,21 +193,21 @@ impl BufferChunker {
     pub fn decode_file_partition(filename: &str) -> String {
         // let mut array = form_urlencoded::parse(filename.as_bytes());
         // let partition = array.remove("partition").unwrap_or_default();
-        let partition = BufferChunker::get_file_part(filename, "partition");
+        
 
         // println!("decoding buffer partition {} file {}", partition, filename);
 
-        partition
+        BufferChunker::get_file_part(filename, "partition")
     }
 
     pub fn decode_file_namespace(filename: &str) -> String {
         // let mut array = form_urlencoded::parse(filename.as_bytes());
         // let namespace = array.get("namespace").map(|s| s.to_string()).unwrap_or_default();
-        let namespace = BufferChunker::get_file_part(filename, "namespace");
+        
 
         // println!("decoding buffer namespace {} from file {}", namespace, filename);
 
-        namespace
+        BufferChunker::get_file_part(filename, "namespace")
     }
 
     pub fn next_file() -> Option<String> {

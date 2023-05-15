@@ -236,7 +236,7 @@ impl Offsets {
                 // may have witnessed the old version to keep working
                 // without taking out any locks. IVec will be
                 // stack-allocated until it reaches 22 bytes
-                let mut backing_bytes = sled::IVec::from(existing);
+                let mut backing_bytes = existing;
 
                 // this verifies that our value is the correct length
                 // and alignment (in this case we don't need it to be

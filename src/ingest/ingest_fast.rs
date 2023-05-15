@@ -117,14 +117,14 @@ fn fast_set_value(
     // };
 
     // if data_type != "" || parent_type == "map" {
-    if data_type != "" {
+    if !data_type.is_empty() {
         // let data_type: &str = &metadata.get_mut(field).unwrap().determined_type;
         // let data_type = "record";
 
         let x: Value;
         let mut new_value: Value = Value::Null;
 
-        if value.to_string().len() > 0 {
+        if !value.to_string().is_empty() {
             // println!("value is {}", value);
             // println!("field is {}", field);
             // println!("data_type is {}", data_type);
@@ -153,7 +153,6 @@ fn fast_set_value(
                             .get_mut(sub_field)
                             .unwrap()
                             .enabled
-                            == true
                         {
                             let newval = fast_set_value(
                                 &metadata
@@ -171,7 +170,7 @@ fn fast_set_value(
                                 updatedSchema,
                             );
 
-                            m.insert(clean_sub_field.to_string(), newval.into());
+                            m.insert(clean_sub_field.to_string(), newval);
                         }
                     }
                 }
@@ -199,7 +198,6 @@ fn fast_set_value(
                             .get_mut(&clean_sub_field)
                             .unwrap()
                             .enabled
-                            == true
                         {
                             let newval = fast_set_value(
                                 &metadata
@@ -217,7 +215,7 @@ fn fast_set_value(
                                 updatedSchema,
                             );
 
-                            m.insert(clean_sub_field.to_string(), newval.into());
+                            m.insert(clean_sub_field.to_string(), newval);
                         }
 
                         i += 1;
@@ -226,134 +224,130 @@ fn fast_set_value(
 
                 x = m.into();
                 new_value = x;
-            } else {
-                if data_type == "map" {
-                    let metadata_field = metadata.get_mut(field).unwrap();
-                    let determined_type_values = &metadata_field.determined_type_values;
-                    let fields = &mut metadata_field.fields;
-                    for (key, val) in value
-                        .as_object()
-                        .unwrap()
-                        .iter()
-                        .filter_map(|(k, v)| Some((k, v)))
-                    {
-                        if Some(val) != None {
-                            new_value[key] = fast_set_value(
-                                determined_type_values,
-                                &key,
-                                value,
-                                fields,
-                                updatedSchema,
-                            );
-                        }
-                    }
-                    // for (key, val) in value.as_object().unwrap() {
-                    //     if Some(val) != None {
-                    //         new_value[key] = fast_set_value(
-                    //             metadata
-                    //                 .get_mut(field)
-                    //                 .unwrap()
-                    //                 .determined_type_values
-                    //                 .clone(),
-                    //             key,
-                    //             val,
-                    //             &mut metadata.get_mut(field).unwrap().fields,
-                    //             updatedSchema
-                    //         );
-                    //     }
-                    // }
-                } else {
-                    if data_type == "array" {
-                        new_value = value.to_owned();
-                    } else {
-                        if data_type == "date" {
-                            // Hive Timestamp doesn't support string dates
-
-                            new_value = match value.as_str() {
-                                Some(val) => {
-                                    let fmt = &metadata
-                                        .get(field)
-                                        .unwrap()
-                                        .date_candidate
-                                        .as_ref()
-                                        .unwrap()
-                                        .format;
-                                    match DateFormats::from_str(fmt) {
-                                        Ok(f) => {
-                                            match NaiveDateTime::parse_from_str(val, f.as_str()) {
-                                                Ok(date) => {
-                                                    let millis = date.timestamp() * 1000;
-                                                    millis.into()
-                                                }
-                                                Err(_) => Value::Null,
-                                            }
-                                        }
-                                        Err(err) => {
-                                            println!("Error date: {}", err);
-                                            Value::Null
-                                        }
-                                    }
-                                }
-                                None => {
-                                    println!("Could not format date to int using format");
-                                    Value::Null
-                                }
-                            };
-                        }
-
-                        let new_value = match data_type {
-                            "string" => value.as_str().map(|s| Value::String(s.to_string())),
-                            "timestamp" | "timestamp_milli" | "int" | "integer" | "long" => {
-                                value.as_i64().map(Value::from)
-                            }
-                            "double" => value.as_f64().map(Value::from),
-                            "boolean" => value.as_bool().map(Value::from),
-                            _ => None,
-                        };
-
-                        new_value.unwrap_or(Value::Null);
-
-                        // if data_type == "string" {
-                        //     new_value = match value.as_str() {
-                        //         Some(val) => Value::String(val.to_string()),
-                        //         None => Value::Null,
-                        //     };
-                        // } else if data_type == "timestamp" || data_type == "timestamp_milli" {
-                        //     new_value = match value.as_i64() {
-                        //         Some(val) => Value::from(val),
-                        //         None => Value::Null,
-                        //     }
-                        // } else if data_type == "int" || data_type == "integer" {
-                        //     new_value = match value.as_i64() {
-                        //         Some(val) => Value::from(val),
-                        //         None => Value::Null,
-                        //     };
-                        //
-                        // } else if data_type == "long" {
-                        //     new_value = match value.as_i64() {
-                        //         Some(val) => Value::from(val),
-                        //         None => Value::Null,
-                        //     }
-                        // } else if data_type == "double" {
-                        //     new_value = match value.as_f64() {
-                        //         Some(val) => Value::from(val),
-                        //         None => Value::Null,
-                        //     }
-                        // } else if data_type == "boolean" {
-                        //     new_value = match value.as_bool() {
-                        //         Some(val) => Value::from(val),
-                        //         None => Value::Null,
-                        //     }
-                        // }
+            } else if data_type == "map" {
+                let metadata_field = metadata.get_mut(field).unwrap();
+                let determined_type_values = &metadata_field.determined_type_values;
+                let fields = &mut metadata_field.fields;
+                for (key, val) in value
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|(k, v)| Some((k, v)))
+                {
+                    if Some(val).is_some() {
+                        new_value[key] = fast_set_value(
+                            determined_type_values,
+                            key,
+                            value,
+                            fields,
+                            updatedSchema,
+                        );
                     }
                 }
+                // for (key, val) in value.as_object().unwrap() {
+                //     if Some(val) != None {
+                //         new_value[key] = fast_set_value(
+                //             metadata
+                //                 .get_mut(field)
+                //                 .unwrap()
+                //                 .determined_type_values
+                //                 .clone(),
+                //             key,
+                //             val,
+                //             &mut metadata.get_mut(field).unwrap().fields,
+                //             updatedSchema
+                //         );
+                //     }
+                // }
+            } else if data_type == "array" {
+                new_value = value.to_owned();
+            } else {
+                if data_type == "date" {
+                    // Hive Timestamp doesn't support string dates
+
+                    new_value = match value.as_str() {
+                        Some(val) => {
+                            let fmt = &metadata
+                                .get(field)
+                                .unwrap()
+                                .date_candidate
+                                .as_ref()
+                                .unwrap()
+                                .format;
+                            match DateFormats::from_str(fmt) {
+                                Ok(f) => {
+                                    match NaiveDateTime::parse_from_str(val, f.as_str()) {
+                                        Ok(date) => {
+                                            let millis = date.timestamp() * 1000;
+                                            millis.into()
+                                        }
+                                        Err(_) => Value::Null,
+                                    }
+                                }
+                                Err(err) => {
+                                    println!("Error date: {}", err);
+                                    Value::Null
+                                }
+                            }
+                        }
+                        None => {
+                            println!("Could not format date to int using format");
+                            Value::Null
+                        }
+                    };
+                }
+
+                let new_value = match data_type {
+                    "string" => value.as_str().map(|s| Value::String(s.to_string())),
+                    "timestamp" | "timestamp_milli" | "int" | "integer" | "long" => {
+                        value.as_i64().map(Value::from)
+                    }
+                    "double" => value.as_f64().map(Value::from),
+                    "boolean" => value.as_bool().map(Value::from),
+                    _ => None,
+                };
+
+                new_value.unwrap_or(Value::Null);
+
+                // if data_type == "string" {
+                //     new_value = match value.as_str() {
+                //         Some(val) => Value::String(val.to_string()),
+                //         None => Value::Null,
+                //     };
+                // } else if data_type == "timestamp" || data_type == "timestamp_milli" {
+                //     new_value = match value.as_i64() {
+                //         Some(val) => Value::from(val),
+                //         None => Value::Null,
+                //     }
+                // } else if data_type == "int" || data_type == "integer" {
+                //     new_value = match value.as_i64() {
+                //         Some(val) => Value::from(val),
+                //         None => Value::Null,
+                //     };
+                //
+                // } else if data_type == "long" {
+                //     new_value = match value.as_i64() {
+                //         Some(val) => Value::from(val),
+                //         None => Value::Null,
+                //     }
+                // } else if data_type == "double" {
+                //     new_value = match value.as_f64() {
+                //         Some(val) => Value::from(val),
+                //         None => Value::Null,
+                //     }
+                // } else if data_type == "boolean" {
+                //     new_value = match value.as_bool() {
+                //         Some(val) => Value::from(val),
+                //         None => Value::Null,
+                //     }
+                // }
             }
         }
         new_value
     } else {
         let discoverd_data_type = discoverIngest(field, value, metadata, updatedSchema);
 
-        return fast_set_value(&discoverd_data_type, &field, value, metadata, updatedSchema);
+        fast_set_value(&discoverd_data_type, field, value, metadata, updatedSchema)
     }
 }
 

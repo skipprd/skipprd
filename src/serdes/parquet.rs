@@ -345,26 +345,24 @@ impl SerdeParquet {
                         .unwrap()
                         .clone(),
                 );
-            } else {
-                if &mut value.determined_type.len() > &mut 0 {
-                    if value.determined_type == "record" {
-                        message.message.insert(field.clone(), Message::new());
-                        // message.insert(field.clone(), Box::new(Message(
-                        //     HashSet::new(),
-                        // )));
-                    } else if value.determined_type == "array" {
-                        message.message.insert(field.clone(), Message::new());
-                    } else if value.determined_type == "map" {
-                        if value.determined_type_values == "string" {
-                            message.message.insert(field.clone(), Message::new());
-                        }
-                        if value.determined_type_values == "int" {
-                            message.message.insert(field.clone(), Message::new());
-                        }
-                    }
-                } else {
+            } else if &mut value.determined_type.len() > &mut 0 {
+                if value.determined_type == "record" {
                     message.message.insert(field.clone(), Message::new());
+                    // message.insert(field.clone(), Box::new(Message(
+                    //     HashSet::new(),
+                    // )));
+                } else if value.determined_type == "array" {
+                    message.message.insert(field.clone(), Message::new());
+                } else if value.determined_type == "map" {
+                    if value.determined_type_values == "string" {
+                        message.message.insert(field.clone(), Message::new());
+                    }
+                    if value.determined_type_values == "int" {
+                        message.message.insert(field.clone(), Message::new());
+                    }
                 }
+            } else {
+                message.message.insert(field.clone(), Message::new());
             }
         }
 

@@ -79,9 +79,9 @@ impl Metadata {
             count: 0,
             types: Default::default(),
             parent_type: "".to_string(),
-            fields: Box::new(Default::default()),
+            fields: Box::default(),
             date_candidate: None,
-            evolution: Box::new(Default::default()),
+            evolution: Box::default(),
             enabled: true,
             determined_type: "".to_string(),
             determined_type_values: "".to_string(),
@@ -229,7 +229,7 @@ impl AnalyseSchema {
         let str: &mut String = &mut "".to_string();
         input_file.read_to_string(str);
 
-        let records: Vec<Value> = SerdeJson::deserialize(&str);
+        let records: Vec<Value> = SerdeJson::deserialize(str);
 
         let mut i = 0;
 
@@ -249,7 +249,7 @@ impl AnalyseSchema {
                 // newMeta = &mut metadata.clone();
             }
 
-            if (Config::truth_value(faltten_events)) {
+            if Config::truth_value(faltten_events) {
                 v = Helpers::flatten(&v);
             }
 
@@ -278,7 +278,7 @@ impl AnalyseSchema {
             match v.type_id() {
                 _Value => {
                     let mut ingest_record = IngestRecord {
-                        source_namespace: source_namespace,
+                        source_namespace,
                         source_partition: "".to_string(),
                         skpr_event_ts: 0,
                         skpr_namespace: skpr_namespace.clone(),
@@ -325,12 +325,8 @@ impl AnalyseSchema {
 
             jsonValue = value.clone();
 
-            if value.as_str().is_some() {
-                if serde_json::from_str(value.as_str().unwrap()).unwrap_or(false) {
-                    if serde_json::from_str(value.as_str().unwrap()).unwrap() {
-                        jsonValue = serde_json::from_str(value.as_str().unwrap()).unwrap();
-                    }
-                }
+            if value.as_str().is_some() && serde_json::from_str(value.as_str().unwrap()).unwrap_or(false) && serde_json::from_str(value.as_str().unwrap()).unwrap() {
+                jsonValue = serde_json::from_str(value.as_str().unwrap()).unwrap();
             }
 
             self.analyse_field(&field, &mut jsonValue, metadata);
@@ -433,11 +429,8 @@ impl AnalyseSchema {
                     // parent field resolve type as `record`.
                     // When in fact we'd want to discover schema as [int, int, int] and
                     // parent field resolve as `array`.
-                    if type_count.len() == 2 {
-                        if type_count.contains_key("integer") && type_count.contains_key("boolean")
-                        {
-                            type_count.remove("boolean");
-                        }
+                    if type_count.len() == 2 && type_count.contains_key("integer") && type_count.contains_key("boolean") {
+                        type_count.remove("boolean");
                     }
                 }
             }
@@ -467,11 +460,8 @@ impl AnalyseSchema {
                     // parent field resolve type as `record`.
                     // When in fact we'd want to discover schema as [int, int, int] and
                     // parent field resolve as `array`.
-                    if type_count.len() == 2 {
-                        if type_count.contains_key("integer") && type_count.contains_key("boolean")
-                        {
-                            type_count.remove("boolean");
-                        }
+                    if type_count.len() == 2 && type_count.contains_key("integer") && type_count.contains_key("boolean") {
+                        type_count.remove("boolean");
                     }
                 }
             }
@@ -520,9 +510,9 @@ impl AnalyseSchema {
 
         let mut data_type = get_type(value);
 
-        if data_type == "string".to_string()
-            || data_type == "integer".to_string()
-            || data_type == "double".to_string()
+        if data_type == *"string"
+            || data_type == *"integer"
+            || data_type == *"double"
         {
             // String really an int?
             data_type = self.check_string_or_int(value);
@@ -530,9 +520,9 @@ impl AnalyseSchema {
             if allow_date {
                 let mut valid_timestamp = false;
 
-                if data_type == "integer".to_string() {
+                if data_type == *"integer" {
                     valid_timestamp = self.is_valid_timestamp(value);
-                } else if data_type == "long".to_string() {
+                } else if data_type == *"long" {
                     valid_timestamp = self.is_valid_timestamp(value);
                 }
 
@@ -549,7 +539,7 @@ impl AnalyseSchema {
             // }
         }
 
-        if data_type == "string".to_string() && allow_date {
+        if data_type == *"string" && allow_date {
             // Limit number of check type attempts for data as expensive operation.
 
             if metadata
@@ -569,10 +559,7 @@ impl AnalyseSchema {
             {
                 // println!("Checking if {} is date type", field);
 
-                let value_str = match json_value.as_str() {
-                    Some(val) => val,
-                    None => "",
-                };
+                let value_str = json_value.as_str().unwrap_or("");
 
                 if let Some(format) = self.is_valid_date(value_str) {
                     data_type = "date".to_string();
@@ -595,7 +582,7 @@ impl AnalyseSchema {
         }
 
         // @todo
-        if data_type == "integer".to_string() {
+        if data_type == *"integer" {
             match parse_bool(value) {
                 Err(_i32) => {
                     // println!("Not float");
@@ -610,7 +597,7 @@ impl AnalyseSchema {
         //     data_type = "boolean".to_string();
         // }
 
-        if data_type == "NULL".to_string() {
+        if data_type == *"NULL" {
             // most systems won't support null
             data_type = "string".to_string();
         }
@@ -631,7 +618,7 @@ impl AnalyseSchema {
             }
         }
 
-        return data_type;
+        data_type
     }
 
     pub fn increment_date_field_candidate_count(
@@ -715,7 +702,7 @@ impl AnalyseSchema {
                 .unwrap()
                 .field = field.clone();
 
-            if format != "" {
+            if !format.is_empty() {
                 metadata
                     .get_mut(field)
                     .unwrap()
@@ -771,7 +758,7 @@ impl AnalyseSchema {
         if date >= min_date && date <= max_date {
             return true;
         }
-        return false;
+        false
     }
 
     fn is_valid_date(&self, value: &str) -> Option<&str> {
@@ -832,16 +819,16 @@ impl AnalyseSchema {
     ) {
         match &*evolution {
             "cast" => {
-                return *data_type = new_value;
+                *data_type = new_value
             }
             "new" => {
-                return *field = new_value;
+                *field = new_value
             }
             "rename" => {
-                return *field = new_value;
+                *field = new_value
             }
             "merge" => {
-                return *field = new_value;
+                *field = new_value
             }
             "default" => {}
             _ => {}
@@ -938,11 +925,11 @@ impl AnalyseSchema {
                 field.parent_type = parent_type.to_string();
             }
 
-            if field.determined_type == "".to_string() {
+            if field.determined_type == *"" {
                 let mut highest_type = "".to_string();
                 let mut highest_count = 0;
 
-                if field.types.len() != 0 {
+                if !field.types.is_empty() {
                     // Don't allow NULL type if we discovered any other types
                     if field.types.len() > 1 {
                         field.types.remove("NULL");
@@ -976,74 +963,70 @@ impl AnalyseSchema {
                 }
             }
 
-            if field.determined_type != ""
-                && vec!["map", "array", "record"].contains(&field.determined_type.as_str())
-            {
-                if !field.fields.len() > 0 {
-                    if field.determined_type == "array" || field.determined_type == "map" {
-                        field.determined_type_values = "".to_string();
+            if !field.determined_type.is_empty() && vec!["map", "array", "record"].contains(&field.determined_type.as_str()) && !field.fields.len() > 0 {
+                if field.determined_type == "array" || field.determined_type == "map" {
+                    field.determined_type_values = "".to_string();
 
-                        // Ignore sub-fields for Avro array, the values are just enumerated, their not fields themselves.
-                        // Else we'd create a field list with string keys for each array value
-                        // e.g. [1,5,3,7,4,3,5]
-                        // would incorrectly become ['a0' => 1, 'a1' => 5, ...]
+                    // Ignore sub-fields for Avro array, the values are just enumerated, their not fields themselves.
+                    // Else we'd create a field list with string keys for each array value
+                    // e.g. [1,5,3,7,4,3,5]
+                    // would incorrectly become ['a0' => 1, 'a1' => 5, ...]
 
-                        let mut type_count = BTreeMap::new();
+                    let mut type_count = BTreeMap::new();
 
-                        // @todo - not intended to build avro type array here
-                        //         however, 'array' type is a special case... how to handle?
+                    // @todo - not intended to build avro type array here
+                    //         however, 'array' type is a special case... how to handle?
 
-                        // Get avro arrays items primitive data type
-                        for (_sub_field, sub_value) in field.fields.iter() {
-                            for (data_type, data_type_count) in sub_value.types.iter() {
-                                // Prefer primitive types to logical types or types
-                                // that cause frequent false positives (demoted types).
-                                // - if there's multiple discovered types
-                                // - and the most common type is a demoted type
-                                // - select the next most common, non-date type
-                                //                                if (!in_array($dataType, $demotedTypes)) {
-                                if type_count.len() <= 1
-                                    || (type_count.len() > 1
-                                        && !demoted_types.contains(&data_type.as_str()))
-                                {
-                                    if type_count.get(data_type).is_none() {
-                                        type_count.insert(data_type.to_string(), *data_type_count);
-                                    } else {
-                                        *type_count.get_mut(data_type).unwrap() += data_type_count;
-                                    }
+                    // Get avro arrays items primitive data type
+                    for (_sub_field, sub_value) in field.fields.iter() {
+                        for (data_type, data_type_count) in sub_value.types.iter() {
+                            // Prefer primitive types to logical types or types
+                            // that cause frequent false positives (demoted types).
+                            // - if there's multiple discovered types
+                            // - and the most common type is a demoted type
+                            // - select the next most common, non-date type
+                            //                                if (!in_array($dataType, $demotedTypes)) {
+                            if type_count.len() <= 1
+                                || (type_count.len() > 1
+                                    && !demoted_types.contains(&data_type.as_str()))
+                            {
+                                if type_count.get(data_type).is_none() {
+                                    type_count.insert(data_type.to_string(), *data_type_count);
+                                } else {
+                                    *type_count.get_mut(data_type).unwrap() += data_type_count;
                                 }
                             }
                         }
-
-                        let mut values_type: &String = &"".to_string();
-
-                        if type_count.len() >= 1 {
-                            values_type = type_count
-                                .iter()
-                                .max_by(|a, b| a.1.cmp(&b.1))
-                                .map(|(k, _v)| k)
-                                .unwrap();
-                        }
-
-                        // println!("HIGHEST TYPE: {}", values_type);
-
-                        field.determined_type_values = values_type.to_string();
-
-                        if field.determined_type == "array".to_string() {
-                            // field.fields.clear();
-                        }
                     }
 
-                    // println!("Field {} determined type is {}", field_name, field.determined_type);
-                    // println!("Field {} values type is {}", field_name, field.determined_type_values);
+                    let mut values_type: &String = &"".to_string();
 
-                    if field.determined_type != "array".to_string() {
-                        let _fo = "";
-                        AnalyseSchema::determine_field_types(
-                            &mut field.fields,
-                            Some(&field.determined_type),
-                        );
+                    if !type_count.is_empty() {
+                        values_type = type_count
+                            .iter()
+                            .max_by(|a, b| a.1.cmp(b.1))
+                            .map(|(k, _v)| k)
+                            .unwrap();
                     }
+
+                    // println!("HIGHEST TYPE: {}", values_type);
+
+                    field.determined_type_values = values_type.to_string();
+
+                    if field.determined_type == *"array" {
+                        // field.fields.clear();
+                    }
+                }
+
+                // println!("Field {} determined type is {}", field_name, field.determined_type);
+                // println!("Field {} values type is {}", field_name, field.determined_type_values);
+
+                if field.determined_type != *"array" {
+                    let _fo = "";
+                    AnalyseSchema::determine_field_types(
+                        &mut field.fields,
+                        Some(&field.determined_type),
+                    );
                 }
             }
         }

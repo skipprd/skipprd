@@ -1,17 +1,17 @@
 use crate::helpers::configuration::{Config, Metrics};
 
-use crate::serdes::json::SerdeJson;
+
 use aws_sdk_s3::Client;
 pub use aws_smithy_http::byte_stream::AggregatedBytes;
 
-use csv::ReaderBuilder;
+
 use flate2::read::GzDecoder;
 use regex::internal::Input;
 
 use std::collections::HashMap;
-use std::fs::File;
 
-use std::io::{BufRead, BufReader, Cursor, Read, Write};
+
+use std::io::{Cursor, Read};
 
 use std::future::Future;
 use std::sync::{Arc, Mutex};
@@ -48,7 +48,7 @@ impl DataSourceS3Plugin {
         let data_dir = Config::get_data_dir();
         let temp_dir = &format!("{}/source_buffer", data_dir);
 
-        match fs::create_dir(format!("{}", temp_dir)) {
+        match fs::create_dir(temp_dir) {
             Ok(_g) => {}
             Err(_err) => {}
         }
@@ -145,7 +145,7 @@ impl DataSourceS3Plugin {
 
                             // let records_total = rdr.records().count();
 
-                            let mut datas: Vec<IngestBatch> = Vec::new();
+                            let _datas: Vec<IngestBatch> = Vec::new();
 
                             let offset_key = OffsetKey {
                                 namespace: inventory_bucket.clone(),
@@ -212,7 +212,7 @@ impl DataSourceS3Plugin {
                 Err(err) => {
                     retries += 1;
 
-                    let wait_time = backoff_duration.as_secs_f64() * 2.0_f64.powi(retries as i32);
+                    let wait_time = backoff_duration.as_secs_f64() * 2.0_f64.powi(retries);
                     thread::sleep(Duration::from_secs_f64(wait_time));
 
                     backoff_duration *= 2;
@@ -248,7 +248,7 @@ impl DataSourceS3Plugin {
                 let bucket_name = bucket_name.to_owned();
 
                 tokio::spawn(async move {
-                    let x_fut = s3_client.get_object(GetObjectRequest {
+                    let _x_fut = s3_client.get_object(GetObjectRequest {
                         bucket: bucket_name.clone(),
                         key: object_key.to_string(),
                         ..Default::default()
@@ -262,12 +262,12 @@ impl DataSourceS3Plugin {
                     .await
                     .unwrap();
                     // println!("Got s3 object");
-                    let download = Download {
-                        key: object_key,
-                        response: response,
-                    };
+                    
 
-                    download
+                    Download {
+                        key: object_key,
+                        response,
+                    }
                 })
             })
             .collect();

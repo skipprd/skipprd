@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::{fs, thread};
+use std::{fs};
 
 #[derive(Clone, Debug)]
 pub struct IngestBatch {
@@ -65,7 +65,7 @@ impl Ingest {
 
         let updated_schema: Arc<Mutex<String>> = Arc::new(Mutex::new("no".to_string()));
 
-        let updated_schema_clone = updated_schema.clone();
+        let updated_schema_clone = updated_schema;
         let metadata_clone = metadata.clone();
         let metrcis_clone = metrics.clone();
         let offset_db_clone = offset_db.clone();
@@ -93,7 +93,7 @@ impl Ingest {
                     continue;
                 }
 
-                if None == has_offsets
+                if has_offsets.is_none()
                     || Some(false)
                         != offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Line, i)
                 {
@@ -115,7 +115,7 @@ impl Ingest {
                         skpr_time_bucket = BufferChunker::event_time_bucket(skpr_time.unwrap());
                     }
 
-                    if (Config::truth_value(faltten_events)) {
+                    if Config::truth_value(faltten_events) {
                         record = Helpers::flatten(&record);
                     }
 
@@ -154,7 +154,7 @@ impl Ingest {
                     output_files
                         .get_mut(&output_file_name)
                         .unwrap()
-                        .write_all(&buf_str.as_bytes())
+                        .write_all(buf_str.as_bytes())
                         .unwrap();
 
                     buf_str.clear();
@@ -184,7 +184,7 @@ impl Ingest {
                 .unwrap()
                 .block_on(async {
                     Config::set_config(
-                        &*metadata_clone.lock().unwrap(),
+                        &metadata_clone.lock().unwrap(),
                         *updated_schema_clone.lock().unwrap() == "yes".to_string(),
                     )
                     .await;

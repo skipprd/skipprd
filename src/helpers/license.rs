@@ -2,7 +2,7 @@ extern crate reqwest;
 extern crate serde_json;
 
 use crate::helpers::configuration::Config;
-use reqwest::{header::HeaderName, Client, Response, Url};
+use reqwest::{header::HeaderName, Client, Url};
 use std::collections::HashMap;
 use std::error::Error;
 use std::process::exit;
@@ -37,7 +37,7 @@ impl LicenseChecker {
             String::from("https://license.api.skippr.io")
         };
 
-        let url = Url::parse(&base_url)?.join(&format!("license-api/check/{}", self.api_key))?;
+        let _url = Url::parse(&base_url)?.join(&format!("license-api/check/{}", self.api_key))?;
 
         let auth_header = HeaderName::from_static("x-api-key");
 

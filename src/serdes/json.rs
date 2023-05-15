@@ -1,14 +1,14 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use std::fs::{remove_file, File, OpenOptions};
-use std::io::{BufRead, BufReader, Lines, Result, Seek, Write};
+use std::fs::{File};
+use std::io::{BufRead, BufReader, Lines, Result};
 use std::path::Path;
 
-use crate::discover::AnalyseSchema;
-use crate::helpers::configuration::Config;
-use rand::Rng;
-use serde_json::Value::Null;
+
+
+
+
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SerdeJson {
@@ -38,7 +38,7 @@ impl SerdeJson {
 
         for item in line {
             if item.is_string() {
-                match serde_json::from_str::<Value>(&item.as_str().unwrap_or_default()) {
+                match serde_json::from_str::<Value>(item.as_str().unwrap_or_default()) {
                     Ok(message) => messages.push(message),
                     Err(e) => println!("Couldn't deserialize message: {}", e),
                 }
@@ -92,9 +92,9 @@ impl SerdeJson {
                     .lines()
                     .map(|line| {
                         let mut cleaned_line = line
-                            .replace("\\", "")
+                            .replace('\\', "")
                             .replace("u'", "\"")
-                            .replace("'", "\"");
+                            .replace('\'', "\"");
 
                         let valid_chars: String = cleaned_line
                             .chars()
@@ -115,7 +115,7 @@ impl SerdeJson {
 
                 let mut deserialized_lines: Vec<Value> = lines
                     .iter()
-                    .map(|line| serde_json::from_str(&line).unwrap_or_default())
+                    .map(|line| serde_json::from_str(line).unwrap_or_default())
                     .collect();
 
                 if deserialized_lines.is_empty()
@@ -199,7 +199,7 @@ fn test_json_serde() {
         let record: String = r#"{"start":"0.620131100002421","end":null}"#.to_string();
         let msg = SerdeJson::deserialize(&record);
         assert_eq!(msg.first().unwrap()["start"], "0.620131100002421");
-        assert_eq!(msg.first().unwrap()["end"], Null);
+        assert_eq!(msg.first().unwrap()["end"], Value::Null);
     }
 
     #[test]

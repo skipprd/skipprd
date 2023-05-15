@@ -32,7 +32,7 @@ impl SkipprHive {
     pub fn convert_skippr_to_hive(metadata: &Metadata) -> Result<Vec<Column>, bool> {
         let field_types: Result<Vec<Column>, bool> =
             SkipprHive::convert_skippr_to_hive_field_types(metadata);
-        return field_types;
+        field_types
     }
 
     fn convert_skippr_to_hive_field_types(metadata: &Metadata) -> Result<Vec<Column>, bool> {
@@ -42,7 +42,7 @@ impl SkipprHive {
             match &*v.determined_type {
                 // Value::Array(array) => {
                 "record" => {
-                    let stuct_cols = SkipprHive::convert_skippr_to_hive_field_types(&v).unwrap();
+                    let stuct_cols = SkipprHive::convert_skippr_to_hive_field_types(v).unwrap();
 
                     let mut type_str =
                         format!("{}<", MAPPINGS.get(&v.determined_type).unwrap().clone());
@@ -61,7 +61,7 @@ impl SkipprHive {
                     )
                 }
                 "map" => {
-                    if &v.determined_type_values != "" {
+                    if !v.determined_type_values.is_empty() {
                         let field_type: String = match MAPPINGS.get(&v.determined_type) {
                             Some(mapped_type) => mapped_type.to_string(),
                             None => v.determined_type.to_string(),
@@ -83,7 +83,7 @@ impl SkipprHive {
                     }
                 }
                 "array" => {
-                    if &v.determined_type_values != "" {
+                    if !v.determined_type_values.is_empty() {
                         let field_type: String = match MAPPINGS.get(&v.determined_type) {
                             Some(mapped_type) => mapped_type.to_string(),
                             None => v.determined_type.to_string(),
