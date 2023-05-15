@@ -1,4 +1,4 @@
-image: rust:latest
+image: rust:bullseye
 
 variables:
   COMPONENT_NAME: skipprd
@@ -9,8 +9,7 @@ variables:
   AWS_ECR_REGISTRY: $ECR_HOST/$COMPONENT_NAME
 
 stages:
-  - lint
-  - test
+#  - qa
   - build
   - dockerize
   - publish
@@ -19,39 +18,38 @@ before_script:
   - rustup update && cargo update
   - alias aws='docker run --rm -v $(pwd):/aws -e AWS_REGION -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY amazon/aws-cli'
 
-cargo_lint:
-  stage: lint
-  script:
-    - rustup component add clippy
-#    - cargo clippy -- -D warnings
-#    - cargo clippy -- -A warnings
+#cargo_lint:
+#  stage: qa
+#  script:
+#    - rustup component add clippy
+##    - cargo clippy -- -D warnings
+##    - cargo clippy -- -A warnings
+#  only:
+#    - master
+#    - tags
+#
+#cargo_test:
+#  stage: qa
+#  script:
+#    - ls
+##    - cargo test
+#  only:
+#    - master
+#    - tags
+
+.cargo_build:
+  stage: build
   only:
     - master
     - tags
-
-cargo_test:
-  stage: test
-  script:
-    - ls
-#    - cargo test
-  only:
-    - master
-    - tags
-
 
 cargo_build:
-  stage: build
+  extends: .cargo_build
   script:
-    - rustup target add x86_64-unknown-linux-gnu aarch64-apple-darwin
-    - cargo build --target x86_64-unknown-linux-gnu --release
-    - cargo build --target aarch64-apple-darwin --release
+    - cargo build --release
   artifacts:
     paths:
-      - ./target/x86_64-unknown-linux-gnu/release/
-      - ./target/aarch64-apple-darwin/release/
-  only:
-    - master
-    - tags
+      - ./target/release/
 
 docker_build:
   stage: dockerize
