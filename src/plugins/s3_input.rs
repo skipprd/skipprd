@@ -128,10 +128,10 @@ impl DataSourceS3Plugin {
                 Err(err) => println!("S3 Error {}", err.into_service_error()),
                 Ok(output) => {
                     if output.clone().next_continuation_token.is_some() {
-                        println!(
-                            "getting next list token {}",
-                            output.clone().next_continuation_token.clone().unwrap()
-                        );
+                        // println!(
+                        //     "getting next list token {}",
+                        //     output.clone().next_continuation_token.clone().unwrap()
+                        // );
                         continuation_token = output.clone().next_continuation_token;
                     } else {
                         // println!("breaking");
