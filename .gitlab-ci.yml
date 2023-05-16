@@ -1,4 +1,4 @@
-image: ekidd/rust-musl-builder
+image: rust:latest
 
 variables:
   COMPONENT_NAME: skipprd
@@ -15,11 +15,11 @@ stages:
 #  - qa
 #  - build
   - dockerize
-  - publish
+#  - publish
 
-before_script:
-  - rustup update && cargo update
-  - alias aws='docker run --rm -v $(pwd):/aws -e AWS_REGION -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY amazon/aws-cli'
+#before_script:
+#  - rustup update && cargo update
+#  - alias aws='docker run --rm -v $(pwd):/aws -e AWS_REGION -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY amazon/aws-cli'
 
 #cargo_lint:
 #  stage: qa
@@ -59,33 +59,40 @@ before_script:
 docker_build:
   image: docker:latest
   stage: dockerize
+  before_script:
+    - rustup update && cargo update
   script:
     - docker build -t $CONTAINER_IMAGE -f Dockerfile .
 #    - docker build -t $CONTAINER_IMAGE -f Dockerfile.mac_arm .
 #    - docker build -t $CONTAINER_IMAGE -f Dockerfile.lambda .
-  only:
-    - master
-    - tags
-
-docker_push:
-  image: docker:latest
-  stage: publish
-  script:
-    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
-    - docker tag $CONTAINER_IMAGE $CONTAINER_RELEASE_IMAGE
-    - docker push $CONTAINER_RELEASE_IMAGE
-
+  after_script:
     # Push to Docker Hub
     - docker login -u skippr -p "DOCKER_HUB_PASS"
     - docker tag $CONTAINER_RELEASE_IMAGE $DOCKER_HUB_REPO/$CONTAINER_RELEASE_IMAGE
     - docker push $DOCKER_HUB_REPO/$CONTAINER_RELEASE_IMAGE
-
-    # Push to AWS ECR
-    - pip install awscli
-    - docker login --username AWS --password $(aws ecr get-login-password --region $AWS_REGION) 536671797322.dkr.ecr.eu-west-2.amazonaws.com
-#    - echo $AWS_ECR_PASSWORD | docker login --username AWS --password-stdin $AWS_ECR_REGISTRY
-    - docker tag $CONTAINER_RELEASE_IMAGE $AWS_ECR_REGISTRY/$CONTAINER_RELEASE_IMAGE
-    - docker push $AWS_ECR_REGISTRY/$CONTAINER_RELEASE_IMAGE
   only:
     - master
     - tags
+
+#docker_push:
+#  image: docker:latest
+#  stage: publish
+#  script:
+#    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
+#    - docker tag $CONTAINER_IMAGE $CONTAINER_RELEASE_IMAGE
+#    - docker push $CONTAINER_RELEASE_IMAGE
+#
+#    # Push to Docker Hub
+#    - docker login -u skippr -p "DOCKER_HUB_PASS"
+#    - docker tag $CONTAINER_RELEASE_IMAGE $DOCKER_HUB_REPO/$CONTAINER_RELEASE_IMAGE
+#    - docker push $DOCKER_HUB_REPO/$CONTAINER_RELEASE_IMAGE
+#
+#    # Push to AWS ECR
+#    - pip install awscli
+#    - docker login --username AWS --password $(aws ecr get-login-password --region $AWS_REGION) 536671797322.dkr.ecr.eu-west-2.amazonaws.com
+##    - echo $AWS_ECR_PASSWORD | docker login --username AWS --password-stdin $AWS_ECR_REGISTRY
+#    - docker tag $CONTAINER_RELEASE_IMAGE $AWS_ECR_REGISTRY/$CONTAINER_RELEASE_IMAGE
+#    - docker push $AWS_ECR_REGISTRY/$CONTAINER_RELEASE_IMAGE
+#  only:
+#    - master
+#    - tags
