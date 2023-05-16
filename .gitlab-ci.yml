@@ -3,7 +3,7 @@ image: rust:latest
 variables:
   COMPONENT_NAME: skipprd
   CONTAINER_IMAGE: $COMPONENT_NAME:$CI_COMMIT_REF_NAME
-  CONTAINER_RELEASE_IMAGE: $COMPONENT_NAME:latest
+  CONTAINER_RELEASE_IMAGE: $COMPONENT_NAME:v3.0.0
   DOCKER_HUB_REPO: skippr
   ECR_HOST: 536671797322.dkr.ecr.eu-west-2.amazonaws.com
   AWS_ECR_REGISTRY: $ECR_HOST/$COMPONENT_NAME
@@ -67,8 +67,8 @@ docker_build:
 #    - docker build -t $CONTAINER_IMAGE -f Dockerfile.lambda .
   after_script:
     # Push to Docker Hub
-    - docker login -u skippr -p "DOCKER_HUB_PASS"
-    - docker tag $CONTAINER_RELEASE_IMAGE $DOCKER_HUB_REPO/$CONTAINER_RELEASE_IMAGE
+    - docker login -u skippr -p "$DOCKER_HUB_PASS"
+    - docker tag $CONTAINER_IMAGE $DOCKER_HUB_REPO/$CONTAINER_RELEASE_IMAGE
     - docker push $DOCKER_HUB_REPO/$CONTAINER_RELEASE_IMAGE
   only:
     - master
