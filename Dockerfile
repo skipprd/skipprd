@@ -8,7 +8,7 @@ WORKDIR /usr/src/skipprd
 COPY . .
 
 # Download the cross-compilation tools
-RUN #rustup target add x86_64-unknown-linux-gnu
+#RUN rustup target add x86_64-unknown-linux-gnu
 
 # Install standard C library for x86_64
 ENV RUSTFLAGS="-C target-cpu=native"
@@ -22,5 +22,6 @@ RUN cargo build --release
 #CMD ["./target/release/skipprd"]
 
 FROM debian:stable-slim
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /usr/src/skipprd/target/release/skipprd /usr/bin/skipprd
 CMD ["skipprd", "sync"]
