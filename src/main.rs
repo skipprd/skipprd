@@ -15,7 +15,7 @@ use std::io::BufReader;
 use std::ops::Add;
 
 use std::sync::{Arc, Mutex};
-use std::thread;
+use std::{env, thread};
 
 use std::fs;
 
@@ -68,6 +68,7 @@ use crate::plugins::s3_inventory::DataSourceS3InventoryPlugin;
 
 #[tokio::main]
 async fn main() {
+    env::set_var("RUST_BACKTRACE", "1");
     Config::init().await;
 
     // let now = Instant::now();
