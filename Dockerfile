@@ -1,14 +1,26 @@
-FROM ekidd/rust-musl-builder as builder
+# Use the official Rust image as Base
+FROM rust:latest
+
+# Set the working directory in the Docker image
 WORKDIR /usr/src/skipprd
 
+# Copy the Rust project to the image
 COPY . .
 
-#RUN rustup target add x86_64-unknown-linux-musl
-#RUN apt update && apt install -y musl-tools musl-dev
-#RUN update-ca-certificates
-#
-#RUN cargo build --target x86_64-unknown-linux-musl --release
+# Download the cross-compilation tools
+RUN #rustup target add x86_64-unknown-linux-gnu
 
-FROM rust:latest
-COPY --from=builder /usr/src/skipprd/target/x86_64-unknown-linux-musl/release/skipprd /usr/bin/skipprd
+# Install standard C library for x86_64
+ENV RUSTFLAGS="-C target-cpu=native"
+
+# Build the Rust project
+RUN cargo build --release
+#RUN cargo build --target x86_64-unknown-linux-gnu
+
+# Set the start command to run your binary
+#CMD ["./target/x86_64-unknown-linux-gnu/debug/skipprd"]
+#CMD ["./target/release/skipprd"]
+
+FROM rust:1.69.0-slim-buster
+COPY --from=builder /usr/src/skipprd/target/release/skipprd /usr/bin/skipprd
 CMD ["skipprd", "sync"]

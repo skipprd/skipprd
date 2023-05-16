@@ -136,5 +136,3 @@ DATA_DIR=./data \
 cargo run sync
 ```
 
-
-

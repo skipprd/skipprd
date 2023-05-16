@@ -13,7 +13,7 @@ services:
 
 stages:
 #  - qa
-  - build
+#  - build
   - dockerize
   - publish
 
@@ -40,21 +40,21 @@ before_script:
 #    - master
 #    - tags
 
-.cargo_build:
-  stage: build
-  only:
-    - master
-    - tags
+#.cargo_build:
+#  stage: build
+#  only:
+#    - master
+#    - tags
 
-cargo_build:
-  extends: .cargo_build
-  script:
-#    - cargo install cross --git https://github.com/cross-rs/cross
-#    - cross build --target x86_64-unknown-linux-musl --release
-    - cargo build --target x86_64-unknown-linux-musl --release
-  artifacts:
-    paths:
-      - ./target
+#cargo_build:
+#  extends: .cargo_build
+#  script:
+##    - cargo install cross --git https://github.com/cross-rs/cross
+##    - cross build --target x86_64-unknown-linux-musl --release
+#    - cargo build --target x86_64-unknown-linux-musl --release
+#  artifacts:
+#    paths:
+#      - ./target
 
 docker_build:
   image: docker:latest
