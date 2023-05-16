@@ -1,5 +1,5 @@
 # Use the official Rust image as Base
-FROM rust:latest
+FROM rust:latest as builder
 
 # Set the working directory in the Docker image
 WORKDIR /usr/src/skipprd
@@ -21,6 +21,6 @@ RUN cargo build --release
 #CMD ["./target/x86_64-unknown-linux-gnu/debug/skipprd"]
 #CMD ["./target/release/skipprd"]
 
-FROM rust:1.69.0-slim-buster
+FROM debian:stable-slim
 COPY --from=builder /usr/src/skipprd/target/release/skipprd /usr/bin/skipprd
 CMD ["skipprd", "sync"]
