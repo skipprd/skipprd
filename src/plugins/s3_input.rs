@@ -1,15 +1,12 @@
 use crate::helpers::configuration::{Config, Metrics};
 
-
 use aws_sdk_s3::Client;
 pub use aws_smithy_http::byte_stream::AggregatedBytes;
-
 
 use flate2::read::GzDecoder;
 use regex::internal::Input;
 
 use std::collections::HashMap;
-
 
 use std::io::{Cursor, Read};
 
@@ -28,7 +25,8 @@ use futures::StreamExt;
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::ingest_work::{Ingest, IngestBatch};
 use rusoto_core::{Region, RusotoError};
-use rusoto_s3::{GetObjectOutput, GetObjectRequest, S3Client, S3};
+use rusoto_s3::{GetObjectOutput, GetObjectRequest, ListObjectsV2Request, S3Client, S3};
+use tokio::time::timeout;
 
 pub struct DataSourceS3Plugin {
     // config: HashMap<String, String>,
@@ -98,27 +96,50 @@ impl DataSourceS3Plugin {
             inventory_bucket.clone(),
             inventory_prefix
         );
-        // let mut params = vec![
-        //     ("Bucket".to_string(), inventory_bucket.to_string()),
-        // ];
-        //
-        // if let Some(s3_inventory_prefix) = Config::getenv("s3_inventory_prefix", "") {
-        //     params.push(("Prefix".to_string(), s3_inventory_prefix.to_string()));
-        // }
 
-        let results = self
-            .s3_client
-            .list_objects()
-            .bucket(inventory_bucket.clone())
-            .prefix(inventory_prefix)
-            .send()
-            .await;
+        let mut continuation_token: Option<String> = None;
 
-        match results {
-            Err(err) => println!("S3 Error {}", err.into_service_error()),
-            Ok(..) => {
-                for result in results {
-                    let objects = result.contents().unwrap();
+        let chunk_size =
+            Config::getenv("DATA_SOURCE_BATCH_SIZE_BYTES", "1024000")
+                .parse::<i64>()
+                .unwrap();
+
+        let mut i = 0;
+        let mut chunk_size_current = 0;
+
+        loop {
+            let mut list_obj_req = self
+                .s3_client
+                .list_objects_v2()
+                .bucket(inventory_bucket.clone());
+
+            if continuation_token.is_some() {
+                list_obj_req
+                    .clone()
+                    .continuation_token(continuation_token.clone().unwrap());
+            }
+
+            if inventory_prefix != "".to_string() && inventory_prefix != "/".to_string() {
+                // println!("adding prfec");
+                list_obj_req.clone().prefix(inventory_prefix.clone());
+            }
+
+            match list_obj_req.send().await {
+                Err(err) => println!("S3 Error {}", err.into_service_error()),
+                Ok(output) => {
+                    if output.clone().next_continuation_token.is_some() {
+                        println!(
+                            "getting next list token {}",
+                            output.clone().next_continuation_token.clone().unwrap()
+                        );
+                        continuation_token = output.clone().next_continuation_token;
+                    } else {
+                        // println!("breaking");
+                        break;
+                    }
+
+                    // for result in results {
+                    let objects = output.contents().unwrap();
 
                     if !objects.is_empty() {
                         for object in objects {
@@ -130,22 +151,16 @@ impl DataSourceS3Plugin {
                             let object_key = object.key().unwrap();
                             let _timestamp = object.last_modified().unwrap().secs();
 
-                            let chunk_size =
-                                Config::getenv("DATA_SOURCE_BATCH_SIZE_BYTES", "1024000")
-                                    .parse::<i64>()
-                                    .unwrap();
+
 
                             // let mut j = 0;
                             // let mut c = 0;
                             //
                             // let inventorys = vec![];
 
-                            let mut i = 0;
-                            let mut chunk_size_current = 0;
+
 
                             // let records_total = rdr.records().count();
-
-                            let _datas: Vec<IngestBatch> = Vec::new();
 
                             let offset_key = OffsetKey {
                                 namespace: inventory_bucket.clone(),
@@ -154,13 +169,19 @@ impl DataSourceS3Plugin {
                             if Some(true)
                                 != offsets_clone.validate(&offset_key, OffsetTypes::Closed, 1)
                             {
+                                // println!("getting key: {}", object_key);
+
                                 outputs.push(object_key.to_string());
 
                                 chunk_size_current += object.size();
 
                                 i += 1;
 
+                                // println!("State {} = {} of {}", i, chunk_size_current, chunk_size);
+
+
                                 if i >= 20 || chunk_size_current >= chunk_size {
+                                    // println!("Ingesting");
                                     Self::download_and_ingest(
                                         &mut self.s3_client_rusoto,
                                         &inventory_bucket,
@@ -181,8 +202,22 @@ impl DataSourceS3Plugin {
                             }
                         }
                     }
+                    // }
+
+
                 }
             }
+
+            Self::download_and_ingest(
+                &mut self.s3_client_rusoto,
+                &inventory_bucket,
+                &outputs,
+                &self.temp_dir,
+                &metadata,
+                &metrics,
+                &offsets_clone,
+            )
+                .await;
         }
     }
 
@@ -199,8 +234,9 @@ impl DataSourceS3Plugin {
             let get_request = GetObjectRequest {
                 bucket: bucket.clone(),
                 key: key.clone(),
-                ..Default::default()
+                    ..Default::default()
             };
+
 
             match s3_client.get_object(get_request).await {
                 Ok(result) => {
@@ -218,9 +254,10 @@ impl DataSourceS3Plugin {
                     backoff_duration *= 2;
 
                     println!(
-                        "Failed to get object {}, retry back in {} seconds",
+                        "Failed to get object {}, retry back in {} seconds, Error: {}",
                         key,
-                        backoff_duration.as_secs()
+                        backoff_duration.as_secs(),
+                        err.to_string()
                     );
 
                     if retries >= max_retries {
@@ -262,7 +299,6 @@ impl DataSourceS3Plugin {
                     .await
                     .unwrap();
                     // println!("Got s3 object");
-                    
 
                     Download {
                         key: object_key,
@@ -348,6 +384,7 @@ impl DataSourceS3Plugin {
         for handle in threads {
             handle.join().unwrap();
         }
+        // println!("Ingested");
     }
 }
 

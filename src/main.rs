@@ -20,6 +20,7 @@ use std::thread;
 use std::fs;
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::sleep;
 use std::time::Instant;
 
 use futures::executor::block_on;
@@ -283,7 +284,7 @@ async fn sync() {
     })
     .expect("Error during graceful shutdown");
 
-    while running.load(Ordering::SeqCst) {
+    // while running.load(Ordering::SeqCst) {
         let now = Arc::new(Mutex::new(Instant::now()));
 
         let metrics: Arc<Mutex<Metrics>> = Arc::new(Mutex::new(Metrics::new()));
@@ -390,7 +391,9 @@ async fn sync() {
                 println!("Plugin {} not supported", unknown);
             }
         };
-    }
+
+        // sleep(Duration::from_secs(5));
+    // }
 }
 
 fn outputSync(metadata: HashMap<String, Metadata>) {
