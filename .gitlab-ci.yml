@@ -1,4 +1,4 @@
-image: rust:bullseye
+image: ekidd/rust-musl-builder
 
 variables:
   COMPONENT_NAME: skipprd
@@ -47,15 +47,14 @@ before_script:
     - tags
 
 cargo_build:
-  image: rust:latest
   extends: .cargo_build
   script:
-    - cargo install cross --git https://github.com/cross-rs/cross
-    - cross build --target x86_64-unknown-linux-musl --release
-#    - cargo build --release
+#    - cargo install cross --git https://github.com/cross-rs/cross
+#    - cross build --target x86_64-unknown-linux-musl --release
+    - cargo build --target x86_64-unknown-linux-musl --release
   artifacts:
     paths:
-      - ./target/release/
+      - ./target
 
 docker_build:
   image: docker:latest
