@@ -8,9 +8,12 @@ variables:
   ECR_HOST: 536671797322.dkr.ecr.eu-west-2.amazonaws.com
   AWS_ECR_REGISTRY: $ECR_HOST/$COMPONENT_NAME
 
+services:
+  - docker:dind
+
 stages:
 #  - qa
-  - build
+#  - build
   - dockerize
   - publish
 
@@ -37,26 +40,26 @@ before_script:
 #    - master
 #    - tags
 
-.cargo_build:
-  stage: build
-  only:
-    - master
-    - tags
-
-cargo_build:
-  extends: .cargo_build
-  script:
-    - cargo build --release
-  artifacts:
-    paths:
-      - ./target/release/
+#.cargo_build:
+#  stage: build
+#  only:
+#    - master
+#    - tags
+#
+#cargo_build:
+#  extends: .cargo_build
+#  script:
+#    - cargo build --release
+#  artifacts:
+#    paths:
+#      - ./target/release/
 
 docker_build:
   stage: dockerize
   script:
     - docker build -t $CONTAINER_IMAGE -f Dockerfile .
-    - docker build -t $CONTAINER_IMAGE -f Dockerfile.mac_arm .
-    - docker build -t $CONTAINER_IMAGE -f Dockerfile.lambda .
+#    - docker build -t $CONTAINER_IMAGE -f Dockerfile.mac_arm .
+#    - docker build -t $CONTAINER_IMAGE -f Dockerfile.lambda .
   only:
     - master
     - tags

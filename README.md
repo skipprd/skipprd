@@ -25,6 +25,12 @@ MACOSX_DEPLOYMENT_TARGET=$(xcrun -sdk macosx12.3 --show-sdk-platform-version) \
 cargo build --release --target=x86_64-apple-darwin
 ```
 
+```bash
+SDKROOT=$(xcrun -sdk macosx12.3 --show-sdk-path) \
+MACOSX_DEPLOYMENT_TARGET=$(xcrun -sdk macosx12.3 --show-sdk-platform-version) \
+cargo build --target x86_64-unknown-linux-gnu --release
+```
+
 ### Run Release
 
 ```bash
