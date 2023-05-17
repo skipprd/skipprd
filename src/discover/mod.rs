@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::Read;
 
-use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use serde_derive::{Deserialize, Serialize};
 
 use serde_json::Value;
@@ -752,13 +752,27 @@ impl AnalyseSchema {
     }
 
     fn is_valid_timestamp(&self, timestamp: &mut String) -> bool {
-        let date = Utc.timestamp(timestamp.parse::<i64>().unwrap(), 0);
-        let min_date = Utc.ymd(1970, 1, 1).and_hms(0, 0, 0);
-        let max_date = Utc.ymd(2040, 1, 1).and_hms(0, 0, 0);
-        if date >= min_date && date <= max_date {
-            return true;
+        match timestamp.parse::<i64>() {
+            Ok(seconds) => {
+                match NaiveDateTime::from_timestamp_opt(seconds, 0) {
+                    Some(dt) => {
+                        let date = Utc.from_utc_datetime(&dt);
+
+                        // let date = Utc.timestamp_opt(seconds, 0).unwrap();
+                        let min_date = Utc.ymd(1970, 1, 1).and_hms(0, 0, 0);
+                        let max_date = Utc.ymd(2040, 1, 1).and_hms(0, 0, 0);
+                        if date >= min_date && date <= max_date {
+                            return true;
+                        }
+                        false
+                    },
+                    None => false,
+                }
+            },
+            Err(_) => {
+                false
+            }
         }
-        false
     }
 
     fn is_valid_date(&self, value: &str) -> Option<&str> {
