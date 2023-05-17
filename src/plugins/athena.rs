@@ -181,8 +181,8 @@ impl DataOutputAwsAthenaPlugin {
                     .send()
                     .await
                 {
-                    Ok(_resp) => {
-                        // println!("Upload success. Version: {:?}", resp.version_id);
+                    Ok(resp) => {
+                        println!("Upload success. Version: {:?}", resp.version_id);
                         fs::remove_file(Path::new(&filename)).unwrap();
                     }
                     Err(err) => {

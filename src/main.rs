@@ -62,6 +62,7 @@ use crate::discover::arrow_schema::convert_skippr_to_arrow;
 use crate::helpers::configuration::{Config, Metrics};
 
 use crate::buffer::BufferChunker;
+use crate::ingest_work::Ingest;
 use crate::plugins::athena::DataOutputAwsAthenaPlugin;
 
 use crate::plugins::s3_input::DataSourceS3Plugin;
@@ -348,11 +349,16 @@ async fn sync() {
 
                  let input_metadata_clone = input_metadata_clone.clone();
 
+                 println!("Output planner started");
+
                  tokio::runtime::Builder::new_multi_thread()
                      .enable_all()
                      .build()
                      .unwrap()
                      .block_on(async {
+
+                         println!("Output planner thread created");
+
                          let input_metadata_clone = {
                              let guard = input_metadata_clone.lock().unwrap();
                              guard.clone()
@@ -440,6 +446,9 @@ fn output_sync(metadata: HashMap<String, Metadata>) {
             require_literal_separator: false,
             require_literal_leading_dot: false,
         };
+
+        println!("Finalising output files");
+        Config::list_dir_contents(output_dir).expect(&format!("Could not list output dir {}", output_dir));
 
         // loop {
         for entry in glob_with(&format!("{}/done/*", output_dir), options)
