@@ -427,7 +427,7 @@ fn output_sync(metadata: HashMap<String, Metadata>) {
         {
             match entry {
                 Ok(path) => {
-                    // println!("Finalising output file {}", path.display());
+                    println!("Finalising output file {}", path.display());
 
                     // alwasy regenerate arrow schema incase updated skippr metadata, e.g. discovered a new field
                     let mut arrow_schema: Result<Schema, ArrowError> = Ok(Schema::empty());
