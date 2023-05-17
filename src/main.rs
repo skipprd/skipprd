@@ -299,18 +299,18 @@ async fn sync() {
 
         let metrics_clone = metrics.clone();
 
-        match Config::list_dir_contents(data_dir.clone()) {
-            Err(e) => println!("Error occurred: {}", e),
-            _ => (),
-        }
+        // match Config::list_dir_contents(data_dir.clone()) {
+        //     Err(e) => println!("Error occurred: {}", e),
+        //     _ => (),
+        // }
 
         planner.add(
             move || {
 
-                match Config::list_dir_contents(data_dir.clone()) {
-                    Err(e) => println!("Error occurred: {}", e),
-                    _ => (),
-                }
+                // match Config::list_dir_contents(data_dir.clone()) {
+                //     Err(e) => println!("Error occurred: {}", e),
+                //     _ => (),
+                // }
 
                 // let mut metrics: Metrics = Metrics::new();
                 let mut metrics_lock = metrics_clone.lock().unwrap();
@@ -344,10 +344,29 @@ async fn sync() {
 
         let mut out_pnanner = periodic::Planner::new();
         out_pnanner.add(
-            move || {
-                output_sync(input_metadata_clone.lock().unwrap().clone());
-                let data_output = block_on(DataOutputAwsAthenaPlugin::new());
-                block_on(data_output.sync(input_metadata_clone.lock().unwrap().clone()));
+             move || {
+
+                 let input_metadata_clone = input_metadata_clone.clone();
+
+                 tokio::runtime::Builder::new_multi_thread()
+                     .enable_all()
+                     .build()
+                     .unwrap()
+                     .block_on(async {
+                         let input_metadata_clone = {
+                             let guard = input_metadata_clone.lock().unwrap();
+                             guard.clone()
+                         };
+                         output_sync(input_metadata_clone.clone());
+
+                         let data_output = DataOutputAwsAthenaPlugin::new().await;
+                         let input_metadata_clone = {
+                             let guard = input_metadata_clone;
+                             guard.clone()
+                         };
+                         data_output.sync(input_metadata_clone).await;
+                    });
+
             },
             periodic::Every::new(Duration::from_secs(60)),
         );
