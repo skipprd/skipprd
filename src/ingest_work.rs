@@ -47,7 +47,9 @@ impl Ingest {
                 );
                 let old_path = format!("{}/{}", output_dir, filename);
 
-                fs::rename(old_path, new_filename).unwrap();
+                fs::rename(&old_path, new_filename).unwrap();
+
+                println!("Rotated buffer file {}", old_path);
             }
         }
     }

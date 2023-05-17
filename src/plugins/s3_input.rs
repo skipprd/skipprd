@@ -152,13 +152,10 @@ impl DataSourceS3Plugin {
                             let _timestamp = object.last_modified().unwrap().secs();
 
 
-
                             // let mut j = 0;
                             // let mut c = 0;
                             //
                             // let inventorys = vec![];
-
-
 
                             // let records_total = rdr.records().count();
 
