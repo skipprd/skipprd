@@ -228,20 +228,22 @@ fn fast_set_value(
                 let metadata_field = metadata.get_mut(field).unwrap();
                 let determined_type_values = &metadata_field.determined_type_values;
                 let fields = &mut metadata_field.fields;
-                for (key, val) in value
-                    .as_object()
-                    .unwrap()
-                    .iter()
-                    .filter_map(|(k, v)| Some((k, v)))
-                {
-                    if Some(val).is_some() {
-                        new_value[key] = fast_set_value(
-                            determined_type_values,
-                            key,
-                            value,
-                            fields,
-                            updatedSchema,
-                        );
+                if value.is_object() {
+                    for (key, val) in value
+                        .as_object()
+                        .unwrap()
+                        .iter()
+                        .filter_map(|(k, v)| Some((k, v)))
+                    {
+                        if Some(val).is_some() {
+                            new_value[key] = fast_set_value(
+                                determined_type_values,
+                                key,
+                                value,
+                                fields,
+                                updatedSchema,
+                            );
+                        }
                     }
                 }
                 // for (key, val) in value.as_object().unwrap() {
