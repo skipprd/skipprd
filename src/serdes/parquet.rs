@@ -17,7 +17,6 @@ use crate::buffer::BufferChunker;
 use crate::helpers::configuration::Config;
 use std::sync::Arc;
 use arrow::error::ArrowError;
-use futures::future::err;
 
 // #[derive(clap::ValueEnum, Clone)]
 // #[allow(non_camel_case_types, clippy::upper_case_acronyms)]
@@ -305,7 +304,7 @@ impl SerdeParquet {
         let mut writer =
             ArrowWriter::try_new(output, reader.schema(), Some(props.build())).unwrap();
 
-        let mut error: Result<bool, ArrowError> = Result::Ok(true);
+        let mut error: Result<bool, ArrowError> = Ok(true);
 
         for batch in reader {
             // for i in batch.iter() {

@@ -349,7 +349,7 @@ async fn sync() {
 
                  let input_metadata_clone = input_metadata_clone.clone();
 
-                 println!("Output planner started");
+                 // println!("Output planner started");
 
                  tokio::runtime::Builder::new_multi_thread()
                      .enable_all()
@@ -357,7 +357,7 @@ async fn sync() {
                      .unwrap()
                      .block_on(async {
 
-                         println!("Output planner thread created");
+                         // println!("Output planner thread created");
 
                          let input_metadata_clone = {
                              let guard = input_metadata_clone.lock().unwrap();
