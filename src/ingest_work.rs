@@ -197,6 +197,7 @@ impl Ingest {
     }
 
     fn is_file_size_exceeded(file: &fs::File) -> bool {
+        // println!("File metadata: {:?}", file.metadata());
         file.metadata().unwrap().len() > MAX_BUFFER_SIZE
     }
 }

@@ -110,15 +110,15 @@ async fn discover() {
 
     let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
 
-    let mut hasAnalysed = false;
+    let mut has_analysed = false;
 
-    // let mut skipprMetadata: HashMap<String, Metadata> = HashMap::new();
+    // let mut skippr_metadata: HashMap<String, Metadata> = HashMap::new();
 
     let data_dir = Config::get_data_dir();
     let metadata_file = format!("{}/metadata.json", data_dir);
 
     // Get existing metadata
-    let mut skipprMetadata: HashMap<String, Metadata> = match File::open(metadata_file) {
+    let mut skippr_metadata: HashMap<String, Metadata> = match File::open(metadata_file) {
         Ok(file) => {
             let reader = BufReader::new(file);
             match serde_json::from_reader(reader) {
@@ -135,20 +135,20 @@ async fn discover() {
         }
     };
 
-    let _arrowSchema: Result<Schema, ArrowError> = Ok(Schema::empty());
+    let _arrow_schema: Result<Schema, ArrowError> = Ok(Schema::empty());
 
     let _schema_ref = Arc::new(Schema::empty());
 
-    let mut analyseCount = 0;
+    let mut analyse_count = 0;
 
     let data_dir = Config::get_data_dir();
     let pattern = &format!("{}/source_buffer/*", data_dir);
 
-    while !hasAnalysed && analyseCount < 10 {
-        analyseCount += 1;
+    while !has_analysed && analyse_count < 10 {
+        analyse_count += 1;
 
         for entry in glob_with(pattern, options).expect("Failed to read glob pattern") {
-            if !hasAnalysed {
+            if !has_analysed {
                 match entry {
                     Ok(path) => {
                         let input_file = File::open(path.clone()).unwrap();
@@ -157,21 +157,21 @@ async fn discover() {
 
                         // let mut buf_reader = BufReader::new(input_file);
 
-                        // skipprMetadata =
+                        // skippr_metadata =
                         //     AnalyseSchema::infer_json_schema(&mut foo, &mut buf_reader, Some(1000))
                         //         .unwrap();
-                        skipprMetadata = AnalyseSchema::infer_json_schema(
+                        skippr_metadata = AnalyseSchema::infer_json_schema(
                             &mut foo,
                             input_file,
                             Some(1000),
-                            &mut skipprMetadata,
+                            &mut skippr_metadata,
                         )
                         .unwrap();
 
-                        // println!("Skippr schema: {:?}", skipprMetadata);
+                        // println!("Skippr schema: {:?}", skippr_metadata);
 
                         // arrowSchema = convert_skippr_to_arrow(
-                        //     skipprMetadata.get(&"example_ns".to_string()).unwrap().fields.clone(),
+                        //     skippr_metadata.get(&"example_ns".to_string()).unwrap().fields.clone(),
                         // );
                         //
                         // // let json = serde_json::to_string_pretty(&arrowSchema).unwrap();
@@ -184,7 +184,7 @@ async fn discover() {
                         // schema_ref = Arc::new(arrowSchema.unwrap());
                         // // schema_ref = arrowSchema.unwrap();
 
-                        hasAnalysed = true;
+                        has_analysed = true;
                     }
                     Err(e) => println!("{:?}", e),
                 }
@@ -192,9 +192,9 @@ async fn discover() {
         }
     }
 
-    AnalyseSchema::determine_field_types(&mut skipprMetadata, None);
+    AnalyseSchema::determine_field_types(&mut skippr_metadata, None);
 
-    Config::set_config(&skipprMetadata, false).await;
+    Config::set_config(&skippr_metadata, false).await;
 
     // let file = OpenOptions::new()
     //     .create(true)
@@ -205,9 +205,9 @@ async fn discover() {
     //
     // let writer = BufWriter::new(file);
     //
-    // serde_json::to_writer(writer, &skipprMetadata).unwrap();
+    // serde_json::to_writer(writer, &skippr_metadata).unwrap();
 
-    // skipprMetadata
+    // skippr_metadata
     // }).join().unwrap();
 }
 
@@ -277,7 +277,7 @@ async fn sync() {
             // // @todo - implemnt Ingest{} build glob for existing files
             // Ingest::flush_buffers(true, output_files);
             // println!("Flushing output buffers");
-            // outputSync(_newmeta_clone.lock().unwrap().clone());
+            // output_sync(_newmeta_clone.lock().unwrap().clone());
         } else {
             println!("Received another Ctrl+C signal - no worries, terminating immediately...");
             std::process::exit(0);
@@ -296,12 +296,23 @@ async fn sync() {
 
         let mut planner = periodic::Planner::new();
 
-        let metricsClone = metrics.clone();
+        let metrics_clone = metrics.clone();
+
+        match Config::list_dir_contents(data_dir.clone()) {
+            Err(e) => println!("Error occurred: {}", e),
+            _ => (),
+        }
 
         planner.add(
             move || {
+
+                match Config::list_dir_contents(data_dir.clone()) {
+                    Err(e) => println!("Error occurred: {}", e),
+                    _ => (),
+                }
+
                 // let mut metrics: Metrics = Metrics::new();
-                let mut metrics_lock = metricsClone.lock().unwrap();
+                let mut metrics_lock = metrics_clone.lock().unwrap();
 
                 // let mut counter_lock = ingestMsgCount.lock().unwrap();
                 // let mut total_lock = ingestMsgTotal.lock().unwrap();
@@ -328,20 +339,20 @@ async fn sync() {
         );
         planner.start();
 
-        let inputMetadataClone = skippr_metadata.clone();
+        let input_metadata_clone = skippr_metadata.clone();
 
         let mut out_pnanner = periodic::Planner::new();
         out_pnanner.add(
             move || {
-                outputSync(inputMetadataClone.lock().unwrap().clone());
+                output_sync(input_metadata_clone.lock().unwrap().clone());
                 // let dataOutput = block_on(DataOutputAwsAthenaPlugin::new());
-                // dataOutput.sync(inputMetadataClone.lock().unwrap().clone()).await;
+                // dataOutput.sync(input_metadata_clone.lock().unwrap().clone()).await;
             },
             periodic::Every::new(Duration::from_secs(60)),
         );
         out_pnanner.start();
 
-        let inputMetadataClone = skippr_metadata.clone();
+        let input_metadata_clone = skippr_metadata.clone();
 
         // @todo - share across s3 ingests
         let _parse_namespace_cache: HashMap<String, String> = HashMap::new();
@@ -367,15 +378,15 @@ async fn sync() {
             Err(_err) => {}
         }
 
-        let metricsClone = metrics.clone();
+        let metrics_clone = metrics.clone();
 
         match Config::getenv("DATA_SOURCE_PLUGIN_NAME", "").as_str() {
             "s3" => {
                 let mut ds3 = block_on(DataSourceS3Plugin::new());
                 ds3.sync(
                     // &m1ut pool,
-                    inputMetadataClone,
-                    metricsClone,
+                    input_metadata_clone,
+                    metrics_clone,
                 )
                 .await;
             }
@@ -383,8 +394,8 @@ async fn sync() {
                 let mut ds3 = block_on(DataSourceS3InventoryPlugin::new());
                 ds3.sync(
                     // &mut pool,
-                    inputMetadataClone,
-                    metricsClone,
+                    input_metadata_clone,
+                    metrics_clone,
                 )
                 .await;
             }
@@ -397,7 +408,7 @@ async fn sync() {
     // }
 }
 
-fn outputSync(metadata: HashMap<String, Metadata>) {
+fn output_sync(metadata: HashMap<String, Metadata>) {
     thread::spawn(move || {
         // println!("Arrow Schema: {:?}", arrowSchema);
 
@@ -419,7 +430,7 @@ fn outputSync(metadata: HashMap<String, Metadata>) {
                     // println!("Finalising output file {}", path.display());
 
                     // alwasy regenerate arrow schema incase updated skippr metadata, e.g. discovered a new field
-                    let mut arrowSchema: Result<Schema, ArrowError> = Ok(Schema::empty());
+                    let mut arrow_schema: Result<Schema, ArrowError> = Ok(Schema::empty());
                     let mut schema_ref = Arc::new(Schema::empty());
 
                     let skpr_namespace =
@@ -439,11 +450,11 @@ fn outputSync(metadata: HashMap<String, Metadata>) {
 
                     // println!("getting schema: {} from file: {}", skpr_namespace, path.to_str().unwrap());
 
-                    arrowSchema = convert_skippr_to_arrow(
+                    arrow_schema = convert_skippr_to_arrow(
                         metadata.get(&skpr_namespace).unwrap().fields.clone(),
                     );
 
-                    schema_ref = Arc::new(arrowSchema.unwrap());
+                    schema_ref = Arc::new(arrow_schema.unwrap());
 
                     schema_ref = SerdeParquet::serialize(path.clone(), schema_ref);
 

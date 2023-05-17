@@ -59,8 +59,8 @@ stages:
 docker_build:
   image: docker:latest
   stage: dockerize
-  before_script:
-    - rustup update && cargo update
+#  before_script:
+#    - rustup update && cargo update
   script:
     - docker build -t $CONTAINER_IMAGE -f Dockerfile .
 #    - docker build -t $CONTAINER_IMAGE -f Dockerfile.mac_arm .

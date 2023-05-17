@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read};
+use std::path::Path;
 use yaml_rust::YamlLoader;
 
 use std::sync::MutexGuard;
@@ -160,6 +161,22 @@ impl Config {
             Ok(val) => val,
             Err(_e) => default.to_string(),
         }
+    }
+
+    pub fn list_dir_contents<P: AsRef<Path>>(path: P) -> std::io::Result<()> {
+        if path.as_ref().is_dir() {
+            for entry_result in fs::read_dir(path)? {
+                let entry = entry_result?;
+                let path = entry.path();
+                if path.is_dir() {
+                    println!("Directory: {}", path.display());
+                    Config::list_dir_contents(path.clone()).expect(format!("Couldn't list dir {}", path.display()).as_str());
+                } else {
+                    println!("File: {}", path.display());
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn get_data_dir() -> String {
