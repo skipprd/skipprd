@@ -37,7 +37,8 @@ impl Ingest {
         let data_dir = Config::get_data_dir();
         let output_dir = format!("{}/output", data_dir);
 
-        for (filename, file) in output_files.iter() {
+        for (filename, mut file) in output_files.iter() {
+            file.flush().expect(&format!("Could not flush file {}", filename));
             if force || Ingest::is_file_size_exceeded(file) {
                 let new_filename = format!(
                     "{}/done/{}-{}",
