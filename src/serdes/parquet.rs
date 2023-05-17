@@ -16,6 +16,8 @@ use std::path::PathBuf;
 use crate::buffer::BufferChunker;
 use crate::helpers::configuration::Config;
 use std::sync::Arc;
+use arrow::error::ArrowError;
+use futures::future::err;
 
 // #[derive(clap::ValueEnum, Clone)]
 // #[allow(non_camel_case_types, clippy::upper_case_acronyms)]
@@ -303,6 +305,8 @@ impl SerdeParquet {
         let mut writer =
             ArrowWriter::try_new(output, reader.schema(), Some(props.build())).unwrap();
 
+        let mut error: Result<bool, ArrowError> = Result::Ok(true);
+
         for batch in reader {
             // for i in batch.iter() {
             //     println!("Batch part: {:?}", i);
@@ -317,13 +321,19 @@ impl SerdeParquet {
                 }
                 // Err(error) => return Err(error.into()),
                 Err(_error) => {
-                    println!("Failed writing batch");
-                    println!("{:?}", _error);
+                    error = Err(_error);
+                    // println!("Failed writing batch");
+                    // println!("{:?}", _error);
                     // AnalyseSchema::determine_field_types(&mut newMeta.get_mut(&ingest_record.skpr_namespace).unwrap().fields, None);
                     // println!("{:?}", newMeta);
                     // let arrowSchema = convert_skippr_to_arrow(&mut newMeta);
                 }
             }
+        }
+
+        if error.is_err() {
+            println!("Failed writing parquet batch");
+            println!("{:?}", error);
         }
 
         writer.close().unwrap();
