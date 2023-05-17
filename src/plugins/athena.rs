@@ -217,7 +217,7 @@ impl AwsAthena {
             Err(_err) => match AwsAthena::create_workgroup(namespace).await {
                 Ok(_) => {}
                 Err(err) => {
-                    println!("ERROR: {}", err);
+                    println!("ERROR creating Athena Workgroup: {}", err);
                 }
             },
         }
@@ -228,7 +228,7 @@ impl AwsAthena {
             Err(_err) => match AwsAthena::glue_create_database(namespace).await {
                 Ok(_) => {}
                 Err(err) => {
-                    println!("ERROR: {}", err);
+                    println!("ERROR getting Glue database: {}", err);
                 }
             },
         }
@@ -237,7 +237,7 @@ impl AwsAthena {
             Ok(true) => match AwsAthena::glue_update_table(namespace, schema).await {
                 Ok(_) => {}
                 Err(err) => {
-                    println!("ERROR: {}", err);
+                    println!("ERROR getting Glue table: {}", err);
                 }
             },
             Ok(false) => {}
@@ -245,7 +245,7 @@ impl AwsAthena {
                 match AwsAthena::glue_create_table(namespace, schema).await {
                     Ok(_) => {}
                     Err(err) => {
-                        println!("ERROR: {}", err);
+                        println!("ERROR creating glue table: {}", err);
                     }
                 }
                 // println!("Create Hive Table Error: {}", err.into_service_error().to_string())
@@ -362,9 +362,7 @@ impl AwsAthena {
             .send()
             .await
         {
-            Ok(_output) => {
-                Ok(true)
-            }
+            Ok(_output) => Ok(true),
             Err(err) => Err(err.into_service_error().to_string()),
         }
     }
@@ -391,20 +389,17 @@ impl AwsAthena {
             .send()
             .await
         {
-            Ok(_output) => {
-                Ok(true)
-            }
+            Ok(_output) => Ok(true),
             Err(err) => Err(err.into_service_error().to_string()),
         }
     }
 
     fn get_partition_by_fields(partitions: &mut Vec<Column>) {
-        let _partition_values: Vec<String> = vec![];
-
         let partition_config = Config::getenv("DATA_OUTPUT_PARTITION_BY_FIELDS", "");
-        let partition_fields: Vec<&str> = partition_config.split(',').collect();
 
-        if !partition_fields.is_empty() {
+        if !partition_config.is_empty() {
+            let partition_fields: Vec<&str> = partition_config.split(',').collect();
+
             for field_dot in partition_fields.clone() {
                 let entity_name = match field_dot.rfind('.') {
                     Some(index) => &field_dot[index + 1..],
@@ -421,6 +416,7 @@ impl AwsAthena {
             }
         }
     }
+
     pub async fn glue_create_table(
         namespace: &str,
         metadata: &discover::Metadata,
@@ -474,43 +470,49 @@ impl AwsAthena {
 
         let glue_client = GlueClient::new(&aws_config);
 
-        match glue_client
+        let mut table_input = TableInput::builder()
+            .name(namespace)
+            .retention(0)
+            .storage_descriptor(
+                StorageDescriptor::builder()
+                    .set_columns(Some(columns)) // @todo
+                    .compressed(false)
+                    .location(format!("s3://{}/{}", bucket, path))
+                    .input_format("org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat")
+                    .output_format("org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat")
+                    .serde_info(
+                        SerDeInfo::builder()
+                            .name(format!("{}.{}", &database, namespace))
+                            .parameters("serialization.format", "1")
+                            .serialization_library(
+                                "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe",
+                            )
+                            .build(),
+                    )
+                    .stored_as_sub_directories(true)
+                    .build(),
+            )
+            .table_type("EXTERNAL_TABLE");
+
+        if !partitions.is_empty() {
+            table_input = table_input.set_partition_keys(Some(partitions));
+        }
+
+        let mut create_table_cmd = glue_client
             .create_table()
             .database_name(&database)
-            .table_input(
-                TableInput::builder()
-                    .name(namespace)
-                    .set_partition_keys(Some(partitions))
-                    .retention(0)
-                    .storage_descriptor(
-                        StorageDescriptor::builder()
-                            .set_columns(Some(columns)) // @todo
-                            .compressed(false)
-                            .location(format!("s3://{}/{}", bucket, path))
-                            .input_format("org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat")
-                            .output_format("org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat")
-                            .serde_info(
-                                SerDeInfo::builder()
-                                    .name(format!("{}.{}", &database, namespace))
-                                    .parameters("serialization.format", "1")
-                                    .serialization_library("org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe")
-                                    .build()
-                            )
-                            .stored_as_sub_directories(true)
-                            .build()
+            .table_input(table_input.build());
 
-                    )
-                    .table_type("EXTERNAL_TABLE")
-                    .build()
-            )
-            .set_partition_indexes(Some(partition_indexes))
-            .send()
-            .await
-        {
-            Ok(_output) => {
-                Ok(true)
+        if !partition_indexes.is_empty() {
+            create_table_cmd = create_table_cmd.set_partition_indexes(Some(partition_indexes));
+        }
+
+        match create_table_cmd.send().await {
+            Ok(_output) => Ok(true),
+            Err(err) => {
+                println!("{:?}", err);
+                Err(err.into_service_error().to_string())
             }
-            Err(err) => Err(err.into_service_error().to_string()),
         }
     }
 
@@ -565,42 +567,43 @@ impl AwsAthena {
 
         let glue_client = GlueClient::new(&aws_config);
 
+        let mut table_input = TableInput::builder()
+            .name(namespace)
+            .retention(0)
+            .storage_descriptor(
+                StorageDescriptor::builder()
+                    .set_columns(Some(columns)) // @todo
+                    .compressed(false)
+                    .location(format!("s3://{}/{}", bucket, path))
+                    .input_format("org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat")
+                    .output_format("org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat")
+                    .serde_info(
+                        SerDeInfo::builder()
+                            .name(format!("{}.{}", &database, namespace))
+                            .parameters("serialization.format", "1")
+                            .serialization_library(
+                                "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe",
+                            )
+                            .build(),
+                    )
+                    .stored_as_sub_directories(true)
+                    .build(),
+            )
+            .table_type("EXTERNAL_TABLE");
+
+        if !partitions.is_empty() {
+            table_input = table_input.set_partition_keys(Some(partitions));
+        }
+
         match glue_client
             .update_table()
             .database_name(&database)
             .skip_archive(true)
-            .table_input(
-                TableInput::builder()
-                    .name(namespace)
-                    .set_partition_keys(Some(partitions))
-                    .retention(0)
-                    .storage_descriptor(
-                        StorageDescriptor::builder()
-                            .set_columns(Some(columns)) // @todo
-                            .compressed(false)
-                            .location(format!("s3://{}/{}", bucket, path))
-                            .input_format("org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat")
-                            .output_format("org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat")
-                            .serde_info(
-                                SerDeInfo::builder()
-                                    .name(format!("{}.{}", &database, namespace))
-                                    .parameters("serialization.format", "1")
-                                    .serialization_library("org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe")
-                                    .build()
-                            )
-                            .stored_as_sub_directories(true)
-                            .build()
-
-                    )
-                    .table_type("EXTERNAL_TABLE")
-                    .build()
-            )
+            .table_input(table_input.build())
             .send()
             .await
         {
-            Ok(_output) => {
-                Ok(true)
-            }
+            Ok(_output) => Ok(true),
             Err(err) => Err(err.into_service_error().to_string()),
         }
     }
