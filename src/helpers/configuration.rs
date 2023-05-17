@@ -21,6 +21,7 @@ use crate::discover::Metadata;
 
 use crate::helpers::license::LicenseChecker;
 use crate::helpers::Helpers;
+use crate::plugins::athena::AwsAthena;
 
 
 #[non_exhaustive]
@@ -343,10 +344,10 @@ impl Config {
 
     pub async fn set_config(metadata: &HashMap<String, Metadata>, evolved: bool) {
         if evolved {
-            // for (namespace, schema) in metadata.into_iter() {
-            //     println!("Updating Hive '{}' schema", namespace);
-            //     AwsAthena::create_or_update_schema(&namespace, &schema).await;
-            // }
+            for (namespace, schema) in metadata.into_iter() {
+                println!("Updating Hive '{}' schema", namespace);
+                AwsAthena::create_or_update_schema(&namespace, &schema).await;
+            }
 
             let data_dir = Config::get_data_dir();
             let metadata_file = format!("{}/metadata.json", data_dir);

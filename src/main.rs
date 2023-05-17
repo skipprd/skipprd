@@ -62,6 +62,7 @@ use crate::discover::arrow_schema::convert_skippr_to_arrow;
 use crate::helpers::configuration::{Config, Metrics};
 
 use crate::buffer::BufferChunker;
+use crate::plugins::athena::DataOutputAwsAthenaPlugin;
 
 use crate::plugins::s3_input::DataSourceS3Plugin;
 use crate::plugins::s3_inventory::DataSourceS3InventoryPlugin;
@@ -345,8 +346,8 @@ async fn sync() {
         out_pnanner.add(
             move || {
                 output_sync(input_metadata_clone.lock().unwrap().clone());
-                // let dataOutput = block_on(DataOutputAwsAthenaPlugin::new());
-                // dataOutput.sync(input_metadata_clone.lock().unwrap().clone()).await;
+                let data_output = block_on(DataOutputAwsAthenaPlugin::new());
+                block_on(data_output.sync(input_metadata_clone.lock().unwrap().clone()));
             },
             periodic::Every::new(Duration::from_secs(60)),
         );
