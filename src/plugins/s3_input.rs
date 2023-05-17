@@ -89,7 +89,7 @@ impl DataSourceS3Plugin {
         let mut outputs: Vec<String> = Vec::new();
 
         let inventory_bucket = Config::getenv("S3_BUCKET", "");
-        let inventory_prefix = Config::getenv("S3_PREFIX", "");
+        let mut inventory_prefix = Config::getenv("S3_PREFIX", "");
 
         println!(
             "Syncing from bucket: {} and prefix {}",
@@ -99,42 +99,36 @@ impl DataSourceS3Plugin {
 
         let mut continuation_token: Option<String> = None;
 
-        let chunk_size =
-            Config::getenv("DATA_SOURCE_BATCH_SIZE_BYTES", "1024000")
-                .parse::<i64>()
-                .unwrap();
+        let chunk_size = Config::getenv("DATA_SOURCE_BATCH_SIZE_BYTES", "1024000")
+            .parse::<i64>()
+            .unwrap();
 
         let mut i = 0;
         let mut chunk_size_current = 0;
 
+        if inventory_prefix == "/".to_string() || inventory_prefix == "./".to_string() {
+            inventory_prefix = "".to_string();
+        }
+
+        let mut list_obj_req = self
+            .s3_client
+            .list_objects_v2()
+            .bucket(inventory_bucket.clone())
+            .prefix(inventory_prefix.clone());
+
         loop {
-            let mut list_obj_req = self
-                .s3_client
-                .list_objects_v2()
-                .bucket(inventory_bucket.clone());
 
-            if continuation_token.is_some() {
-                list_obj_req
-                    .clone()
-                    .continuation_token(continuation_token.clone().unwrap());
-            }
-
-            if inventory_prefix != "".to_string() && inventory_prefix != "/".to_string() {
-                // println!("adding prfec");
-                list_obj_req.clone().prefix(inventory_prefix.clone());
-            }
-
-            match list_obj_req.send().await {
-                Err(err) => println!("S3 Error {}", err.into_service_error()),
+            match list_obj_req.clone().send().await {
+                Err(err) => println!("S3 Error {}", err),
                 Ok(output) => {
                     if output.clone().next_continuation_token.is_some() {
-                        // println!(
-                        //     "getting next list token {}",
-                        //     output.clone().next_continuation_token.clone().unwrap()
-                        // );
                         continuation_token = output.clone().next_continuation_token;
+
+                        println!("Listing with next continuation token {}", continuation_token.clone().unwrap());
+
+                        list_obj_req = list_obj_req.set_continuation_token(continuation_token.clone());
                     } else {
-                        // println!("breaking");
+                        println!("Reached end of S3 pagination");
                         break;
                     }
 
@@ -150,7 +144,6 @@ impl DataSourceS3Plugin {
 
                             let object_key = object.key().unwrap();
                             let _timestamp = object.last_modified().unwrap().secs();
-
 
                             // let mut j = 0;
                             // let mut c = 0;
@@ -176,7 +169,6 @@ impl DataSourceS3Plugin {
 
                                 // println!("State {} = {} of {}", i, chunk_size_current, chunk_size);
 
-
                                 if i >= 20 || chunk_size_current >= chunk_size {
                                     // println!("Ingesting");
                                     Self::download_and_ingest(
@@ -195,26 +187,26 @@ impl DataSourceS3Plugin {
                                     chunk_size_current = 0;
                                 }
                             } else {
-                                // println!("Skipping object: {} already processed", target_key);
+                                // println!("Skipping object: {} already processed", object_key);
                             }
                         }
                     }
                     // }
-
-
                 }
             }
 
-            Self::download_and_ingest(
-                &mut self.s3_client_rusoto,
-                &inventory_bucket,
-                &outputs,
-                &self.temp_dir,
-                &metadata,
-                &metrics,
-                &offsets_clone,
-            )
+            if (!outputs.is_empty()) {
+                Self::download_and_ingest(
+                    &mut self.s3_client_rusoto,
+                    &inventory_bucket,
+                    &outputs,
+                    &self.temp_dir,
+                    &metadata,
+                    &metrics,
+                    &offsets_clone,
+                )
                 .await;
+            }
         }
     }
 
@@ -231,9 +223,8 @@ impl DataSourceS3Plugin {
             let get_request = GetObjectRequest {
                 bucket: bucket.clone(),
                 key: key.clone(),
-                    ..Default::default()
+                ..Default::default()
             };
-
 
             match s3_client.get_object(get_request).await {
                 Ok(result) => {
