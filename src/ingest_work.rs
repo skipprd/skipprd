@@ -19,11 +19,17 @@ pub struct IngestBatch {
     pub(crate) data: String,
 }
 
+// Can't rely on file.metadata() as we don't know we're dealing with a unix FS. e.g. EFS
+pub struct OutputFile {
+    pub(crate) bytes: u64,
+    pub(crate) file: File,
+}
+
 const MAX_BUFFER_SIZE: u64 = 1024 * 1024 * 10;
 
 static parse_namespace_cache: Lazy<Mutex<HashMap<String, String>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
-static output_files_static: Lazy<Mutex<HashMap<String, File>>> =
+static output_files_static: Lazy<Mutex<HashMap<String, OutputFile>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 pub struct Ingest {}
@@ -33,13 +39,16 @@ impl Ingest {
         Ingest {}
     }
 
-    pub fn flush_buffers(force: bool, output_files: &mut MutexGuard<HashMap<String, File>>) {
+    pub fn flush_buffers(force: bool, output_files: &mut MutexGuard<HashMap<String, OutputFile>>) {
         let data_dir = Config::get_data_dir();
         let output_dir = format!("{}/output", data_dir);
 
-        for (filename, mut file) in output_files.iter() {
+        for (filename, output_file) in output_files.iter() {
+
+            let mut file= &output_file.file;
             file.flush().expect(&format!("Could not flush file {}", filename));
-            if force || Ingest::is_file_size_exceeded(file) {
+
+            if force || Ingest::is_file_size_exceeded(&output_file) {
                 let new_filename = format!(
                     "{}/done/{}-{}",
                     output_dir,
@@ -101,8 +110,8 @@ impl Ingest {
                         != offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Line, i)
                 {
                     let usize = serde_json::to_vec(&record).unwrap().len();
-                    let _bytes: u64 = usize.try_into().unwrap();
-                    bytes += _bytes;
+                    let record_bytes: u64 = usize.try_into().unwrap();
+                    bytes += record_bytes;
 
                     let skpr_namespace = Helpers::parse_namespace_field(
                         &record,
@@ -138,7 +147,12 @@ impl Ingest {
                             .open(output_file)
                             .unwrap();
 
-                        output_files.insert(output_file_name.clone(), f);
+                        let mut new_file = OutputFile {
+                            bytes: record_bytes,
+                            file: f
+                        };
+
+                        output_files.insert(output_file_name.clone(), new_file);
                     }
 
                     let mut meta = metadata_clone.lock().unwrap();
@@ -157,8 +171,14 @@ impl Ingest {
                     output_files
                         .get_mut(&output_file_name)
                         .unwrap()
+                        .file
                         .write_all(buf_str.as_bytes())
                         .unwrap();
+
+                    output_files
+                        .get_mut(&output_file_name)
+                        .unwrap()
+                        .bytes += record_bytes;
 
                     buf_str.clear();
 
@@ -197,8 +217,7 @@ impl Ingest {
         }
     }
 
-    fn is_file_size_exceeded(file: &fs::File) -> bool {
-        // println!("File metadata: {:?}", file.metadata());
-        file.metadata().unwrap().len() > MAX_BUFFER_SIZE
+    fn is_file_size_exceeded(file: &OutputFile) -> bool {
+        file.bytes > MAX_BUFFER_SIZE
     }
 }
