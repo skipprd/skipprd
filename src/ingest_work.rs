@@ -158,7 +158,7 @@ impl Ingest {
                             Ok(f) => f,
                             Err(_) => {
                                 println!("ljlkj");
-                                Config::list_dir_contents(output_dir.clone());
+                                Config::list_dir_contents(output_dir.clone()).unwrap();
                                 OpenOptions::new()
                                     .create(true)
                                     .write(true)
