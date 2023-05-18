@@ -15,6 +15,7 @@ stages:
 #  - qa
 #  - build
   - dockerize
+  - run
 #  - publish
 
 #before_script:
@@ -96,3 +97,25 @@ docker_build:
 #  only:
 #    - master
 #    - tags
+
+docker_run:
+  image: docker:latest
+  stage: run
+  script:
+    - docker pull $DOCKER_HUB_REPO/$CONTAINER_RELEASE_IMAGE
+    - docker run -e DATA_SOURCE_PLUGIN_NAME=s3 \
+      -e S3_BUCKET=skpr-sample-data-output \
+      -e S3_PREFIX=skpr-sample-data/smail-files \
+      -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 \
+      -e DATA_OUTPUT_S3_BUCKET=production-datalake-stac-datalakeskipprbucket4a91-db0ekzd8fkz0 \
+      -e DATA_OUTPUT_S3_PREFIX=bikehire \
+      -e GLUE_DATABASE_NAME=bikehire \
+      -e ATHENA_WORKGROUP_NAME=bikehire \
+      -e PIPELINE_NAME=bikehire \
+      -e PIPELINE_ID=gitlab_test \
+      -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg \
+      -e DATA_DIR=./data \
+      -e APP_ENV=dev $DOCKER_HUB_REPO/$CONTAINER_RELEASE_IMAGE
+  only:
+    - master
+    - tags
