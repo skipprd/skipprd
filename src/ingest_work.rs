@@ -147,15 +147,26 @@ impl Ingest {
                         Some(&skpr_partition),
                         Some(skpr_time_bucket),
                     );
-                    let output_file = format!("{}/{}", output_dir, &output_file_name);
+                    let output_file = format!("{}/{}", output_dir.clone(), &output_file_name);
 
                     if output_files.get_mut(&output_file_name).is_none() {
-                        let f = OpenOptions::new()
+                        let f = match OpenOptions::new()
                             .create(true)
                             .write(true)
                             .append(true)
-                            .open(output_file.clone())
-                            .expect(&format!("could not open file {}", output_file));
+                            .open(output_file.clone()) {
+                            Ok(f) => f,
+                            Err(_) => {
+                                println!("ljlkj");
+                                Config::list_dir_contents(output_dir.clone());
+                                OpenOptions::new()
+                                    .create(true)
+                                    .write(true)
+                                    .append(true)
+                                    .open(output_file.clone())
+                                    .unwrap()
+                            }
+                        };
                             // .unwrap();
 
                         let mut new_file = OutputFile {
