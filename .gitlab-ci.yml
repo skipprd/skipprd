@@ -14,7 +14,7 @@ services:
 stages:
 #  - qa
 #  - build
-#  - dockerize
+  - dockerize
   - run
 #  - publish
 
@@ -57,23 +57,23 @@ stages:
 #    paths:
 #      - ./target
 
-#docker_build:
-#  image: docker:latest
-#  stage: dockerize
+docker_build:
+  image: docker:latest
+  stage: dockerize
 #  before_script:
 #    - rustup update && cargo update
-#  script:
-#    - docker build -t $CONTAINER_IMAGE -f Dockerfile .
+  script:
+    - docker build -t $CONTAINER_IMAGE -f Dockerfile .
 #    - docker build -t $CONTAINER_IMAGE -f Dockerfile.mac_arm .
 #    - docker build -t $CONTAINER_IMAGE -f Dockerfile.lambda .
-#  after_script:
+  after_script:
     # Push to Docker Hub
-#    - docker login -u skippr -p "$DOCKER_HUB_PASS"
-#    - docker tag $CONTAINER_IMAGE $DOCKER_HUB_REPO/$CONTAINER_RELEASE_IMAGE
-#    - docker push $DOCKER_HUB_REPO/$CONTAINER_RELEASE_IMAGE
-#  only:
-#    - master
-#    - tags
+    - docker login -u skippr -p "$DOCKER_HUB_PASS"
+    - docker tag $CONTAINER_IMAGE $DOCKER_HUB_REPO/$CONTAINER_RELEASE_IMAGE
+    - docker push $DOCKER_HUB_REPO/$CONTAINER_RELEASE_IMAGE
+  only:
+    - master
+    - tags
 
 #docker_push:
 #  image: docker:latest
