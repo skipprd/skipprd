@@ -103,12 +103,18 @@ impl DataSourceS3Plugin {
             .parse::<i64>()
             .unwrap();
 
+        println!("1");
+
         let mut i = 0;
         let mut chunk_size_current = 0;
+
+        println!("2");
 
         if inventory_prefix == "/".to_string() || inventory_prefix == "./".to_string() {
             inventory_prefix = "".to_string();
         }
+
+        println!("3");
 
         let mut list_obj_req = self
             .s3_client
@@ -116,13 +122,17 @@ impl DataSourceS3Plugin {
             .bucket(inventory_bucket.clone())
             .prefix(inventory_prefix.clone());
 
+        println!("4");
+
         loop {
+
+            println!("5");
 
             match list_obj_req.clone().send().await {
                 Err(err) => println!("S3 Error {}", err),
                 Ok(output) => {
 
-                    println!("Next",);
+                    println!("Next");
 
                     if output.clone().next_continuation_token.is_some() {
                         continuation_token = output.clone().next_continuation_token;
