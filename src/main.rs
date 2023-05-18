@@ -347,31 +347,31 @@ async fn sync() {
         out_pnanner.add(
              move || {
 
-                 let input_metadata_clone = input_metadata_clone.clone();
-
-                 // println!("Output planner started");
-
-                 tokio::runtime::Builder::new_multi_thread()
-                     .enable_all()
-                     .build()
-                     .unwrap()
-                     .block_on(async {
-
-                         // println!("Output planner thread created");
-
-                         let input_metadata_clone = {
-                             let guard = input_metadata_clone.lock().unwrap();
-                             guard.clone()
-                         };
-                         output_sync(input_metadata_clone.clone());
-
-                         let data_output = DataOutputAwsAthenaPlugin::new().await;
-                         let input_metadata_clone = {
-                             let guard = input_metadata_clone;
-                             guard.clone()
-                         };
-                         data_output.sync(input_metadata_clone).await;
-                    });
+                 // let input_metadata_clone = input_metadata_clone.clone();
+                 //
+                 // // println!("Output planner started");
+                 //
+                 // tokio::runtime::Builder::new_multi_thread()
+                 //     .enable_all()
+                 //     .build()
+                 //     .unwrap()
+                 //     .block_on(async {
+                 //
+                 //         // println!("Output planner thread created");
+                 //
+                 //         let input_metadata_clone = {
+                 //             let guard = input_metadata_clone.lock().unwrap();
+                 //             guard.clone()
+                 //         };
+                 //         output_sync(input_metadata_clone.clone());
+                 //
+                 //         let data_output = DataOutputAwsAthenaPlugin::new().await;
+                 //         let input_metadata_clone = {
+                 //             let guard = input_metadata_clone;
+                 //             guard.clone()
+                 //         };
+                 //         data_output.sync(input_metadata_clone).await;
+                 //    });
 
             },
             periodic::Every::new(Duration::from_secs(60)),
