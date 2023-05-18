@@ -58,8 +58,8 @@ stages:
 #      - ./target
 
 #docker_build:
-  image: docker:latest
-  stage: dockerize
+#  image: docker:latest
+#  stage: dockerize
 #  before_script:
 #    - rustup update && cargo update
 #  script:
