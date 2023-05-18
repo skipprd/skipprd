@@ -183,7 +183,7 @@ fn fast_set_value(
                     for sub_value in value.as_array().unwrap() {
                         let clean_sub_field = Helpers::clean_field_name(i.to_string());
 
-                        match metadata.get(field).unwrap().fields.get(&clean_sub_field) {
+                        match metadata.get(field).unwrap().fields.get(&i.to_string()) {
                             Some(_t) => (),
                             None => {
                                 discoverIngest(field, value, metadata, updatedSchema);
@@ -195,7 +195,7 @@ fn fast_set_value(
                             .get_mut(field)
                             .unwrap()
                             .fields
-                            .get_mut(&clean_sub_field)
+                            .get_mut(&i.to_string())
                             .unwrap()
                             .enabled
                         {
@@ -204,11 +204,11 @@ fn fast_set_value(
                                     .get_mut(field)
                                     .unwrap()
                                     .fields
-                                    .get_mut(&clean_sub_field)
+                                    .get_mut(&i.to_string())
                                     .unwrap()
                                     .determined_type
                                     .clone(),
-                                &clean_sub_field,
+                                &i.to_string(),
                                 // &mut sub_value.as_str().unwrap_or(&value.to_string()), // pass string val or string representation of map/array, etc
                                 sub_value,
                                 &mut metadata.get_mut(field).unwrap().fields,

@@ -317,7 +317,7 @@ impl AnalyseSchema {
         // let mut helpers = Helpers { clean_field_cache: Default::default() };
 
         for (field, value) in message.as_object().unwrap() {
-            let field = Helpers::clean_field_name(field.to_string());
+            // let field = Helpers::clean_field_name(field.to_string());
 
             self.init_discovered_type(metadata, &field);
 
@@ -351,7 +351,7 @@ impl AnalyseSchema {
 
         if value.is_object() {
             for (sub_field, sub_value) in value.as_object().unwrap() {
-                let sub_field = Helpers::clean_field_name(sub_field.to_string());
+                // let sub_field = Helpers::clean_field_name(sub_field.to_string());
 
                 let mut sv = sub_value.clone();
                 // let mut svv: Value = serde_json::from_str(sv.unwrap()).unwrap();
@@ -368,7 +368,8 @@ impl AnalyseSchema {
             for sub_value in value.as_array().unwrap() {
                 let mut sv = sub_value.clone();
                 self.analyse_field(
-                    &Helpers::clean_field_name(i.to_string()),
+                    // &Helpers::clean_field_name(i.to_string()),
+                    &i.to_string(),
                     &mut sv,
                     metadata.get_mut(field).unwrap().fields.as_mut(),
                 );
