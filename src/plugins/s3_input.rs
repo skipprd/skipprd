@@ -121,6 +121,9 @@ impl DataSourceS3Plugin {
             match list_obj_req.clone().send().await {
                 Err(err) => println!("S3 Error {}", err),
                 Ok(output) => {
+
+                    println!("Next",);
+
                     if output.clone().next_continuation_token.is_some() {
                         continuation_token = output.clone().next_continuation_token;
 
@@ -144,6 +147,8 @@ impl DataSourceS3Plugin {
 
                             let object_key = object.key().unwrap();
                             let _timestamp = object.last_modified().unwrap().secs();
+
+                            println!("Object Key {}", object_key);
 
                             // let mut j = 0;
                             // let mut c = 0;

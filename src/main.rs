@@ -300,10 +300,10 @@ async fn sync() {
 
         let metrics_clone = metrics.clone();
 
-        // match Config::list_dir_contents(data_dir.clone()) {
-        //     Err(e) => println!("Error occurred: {}", e),
-        //     _ => (),
-        // }
+        match Config::list_dir_contents(data_dir.clone()) {
+            Err(e) => println!("Error occurred: {}", e),
+            _ => (),
+        }
 
         planner.add(
             move || {
