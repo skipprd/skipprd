@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use std::time::Duration;
 use std::{fs, thread};
+use std::thread::sleep;
 
 use crate::discover::Metadata;
 use futures::future::join_all;
@@ -210,7 +211,12 @@ impl DataSourceS3Plugin {
                 }
             }
 
+            println!("6");
+
             if (!outputs.is_empty()) {
+
+                println!("7");
+
                 Self::download_and_ingest(
                     &mut self.s3_client_rusoto,
                     &inventory_bucket,
@@ -221,8 +227,16 @@ impl DataSourceS3Plugin {
                     &offsets_clone,
                 )
                 .await;
+
+                println!("8");
             }
+
+            println!("9");
         }
+
+        println!("10");
+
+        sleep(Duration::from_secs(15));
     }
 
     async fn download_s3_object_with_backoff(
