@@ -311,7 +311,7 @@ impl DataSourceS3Plugin {
             })
             .collect();
 
-        let datas: Arc<Mutex<Vec<IngestBatch>>> = Arc::new(Mutex::new(Vec::new()));
+        // let datas: Arc<Mutex<Vec<IngestBatch>>> = Arc::new(Mutex::new(Vec::new()));
 
         let future_result = tokio::join!(join_all(futures)).0;
 
@@ -322,7 +322,8 @@ impl DataSourceS3Plugin {
 
         // for thread in threads {
         for future in future_result {
-            let datas = datas.clone();
+            // let datas = datas.clone();
+            let mut datas: Vec<IngestBatch> = Vec::new();
 
             let bucket_name = bucket_name.clone();
             let metrics = metrics.clone();
@@ -352,7 +353,7 @@ impl DataSourceS3Plugin {
                     let mut decompressed_data = String::new();
                     stream.read_to_string(&mut decompressed_data).unwrap();
 
-                    datas.lock().unwrap().push(IngestBatch {
+                    datas.push(IngestBatch {
                         offset_key: OffsetKey {
                             namespace: bucket_name.to_string(),
                             partition: download.key,
@@ -365,7 +366,7 @@ impl DataSourceS3Plugin {
                     let mut str_data = String::new();
                     c.read_to_string(&mut str_data).unwrap();
 
-                    datas.lock().unwrap().push(IngestBatch {
+                    datas.push(IngestBatch {
                         offset_key: OffsetKey {
                             namespace: bucket_name.to_string(),
                             partition: download.key,
@@ -375,7 +376,7 @@ impl DataSourceS3Plugin {
                 }
 
                 self::Ingest::ingest_file(
-                    datas.lock().unwrap().to_vec(),
+                    datas.to_vec(),
                     &metadata,
                     &metrics,
                     &offsets_clone,
