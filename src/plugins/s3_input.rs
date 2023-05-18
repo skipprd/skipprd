@@ -158,7 +158,7 @@ impl DataSourceS3Plugin {
                             let object_key = object.key().unwrap();
                             let _timestamp = object.last_modified().unwrap().secs();
 
-                            println!("Object Key {}", object_key);
+                            // println!("Object Key {}", object_key);
 
                             // let mut j = 0;
                             // let mut c = 0;
