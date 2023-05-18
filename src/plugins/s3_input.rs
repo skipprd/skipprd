@@ -134,18 +134,6 @@ impl DataSourceS3Plugin {
                 Ok(output) => {
 
                     println!("Next");
-
-                    if output.clone().next_continuation_token.is_some() {
-                        continuation_token = output.clone().next_continuation_token;
-
-                        println!("Listing with next continuation token {}", continuation_token.clone().unwrap());
-
-                        list_obj_req = list_obj_req.set_continuation_token(continuation_token.clone());
-                    } else {
-                        println!("Reached end of S3 pagination");
-                        break;
-                    }
-
                     // for result in results {
                     let objects = output.contents().unwrap();
 
@@ -172,6 +160,7 @@ impl DataSourceS3Plugin {
                                 namespace: inventory_bucket.clone(),
                                 partition: object_key.to_string(),
                             };
+
                             if Some(true)
                                 != offsets_clone.validate(&offset_key, OffsetTypes::Closed, 1)
                             {
@@ -207,36 +196,50 @@ impl DataSourceS3Plugin {
                             }
                         }
                     }
+
+                    if output.clone().next_continuation_token.is_some() {
+                        continuation_token = output.clone().next_continuation_token;
+
+                        println!("Listing with next continuation token {}", continuation_token.clone().unwrap());
+
+                        list_obj_req = list_obj_req.set_continuation_token(continuation_token.clone());
+                    } else {
+                        println!("Reached end of S3 pagination");
+
+                        println!("6");
+
+                        if !outputs.is_empty() {
+
+                            println!("7");
+
+                            Self::download_and_ingest(
+                                &mut self.s3_client_rusoto,
+                                &inventory_bucket,
+                                &outputs,
+                                &self.temp_dir,
+                                &metadata,
+                                &metrics,
+                                &offsets_clone,
+                            )
+                                .await;
+
+                            println!("8");
+                        }
+
+                        break;
+                    }
+
                     // }
                 }
             }
 
-            println!("6");
 
-            if (!outputs.is_empty()) {
-
-                println!("7");
-
-                Self::download_and_ingest(
-                    &mut self.s3_client_rusoto,
-                    &inventory_bucket,
-                    &outputs,
-                    &self.temp_dir,
-                    &metadata,
-                    &metrics,
-                    &offsets_clone,
-                )
-                .await;
-
-                println!("8");
-            }
 
             println!("9");
         }
 
         println!("10");
 
-        sleep(Duration::from_secs(15));
     }
 
     async fn download_s3_object_with_backoff(
@@ -349,6 +352,7 @@ impl DataSourceS3Plugin {
 
                 // println!("Downloading s3 object");
                 let mut data = Vec::new();
+
                 match download.response.body.take() {
                     Some(body) => match body.into_blocking_read().read_to_end(&mut data) {
                         Ok(_) => {}
@@ -388,6 +392,8 @@ impl DataSourceS3Plugin {
                         data: str_data,
                     });
                 }
+
+                // println!("Ingesting");
 
                 self::Ingest::ingest_file(
                     datas.to_vec(),

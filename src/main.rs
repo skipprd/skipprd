@@ -277,9 +277,9 @@ async fn sync() {
 
             // println!("Flushing ingest buffers");
             // // @todo - implemnt Ingest{} build glob for existing files
-            // Ingest::flush_buffers(true, output_files);
-            // println!("Flushing output buffers");
-            // output_sync(_newmeta_clone.lock().unwrap().clone());
+            // Ingest::flush_buffers(true, &mut Mutex::new(HashMap::new()).lock().unwrap());
+            println!("Flushing output buffers");
+            output_sync(_newmeta_clone.lock().unwrap().clone());
         } else {
             println!("Received another Ctrl+C signal - no worries, terminating immediately...");
             std::process::exit(0);

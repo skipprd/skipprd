@@ -12,6 +12,8 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::{fs};
+use std::ops::Deref;
+use std::sync::atomic::Ordering;
 
 #[derive(Clone, Debug)]
 pub struct IngestBatch {
@@ -29,6 +31,7 @@ const MAX_BUFFER_SIZE: u64 = 1024 * 1024 * 10;
 
 static parse_namespace_cache: Lazy<Mutex<HashMap<String, String>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+
 static output_files_static: Lazy<Mutex<HashMap<String, OutputFile>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
@@ -40,8 +43,12 @@ impl Ingest {
     }
 
     pub fn flush_buffers(force: bool, output_files: &mut MutexGuard<HashMap<String, OutputFile>>) {
+    // pub fn flush_buffers(force: bool) {
+
         let data_dir = Config::get_data_dir();
         let output_dir = format!("{}/output", data_dir);
+
+        // let output_files = &mut output_files_static.lock().unwrap();
 
         for (filename, output_file) in output_files.iter() {
 
@@ -57,9 +64,12 @@ impl Ingest {
                 );
                 let old_path = format!("{}/{}", output_dir, filename);
 
-                fs::rename(&old_path, new_filename).unwrap();
+                match fs::rename(&old_path, new_filename) {
+                    Ok(_) => {},
+                    Err(_) => {}
+                };
 
-                println!("Rotated buffer file {}", old_path);
+                // println!("Rotated buffer file {}", old_path);
             }
         }
     }
@@ -144,8 +154,9 @@ impl Ingest {
                             .create(true)
                             .write(true)
                             .append(true)
-                            .open(output_file)
-                            .unwrap();
+                            .open(output_file.clone())
+                            .expect(&format!("could not open file {}", output_file));
+                            // .unwrap();
 
                         let mut new_file = OutputFile {
                             bytes: record_bytes,
@@ -195,7 +206,8 @@ impl Ingest {
             counter_lock.bytes_current += bytes;
         }
 
-        Self::flush_buffers(false, output_files);
+        // Self::flush_buffers(true);
+        Self::flush_buffers(true, output_files);
 
         // Retain only items that didn't qualify for flushing
         output_files.retain(|_filename, file| !Ingest::is_file_size_exceeded(file));
