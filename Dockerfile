@@ -21,7 +21,7 @@ RUN cargo build --release
 #CMD ["./target/x86_64-unknown-linux-gnu/debug/skipprd"]
 #CMD ["./target/release/skipprd"]
 
-FROM debian:buster-slim
+FROM debian:stable-slim
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /usr/src/skipprd/target/release/skipprd /usr/bin/skipprd
 CMD ["skipprd", "sync"]
