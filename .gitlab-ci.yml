@@ -115,7 +115,7 @@ docker_run:
       -e PIPELINE_ID=gitlab_test \
       -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg \
       -e DATA_DIR=./data \
-      -e APP_ENV=dev ${DOCKER_HUB_REPO}/${CONTAINER_RELEASE_IMAGE}
+      -e APP_ENV=dev skippr/skipprd:v3.0.0
   only:
     - master
     - tags
