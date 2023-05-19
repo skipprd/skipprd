@@ -112,7 +112,7 @@ impl Ingest {
 
                     // println!("{}", &ingest_batch.data);
                     let mut counter_lock = metrcis_clone.lock().unwrap();
-                    counter_lock.deadletters_current += 1;
+                    counter_lock.deadletters_total += 1;
 
                     continue;
                 }
@@ -205,7 +205,8 @@ impl Ingest {
             offset_db_clone.set(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
 
             let mut counter_lock = metrcis_clone.lock().unwrap();
-            counter_lock.msgs_current += j;
+            counter_lock.ingeted_current += j;
+            counter_lock.ingeted_total += j;
             counter_lock.msgs_total += i;
             counter_lock.bytes_current += bytes;
         }

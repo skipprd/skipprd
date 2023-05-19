@@ -303,10 +303,10 @@ async fn sync() {
         let metrics_clone = metrics.clone();
         let now_clone = now.clone();
 
-        match Config::list_dir_contents(data_dir.clone()) {
-            Err(e) => println!("Error occurred: {}", e),
-            _ => (),
-        }
+        // match Config::list_dir_contents(data_dir.clone()) {
+        //     Err(e) => println!("Error occurred: {}", e),
+        //     _ => (),
+        // }
 
         planner.add(
             move || {
@@ -331,12 +331,13 @@ async fn sync() {
                 metrics_lock.run_time_seconds = now_lock.elapsed().as_secs();
 
                 println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
-                println!("Deadletters Messages: {}", metrics_lock.deadletters_current);
-                println!("Ingested Messages: {}", metrics_lock.msgs_current);
+                println!("Ingested Batch: {}", metrics_lock.ingeted_current);
+                println!("Ingested Messages: {}", metrics_lock.ingeted_total);
                 println!("Total Messages: {}", metrics_lock.msgs_total);
+                println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
                 println!("Bytes: {}", metrics_lock.bytes_total);
 
-                metrics_lock.msgs_current = 0;
+                metrics_lock.ingeted_current = 0;
 
                 Config::set_status(metrics_lock, None);
             },
@@ -459,12 +460,13 @@ async fn sync() {
     metrics_lock.run_time_seconds = now_lock.elapsed().as_secs();
 
     println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
-    println!("Deadletters Messages: {}", metrics_lock.deadletters_current);
-    println!("Ingested Messages: {}", metrics_lock.msgs_current);
+    println!("Ingested Batch: {}", metrics_lock.ingeted_current);
+    println!("Ingested Messages: {}", metrics_lock.ingeted_total);
     println!("Total Messages: {}", metrics_lock.msgs_total);
+    println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
     println!("Bytes: {}", metrics_lock.bytes_total);
 
-    metrics_lock.msgs_current = 0;
+    metrics_lock.ingeted_current = 0;
 
     // Config::set_status(metrics_lock, None)
 
@@ -496,7 +498,7 @@ fn output_sync(metadata: HashMap<String, Metadata>) {
         {
             match entry {
                 Ok(path) => {
-                    println!("Finalising output file {}", path.display());
+                    // println!("Finalising output file {}", path.display());
 
                     // alwasy regenerate arrow schema incase updated skippr metadata, e.g. discovered a new field
                     let mut arrow_schema: Result<Schema, ArrowError> = Ok(Schema::empty());

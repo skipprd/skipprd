@@ -182,7 +182,7 @@ impl DataOutputAwsAthenaPlugin {
                     .await
                 {
                     Ok(resp) => {
-                        println!("Upload success. Version: {:?}", resp.version_id);
+                        println!("Upload to S3: {}", key);
                         fs::remove_file(Path::new(&filename)).unwrap();
                     }
                     Err(err) => {

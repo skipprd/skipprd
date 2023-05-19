@@ -455,9 +455,10 @@ impl Config {
         let data = json!({
             "metrics": {
                 "msgs_total": metrics.msgs_total,
-                "msgs_current": metrics.msgs_current,
+                "ingeted_total": metrics.ingeted_total,
+                "deadletters_total": metrics.deadletters_total,
+                "ingeted_current": metrics.ingeted_current,
                 "run_time_seconds": metrics.run_time_seconds,
-                "deadletters_current": metrics.deadletters_current,
                 "bytes_current": metrics.bytes_current,
                 "bytes_total": metrics.bytes_total,
             },
@@ -494,8 +495,9 @@ impl Config {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Metrics {
     pub msgs_total: u64,
-    pub msgs_current: u64,
-    pub deadletters_current: u64,
+    pub ingeted_total: u64,
+    pub deadletters_total: u64,
+    pub ingeted_current: u64,
     pub run_time_seconds: u64,
     pub bytes_current: u64,
     pub bytes_total: u64,
@@ -506,8 +508,9 @@ impl Metrics {
     pub fn new() -> Self {
         Self {
             msgs_total: 0,
-            msgs_current: 0,
-            deadletters_current: 0,
+            ingeted_total: 0,
+            deadletters_total: 0,
+            ingeted_current: 0,
             run_time_seconds: 0,
             bytes_current: 0,
             bytes_total: 0,
