@@ -68,6 +68,8 @@ use crate::plugins::athena::DataOutputAwsAthenaPlugin;
 use crate::plugins::s3_input::DataSourceS3Plugin;
 use crate::plugins::s3_inventory::DataSourceS3InventoryPlugin;
 
+use crate::ingest_work::OUTPUT_FILES_STATIC;
+
 #[tokio::main]
 async fn main() {
     env::set_var("RUST_BACKTRACE", "1");
@@ -275,9 +277,9 @@ async fn sync() {
 
             // Config::set_config(&newmeta_clone.lock().unwrap(),true);
 
-            // println!("Flushing ingest buffers");
-            // // @todo - implemnt Ingest{} build glob for existing files
-            // Ingest::flush_buffers(true, &mut Mutex::new(HashMap::new()).lock().unwrap());
+            println!("Flushing ingest buffers");
+            let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
+            ingest_work::Ingest::flush_buffers(true, &mut output_files);
             println!("Flushing output buffers");
             output_sync(_newmeta_clone.lock().unwrap().clone());
         } else {
@@ -299,6 +301,7 @@ async fn sync() {
         let mut planner = periodic::Planner::new();
 
         let metrics_clone = metrics.clone();
+        let now_clone = now.clone();
 
         match Config::list_dir_contents(data_dir.clone()) {
             Err(e) => println!("Error occurred: {}", e),
@@ -318,9 +321,9 @@ async fn sync() {
 
                 // let mut counter_lock = ingestMsgCount.lock().unwrap();
                 // let mut total_lock = ingestMsgTotal.lock().unwrap();
-                let now_lock = now.lock().unwrap();
+                let now_lock = now_clone.lock().unwrap();
 
-                metrics_lock.msgs_total += metrics_lock.msgs_current;
+                // metrics_lock.msgs_total += metrics_lock.msgs_current;
                 metrics_lock.bytes_total += metrics_lock.bytes_current;
 
                 // metrics.msgs_total = *total_lock;
@@ -430,12 +433,47 @@ async fn sync() {
             }
         };
 
+    // wait arbitrary time for ingest threads to complete
+    // sleep(Duration::from_secs(30));
+
+    let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
+    ingest_work::Ingest::flush_buffers(true, &mut output_files);
+
+    let input_metadata_clone = skippr_metadata.clone();
+    output_sync(input_metadata_clone.lock().unwrap().clone());
+
+    let metrics_clone = metrics.clone();
+
+    // let mut metrics: Metrics = Metrics::new();
+    let mut metrics_lock = metrics_clone.lock().unwrap();
+
+    // let mut counter_lock = ingestMsgCount.lock().unwrap();
+    // let mut total_lock = ingestMsgTotal.lock().unwrap();
+    let now_lock = now.lock().unwrap();
+
+    // metrics_lock.msgs_total += metrics_lock.msgs_current;
+    metrics_lock.bytes_total += metrics_lock.bytes_current;
+
+    // metrics.msgs_total = *total_lock;
+    // metrics.msgs_current = *counter_lock;
+    metrics_lock.run_time_seconds = now_lock.elapsed().as_secs();
+
+    println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
+    println!("Deadletters Messages: {}", metrics_lock.deadletters_current);
+    println!("Ingested Messages: {}", metrics_lock.msgs_current);
+    println!("Total Messages: {}", metrics_lock.msgs_total);
+    println!("Bytes: {}", metrics_lock.bytes_total);
+
+    metrics_lock.msgs_current = 0;
+
+    // Config::set_status(metrics_lock, None)
+
         // sleep(Duration::from_secs(5));
     // }
 }
 
 fn output_sync(metadata: HashMap<String, Metadata>) {
-    thread::spawn(move || {
+    // thread::spawn(move || {
         // println!("Arrow Schema: {:?}", arrowSchema);
 
         let data_dir = Config::get_data_dir();
@@ -447,8 +485,8 @@ fn output_sync(metadata: HashMap<String, Metadata>) {
             require_literal_leading_dot: false,
         };
 
-        println!("Finalising output files");
-        Config::list_dir_contents(output_dir).expect(&format!("Could not list output dir {}", output_dir));
+        // println!("Finalising output files");
+        // Config::list_dir_contents(output_dir).expect(&format!("Could not list output dir {}", output_dir));
 
         // loop {
         for entry in glob_with(&format!("{}/done/*", output_dir), options)
@@ -498,5 +536,5 @@ fn output_sync(metadata: HashMap<String, Metadata>) {
 
         // sleep(Duration::from_secs(1));
         // }
-    });
+    // });
 }

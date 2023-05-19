@@ -12,8 +12,6 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::{fs};
-use std::ops::Deref;
-use std::sync::atomic::Ordering;
 
 #[derive(Clone, Debug)]
 pub struct IngestBatch {
@@ -32,7 +30,7 @@ const MAX_BUFFER_SIZE: u64 = 1024 * 1024 * 10;
 static parse_namespace_cache: Lazy<Mutex<HashMap<String, String>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-static output_files_static: Lazy<Mutex<HashMap<String, OutputFile>>> =
+pub static OUTPUT_FILES_STATIC: Lazy<Mutex<HashMap<String, OutputFile>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 pub struct Ingest {}
@@ -48,8 +46,6 @@ impl Ingest {
         let data_dir = Config::get_data_dir();
         let output_dir = format!("{}/output", data_dir);
 
-        // let output_files = &mut output_files_static.lock().unwrap();
-
         for (filename, output_file) in output_files.iter() {
 
             let mut file= &output_file.file;
@@ -64,12 +60,12 @@ impl Ingest {
                 );
                 let old_path = format!("{}/{}", output_dir, filename);
 
-                match fs::rename(&old_path, new_filename) {
+                match fs::rename(&old_path, &new_filename) {
                     Ok(_) => {},
                     Err(_) => {}
                 };
 
-                // println!("Rotated buffer file {}", old_path);
+                // println!("Rotated buffer file {}", new_filename);
             }
         }
     }
@@ -94,7 +90,7 @@ impl Ingest {
 
         let mut bytes: u64 = 0;
 
-        let output_files = &mut output_files_static.lock().unwrap();
+        let output_files = &mut OUTPUT_FILES_STATIC.lock().unwrap();
 
         // thread::spawn(move || {
         for ingest_batch in datas {
@@ -107,11 +103,17 @@ impl Ingest {
                 offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Closed, 0);
 
             let mut i = 1;
+            let mut j = 1;
 
             let records: Vec<Value> = SerdeJson::deserialize(&ingest_batch.data);
 
             for mut record in records {
                 if record.is_null() {
+
+                    // println!("{}", &ingest_batch.data);
+                    let mut counter_lock = metrcis_clone.lock().unwrap();
+                    counter_lock.deadletters_current += 1;
+
                     continue;
                 }
 
@@ -150,24 +152,12 @@ impl Ingest {
                     let output_file = format!("{}/{}", output_dir.clone(), &output_file_name);
 
                     if output_files.get_mut(&output_file_name).is_none() {
-                        let f = match OpenOptions::new()
+                        let f = OpenOptions::new()
                             .create(true)
                             .write(true)
                             .append(true)
-                            .open(output_file.clone()) {
-                            Ok(f) => f,
-                            Err(_) => {
-                                println!("ljlkj");
-                                Config::list_dir_contents(output_dir.clone()).unwrap();
-                                OpenOptions::new()
-                                    .create(true)
-                                    .write(true)
-                                    .append(true)
-                                    .open(output_file.clone())
-                                    .unwrap()
-                            }
-                        };
-                            // .unwrap();
+                            .open(output_file.clone())
+                            .unwrap();
 
                         let mut new_file = OutputFile {
                             bytes: record_bytes,
@@ -205,6 +195,8 @@ impl Ingest {
                     buf_str.clear();
 
                     offset_db_clone.set(&ingest_batch.offset_key, OffsetTypes::Line, i);
+
+                    j += 1;
                 }
 
                 i += 1;
@@ -213,12 +205,13 @@ impl Ingest {
             offset_db_clone.set(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
 
             let mut counter_lock = metrcis_clone.lock().unwrap();
-            counter_lock.msgs_current += i;
+            counter_lock.msgs_current += j;
+            counter_lock.msgs_total += i;
             counter_lock.bytes_current += bytes;
         }
 
         // Self::flush_buffers(true);
-        Self::flush_buffers(true, output_files);
+        Self::flush_buffers(false, output_files);
 
         // Retain only items that didn't qualify for flushing
         output_files.retain(|_filename, file| !Ingest::is_file_size_exceeded(file));
