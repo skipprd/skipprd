@@ -10,6 +10,7 @@ COPY . .
 # Download the cross-compilation tools
 #RUN rustup target add x86_64-unknown-linux-gnu
 
+# @todo - this causes Fargate containers to fail :-(
 # Install standard C library for x86_64
 #ENV RUSTFLAGS="-C target-cpu=native"
 
