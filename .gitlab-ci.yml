@@ -138,7 +138,7 @@ docker_push:
     # Push to Docker Hub
     - docker login -u skippr -p "$DOCKER_HUB_PASS"
 #    - docker pull $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE
-    - docker tag $CONTAINER_RELEASE_IMAGE $DOCKER_HUB_REPO/$CONTAINER_RELEASE_IMAGE
+    - docker tag $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE $DOCKER_HUB_REPO/$CONTAINER_RELEASE_IMAGE
     - docker push $DOCKER_HUB_REPO/$CONTAINER_RELEASE_IMAGE
 
     # Push to AWS ECR
