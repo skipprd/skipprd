@@ -3,6 +3,7 @@ image: rust:latest
 variables:
   COMPONENT_NAME: skipprd
   CONTAINER_IMAGE: $COMPONENT_NAME:$CI_COMMIT_REF_NAME
+  CONTAINER_LATEST_IMAGE: $COMPONENT_NAME:latest
   CONTAINER_RELEASE_IMAGE: $COMPONENT_NAME:v3.0.0
   DOCKER_HUB_REPO: skippr
   ECR_HOST: 536671797322.dkr.ecr.eu-west-2.amazonaws.com
@@ -69,8 +70,8 @@ docker_build:
   after_script:
     # Push to Docker Hub
     - docker login -u skippr -p "$DOCKER_HUB_PASS"
-    - docker tag $CONTAINER_IMAGE $DOCKER_HUB_REPO/latest
-    - docker push $DOCKER_HUB_REPO/latest
+    - docker tag $CONTAINER_IMAGE $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE
+    - docker push $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE
   only:
     - master
     - tags
@@ -80,8 +81,8 @@ docker_run:
   image: docker:latest
   stage: run
   script:
-    - docker pull $DOCKER_HUB_REPO/latest
-    - docker run -e AWS_DEFAULT_REGION=eu-west-2 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skpr-sample-data-output -e S3_PREFIX=skpr-sample-data/smail-files -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=production-datalake-stac-datalakeskipprbucket4a91-db0ekzd8fkz0 -e DATA_OUTPUT_S3_PREFIX=bikehire -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=bikehire -e PIPELINE_ID=gitlab_test -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=dev skippr/latest
+    - docker pull $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE
+    - docker run -e AWS_DEFAULT_REGION=eu-west-2 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skpr-sample-data -e S3_PREFIX=small-files -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=production-datalake-stac-datalakeskipprbucket4a91-db0ekzd8fkz0 -e DATA_OUTPUT_S3_PREFIX=bikehire -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=bikehire -e PIPELINE_ID=gitlab_test -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=dev skippr/skipprd:latest
   only:
     - master
     - tags
@@ -97,7 +98,7 @@ docker_push:
 
     # Push to Docker Hub
     - docker login -u skippr -p "$DOCKER_HUB_PASS"
-#    - docker pull $DOCKER_HUB_REPO/latest
+#    - docker pull $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE
     - docker tag $CONTAINER_RELEASE_IMAGE $DOCKER_HUB_REPO/$CONTAINER_RELEASE_IMAGE
     - docker push $DOCKER_HUB_REPO/$CONTAINER_RELEASE_IMAGE
 
