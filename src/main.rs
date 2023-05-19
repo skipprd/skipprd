@@ -265,10 +265,14 @@ async fn sync() {
         }
     }));
 
+    println!("a");
+
     let _newmeta_clone = skippr_metadata.clone();
 
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
+
+    println!("b");
 
     ctrlc::set_handler(move || {
         if r.load(Ordering::SeqCst) {
@@ -344,6 +348,8 @@ async fn sync() {
         );
         planner.start();
 
+    println!("c");
+
         let input_metadata_clone = skippr_metadata.clone();
 
         let mut out_pnanner = periodic::Planner::new();
@@ -381,6 +387,8 @@ async fn sync() {
         );
         out_pnanner.start();
 
+    println!("d");
+
         let input_metadata_clone = skippr_metadata.clone();
 
         // @todo - share across s3 ingests
@@ -406,6 +414,8 @@ async fn sync() {
             Ok(_g) => {}
             Err(_err) => {}
         }
+
+    println!("e");
 
         let metrics_clone = metrics.clone();
 
@@ -436,8 +446,12 @@ async fn sync() {
     // wait arbitrary time for ingest threads to complete
     // sleep(Duration::from_secs(30));
 
+    println!("f");
+
     let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
     ingest_work::Ingest::flush_buffers(true, &mut output_files);
+
+    println!("g");
 
     let input_metadata_clone = skippr_metadata.clone();
     output_sync(input_metadata_clone.lock().unwrap().clone());
@@ -470,6 +484,8 @@ async fn sync() {
 
         // sleep(Duration::from_secs(5));
     // }
+
+    println!("Shutting Down... bye");
 }
 
 fn output_sync(metadata: HashMap<String, Metadata>) {
