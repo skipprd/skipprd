@@ -330,7 +330,7 @@ impl Config {
                     Ok(metadata)
                 }
                 err => {
-                    println!("Metadata HTTP Error: {:?}", err);
+                    // println!("Metadata HTTP Error: {:?}", err);
                     Err(false)
                 }
             },

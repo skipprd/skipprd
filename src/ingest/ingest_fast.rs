@@ -38,7 +38,7 @@ pub fn fast_path_ingest(
     let mut message: Value = Value::Null;
 
     for (field, value) in unwrapped_message.as_object().unwrap() {
-        let field = Helpers::clean_field_name(field.to_string());
+        // let field = Helpers::clean_field_name(field.to_string());
 
         // println!("Ingesting field: {:?}", field);
 
@@ -47,7 +47,7 @@ pub fn fast_path_ingest(
         // } else {
         //         let resolved_value = Value::Null;
 
-        let field_data_type = match metadata.get_mut(&field) {
+        let field_data_type = match metadata.get_mut(field) {
             Some(data_type) => {
                 // println!("{:?}",  data_type.determined_type.clone());
                 data_type.determined_type.clone()
@@ -63,7 +63,7 @@ pub fn fast_path_ingest(
         // let foo = resolved_value;
         // ignore if null, use default message which has correct null for data type
         if !resolved_value.is_null() {
-            message[field] = resolved_value;
+            message[metadata.get(field).unwrap().clone().out_field_name] = resolved_value;
             // match resolved_value {
             //     Value::Object(_) => message.as_array_mut().unwrap().push(resolved_value),
             //     _ => println!("Row needs to be of type object, got: {:?}", resolved_value)
@@ -136,7 +136,7 @@ fn fast_set_value(
 
                 if value.is_object() {
                     for (sub_field, sub_value) in value.as_object().unwrap() {
-                        let clean_sub_field = Helpers::clean_field_name(sub_field.to_string());
+                        // let clean_sub_field = Helpers::clean_field_name(sub_field.to_string());
 
                         match metadata.get(field).unwrap().fields.get(sub_field) {
                             Some(_t) => (),
@@ -170,7 +170,7 @@ fn fast_set_value(
                                 updatedSchema,
                             );
 
-                            m.insert(clean_sub_field.to_string(), newval);
+                            m.insert(metadata.get(field).unwrap().fields.get(sub_field).unwrap().clone().out_field_name, newval);
                         }
                     }
                 }
@@ -181,7 +181,7 @@ fn fast_set_value(
                 if value.is_array() {
                     let mut i = 0;
                     for sub_value in value.as_array().unwrap() {
-                        let clean_sub_field = Helpers::clean_field_name(i.to_string());
+                        // let clean_sub_field = Helpers::clean_field_name(i.to_string());
 
                         match metadata.get(field).unwrap().fields.get(&i.to_string()) {
                             Some(_t) => (),
@@ -215,7 +215,7 @@ fn fast_set_value(
                                 updatedSchema,
                             );
 
-                            m.insert(clean_sub_field.to_string(), newval);
+                            m.insert(metadata.get(field).unwrap().fields.get(&i.to_string()).unwrap().clone().out_field_name, newval);
                         }
 
                         i += 1;
@@ -236,7 +236,7 @@ fn fast_set_value(
                         .filter_map(|(k, v)| Some((k, v)))
                     {
                         if Some(val).is_some() {
-                            new_value[key] = fast_set_value(
+                            new_value[fields.get(key).unwrap().clone().out_field_name] = fast_set_value(
                                 determined_type_values,
                                 key,
                                 value,

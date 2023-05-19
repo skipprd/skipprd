@@ -49,6 +49,7 @@ pub struct Metadata {
     pub(crate) date_candidate: Option<DateCandidate>,
     pub(crate) evolution: Box<HashMap<String, Evolution>>,
     pub(crate) enabled: bool,
+    pub(crate) out_field_name: String,
     pub(crate) determined_type: String,
     pub(crate) determined_type_values: String,
 }
@@ -83,6 +84,7 @@ impl Metadata {
             date_candidate: None,
             evolution: Box::default(),
             enabled: true,
+            out_field_name: "".to_string(),
             determined_type: "".to_string(),
             determined_type_values: "".to_string(),
         })
@@ -934,11 +936,13 @@ impl AnalyseSchema {
     ) {
         let demoted_types = vec!["boolean", "date", "timestamp", "timestamp_milli"];
 
-        for (_field_name, field) in metadata.iter_mut() {
+        for (field_name, field) in metadata.iter_mut() {
             // Useful for field evolution logic for maps, which only support one sub-field type
             if let Some(parent_type) = parent_type {
                 field.parent_type = parent_type.to_string();
             }
+
+            field.out_field_name = Helpers::clean_field_name(field_name.to_string());
 
             if field.determined_type == *"" {
                 let mut highest_type = "".to_string();
@@ -1029,7 +1033,7 @@ impl AnalyseSchema {
                     field.determined_type_values = values_type.to_string();
 
                     if field.determined_type == *"array" {
-                        // field.fields.clear();
+                        field.fields.clear();
                     }
                 }
 

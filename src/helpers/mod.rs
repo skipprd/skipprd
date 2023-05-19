@@ -155,16 +155,16 @@ impl Helpers {
                     }
                 }
             }
-            Value::Array(arr) => {
-                if arr.is_empty() {
-                    result.insert(prefix.to_string(), json.clone());
-                } else {
-                    for (index, value) in arr.iter().enumerate() {
-                        let new_key = format!("{}_{}", prefix, index);
-                        Helpers::flatten_internal(value, &new_key, result);
-                    }
-                }
-            }
+            // Value::Array(arr) => {
+                // if arr.is_empty() {
+                //     result.insert(prefix.to_string(), json.clone());
+                // } else {
+                //     for (index, value) in arr.iter().enumerate() {
+                //         let new_key = format!("{}_{}", prefix, index);
+                //         Helpers::flatten_internal(value, &new_key, result);
+                //     }
+                // }
+            // }
             _ => {
                 result.insert(prefix.to_string(), json.clone());
             }

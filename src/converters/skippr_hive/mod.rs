@@ -55,7 +55,7 @@ impl SkipprHive {
 
                     field_types.push(
                         Column::builder()
-                            .name(k.to_string())
+                            .name(v.out_field_name.to_string())
                             .r#type(type_str)
                             .build(),
                     )
@@ -76,7 +76,7 @@ impl SkipprHive {
 
                         field_types.push(
                             Column::builder()
-                                .name(k.to_string())
+                                .name(v.out_field_name.to_string())
                                 .r#type(type_str)
                                 .build(),
                         )
@@ -98,7 +98,7 @@ impl SkipprHive {
 
                         field_types.push(
                             Column::builder()
-                                .name(k.to_string())
+                                .name(&v.out_field_name.to_string())
                                 .r#type(type_str)
                                 .build(),
                         )
@@ -110,7 +110,7 @@ impl SkipprHive {
                         None => {
                             println!(
                                 "No Hive mapped type for skippr field '{}' with type of '{}'",
-                                k, &v.determined_type
+                                &v.out_field_name, &v.determined_type
                             );
                             ""
                         }
@@ -118,7 +118,7 @@ impl SkipprHive {
 
                     field_types.push(
                         Column::builder()
-                            .name(k.to_string())
+                            .name(&v.out_field_name.to_string())
                             .r#type(mapped_type)
                             .build(),
                     )

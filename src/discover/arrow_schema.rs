@@ -128,40 +128,40 @@ fn convert_skippr_to_arrow_field_types(
                 field.insert(dataType);
 
                 field_types.insert(
-                    k.to_string(),
+                    v.out_field_name.to_string(),
                     InferredType::Array(Box::new(InferredType::Scalar(field))),
                 );
             }
             "map" => {
                 field_types.insert(
-                    k.to_string(),
+                    v.out_field_name.to_string(),
                     InferredType::Object(convert_skippr_to_arrow_field_types(&v.fields).unwrap()),
                 );
             }
             "boolean" => {
-                set_object_scalar_field_type(&mut field_types, k, DataType::Boolean);
+                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Boolean);
             }
             "NULL" => {
-                set_object_scalar_field_type(&mut field_types, k, DataType::Null);
+                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Null);
             }
             "integer" => {
-                set_object_scalar_field_type(&mut field_types, k, DataType::Int32);
+                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Int32);
             }
             "long" => {
-                set_object_scalar_field_type(&mut field_types, k, DataType::Int64);
+                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Int64);
             }
             "double" => {
-                set_object_scalar_field_type(&mut field_types, k, DataType::Float64);
+                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Float64);
             }
             "string" => {
-                set_object_scalar_field_type(&mut field_types, k, DataType::Utf8);
+                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Utf8);
             }
             "date" => {
-                set_object_scalar_field_type(&mut field_types, k, DataType::Int64);
+                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Int64);
             }
             "record" => {
                 field_types.insert(
-                    k.to_string(),
+                    v.out_field_name.to_string(),
                     InferredType::Object(convert_skippr_to_arrow_field_types(&v.fields).unwrap()),
                 );
             }
