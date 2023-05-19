@@ -104,18 +104,12 @@ impl DataSourceS3Plugin {
             .parse::<i64>()
             .unwrap();
 
-        println!("1");
-
         let mut i = 0;
         let mut chunk_size_current = 0;
-
-        println!("2");
 
         if inventory_prefix == "/".to_string() || inventory_prefix == "./".to_string() {
             inventory_prefix = "".to_string();
         }
-
-        println!("3");
 
         let mut list_obj_req = self
             .s3_client
@@ -123,17 +117,12 @@ impl DataSourceS3Plugin {
             .bucket(inventory_bucket.clone())
             .prefix(inventory_prefix.clone());
 
-        println!("4");
-
         loop {
-
-            println!("5");
 
             match list_obj_req.clone().send().await {
                 Err(err) => println!("S3 Error {}", err),
                 Ok(output) => {
 
-                    println!("Next");
                     // for result in results {
                     let objects = output.contents().unwrap();
 
@@ -175,7 +164,6 @@ impl DataSourceS3Plugin {
                                 // println!("State {} = {} of {}", i, chunk_size_current, chunk_size);
 
                                 if i >= 20 || chunk_size_current >= chunk_size {
-                                    println!("Ingesting");
                                     Self::download_and_ingest(
                                         &mut self.s3_client_rusoto,
                                         &inventory_bucket,
@@ -192,7 +180,7 @@ impl DataSourceS3Plugin {
                                     chunk_size_current = 0;
                                 }
                             } else {
-                                println!("Skipping object: {} already processed", object_key);
+                                // println!("Skipping object: {} already processed", object_key);
                             }
                         }
                     }
@@ -206,11 +194,7 @@ impl DataSourceS3Plugin {
                     } else {
                         println!("Reached end of S3 pagination");
 
-                        println!("6");
-
                         if !outputs.is_empty() {
-
-                            println!("7");
 
                             Self::download_and_ingest(
                                 &mut self.s3_client_rusoto,
@@ -222,8 +206,6 @@ impl DataSourceS3Plugin {
                                 &offsets_clone,
                             )
                                 .await;
-
-                            println!("8");
                         }
 
                         break;
@@ -232,14 +214,7 @@ impl DataSourceS3Plugin {
                     // }
                 }
             }
-
-
-
-            println!("9");
         }
-
-        println!("10");
-
     }
 
     async fn download_s3_object_with_backoff(
@@ -408,7 +383,7 @@ impl DataSourceS3Plugin {
         for handle in threads {
             handle.join().unwrap();
         }
-        println!("Ingested");
+        // println!("Ingested");
     }
 }
 
