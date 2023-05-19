@@ -104,18 +104,18 @@ impl DataSourceS3Plugin {
             .parse::<i64>()
             .unwrap();
 
-        println!("1");
+        // println!("1");
 
         let mut i = 0;
         let mut chunk_size_current = 0;
 
-        println!("2");
+        // println!("2");
 
         if inventory_prefix == "/".to_string() || inventory_prefix == "./".to_string() {
             inventory_prefix = "".to_string();
         }
 
-        println!("3");
+        // println!("3");
 
         let mut list_obj_req = self
             .s3_client
@@ -123,17 +123,17 @@ impl DataSourceS3Plugin {
             .bucket(inventory_bucket.clone())
             .prefix(inventory_prefix.clone());
 
-        println!("4");
+        // println!("4");
 
         loop {
 
-            println!("5");
+            // println!("5");
 
             match list_obj_req.clone().send().await {
                 Err(err) => println!("S3 Error {}", err),
                 Ok(output) => {
 
-                    println!("Next");
+                    // println!("Next");
                     // for result in results {
                     let objects = output.contents().unwrap();
 
@@ -206,11 +206,11 @@ impl DataSourceS3Plugin {
                     } else {
                         println!("Reached end of S3 pagination");
 
-                        println!("6");
+                        // println!("6");
 
                         if !outputs.is_empty() {
 
-                            println!("7");
+                            // println!("7");
 
                             Self::download_and_ingest(
                                 &mut self.s3_client_rusoto,
@@ -223,7 +223,7 @@ impl DataSourceS3Plugin {
                             )
                                 .await;
 
-                            println!("8");
+                            // println!("8");
                         }
 
                         break;
@@ -235,10 +235,10 @@ impl DataSourceS3Plugin {
 
 
 
-            println!("9");
+            // println!("9");
         }
 
-        println!("10");
+        // println!("10");
 
     }
 
