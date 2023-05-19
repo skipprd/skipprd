@@ -11,7 +11,7 @@ COPY . .
 #RUN rustup target add x86_64-unknown-linux-gnu
 
 # Install standard C library for x86_64
-ENV RUSTFLAGS="-C target-cpu=native"
+#ENV RUSTFLAGS="-C target-cpu=native"
 
 # Build the Rust project
 RUN cargo build --release
