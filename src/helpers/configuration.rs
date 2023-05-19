@@ -185,12 +185,13 @@ impl Config {
         if data_dir.ends_with('/') {
             data_dir.pop();
         }
+
         let pipeline_name = Config::getenv("PIPELINE_NAME", "default");
 
         let data_dir = format!("{}/{}", data_dir, pipeline_name);
-        match fs::create_dir(&data_dir) {
+        match fs::create_dir_all(&data_dir) {
             Ok(_g) => {}
-            Err(_err) => {}
+            Err(err) => panic!("Error creating data dir {}, does the host path exist? {:?}", data_dir, err)
         }
 
         data_dir
@@ -486,7 +487,7 @@ impl Config {
         license.unwrap().get_license().await.unwrap();
 
         // let config: Config = Config::get_config().await;
-        // create_dir(Config::get_data_dir());
+        Config::get_data_dir();
     }
 }
 
