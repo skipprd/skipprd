@@ -249,10 +249,9 @@ impl DataSourceS3Plugin {
                     backoff_duration *= 2;
 
                     println!(
-                        "Failed to get object {}, retry back in {} seconds, Error: {}",
+                        "Failed to get object {}, retry back in {} seconds",
                         key,
-                        backoff_duration.as_secs(),
-                        err.to_string()
+                        backoff_duration.as_secs()
                     );
 
                     if retries >= max_retries {
