@@ -355,7 +355,7 @@ async fn sync() {
             move || {
                 println!("Chaos mode throwing a random exit. You can disable this test mode buy removing CHAOS_MODE flag or setting to 'no'");
                 exit(0);
-            }, periodic::Every::new(Duration::from_secs(rand::thread_rng().gen_range(15..20))),
+            }, periodic::Every::new(Duration::from_secs(rand::thread_rng().gen_range(15..60))),
         );
     }
         out_pnanner.add(
