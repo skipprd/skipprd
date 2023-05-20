@@ -1052,6 +1052,38 @@ impl AnalyseSchema {
 
         // println!("Metadata {:?}", metadata);
     }
+
+    pub fn merge_metadata(foo: &mut HashMap<String, Metadata>, bar: &mut HashMap<String, Metadata>) {
+        for (key, value) in bar.drain() {
+            foo.entry(key.clone())
+                .and_modify(|metadata| {
+                    let value = value.clone();
+
+                    metadata.count += value.count;
+                    for (t, count) in value.types {
+                        *metadata.types.entry(t).or_insert(0) += count;
+                    }
+                    if metadata.parent_type.is_empty() {
+                        metadata.parent_type = value.parent_type.clone();
+                    }
+                    for (field, field_metadata) in *value.fields {
+                        *metadata.fields.entry(field).or_insert( field_metadata) = field_metadata.clone();
+                    }
+                    metadata.date_candidate = value.date_candidate.or(metadata.date_candidate.take());
+                    for (evolution_key, evolution_value) in *value.evolution {
+                        *metadata.evolution.entry(evolution_key).or_insert(evolution_value) = evolution_value.clone();
+                    }
+                    metadata.enabled = metadata.enabled || value.enabled;
+                    if !value.determined_type.is_empty() {
+                        metadata.determined_type = value.determined_type.clone();
+                    }
+                    if !value.determined_type_values.is_empty() {
+                        metadata.determined_type_values = value.determined_type_values.clone();
+                    }
+                })
+                .or_insert(value);
+        }
+    }
 }
 
 #[cfg(test)]
