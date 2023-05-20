@@ -2,7 +2,8 @@
 # Run Local Build
 
 ```bash
-AWS_PROFILE=skippr \
+AWS_PROFILE=skippr_old \
+DATA_SOURCE_PLUGIN_NAME=s3_inventroy \
 S3_BUCKET=skpr-sample-data-output \
 S3_PREFIX=skpr-sample-data/test \
 DATA_SOURCE_BATCH_SIZE=6 \
@@ -84,17 +85,20 @@ cargo run sync
 
 ```bash
 AWS_PROFILE=skippr_old \
-S3_BUCKET=skpr-sample-data-output \
-S3_PREFIX=skpr-sample-data/smail-files \
+DATA_OUTPUT_TIME_FIELDS=metadata.sent_time \
+DATA_SOURCE_PLUGIN_NAME=s3 \
+S3_BUCKET=skpr-sample-data \
+S3_PREFIX=small-files \
 DATA_SOURCE_BATCH_SIZE_BYTES=2048000 \
-DATA_OUTPUT_S3_BUCKET=production-datalake-stac-datalakeskipprbucket4a91-db0ekzd8fkz0 \
+DATA_OUTPUT_S3_BUCKET=skpr-sample-data-output \
 DATA_OUTPUT_S3_PREFIX=bikehire \
 GLUE_DATABASE_NAME=bikehire \
 ATHENA_WORKGROUP_NAME=bikehire \
 PIPELINE_NAME=bikehire \
-PIPELINE_ID=69 \
+PIPELINE_ID=gitlab_test \
 SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg \
 DATA_DIR=./data \
+APP_ENV=dev \
 cargo run sync
 ```
 
@@ -103,15 +107,14 @@ cargo run sync
 
 ```bash
 sudo AWS_PROFILE=skippr_old \
-S3_BUCKET=skpr-sample-data-output \
-S3_PREFIX=skpr-sample-data/smail-files \
+S3_BUCKET=skpr-sample-data \
+S3_PREFIX=small-files \
 DATA_SOURCE_BATCH_SIZE_BYTES=2048000 \
 DATA_OUTPUT_S3_BUCKET=production-datalake-stac-datalakeskipprbucket4a91-db0ekzd8fkz0 \
 DATA_OUTPUT_S3_PREFIX=bikehire \
 GLUE_DATABASE_NAME=bikehire \
 ATHENA_WORKGROUP_NAME=bikehire \
 PIPELINE_NAME=bikehire \
-PIPELINE_ID=69 \
 SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg \
 DATA_DIR=./data \
 cargo flamegraph --dev -- sync
@@ -130,7 +133,6 @@ ATHENA_WORKGROUP_NAME=test123 \
 PIPELINE_NAME=cubevents7 \
 SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg \
 APP_ENV=dev \
-RUST_BACKTRACE=1 \
 DATA_DIR=./data \
 cargo run sync
 ```
