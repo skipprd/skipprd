@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::{env, thread};
 
 use std::fs;
+use std::process::exit;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::sleep;
@@ -56,13 +57,10 @@ use crate::serdes::parquet::SerdeParquet;
 
 mod plugins;
 
-// use crate::helpers::Config
-
 use crate::discover::arrow_schema::convert_skippr_to_arrow;
 use crate::helpers::configuration::{Config, Metrics};
 
 use crate::buffer::BufferChunker;
-use crate::ingest_work::Ingest;
 use crate::plugins::athena::DataOutputAwsAthenaPlugin;
 
 use crate::plugins::s3_input::DataSourceS3Plugin;
@@ -347,7 +345,19 @@ async fn sync() {
 
         let input_metadata_clone = skippr_metadata.clone();
 
-        let mut out_pnanner = periodic::Planner::new();
+    let mut out_pnanner = periodic::Planner::new();
+
+    use rand::Rng; // 0.8.5
+
+    let chaos = Config::getenv("CHAOS_MODE", "no");
+    if Config::truth_value(&chaos) {
+        out_pnanner.add(
+            move || {
+                println!("Chaos mode throwing a random exit. You can disable this test mode buy removing CHAOS_MODE flag or setting to 'no'");
+                exit(0);
+            }, periodic::Every::new(Duration::from_secs(rand::thread_rng().gen_range(15..20))),
+        );
+    }
         out_pnanner.add(
              move || {
 
