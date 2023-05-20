@@ -110,7 +110,7 @@ chaos_mode:
   only:
     - master
     - tags
-    -
+
 flatten:
   image: docker:latest
   stage: e2e
