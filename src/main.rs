@@ -333,8 +333,10 @@ async fn sync() {
                 println!("Ingested Messages: {}", metrics_lock.ingeted_total);
                 println!("Total Messages: {}", metrics_lock.msgs_total);
                 println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
+                println!("Bytes Batch: {}", metrics_lock.bytes_current);
                 println!("Bytes: {}", metrics_lock.bytes_total);
 
+                metrics_lock.bytes_current = 0;
                 metrics_lock.ingeted_current = 0;
 
                 Config::set_status(metrics_lock, None);
@@ -474,8 +476,10 @@ async fn sync() {
     println!("Ingested Messages: {}", metrics_lock.ingeted_total);
     println!("Total Messages: {}", metrics_lock.msgs_total);
     println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
+    println!("Bytes Batch: {}", metrics_lock.bytes_current);
     println!("Bytes: {}", metrics_lock.bytes_total);
 
+    metrics_lock.bytes_current = 0;
     metrics_lock.ingeted_current = 0;
 
     // Config::set_status(metrics_lock, None)

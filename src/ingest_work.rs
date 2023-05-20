@@ -46,10 +46,12 @@ impl Ingest {
         let data_dir = Config::get_data_dir();
         let output_dir = format!("{}/output", data_dir);
 
-        for (filename, output_file) in output_files.iter() {
+        for (filename, output_file) in output_files.iter_mut() {
 
-            let mut file= &output_file.file;
-            file.flush().expect(&format!("Could not flush file {}", filename));
+            output_file.file.flush().expect(&format!("Could not flush file {}", filename));
+
+            // let mut file= &output_file.file;
+            // file.flush().expect(&format!("Could not flush file {}", filename));
 
             if force || Ingest::is_file_size_exceeded(&output_file) {
                 let new_filename = format!(
