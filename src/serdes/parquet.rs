@@ -306,6 +306,8 @@ impl SerdeParquet {
 
         let mut error: Result<bool, ArrowError> = Ok(true);
 
+        let mut error_count = 0;
+
         for batch in reader {
             // for i in batch.iter() {
             //     println!("Batch part: {:?}", i);
@@ -320,6 +322,7 @@ impl SerdeParquet {
                 }
                 // Err(error) => return Err(error.into()),
                 Err(_error) => {
+                    error_count += 1;
                     error = Err(_error);
                     // println!("Failed writing batch");
                     // println!("{:?}", _error);
@@ -331,7 +334,7 @@ impl SerdeParquet {
         }
 
         if error.is_err() {
-            println!("Failed writing parquet batch");
+            println!("Failed writing parquet batch, {} errors", error_count);
             println!("{:?}", error);
         }
 
