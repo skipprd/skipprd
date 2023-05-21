@@ -503,6 +503,8 @@ fn output_sync(metadata: HashMap<String, Metadata>) {
     // thread::spawn(move || {
         // println!("Arrow Schema: {:?}", arrowSchema);
 
+    let flatten = Config::truth_value(&Config::getenv("DATA_SOURCE_FLATTEN_EVENTS", "no"));
+
         let data_dir = Config::get_data_dir();
         let output_dir = &format!("{}/output", data_dir);
 
@@ -531,6 +533,26 @@ fn output_sync(metadata: HashMap<String, Metadata>) {
                         BufferChunker::decode_file_namespace(path.to_str().unwrap());
                     // let skpr_partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
 
+                    let mut output_metadata: HashMap<String, Metadata> = HashMap::new();
+                    if flatten {
+
+                        let mut meta : HashMap<String, Metadata> = HashMap::new();
+
+                        // output_metadata = flatten_metadata(metadata.get(&skpr_namespace).unwrap());
+
+                        flatten_metadata(metadata.get(&skpr_namespace).unwrap(), &mut meta);
+
+                        let mut flat: Metadata =Metadata::new().unwrap();
+                        flat.fields = Box::new(meta);
+                        output_metadata.insert(skpr_namespace.clone(), flat);
+
+                        // println!("{:?}", output_metadata);
+                        // exit(0);
+
+                    } else {
+                        output_metadata = metadata.clone();
+                    }
+
                     // let mut skpr_namespace: String = "".to_string();
                     // if let Some((a, b)) = path.display().to_string().split_once("done/") {
                     //     if let Some((hash, namespace_part)) = b.to_string().split_once("-") {
@@ -544,8 +566,10 @@ fn output_sync(metadata: HashMap<String, Metadata>) {
 
                     // println!("getting schema: {} from file: {}", skpr_namespace, path.to_str().unwrap());
 
+
+
                     arrow_schema = convert_skippr_to_arrow(
-                        metadata.get(&skpr_namespace).unwrap().fields.clone(),
+                        output_metadata.get(&skpr_namespace).unwrap().fields.clone(),
                     );
 
                     schema_ref = Arc::new(arrow_schema.unwrap());
@@ -565,3 +589,15 @@ fn output_sync(metadata: HashMap<String, Metadata>) {
         // }
     // });
 }
+
+pub fn flatten_metadata(metadata: &Metadata, flattened: &mut HashMap<String, Metadata>) {
+    for (key, val) in metadata.fields.iter() {
+        if (val.determined_type == "record" || val.determined_type == "map") {
+            flatten_metadata(val, flattened);
+        } else {
+            flattened.insert(val.out_field_name.clone(), val.clone());
+            flatten_metadata(val, flattened);
+        }
+    }
+}
+
