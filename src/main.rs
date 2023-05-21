@@ -48,6 +48,7 @@ extern crate clap;
 extern crate core;
 
 use clap::Parser;
+use once_cell::sync::Lazy;
 
 mod ingest;
 
@@ -67,6 +68,9 @@ use crate::plugins::s3_input::DataSourceS3Plugin;
 use crate::plugins::s3_inventory::DataSourceS3InventoryPlugin;
 
 use crate::ingest_work::OUTPUT_FILES_STATIC;
+
+pub static RUNNING: Lazy<Mutex<AtomicBool>> =
+    Lazy::new(|| Mutex::new(AtomicBool::new(true)));
 
 #[tokio::main]
 async fn main() {
@@ -265,21 +269,24 @@ async fn sync() {
 
     let _newmeta_clone = skippr_metadata.clone();
 
-    let running = Arc::new(AtomicBool::new(true));
-    let r = running.clone();
+    // let r = running.clone();
 
     ctrlc::set_handler(move || {
-        if r.load(Ordering::SeqCst) {
+        if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
             println!("Received Ctrl+C: Gracefully shutting down");
-            r.store(false, Ordering::SeqCst);
+            RUNNING.lock().unwrap().store(false, Ordering::SeqCst);
 
             // Config::set_config(&newmeta_clone.lock().unwrap(),true);
 
             println!("Flushing ingest buffers");
             let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
             ingest_work::Ingest::flush_buffers(true, &mut output_files);
-            println!("Flushing output buffers");
-            output_sync(_newmeta_clone.lock().unwrap().clone());
+            // println!("Flushing output buffers");
+            // output_sync(_newmeta_clone.lock().unwrap().clone());
+
+            println!("Greaceful shutdown complete... bye");
+            std::process::exit(0);
+
         } else {
             println!("Received another Ctrl+C signal - no worries, terminating immediately...");
             std::process::exit(0);

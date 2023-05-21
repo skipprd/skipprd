@@ -12,7 +12,10 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::{fs};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::sleep;
+use crate::RUNNING;
 
 #[derive(Clone, Debug)]
 pub struct IngestBatch {
@@ -80,6 +83,7 @@ impl Ingest {
         metrics: &Arc<Mutex<Metrics>>,
         offset_db: &Arc<Offsets>,
     ) {
+
         let data_dir = Config::get_data_dir();
         let output_dir = format!("{}/output", data_dir);
 
@@ -111,6 +115,12 @@ impl Ingest {
             let records: Vec<Value> = SerdeJson::deserialize(&ingest_batch.data);
 
             for mut record in records {
+
+                if !RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+                    sleep(Duration::from_secs(60));
+                    return;
+                }
+
                 if record.is_null() {
 
                     // println!("{}", &ingest_batch.data);
