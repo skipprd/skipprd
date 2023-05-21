@@ -117,7 +117,7 @@ impl Ingest {
             for mut record in records {
 
                 if !RUNNING.lock().unwrap().load(Ordering::SeqCst) {
-                    sleep(Duration::from_secs(60));
+                    sleep(Duration::from_secs(1));
                     return;
                 }
 
