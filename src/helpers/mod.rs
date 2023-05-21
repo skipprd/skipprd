@@ -18,6 +18,7 @@ pub mod offsets;
 use crate::helpers::configuration::Config;
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
+use crate::discover::Metadata;
 
 // static clean_field_cache: Lazy<Mutex<i64>> = Lazy::new(|| Mutex::new(1));
 static clean_field_cache: Lazy<Mutex<HashMap<String, bool>>> =
@@ -139,41 +140,50 @@ impl Helpers {
         pass
     }
 
-    fn flatten_internal(json: &Value, prefix: &str, result: &mut Map<String, Value>) {
+    // fn flatten_internal(json: &Value, result: &mut Map<String, Value>, metadata: &Metadata) {
+    fn flatten_internal(field: &str, json: &Value, result: &mut Map<String, Value>) {
         match json {
             Value::Object(map) => {
                 if map.is_empty() {
-                    result.insert(prefix.to_string(), json.clone());
+                    // result.insert(metadata.get(), json.clone());
                 } else {
                     for (key, value) in map {
-                        let new_key = if prefix.is_empty() {
-                            key.clone()
-                        } else {
-                            format!("{}_{}", prefix, key)
-                        };
-                        Helpers::flatten_internal(value, &new_key, result);
+                        // let new_key = if prefix.is_empty() {
+                        //     key.clone()
+                        // } else {
+                        //     format!("{}_{}", prefix, key)
+                        // };
+                        // Helpers::flatten_internal(value, result, metadata.fields.get(&key.clone()).unwrap());
+                        Helpers::flatten_internal(key, value, result);
                     }
                 }
             }
-            // Value::Array(arr) => {
-                // if arr.is_empty() {
-                //     result.insert(prefix.to_string(), json.clone());
-                // } else {
-                //     for (index, value) in arr.iter().enumerate() {
-                //         let new_key = format!("{}_{}", prefix, index);
-                //         Helpers::flatten_internal(value, &new_key, result);
-                //     }
-                // }
-            // }
+            Value::Array(arr) => {
+                if arr.is_empty() {
+                    // result.insert(prefix.to_string(), json.clone());
+                } else {
+                    for (index, value) in arr.iter().enumerate() {
+                        // let new_key = format!("{}_{}", prefix, index);
+                        // Helpers::flatten_internal(value, result, metadata.fields.get(&index.to_string()).unwrap());
+                        Helpers::flatten_internal(&index.to_string(), value, result);
+                    }
+                }
+            }
             _ => {
-                result.insert(prefix.to_string(), json.clone());
+                // if metadata.determined_type != "record" {
+                //     result.insert(metadata.out_field_name.clone(), json.clone());
+                    result.insert(field.to_string(), json.clone());
+                // }
             }
         }
     }
 
-    pub fn flatten(json: &Value) -> Value {
+    pub fn flatten(json: &Value, metadata: &HashMap<String, Metadata>) -> Value {
         let mut result = Map::new();
-        Helpers::flatten_internal(json, "", &mut result);
+        for (key, value) in  json.as_object().unwrap() {
+            Helpers::flatten_internal(key, value, &mut result);
+        }
+        // Helpers::flatten_internal(json, &mut result, metadata);
         Value::Object(result)
     }
 
@@ -464,41 +474,136 @@ mod flattern_tests {
     use serde_json::json;
 
     #[test]
-    fn test_flatten() {
-        let input = json!({
-            "key1": "value1",
-            "key2": {
-                "key3": "value3",
-                "key4": {
-                    "key5": "value5"
-                }
-            },
-            "key6": ["value6", "value7", {
-                "key8": "value8"
-            }]
-        });
-        let expected_output = json!({
-            "key1": "value1",
-            "key2_key3": "value3",
-            "key2_key4_key5": "value5",
-            "key6_0": "value6",
-            "key6_1": "value7",
-            "key6_2_key8": "value8"
-        });
-        assert_eq!(Helpers::flatten(&input), expected_output);
-
-        let input = json!({
-            "empty_obj": {},
-            "empty_arr": [],
-            "empty_str": ""
-        });
-        let expected_output = json!({
-            "empty_obj": {},
-            "empty_arr": [],
-            "empty_str": ""
-        });
-        assert_eq!(Helpers::flatten(&input), expected_output);
+    fn test_metadata_default() {
+        let default_metadata = Metadata::new().unwrap();
+        assert_eq!(default_metadata.count, 0);
+        assert!(default_metadata.types.is_empty());
+        assert_eq!(default_metadata.parent_type, "");
+        assert!(default_metadata.fields.is_empty());
+        assert!(default_metadata.date_candidate.is_none());
+        assert!(default_metadata.evolution.is_empty());
+        assert!(!default_metadata.enabled);
+        assert_eq!(default_metadata.out_field_name, "");
+        assert_eq!(default_metadata.determined_type, "");
+        assert_eq!(default_metadata.determined_type_values, "");
     }
+
+    #[test]
+    fn test_flatten_empty_object() {
+        let json = json!({});
+        let metadata = HashMap::new();
+        let flattened = Helpers::flatten(&json, &metadata);
+        assert_eq!(flattened, json!({}));
+    }
+
+    #[test]
+    fn test_flatten_simple_object() {
+        let json = json!(
+            {
+                "field": "value",
+                "contact": {
+                    "name": "Dave",
+                    "tel": "123"
+                }
+            }
+        );
+        let mut metadata = HashMap::new();
+        metadata.insert("field".into(), Metadata {
+            count: 1,
+            types: HashMap::new(),
+            parent_type: "".into(),
+            fields: Box::new(HashMap::new()),
+            date_candidate: None,
+            evolution: Box::new(HashMap::new()),
+            enabled: true,
+            out_field_name: "field".into(),
+            determined_type: "".into(),
+            determined_type_values: "".into(),
+        });
+        metadata.insert("name".into(), Metadata {
+            count: 1,
+            types: HashMap::new(),
+            parent_type: "".into(),
+            fields: Box::new(HashMap::new()),
+            date_candidate: None,
+            evolution: Box::new(HashMap::new()),
+            enabled: true,
+            out_field_name: "contact_name".into(),
+            determined_type: "".into(),
+            determined_type_values: "".into(),
+        });
+        metadata.insert("tel".into(), Metadata {
+            count: 1,
+            types: HashMap::new(),
+            parent_type: "".into(),
+            fields: Box::new(HashMap::new()),
+            date_candidate: None,
+            evolution: Box::new(HashMap::new()),
+            enabled: true,
+            out_field_name: "contact_tel".into(),
+            determined_type: "".into(),
+            determined_type_values: "".into(),
+        });
+        let flattened = Helpers::flatten(&json, &metadata);
+        assert_eq!(flattened, json!({ "field": "value", "contact_name": "Dave", "contact_tel": "123" }));
+    }
+
+
+    // #[test]
+    // fn test_flatten() {
+    //     let input = json!({
+    //         "key1": "value1",
+    //         "key2": {
+    //             "key3": "value3",
+    //             "key4": {
+    //                 "key5": "value5"
+    //             }
+    //         },
+    //         "key6": ["value6", "value7"]
+    //     });
+    //     let expected_output = json!({
+    //         "key1": "value1",
+    //         "key2_key3": "value3",
+    //         "key2_key4_key5": "value5",
+    //         "key6": ["value6", "value7"]
+    //     });
+    //     assert_eq!(Helpers::flatten(&input), expected_output);
+    //
+    //
+    //     let input = json!({
+    //         "key1": "value1",
+    //         "key2": {
+    //             "key3": "value3",
+    //             "key4": {
+    //                 "key5": "value5"
+    //             }
+    //         },
+    //         "key6": ["value6", "value7", {
+    //             "key8": "value8"
+    //         }]
+    //     });
+    //     let expected_output = json!({
+    //         "key1": "value1",
+    //         "key2_key3": "value3",
+    //         "key2_key4_key5": "value5",
+    //         "key6_0": "value6",
+    //         "key6_1": "value7",
+    //         "key6_2_key8": "value8"
+    //     });
+    //     assert_eq!(Helpers::flatten(&input), expected_output);
+    //
+    //     let input = json!({
+    //         "empty_obj": {},
+    //         "empty_arr": [],
+    //         "empty_str": ""
+    //     });
+    //     let expected_output = json!({
+    //         "empty_obj": {},
+    //         "empty_arr": [],
+    //         "empty_str": ""
+    //     });
+    //     assert_eq!(Helpers::flatten(&input), expected_output);
+    // }
 
     // Additional tests can be written similarly...
 }

@@ -251,9 +251,9 @@ impl AnalyseSchema {
                 // newMeta = &mut metadata.clone();
             }
 
-            if Config::truth_value(faltten_events) {
-                v = Helpers::flatten(&v);
-            }
+            // if Config::truth_value(faltten_events) {
+            //     v = Helpers::flatten(&v);
+            // }
 
             i += 1;
 
@@ -933,6 +933,8 @@ impl AnalyseSchema {
     pub fn determine_field_types(
         metadata: &mut HashMap<String, Metadata>,
         parent_type: Option<&String>,
+        parent_field: Option<&String>,
+        flatten: bool
     ) {
         let demoted_types = vec!["boolean", "date", "timestamp", "timestamp_milli"];
 
@@ -942,7 +944,16 @@ impl AnalyseSchema {
                 field.parent_type = parent_type.to_string();
             }
 
-            field.out_field_name = Helpers::clean_field_name(field_name.to_string());
+            if flatten {
+                if let Some(parent_field) = parent_field {
+                    field.out_field_name = format!("{}_{}", parent_field, Helpers::clean_field_name(field_name.to_string()));
+                } else {
+                    field.out_field_name = Helpers::clean_field_name(field_name.to_string());
+                }
+
+            } else {
+                field.out_field_name = Helpers::clean_field_name(field_name.to_string());
+            }
 
             if field.determined_type == *"" {
                 let mut highest_type = "".to_string();
@@ -1045,6 +1056,8 @@ impl AnalyseSchema {
                     AnalyseSchema::determine_field_types(
                         &mut field.fields,
                         Some(&field.determined_type),
+                        Some(&field.out_field_name),
+                        flatten
                     );
                 }
             }
@@ -1231,7 +1244,7 @@ mod tests {
         let mut newMeta =
             AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1), &mut metadata).unwrap();
 
-        AnalyseSchema::determine_field_types(&mut newMeta, None);
+        AnalyseSchema::determine_field_types(&mut newMeta, None, None, false);
 
         remove_file(Path::new(&format!("./{}", random_tmp_file_name))).unwrap();
 
@@ -1414,7 +1427,7 @@ mod tests {
         let mut newMeta =
             AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1), &mut metadata).unwrap();
 
-        AnalyseSchema::determine_field_types(&mut newMeta, None);
+        AnalyseSchema::determine_field_types(&mut newMeta, None, None, false);
 
         remove_file(Path::new(&format!("./{}", random_tmp_file_name)));
 
@@ -1620,7 +1633,7 @@ mod tests {
         let mut newMeta =
             AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1), &mut metadata).unwrap();
 
-        AnalyseSchema::determine_field_types(&mut newMeta, None);
+        AnalyseSchema::determine_field_types(&mut newMeta, None, None, false);
 
         remove_file(Path::new(&format!("./{}", random_tmp_file_name)));
 

@@ -7,6 +7,9 @@ use serde_json::{Map, Value};
 use std::borrow::BorrowMut;
 use std::collections::HashMap;
 use std::io::{BufReader, Read};
+use std::ops::Index;
+use std::process::exit;
+use crate::helpers::configuration::Config;
 
 #[derive(Default)]
 pub struct IngestRecord {
@@ -28,11 +31,13 @@ pub fn fast_path_ingest(
     unwrapped_message: &Value,
     metadata: &mut HashMap<String, Metadata>,
     updatedSchema: &mut String,
+    flatten: bool
 ) -> Value {
     // let mut helpers = Helpers { clean_field_cache: Default::default() };
 
     // let mut message = default_msgs[namespace].clone();
     // let mut message = SerderParquet::default_message(metadata);
+
 
     // let mut message: Vec<Value> = Vec::with_capacity(batch_size);
     let mut message: Value = Value::Null;
@@ -56,14 +61,17 @@ pub fn fast_path_ingest(
         };
 
         let resolved_value =
-            fast_set_value(&field_data_type, &field, value, metadata, updatedSchema);
+            fast_set_value(&field_data_type, &field, value, metadata, updatedSchema, flatten);
 
-        // println!("Setting message with field: {:?}", resolved_value);
+        // println!("Setting message with field: {:?} and value {:?}", field, resolved_value);
 
         // let foo = resolved_value;
         // ignore if null, use default message which has correct null for data type
         if !resolved_value.is_null() {
+
             message[metadata.get(field).unwrap().clone().out_field_name] = resolved_value;
+
+            // println!("{:?}", message);
             // match resolved_value {
             //     Value::Object(_) => message.as_array_mut().unwrap().push(resolved_value),
             //     _ => println!("Row needs to be of type object, got: {:?}", resolved_value)
@@ -95,6 +103,12 @@ pub fn fast_path_ingest(
 
     // let message = message[..];
 
+    // println!("{:?}", message);
+    if flatten {
+        message = Helpers::flatten(&message, &metadata);
+    }
+    // println!("{:?}", message);
+    // exit(0);
     message
 }
 
@@ -110,6 +124,7 @@ fn fast_set_value(
     value: &Value,
     metadata: &mut HashMap<String, Metadata>,
     updatedSchema: &mut String,
+    flatten: bool
 ) -> Value {
     // let _parent_type = match metadata.get_mut(field) {
     //     Some(pt) => &pt.parent_type,
@@ -125,9 +140,6 @@ fn fast_set_value(
         let mut new_value: Value = Value::Null;
 
         if !value.to_string().is_empty() {
-            // println!("value is {}", value);
-            // println!("field is {}", field);
-            // println!("data_type is {}", data_type);
 
             if data_type == "record" {
                 // println!("{} is record", field);
@@ -141,7 +153,7 @@ fn fast_set_value(
                         match metadata.get(field).unwrap().fields.get(sub_field) {
                             Some(_t) => (),
                             None => {
-                                discoverIngest(field, value, metadata, updatedSchema);
+                                discover_ingest(field, value, metadata, updatedSchema, flatten);
                             }
                         }
 
@@ -168,6 +180,7 @@ fn fast_set_value(
                                 sub_value,
                                 &mut metadata.get_mut(field).unwrap().fields,
                                 updatedSchema,
+                                flatten
                             );
 
                             m.insert(metadata.get(field).unwrap().fields.get(sub_field).unwrap().clone().out_field_name, newval);
@@ -186,7 +199,7 @@ fn fast_set_value(
                         match metadata.get(field).unwrap().fields.get(&i.to_string()) {
                             Some(_t) => (),
                             None => {
-                                discoverIngest(field, value, metadata, updatedSchema);
+                                discover_ingest(field, value, metadata, updatedSchema, flatten);
                             }
                         }
 
@@ -213,6 +226,7 @@ fn fast_set_value(
                                 sub_value,
                                 &mut metadata.get_mut(field).unwrap().fields,
                                 updatedSchema,
+                                flatten
                             );
 
                             m.insert(metadata.get(field).unwrap().fields.get(&i.to_string()).unwrap().clone().out_field_name, newval);
@@ -242,6 +256,7 @@ fn fast_set_value(
                                 value,
                                 fields,
                                 updatedSchema,
+                                flatten
                             );
                         }
                     }
@@ -264,6 +279,11 @@ fn fast_set_value(
             } else if data_type == "array" {
                 new_value = value.to_owned();
             } else {
+
+                // println!("value is {}", value);
+                // println!("field is {}", field);
+                // println!("data_type is {}", data_type);
+
                 if data_type == "date" {
                     // Hive Timestamp doesn't support string dates
 
@@ -299,17 +319,23 @@ fn fast_set_value(
                     };
                 }
 
-                let new_value = match data_type {
-                    "string" => value.as_str().map(|s| Value::String(s.to_string())),
+                let scalar_value = match data_type {
+                    "string" => {
+                        value.as_str().map(|s| Value::String(s.to_string()))
+                    },
                     "timestamp" | "timestamp_milli" | "int" | "integer" | "long" => {
                         value.as_i64().map(Value::from)
                     }
                     "double" => value.as_f64().map(Value::from),
                     "boolean" => value.as_bool().map(Value::from),
-                    _ => None,
+                    _ => {
+                        None
+                    },
                 };
 
-                new_value.unwrap_or(Value::Null);
+                // println!("field {} value: {:?}", field, scalar_value);
+                new_value = scalar_value.unwrap_or(Value::Null);
+                // println!("field {} value: {:?}", field, new_value);
 
                 // if data_type == "string" {
                 //     new_value = match value.as_str() {
@@ -347,17 +373,18 @@ fn fast_set_value(
         }
         new_value
     } else {
-        let discoverd_data_type = discoverIngest(field, value, metadata, updatedSchema);
+        let discoverd_data_type = discover_ingest(field, value, metadata, updatedSchema, flatten);
 
-        fast_set_value(&discoverd_data_type, field, value, metadata, updatedSchema)
+        fast_set_value(&discoverd_data_type, field, value, metadata, updatedSchema, flatten)
     }
 }
 
-fn discoverIngest(
+fn discover_ingest(
     field: &str,
     value: &Value,
     metadata: &mut HashMap<String, Metadata>,
-    updatedSchema: &mut String,
+    updated_schema: &mut String,
+    flatten: bool
 ) -> String {
     let foo: AnalyseSchema = AnalyseSchema { i: 0 };
 
@@ -388,7 +415,7 @@ fn discoverIngest(
         metadata,
     );
 
-    AnalyseSchema::determine_field_types(metadata, None);
+    AnalyseSchema::determine_field_types(metadata, None, None, flatten);
 
     // println!("{:?}", metadata.get_mut(field).unwrap());
 
@@ -408,7 +435,7 @@ fn discoverIngest(
 
     // exit(0);
 
-    *updatedSchema = "yes".to_string();
+    *updated_schema = "yes".to_string();
 
     discoverd_data_type.clone()
 }
@@ -529,6 +556,7 @@ mod tests {
             records.first().unwrap(),
             &mut newMeta.get_mut("").unwrap().fields,
             &mut updatedSchema,
+            false
         );
 
         let _f = [2, 15, 33, 45, 56, 57, 47, 36, 19, 5];

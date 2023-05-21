@@ -84,10 +84,10 @@ impl Ingest {
         offset_db: &Arc<Offsets>,
     ) {
 
+        let flatten = Config::truth_value(&Config::getenv("DATA_SOURCE_FLATTEN_EVENTS", "no"));
+
         let data_dir = Config::get_data_dir();
         let output_dir = format!("{}/output", data_dir);
-
-        let faltten_events = &Config::getenv("DATA_SOURCE_FLATTEN_EVENTS", "no");
 
         let updated_schema: Arc<Mutex<String>> = Arc::new(Mutex::new("no".to_string()));
 
@@ -152,9 +152,9 @@ impl Ingest {
                         skpr_time_bucket = BufferChunker::event_time_bucket(skpr_time.unwrap());
                     }
 
-                    if Config::truth_value(faltten_events) {
-                        record = Helpers::flatten(&record);
-                    }
+                    // if Config::truth_value(faltten_events) {
+                    //     record = Helpers::flatten(&record);
+                    // }
 
                     let output_file_name = BufferChunker::encode_chunk_name(
                         "ingest",
@@ -190,6 +190,7 @@ impl Ingest {
                         &record,
                         &mut meta.get_mut(&skpr_namespace).unwrap().fields,
                         &mut updated_schema_clone.lock().unwrap(),
+                        flatten
                     );
 
                     buf_str = msg.to_string() + "\n";

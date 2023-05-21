@@ -198,7 +198,9 @@ async fn discover() {
         }
     }
 
-    AnalyseSchema::determine_field_types(&mut skippr_metadata, None);
+    let flatten = Config::truth_value(&Config::getenv("DATA_SOURCE_FLATTEN_EVENTS", "no"));
+
+    AnalyseSchema::determine_field_types(&mut skippr_metadata, None, None, flatten);
 
     Config::set_config(&skippr_metadata, false).await;
 
