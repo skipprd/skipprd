@@ -12,6 +12,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::{fs};
+use std::time::SystemTime;
 
 #[derive(Clone, Debug)]
 pub struct IngestBatch {
@@ -22,10 +23,11 @@ pub struct IngestBatch {
 // Can't rely on file.metadata() as we don't know we're dealing with a unix FS. e.g. EFS
 pub struct OutputFile {
     pub(crate) bytes: u64,
+    pub(crate) seconds: u64,
     pub(crate) file: File,
 }
 
-const MAX_BUFFER_SIZE: u64 = 1024 * 1024 * 10;
+// const MAX_BUFFER_SIZE: u64 = 1024 * 1024 * 10;
 
 static parse_namespace_cache: Lazy<Mutex<HashMap<String, String>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
@@ -53,7 +55,7 @@ impl Ingest {
             // let mut file= &output_file.file;
             // file.flush().expect(&format!("Could not flush file {}", filename));
 
-            if force || Ingest::is_file_size_exceeded(&output_file) {
+            if force || Ingest::is_file_size_exceeded(&output_file) || Ingest::is_file_time_exceeded(&output_file) {
                 let new_filename = format!(
                     "{}/done/{}-{}",
                     output_dir,
@@ -90,8 +92,6 @@ impl Ingest {
         let metrcis_clone = metrics.clone();
         let offset_db_clone = offset_db.clone();
 
-        let mut bytes: u64 = 0;
-
         let output_files = &mut OUTPUT_FILES_STATIC.lock().unwrap();
 
         // thread::spawn(move || {
@@ -104,6 +104,7 @@ impl Ingest {
             let has_offsets =
                 offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Closed, 0);
 
+            let mut bytes: u64 = 0;
             let mut i = 1;
             let mut j = 1;
 
@@ -161,8 +162,9 @@ impl Ingest {
                             .open(output_file.clone())
                             .unwrap();
 
-                        let mut new_file = OutputFile {
+                        let new_file = OutputFile {
                             bytes: record_bytes,
+                            seconds: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(),
                             file: f
                         };
 
@@ -193,6 +195,11 @@ impl Ingest {
                         .get_mut(&output_file_name)
                         .unwrap()
                         .bytes += record_bytes;
+
+                    output_files
+                        .get_mut(&output_file_name)
+                        .unwrap()
+                        .seconds = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
 
                     buf_str.clear();
 
@@ -237,6 +244,17 @@ impl Ingest {
     }
 
     fn is_file_size_exceeded(file: &OutputFile) -> bool {
-        file.bytes > MAX_BUFFER_SIZE
+        let buffer_size = Config::getenv("BUFFER_THRESHOLD_BYTES", "10485760"); // 10MB default
+
+        if file.bytes > buffer_size.parse::<u64>().unwrap() {
+            return true
+        }
+
+        false
+    }
+
+    fn is_file_time_exceeded(file: &OutputFile) -> bool {
+        let ttl = Config::getenv("BUFFER_THRESHOLD_SECONDS", "300"); // 10MB default
+        file.seconds > ttl.parse::<u64>().unwrap()
     }
 }
