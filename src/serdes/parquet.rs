@@ -254,7 +254,7 @@ impl SerdeParquet {
         let skpr_partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
         let source_time = BufferChunker::decode_file_time(path.to_str().unwrap());
 
-        // let skpr_namespace = Helpers::parse_namespace_field(&record, source_namespace, &mut parse_namespace_cache);
+        // let skpr_namespace = Helpers::parse_namespace_field(&record, source_namespace, &mut PARSE_NAMESPACE_CACHE);
 
         let output_file_name = BufferChunker::encode_chunk_name(
             "ingest",

@@ -53,7 +53,7 @@ impl DataOutputAwsAthenaPlugin {
     }
 
     pub async fn sync(&self, metadata: HashMap<std::string::String, discover::Metadata>) {
-        let mut partition_cache: Vec<Digest> = vec![];
+        let mut partition_cache: Vec<String> = vec![];
 
         while let Some(filename) = BufferChunker::next_file() {
             let mut file = BufReader::new(File::open(&filename).unwrap());
@@ -616,7 +616,7 @@ impl AwsAthena {
         namespace: &str,
         partition_values: Vec<String>,
         _key: &str,
-        partition_cache: &mut Vec<Digest>,
+        partition_cache: &mut Vec<String>,
         metadata: &discover::Metadata,
     ) -> Result<bool, Error> {
         let database = Config::getenv("GLUE_DATABASE_NAME", "");

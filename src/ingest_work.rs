@@ -32,7 +32,7 @@ pub struct OutputFile {
 
 // const MAX_BUFFER_SIZE: u64 = 1024 * 1024 * 10;
 
-static parse_namespace_cache: Lazy<Mutex<HashMap<String, String>>> =
+pub static PARSE_NAMESPACE_CACHE: Lazy<Mutex<HashMap<String, String>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 pub static OUTPUT_FILES_STATIC: Lazy<Mutex<HashMap<String, OutputFile>>> =
@@ -141,7 +141,7 @@ impl Ingest {
                     let skpr_namespace = Helpers::parse_namespace_field(
                         &record,
                         Config::get_pipeline_name(),
-                        &mut parse_namespace_cache.lock().unwrap(),
+                        &mut PARSE_NAMESPACE_CACHE.lock().unwrap(),
                     );
                     let skpr_partition = Helpers::parse_partition_field(&record);
                     let skpr_time = Helpers::parse_time_field(&record);

@@ -234,6 +234,7 @@ impl Helpers {
 
             clean_partition = partitions.join("-");
             clean_partition = clean_partition.trim_matches('-').to_lowercase();
+            clean_partition = Helpers::clean_field_name(clean_partition);
         }
 
         clean_partition
@@ -270,6 +271,8 @@ impl Helpers {
                 clean_namespace = namespaces.join("_");
 
                 clean_namespace = clean_namespace.trim_matches('_').to_lowercase();
+
+                clean_namespace = Helpers::clean_field_name(clean_namespace);
             }
         }
 
