@@ -250,6 +250,14 @@ fn fast_set_value(
                         .filter_map(|(k, v)| Some((k, v)))
                     {
                         if Some(val).is_some() {
+
+                            match fields.get(key){
+                                Some(_t) => (),
+                                None => {
+                                    discover_ingest(key, val, fields, updatedSchema, flatten);
+                                }
+                            }
+
                             new_value[fields.get(key).unwrap().clone().out_field_name] = fast_set_value(
                                 determined_type_values,
                                 key,
