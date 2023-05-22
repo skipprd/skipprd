@@ -537,10 +537,10 @@ fn output_sync(metadata: HashMap<String, Metadata>) {
                     if flatten {
 
                         let mut meta : HashMap<String, Metadata> = HashMap::new();
-                        
+
                         flatten_metadata(metadata.get(&skpr_namespace).unwrap(), &mut meta);
 
-                        let mut flat: Metadata =Metadata::new().unwrap();
+                        let mut flat: Metadata = Metadata::new().unwrap();
                         flat.fields = Box::new(meta);
                         output_metadata.insert(skpr_namespace.clone(), flat);
 
