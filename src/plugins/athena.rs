@@ -72,7 +72,11 @@ impl DataOutputAwsAthenaPlugin {
             let mut full_key = "".to_string();
             // key = trimmed_key;
             if !namespace.is_empty() {
-                full_key = format!("{}/{}", trimmed_key, namespace);
+                if !trimmed_key.is_empty() {
+                    full_key = format!("{}/{}", trimmed_key, namespace);
+                } else {
+                    full_key = format!("{}", namespace);
+                }
             }
 
             // Partitioning
