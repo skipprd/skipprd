@@ -26,7 +26,7 @@ pub struct IngestBatch {
 // Can't rely on file.metadata() as we don't know we're dealing with a unix FS. e.g. EFS
 pub struct OutputFile {
     pub(crate) bytes: u64,
-    pub(crate) seconds: u64,
+    pub(crate) upated_at: SystemTime,
     pub(crate) file: File,
 }
 
@@ -174,7 +174,7 @@ impl Ingest {
 
                         let new_file = OutputFile {
                             bytes: record_bytes,
-                            seconds: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(),
+                            upated_at: SystemTime::now(),
                             file: f
                         };
 
@@ -210,7 +210,7 @@ impl Ingest {
                     output_files
                         .get_mut(&output_file_name)
                         .unwrap()
-                        .seconds = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
+                        .upated_at = SystemTime::now();
 
                     buf_str.clear();
 
@@ -256,16 +256,11 @@ impl Ingest {
 
     fn is_file_size_exceeded(file: &OutputFile) -> bool {
         let buffer_size = Config::getenv("BUFFER_THRESHOLD_BYTES", "10485760"); // 10MB default
-
-        if file.bytes > buffer_size.parse::<u64>().unwrap() {
-            return true
-        }
-
-        false
+        file.bytes > buffer_size.parse::<u64>().unwrap()
     }
 
     fn is_file_time_exceeded(file: &OutputFile) -> bool {
         let ttl = Config::getenv("BUFFER_THRESHOLD_SECONDS", "300"); // 10MB default
-        file.seconds > ttl.parse::<u64>().unwrap()
+        SystemTime::now().duration_since(file.upated_at).unwrap().as_secs() > ttl.parse::<u64>().unwrap()
     }
 }
