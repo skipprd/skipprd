@@ -321,7 +321,7 @@ fn fast_set_value(
                             }
                         }
                         None => {
-                            println!("Could not format date to int using format");
+                            // println!("Could not format date to int using format");
                             Value::Null
                         }
                     };
