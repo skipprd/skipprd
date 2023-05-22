@@ -232,7 +232,7 @@ async fn sync() {
 
     let data_dir = Config::get_data_dir();
 
-    let _metadata_file = format!("{}/metadata.json", data_dir);
+    // let _metadata_file = format!("{}/metadata.json", data_dir);
 
     // let skippr_metadata = Arc::new(Mutex::new(match File::open(metadata_file.clone()) {
     let skippr_metadata = Arc::new(Mutex::new(match Config::get_config().await {
@@ -537,17 +537,12 @@ fn output_sync(metadata: HashMap<String, Metadata>) {
                     if flatten {
 
                         let mut meta : HashMap<String, Metadata> = HashMap::new();
-
-                        // output_metadata = flatten_metadata(metadata.get(&skpr_namespace).unwrap());
-
+                        
                         flatten_metadata(metadata.get(&skpr_namespace).unwrap(), &mut meta);
 
                         let mut flat: Metadata =Metadata::new().unwrap();
                         flat.fields = Box::new(meta);
                         output_metadata.insert(skpr_namespace.clone(), flat);
-
-                        // println!("{:?}", output_metadata);
-                        // exit(0);
 
                     } else {
                         output_metadata = metadata.clone();
