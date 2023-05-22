@@ -285,6 +285,10 @@ impl Helpers {
         clean_namespace
     }
 
+    fn is_millisecond_timestamp(time: i64) -> bool {
+        let num_digits = ((time as f64).log10() + 1.0).floor() as i32;
+        num_digits > 10
+    }
     pub fn parse_time_field(message: &Value) -> Option<i64> {
         // default to beginning of epoch.
         let mut time_field_value: Option<i64> = None;
@@ -298,26 +302,29 @@ impl Helpers {
                         // Handle millisecond timestamps
                         match value.as_i64() {
                             Some(i64_val) => {
-                                if i64_val > 1000000000000 {
-                                    time_field_value = Some(i64_val / 1000)
+                                if Helpers::is_millisecond_timestamp(i64_val) {
+                                    time_field_value = Some(i64_val / 1000);
                                 } else {
-                                    time_field_value = None
+                                    // Handle second timestamps
+                                    time_field_value = Some(i64_val);
                                 }
                             }
                             None => time_field_value = None,
                         }
 
-                        // Handle datetime strings
-                        match value.as_str() {
-                            Some(val) => {
-                                if let Ok(dt) = DateTime::parse_from_rfc3339(val) {
-                                    time_field_value = Some(dt.with_timezone(&Utc).timestamp());
+                        if time_field_value.is_none() {
+                            // Handle datetime strings
+                            match value.as_str() {
+                                Some(val) => {
+                                    if let Ok(dt) = DateTime::parse_from_rfc3339(val) {
+                                        time_field_value = Some(dt.with_timezone(&Utc).timestamp());
+                                    }
                                 }
-                            }
-                            None => {
-                                time_field_value = None;
-                            }
-                        };
+                                None => {
+                                    time_field_value = None;
+                                }
+                            };
+                        }
                     }
                     None => {
                         time_field_value = None;
@@ -359,6 +366,92 @@ impl Helpers {
 }
 
 #[cfg(test)]
+mod parse_time_field_tests {
+    use super::*;
+    use serde_json::json;
+    use chrono::prelude::*;
+    use std::env;
+
+    #[test]
+    fn test_parse_time_field_no_time_fields() {
+        // Mocking the environment variable.
+        env::set_var("DATA_OUTPUT_TIME_FIELDS", "");
+
+        let message = json!({
+            "key": "value"
+        });
+
+        assert_eq!(Helpers::parse_time_field(&message), None);
+    }
+
+    #[test]
+    fn test_parse_time_field_with_millisecond_timestamp() {
+        // Mocking the environment variable.
+        env::set_var("DATA_OUTPUT_TIME_FIELDS", "time1");
+
+        let time = Utc::now().timestamp_millis();
+        println!("{}", time);
+        let message = json!({
+            "time1": time
+        });
+
+        assert_eq!(Helpers::parse_time_field(&message), Some(time / 1000));
+    }
+
+    #[test]
+    fn test_parse_time_field_with_invalid_millisecond_timestamp() {
+        // Mocking the environment variable.
+        env::set_var("DATA_OUTPUT_TIME_FIELDS", "time2");
+
+        let time: i64 = 999999999; // Invalid timestamp, less than 1000000000000
+        let message = json!({
+            "time2": time
+        });
+
+        assert_eq!(Helpers::parse_time_field(&message), None);
+    }
+
+    #[test]
+    fn test_parse_time_field_with_valid_second_timestamp() {
+        // Mocking the environment variable.
+        env::set_var("DATA_OUTPUT_TIME_FIELDS", "time3");
+
+        let time: i64 = 1646901960;
+        let message = json!({
+            "time3": time
+        });
+
+        assert_eq!(Helpers::parse_time_field(&message), Some(time));
+    }
+
+    #[test]
+    fn test_parse_time_field_with_datetime_string() {
+        // Mocking the environment variable.
+        env::set_var("DATA_OUTPUT_TIME_FIELDS", "time4");
+
+        let dt = Utc::now();
+        let time = dt.to_rfc3339();
+        let message = json!({
+            "time4": time
+        });
+
+        assert_eq!(Helpers::parse_time_field(&message), Some(dt.timestamp()));
+    }
+
+    #[test]
+    fn test_parse_time_field_with_invalid_datetime_string() {
+        // Mocking the environment variable.
+        env::set_var("DATA_OUTPUT_TIME_FIELDS", "time5");
+
+        let time = "invalid datetime string";
+        let message = json!({
+            "time5": time
+        });
+    }
+}
+
+
+        #[cfg(test)]
 mod parse_partition_tests {
     use super::*;
     use serde_json::json;
