@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read};
@@ -18,6 +19,7 @@ use reqwest::header::{HeaderMap, HeaderName};
 use reqwest::{Client, StatusCode};
 
 use crate::discover::Metadata;
+use crate::flatten_metadata;
 
 use crate::helpers::license::LicenseChecker;
 use crate::helpers::Helpers;
@@ -345,9 +347,27 @@ impl Config {
 
     pub async fn set_config(metadata: &HashMap<String, Metadata>, evolved: bool) {
         if evolved {
+
+            let flatten = Config::truth_value(&Config::getenv("DATA_SOURCE_FLATTEN_EVENTS", "no"));
+
             for (namespace, schema) in metadata.into_iter() {
+
                 println!("Updating Hive '{}' schema", namespace);
-                AwsAthena::create_or_update_schema(&namespace, &schema).await;
+
+
+                if flatten {
+                    let mut out_meta: HashMap<String, Metadata> = HashMap::new();
+                    flatten_metadata(metadata.get(namespace).unwrap(), &mut out_meta);
+
+                    let mut output_metadata: HashMap<String, Metadata> = HashMap::new();
+                    let mut flat: Metadata = Metadata::new().unwrap();
+                    flat.fields = Box::new(out_meta);
+                    output_metadata.insert(namespace.clone(), flat);
+
+                    AwsAthena::create_or_update_schema(&namespace, &output_metadata.get(namespace).unwrap()).await;
+                } else {
+                    AwsAthena::create_or_update_schema(&namespace, &schema).await;
+                }
             }
 
             let data_dir = Config::get_data_dir();
