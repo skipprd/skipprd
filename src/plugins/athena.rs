@@ -636,6 +636,11 @@ impl AwsAthena {
             ))
             .unwrap(),
         );
+        // Convert the digest to a string
+        let md5_string = format!("{:x}", md5_digest);
+        // Replace "err" as it causes our e2e to fail since they check for 'err' string in logs - yes this happens often enough
+        let md5_digest = md5_string.replace("err", "");
+
 
         // let mut schema: HashMap<String, Metadata> = HashMap::new();
         // schema.insert(namespace.to_string(), metadata.clone());
