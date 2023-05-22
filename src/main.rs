@@ -533,47 +533,46 @@ fn output_sync(metadata: HashMap<String, Metadata>) {
                         BufferChunker::decode_file_namespace(path.to_str().unwrap());
                     // let skpr_partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
 
-                    let mut output_metadata: HashMap<String, Metadata> = HashMap::new();
-                    if flatten {
+                    if metadata.get(&skpr_namespace).is_some() {
+                        let mut output_metadata: HashMap<String, Metadata> = HashMap::new();
+                        if flatten {
+                            let mut meta: HashMap<String, Metadata> = HashMap::new();
 
-                        let mut meta : HashMap<String, Metadata> = HashMap::new();
+                            flatten_metadata(metadata.get(&skpr_namespace).unwrap(), &mut meta);
 
-                        flatten_metadata(metadata.get(&skpr_namespace).unwrap(), &mut meta);
+                            let mut flat: Metadata = Metadata::new().unwrap();
+                            flat.fields = Box::new(meta);
+                            output_metadata.insert(skpr_namespace.clone(), flat);
+                        } else {
+                            output_metadata = metadata.clone();
+                        }
 
-                        let mut flat: Metadata = Metadata::new().unwrap();
-                        flat.fields = Box::new(meta);
-                        output_metadata.insert(skpr_namespace.clone(), flat);
+                        // let mut skpr_namespace: String = "".to_string();
+                        // if let Some((a, b)) = path.display().to_string().split_once("done/") {
+                        //     if let Some((hash, namespace_part)) = b.to_string().split_once("-") {
+                        //         skpr_namespace = namespace_part.to_string()
+                        //     }
+                        // }
 
-                    } else {
-                        output_metadata = metadata.clone();
-                    }
+                        // if metadata.get(&skpr_namespace).is_none() {
+                        //     metadata.insert(skpr_namespace.clone(), Metadata::new().unwrap());
+                        // }
 
-                    // let mut skpr_namespace: String = "".to_string();
-                    // if let Some((a, b)) = path.display().to_string().split_once("done/") {
-                    //     if let Some((hash, namespace_part)) = b.to_string().split_once("-") {
-                    //         skpr_namespace = namespace_part.to_string()
-                    //     }
-                    // }
-
-                    // if metadata.get(&skpr_namespace).is_none() {
-                    //     metadata.insert(skpr_namespace.clone(), Metadata::new().unwrap());
-                    // }
-
-                    // println!("getting schema: {} from file: {}", skpr_namespace, path.to_str().unwrap());
-
+                        // println!("getting schema: {} from file: {}", skpr_namespace, path.to_str().unwrap());
 
 
-                    arrow_schema = convert_skippr_to_arrow(
-                        output_metadata.get(&skpr_namespace).unwrap().fields.clone(),
-                    );
+                        arrow_schema = convert_skippr_to_arrow(
+                            output_metadata.get(&skpr_namespace).unwrap().fields.clone(),
+                        );
 
-                    schema_ref = Arc::new(arrow_schema.unwrap());
+                        schema_ref = Arc::new(arrow_schema.unwrap());
 
-                    schema_ref = SerdeParquet::serialize(path.clone(), schema_ref);
+                        schema_ref = SerdeParquet::serialize(path.clone(), schema_ref);
 
-                    match std::fs::remove_file(path) {
-                        Ok(_t) => {}
-                        Err(err) => println!("{:?}", err),
+                        match std::fs::remove_file(path) {
+                            Ok(_t) => {}
+                            Err(err) => println!("{:?}", err),
+                        }
                     }
                 }
                 Err(e) => println!("{:?}", e),
