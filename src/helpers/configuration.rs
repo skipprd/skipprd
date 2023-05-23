@@ -188,7 +188,7 @@ impl Config {
             data_dir.pop();
         }
 
-        let pipeline_name = Config::getenv("PIPELINE_NAME", "default");
+        let pipeline_name = Config::get_pipeline_name();
 
         let data_dir = format!("{}/{}", data_dir, pipeline_name);
         match fs::create_dir_all(&data_dir) {
@@ -221,7 +221,10 @@ impl Config {
         // let default_pipeline_name = format!("{} to {}", input_plugin_name, output_plugin_name);
         
 
-        Config::getenv("PIPELINE_NAME", "default")
+        let workspace = Config::getenv("WORKSPACE_NAME", "default");
+        let pipeline = Config::getenv("PIPELINE_NAME", "default");
+
+        format!("{}_{}", workspace, pipeline)
     }
 
     fn load_file() {
