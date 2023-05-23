@@ -27,9 +27,9 @@ use crate::serdes::json::SerdeJson;
 
 #[derive(Default, Debug, Clone, Deserialize, Serialize)]
 pub struct DateCandidate {
-    check_count: i32,
-    valid_count: i32,
-    field: String,
+    pub(crate) check_count: i32,
+    pub(crate) valid_count: i32,
+    pub(crate) field: String,
     pub(crate) format: String,
 }
 
@@ -778,7 +778,7 @@ impl AnalyseSchema {
         }
     }
 
-    fn is_valid_date(&self, value: &str) -> Option<&str> {
+    pub(crate) fn is_valid_date(&self, value: &str) -> Option<&str> {
         let valid_formats = [
             DateFormats::Atom,
             DateFormats::AtomZ,
@@ -1174,6 +1174,43 @@ mod is_valid_date_tests {
         let date_str = "2022-02-22";
         let _nd = NaiveDate::parse_from_str(date_str, "%Y-%m-%d").unwrap();
         assert_eq!(Some("DateOnly"), foo.is_valid_date(date_str));
+    }
+}
+
+#[cfg(test)]
+mod discover_date_formats_tests {
+    use crate::discover::date_formats::DateFormats;
+    use crate::discover::AnalyseSchema;
+    use chrono::{DateTime, NaiveDate, NaiveDateTime};
+    use serde_json::Value;
+
+    #[test]
+    fn test_valid_date_formats() {
+        let foo: AnalyseSchema = AnalyseSchema { i: 0 };
+
+        let date_str = "2022-01-05T08:30:12.000Z";
+        assert_eq!(Some("Iso8601"), foo.is_valid_date(date_str));
+
+        let fmt = DateFormats::from_str("Iso8601").unwrap();
+        assert_eq!("%Y-%m-%dT%H:%M:%S.%fZ", fmt.as_str());
+        NaiveDateTime::parse_from_str(date_str, fmt.as_str()).unwrap();
+
+        let date_str = "2022-01-07T08:28:07Z";
+        assert_eq!(Some("AtomZ"), foo.is_valid_date(date_str));
+
+        let date_str = "2022-02-22T22:22:22";
+        assert_eq!(Some("Atom"), foo.is_valid_date(date_str));
+
+        let mut date_str = "2021-01-03 02:30:00";
+        assert_eq!(Some("Mysql"), foo.is_valid_date(date_str));
+
+        date_str = "Tue, 22 Feb 2022 22:22:22 GMT";
+        assert_eq!(Some("Rfc850"), foo.is_valid_date(date_str));
+
+        date_str = "2022-02-22";
+        assert_eq!(Some("DateOnly"), foo.is_valid_date(date_str));
+
+
     }
 }
 

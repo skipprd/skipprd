@@ -293,56 +293,27 @@ fn fast_set_value(
                 // println!("data_type is {}", data_type);
 
                 if data_type == "date" {
-                    // Hive Timestamp doesn't support string dates
-
-                    new_value = match value.as_str() {
-                        Some(val) => {
-                            let fmt = &metadata
-                                .get(field)
-                                .unwrap()
-                                .date_candidate
-                                .as_ref()
-                                .unwrap()
-                                .format;
-                            match DateFormats::from_str(fmt) {
-                                Ok(f) => {
-                                    match NaiveDateTime::parse_from_str(val, f.as_str()) {
-                                        Ok(date) => {
-                                            let millis = date.timestamp() * 1000;
-                                            millis.into()
-                                        }
-                                        Err(_) => Value::Null,
-                                    }
-                                }
-                                Err(err) => {
-                                    println!("Error date: {}", err);
-                                    Value::Null
-                                }
-                            }
+                    new_value = set_date(field, value, metadata);
+                } else {
+                    let scalar_value = match data_type {
+                        "string" => {
+                            value.as_str().map(|s| Value::String(s.to_string()))
+                        },
+                        "timestamp" | "timestamp_milli" | "int" | "integer" | "long" => {
+                            value.as_i64().map(Value::from)
                         }
-                        None => {
-                            // println!("Could not format date to int using format");
-                            Value::Null
-                        }
+                        "double" => value.as_f64().map(Value::from),
+                        "boolean" => value.as_bool().map(Value::from),
+                        _ => {
+                            None
+                        },
                     };
+
+                    new_value = scalar_value.unwrap_or(Value::Null);
                 }
 
-                let scalar_value = match data_type {
-                    "string" => {
-                        value.as_str().map(|s| Value::String(s.to_string()))
-                    },
-                    "timestamp" | "timestamp_milli" | "int" | "integer" | "long" => {
-                        value.as_i64().map(Value::from)
-                    }
-                    "double" => value.as_f64().map(Value::from),
-                    "boolean" => value.as_bool().map(Value::from),
-                    _ => {
-                        None
-                    },
-                };
-
                 // println!("field {} value: {:?}", field, scalar_value);
-                new_value = scalar_value.unwrap_or(Value::Null);
+
                 // println!("field {} value: {:?}", field, new_value);
 
                 // if data_type == "string" {
@@ -384,6 +355,41 @@ fn fast_set_value(
         let discoverd_data_type = discover_ingest(field, value, metadata, updatedSchema, flatten);
 
         fast_set_value(&discoverd_data_type, field, value, metadata, updatedSchema, flatten)
+    }
+}
+
+
+fn set_date(field: &str, value: &Value, metadata: &HashMap<String, Metadata>) -> Value {
+    // Hive Timestamp doesn't support string dates
+    match value.as_str() {
+        Some(val) => {
+            let fmt = &metadata
+                .get(field)
+                .unwrap()
+                .date_candidate
+                .as_ref()
+                .unwrap()
+                .format;
+            match DateFormats::from_str(fmt) {
+                Ok(f) => {
+                    match NaiveDateTime::parse_from_str(val, f.as_str()) {
+                        Ok(date) => {
+                            let millis = date.timestamp() * 1000;
+                            millis.into()
+                        }
+                        Err(_) => Value::Null,
+                    }
+                }
+                Err(err) => {
+                    println!("Error date: {}", err);
+                    Value::Null
+                }
+            }
+        }
+        None => {
+            // println!("Could not format date to int using format");
+            Value::Null
+        }
     }
 }
 
@@ -450,6 +456,107 @@ fn discover_ingest(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use chrono::NaiveDateTime;
+    use std::collections::HashMap;
+    use crate::discover::DateCandidate;
+
+    #[test]
+    fn test_set_date_with_valid_date() {
+
+        let foo: AnalyseSchema = AnalyseSchema { i: 0 };
+
+        let mut meta = HashMap::new();
+        let field = "test_field";
+
+        let date_str= "2023-05-21 12:34:56";
+        let format_name = foo.is_valid_date(date_str).unwrap();
+        let format = DateFormats::from_str(format_name).unwrap().as_str();
+
+        let date_candidate = DateCandidate {
+            check_count: 1,
+            valid_count: 1,
+            field: String::from(field),
+            format: String::from(format_name), // ISO 8601 format
+        };
+
+        meta.insert(
+            String::from(field),
+            Metadata {
+                count: 1,
+                types: HashMap::new(),
+                parent_type: String::from("parent"),
+                fields: Box::new(HashMap::new()),
+                date_candidate: Some(date_candidate),
+                evolution: Box::new(HashMap::new()),
+                enabled: true,
+                out_field_name: String::from(field),
+                determined_type: String::from("date"),
+                determined_type_values: "".to_string(),
+            },
+        );
+
+
+        let value = Value::String(String::from(date_str));
+
+        let result = set_date(field, &value, &meta);
+
+        let expected_date = NaiveDateTime::parse_from_str(date_str, format).unwrap();
+        let expected_millis = Value::Number(serde_json::Number::from(expected_date.timestamp() * 1000));
+
+        assert_eq!(result, expected_millis);
+    }
+
+    #[test]
+    fn test_set_date_with_valid_iso_date() {
+
+        let foo: AnalyseSchema = AnalyseSchema { i: 0 };
+
+        let mut meta = HashMap::new();
+        let field = "test_field";
+
+        let date_str= "2023-05-23T07:09:03.000Z";
+        let format_name = foo.is_valid_date(date_str).unwrap();
+        let format = DateFormats::from_str(format_name).unwrap().as_str();
+
+        let date_candidate = DateCandidate {
+            check_count: 1,
+            valid_count: 1,
+            field: String::from(field),
+            format: String::from(format_name),
+        };
+
+        meta.insert(
+            String::from(field),
+            Metadata {
+                count: 1,
+                types: HashMap::new(),
+                parent_type: String::from("parent"),
+                fields: Box::new(HashMap::new()),
+                date_candidate: Some(date_candidate),
+                evolution: Box::new(HashMap::new()),
+                enabled: true,
+                out_field_name: String::from(field),
+                determined_type: String::from("date"),
+                determined_type_values: "".to_string(),
+            },
+        );
+
+
+        let value = Value::String(String::from(date_str));
+
+        let result = set_date(field, &value, &meta);
+
+        let expected_date = NaiveDateTime::parse_from_str(date_str, format).unwrap();
+        let expected_millis = Value::Number(serde_json::Number::from(expected_date.timestamp() * 1000));
+
+        assert_eq!(result, expected_millis);
+    }
+}
+
+
+#[cfg(test)]
+mod test_set_date {
     use serial_test::serial;
     use std::collections::HashMap;
     use std::fs::{remove_file, File, OpenOptions};
@@ -468,7 +575,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_discover_complex_types() {
+    fn test_set_date_valid() {
         let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
 
         let field = r#"
