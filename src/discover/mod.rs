@@ -754,7 +754,7 @@ impl AnalyseSchema {
         result
     }
 
-    fn is_valid_timestamp(&self, timestamp: &mut String) -> bool {
+    pub fn is_valid_timestamp(&self, timestamp: &mut String) -> bool {
         match timestamp.parse::<i64>() {
             Ok(seconds) => {
                 match NaiveDateTime::from_timestamp_opt(seconds, 0) {

@@ -459,29 +459,21 @@ mod tests {
     use super::*;
     use chrono::NaiveDateTime;
     use std::collections::HashMap;
+    use serde_json::Number;
     use crate::discover::DateCandidate;
 
-    #[test]
-    fn test_set_date_with_valid_date() {
-
-        let foo: AnalyseSchema = AnalyseSchema { i: 0 };
-
-        let mut meta = HashMap::new();
-        let field = "test_field";
-
-        let date_str= "2023-05-21 12:34:56";
-        let format_name = foo.is_valid_date(date_str).unwrap();
-        let format = DateFormats::from_str(format_name).unwrap().as_str();
-
+    fn generate_metadata(field: &str, format_name: &str) -> HashMap<String, Metadata> {
         let date_candidate = DateCandidate {
             check_count: 1,
             valid_count: 1,
-            field: String::from(field),
-            format: String::from(format_name), // ISO 8601 format
+            field: String::from(field.clone()),
+            format: String::from(format_name),
         };
 
+        let mut meta = HashMap::new();
+
         meta.insert(
-            String::from(field),
+            String::from(field.clone()),
             Metadata {
                 count: 1,
                 types: HashMap::new(),
@@ -496,6 +488,21 @@ mod tests {
             },
         );
 
+        meta
+    }
+
+    #[test]
+    fn test_set_date_with_valid_date() {
+
+        let foo: AnalyseSchema = AnalyseSchema { i: 0 };
+
+        let field = "test_field";
+
+        let date_str= "2023-05-21 12:34:56";
+        let format_name = foo.is_valid_date(date_str).unwrap();
+        let format = DateFormats::from_str(format_name).unwrap().as_str();
+
+        let mut meta = generate_metadata(field, format);
 
         let value = Value::String(String::from(date_str));
 
@@ -512,36 +519,14 @@ mod tests {
 
         let foo: AnalyseSchema = AnalyseSchema { i: 0 };
 
-        let mut meta = HashMap::new();
+
         let field = "test_field";
 
         let date_str= "2023-05-23T07:09:03.000Z";
         let format_name = foo.is_valid_date(date_str).unwrap();
         let format = DateFormats::from_str(format_name).unwrap().as_str();
 
-        let date_candidate = DateCandidate {
-            check_count: 1,
-            valid_count: 1,
-            field: String::from(field),
-            format: String::from(format_name),
-        };
-
-        meta.insert(
-            String::from(field),
-            Metadata {
-                count: 1,
-                types: HashMap::new(),
-                parent_type: String::from("parent"),
-                fields: Box::new(HashMap::new()),
-                date_candidate: Some(date_candidate),
-                evolution: Box::new(HashMap::new()),
-                enabled: true,
-                out_field_name: String::from(field),
-                determined_type: String::from("date"),
-                determined_type_values: "".to_string(),
-            },
-        );
-
+        let mut meta = generate_metadata(field, format);
 
         let value = Value::String(String::from(date_str));
 
