@@ -188,7 +188,7 @@ impl Config {
             data_dir.pop();
         }
 
-        let pipeline_name = Config::get_pipeline_name();
+        let pipeline_name = Config::get_full_namespace_name();
 
         let data_dir = format!("{}/{}", data_dir, pipeline_name);
         match fs::create_dir_all(&data_dir) {
@@ -214,12 +214,18 @@ impl Config {
     }
 
     pub fn get_pipeline_name() -> String {
+
+        Config::getenv("PIPELINE_NAME", "default")
+
+    }
+
+    pub fn get_full_namespace_name() -> String {
         // let mut helpers = Helpers { clean_field_cache: Default::default() };
 
         // let input_plugin_name = Helpers::clean_field_name(Config::getenv("DATA_SOURCE_PLUGIN_NAME", "unknown"));
         // let output_plugin_name = Helpers::clean_field_name(Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "unknown"));
         // let default_pipeline_name = format!("{} to {}", input_plugin_name, output_plugin_name);
-        
+
 
         let workspace = Config::getenv("WORKSPACE_NAME", "default");
         let pipeline = Config::getenv("PIPELINE_NAME", "default");
@@ -308,7 +314,7 @@ impl Config {
             config.data_dir = data_dir;
         }
 
-        let pipeline_name = Config::get_pipeline_name();
+        let full_namespace = Config::get_full_namespace_name();
 
         let env = Config::getenv("APP_ENV", "prod");
         let uri = if env != "prod" {
@@ -324,7 +330,7 @@ impl Config {
 
         let client = Client::builder().default_headers(headers).build().unwrap();
 
-        let path = format!("{}/{}", pipeline_name, "approved");
+        let path = format!("{}/{}", full_namespace, "approved");
 
         let response = client.get(&format!("{}/{}", uri, path)).send().await;
 
@@ -389,7 +395,7 @@ impl Config {
 
             ///////////
 
-            let pipeline_name = Config::get_pipeline_name();
+            let full_namespace = Config::get_full_namespace_name();
 
             if !Config::getenv("DATA_OUTPUT_TIME_BUCKET", "").is_empty() && Config::getenv("DATA_OUTPUT_TIME_FIELDS", "").is_empty() {
                 println!("ERROR: Environment variable: 'DATA_OUTPUT_TIME_FIELDS' must be since you've set: 'DATA_OUTPUT_TIME_BUCKET'.");
@@ -414,7 +420,7 @@ impl Config {
             let path = "";
 
             let data = json!({
-                "namespace": pipeline_name,
+                "namespace": full_namespace,
                 "metadata": metadata,
                 "status": "approved",
             });
@@ -451,7 +457,7 @@ impl Config {
     }
 
     pub(crate) fn set_status(metrics: MutexGuard<Metrics>, exit_code: Option<i8>) {
-        let pipeline_name = Config::get_pipeline_name();
+        let pipeline_name = Config::get_full_namespace_name();
 
         let env = Config::getenv("APP_ENV", "prod");
         let uri = if env != "prod" {
