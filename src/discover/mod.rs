@@ -993,9 +993,9 @@ impl AnalyseSchema {
                 }
             }
 
-            if !field.determined_type.is_empty() && vec!["map", "array", "record"].contains(&field.determined_type.as_str()) && !field.fields.len() > 0 {
-                if field.determined_type == "array" || field.determined_type == "map" {
-                    field.determined_type_values = "".to_string();
+            if !field.determined_type.is_empty() && vec!["map", "array", "record"].contains(&field.determined_type.as_str()) && field.fields.len() > 0 {
+                if field.determined_type_values == "".to_string() && (field.determined_type == "array" || field.determined_type == "map") {
+                    // field.determined_type_values = "".to_string();
 
                     // Ignore sub-fields for Avro array, the values are just enumerated, their not fields themselves.
                     // Else we'd create a field list with string keys for each array value
