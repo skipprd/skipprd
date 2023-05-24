@@ -1,9 +1,10 @@
 use sled;
 use Result;
+use std::process::exit;
 
 use crate::helpers::configuration::Config;
 use serde::__private::de::IdentifierDeserializer;
-use sled::IVec;
+use sled::{Db, IVec};
 use {
     byteorder::{BigEndian, LittleEndian},
     zerocopy::{byteorder::U64, AsBytes, FromBytes, LayoutVerified, Unaligned, U16},
@@ -61,7 +62,13 @@ pub struct Offsets {
 impl Offsets {
     pub fn init() -> Result<Offsets, bool> {
         let db_path = format!("{}/{}", Config::get_data_dir(), SLED_NAME);
-        let db = sled::open(&db_path).map_err(|e| format!("Failed opening DB at this location: {:?} . Is another instance of Atomic Server running? {}", &db_path, e)).unwrap();
+        let db = match sled::open(&db_path).map_err(|e| format!("Failed opening offset DB at this location: {:?}. Is another instance of Skippr running?", &db_path)) {
+            Ok(db) => {db}
+            Err(err) => {
+                println!("{}", err);
+                exit(1);
+            }
+        };
         let tree = db.open_tree("offsets").expect("Could not open offset tree");
 
         // let names: Vec<String> = db
