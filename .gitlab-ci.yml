@@ -214,9 +214,10 @@ cleanup:
     - docker run amazon/aws-cli:latest /bin/sh -c "set -x
       && aws s3 rm s3://skippr-e2e-sample-data-output/bikehire --recursive
       && aws glue delete-database --catalog-id 353855562591 --name bikehire
-#      && aws dynamodb scan --table-name Test-MetadataService-Stack-MetadataTable8CB34826-XGZT4CFIJO8Y --attributes-to-get KeyAttributeName --query 'Items[*]' --output json > items.json
-#      && for item in $(cat items.json | jq -r '.[] | @base64'); do aws dynamodb delete-item --table-name Test-MetadataService-Stack-MetadataTable8CB34826-XGZT4CFIJO8Y --key "$(echo ${item} | base64 --decode)"; done
       && aws s3 rm s3://skippr-metadata-test --recursive"
   only:
     - master
     - tags
+
+#      && aws dynamodb scan --table-name Test-MetadataService-Stack-MetadataTable8CB34826-XGZT4CFIJO8Y --attributes-to-get KeyAttributeName --query 'Items[*]' --output json > items.json
+#      && for item in $(cat items.json | jq -r '.[] | @base64'); do aws dynamodb delete-item --table-name Test-MetadataService-Stack-MetadataTable8CB34826-XGZT4CFIJO8Y --key "$(echo ${item} | base64 --decode)"; done
