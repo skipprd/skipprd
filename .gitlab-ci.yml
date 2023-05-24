@@ -16,9 +16,9 @@ stages:
 #  - qa
 #  - build
 #  - dockerize
+  - cleanup
   - e2e
   - publish
-  - cleanup
 
 #before_script:
 #  - rustup update && cargo update
@@ -82,7 +82,7 @@ s3_plugin:
   stage: e2e
   script:
     - docker pull $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE
-    - docker run --name skippre2e -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skippr-e2e-sample-data -e S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=bikehire-s3_plugin -e PIPELINE_ID=gitlab_test-s3_plugin -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=dev skippr/skipprd:latest
+    - docker run --name skippre2e -e APP_ENV=test -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skippr-e2e-sample-data -e S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=bikehire-s3_plugin -e PIPELINE_ID=gitlab_test-s3_plugin -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=dev skippr/skipprd:latest
     - if [[ "$(docker logs skippre2e >& container-logs ; cat container-logs | grep -i 'Err' | wc -l)" -gt 0 ]]; then exit 1; fi
     - if [[ "$(docker container wait skippre2e)" -eq 1 ]]; then exit 1; fi
   after_script:
@@ -97,11 +97,11 @@ chaos_mode:
   stage: e2e
   script:
     - docker pull $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE
-    - docker run --name skippre2e1 -e CHAOS_MODE=yes -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skippr-e2e-sample-data -e S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=bikehire-chaos_mode -e PIPELINE_ID=gitlab_test-chaos_mode -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=dev skippr/skipprd:latest
-    - docker run --name skippre2e2 -e CHAOS_MODE=yes -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skippr-e2e-sample-data -e S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=bikehire-chaos_mode -e PIPELINE_ID=gitlab_test-chaos_mode -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=dev skippr/skipprd:latest
-    - docker run --name skippre2e3 -e CHAOS_MODE=yes -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skippr-e2e-sample-data -e S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=bikehire-chaos_mode -e PIPELINE_ID=gitlab_test-chaos_mode -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=dev skippr/skipprd:latest
-    - docker run --name skippre2e4 -e CHAOS_MODE=yes -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skippr-e2e-sample-data -e S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=bikehire-chaos_mode -e PIPELINE_ID=gitlab_test-chaos_mode -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=dev skippr/skipprd:latest
-    - docker run --name skippre2e5 -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skippr-e2e-sample-data -e S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=bikehire-chaos_mode -e PIPELINE_ID=gitlab_test-chaos_mode -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=dev skippr/skipprd:latest
+    - docker run --name skippre2e1 -e APP_ENV=test -e CHAOS_MODE=yes -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skippr-e2e-sample-data -e S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=bikehire-chaos_mode -e PIPELINE_ID=gitlab_test-chaos_mode -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=dev skippr/skipprd:latest
+    - docker run --name skippre2e2 -e APP_ENV=test -e CHAOS_MODE=yes -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skippr-e2e-sample-data -e S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=bikehire-chaos_mode -e PIPELINE_ID=gitlab_test-chaos_mode -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=dev skippr/skipprd:latest
+    - docker run --name skippre2e3 -e APP_ENV=test -e CHAOS_MODE=yes -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skippr-e2e-sample-data -e S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=bikehire-chaos_mode -e PIPELINE_ID=gitlab_test-chaos_mode -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=dev skippr/skipprd:latest
+    - docker run --name skippre2e4 -e APP_ENV=test -e CHAOS_MODE=yes -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skippr-e2e-sample-data -e S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=bikehire-chaos_mode -e PIPELINE_ID=gitlab_test-chaos_mode -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=dev skippr/skipprd:latest
+    - docker run --name skippre2e5 -e APP_ENV=test -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skippr-e2e-sample-data -e S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=bikehire-chaos_mode -e PIPELINE_ID=gitlab_test-chaos_mode -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=dev skippr/skipprd:latest
     - if [[ "$(docker logs skippre2e5 >& container-logs ; cat container-logs | grep -i 'Err' | wc -l)" -gt 0 ]]; then exit 1; fi
     - if [[ "$(docker container wait skippre2e5)" -eq 1 ]]; then exit 1; fi
   after_script:
@@ -116,7 +116,7 @@ flatten:
   stage: e2e
   script:
     - docker pull $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE
-    - docker run --name skippre2e -e DATA_SOURCE_FLATTEN_EVENTS=yes -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skippr-e2e-sample-data -e S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=flatten -e PIPELINE_ID=gitlab_test-flatten -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=dev skippr/skipprd:latest
+    - docker run --name skippre2e -e APP_ENV=test -e DATA_SOURCE_FLATTEN_EVENTS=yes -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skippr-e2e-sample-data -e S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=flatten -e PIPELINE_ID=gitlab_test-flatten -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=dev skippr/skipprd:latest
     - if [[ "$(docker logs skippre2e >& container-logs ; cat container-logs | grep -i 'Err' | wc -l)" -gt 0 ]]; then exit 1; fi
     - if [[ "$(docker container wait skippre2e)" -eq 1 ]]; then exit 1; fi
   after_script:
@@ -131,7 +131,7 @@ event_types:
   stage: e2e
   script:
     - docker pull $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE
-    - docker run --name skippre2e -e DATA_SOURCE_EVENT_TYPE_FIELDS="event_type" -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skippr-e2e-sample-data -e S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=event_types -e PIPELINE_ID=gitlab_test-flatten -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=dev skippr/skipprd:latest
+    - docker run --name skippre2e -e APP_ENV=test -e DATA_SOURCE_EVENT_TYPE_FIELDS="event_type" -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skippr-e2e-sample-data -e S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=event_types -e PIPELINE_ID=gitlab_test-flatten -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=dev skippr/skipprd:latest
     - if [[ "$(docker logs skippre2e >& container-logs ; cat container-logs | grep -i 'Err' | wc -l)" -gt 0 ]]; then exit 1; fi
     - if [[ "$(docker container wait skippre2e)" -eq 1 ]]; then exit 1; fi
   after_script:
@@ -146,7 +146,7 @@ time_buckets_date:
   stage: e2e
   script:
     - docker pull $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE
-    - docker run --name skippre2e -e DATA_OUTPUT_TIME_BUCKET=day -e DATA_OUTPUT_TIME_FIELDS=event_date -e DATA_SOURCE_FLATTEN_EVENTS=yes -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skippr-e2e-sample-data -e S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=time_buckets_date -e PIPELINE_ID=gitlab_test-flatten -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=dev skippr/skipprd:latest
+    - docker run --name skippre2e -e APP_ENV=test -e DATA_OUTPUT_TIME_BUCKET=day -e DATA_OUTPUT_TIME_FIELDS=event_date -e DATA_SOURCE_FLATTEN_EVENTS=yes -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skippr-e2e-sample-data -e S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=time_buckets_date -e PIPELINE_ID=gitlab_test-flatten -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=dev skippr/skipprd:latest
     - if [[ "$(docker logs skippre2e >& container-logs ; cat container-logs | grep -i 'Err' | wc -l)" -gt 0 ]]; then exit 1; fi
     - if [[ "$(docker container wait skippre2e)" -eq 1 ]]; then exit 1; fi
   after_script:
@@ -212,6 +212,9 @@ cleanup:
   script:
     - aws s3 rm s3://skippr-e2e-sample-data-output/bikehire --recursive
     - aws glue delete-database --catalog-id 353855562591 --name bikehire
+    - aws dynamodb scan --table-name Test-MetadataService-Stack-MetadataTable8CB34826-XGZT4CFIJO8Y --attributes-to-get KeyAttributeName --query 'Items[*]' --output json > items.json
+    - for item in $(cat items.json | jq -r '.[] | @base64'); do aws dynamodb delete-item --table-name Test-MetadataService-Stack-MetadataTable8CB34826-XGZT4CFIJO8Y --key "$(echo ${item} | base64 --decode)"; done
+    - aws s3 rm s3://skippr-metadata-test --recursive
   only:
     - master
     - tags
