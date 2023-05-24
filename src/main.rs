@@ -318,37 +318,39 @@ async fn sync() {
         planner.add(
             move || {
 
-                // match Config::list_dir_contents(data_dir.clone()) {
-                //     Err(e) => println!("Error occurred: {}", e),
-                //     _ => (),
-                // }
 
-                // let mut metrics: Metrics = Metrics::new();
-                let mut metrics_lock = metrics_clone.lock().unwrap();
+                    // match Config::list_dir_contents(data_dir.clone()) {
+                    //     Err(e) => println!("Error occurred: {}", e),
+                    //     _ => (),
+                    // }
 
-                // let mut counter_lock = ingestMsgCount.lock().unwrap();
-                // let mut total_lock = ingestMsgTotal.lock().unwrap();
-                let now_lock = now_clone.lock().unwrap();
+                    // let mut metrics: Metrics = Metrics::new();
+                    let mut metrics_lock = metrics_clone.lock().unwrap();
 
-                // metrics_lock.msgs_total += metrics_lock.msgs_current;
-                metrics_lock.bytes_total += metrics_lock.bytes_current;
+                    // let mut counter_lock = ingestMsgCount.lock().unwrap();
+                    // let mut total_lock = ingestMsgTotal.lock().unwrap();
+                    let now_lock = now_clone.lock().unwrap();
 
-                // metrics.msgs_total = *total_lock;
-                // metrics.msgs_current = *counter_lock;
-                metrics_lock.run_time_seconds = now_lock.elapsed().as_secs();
+                    // metrics_lock.msgs_total += metrics_lock.msgs_current;
+                    metrics_lock.bytes_total += metrics_lock.bytes_current;
 
-                println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
-                println!("Ingested Batch: {}", metrics_lock.ingeted_current);
-                println!("Ingested Messages: {}", metrics_lock.ingeted_total);
-                println!("Total Messages: {}", metrics_lock.msgs_total);
-                println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
-                println!("Bytes Batch: {}", metrics_lock.bytes_current);
-                println!("Bytes: {}", metrics_lock.bytes_total);
+                    // metrics.msgs_total = *total_lock;
+                    // metrics.msgs_current = *counter_lock;
+                    metrics_lock.run_time_seconds = now_lock.elapsed().as_secs();
 
-                metrics_lock.bytes_current = 0;
-                metrics_lock.ingeted_current = 0;
+                    println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
+                    println!("Ingested Batch: {}", metrics_lock.ingeted_current);
+                    println!("Ingested Messages: {}", metrics_lock.ingeted_total);
+                    println!("Total Messages: {}", metrics_lock.msgs_total);
+                    println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
+                    println!("Bytes Batch: {}", metrics_lock.bytes_current);
+                    println!("Bytes: {}", metrics_lock.bytes_total);
 
-                Config::set_status(metrics_lock, None);
+                    metrics_lock.bytes_current = 0;
+                    metrics_lock.ingeted_current = 0;
+
+                    Config::set_status(metrics_lock, None);
+
             },
             periodic::Every::new(Duration::from_secs(60)),
         );
@@ -371,33 +373,33 @@ async fn sync() {
     }
         out_pnanner.add(
              move || {
+                 if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+                     let input_metadata_clone = input_metadata_clone.clone();
 
-                 let input_metadata_clone = input_metadata_clone.clone();
+                     // println!("Output planner started");
 
-                 // println!("Output planner started");
+                     tokio::runtime::Builder::new_multi_thread()
+                         .enable_all()
+                         .build()
+                         .unwrap()
+                         .block_on(async {
 
-                 tokio::runtime::Builder::new_multi_thread()
-                     .enable_all()
-                     .build()
-                     .unwrap()
-                     .block_on(async {
+                             // println!("Output planner thread created");
 
-                         // println!("Output planner thread created");
+                             let input_metadata_clone = {
+                                 let guard = input_metadata_clone.lock().unwrap();
+                                 guard.clone()
+                             };
+                             output_sync(input_metadata_clone.clone());
 
-                         let input_metadata_clone = {
-                             let guard = input_metadata_clone.lock().unwrap();
-                             guard.clone()
-                         };
-                         output_sync(input_metadata_clone.clone());
-
-                         let data_output = DataOutputAwsAthenaPlugin::new().await;
-                         let input_metadata_clone = {
-                             let guard = input_metadata_clone;
-                             guard.clone()
-                         };
-                         data_output.sync(input_metadata_clone).await;
-                    });
-
+                             let data_output = DataOutputAwsAthenaPlugin::new().await;
+                             let input_metadata_clone = {
+                                 let guard = input_metadata_clone;
+                                 guard.clone()
+                             };
+                             data_output.sync(input_metadata_clone).await;
+                         });
+                 }
             },
             periodic::Every::new(Duration::from_secs(60)),
         );
@@ -457,6 +459,8 @@ async fn sync() {
 
     // wait arbitrary time for ingest threads to complete
     // sleep(Duration::from_secs(30));
+
+    RUNNING.lock().unwrap().store(false, Ordering::SeqCst);
 
     println!("Flushing ingest buffers");
     let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
