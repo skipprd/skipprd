@@ -187,7 +187,12 @@ impl DataOutputAwsAthenaPlugin {
                 {
                     Ok(resp) => {
                         println!("Uploaded to S3: {}", key);
-                        fs::remove_file(Path::new(&filename)).unwrap();
+                        match fs::remove_file(Path::new(&filename)) {
+                            Ok(_) => {}
+                            Err(_) => {
+                                // @todo - log this back to skippr platform
+                            }
+                        };
                     }
                     Err(err) => {
                         println!("Got an error uploading object:");
@@ -232,7 +237,7 @@ impl AwsAthena {
             Err(_err) => match AwsAthena::glue_create_database(namespace).await {
                 Ok(_) => {}
                 Err(err) => {
-                    println!("ERROR getting Glue database: {}", err);
+                    println!("ERROR creating Glue database: {}", err);
                 }
             },
         }
