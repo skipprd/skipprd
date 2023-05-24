@@ -588,7 +588,7 @@ fn output_sync(metadata: HashMap<String, Metadata>) {
 
                         schema_ref = Arc::new(arrow_schema.unwrap());
 
-                        schema_ref = SerdeParquet::serialize(path.clone(), schema_ref);
+                        SerdeParquet::serialize(path.clone(), schema_ref);
 
                         match std::fs::remove_file(path) {
                             Ok(_t) => {}

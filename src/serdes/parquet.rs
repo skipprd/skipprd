@@ -152,7 +152,7 @@ impl SerdeParquet {
     //
     // }
 
-    pub fn serialize(path: PathBuf, mut schema_ref: Arc<Schema>) -> Arc<Schema> {
+    pub fn serialize(path: PathBuf, mut schema_ref: Arc<Schema>) {
         // pub fn serialize(path: PathBuf, mut schema_ref: Schema) -> Schema {
 
         // println!("Arrow schema: {:?}", schema_ref);
@@ -228,7 +228,20 @@ impl SerdeParquet {
         //     props = props.set_max_statistics_size(size);
         // }
 
-        let input_file = File::open(path.clone()).unwrap();
+        let source_file = match File::open(path.clone()) {
+            Ok(file) => Some(file),
+            Err(err) => {
+                println!("Error opening file for serialisation, already processed? {}", err);
+                None
+            }
+        };
+
+        if source_file.is_none() {
+            return;
+        }
+
+        let input_file = source_file.unwrap();
+
         // let mut input_file = File::open("/tmp/ddd/s3-uewnxrmskf").unwrap();
 
         // let mut output = OpenOptions::new()
@@ -340,7 +353,6 @@ impl SerdeParquet {
 
         writer.close().unwrap();
 
-        schema_ref
     }
 
     pub fn default_message(metadata: &mut HashMap<String, Metadata>) -> Result<Message, String> {
