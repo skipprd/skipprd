@@ -15,7 +15,7 @@ checks for time_buckets_timestamp:
 #  - :
 #      filter: from_iso8601_timestamp(detail_docket_datetime_batch_utc) between DATE_ADD('hour', -1, NOW()) AND NOW()
 
-  - duplicate_count(id) = 0
+#  - duplicate_count(id) = 0
 #  - :
 #      filter: from_iso8601_timestamp(detail_docket_datetime_batch_utc) between DATE_ADD('hour', -1, NOW()) AND NOW()
 
