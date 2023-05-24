@@ -85,6 +85,9 @@ s3_plugin:
     - docker run --name skippre2e -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skippr-e2e-sample-data -e S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=bikehire-s3_plugin -e PIPELINE_ID=gitlab_test-s3_plugin -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=dev skippr/skipprd:latest
     - if [[ "$(docker logs skippre2e >& container-logs ; cat container-logs | grep -i 'Err' | wc -l)" -gt 0 ]]; then exit 1; fi
     - if [[ "$(docker container wait skippre2e)" -eq 1 ]]; then exit 1; fi
+  after_script:
+    - docker run --name soda -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -v `pwd`/soda:/soda sodadata/soda-core scan -d datalake_e2e -c /soda/configuration.yml /soda/s3_plugin.yml
+    - if [[ "$(docker container wait soda)" -eq 1 ]]; then exit 1; fi
   only:
     - master
     - tags
@@ -101,6 +104,9 @@ chaos_mode:
     - docker run --name skippre2e5 -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skippr-e2e-sample-data -e S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=bikehire-chaos_mode -e PIPELINE_ID=gitlab_test-chaos_mode -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=dev skippr/skipprd:latest
     - if [[ "$(docker logs skippre2e5 >& container-logs ; cat container-logs | grep -i 'Err' | wc -l)" -gt 0 ]]; then exit 1; fi
     - if [[ "$(docker container wait skippre2e5)" -eq 1 ]]; then exit 1; fi
+  after_script:
+    - docker run --name soda -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -v `pwd`/soda:/soda sodadata/soda-core scan -d datalake_e2e -c /soda/configuration.yml /soda/chaos_mode.yml
+    - if [[ "$(docker container wait soda)" -eq 1 ]]; then exit 1; fi
   only:
     - master
     - tags
@@ -113,6 +119,9 @@ flatten:
     - docker run --name skippre2e -e DATA_SOURCE_FLATTEN_EVENTS=yes -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skippr-e2e-sample-data -e S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=flatten -e PIPELINE_ID=gitlab_test-flatten -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=dev skippr/skipprd:latest
     - if [[ "$(docker logs skippre2e >& container-logs ; cat container-logs | grep -i 'Err' | wc -l)" -gt 0 ]]; then exit 1; fi
     - if [[ "$(docker container wait skippre2e)" -eq 1 ]]; then exit 1; fi
+  after_script:
+    - docker run --name soda -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -v `pwd`/soda:/soda sodadata/soda-core scan -d datalake_e2e -c /soda/configuration.yml /soda/flatten.yml
+    - if [[ "$(docker container wait soda)" -eq 1 ]]; then exit 1; fi
   only:
     - master
     - tags
@@ -125,6 +134,9 @@ event_types:
     - docker run --name skippre2e -e DATA_SOURCE_EVENT_TYPE_FIELDS="event_type" -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skippr-e2e-sample-data -e S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=event_types -e PIPELINE_ID=gitlab_test-flatten -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=dev skippr/skipprd:latest
     - if [[ "$(docker logs skippre2e >& container-logs ; cat container-logs | grep -i 'Err' | wc -l)" -gt 0 ]]; then exit 1; fi
     - if [[ "$(docker container wait skippre2e)" -eq 1 ]]; then exit 1; fi
+  after_script:
+    - docker run --name soda -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -v `pwd`/soda:/soda sodadata/soda-core scan -d datalake_e2e -c /soda/configuration.yml /soda/event_types.yml
+    - if [[ "$(docker container wait soda)" -eq 1 ]]; then exit 1; fi
   only:
     - master
     - tags
@@ -138,7 +150,8 @@ time_buckets_date:
     - if [[ "$(docker logs skippre2e >& container-logs ; cat container-logs | grep -i 'Err' | wc -l)" -gt 0 ]]; then exit 1; fi
     - if [[ "$(docker container wait skippre2e)" -eq 1 ]]; then exit 1; fi
   after_script:
-    -  docker run -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -v `pwd`/soda:/soda sodadata/soda-core scan -d datalake_e2e -c /soda/configuration.yml /soda/time_buckets_date.yml
+    - docker run --name soda -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -v `pwd`/soda:/soda sodadata/soda-core scan -d datalake_e2e -c /soda/configuration.yml /soda/time_buckets_date.yml
+    - if [[ "$(docker container wait soda)" -eq 1 ]]; then exit 1; fi
   only:
     - master
     - tags
