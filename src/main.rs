@@ -458,11 +458,16 @@ async fn sync() {
     // wait arbitrary time for ingest threads to complete
     // sleep(Duration::from_secs(30));
 
+    println!("Flushing ingest buffers");
     let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
     ingest_work::Ingest::flush_buffers(true, &mut output_files);
-
+    println!("Flushing output buffers");
     let input_metadata_clone = skippr_metadata.clone();
-    output_sync(input_metadata_clone.lock().unwrap().clone());
+    let input_metadata_clone = {
+        let guard = input_metadata_clone.lock().unwrap();
+        guard.clone()
+    };
+    output_sync(input_metadata_clone.clone());
 
     let metrics_clone = metrics.clone();
 
@@ -495,6 +500,14 @@ async fn sync() {
 
         // sleep(Duration::from_secs(5));
     // }
+
+
+    let data_output = DataOutputAwsAthenaPlugin::new().await;
+    let input_metadata_clone = {
+        let guard = input_metadata_clone;
+        guard.clone()
+    };
+    data_output.sync(input_metadata_clone).await;
 
     println!("Shutting Down... bye");
 }
