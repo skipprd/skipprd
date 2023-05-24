@@ -211,10 +211,9 @@ cleanup:
   stage: cleanup
   script:
     - docker pull amazon/aws-cli:latest
-    - docker run amazon/aws-cli:latest /bin/sh -c "set -x
-      && aws s3 rm s3://skippr-e2e-sample-data-output/bikehire --recursive
-      && aws glue delete-database --catalog-id 353855562591 --name bikehire
-      && aws s3 rm s3://skippr-metadata-test --recursive"
+    - docker run amazon/aws-cli:latest /bin/sh -c "aws s3 rm s3://skippr-e2e-sample-data-output/bikehire --recursive"
+    - docker run amazon/aws-cli:latest /bin/sh -c "aws glue delete-database --catalog-id 353855562591 --name bikehire"
+    - docker run amazon/aws-cli:latest /bin/sh -c "aws s3 rm s3://skippr-metadata-test --recursive""
   only:
     - master
     - tags
