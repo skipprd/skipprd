@@ -341,7 +341,6 @@ async fn sync() {
                     println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
                     println!("Ingested Batch: {}", metrics_lock.ingeted_current);
                     println!("Ingested Messages: {}", metrics_lock.ingeted_total);
-                    println!("Total Messages: {}", metrics_lock.msgs_total);
                     println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
                     println!("Bytes Batch: {}", metrics_lock.bytes_current);
                     println!("Bytes: {}", metrics_lock.bytes_total);
@@ -362,13 +361,29 @@ async fn sync() {
 
     use rand::Rng; // 0.8.5
 
+    let mut metrics_clone = metrics.clone();
+
     let chaos = Config::getenv("CHAOS_MODE", "no");
     if Config::truth_value(&chaos) {
         out_pnanner.add(
             move || {
+
+                let mut metrics_lock = metrics_clone.lock().unwrap();
+
+                // let mut metrics: Metrics = Metrics::new();
+                // metrics_lock.msgs_total += metrics_lock.msgs_current;
+                metrics_lock.bytes_total += metrics_lock.bytes_current;
+
+                println!("Ingested Batch: {}", metrics_lock.ingeted_current);
+                println!("Ingested Messages: {}", metrics_lock.ingeted_total);
+                println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
+                println!("Bytes Batch: {}", metrics_lock.bytes_current);
+                println!("Bytes: {}", metrics_lock.bytes_total);
+
                 println!("Chaos mode throwing a random exit. You can disable this test mode buy removing CHAOS_MODE flag or setting to 'no'");
+
                 exit(0);
-            }, periodic::Every::new(Duration::from_secs(rand::thread_rng().gen_range(15..60))),
+            }, periodic::Every::new(Duration::from_secs(rand::thread_rng().gen_range(30..60))),
         );
     }
         out_pnanner.add(
@@ -504,7 +519,6 @@ async fn sync() {
     println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
     println!("Ingested Batch: {}", metrics_lock.ingeted_current);
     println!("Ingested Messages: {}", metrics_lock.ingeted_total);
-    println!("Total Messages: {}", metrics_lock.msgs_total);
     println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
     println!("Bytes Batch: {}", metrics_lock.bytes_current);
     println!("Bytes: {}", metrics_lock.bytes_total);
