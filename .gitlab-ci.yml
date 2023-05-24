@@ -150,7 +150,7 @@ time_buckets_timestamp:
     - if [[ "$(docker logs skippre2e >& container-logs ; cat container-logs | grep -i 'Err' | wc -l)" -gt 0 ]]; then exit 1; fi
     - if [[ "$(docker container wait skippre2e)" -eq 1 ]]; then exit 1; fi
   after_script:
-    -  docker run -v `pwd`/soda:/soda sodadata/soda-core scan -d datalake_e2e -c /soda/configuration.yml /soda/time_buckets_timestamp.yml
+    -  docker run -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -v `pwd`/soda:/soda sodadata/soda-core scan -d datalake_e2e -c /soda/configuration.yml /soda/time_buckets_timestamp.yml
   only:
     - master
     - tags
