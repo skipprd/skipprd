@@ -16,7 +16,7 @@ stages:
 #  - qa
 #  - build
 #  - dockerize
-  - cleanup
+#  - cleanup
   - e2e
   - publish
 
@@ -206,17 +206,17 @@ docker_push:
     - master
     - tags
 
-cleanup:
-  image: docker:latest
-  stage: cleanup
-  script:
-    - docker pull amazon/aws-cli:latest
-    - docker run -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY amazon/aws-cli:latest /bin/sh -c "aws s3 rm s3://skippr-e2e-sample-data-output/bikehire --recursive"
-    - docker run -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY amazon/aws-cli:latest /bin/sh -c "aws glue delete-database --catalog-id 353855562591 --name bikehire"
-    - docker run -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY amazon/aws-cli:latest /bin/sh -c "aws s3 rm s3://skippr-metadata-test --recursive"
-  only:
-    - master
-    - tags
+#cleanup:
+#  image: docker:latest
+#  stage: cleanup
+#  script:
+#    - docker pull amazon/aws-cli:latest
+#    - docker run -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY amazon/aws-cli:latest /bin/sh -c "aws s3 rm s3://skippr-e2e-sample-data-output/bikehire --recursive"
+#    - docker run -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY amazon/aws-cli:latest /bin/sh -c "aws glue delete-database --catalog-id 353855562591 --name bikehire"
+#    - docker run -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY amazon/aws-cli:latest /bin/sh -c "aws s3 rm s3://skippr-metadata-test --recursive"
+#  only:
+#    - master
+#    - tags
 
 #      && aws dynamodb scan --table-name Test-MetadataService-Stack-MetadataTable8CB34826-XGZT4CFIJO8Y --attributes-to-get KeyAttributeName --query 'Items[*]' --output json > items.json
 #      && for item in $(cat items.json | jq -r '.[] | @base64'); do aws dynamodb delete-item --table-name Test-MetadataService-Stack-MetadataTable8CB34826-XGZT4CFIJO8Y --key "$(echo ${item} | base64 --decode)"; done
