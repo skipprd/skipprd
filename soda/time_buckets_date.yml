@@ -2,7 +2,7 @@
 #filter time_buckets_timestamp [hourly]:
 #  where: from_iso8601_timestamp(detail_docket_datetime_batch_utc) between DATE_ADD('hour', -1, NOW()) AND NOW()
 
-checks for time_buckets_timestamp:
+checks for time_buckets_date:
 #  - schema:
 #      warn:
 #        when required column missing: [detail_docket_truck_imei, detail_docket_truck_plate]
