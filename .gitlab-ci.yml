@@ -210,6 +210,7 @@ cleanup:
   image: amazon/aws-cli:2.11.21
   stage: cleanup
   script:
+    - set -x
     - aws s3 rm s3://skippr-e2e-sample-data-output/bikehire --recursive
     - aws glue delete-database --catalog-id 353855562591 --name bikehire
     - aws dynamodb scan --table-name Test-MetadataService-Stack-MetadataTable8CB34826-XGZT4CFIJO8Y --attributes-to-get KeyAttributeName --query 'Items[*]' --output json > items.json
