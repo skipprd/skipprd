@@ -15,9 +15,10 @@ services:
 stages:
 #  - qa
 #  - build
-  - dockerize
+#  - dockerize
   - e2e
   - publish
+  - cleanup
 
 #before_script:
 #  - rustup update && cargo update
@@ -58,30 +59,30 @@ stages:
 #    paths:
 #      - ./target
 
-docker_build:
-  image: docker:latest
-  stage: dockerize
-#  before_script:
-#    - rustup update && cargo update
-  script:
-    - docker build -t $CONTAINER_IMAGE -f Dockerfile .
-#    - docker build -t $CONTAINER_IMAGE -f Dockerfile.mac_arm .
-#    - docker build -t $CONTAINER_IMAGE -f Dockerfile.lambda .
-  after_script:
-    # Push to Docker Hub
-    - docker login -u skippr -p "$DOCKER_HUB_PASS"
-    - docker tag $CONTAINER_IMAGE $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE
-    - docker push $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE
-  only:
-    - master
-    - tags
+#docker_build:
+#  image: docker:latest
+#  stage: dockerize
+##  before_script:
+##    - rustup update && cargo update
+#  script:
+#    - docker build -t $CONTAINER_IMAGE -f Dockerfile .
+##    - docker build -t $CONTAINER_IMAGE -f Dockerfile.mac_arm .
+##    - docker build -t $CONTAINER_IMAGE -f Dockerfile.lambda .
+#  after_script:
+#    # Push to Docker Hub
+#    - docker login -u skippr -p "$DOCKER_HUB_PASS"
+#    - docker tag $CONTAINER_IMAGE $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE
+#    - docker push $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE
+#  only:
+#    - master
+#    - tags
 
 s3_plugin:
   image: docker:latest
   stage: e2e
   script:
     - docker pull $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE
-    - docker run --name skippre2e -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skippr-e2e-sample-data -e S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=bikehire-s3_plugin -e PIPELINE_ID=gitlab_test-s3_plugin -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=dev skippr/skipprd:latest
+    - docker run --name skippre2e -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skippr-e2e-sample-data -e S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire/s3_plugin -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=bikehire-s3_plugin -e PIPELINE_ID=gitlab_test-s3_plugin -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=dev skippr/skipprd:latest
     - if [[ "$(docker logs skippre2e >& container-logs ; cat container-logs | grep -i 'Err' | wc -l)" -gt 0 ]]; then exit 1; fi
     - if [[ "$(docker container wait skippre2e)" -eq 1 ]]; then exit 1; fi
   only:
@@ -121,7 +122,7 @@ event_types:
   stage: e2e
   script:
     - docker pull $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE
-    - docker run --name skippre2e -e DATA_SOURCE_EVENT_TYPE_FIELDS="event_type" -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skippr-e2e-sample-data -e S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire/flatten -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=bikehire-flatten -e PIPELINE_ID=gitlab_test-flatten -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=dev skippr/skipprd:latest
+    - docker run --name skippre2e -e DATA_SOURCE_EVENT_TYPE_FIELDS="event_type" -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skippr-e2e-sample-data -e S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire/event_types -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=bikehire-flatten -e PIPELINE_ID=gitlab_test-flatten -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=dev skippr/skipprd:latest
     - if [[ "$(docker logs skippre2e >& container-logs ; cat container-logs | grep -i 'Err' | wc -l)" -gt 0 ]]; then exit 1; fi
     - if [[ "$(docker container wait skippre2e)" -eq 1 ]]; then exit 1; fi
   only:
@@ -133,7 +134,7 @@ time_buckets_date:
   stage: e2e
   script:
     - docker pull $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE
-    - docker run --name skippre2e -e DATA_OUTPUT_TIME_BUCKET=day -e DATA_OUTPUT_TIME_FIELDS=event_date -e DATA_SOURCE_FLATTEN_EVENTS=yes -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skippr-e2e-sample-data -e S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire/flatten -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=bikehire-flatten -e PIPELINE_ID=gitlab_test-flatten -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=dev skippr/skipprd:latest
+    - docker run --name skippre2e -e DATA_OUTPUT_TIME_BUCKET=day -e DATA_OUTPUT_TIME_FIELDS=event_date -e DATA_SOURCE_FLATTEN_EVENTS=yes -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skippr-e2e-sample-data -e S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire/time_buckets_date -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=bikehire-flatten -e PIPELINE_ID=gitlab_test-flatten -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=dev skippr/skipprd:latest
     - if [[ "$(docker logs skippre2e >& container-logs ; cat container-logs | grep -i 'Err' | wc -l)" -gt 0 ]]; then exit 1; fi
     - if [[ "$(docker container wait skippre2e)" -eq 1 ]]; then exit 1; fi
   only:
@@ -145,9 +146,11 @@ time_buckets_timestamp:
   stage: e2e
   script:
     - docker pull $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE
-    - docker run --name skippre2e -e DATA_OUTPUT_TIME_BUCKET=day -e DATA_OUTPUT_TIME_FIELDS=metadata.sent_time -e DATA_SOURCE_FLATTEN_EVENTS=yes -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skippr-e2e-sample-data -e S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire/flatten -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=bikehire-flatten -e PIPELINE_ID=gitlab_test-flatten -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=dev skippr/skipprd:latest
+    - docker run --name skippre2e -e DATA_OUTPUT_TIME_BUCKET=day -e DATA_OUTPUT_TIME_FIELDS=metadata.sent_time -e DATA_SOURCE_FLATTEN_EVENTS=yes -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skippr-e2e-sample-data -e S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire/time_buckets_timestamp -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=bikehire-flatten -e PIPELINE_ID=gitlab_test-flatten -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=dev skippr/skipprd:latest
     - if [[ "$(docker logs skippre2e >& container-logs ; cat container-logs | grep -i 'Err' | wc -l)" -gt 0 ]]; then exit 1; fi
     - if [[ "$(docker container wait skippre2e)" -eq 1 ]]; then exit 1; fi
+  after_script:
+    -  docker run -v `pwd`/soda:/soda sodadata/soda-core scan -d datalake_e2e -c /soda/configuration.yml /soda/time_buckets_timestamp.yml
   only:
     - master
     - tags
@@ -184,6 +187,15 @@ docker_push:
 ##    - echo $AWS_ECR_PASSWORD | docker login --username AWS --password-stdin $AWS_ECR_REGISTRY
 #    - docker tag $CONTAINER_RELEASE_IMAGE $AWS_ECR_REGISTRY/$CONTAINER_RELEASE_IMAGE
 #    - docker push $AWS_ECR_REGISTRY/$CONTAINER_RELEASE_IMAGE
+  only:
+    - master
+    - tags
+
+cleanup:
+  image: amazon/aws-cli:2.x
+  stage: cleanup
+  script:
+    - aws s3 rm s3://skippr-e2e-sample-data-output/bikehire --recursive
   only:
     - master
     - tags

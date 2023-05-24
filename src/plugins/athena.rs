@@ -186,7 +186,7 @@ impl DataOutputAwsAthenaPlugin {
                     .await
                 {
                     Ok(resp) => {
-                        println!("Upload to S3: {}", key);
+                        println!("Uploaded to S3: {}", key);
                         fs::remove_file(Path::new(&filename)).unwrap();
                     }
                     Err(err) => {
