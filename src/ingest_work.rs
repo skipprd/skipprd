@@ -28,6 +28,7 @@ pub struct OutputFile {
     pub(crate) bytes: u64,
     pub(crate) upated_at: SystemTime,
     pub(crate) file: File,
+    pub(crate) rotated: Option<bool>,
 }
 
 // const MAX_BUFFER_SIZE: u64 = 1024 * 1024 * 10;
@@ -58,7 +59,15 @@ impl Ingest {
             // let mut file= &output_file.file;
             // file.flush().expect(&format!("Could not flush file {}", filename));
 
+            if (force && output_file.bytes == 0) {
+                output_file.rotated = Some(true);
+                continue;
+            }
+
             if force || Ingest::is_file_size_exceeded(&output_file) || Ingest::is_file_time_exceeded(&output_file) {
+
+                output_file.rotated = Some(true);
+
                 let new_filename = format!(
                     "{}/done/{}-{}",
                     output_dir,
@@ -175,7 +184,8 @@ impl Ingest {
                         let new_file = OutputFile {
                             bytes: record_bytes,
                             upated_at: SystemTime::now(),
-                            file: f
+                            file: f,
+                            rotated: None
                         };
 
                         output_files.insert(output_file_name.clone(), new_file);
@@ -235,7 +245,7 @@ impl Ingest {
         Self::flush_buffers(false, output_files);
 
         // Retain only items that didn't qualify for flushing
-        output_files.retain(|_filename, file| !Ingest::is_file_size_exceeded(file));
+        output_files.retain(|_filename, file| !Ingest::is_rotated(file));
 
         if *updated_schema_clone.lock().unwrap() == "yes".to_string() {
             tokio::runtime::Builder::new_multi_thread()
@@ -262,5 +272,9 @@ impl Ingest {
     fn is_file_time_exceeded(file: &OutputFile) -> bool {
         let ttl = Config::getenv("BUFFER_THRESHOLD_SECONDS", "300"); // 10MB default
         SystemTime::now().duration_since(file.upated_at).unwrap().as_secs() > ttl.parse::<u64>().unwrap()
+    }
+
+    fn is_rotated(file: &OutputFile) -> bool {
+        file.rotated.is_some()
     }
 }
