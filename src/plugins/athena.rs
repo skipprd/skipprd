@@ -363,7 +363,7 @@ impl AwsAthena {
                                     .encryption_option(EncryptionOption::SseS3)
                                     .build(),
                             )
-                            .output_location(format!("s3://{}/{}/query-results", bucket, path))
+                            .output_location(format!("s3://{}/{}-query-results", bucket, path))
                             .build(),
                     )
                     .build(),
