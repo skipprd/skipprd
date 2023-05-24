@@ -7,6 +7,12 @@ use arrow::error::ArrowError;
 // use thread_pool::ThreadPool;
 mod ingest_work;
 
+extern crate nix;
+
+use nix::sys::signal::{kill, Signal};
+use nix::unistd::Pid;
+use std::process;
+
 use std::collections::HashMap;
 
 use std::fs::File;
@@ -48,7 +54,11 @@ extern crate clap;
 extern crate core;
 
 use clap::Parser;
+
+use signal_hook::{consts::SIGINT, iterator::Signals};
+
 use once_cell::sync::Lazy;
+use signal_hook::consts::{SIGABRT, SIGQUIT, SIGTERM};
 
 mod ingest;
 
@@ -67,7 +77,7 @@ use crate::plugins::athena::DataOutputAwsAthenaPlugin;
 use crate::plugins::s3_input::DataSourceS3Plugin;
 use crate::plugins::s3_inventory::DataSourceS3InventoryPlugin;
 
-use crate::ingest_work::OUTPUT_FILES_STATIC;
+use crate::ingest_work::{Ingest, OUTPUT_FILES_STATIC};
 
 pub static RUNNING: Lazy<Mutex<AtomicBool>> =
     Lazy::new(|| Mutex::new(AtomicBool::new(true)));
@@ -273,6 +283,20 @@ async fn sync() {
 
     // let r = running.clone();
 
+    let mut signals = Signals::new(&[SIGTERM, SIGQUIT, SIGABRT]).unwrap();
+
+    thread::spawn(move || {
+        for sig in signals.forever() {
+            println!("Received signal {:?}", sig);
+            println!("Shutdown detected");
+            println!("Flushing ingest buffers");
+            let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
+            Ingest::flush_buffers(true, &mut output_files);
+            println!("Greaceful shutdown complete... bye");
+            std::process::exit(0);
+        }
+    });
+
     ctrlc::set_handler(move || {
         if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
             println!("Received Ctrl+C: Gracefully shutting down");
@@ -361,29 +385,37 @@ async fn sync() {
 
     use rand::Rng; // 0.8.5
 
-    let mut metrics_clone = metrics.clone();
+    let metrics_clone = metrics.clone();
 
     let chaos = Config::getenv("CHAOS_MODE", "no");
     if Config::truth_value(&chaos) {
         out_pnanner.add(
             move || {
+                if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+                    // let mut metrics_lock = metrics_clone.lock().unwrap();
+                    //
+                    // // let mut metrics: Metrics = Metrics::new();
+                    // // metrics_lock.msgs_total += metrics_lock.msgs_current;
+                    // metrics_lock.bytes_total += metrics_lock.bytes_current;
+                    //
+                    // println!("Ingested Batch: {}", metrics_lock.ingeted_current);
+                    // println!("Ingested Messages: {}", metrics_lock.ingeted_total);
+                    // println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
+                    // println!("Bytes Batch: {}", metrics_lock.bytes_current);
+                    // println!("Bytes: {}", metrics_lock.bytes_total);
 
-                let mut metrics_lock = metrics_clone.lock().unwrap();
 
-                // let mut metrics: Metrics = Metrics::new();
-                // metrics_lock.msgs_total += metrics_lock.msgs_current;
-                metrics_lock.bytes_total += metrics_lock.bytes_current;
+                    println!("Chaos mode throwing a random exit. You can disable this test mode buy removing CHAOS_MODE flag or setting to 'no'");
 
-                println!("Ingested Batch: {}", metrics_lock.ingeted_current);
-                println!("Ingested Messages: {}", metrics_lock.ingeted_total);
-                println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
-                println!("Bytes Batch: {}", metrics_lock.bytes_current);
-                println!("Bytes: {}", metrics_lock.bytes_total);
+                    let pid = process::id() as i32; // or replace with the PID of the target process
 
-                println!("Chaos mode throwing a random exit. You can disable this test mode buy removing CHAOS_MODE flag or setting to 'no'");
+                    unsafe {
+                        kill(Pid::from_raw(pid), Signal::SIGTERM).unwrap();
+                    }
+                }
 
-                exit(0);
-            }, periodic::Every::new(Duration::from_secs(rand::thread_rng().gen_range(30..60))),
+                // exit(0);
+            }, periodic::Every::new(Duration::from_secs(rand::thread_rng().gen_range(15..60))),
         );
     }
         out_pnanner.add(

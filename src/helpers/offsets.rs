@@ -161,6 +161,12 @@ impl Offsets {
         format!("{}-{}-latest", key.namespace, key.partition)
     }
 
+    pub fn flush(&self) -> Option<usize> {
+        match self.tree.flush() {
+            Ok(val) => Some(val),
+            Err(_) => None,
+        }
+    }
     pub fn set(&self, key: &OffsetKey, offset_type: OffsetTypes, offset: u64) -> Option<IVec> {
         match self.upsert(key, offset_type, offset) {
             Ok(val) => val,

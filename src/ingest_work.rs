@@ -59,7 +59,7 @@ impl Ingest {
             // let mut file= &output_file.file;
             // file.flush().expect(&format!("Could not flush file {}", filename));
 
-            if (force && output_file.bytes == 0) {
+            if force && output_file.bytes == 0 {
                 output_file.rotated = Some(true);
                 continue;
             }
@@ -224,28 +224,29 @@ impl Ingest {
 
                     buf_str.clear();
 
-                    offset_db_clone.set(&ingest_batch.offset_key, OffsetTypes::Line, i);
-
                     j += 1;
                 }
 
                 i += 1;
             }
 
+            // Self::flush_buffers(true);
+            Self::flush_buffers(false, output_files);
+
+            // Retain only items that didn't qualify for flushing
+            output_files.retain(|_filename, file| !Ingest::is_rotated(file));
+
+            offset_db_clone.set(&ingest_batch.offset_key, OffsetTypes::Line, i);
+
             offset_db_clone.set(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
+
+            offset_db_clone.flush();
 
             let mut counter_lock = metrcis_clone.lock().unwrap();
             counter_lock.ingeted_current += j;
-            counter_lock.ingeted_total += j;
-            counter_lock.msgs_total += i;
+            counter_lock.ingeted_total += i;
             counter_lock.bytes_current += bytes;
         }
-
-        // Self::flush_buffers(true);
-        Self::flush_buffers(false, output_files);
-
-        // Retain only items that didn't qualify for flushing
-        output_files.retain(|_filename, file| !Ingest::is_rotated(file));
 
         if *updated_schema_clone.lock().unwrap() == "yes".to_string() {
             tokio::runtime::Builder::new_multi_thread()
