@@ -317,7 +317,7 @@ async fn sync() {
 
         planner.add(
             move || {
-
+                if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
 
                     // match Config::list_dir_contents(data_dir.clone()) {
                     //     Err(e) => println!("Error occurred: {}", e),
@@ -350,7 +350,7 @@ async fn sync() {
                     metrics_lock.ingeted_current = 0;
 
                     Config::set_status(metrics_lock, None);
-
+                }
             },
             periodic::Every::new(Duration::from_secs(60)),
         );
@@ -473,6 +473,18 @@ async fn sync() {
     };
     output_sync(input_metadata_clone.clone());
 
+
+
+    let data_output = DataOutputAwsAthenaPlugin::new().await;
+    let input_metadata_clone = {
+        let guard = input_metadata_clone;
+        guard.clone()
+    };
+    data_output.sync(input_metadata_clone).await;
+
+
+
+
     let metrics_clone = metrics.clone();
 
     // let mut metrics: Metrics = Metrics::new();
@@ -504,14 +516,6 @@ async fn sync() {
 
         // sleep(Duration::from_secs(5));
     // }
-
-
-    let data_output = DataOutputAwsAthenaPlugin::new().await;
-    let input_metadata_clone = {
-        let guard = input_metadata_clone;
-        guard.clone()
-    };
-    data_output.sync(input_metadata_clone).await;
 
     println!("Shutting Down... bye");
 }
