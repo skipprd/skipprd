@@ -207,7 +207,7 @@ docker_push:
     - tags
 
 cleanup:
-  image: amazon/aws-cli:2.x
+  image: amazon/aws-cli:2.11.21
   stage: cleanup
   script:
     - aws s3 rm s3://skippr-e2e-sample-data-output/bikehire --recursive
