@@ -41,6 +41,7 @@ pub static OUTPUT_FILES_STATIC: Lazy<Mutex<HashMap<String, OutputFile>>> =
 
 pub struct Ingest {}
 
+
 impl Ingest {
     pub fn new() -> Ingest {
         Ingest {}
@@ -48,7 +49,7 @@ impl Ingest {
 
     pub fn flush_buffers(force: bool, output_files: &mut MutexGuard<HashMap<String, OutputFile>>) {
     // pub fn flush_buffers(force: bool) {
-
+        println!("Flushing ingest buffers");
         let data_dir = Config::get_data_dir();
         let output_dir = format!("{}/output", data_dir);
 
@@ -59,30 +60,28 @@ impl Ingest {
             // let mut file= &output_file.file;
             // file.flush().expect(&format!("Could not flush file {}", filename));
 
-            if force && output_file.bytes == 0 {
-                output_file.rotated = Some(true);
-                continue;
-            }
 
             if force || Ingest::is_file_size_exceeded(&output_file) || Ingest::is_file_time_exceeded(&output_file) {
 
-                output_file.rotated = Some(true);
+                if (output_file.bytes > 0) { // don't flush empty files when forced
+                    output_file.rotated = Some(true);
 
-                let new_filename = format!(
-                    "{}/done/{}-{}",
-                    output_dir,
-                    Helpers::random_str(12),
-                    filename
-                );
-                let old_path = format!("{}/{}", output_dir, filename);
+                    let new_filename = format!(
+                        "{}/done/{}-{}",
+                        output_dir,
+                        Helpers::random_str(12),
+                        filename
+                    );
+                    let old_path = format!("{}/{}", output_dir, filename);
 
-                match fs::rename(&old_path, &new_filename) {
-                    Ok(_) => {},
-                    Err(_) => {}
-                };
-
+                    match fs::rename(&old_path, &new_filename) {
+                        Ok(_) => {},
+                        Err(_) => {}
+                    };
+                }
                 // println!("Rotated buffer file {}", new_filename);
             }
+            output_file.rotated = Some(true);
         }
     }
 
@@ -125,128 +124,126 @@ impl Ingest {
 
             for mut record in records {
 
-                if !RUNNING.lock().unwrap().load(Ordering::SeqCst) {
-                    sleep(Duration::from_secs(1));
-                    return;
-                }
+                if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+                    if record.is_null() {
 
-                if record.is_null() {
+                        // println!("{}", &ingest_batch.data);
+                        let mut counter_lock = metrcis_clone.lock().unwrap();
+                        counter_lock.deadletters_total += 1;
 
-                    // println!("{}", &ingest_batch.data);
-                    let mut counter_lock = metrcis_clone.lock().unwrap();
-                    counter_lock.deadletters_total += 1;
-
-                    continue;
-                }
-
-                if has_offsets.is_none()
-                    || Some(false)
-                        != offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Line, i)
-                {
-                    let usize = serde_json::to_vec(&record).unwrap().len();
-                    let record_bytes: u64 = usize.try_into().unwrap();
-                    bytes += record_bytes;
-
-                    let skpr_namespace = Helpers::parse_namespace_field(
-                        &record,
-                        Config::get_pipeline_name(),
-                        &mut PARSE_NAMESPACE_CACHE.lock().unwrap(),
-                    );
-                    let skpr_partition = Helpers::parse_partition_field(&record);
-                    let skpr_time = Helpers::parse_time_field(&record);
-
-                    let mut skpr_time_bucket = 0;
-
-                    if skpr_time.is_some() {
-                        skpr_time_bucket = BufferChunker::event_time_bucket(skpr_time.unwrap());
+                        continue;
                     }
 
-                    // if Config::truth_value(faltten_events) {
-                    //     record = Helpers::flatten(&record);
-                    // }
+                    if has_offsets.is_none()
+                        || Some(false)
+                        != offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Line, i)
+                    {
+                        let usize = serde_json::to_vec(&record).unwrap().len();
+                        let record_bytes: u64 = usize.try_into().unwrap();
+                        bytes += record_bytes;
 
-                    let output_file_name = BufferChunker::encode_chunk_name(
-                        "ingest",
-                        Some(&skpr_namespace),
-                        Some(&skpr_partition),
-                        Some(skpr_time_bucket),
-                    );
-                    let output_file = format!("{}/{}", output_dir.clone(), &output_file_name);
+                        let skpr_namespace = Helpers::parse_namespace_field(
+                            &record,
+                            Config::get_pipeline_name(),
+                            &mut PARSE_NAMESPACE_CACHE.lock().unwrap(),
+                        );
+                        let skpr_partition = Helpers::parse_partition_field(&record);
+                        let skpr_time = Helpers::parse_time_field(&record);
 
-                    if output_files.get_mut(&output_file_name).is_none() {
-                        let f = OpenOptions::new()
-                            .create(true)
-                            .write(true)
-                            .append(true)
-                            .open(output_file.clone())
+                        let mut skpr_time_bucket = 0;
+
+                        if skpr_time.is_some() {
+                            skpr_time_bucket = BufferChunker::event_time_bucket(skpr_time.unwrap());
+                        }
+
+                        // if Config::truth_value(faltten_events) {
+                        //     record = Helpers::flatten(&record);
+                        // }
+
+                        let output_file_name = BufferChunker::encode_chunk_name(
+                            "ingest",
+                            Some(&skpr_namespace),
+                            Some(&skpr_partition),
+                            Some(skpr_time_bucket),
+                        );
+                        let output_file = format!("{}/{}", output_dir.clone(), &output_file_name);
+
+                        if output_files.get_mut(&output_file_name).is_none() {
+                            let f = OpenOptions::new()
+                                .create(true)
+                                .write(true)
+                                .append(true)
+                                .open(output_file.clone())
+                                .unwrap();
+
+                            let new_file = OutputFile {
+                                bytes: record_bytes,
+                                upated_at: SystemTime::now(),
+                                file: f,
+                                rotated: None
+                            };
+
+                            output_files.insert(output_file_name.clone(), new_file);
+                        }
+
+                        let mut meta = metadata_clone.lock().unwrap();
+                        if meta.get(&skpr_namespace).is_none() {
+                            meta.insert(skpr_namespace.clone(), Metadata::new().unwrap());
+                        }
+
+                        let msg = fast_path_ingest(
+                            &record,
+                            &mut meta.get_mut(&skpr_namespace).unwrap().fields,
+                            &mut updated_schema_clone.lock().unwrap(),
+                            flatten
+                        );
+
+                        buf_str = msg.to_string() + "\n";
+
+                        output_files
+                            .get_mut(&output_file_name)
+                            .unwrap()
+                            .file
+                            .write_all(buf_str.as_bytes())
                             .unwrap();
 
-                        let new_file = OutputFile {
-                            bytes: record_bytes,
-                            upated_at: SystemTime::now(),
-                            file: f,
-                            rotated: None
-                        };
+                        output_files
+                            .get_mut(&output_file_name)
+                            .unwrap()
+                            .bytes += record_bytes;
 
-                        output_files.insert(output_file_name.clone(), new_file);
+                        output_files
+                            .get_mut(&output_file_name)
+                            .unwrap()
+                            .upated_at = SystemTime::now();
+
+                        buf_str.clear();
+
+                        offset_db_clone.set(&ingest_batch.offset_key, OffsetTypes::Line, i);
+
+                        j += 1;
                     }
 
-                    let mut meta = metadata_clone.lock().unwrap();
-                    if meta.get(&skpr_namespace).is_none() {
-                        meta.insert(skpr_namespace.clone(), Metadata::new().unwrap());
-                    }
-
-                    let msg = fast_path_ingest(
-                        &record,
-                        &mut meta.get_mut(&skpr_namespace).unwrap().fields,
-                        &mut updated_schema_clone.lock().unwrap(),
-                        flatten
-                    );
-
-                    buf_str = msg.to_string() + "\n";
-
-                    output_files
-                        .get_mut(&output_file_name)
-                        .unwrap()
-                        .file
-                        .write_all(buf_str.as_bytes())
-                        .unwrap();
-
-                    output_files
-                        .get_mut(&output_file_name)
-                        .unwrap()
-                        .bytes += record_bytes;
-
-                    output_files
-                        .get_mut(&output_file_name)
-                        .unwrap()
-                        .upated_at = SystemTime::now();
-
-                    buf_str.clear();
-
-                    j += 1;
+                    i += 1;
+                } else {
+                    println!("Stopping ingest");
+                    break;
                 }
-
-                i += 1;
             }
-
-            // Self::flush_buffers(true);
-            Self::flush_buffers(false, output_files);
-
-            // Retain only items that didn't qualify for flushing
-            output_files.retain(|_filename, file| !Ingest::is_rotated(file));
-
-            offset_db_clone.set(&ingest_batch.offset_key, OffsetTypes::Line, i);
 
             offset_db_clone.set(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
 
-            offset_db_clone.flush();
-
             let mut counter_lock = metrcis_clone.lock().unwrap();
             counter_lock.ingeted_current += j;
-            counter_lock.ingeted_total += i;
+            counter_lock.ingeted_total += j;
             counter_lock.bytes_current += bytes;
         }
+
+        // Self::flush_buffers(true);
+        Self::flush_buffers(false, output_files);
+
+        // Retain only items that didn't qualify for flushing
+        output_files.retain(|_filename, file| !Ingest::is_rotated(file));
 
         if *updated_schema_clone.lock().unwrap() == "yes".to_string() {
             tokio::runtime::Builder::new_multi_thread()

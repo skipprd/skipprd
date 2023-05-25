@@ -287,11 +287,12 @@ async fn sync() {
 
     thread::spawn(move || {
         for sig in signals.forever() {
-            println!("Received signal {:?}", sig);
-            println!("Shutdown detected");
-            println!("Flushing ingest buffers");
-            let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
-            Ingest::flush_buffers(true, &mut output_files);
+            RUNNING.lock().unwrap().store(false, Ordering::SeqCst);
+            println!("Received signal {:?}: Gracefully shutting down", sig);
+            // println!("Flushing ingest buffers");
+            // let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
+            // Ingest::flush_buffers(true, &mut output_files);
+            // sleep(Duration::from_secs(30)); // wait for threads to flush
             println!("Greaceful shutdown complete... bye");
             std::process::exit(0);
         }
@@ -304,9 +305,9 @@ async fn sync() {
 
             // Config::set_config(&newmeta_clone.lock().unwrap(),true);
 
-            println!("Flushing ingest buffers");
-            let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
-            ingest_work::Ingest::flush_buffers(true, &mut output_files);
+            // println!("Flushing ingest buffers");
+            // let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
+            // ingest_work::Ingest::flush_buffers(true, &mut output_files);
             // println!("Flushing output buffers");
             // output_sync(_newmeta_clone.lock().unwrap().clone());
 

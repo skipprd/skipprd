@@ -204,8 +204,7 @@ impl DataSourceS3Plugin {
                                 &metadata,
                                 &metrics,
                                 &offsets_clone,
-                            )
-                                .await;
+                            ).await;
                         }
 
                         break;
