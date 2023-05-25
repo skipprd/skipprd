@@ -4,6 +4,7 @@ use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read};
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use yaml_rust::YamlLoader;
 
 use std::sync::MutexGuard;
@@ -19,7 +20,7 @@ use reqwest::header::{HeaderMap, HeaderName};
 use reqwest::{Client, StatusCode};
 
 use crate::discover::Metadata;
-use crate::flatten_metadata;
+use crate::{flatten_metadata, RUNNING};
 
 use crate::helpers::license::LicenseChecker;
 use crate::helpers::Helpers;
@@ -340,8 +341,13 @@ impl Config {
                     let metadata = resp.json::<HashMap<String, Metadata>>().await.unwrap();
                     Ok(metadata)
                 }
-                err => {
+                StatusCode::NOT_FOUND => {
                     // println!("Metadata HTTP Error: {:?}", err);
+                    Err(false)
+                }
+                err => {
+                    println!("Metadata HTTP Error: {:?}", err);
+                    RUNNING.lock().unwrap().store(false, Ordering::SeqCst);
                     Err(false)
                 }
             },

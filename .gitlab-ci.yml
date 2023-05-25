@@ -220,7 +220,7 @@ cleanup:
     - aws glue delete-database --catalog-id 353855562591 --name bikehire
     - aws s3 rm s3://skippr-metadata-test --recursive
     - aws dynamodb scan --table-name Test-MetadataService-Stack-MetadataTable8CB34826-XGZT4CFIJO8Y --attributes-to-get KeyAttributeName --query 'Items[*]' --output json > items.json
-    - for item in $(cat items.json | jq -r '.[] | @base64'); do aws dynamodb delete-item --table-name Test-MetadataService-Stack-MetadataTable8CB34826-XGZT4CFIJO8Y --key "$(echo ${item} | base64 --decode)"; done
+    - for item in $(cat items.json | jq -r '.[] | @base64'); do aws dynamodb delete-item --table-name Test-MetadataService-Stack-MetadataTable8CB34826-XGZT4CFIJO8Y --key "$(echo ${item} | base64 -d)"; done
   only:
     - master
     - tags
