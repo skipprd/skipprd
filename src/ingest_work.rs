@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::sleep;
 use glob::{glob_with, GlobResult, MatchOptions};
 use crate::RUNNING;
-use crate::GRACEFUL_SHUTDOWN_COMPLETE;
+// use crate::GRACEFUL_SHUTDOWN_COMPLETE;
 
 #[derive(Clone, Debug)]
 pub struct IngestBatch {
@@ -164,7 +164,7 @@ impl Ingest {
 
             for mut record in records {
 
-                if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+                // if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
 
                     if record.is_null() {
 
@@ -269,40 +269,36 @@ impl Ingest {
                     }
 
 
-                } else {
-                    println!("Stopping ingest");
-                    break;
-                }
+                // } else {
+                //     println!("Stopping ingest");
+                //     break;
+                // }
             }
 
             // let mut force = false;
-            if !RUNNING.lock().unwrap().load(Ordering::SeqCst) {
-                for (filename, output_file) in output_files.iter_mut() {
-                    output_file.file.flush().expect(&format!("Could not flush file {}", filename));
-                }
-            }
+            // if !RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+            //     for (filename, output_file) in output_files.iter_mut() {
+            //         output_file.file.flush().expect(&format!("Could not flush file {}", filename));
+            //     }
+            // }
+
+            Self::flush_buffers(false, output_files);
+
+            // Retain only items that didn't qualify for flushing
+            output_files.retain(|_filename, file| !Ingest::is_rotated(file));
 
             offset_db_clone.set(&ingest_batch.offset_key, OffsetTypes::Line, i);
 
-            if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+            // if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
                 offset_db_clone.set(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
-            }
-
-            // if !RUNNING.lock().unwrap().load(Ordering::SeqCst) {
-                offset_db_clone.flush();
             // }
+            offset_db_clone.flush();
 
             let mut counter_lock = metrcis_clone.lock().unwrap();
             counter_lock.ingeted_current += j;
             counter_lock.messages_total += i;
             counter_lock.bytes_current += bytes;
-
         }
-
-        Self::flush_buffers(false, output_files);
-
-        // Retain only items that didn't qualify for flushing
-        output_files.retain(|_filename, file| !Ingest::is_rotated(file));
 
         if *updated_schema_clone.lock().unwrap() == "yes".to_string() {
             tokio::runtime::Builder::new_multi_thread()

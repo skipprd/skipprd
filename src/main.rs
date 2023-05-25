@@ -535,15 +535,17 @@ async fn sync() {
     // wait arbitrary time for ingest threads to complete
     // sleep(Duration::from_secs(30));
 
-    RUNNING.lock().unwrap().store(false, Ordering::SeqCst);
+    // RUNNING.lock().unwrap().store(false, Ordering::SeqCst);
+    //
+    // let elapsed = SystemTime::now();
+    // while !GRACEFUL_SHUTDOWN_COMPLETE.lock().unwrap().load(Ordering::SeqCst) {
+    //     sleep(Duration::from_secs(1));
+    //     if elapsed.elapsed().unwrap() > Duration::from_secs(15) {
+    //         GRACEFUL_SHUTDOWN_COMPLETE.lock().unwrap().store(true, Ordering::SeqCst);
+    //     }
+    // }
 
-    let elapsed = SystemTime::now();
-    while !GRACEFUL_SHUTDOWN_COMPLETE.lock().unwrap().load(Ordering::SeqCst) {
-        sleep(Duration::from_secs(1));
-        if elapsed.elapsed().unwrap() > Duration::from_secs(60) {
-            GRACEFUL_SHUTDOWN_COMPLETE.lock().unwrap().store(true, Ordering::SeqCst);
-        }
-    }
+    sleep(Duration::from_secs(60));
 
     println!("Flushing ingest buffers");
     let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
