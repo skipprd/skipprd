@@ -28,7 +28,8 @@ use std::process::exit;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::sleep;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
+use chrono::Duration;
 
 use futures::executor::block_on;
 use glob::glob_with;
@@ -81,6 +82,8 @@ use crate::ingest_work::{Ingest, OUTPUT_FILES_STATIC};
 
 pub static RUNNING: Lazy<Mutex<AtomicBool>> =
     Lazy::new(|| Mutex::new(AtomicBool::new(true)));
+pub static GRACEFUL_SHUTDOWN_COMPLETE: Lazy<Mutex<AtomicBool>> =
+    Lazy::new(|| Mutex::new(AtomicBool::new(false)));
 
 #[tokio::main]
 async fn main() {
@@ -296,7 +299,14 @@ async fn sync() {
             // println!("Flushing ingest buffers");
             // let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
             // Ingest::flush_buffers(true, &mut output_files);
-            sleep(Duration::from_secs(30)); // wait for threads to flush
+            // sleep(Duration::from_secs(30)); // wait for threads to flush
+
+            while !GRACEFUL_SHUTDOWN_COMPLETE.lock().unwrap().load(Ordering::SeqCst) {
+                sleep(Duration::from_secs(1));
+            }
+
+            let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
+            Ingest::flush_buffers(true, &mut output_files);
 
             // let mut metrics: Metrics = Metrics::new();
             let metrics_lock = metrics_clone.lock().unwrap();
@@ -322,9 +332,14 @@ async fn sync() {
             // println!("Flushing output buffers");
             // output_sync(_newmeta_clone.lock().unwrap().clone());
 
-            // while RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+            while !GRACEFUL_SHUTDOWN_COMPLETE.lock().unwrap().load(Ordering::SeqCst) {
+                sleep(Duration::from_secs(1));
+            }
 
-            sleep(Duration::from_secs(30)); // wait for threads to flush
+            let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
+            Ingest::flush_buffers(true, &mut output_files);
+
+            // sleep(Duration::from_secs(30)); // wait for threads to flush
             println!("Greaceful shutdown complete... bye");
             std::process::exit(0);
 
@@ -522,9 +537,18 @@ async fn sync() {
 
     RUNNING.lock().unwrap().store(false, Ordering::SeqCst);
 
+    let elapsed = SystemTime::now();
+    while !GRACEFUL_SHUTDOWN_COMPLETE.lock().unwrap().load(Ordering::SeqCst) {
+        sleep(Duration::from_secs(1));
+        if elapsed.elapsed().unwrap() > Duration::from_secs(60) {
+            GRACEFUL_SHUTDOWN_COMPLETE.lock().unwrap().store(true, Ordering::SeqCst);
+        }
+    }
+
     println!("Flushing ingest buffers");
     let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
     ingest_work::Ingest::flush_buffers(true, &mut output_files);
+
     println!("Flushing output buffers");
     let input_metadata_clone = skippr_metadata.clone();
     let input_metadata_clone = {

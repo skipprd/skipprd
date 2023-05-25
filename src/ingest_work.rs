@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::sleep;
 use glob::{glob_with, GlobResult, MatchOptions};
 use crate::RUNNING;
+use crate::GRACEFUL_SHUTDOWN_COMPLETE;
 
 #[derive(Clone, Debug)]
 pub struct IngestBatch {
@@ -267,11 +268,11 @@ impl Ingest {
                 }
             }
 
-            let mut force = false;
-            if !RUNNING.lock().unwrap().load(Ordering::SeqCst) {
-                force = true;
-            }
-            Self::flush_buffers(force, output_files);
+            // let mut force = false;
+            // if !RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+            //     force = true;
+            // }
+            Self::flush_buffers(false, output_files);
 
             // Retain only items that didn't qualify for flushing
             output_files.retain(|_filename, file| !Ingest::is_rotated(file));
@@ -287,6 +288,7 @@ impl Ingest {
             counter_lock.ingeted_current += j;
             counter_lock.messages_total += i;
             counter_lock.bytes_current += bytes;
+            
         }
 
 
@@ -307,9 +309,6 @@ impl Ingest {
             *updated_schema_clone.lock().unwrap() = "no".to_string();
         }
 
-        if !RUNNING.lock().unwrap().load(Ordering::SeqCst) {
-            sleep(Duration::from_secs(120));
-        }
     }
 
     fn is_file_size_exceeded(file: &OutputFile) -> bool {

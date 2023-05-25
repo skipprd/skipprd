@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use std::time::Duration;
 use std::{fs, thread};
+use std::sync::atomic::Ordering;
 use std::thread::sleep;
 
 use crate::discover::Metadata;
@@ -28,6 +29,7 @@ use crate::ingest_work::{Ingest, IngestBatch};
 use rusoto_core::{Region, RusotoError};
 use rusoto_s3::{GetObjectOutput, GetObjectRequest, ListObjectsV2Request, S3Client, S3};
 use tokio::time::timeout;
+use crate::{GRACEFUL_SHUTDOWN_COMPLETE, RUNNING};
 
 pub struct DataSourceS3Plugin {
     // config: HashMap<String, String>,
@@ -380,6 +382,11 @@ impl DataSourceS3Plugin {
         // Wait for all threads to finish, else we will stampead the data source
         for handle in threads {
             handle.join().unwrap();
+        }
+
+        if !RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+            GRACEFUL_SHUTDOWN_COMPLETE.lock().unwrap().store(true, Ordering::SeqCst);
+            sleep(Duration::from_secs(120));
         }
         // println!("Ingested");
     }
