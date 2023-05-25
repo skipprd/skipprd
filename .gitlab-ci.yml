@@ -219,7 +219,37 @@ cleanup:
     - aws s3 rm s3://skippr-e2e-sample-data-output/bikehire --recursive
     - aws s3 rm s3://skippr-metadata-test --recursive
     - aws glue delete-database --catalog-id 353855562591 --name bikehire || true
-#    - |
+    - |
+      aws configure set default.region us-est-1
+
+      TABLE_NAME="Test-MetadataService-Stack-MetadataTable8CB34826-XGZT4CFIJO8Y"
+
+      KEY_CONDITION_EXPRESSION="#t = :tenantval"
+      EXPRESSION_ATTRIBUTE_NAMES='{"#t": "tenant"}'
+      EXPRESSION_ATTRIBUTE_VALUES='{":tenantval":{"S":"skippr"}}'
+      PROJECTION_EXPRESSION="tenant,id"
+
+      while true;
+      do
+        OUTPUT=$(aws dynamodb query --table-name $TABLE_NAME --key-condition-expression "$KEY_CONDITION_EXPRESSION" --expression-attribute-names "$EXPRESSION_ATTRIBUTE_NAMES" --expression-attribute-values "$EXPRESSION_ATTRIBUTE_VALUES" --projection-expression "$PROJECTION_EXPRESSION")
+
+        IDS=$(echo $OUTPUT | jq -r '.Items[] | {id: .id.S, tenant: .tenant.S} | [.id, .tenant] | "\(.[0]) \(.[1])"')
+
+        if [ -z "$IDS" ]; then
+          echo "No more items to delete"
+          break
+        fi
+
+        for ID in $IDS
+        do
+          IDSPLIT=($ID)
+          ID="${IDSPLIT[0]}"
+          TENANT="${IDSPLIT[1]}"
+          echo "Deleting item with id $ID and tenant $TENANT"
+
+          aws dynamodb delete-item --table-name $TABLE_NAME --key '{"tenant": {"S": "'$TENANT'"}, "id": {"S": "'$ID'"}}'
+        done
+      done
 #      aws dynamodb delete-item --table-name Test-MetadataService-Stack-MetadataTable8CB34826-XGZT4CFIJO8Y --key '{"tenant": {"S": "skippr"}}'
 
   only:
