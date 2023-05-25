@@ -166,13 +166,13 @@ impl Ingest {
 
                 if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
 
-                    i += 1;
-
                     if record.is_null() {
 
                         // println!("{}", &ingest_batch.data);
                         let mut counter_lock = metrcis_clone.lock().unwrap();
                         counter_lock.deadletters_total += 1;
+
+                        i += 1;
 
                         continue;
                     }
@@ -264,7 +264,7 @@ impl Ingest {
 
                         buf_str.clear();
 
-
+                        i += 1;
                         j += 1;
                     }
 
@@ -276,13 +276,11 @@ impl Ingest {
             }
 
             // let mut force = false;
-            // if !RUNNING.lock().unwrap().load(Ordering::SeqCst) {
-            //     force = true;
-            // }
-            Self::flush_buffers(false, output_files);
-
-            // Retain only items that didn't qualify for flushing
-            output_files.retain(|_filename, file| !Ingest::is_rotated(file));
+            if !RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+                for (filename, output_file) in output_files.iter_mut() {
+                    output_file.file.flush().expect(&format!("Could not flush file {}", filename));
+                }
+            }
 
             offset_db_clone.set(&ingest_batch.offset_key, OffsetTypes::Line, i);
 
@@ -301,7 +299,10 @@ impl Ingest {
 
         }
 
+        Self::flush_buffers(false, output_files);
 
+        // Retain only items that didn't qualify for flushing
+        output_files.retain(|_filename, file| !Ingest::is_rotated(file));
 
         if *updated_schema_clone.lock().unwrap() == "yes".to_string() {
             tokio::runtime::Builder::new_multi_thread()

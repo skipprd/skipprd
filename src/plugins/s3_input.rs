@@ -303,7 +303,7 @@ impl DataSourceS3Plugin {
             })
             .collect();
 
-        // let datas: Arc<Mutex<Vec<IngestBatch>>> = Arc::new(Mutex::new(Vec::new()));
+        let datas: Arc<Mutex<Vec<IngestBatch>>> = Arc::new(Mutex::new(Vec::new()));
 
         let future_result = tokio::join!(join_all(futures)).0;
 
@@ -312,17 +312,22 @@ impl DataSourceS3Plugin {
         let data_dir = Config::get_data_dir();
         let _temp_dir = &format!("{}/source_buffer", data_dir);
 
-        // for thread in threads {
-        for future in future_result {
-            // let datas = datas.clone();
-            let mut datas: Vec<IngestBatch> = Vec::new();
+        let metrics = metrics.clone();
+        let metadata = metadata.clone();
+        let offsets_clone = offsets_clone.clone();
+        let bucket_name = bucket_name.clone();
+        let mut datas = datas.clone();
 
-            let bucket_name = bucket_name.clone();
-            let metrics = metrics.clone();
-            let metadata = metadata.clone();
-            let offsets_clone = offsets_clone.clone();
+        threads.push(thread::spawn(move || {
 
-            threads.push(thread::spawn(move || {
+            // for thread in threads {
+            for future in future_result {
+
+                // let mut datas: Vec<IngestBatch> = Vec::new();
+
+
+
+
                 let mut download = future.unwrap();
 
                 // println!("Downloading s3 object");
@@ -346,7 +351,7 @@ impl DataSourceS3Plugin {
                     let mut decompressed_data = String::new();
                     stream.read_to_string(&mut decompressed_data).unwrap();
 
-                    datas.push(IngestBatch {
+                    datas.lock().unwrap().push(IngestBatch {
                         offset_key: OffsetKey {
                             namespace: bucket_name.to_string(),
                             partition: download.key,
@@ -359,7 +364,7 @@ impl DataSourceS3Plugin {
                     let mut str_data = String::new();
                     c.read_to_string(&mut str_data).unwrap();
 
-                    datas.push(IngestBatch {
+                    datas.lock().unwrap().push(IngestBatch {
                         offset_key: OffsetKey {
                             namespace: bucket_name.to_string(),
                             partition: download.key,
@@ -367,17 +372,20 @@ impl DataSourceS3Plugin {
                         data: str_data,
                     });
                 }
-
+            }
                 // println!("Ingesting");
 
-                self::Ingest::ingest_file(
-                    datas.to_vec(),
-                    &metadata,
-                    &metrics,
-                    &offsets_clone,
-                );
-            }));
-        }
+
+
+
+            self::Ingest::ingest_file(
+                datas.lock().unwrap().to_vec(),
+                &metadata,
+                &metrics,
+                &offsets_clone,
+            );
+        }));
+
 
         // Wait for all threads to finish, else we will stampead the data source
         for handle in threads {
