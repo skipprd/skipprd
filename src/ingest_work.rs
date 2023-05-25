@@ -242,6 +242,8 @@ impl Ingest {
         // Self::flush_buffers(true);
         Self::flush_buffers(false, output_files);
 
+        offset_db_clone.flush();
+        
         // Retain only items that didn't qualify for flushing
         output_files.retain(|_filename, file| !Ingest::is_rotated(file));
 
@@ -259,6 +261,10 @@ impl Ingest {
                 });
 
             *updated_schema_clone.lock().unwrap() = "no".to_string();
+        }
+
+        if !RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+            sleep(Duration::from_secs(120));
         }
     }
 
