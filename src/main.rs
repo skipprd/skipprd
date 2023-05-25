@@ -281,7 +281,11 @@ async fn sync() {
 
     let _newmeta_clone = skippr_metadata.clone();
 
-    // let r = running.clone();
+    let now = Arc::new(Mutex::new(Instant::now()));
+
+    let metrics: Arc<Mutex<Metrics>> = Arc::new(Mutex::new(Metrics::new()));
+
+    let metrics_clone = metrics.clone();
 
     let mut signals = Signals::new(&[SIGTERM, SIGQUIT, SIGABRT]).unwrap();
 
@@ -293,6 +297,13 @@ async fn sync() {
             // let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
             // Ingest::flush_buffers(true, &mut output_files);
             sleep(Duration::from_secs(30)); // wait for threads to flush
+
+            // let mut metrics: Metrics = Metrics::new();
+            let metrics_lock = metrics_clone.lock().unwrap();
+
+            println!("Ingested Batch: {}", metrics_lock.ingeted_current);
+            println!("Ingested Messages: {}", metrics_lock.messages_total);
+
             println!("Greaceful shutdown complete... bye");
             std::process::exit(0);
         }
@@ -325,9 +336,7 @@ async fn sync() {
     .expect("Error during graceful shutdown");
 
     // while running.load(Ordering::SeqCst) {
-        let now = Arc::new(Mutex::new(Instant::now()));
 
-        let metrics: Arc<Mutex<Metrics>> = Arc::new(Mutex::new(Metrics::new()));
 
         // let mut pool = ThreadPool::new(4, skippr_metadata.clone());
 
@@ -368,7 +377,7 @@ async fn sync() {
 
                     println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
                     println!("Ingested Batch: {}", metrics_lock.ingeted_current);
-                    println!("Ingested Messages: {}", metrics_lock.ingeted_total);
+                    println!("Ingested Messages: {}", metrics_lock.messages_total);
                     println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
                     println!("Bytes Batch: {}", metrics_lock.bytes_current);
                     println!("Bytes: {}", metrics_lock.bytes_total);

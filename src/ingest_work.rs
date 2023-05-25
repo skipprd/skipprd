@@ -9,12 +9,13 @@ use once_cell::sync::Lazy;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::{fs};
 use std::time::{Duration, SystemTime};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::sleep;
+use glob::{glob_with, GlobResult, MatchOptions};
 use crate::RUNNING;
 
 #[derive(Clone, Debug)]
@@ -27,7 +28,7 @@ pub struct IngestBatch {
 pub struct OutputFile {
     pub(crate) bytes: u64,
     pub(crate) upated_at: SystemTime,
-    pub(crate) file: File,
+    pub(crate) file: BufWriter<File>,
     pub(crate) rotated: Option<bool>,
 }
 
@@ -63,7 +64,7 @@ impl Ingest {
 
             if force || Ingest::is_file_size_exceeded(&output_file) || Ingest::is_file_time_exceeded(&output_file) {
 
-                if (output_file.bytes > 0) { // don't flush empty files when forced
+                if output_file.bytes > 0 { // don't flush empty files when forced
                     output_file.rotated = Some(true);
 
                     let new_filename = format!(
@@ -82,6 +83,40 @@ impl Ingest {
                 // println!("Rotated buffer file {}", new_filename);
             }
             output_file.rotated = Some(true);
+        }
+
+        if force {
+
+            let options = MatchOptions {
+                case_sensitive: false,
+                require_literal_separator: false,
+                require_literal_leading_dot: false,
+            };
+
+            for entry in glob_with(&format!("{}/*", output_dir), options)
+                .expect("Failed to read glob pattern")
+            {
+                match entry {
+                    Ok(path) => {
+
+                        println!("Flushing orphaned ingest buffer: {}", path.display().to_string());
+
+                        let new_filename = format!(
+                            "{}/done/{}-{}",
+                            output_dir,
+                            Helpers::random_str(12),
+                            path.display().to_string()
+                        );
+                        let old_path = format!("{}/{}", output_dir, path.display().to_string());
+
+                        match fs::rename(&old_path, &new_filename) {
+                            Ok(_) => {},
+                            Err(_) => {}
+                        };
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 
@@ -117,8 +152,8 @@ impl Ingest {
                 offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Closed, 0);
 
             let mut bytes: u64 = 0;
-            let mut i = 1;
-            let mut j = 1;
+            let mut i = 0;
+            let mut j = 0;
 
             let records: Vec<Value> = SerdeJson::deserialize(&ingest_batch.data);
 
@@ -176,10 +211,12 @@ impl Ingest {
                                 .open(output_file.clone())
                                 .unwrap();
 
+                            let mut writer = BufWriter::new(f);
+
                             let new_file = OutputFile {
                                 bytes: record_bytes,
                                 upated_at: SystemTime::now(),
-                                file: f,
+                                file: writer,
                                 rotated: None
                             };
 
@@ -219,7 +256,6 @@ impl Ingest {
 
                         buf_str.clear();
 
-                        offset_db_clone.set(&ingest_batch.offset_key, OffsetTypes::Line, i);
 
                         j += 1;
                     }
@@ -231,21 +267,29 @@ impl Ingest {
                 }
             }
 
+            let mut force = false;
+            if !RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+                force = true;
+            }
+            Self::flush_buffers(force, output_files);
+
+            // Retain only items that didn't qualify for flushing
+            output_files.retain(|_filename, file| !Ingest::is_rotated(file));
+
+            offset_db_clone.set(&ingest_batch.offset_key, OffsetTypes::Line, i);
             offset_db_clone.set(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
+
+            // if !RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+                offset_db_clone.flush();
+            // }
 
             let mut counter_lock = metrcis_clone.lock().unwrap();
             counter_lock.ingeted_current += j;
-            counter_lock.ingeted_total += j;
+            counter_lock.messages_total += i;
             counter_lock.bytes_current += bytes;
         }
 
-        // Self::flush_buffers(true);
-        Self::flush_buffers(false, output_files);
 
-        offset_db_clone.flush();
-        
-        // Retain only items that didn't qualify for flushing
-        output_files.retain(|_filename, file| !Ingest::is_rotated(file));
 
         if *updated_schema_clone.lock().unwrap() == "yes".to_string() {
             tokio::runtime::Builder::new_multi_thread()

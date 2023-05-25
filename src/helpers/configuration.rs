@@ -8,6 +8,7 @@ use std::sync::atomic::Ordering;
 use yaml_rust::YamlLoader;
 
 use std::sync::MutexGuard;
+use std::time::Duration;
 
 // use aws_config::profile::profile_file::ProfileFileKind::Config;
 use serde_derive::{Deserialize, Serialize};
@@ -333,7 +334,7 @@ impl Config {
 
         let path = format!("{}/{}", full_namespace, "approved");
 
-        let response = client.get(&format!("{}/{}", uri, path)).send().await;
+        let response = client.get(&format!("{}/{}", uri, path)).timeout(Duration::from_secs(15)).send().await;
 
         let metadata: Result<HashMap<String, Metadata>, bool> = match response {
             Ok(resp) => match resp.status() {
@@ -346,7 +347,7 @@ impl Config {
                     Err(false)
                 }
                 err => {
-                    println!("Metadata HTTP Error: {:?}", err);
+                    println!("Metadata HTTP Error: {} - {:?}", err, resp.error_for_status());
                     RUNNING.lock().unwrap().store(false, Ordering::SeqCst);
                     Err(false)
                 }
@@ -490,7 +491,7 @@ impl Config {
         let data = json!({
             "metrics": {
                 "msgs_total": metrics.msgs_total,
-                "ingeted_total": metrics.ingeted_total,
+                "ingeted_total": metrics.messages_total,
                 "deadletters_total": metrics.deadletters_total,
                 "ingeted_current": metrics.ingeted_current,
                 "run_time_seconds": metrics.run_time_seconds,
@@ -530,7 +531,7 @@ impl Config {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Metrics {
     pub msgs_total: u64,
-    pub ingeted_total: u64,
+    pub messages_total: u64,
     pub deadletters_total: u64,
     pub ingeted_current: u64,
     pub run_time_seconds: u64,
@@ -543,7 +544,7 @@ impl Metrics {
     pub fn new() -> Self {
         Self {
             msgs_total: 0,
-            ingeted_total: 0,
+            messages_total: 0,
             deadletters_total: 0,
             ingeted_current: 0,
             run_time_seconds: 0,
