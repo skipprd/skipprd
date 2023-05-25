@@ -100,6 +100,10 @@ impl Ingest {
                 match entry {
                     Ok(path) => {
 
+                        if path.is_dir() {
+                           break;
+                        }
+
                         println!("Flushing orphaned ingest buffer: {}", path.display().to_string());
 
                         let new_filename = format!(
@@ -161,6 +165,9 @@ impl Ingest {
             for mut record in records {
 
                 if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+
+                    i += 1;
+
                     if record.is_null() {
 
                         // println!("{}", &ingest_batch.data);
@@ -261,7 +268,7 @@ impl Ingest {
                         j += 1;
                     }
 
-                    i += 1;
+
                 } else {
                     println!("Stopping ingest");
                     break;

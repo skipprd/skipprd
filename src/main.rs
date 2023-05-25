@@ -587,7 +587,7 @@ async fn sync() {
 
     println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
     println!("Ingested Batch: {}", metrics_lock.ingeted_current);
-    println!("Ingested Messages: {}", metrics_lock.ingeted_total);
+    println!("Ingested Messages: {}", metrics_lock.messages_total);
     println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
     println!("Bytes Batch: {}", metrics_lock.bytes_current);
     println!("Bytes: {}", metrics_lock.bytes_total);
