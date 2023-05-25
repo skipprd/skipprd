@@ -292,7 +292,7 @@ async fn sync() {
             // println!("Flushing ingest buffers");
             // let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
             // Ingest::flush_buffers(true, &mut output_files);
-            // sleep(Duration::from_secs(30)); // wait for threads to flush
+            sleep(Duration::from_secs(30)); // wait for threads to flush
             println!("Greaceful shutdown complete... bye");
             std::process::exit(0);
         }
@@ -311,6 +311,9 @@ async fn sync() {
             // println!("Flushing output buffers");
             // output_sync(_newmeta_clone.lock().unwrap().clone());
 
+            // while RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+
+            sleep(Duration::from_secs(30)); // wait for threads to flush
             println!("Greaceful shutdown complete... bye");
             std::process::exit(0);
 
