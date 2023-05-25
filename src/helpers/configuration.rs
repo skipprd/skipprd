@@ -9,6 +9,7 @@ use yaml_rust::YamlLoader;
 
 use std::sync::MutexGuard;
 use std::time::Duration;
+use nix::libc::exit;
 
 // use aws_config::profile::profile_file::ProfileFileKind::Config;
 use serde_derive::{Deserialize, Serialize};
@@ -346,10 +347,11 @@ impl Config {
                     // println!("Metadata HTTP Error: {:?}", err);
                     Err(false)
                 }
-                err => {
+                err => unsafe {
                     println!("Metadata HTTP Error: {} - {:?}", err, resp.error_for_status());
                     RUNNING.lock().unwrap().store(false, Ordering::SeqCst);
-                    Err(false)
+                    // Err(false)
+                    exit(1);
                 }
             },
             Err(_err) => {

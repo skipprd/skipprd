@@ -321,8 +321,8 @@ async fn sync() {
 
     ctrlc::set_handler(move || {
         if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
-            println!("Received Ctrl+C: Gracefully shutting down");
-            RUNNING.lock().unwrap().store(false, Ordering::SeqCst);
+            // println!("Received Ctrl+C: Gracefully shutting down");
+            // RUNNING.lock().unwrap().store(false, Ordering::SeqCst);
 
             // Config::set_config(&newmeta_clone.lock().unwrap(),true);
 
@@ -332,16 +332,16 @@ async fn sync() {
             // println!("Flushing output buffers");
             // output_sync(_newmeta_clone.lock().unwrap().clone());
 
-            while !GRACEFUL_SHUTDOWN_COMPLETE.lock().unwrap().load(Ordering::SeqCst) {
-                sleep(Duration::from_secs(1));
-            }
+            // while !GRACEFUL_SHUTDOWN_COMPLETE.lock().unwrap().load(Ordering::SeqCst) {
+            //     sleep(Duration::from_secs(1));
+            // }
 
-            let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
-            Ingest::flush_buffers(true, &mut output_files);
+            // let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
+            // Ingest::flush_buffers(true, &mut output_files);
 
             // sleep(Duration::from_secs(30)); // wait for threads to flush
-            println!("Greaceful shutdown complete... bye");
-            std::process::exit(0);
+            // println!("Greaceful shutdown complete... bye");
+            // std::process::exit(0);
 
         } else {
             println!("Received another Ctrl+C signal - no worries, terminating immediately...");

@@ -278,7 +278,10 @@ impl Ingest {
             output_files.retain(|_filename, file| !Ingest::is_rotated(file));
 
             offset_db_clone.set(&ingest_batch.offset_key, OffsetTypes::Line, i);
-            offset_db_clone.set(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
+
+            if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+                offset_db_clone.set(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
+            }
 
             // if !RUNNING.lock().unwrap().load(Ordering::SeqCst) {
                 offset_db_clone.flush();
@@ -288,7 +291,7 @@ impl Ingest {
             counter_lock.ingeted_current += j;
             counter_lock.messages_total += i;
             counter_lock.bytes_current += bytes;
-            
+
         }
 
 
