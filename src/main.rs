@@ -508,7 +508,13 @@ async fn sync() {
                                  let guard = input_metadata_clone;
                                  guard.clone()
                              };
+
+                             if OUTPUT_RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+                                 return;
+                             }
+                             OUTPUT_RUNNING.lock().unwrap().store(true, Ordering::SeqCst);
                              data_output.sync(input_metadata_clone).await;
+                             OUTPUT_RUNNING.lock().unwrap().store(false, Ordering::SeqCst);
                          });
                  }
             },
