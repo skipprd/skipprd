@@ -73,6 +73,7 @@ use crate::discover::arrow_schema::convert_skippr_to_arrow;
 use crate::helpers::configuration::{Config, Metrics};
 
 use crate::buffer::BufferChunker;
+use crate::helpers::Helpers;
 use crate::plugins::athena::DataOutputAwsAthenaPlugin;
 
 use crate::plugins::s3_input::DataSourceS3Plugin;
@@ -82,7 +83,11 @@ use crate::ingest_work::{Ingest, OUTPUT_FILES_STATIC};
 
 pub static RUNNING: Lazy<Mutex<AtomicBool>> =
     Lazy::new(|| Mutex::new(AtomicBool::new(true)));
-pub static GRACEFUL_SHUTDOWN_COMPLETE: Lazy<Mutex<AtomicBool>> =
+pub static INPUT_GRACEFUL_SHUTDOWN_COMPLETE: Lazy<Mutex<AtomicBool>> =
+    Lazy::new(|| Mutex::new(AtomicBool::new(false)));
+pub static OUTPUT_RUNNING: Lazy<Mutex<AtomicBool>> =
+    Lazy::new(|| Mutex::new(AtomicBool::new(false)));
+pub static OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE: Lazy<Mutex<AtomicBool>> =
     Lazy::new(|| Mutex::new(AtomicBool::new(false)));
 
 #[tokio::main]
@@ -301,7 +306,8 @@ async fn sync() {
             // Ingest::flush_buffers(true, &mut output_files);
             // sleep(Duration::from_secs(30)); // wait for threads to flush
 
-            while !GRACEFUL_SHUTDOWN_COMPLETE.lock().unwrap().load(Ordering::SeqCst) {
+            while !INPUT_GRACEFUL_SHUTDOWN_COMPLETE.lock().unwrap().load(Ordering::SeqCst)
+                && !OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE.lock().unwrap().load(Ordering::SeqCst) {
                 sleep(Duration::from_secs(1));
             }
 
@@ -313,6 +319,36 @@ async fn sync() {
 
             println!("Ingested Batch: {}", metrics_lock.ingeted_current);
             println!("Ingested Messages: {}", metrics_lock.messages_total);
+
+            ////////////// Cleanup part written parquet files START ////////
+            let options = MatchOptions {
+                case_sensitive: false,
+                require_literal_separator: false,
+                require_literal_leading_dot: false,
+            };
+
+            let data_dir = Config::get_data_dir();
+
+            println!("Looking for temp files in {}", &format!("{}/finalised/*parquet.temp", data_dir));
+
+            for entry in glob_with(&format!("{}/finalised/*parquet.temp", data_dir), options)
+                .expect("Failed to read glob 'finalised' pattern")
+            {
+                match entry {
+                    Ok(path) => {
+
+                        println!("Removing file {}", path.display().to_string());
+
+                        match std::fs::remove_file(path) {
+                            Ok(_t) => {}
+                            Err(err) => println!("{:?}", err),
+                        }
+                    },
+                    Err(e) => println!("{:?}", e),
+                }
+
+            }
+            ////////////// Cleanup part written parquet files END ////////
 
             println!("Greaceful shutdown complete... bye");
             std::process::exit(0);
@@ -551,6 +587,10 @@ async fn sync() {
     let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
     ingest_work::Ingest::flush_buffers(true, &mut output_files);
 
+    while OUTPUT_RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+        sleep(Duration::from_secs(1));
+    }
+
     println!("Flushing output buffers");
     let input_metadata_clone = skippr_metadata.clone();
     let input_metadata_clone = {
@@ -558,8 +598,6 @@ async fn sync() {
         guard.clone()
     };
     output_sync(input_metadata_clone.clone());
-
-
 
     let data_output = DataOutputAwsAthenaPlugin::new().await;
     let input_metadata_clone = {
@@ -609,10 +647,16 @@ fn output_sync(metadata: HashMap<String, Metadata>) {
     // thread::spawn(move || {
         // println!("Arrow Schema: {:?}", arrowSchema);
 
+    if OUTPUT_RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+        return;
+    }
+    OUTPUT_RUNNING.lock().unwrap().store(true, Ordering::SeqCst);
+
     let flatten = Config::truth_value(&Config::getenv("DATA_SOURCE_FLATTEN_EVENTS", "no"));
 
         let data_dir = Config::get_data_dir();
         let output_dir = &format!("{}/output", data_dir);
+        let finalised_dir = &format!("{}/finalised", data_dir);
 
         let options = MatchOptions {
             case_sensitive: false,
@@ -627,64 +671,94 @@ fn output_sync(metadata: HashMap<String, Metadata>) {
         for entry in glob_with(&format!("{}/done/*", output_dir), options)
             .expect("Failed to read glob pattern")
         {
-            match entry {
-                Ok(path) => {
-                    // println!("Finalising output file {}", path.display());
+            if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
 
-                    // alwasy regenerate arrow schema incase updated skippr metadata, e.g. discovered a new field
-                    let mut arrow_schema: Result<Schema, ArrowError> = Ok(Schema::empty());
-                    let mut schema_ref = Arc::new(Schema::empty());
+                match entry {
+                    Ok(path) => {
+                        // println!("Finalising output file {}", path.display());
 
-                    let skpr_namespace =
-                        BufferChunker::decode_file_namespace(path.to_str().unwrap());
-                    // let skpr_partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
+                        // Always regenerate arrow schema incase updated skippr metadata, e.g. discovered a new field
+                        let mut arrow_schema: Result<Schema, ArrowError> = Ok(Schema::empty());
+                        let mut schema_ref = Arc::new(Schema::empty());
 
-                    if metadata.get(&skpr_namespace).is_some() {
-                        let mut output_metadata: HashMap<String, Metadata> = HashMap::new();
-                        if flatten {
-                            let mut meta: HashMap<String, Metadata> = HashMap::new();
+                        let skpr_namespace =
+                            BufferChunker::decode_file_namespace(path.to_str().unwrap());
+                        // let skpr_partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
 
-                            flatten_metadata(metadata.get(&skpr_namespace).unwrap(), &mut meta);
+                        if metadata.get(&skpr_namespace).is_some() {
+                            let mut output_metadata: HashMap<String, Metadata> = HashMap::new();
+                            if flatten {
+                                let mut meta: HashMap<String, Metadata> = HashMap::new();
 
-                            let mut flat: Metadata = Metadata::new().unwrap();
-                            flat.fields = Box::new(meta);
-                            output_metadata.insert(skpr_namespace.clone(), flat);
-                        } else {
-                            output_metadata = metadata.clone();
-                        }
+                                flatten_metadata(metadata.get(&skpr_namespace).unwrap(), &mut meta);
 
-                        // let mut skpr_namespace: String = "".to_string();
-                        // if let Some((a, b)) = path.display().to_string().split_once("done/") {
-                        //     if let Some((hash, namespace_part)) = b.to_string().split_once("-") {
-                        //         skpr_namespace = namespace_part.to_string()
-                        //     }
-                        // }
+                                let mut flat: Metadata = Metadata::new().unwrap();
+                                flat.fields = Box::new(meta);
+                                output_metadata.insert(skpr_namespace.clone(), flat);
+                            } else {
+                                output_metadata = metadata.clone();
+                            }
 
-                        // if metadata.get(&skpr_namespace).is_none() {
-                        //     metadata.insert(skpr_namespace.clone(), Metadata::new().unwrap());
-                        // }
+                            // let mut skpr_namespace: String = "".to_string();
+                            // if let Some((a, b)) = path.display().to_string().split_once("done/") {
+                            //     if let Some((hash, namespace_part)) = b.to_string().split_once("-") {
+                            //         skpr_namespace = namespace_part.to_string()
+                            //     }
+                            // }
 
-                        // println!("getting schema: {} from file: {}", skpr_namespace, path.to_str().unwrap());
+                            // if metadata.get(&skpr_namespace).is_none() {
+                            //     metadata.insert(skpr_namespace.clone(), Metadata::new().unwrap());
+                            // }
 
+                            // println!("getting schema: {} from file: {}", skpr_namespace, path.to_str().unwrap());
 
-                        arrow_schema = convert_skippr_to_arrow(
-                            output_metadata.get(&skpr_namespace).unwrap().fields.clone(),
-                        );
+                            // let skpr_namespace = BufferChunker::decode_file_namespace(path.to_str().unwrap());
+                            let skpr_partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
+                            let source_time = BufferChunker::decode_file_time(path.to_str().unwrap());
 
-                        schema_ref = Arc::new(arrow_schema.unwrap());
+                            arrow_schema = convert_skippr_to_arrow(
+                                output_metadata.get(&skpr_namespace).unwrap().fields.clone(),
+                            );
 
-                        SerdeParquet::serialize(path.clone(), schema_ref);
+                            schema_ref = Arc::new(arrow_schema.unwrap());
 
-                        match std::fs::remove_file(path) {
-                            Ok(_t) => {}
-                            Err(err) => println!("{:?}", err),
+                            let tmp_file_path = SerdeParquet::serialize(path.clone(), schema_ref);
+
+                            let finalised_file_name = BufferChunker::encode_chunk_name(
+                                "ingest",
+                                Some(&skpr_namespace),
+                                Some(&skpr_partition),
+                                Some(source_time),
+                            );
+
+                            let finalised_file_path = &format!(
+                                "{}/{}&part={}.parquet",
+                                finalised_dir,
+                                finalised_file_name,
+                                Helpers::random_str(12).as_str()
+                            );
+
+                            match fs::rename(tmp_file_path, finalised_file_path) {
+                                Ok(_) => {},
+                                Err(_) => {}
+                            };
+
+                            match std::fs::remove_file(path) {
+                                Ok(_t) => {}
+                                Err(err) => println!("{:?}", err),
+                            }
                         }
                     }
+                    Err(e) => println!("{:?}", e),
                 }
-                Err(e) => println!("{:?}", e),
             }
         }
 
+    OUTPUT_RUNNING.lock().unwrap().store(false, Ordering::SeqCst);
+
+    if !RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+        OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE.lock().unwrap().store(true, Ordering::SeqCst);
+    }
         // sleep(Duration::from_secs(1));
         // }
     // });

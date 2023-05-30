@@ -29,7 +29,7 @@ use crate::ingest_work::{Ingest, IngestBatch};
 use rusoto_core::{Region, RusotoError};
 use rusoto_s3::{GetObjectOutput, GetObjectRequest, ListObjectsV2Request, S3Client, S3};
 use tokio::time::timeout;
-use crate::{GRACEFUL_SHUTDOWN_COMPLETE, RUNNING};
+use crate::{INPUT_GRACEFUL_SHUTDOWN_COMPLETE, RUNNING};
 
 pub struct DataSourceS3Plugin {
     // config: HashMap<String, String>,
@@ -393,7 +393,7 @@ impl DataSourceS3Plugin {
         }
 
         if !RUNNING.lock().unwrap().load(Ordering::SeqCst) {
-            GRACEFUL_SHUTDOWN_COMPLETE.lock().unwrap().store(true, Ordering::SeqCst);
+            INPUT_GRACEFUL_SHUTDOWN_COMPLETE.lock().unwrap().store(true, Ordering::SeqCst);
             sleep(Duration::from_secs(120));
         }
         // println!("Ingested");

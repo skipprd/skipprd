@@ -152,7 +152,7 @@ impl SerdeParquet {
     //
     // }
 
-    pub fn serialize(path: PathBuf, mut schema_ref: Arc<Schema>) {
+    pub fn serialize(path: PathBuf, mut schema_ref: Arc<Schema>) -> String {
         // pub fn serialize(path: PathBuf, mut schema_ref: Schema) -> Schema {
 
         // println!("Arrow schema: {:?}", schema_ref);
@@ -237,7 +237,7 @@ impl SerdeParquet {
         };
 
         if source_file.is_none() {
-            return;
+            return "".to_string();
         }
 
         let input_file = source_file.unwrap();
@@ -284,7 +284,7 @@ impl SerdeParquet {
         }
 
         let output_file_path = &format!(
-            "{}/{}&part={}.parquet",
+            "{}/{}&{}-parquet.temp",
             output_dir,
             output_file_name,
             Helpers::random_str(12).as_str()
@@ -352,6 +352,8 @@ impl SerdeParquet {
         }
 
         writer.close().unwrap();
+
+        output_file_path.to_string()
 
     }
 
