@@ -51,7 +51,7 @@ impl Ingest {
 
     pub fn flush_buffers(force: bool, output_files: &mut MutexGuard<HashMap<String, OutputFile>>) {
     // pub fn flush_buffers(force: bool) {
-        println!("Flushing ingest buffers");
+    //     println!("Flushing ingest buffers");
         let data_dir = Config::get_data_dir();
         let output_dir = format!("{}/output", data_dir);
 
