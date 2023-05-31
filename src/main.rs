@@ -509,9 +509,10 @@ async fn sync() {
                                  guard.clone()
                              };
 
-                             if OUTPUT_RUNNING.lock().unwrap().load(Ordering::SeqCst) {
-                                 return;
+                             while OUTPUT_RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+                                 sleep(Duration::from_secs(1));
                              }
+
                              OUTPUT_RUNNING.lock().unwrap().store(true, Ordering::SeqCst);
                              data_output.sync(input_metadata_clone).await;
                              OUTPUT_RUNNING.lock().unwrap().store(false, Ordering::SeqCst);
