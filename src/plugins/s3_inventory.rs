@@ -20,6 +20,7 @@ use std::time::Duration;
 use std::{fs, thread};
 use std::sync::atomic::Ordering;
 use std::thread::sleep;
+use aws_sdk_s3::types::Object;
 
 use crate::discover::Metadata;
 use futures::future::join_all;
@@ -118,10 +119,15 @@ impl DataSourceS3InventoryPlugin {
             .await;
 
         match results {
-            Err(err) => println!("S3 Error {}", err.into_service_error()),
+            Err(err) => println!("S3 Error {}", err.to_string()),
             Ok(..) => {
                 for result in results {
-                    let objects = result.contents().unwrap();
+                    let objects = match result.contents() {
+                        Some(objs) => objs,
+                        None => {
+                            continue;
+                        }
+                    };
 
                     if !objects.is_empty() {
                         for object in objects {
