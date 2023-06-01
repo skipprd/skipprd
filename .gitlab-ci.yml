@@ -200,7 +200,7 @@ chaos_mode_s3_inventory_plugin:
   only:
     - master
     - tags
-    -
+    
 docker_push:
   image: docker:latest
   stage: publish
