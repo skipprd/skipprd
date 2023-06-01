@@ -59,10 +59,6 @@ impl Ingest {
 
             output_file.file.flush().expect(&format!("Could not flush file {}", filename));
 
-            // let mut file= &output_file.file;
-            // file.flush().expect(&format!("Could not flush file {}", filename));
-
-
             if force || Ingest::is_file_size_exceeded(&output_file) || Ingest::is_file_time_exceeded(&output_file) {
 
                 if output_file.bytes > 0 { // don't flush empty files when forced
@@ -83,7 +79,6 @@ impl Ingest {
                 }
                 // println!("Rotated buffer file {}", new_filename);
             }
-            output_file.rotated = Some(true);
         }
 
         if force {
@@ -104,19 +99,19 @@ impl Ingest {
                            break;
                         }
 
-                        println!("Flushing orphaned ingest buffer: {}", path.display().to_string());
-
                         let new_filename = format!(
                             "{}/done/{}-{}",
                             output_dir,
                             Helpers::random_str(12),
-                            path.display().to_string()
+                            path.file_name().unwrap().to_str().unwrap()
                         );
-                        let old_path = format!("{}/{}", output_dir, path.display().to_string());
+                        let old_path = format!("{}", path.display().to_string());
+
+                        println!("Flushing orphaned ingest buffer: {} to output: {}", path.display().to_string(), new_filename);
 
                         match fs::rename(&old_path, &new_filename) {
                             Ok(_) => {},
-                            Err(_) => {}
+                            Err(err) => {println!("Error: {}", err)}
                         };
                     }
                     _ => {}
@@ -211,7 +206,7 @@ impl Ingest {
                         );
                         let output_file = format!("{}/{}", output_dir.clone(), &output_file_name);
 
-                        if output_files.get_mut(&output_file_name).is_none() {
+                        if output_files.get(&output_file_name).is_none() {
                             let f = OpenOptions::new()
                                 .create(true)
                                 .write(true)

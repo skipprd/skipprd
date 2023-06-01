@@ -485,11 +485,7 @@ async fn sync() {
         out_pnanner.add(
              move || {
 
-                 println!("Output planner init");
-
                  if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
-
-                     println!("Output planner started");
 
                      let input_metadata_clone = input_metadata_clone.clone();
                      tokio::runtime::Builder::new_multi_thread()
@@ -498,12 +494,11 @@ async fn sync() {
                          .unwrap()
                          .block_on(async {
 
-                             println!("Output planner thread created");
-
                              let input_metadata_clone = {
                                  let guard = input_metadata_clone.lock().unwrap();
                                  guard.clone()
                              };
+
                              output_sync(input_metadata_clone.clone());
 
                              let data_output = DataOutputAwsAthenaPlugin::new().await;
@@ -513,12 +508,16 @@ async fn sync() {
                              };
 
                              while OUTPUT_RUNNING.lock().unwrap().load(Ordering::SeqCst) {
-                                 sleep(Duration::from_secs(1));
+                                 // sleep(Duration::from_secs(1));
+                                 return;
                              }
 
                              OUTPUT_RUNNING.lock().unwrap().store(true, Ordering::SeqCst);
+
                              data_output.sync(input_metadata_clone).await;
+
                              OUTPUT_RUNNING.lock().unwrap().store(false, Ordering::SeqCst);
+
                          });
                  }
             },
@@ -526,7 +525,6 @@ async fn sync() {
         );
         out_pnanner.start();
 
-        let input_metadata_clone = skippr_metadata.clone();
 
         // @todo - share across s3 ingests
         let _parse_namespace_cache: HashMap<String, String> = HashMap::new();
@@ -552,9 +550,26 @@ async fn sync() {
             Err(_err) => {}
         }
 
-        let metrics_clone = metrics.clone();
+    // flush last run before we start again
+    // println!("Flushing ingest buffers");
+    // let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
+    // ingest_work::Ingest::flush_buffers(true, &mut output_files);
+    // drop(output_files);
 
-        match Config::getenv("DATA_SOURCE_PLUGIN_NAME", "").as_str() {
+    // println!("Flushing output buffers");
+    // let input_metadata_clone = skippr_metadata.clone();
+    // let input_metadata_clone = {
+    //     let guard = input_metadata_clone.lock().unwrap();
+    //     guard.clone()
+    // };
+    // output_sync(input_metadata_clone.clone());
+    //
+
+    let input_metadata_clone = skippr_metadata.clone();
+
+    let metrics_clone = metrics.clone();
+
+    match Config::getenv("DATA_SOURCE_PLUGIN_NAME", "").as_str() {
             "s3" => {
                 let mut ds3 = block_on(DataSourceS3Plugin::new());
                 ds3.sync(
@@ -681,6 +696,7 @@ fn output_sync(metadata: HashMap<String, Metadata>) {
         for entry in glob_with(&format!("{}/done/*", output_dir), options)
             .expect("Failed to read glob pattern")
         {
+
             if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
 
                 match entry {
