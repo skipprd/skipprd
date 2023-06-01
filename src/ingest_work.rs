@@ -296,6 +296,9 @@ impl Ingest {
         }
 
         if *updated_schema_clone.lock().unwrap() == "yes".to_string() {
+
+            *updated_schema_clone.lock().unwrap() = "no".to_string();
+
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
@@ -308,7 +311,6 @@ impl Ingest {
                     .await;
                 });
 
-            *updated_schema_clone.lock().unwrap() = "no".to_string();
         }
 
     }

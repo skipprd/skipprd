@@ -366,41 +366,20 @@ impl Config {
     pub async fn set_config(metadata: &HashMap<String, Metadata>, evolved: bool) {
         if evolved {
 
-            let flatten = Config::truth_value(&Config::getenv("DATA_SOURCE_FLATTEN_EVENTS", "no"));
 
-            for (namespace, schema) in metadata.into_iter() {
-
-                println!("Updating Hive '{}' schema", namespace);
-
-
-                if flatten {
-                    let mut out_meta: HashMap<String, Metadata> = HashMap::new();
-                    flatten_metadata(metadata.get(namespace).unwrap(), &mut out_meta);
-
-                    let mut output_metadata: HashMap<String, Metadata> = HashMap::new();
-                    let mut flat: Metadata = Metadata::new().unwrap();
-                    flat.fields = Box::new(out_meta);
-                    output_metadata.insert(namespace.clone(), flat);
-
-                    AwsAthena::create_or_update_schema(&namespace, &output_metadata.get(namespace).unwrap()).await;
-                } else {
-                    AwsAthena::create_or_update_schema(&namespace, &schema).await;
-                }
-            }
-
-            let data_dir = Config::get_data_dir();
-            let metadata_file = format!("{}/metadata.json", data_dir);
-
-            let file = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(metadata_file)
-                .unwrap();
-
-            let writer = BufWriter::new(file);
-
-            serde_json::to_writer(writer, &metadata).unwrap();
+            // let data_dir = Config::get_data_dir();
+            // let metadata_file = format!("{}/metadata.json", data_dir);
+            //
+            // let file = OpenOptions::new()
+            //     .create(true)
+            //     .write(true)
+            //     .truncate(true)
+            //     .open(metadata_file)
+            //     .unwrap();
+            //
+            // let writer = BufWriter::new(file);
+            //
+            // serde_json::to_writer(writer, &metadata).unwrap();
 
             ///////////
 
@@ -447,6 +426,7 @@ impl Config {
                     match resp.status() {
                         StatusCode::OK => {
                             // println!("Metadata HTTP resp: {:?}", resp);
+                            println!("Updated pipeline metadata in Skippr SaaS");
                         }
                         err => println!("Metadata HTTP Error: {:?}", err),
                     };
@@ -461,7 +441,27 @@ impl Config {
                   // }
             }
 
-            println!("Updated pipeline metadata in Skippr SaaS");
+            let flatten = Config::truth_value(&Config::getenv("DATA_SOURCE_FLATTEN_EVENTS", "no"));
+
+            for (namespace, schema) in metadata.into_iter() {
+
+                println!("Updating Hive '{}' schema", namespace);
+
+                if flatten {
+                    let mut out_meta: HashMap<String, Metadata> = HashMap::new();
+                    flatten_metadata(metadata.get(namespace).unwrap(), &mut out_meta);
+
+                    let mut output_metadata: HashMap<String, Metadata> = HashMap::new();
+                    let mut flat: Metadata = Metadata::new().unwrap();
+                    flat.fields = Box::new(out_meta);
+                    output_metadata.insert(namespace.clone(), flat);
+
+                    AwsAthena::create_or_update_schema(&namespace, &output_metadata.get(namespace).unwrap()).await;
+                } else {
+                    AwsAthena::create_or_update_schema(&namespace, &schema).await;
+                }
+            }
+
         }
     }
 
