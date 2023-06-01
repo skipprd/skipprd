@@ -306,7 +306,7 @@ impl Ingest {
                 .block_on(async {
                     Config::set_config(
                         &metadata_clone.lock().unwrap(),
-                        *updated_schema_clone.lock().unwrap() == "yes".to_string(),
+                        true,
                     )
                     .await;
                 });
