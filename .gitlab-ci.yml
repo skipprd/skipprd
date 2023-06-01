@@ -170,18 +170,37 @@ time_buckets_date:
 #    - master
 #    - tags
 
-#s3_inventory_plugin:
-#  image: docker:latest
-#  stage: e2e
-#  script:
-#    - docker pull $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE
-#    - docker run --name skippre2e -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3_inventory -e S3_BUCKET=skippr-e2e-sample-data-output -e S3_PREFIX=skippr-e2e-sample-data/smail-files -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=bikehire-s3_inventory_plugin -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=test skippr/skipprd:latest
-#    - if [[ "$(docker logs skippre2e >& container-logs ; cat container-logs | grep -i 'Err' | wc -l)" -gt 0 ]]; then exit 1; fi
-#    - if [[ "$(docker container wait skippre2e)" -gt 0 ]]; then exit 1; fi
-#  only:
-#    - master
-#    - tags
+s3_inventory_plugin:
+  image: docker:latest
+  stage: e2e
+  script:
+    - docker pull $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE
+    - docker run --name skippre2e -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3_inventory -e S3_BUCKET=skippr-e2e-sample-data-output -e S3_PREFIX=skippr-e2e-sample-data/smail-files -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=bikehire-s3_inventory_plugin -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=test skippr/skipprd:latest
+    - if [[ "$(docker logs skippre2e >& container-logs ; cat container-logs | grep -i 'Err' | wc -l)" -gt 0 ]]; then exit 1; fi
+    - if [[ "$(docker container wait skippre2e)" -gt 0 ]]; then exit 1; fi
+  only:
+    - master
+    - tags
 
+chaos_mode_s3_inventory_plugin:
+  image: docker:latest
+  stage: e2e
+  script:
+    - docker pull $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE
+    - docker run --name skippre2e1 -e CHAOS_MODE=yes -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3_inventory -e S3_BUCKET=skippr-e2e-sample-data-output -e S3_PREFIX=skippr-e2e-sample-data/smail-files -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=chaos_mode_inventory_s3 -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./data -e APP_ENV=test -v `pwd`/data:/data skippr/skipprd:latest
+    - docker run --name skippre2e2 -e CHAOS_MODE=yes -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3_inventory -e S3_BUCKET=skippr-e2e-sample-data-output -e S3_PREFIX=skippr-e2e-sample-data/smail-files -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=chaos_mode_inventory_s3 -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./data -e APP_ENV=test -v `pwd`/data:/data skippr/skipprd:latest
+    - docker run --name skippre2e3 -e CHAOS_MODE=yes -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3_inventory -e S3_BUCKET=skippr-e2e-sample-data-output -e S3_PREFIX=skippr-e2e-sample-data/smail-files -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=chaos_mode_inventory_s3 -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./data -e APP_ENV=test -v `pwd`/data:/data skippr/skipprd:latest
+    - docker run --name skippre2e4 -e CHAOS_MODE=yes -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3_inventory -e S3_BUCKET=skippr-e2e-sample-data-output -e S3_PREFIX=skippr-e2e-sample-data/smail-files -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=chaos_mode_inventory_s3 -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./data -e APP_ENV=test -v `pwd`/data:/data skippr/skipprd:latest
+    - docker run --name skippre2e5 -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3_inventory -e S3_BUCKET=skippr-e2e-sample-data-output -e S3_PREFIX=skippr-e2e-sample-data/smail-files -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=chaos_mode_inventory_s3 -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./data -e APP_ENV=test -v `pwd`/data:/data skippr/skipprd:latest
+    - if [[ "$(docker logs skippre2e5 >& container-logs ; cat container-logs | grep -i 'Err' | wc -l)" -gt 0 ]]; then exit 1; fi
+    - if [[ "$(docker container wait skippre2e5)" -gt 0 ]]; then exit 1; fi
+  after_script:
+    - docker run --name soda -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -v `pwd`/soda:/soda sodadata/soda-core scan -d datalake_e2e -c /soda/configuration.yml /soda/chaos_mode.yml
+    - if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
+  only:
+    - master
+    - tags
+    -
 docker_push:
   image: docker:latest
   stage: publish

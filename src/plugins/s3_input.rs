@@ -323,11 +323,6 @@ impl DataSourceS3Plugin {
             // for thread in threads {
             for future in future_result {
 
-                // let mut datas: Vec<IngestBatch> = Vec::new();
-
-
-
-
                 let mut download = future.unwrap();
 
                 // println!("Downloading s3 object");
@@ -373,10 +368,6 @@ impl DataSourceS3Plugin {
                     });
                 }
             }
-                // println!("Ingesting");
-
-
-
 
             self::Ingest::ingest_file(
                 datas.lock().unwrap().to_vec(),

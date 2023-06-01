@@ -18,6 +18,8 @@ use std::sync::{Arc, Mutex};
 
 use std::time::Duration;
 use std::{fs, thread};
+use std::sync::atomic::Ordering;
+use std::thread::sleep;
 
 use crate::discover::Metadata;
 use futures::future::join_all;
@@ -29,6 +31,7 @@ use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::ingest_work::{Ingest, IngestBatch};
 use rusoto_core::{Region, RusotoError};
 use rusoto_s3::{GetObjectOutput, GetObjectRequest, S3Client, S3};
+use crate::{INPUT_GRACEFUL_SHUTDOWN_COMPLETE, RUNNING};
 
 pub struct DataSourceS3InventoryPlugin {
     // config: HashMap<String, String>,
@@ -342,6 +345,23 @@ impl DataSourceS3InventoryPlugin {
                                 }
                             }
                         }
+                    } else {
+                        println!("Reached end of S3 pagination");
+
+                        if !outputs.is_empty() {
+
+                            Self::download_and_ingest(
+                                &mut self.s3_client_rusoto,
+                                &inventory_bucket,
+                                &outputs,
+                                &self.temp_dir,
+                                &metadata,
+                                &metrics,
+                                &offsets_clone,
+                            ).await;
+                        }
+
+                        break;
                     }
                 }
             }
@@ -443,20 +463,22 @@ impl DataSourceS3InventoryPlugin {
         let data_dir = Config::get_data_dir();
         let _temp_dir = &format!("{}/source_buffer", data_dir);
 
-        // for thread in threads {
-        for future in future_result {
-            let datas = datas.clone();
+        let datas = datas.clone();
 
-            let bucket_name = bucket_name.clone();
-            let metrics = metrics.clone();
-            let metadata = metadata.clone();
-            let offsets_clone = offsets_clone.clone();
+        let bucket_name = bucket_name.clone();
+        let metrics = metrics.clone();
+        let metadata = metadata.clone();
+        let offsets_clone = offsets_clone.clone();
 
-            threads.push(thread::spawn(move || {
+        threads.push(thread::spawn(move || {
+
+            // for thread in threads {
+            for future in future_result {
                 let mut download = future.unwrap();
 
                 // println!("Downloading s3 object");
                 let mut data = Vec::new();
+
                 match download.response.body.take() {
                     Some(body) => match body.into_blocking_read().read_to_end(&mut data) {
                         Ok(_) => {}
@@ -496,20 +518,27 @@ impl DataSourceS3InventoryPlugin {
                         data: str_data,
                     });
                 }
+            }
 
-                self::Ingest::ingest_file(
-                    datas.lock().unwrap().to_vec(),
-                    &metadata,
-                    &metrics,
-                    &offsets_clone,
-                );
-            }));
-        }
+            self::Ingest::ingest_file(
+                datas.lock().unwrap().to_vec(),
+                &metadata,
+                &metrics,
+                &offsets_clone,
+            );
+        }));
+
 
         // Wait for all threads to finish, else we will stampead the data source
         for handle in threads {
             handle.join().unwrap();
         }
+
+        if !RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+            INPUT_GRACEFUL_SHUTDOWN_COMPLETE.lock().unwrap().store(true, Ordering::SeqCst);
+            sleep(Duration::from_secs(120));
+        }
+        // println!("Ingested");
     }
 }
 
