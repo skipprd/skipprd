@@ -335,20 +335,21 @@ impl DataSourceS3InventoryPlugin {
                                         };
                                     }
 
-                                    offsets.set(
-                                        &OffsetKey {
-                                            namespace: inventory_bucket.clone(),
-                                            partition: object_key.to_string(),
-                                        },
-                                        OffsetTypes::Closed,
-                                        1,
-                                    );
                                 } else {
                                     println!(
                                         "Skipping inventory: {} already processed",
                                         object_key
                                     );
                                 }
+
+                                offsets.set(
+                                    &OffsetKey {
+                                        namespace: inventory_bucket.clone(),
+                                        partition: object_key.to_string(),
+                                    },
+                                    OffsetTypes::Closed,
+                                    1,
+                                );
                             }
                         }
                     } else {
