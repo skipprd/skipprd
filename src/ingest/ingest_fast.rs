@@ -131,6 +131,8 @@ fn fast_set_value(
     //     None => ""
     // };
 
+    if field == "" { return Value::Null } // edgecase seen in cloudcycle cubeevent, probably in a map?
+
     // if data_type != "" || parent_type == "map" {
     if !data_type.is_empty() {
         // let data_type: &str = &metadata.get_mut(field).unwrap().determined_type;
