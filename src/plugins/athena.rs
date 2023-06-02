@@ -620,7 +620,7 @@ impl AwsAthena {
     pub async fn glue_create_partition(
         namespace: &str,
         partition_values: Vec<String>,
-        _key: &str,
+        key: &str,
         partition_cache: &mut Vec<String>,
         metadata: &discover::Metadata,
     ) -> Result<bool, Error> {
@@ -629,7 +629,7 @@ impl AwsAthena {
 
         let path = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
         let path = path.trim_start_matches('/');
-        let path = format!("{}/{}", path, namespace);
+        let path = format!("{}/{}/{}", key, path, namespace);
 
         let md5_digest = md5::compute(
             serde_json::to_string(&format!(
