@@ -131,7 +131,7 @@ impl DataOutputAwsAthenaPlugin {
                 match AwsAthena::glue_create_partition(
                     &namespace,
                     partition_values,
-                    key,
+                    &full_key,
                     &mut partition_cache,
                     metadata.get(&namespace).unwrap(),
                 )
