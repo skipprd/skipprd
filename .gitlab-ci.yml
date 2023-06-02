@@ -244,7 +244,16 @@ cleanup:
     - aws s3 rm s3://skippr-metadata-test --recursive
     - aws glue delete-database --catalog-id 353855562591 --name bikehire || true
 #      aws dynamodb delete-item --table-name Test-MetadataService-Stack-MetadataTable8CB34826-XGZT4CFIJO8Y --key '{"tenant": {"S": "skippr"}}'
+  only:
+    - master
+    - tags
 
+purge_dynamodb:
+  image: node:14
+  stage: init
+  script:
+    - npm install aws-sdk
+    - node _files/purge-dynamodb.js
   only:
     - master
     - tags
