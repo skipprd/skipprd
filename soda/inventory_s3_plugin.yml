@@ -1,0 +1,34 @@
+
+#filter time_buckets_timestamp [hourly]:
+#  where: from_iso8601_timestamp(detail_docket_datetime_batch_utc) between DATE_ADD('hour', -1, NOW()) AND NOW()
+
+checks for inventory_s3_plugin:
+#  - schema:
+#      warn:
+#        when required column missing: [detail_docket_truck_imei, detail_docket_truck_plate]
+#      fail:
+#        when forbidden column present: [credit_card]
+
+
+#checks for cloudcycle_docket [hourly]:
+  - row_count = 1000000
+#  - :
+#      filter: from_iso8601_timestamp(detail_docket_datetime_batch_utc) between DATE_ADD('hour', -1, NOW()) AND NOW()
+
+#  - duplicate_count(id) = 0
+#  - :
+#      filter: from_iso8601_timestamp(detail_docket_datetime_batch_utc) between DATE_ADD('hour', -1, NOW()) AND NOW()
+
+#  - row_count same as cemex
+#      filter: from_iso8601_timestamp(detail_docket_datetime_batch_utc) between DATE_ADD('hour', -1, NOW()) AND NOW()
+
+#  - values in (detail_docket_order_code) must exist in datalake_prod.cloudcycle_docket (detail_docket_order_code)
+#      filter: detail_docket_rmc = 'Cemex'
+
+#checks for data:
+#- duplicate_count(imei, system_datetime_posix_utc_seconds) = 0
+#- schema:
+#    fail:
+#      when required column missing: [imei, system_datetime_posix_utc_seconds]
+#- values in (imei) must exist in cloudcycle_docket (detail_docket_truck_imei)
+#- freshness(system_datetime_posix_utc_seconds) < 1h
