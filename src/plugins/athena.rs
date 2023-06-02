@@ -627,16 +627,16 @@ impl AwsAthena {
         let database = Config::getenv("GLUE_DATABASE_NAME", "");
         let bucket = Config::getenv("DATA_OUTPUT_S3_BUCKET", "");
 
-        let path = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
-        let path = path.trim_start_matches('/');
-        let path = format!("{}/{}/{}", key, path, namespace);
+        // let path = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
+        // let path = path.trim_start_matches('/');
+        // let path = format!("{}/{}", path, key);
 
         let md5_digest = md5::compute(
             serde_json::to_string(&format!(
                 "{}{}{}{:?}",
                 namespace,
                 bucket,
-                path,
+                key,
                 &partition_values.clone()
             ))
             .unwrap(),
@@ -646,6 +646,7 @@ impl AwsAthena {
         // Replace "err" as it causes our e2e to fail since they check for 'err' string in logs - yes this happens often enough
         let md5_digest = md5_string.replace("err", "");
 
+        println!("partiton locaiton {}", format!("s3://{}/{}", bucket, key));
 
         // let mut schema: HashMap<String, Metadata> = HashMap::new();
         // schema.insert(namespace.to_string(), metadata.clone());
@@ -662,7 +663,7 @@ impl AwsAthena {
                     .set_columns(Some(columns)) // @todo
                     .compressed(false)
                     .input_format("org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat")
-                    .location(format!("s3://{}/{}", bucket, path))
+                    .location(format!("s3://{}/{}", bucket, key))
                     .output_format("org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat")
                     .serde_info(
                         SerDeInfo::builder()
@@ -725,7 +726,7 @@ impl AwsAthena {
                         }
                         Err(err) => {
                             println!("{:?}", partition_values);
-                            println!("{}", path);
+                            println!("{}", key);
                             println!(
                                 "Failed to create new Athena partition: {}",
                                 err.into_service_error()
