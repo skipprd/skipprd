@@ -127,7 +127,6 @@ impl DataSourceS3Plugin {
                 Err(err) => println!("S3 Error {}", err),
                 Ok(output) => {
 
-                    // for result in results {
                     let objects = output.contents().unwrap();
 
                     if !objects.is_empty() {

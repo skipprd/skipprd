@@ -1221,7 +1221,7 @@ mod tests {
     use std::fs::{remove_file, File, OpenOptions};
     use std::io::{Seek, Write};
 
-    use crate::discover::AnalyseSchema;
+    use crate::discover::{AnalyseSchema, Metadata};
     use crate::helpers::configuration::Config;
     use parquet::data_type::AsBytes;
     use rand::Rng;
@@ -1277,23 +1277,24 @@ mod tests {
         // let mut buf_reader = BufReader::new(in_file);
 
         let mut metadata = HashMap::new();
+        metadata.insert("foo".to_string(), Metadata::new().unwrap());
 
-        let mut newMeta =
-            AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1), &mut metadata).unwrap();
+        AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1), &mut metadata.get_mut("foo").unwrap().fields).unwrap();
 
-        AnalyseSchema::determine_field_types(&mut newMeta, None, None, false);
+        AnalyseSchema::determine_field_types(&mut metadata, None, None, false);
 
         remove_file(Path::new(&format!("./{}", random_tmp_file_name))).unwrap();
 
-        // println!("{:?}", newMeta);
-        // println!("{:?}", newMeta.get("").unwrap().fields);
-        println!("{:?}", newMeta.get("").unwrap().fields.get("abc2").unwrap());
-        // println!("{:?}", newMeta.get("").unwrap().fields.get("abc2").unwrap().determined_type);
-        // println!("{:?}", newMeta.get("").unwrap().fields.get("abc2").unwrap().determined_type_values);
+        println!("{:?}", metadata);
+        println!("{:?}", metadata.get("foo").unwrap().fields);
+        println!("{:?}", metadata.get("foo").unwrap().fields.get("abc1").unwrap());
+        println!("{:?}", metadata.get("foo").unwrap().fields.get("abc2").unwrap());
+        // println!("{:?}", new_meta.get("foo").unwrap().fields.get("abc2").unwrap().determined_type);
+        // println!("{:?}", new_meta.get("foo").unwrap().fields.get("abc2").unwrap().determined_type_values);
 
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("foo")
                 .unwrap()
                 .fields
                 .get("abc1")
@@ -1302,8 +1303,8 @@ mod tests {
             "array"
         );
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("foo")
                 .unwrap()
                 .fields
                 .get("abc1")
@@ -1312,8 +1313,8 @@ mod tests {
             "integer"
         );
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("foo")
                 .unwrap()
                 .fields
                 .get("abc2")
@@ -1322,8 +1323,8 @@ mod tests {
             "array"
         );
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("foo")
                 .unwrap()
                 .fields
                 .get("abc2")
@@ -1332,8 +1333,8 @@ mod tests {
             "string"
         );
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("foo")
                 .unwrap()
                 .fields
                 .get("abc3")
@@ -1342,8 +1343,8 @@ mod tests {
             "map"
         );
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("foo")
                 .unwrap()
                 .fields
                 .get("abc3")
@@ -1352,8 +1353,8 @@ mod tests {
             "string"
         );
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("foo")
                 .unwrap()
                 .fields
                 .get("abc4")
@@ -1362,8 +1363,8 @@ mod tests {
             "map"
         );
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("foo")
                 .unwrap()
                 .fields
                 .get("abc4")
@@ -1372,8 +1373,8 @@ mod tests {
             "string"
         );
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("foo")
                 .unwrap()
                 .fields
                 .get("abc5")
@@ -1382,8 +1383,8 @@ mod tests {
             "map"
         );
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("foo")
                 .unwrap()
                 .fields
                 .get("abc5")
@@ -1392,8 +1393,8 @@ mod tests {
             "integer"
         );
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("foo")
                 .unwrap()
                 .fields
                 .get("abc6")
@@ -1402,8 +1403,8 @@ mod tests {
             "record"
         );
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("foo")
                 .unwrap()
                 .fields
                 .get("abc7")
