@@ -373,7 +373,7 @@ impl AnalyseSchema {
                     // &Helpers::clean_field_name(i.to_string()),
                     &i.to_string(),
                     &mut sv,
-                    metadata.get_mut(field).unwrap().fields.as_mut(),
+                    metadata.get_mut(&field.to_string()).unwrap().fields.as_mut(),
                 );
                 i += 1;
             }

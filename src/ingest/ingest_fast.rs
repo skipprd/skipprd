@@ -1,5 +1,6 @@
 use crate::discover::date_formats::DateFormats;
 use crate::discover::{AnalyseSchema, Metadata};
+use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
 use arrow::json::reader::ValueIter;
 use chrono::NaiveDateTime;
@@ -9,7 +10,6 @@ use std::collections::HashMap;
 use std::io::{BufReader, Read};
 use std::ops::Index;
 use std::process::exit;
-use crate::helpers::configuration::Config;
 
 #[derive(Default)]
 pub struct IngestRecord {
@@ -31,13 +31,12 @@ pub fn fast_path_ingest(
     unwrapped_message: &Value,
     metadata: &mut HashMap<String, Metadata>,
     updatedSchema: &mut String,
-    flatten: bool
+    flatten: bool,
 ) -> Value {
     // let mut helpers = Helpers { clean_field_cache: Default::default() };
 
     // let mut message = default_msgs[namespace].clone();
     // let mut message = SerderParquet::default_message(metadata);
-
 
     // let mut message: Vec<Value> = Vec::with_capacity(batch_size);
     let mut message: Value = Value::Null;
@@ -52,7 +51,7 @@ pub fn fast_path_ingest(
         // } else {
         //         let resolved_value = Value::Null;
 
-        let field_data_type = match metadata.get_mut(field) {
+        let field_data_type = match metadata.get_mut(&field.to_string()) {
             Some(data_type) => {
                 // println!("{:?}",  data_type.determined_type.clone());
                 data_type.determined_type.clone()
@@ -60,16 +59,21 @@ pub fn fast_path_ingest(
             None => "".to_string(),
         };
 
-        let resolved_value =
-            fast_set_value(&field_data_type, &field, value, metadata, updatedSchema, flatten);
+        let resolved_value = fast_set_value(
+            &field_data_type,
+            &field.to_string(),
+            value,
+            metadata,
+            updatedSchema,
+            flatten,
+        );
 
         // println!("Setting message with field: {:?} and value {:?}", field, resolved_value);
 
         // let foo = resolved_value;
         // ignore if null, use default message which has correct null for data type
         if !resolved_value.is_null() {
-
-            message[metadata.get(field).unwrap().clone().out_field_name] = resolved_value;
+            message[metadata.get(&field.to_string()).unwrap().clone().out_field_name] = resolved_value;
 
             // println!("{:?}", message);
             // match resolved_value {
@@ -124,14 +128,16 @@ fn fast_set_value(
     value: &Value,
     metadata: &mut HashMap<String, Metadata>,
     updatedSchema: &mut String,
-    flatten: bool
+    flatten: bool,
 ) -> Value {
     // let _parent_type = match metadata.get_mut(field) {
     //     Some(pt) => &pt.parent_type,
     //     None => ""
     // };
 
-    if field == "" { return Value::Null } // edgecase seen in cloudcycle cubeevent, probably in a map?
+    // if field == "" {
+    //     return Value::Null;
+    // } // edgecase seen in cloudcycle cubeevent, probably in a map?
 
     // if data_type != "" || parent_type == "map" {
     if !data_type.is_empty() {
@@ -142,7 +148,6 @@ fn fast_set_value(
         let mut new_value: Value = Value::Null;
 
         if !value.to_string().is_empty() {
-
             if data_type == "record" {
                 // println!("{} is record", field);
 
@@ -152,40 +157,54 @@ fn fast_set_value(
                     for (sub_field, sub_value) in value.as_object().unwrap() {
                         // let clean_sub_field = Helpers::clean_field_name(sub_field.to_string());
 
-                        match metadata.get(field).unwrap().fields.get(sub_field) {
+                        // println!("({}) ingesting {} => {} with value: {}", data_type, field, &sub_field.to_string(), sub_value);
+
+                        match metadata.get(&field.to_string()).unwrap().fields.get(&sub_field.to_string()) {
                             Some(_t) => (),
                             None => {
-                                discover_ingest(field, value, metadata, updatedSchema, flatten);
+                                println!("({}) no metadata for {} => {} with value: {}", data_type, field, &sub_field.to_string(), sub_value);
+                                discover_ingest(&sub_field.to_string(), sub_value, &mut metadata.get_mut(&field.to_string()).unwrap().fields, updatedSchema, flatten);
+                                // discover_ingest(field, value, metadata, updatedSchema, flatten);
                             }
                         }
 
                         // only ingest fields enabled to sync to output
                         if metadata
-                            .get_mut(field)
+                            .get_mut(&field.to_string())
                             .unwrap()
                             .fields
-                            .get_mut(sub_field)
+                            .get_mut(&sub_field.to_string())
                             .unwrap()
                             .enabled
                         {
                             let newval = fast_set_value(
                                 &metadata
-                                    .get_mut(field)
+                                    .get_mut(&field.to_string())
                                     .unwrap()
                                     .fields
-                                    .get_mut(sub_field)
+                                    .get_mut(&sub_field.to_string())
                                     .unwrap()
                                     .determined_type
                                     .clone(),
-                                sub_field,
+                                &sub_field.to_string(),
                                 // &mut sub_value.as_str().unwrap_or(&value.to_string()), // pass string val or string representation of map/array, etc
                                 sub_value,
-                                &mut metadata.get_mut(field).unwrap().fields,
+                                &mut metadata.get_mut(&field.to_string()).unwrap().fields,
                                 updatedSchema,
-                                flatten
+                                flatten,
                             );
 
-                            m.insert(metadata.get(field).unwrap().fields.get(sub_field).unwrap().clone().out_field_name, newval);
+                            m.insert(
+                                metadata
+                                    .get(&field.to_string())
+                                    .unwrap()
+                                    .fields
+                                    .get(&sub_field.to_string())
+                                    .unwrap()
+                                    .clone()
+                                    .out_field_name,
+                                newval,
+                            );
                         }
                     }
                 }
@@ -198,16 +217,20 @@ fn fast_set_value(
                     for sub_value in value.as_array().unwrap() {
                         // let clean_sub_field = Helpers::clean_field_name(i.to_string());
 
-                        match metadata.get(field).unwrap().fields.get(&i.to_string()) {
+                        // println!("({}) ingesting {} => {} with value: {}", data_type, &field.to_string(), &i.to_string(), sub_value);
+
+                        match metadata.get(&field.to_string()).unwrap().fields.get(&i.to_string()) {
                             Some(_t) => (),
                             None => {
-                                discover_ingest(field, value, metadata, updatedSchema, flatten);
+                                println!("({}.array) no metadata for {} => {} with value: {}", data_type, &field.to_string(), i.to_string(), sub_value);
+                                // discover_ingest(&field.to_string(), value, metadata, updatedSchema, flatten);
+                                discover_ingest(&i.to_string(), sub_value, &mut metadata.get_mut(&field.to_string()).unwrap().fields, updatedSchema, flatten);
                             }
                         }
 
                         // only ingest fields enabled to sync to output
                         if metadata
-                            .get_mut(field)
+                            .get_mut(&field.to_string())
                             .unwrap()
                             .fields
                             .get_mut(&i.to_string())
@@ -216,7 +239,7 @@ fn fast_set_value(
                         {
                             let newval = fast_set_value(
                                 &metadata
-                                    .get_mut(field)
+                                    .get_mut(&field.to_string())
                                     .unwrap()
                                     .fields
                                     .get_mut(&i.to_string())
@@ -226,12 +249,22 @@ fn fast_set_value(
                                 &i.to_string(),
                                 // &mut sub_value.as_str().unwrap_or(&value.to_string()), // pass string val or string representation of map/array, etc
                                 sub_value,
-                                &mut metadata.get_mut(field).unwrap().fields,
+                                &mut metadata.get_mut(&field.to_string()).unwrap().fields,
                                 updatedSchema,
-                                flatten
+                                flatten,
                             );
 
-                            m.insert(metadata.get(field).unwrap().fields.get(&i.to_string()).unwrap().clone().out_field_name, newval);
+                            m.insert(
+                                metadata
+                                    .get(&field.to_string())
+                                    .unwrap()
+                                    .fields
+                                    .get(&i.to_string())
+                                    .unwrap()
+                                    .clone()
+                                    .out_field_name,
+                                newval,
+                            );
                         }
 
                         i += 1;
@@ -248,24 +281,59 @@ fn fast_set_value(
                         .iter()
                         .filter_map(|(k, v)| Some((k, v)))
                     {
-                        if Some(val).is_some() {
 
-                            match  metadata.get(field).unwrap().fields.get(key){
+                        // if field == "trip" {
+                        //     println!("{:?}", metadata.get_mut(field));
+                        // }
+
+                        if Some(val).is_some() {
+                            match metadata.get(field).unwrap().fields.get(key) {
                                 Some(_t) => (),
                                 None => {
-                                    // discover_ingest(key, val, fields, updatedSchema, flatten);
+                                    println!("({}) no metadata for {} => {} with value: {}", data_type, field, key, val);
+                                    // discover_ingest(key, val, &mut metadata.get_mut(field).unwrap().fields, updatedSchema, flatten);
                                     discover_ingest(field, value, metadata, updatedSchema, flatten);
                                 }
                             }
 
-                            new_value[ metadata.get(field).unwrap().fields.get(key).unwrap().clone().out_field_name] = fast_set_value(
-                                &metadata.get_mut(field).unwrap().fields.get_mut(key).unwrap().determined_type_values.clone(),
-                                key,
-                                value,
-                                &mut metadata.get_mut(field).unwrap().fields,
-                                updatedSchema,
-                                flatten
-                            );
+                            // only ingest fields enabled to sync to output
+                            if metadata
+                                .get_mut(field)
+                                .unwrap()
+                                .fields
+                                .get_mut(key)
+                                .unwrap()
+                                .enabled
+                            {
+
+                                // println!("ingesting {} => {} with value: {}", field, key, val);
+
+
+                                new_value[metadata
+                                    .get(field)
+                                    .unwrap()
+                                    .fields
+                                    .get(key)
+                                    .unwrap()
+                                    .clone()
+                                    .out_field_name] = fast_set_value(
+                                    &metadata
+                                        .get_mut(field)
+                                        .unwrap()
+                                        .fields
+                                        .get_mut(&key.to_string())
+                                        .unwrap()
+                                        .determined_type
+                                        .clone(),
+                                    &key.to_string(),
+                                    val,
+                                    &mut metadata.get_mut(field).unwrap().fields,
+                                    updatedSchema,
+                                    flatten,
+                                );
+
+                            }
+
                         }
                     }
                 }
@@ -287,7 +355,6 @@ fn fast_set_value(
             } else if data_type == "array" {
                 new_value = value.to_owned();
             } else {
-
                 // println!("value is {}", value);
                 // println!("field is {}", field);
                 // println!("data_type is {}", data_type);
@@ -296,17 +363,13 @@ fn fast_set_value(
                     new_value = set_date(field, value, metadata);
                 } else {
                     let scalar_value = match data_type {
-                        "string" => {
-                            value.as_str().map(|s| Value::String(s.to_string()))
-                        },
+                        "string" => value.as_str().map(|s| Value::String(s.to_string())),
                         "timestamp" | "timestamp_milli" | "int" | "integer" | "long" => {
                             value.as_i64().map(Value::from)
                         }
                         "double" => value.as_f64().map(Value::from),
                         "boolean" => value.as_bool().map(Value::from),
-                        _ => {
-                            None
-                        },
+                        _ => None,
                     };
 
                     new_value = scalar_value.unwrap_or(Value::Null);
@@ -352,44 +415,21 @@ fn fast_set_value(
         }
         new_value
     } else {
-        let discoverd_data_type = discover_ingest(field, value, metadata, updatedSchema, flatten);
 
-        fast_set_value(&discoverd_data_type, field, value, metadata, updatedSchema, flatten)
-    }
-}
+        println!("({}) no metadata for {} with value: {}", data_type, &field.to_string(), value);
 
+        panic!("fuck off");
 
-fn set_date(field: &str, value: &Value, metadata: &HashMap<String, Metadata>) -> Value {
-    // Hive Timestamp doesn't support string dates
-    match value.as_str() {
-        Some(val) => {
-            let fmt = &metadata
-                .get(field)
-                .unwrap()
-                .date_candidate
-                .as_ref()
-                .unwrap()
-                .format;
-            match DateFormats::from_str(fmt) {
-                Ok(f) => {
-                    match NaiveDateTime::parse_from_str(val, f.as_str()) {
-                        Ok(date) => {
-                            let millis = date.timestamp() * 1000;
-                            millis.into()
-                        }
-                        Err(_) => Value::Null,
-                    }
-                }
-                Err(err) => {
-                    println!("Error date: {}", err);
-                    Value::Null
-                }
-            }
-        }
-        None => {
-            // println!("Could not format date to int using format");
-            Value::Null
-        }
+        let discoverd_data_type = discover_ingest(&field.to_string(), value, metadata, updatedSchema, flatten);
+
+        fast_set_value(
+            &discoverd_data_type,
+            &field.to_string(),
+            value,
+            metadata,
+            updatedSchema,
+            flatten,
+        )
     }
 }
 
@@ -398,7 +438,7 @@ fn discover_ingest(
     value: &Value,
     metadata: &mut HashMap<String, Metadata>,
     updated_schema: &mut String,
-    flatten: bool
+    flatten: bool,
 ) -> String {
     let foo: AnalyseSchema = AnalyseSchema { i: 0 };
 
@@ -454,13 +494,46 @@ fn discover_ingest(
     discoverd_data_type.clone()
 }
 
+
+fn set_date(field: &str, value: &Value, metadata: &HashMap<String, Metadata>) -> Value {
+    // Hive Timestamp doesn't support string dates
+    match value.as_str() {
+        Some(val) => {
+            let fmt = &metadata
+                .get(field)
+                .unwrap()
+                .date_candidate
+                .as_ref()
+                .unwrap()
+                .format;
+            match DateFormats::from_str(fmt) {
+                Ok(f) => match NaiveDateTime::parse_from_str(val, f.as_str()) {
+                    Ok(date) => {
+                        let millis = date.timestamp() * 1000;
+                        millis.into()
+                    }
+                    Err(_) => Value::Null,
+                },
+                Err(err) => {
+                    println!("Error date: {}", err);
+                    Value::Null
+                }
+            }
+        }
+        None => {
+            // println!("Could not format date to int using format");
+            Value::Null
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::NaiveDateTime;
-    use std::collections::HashMap;
-    use serde_json::Number;
     use crate::discover::DateCandidate;
+    use chrono::NaiveDateTime;
+    use serde_json::Number;
+    use std::collections::HashMap;
 
     fn generate_metadata(field: &str, format_name: &str) -> HashMap<String, Metadata> {
         let date_candidate = DateCandidate {
@@ -493,12 +566,11 @@ mod tests {
 
     #[test]
     fn test_set_date_with_valid_date() {
-
         let foo: AnalyseSchema = AnalyseSchema { i: 0 };
 
         let field = "test_field";
 
-        let date_str= "2023-05-21 12:34:56";
+        let date_str = "2023-05-21 12:34:56";
         let format_name = foo.is_valid_date(date_str).unwrap();
         let format = DateFormats::from_str(format_name).unwrap().as_str();
 
@@ -509,20 +581,19 @@ mod tests {
         let result = set_date(field, &value, &meta);
 
         let expected_date = NaiveDateTime::parse_from_str(date_str, format).unwrap();
-        let expected_millis = Value::Number(serde_json::Number::from(expected_date.timestamp() * 1000));
+        let expected_millis =
+            Value::Number(serde_json::Number::from(expected_date.timestamp() * 1000));
 
         assert_eq!(result, expected_millis);
     }
 
     #[test]
     fn test_set_date_with_valid_iso_date() {
-
         let foo: AnalyseSchema = AnalyseSchema { i: 0 };
-
 
         let field = "test_field";
 
-        let date_str= "2023-05-23T07:09:03.000Z";
+        let date_str = "2023-05-23T07:09:03.000Z";
         let format_name = foo.is_valid_date(date_str).unwrap();
         let format = DateFormats::from_str(format_name).unwrap().as_str();
 
@@ -533,29 +604,31 @@ mod tests {
         let result = set_date(field, &value, &meta);
 
         let expected_date = NaiveDateTime::parse_from_str(date_str, format).unwrap();
-        let expected_millis = Value::Number(serde_json::Number::from(expected_date.timestamp() * 1000));
+        let expected_millis =
+            Value::Number(serde_json::Number::from(expected_date.timestamp() * 1000));
 
         assert_eq!(result, expected_millis);
     }
 }
 
-
 #[cfg(test)]
-mod test_set_date {
+mod test_discover_on_ingest {
     use serial_test::serial;
     use std::collections::HashMap;
     use std::fs::{remove_file, File, OpenOptions};
     use std::io::{Seek, Write};
+    use std::iter::Map;
 
     use parquet::data_type::AsBytes;
     use rand::Rng;
     use std::path::Path;
 
-    use serde_json::Value;
+    use serde_json::{Number, Value};
 
     use crate::discover::AnalyseSchema;
 
     use crate::ingest::ingest_fast::fast_path_ingest;
+    use crate::serdes::json;
     use crate::serdes::json::SerdeJson;
 
     #[test]
@@ -656,11 +729,32 @@ mod test_set_date {
             records.first().unwrap(),
             &mut newMeta.get_mut("").unwrap().fields,
             &mut updatedSchema,
-            false
+            false,
         );
 
-        let _f = [2, 15, 33, 45, 56, 57, 47, 36, 19, 5];
-        let _v = ingestValue.get("last_crank").unwrap().as_array().unwrap();
+        let mut f: Vec<Value> = vec![];
+        f.insert(0, Value::Number(Number::from(2)));
+        f.insert(1, Value::Number(Number::from(15)));
+        f.insert(2, Value::Number(Number::from(33)));
+        f.insert(3, Value::Number(Number::from(45)));
+        f.insert(4, Value::Number(Number::from(56)));
+        f.insert(5, Value::Number(Number::from(57)));
+        f.insert(6, Value::Number(Number::from(47)));
+        f.insert(7, Value::Number(Number::from(36)));
+        f.insert(8, Value::Number(Number::from(19)));
+        f.insert(9, Value::Number(Number::from(5)));
+
+        let v = ingestValue.get("last_crank").unwrap().as_array().unwrap();
+
+        assert_eq!(&f, v);
+
+        let mut map = serde_json::Map::new();
+        map.insert("end_temprature".to_string(), Value::Number(Number::from(2)));
+        map.insert("start_temprature".to_string(), Value::Number(Number::from(0)));
+
+        let trip_map = ingestValue.get("trip").unwrap().as_object().unwrap();
+
+        assert_eq!(&map, trip_map);
 
         remove_file(Path::new(&format!("./{}", random_tmp_file_name)));
     }
