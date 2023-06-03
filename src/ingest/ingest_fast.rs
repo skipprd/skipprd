@@ -162,7 +162,7 @@ fn fast_set_value(
                         match metadata.get(&field.to_string()).unwrap().fields.get(&sub_field.to_string()) {
                             Some(_t) => (),
                             None => {
-                                println!("({}) no metadata for {} => {} with value: {}", data_type, field, &sub_field.to_string(), sub_value);
+                                // println!("({}) no metadata for {} => {} with value: {}", data_type, field, &sub_field.to_string(), sub_value);
                                 discover_ingest(&sub_field.to_string(), sub_value, &mut metadata.get_mut(&field.to_string()).unwrap().fields, updatedSchema, flatten);
                                 // discover_ingest(field, value, metadata, updatedSchema, flatten);
                             }
@@ -222,7 +222,7 @@ fn fast_set_value(
                         match metadata.get(&field.to_string()).unwrap().fields.get(&i.to_string()) {
                             Some(_t) => (),
                             None => {
-                                println!("({}.array) no metadata for {} => {} with value: {}", data_type, &field.to_string(), i.to_string(), sub_value);
+                                // println!("({}.array) no metadata for {} => {} with value: {}", data_type, &field.to_string(), i.to_string(), sub_value);
                                 // discover_ingest(&field.to_string(), value, metadata, updatedSchema, flatten);
                                 discover_ingest(&i.to_string(), sub_value, &mut metadata.get_mut(&field.to_string()).unwrap().fields, updatedSchema, flatten);
                             }
@@ -290,7 +290,7 @@ fn fast_set_value(
                             match metadata.get(field).unwrap().fields.get(key) {
                                 Some(_t) => (),
                                 None => {
-                                    println!("({}) no metadata for {} => {} with value: {}", data_type, field, key, val);
+                                    // println!("({}) no metadata for {} => {} with value: {}", data_type, field, key, val);
                                     // discover_ingest(key, val, &mut metadata.get_mut(field).unwrap().fields, updatedSchema, flatten);
                                     discover_ingest(field, value, metadata, updatedSchema, flatten);
                                 }
@@ -416,9 +416,7 @@ fn fast_set_value(
         new_value
     } else {
 
-        println!("({}) no metadata for {} with value: {}", data_type, &field.to_string(), value);
-
-        panic!("fuck off");
+        // println!("({}) no metadata for {} with value: {}", data_type, &field.to_string(), value);
 
         let discoverd_data_type = discover_ingest(&field.to_string(), value, metadata, updatedSchema, flatten);
 
