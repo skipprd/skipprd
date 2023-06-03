@@ -241,9 +241,6 @@ fn fast_set_value(
                 x = m.into();
                 new_value = x;
             } else if data_type == "map" {
-                let metadata_field = metadata.get_mut(field).unwrap();
-                let determined_type_values = &metadata_field.determined_type_values;
-                let fields = &mut metadata_field.fields;
                 if value.is_object() {
                     for (key, val) in value
                         .as_object()
@@ -253,18 +250,19 @@ fn fast_set_value(
                     {
                         if Some(val).is_some() {
 
-                            match fields.get(key){
+                            match  metadata.get(field).unwrap().fields.get(key){
                                 Some(_t) => (),
                                 None => {
-                                    discover_ingest(key, val, fields, updatedSchema, flatten);
+                                    // discover_ingest(key, val, fields, updatedSchema, flatten);
+                                    discover_ingest(field, value, metadata, updatedSchema, flatten);
                                 }
                             }
 
-                            new_value[fields.get(key).unwrap().clone().out_field_name] = fast_set_value(
-                                determined_type_values,
+                            new_value[ metadata.get(field).unwrap().fields.get(key).unwrap().clone().out_field_name] = fast_set_value(
+                                &metadata.get_mut(field).unwrap().fields.get_mut(key).unwrap().determined_type_values.clone(),
                                 key,
                                 value,
-                                fields,
+                                &mut metadata.get_mut(field).unwrap().fields,
                                 updatedSchema,
                                 flatten
                             );
