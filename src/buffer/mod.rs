@@ -193,11 +193,21 @@ impl BufferChunker {
     pub fn decode_file_partition(filename: &str) -> String {
         // let mut array = form_urlencoded::parse(filename.as_bytes());
         // let partition = array.remove("partition").unwrap_or_default();
-        
+
+        let mut path_parts = "".to_string();
 
         // println!("decoding buffer partition {} file {}", partition, filename);
 
-        BufferChunker::get_file_part(filename, "partition")
+        let partition = BufferChunker::get_file_part(filename, "partition");
+
+        if !partition.is_empty() {
+            let parts = partition.split('-');
+            let collection: Vec<&str> = parts.collect();
+
+            path_parts = collection.join("/");
+        }
+
+        path_parts
     }
 
     pub fn decode_file_namespace(filename: &str) -> String {

@@ -67,10 +67,9 @@ impl DataOutputAwsAthenaPlugin {
             let namespace = BufferChunker::decode_file_namespace(&filename);
             // let _time_partition = BufferChunker::decode_file_time(&filename);
 
-            let trimmed_key = &key.trim_start_matches('/').to_string();
+            let trimmed_key = &key.trim_matches('/').to_string();
 
             let mut full_key = "".to_string();
-            // key = trimmed_key;
             if !namespace.is_empty() {
                 if !trimmed_key.is_empty() {
                     full_key = format!("{}/{}", trimmed_key, namespace);
@@ -82,10 +81,10 @@ impl DataOutputAwsAthenaPlugin {
             // Partitioning
             let mut partition_values: Vec<String> = vec![];
 
-            let partition = BufferChunker::decode_file_partition(&filename);
+            let partition_path = BufferChunker::decode_file_partition(&filename);
 
-            if !partition.is_empty() {
-                let parts = partition.split('-');
+            if !partition_path.is_empty() {
+                let parts = partition_path.split('/');
                 let collection: Vec<&str> = parts.collect();
 
                 for item in &collection {
@@ -93,10 +92,8 @@ impl DataOutputAwsAthenaPlugin {
                     partition_values.push(value.to_string());
                 }
 
-                let path_parts = collection.join("/");
-
                 // .collect().join("/")
-                full_key = format!("{}/{}", full_key, path_parts);
+                full_key = format!("{}/{}", full_key, partition_path);
             }
 
             let time_partition_str = BufferChunker::decode_file_time_to_datetime_string(&filename);
@@ -339,7 +336,7 @@ impl AwsAthena {
         let workgroup = Config::getenv("ATHENA_WORKGROUP_NAME", "");
         let bucket = Config::getenv("DATA_OUTPUT_S3_BUCKET", "");
         let path = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
-        let path = path.trim_start_matches('/');
+        let path = path.trim_matches('/');
 
         let aws_config = aws_config::from_env().load().await;
 
@@ -380,7 +377,7 @@ impl AwsAthena {
         let database = Config::getenv("GLUE_DATABASE_NAME", "");
         let bucket = Config::getenv("DATA_OUTPUT_S3_BUCKET", "");
         let path = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
-        let path = path.trim_start_matches('/');
+        let path = path.trim_matches('/');
 
         let aws_config = aws_config::from_env().load().await;
 
@@ -435,7 +432,7 @@ impl AwsAthena {
         let granularity_target = Config::getenv("DATA_OUTPUT_TIME_BUCKET", "");
 
         let path = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
-        let path = path.trim_start_matches('/');
+        let path = path.trim_matches('/');
         let path = format!("{}/{}", path, namespace);
 
         let mut partitions: Vec<Column> = Vec::new();
@@ -534,7 +531,7 @@ impl AwsAthena {
         let granularity_target = Config::getenv("DATA_OUTPUT_TIME_BUCKET", "");
 
         let path = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
-        let path = path.trim_start_matches('/');
+        let path = path.trim_matches('/');
         let path = format!("{}/{}", path, namespace);
 
         let mut partitions: Vec<Column> = Vec::new();
@@ -628,7 +625,7 @@ impl AwsAthena {
         let bucket = Config::getenv("DATA_OUTPUT_S3_BUCKET", "");
 
         // let path = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
-        // let path = path.trim_start_matches('/');
+        // let path = path.trim_matches('/');
         // let path = format!("{}/{}", path, key);
 
         let md5_digest = md5::compute(

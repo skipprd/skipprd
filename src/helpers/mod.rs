@@ -91,7 +91,7 @@ impl Helpers {
             // clean = ltrim(clean, "0123456789");
 
             // '_' at the beginning is common and probably allowable
-            clean = clean.trim_start_matches('_').to_string();
+            clean = clean.trim_matches('_').to_string();
             // clean = trim(clean, '_');
 
             if clean != field {
@@ -210,7 +210,7 @@ impl Helpers {
 
         // optional: partition by composite key
         if !Config::getenv("DATA_OUTPUT_PARTITION_BY_FIELDS", "").is_empty() {
-            let mut partitions = vec!["".to_string()];
+            let mut partitions = vec![];
 
             for entity_field_dot in Config::getenv("DATA_OUTPUT_PARTITION_BY_FIELDS", "").split(',')
             {
@@ -232,9 +232,9 @@ impl Helpers {
                 }
             }
 
-            clean_partition = partitions.join("-");
+            clean_partition = partitions.join("/");
             clean_partition = clean_partition.trim_matches('-').to_lowercase();
-            clean_partition = Helpers::clean_field_name(clean_partition);
+            // clean_partition = Helpers::clean_field_name(clean_partition);
         }
 
         clean_partition
@@ -490,7 +490,7 @@ mod parse_partition_tests {
         let message = json!({"foo": {"bar": "baz"}, "abc1": "def"});
         std::env::set_var("DATA_OUTPUT_PARTITION_BY_FIELDS", "foo.bar,abc1");
         let partition = Helpers::parse_partition_field(&message);
-        assert_eq!(partition, "bar=baz-abc1=def");
+        assert_eq!(partition, "bar=baz/abc1=def");
     }
 }
 

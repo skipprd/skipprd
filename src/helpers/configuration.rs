@@ -195,7 +195,7 @@ impl Config {
 
         let data_dir = format!("{}/{}", data_dir, pipeline_name);
         match fs::create_dir_all(&data_dir) {
-            Ok(_g) => {}
+            Ok(_g) => { println!("Failed to create data dir {}", data_dir) }
             Err(err) => panic!("Error creating data dir {}, does the host path exist? {:?}", data_dir, err)
         }
 
