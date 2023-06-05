@@ -85,10 +85,18 @@ impl DataOutputAwsAthenaPlugin {
 
             if !partition_path.is_empty() {
                 let parts = partition_path.split('/');
+                // let parts = partition_path.split("%2F"); // '/'
                 let collection: Vec<&str> = parts.collect();
 
                 for item in &collection {
-                    let value = item.rsplitn(1, '=').next().unwrap();
+
+                    // let value = item.rsplitn(1, '=').next().unwrap();
+                    let mut value = item.split("=").last().unwrap(); // '='
+
+                    if value == "" {
+                        value = "none";
+                    }
+
                     partition_values.push(value.to_string());
                 }
 
@@ -408,8 +416,8 @@ impl AwsAthena {
 
             for field_dot in partition_fields.clone() {
                 let entity_name = match field_dot.rfind('.') {
-                    Some(index) => &field_dot[index + 1..],
-                    None => field_dot,
+                    Some(index) => format!("p_{}", &field_dot[index + 1..]),
+                    None => format!("p_{}", field_dot),
                 };
                 let clean_field_name = Helpers::clean_field_name(entity_name.to_string());
 
@@ -598,6 +606,7 @@ impl AwsAthena {
             .table_type("EXTERNAL_TABLE");
 
         if !partitions.is_empty() {
+            println!("Partition keys: {:?}", partitions);
             table_input = table_input.set_partition_keys(Some(partitions));
         }
 
@@ -643,7 +652,7 @@ impl AwsAthena {
         // Replace "err" as it causes our e2e to fail since they check for 'err' string in logs - yes this happens often enough
         let md5_digest = md5_string.replace("err", "");
 
-        println!("partiton locaiton {}", format!("s3://{}/{}", bucket, key));
+        // println!("partiton locaiton {}", format!("s3://{}/{}", bucket, key));
 
         // let mut schema: HashMap<String, Metadata> = HashMap::new();
         // schema.insert(namespace.to_string(), metadata.clone());
@@ -722,8 +731,8 @@ impl AwsAthena {
                             println!("Created new Athena partition");
                         }
                         Err(err) => {
-                            println!("{:?}", partition_values);
-                            println!("{}", key);
+                            println!("Key: {}", key);
+                            println!("Values: {:?}", partition_values);
                             println!(
                                 "Failed to create new Athena partition: {}",
                                 err.into_service_error()

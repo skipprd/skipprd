@@ -304,86 +304,67 @@ async fn sync() {
                 std::process::exit(0);
             }
             RUNNING.lock().unwrap().store(false, Ordering::SeqCst);
-            println!("Received signal {:?}: Gracefully shutting down", sig);
-            // println!("Flushing ingest buffers");
-            // let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
-            // Ingest::flush_buffers(true, &mut output_files);
-            // sleep(Duration::from_secs(30)); // wait for threads to flush
 
-            while !INPUT_GRACEFUL_SHUTDOWN_COMPLETE.lock().unwrap().load(Ordering::SeqCst)
-                && !OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE.lock().unwrap().load(Ordering::SeqCst) {
-                sleep(Duration::from_secs(1));
-            }
+            let metrics_clone = metrics_clone.clone();
 
-            let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
-            Ingest::flush_buffers(true, &mut output_files);
+            thread::spawn(move || {
+                println!("Received SIG: Gracefully shutting down");
+                // println!("Flushing ingest buffers");
+                // let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
+                // Ingest::flush_buffers(true, &mut output_files);
+                // sleep(Duration::from_secs(30)); // wait for threads to flush
 
-            // let mut metrics: Metrics = Metrics::new();
-            let metrics_lock = metrics_clone.lock().unwrap();
-
-            println!("Ingested Batch: {}", metrics_lock.ingeted_current);
-            println!("Ingested Messages: {}", metrics_lock.messages_total);
-
-            ////////////// Cleanup part written parquet files START ////////
-            let options = MatchOptions {
-                case_sensitive: false,
-                require_literal_separator: false,
-                require_literal_leading_dot: false,
-            };
-
-            let data_dir = Config::get_data_dir();
-
-            // println!("Looking for temp files in {}", &format!("{}/finalised/*parquet.temp", data_dir));
-
-            for entry in glob_with(&format!("{}/finalised/*parquet.temp", data_dir), options)
-                .expect("Failed to read glob 'finalised' pattern")
-            {
-                match entry {
-                    Ok(path) => {
-
-                        // println!("Removing file {}", path.display().to_string());
-
-                        match std::fs::remove_file(path) {
-                            Ok(_t) => {}
-                            Err(err) => println!("{:?}", err),
-                        }
-                    },
-                    Err(e) => println!("{:?}", e),
+                while !INPUT_GRACEFUL_SHUTDOWN_COMPLETE.lock().unwrap().load(Ordering::SeqCst)
+                    && !OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE.lock().unwrap().load(Ordering::SeqCst) {
+                    sleep(Duration::from_secs(1));
                 }
 
-            }
-            ////////////// Cleanup part written parquet files END ////////
+                let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
+                Ingest::flush_buffers(true, &mut output_files);
 
-            println!("Graceful shutdown complete... bye");
-            std::process::exit(0);
+                // let mut metrics: Metrics = Metrics::new();
+                let metrics_lock = metrics_clone.lock().unwrap();
+
+                println!("Ingested Batch: {}", metrics_lock.ingeted_current);
+                println!("Ingested Messages: {}", metrics_lock.messages_total);
+
+                ////////////// Cleanup part written parquet files START ////////
+                let options = MatchOptions {
+                    case_sensitive: false,
+                    require_literal_separator: false,
+                    require_literal_leading_dot: false,
+                };
+
+                let data_dir = Config::get_data_dir();
+
+                // println!("Looking for temp files in {}", &format!("{}/finalised/*parquet.temp", data_dir));
+
+                for entry in glob_with(&format!("{}/finalised/*parquet.temp", data_dir), options)
+                    .expect("Failed to read glob 'finalised' pattern")
+                {
+                    match entry {
+                        Ok(path) => {
+
+                            // println!("Removing file {}", path.display().to_string());
+
+                            match std::fs::remove_file(path) {
+                                Ok(_t) => {}
+                                Err(err) => println!("{:?}", err),
+                            }
+                        },
+                        Err(e) => println!("{:?}", e),
+                    }
+                }
+                ////////////// Cleanup part written parquet files END ////////
+
+                println!("Graceful shutdown complete... bye");
+                std::process::exit(0);
+            });
         }
     });
 
     // ctrlc::set_handler(move || {
-    //     if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
-    //         // println!("Received Ctrl+C: Gracefully shutting down");
-    //         // RUNNING.lock().unwrap().store(false, Ordering::SeqCst);
-    //
-    //         // Config::set_config(&newmeta_clone.lock().unwrap(),true);
-    //
-    //         // println!("Flushing ingest buffers");
-    //         // let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
-    //         // ingest_work::Ingest::flush_buffers(true, &mut output_files);
-    //         // println!("Flushing output buffers");
-    //         // output_sync(_newmeta_clone.lock().unwrap().clone());
-    //
-    //         // while !GRACEFUL_SHUTDOWN_COMPLETE.lock().unwrap().load(Ordering::SeqCst) {
-    //         //     sleep(Duration::from_secs(1));
-    //         // }
-    //
-    //         // let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
-    //         // Ingest::flush_buffers(true, &mut output_files);
-    //
-    //         // sleep(Duration::from_secs(30)); // wait for threads to flush
-    //         // println!("Greaceful shutdown complete... bye");
-    //         // std::process::exit(0);
-    //
-    //     } else {
+    //     if !RUNNING.lock().unwrap().load(Ordering::SeqCst) {
     //         println!("Received another Ctrl+C signal - no worries, terminating immediately...");
     //         std::process::exit(0);
     //     }

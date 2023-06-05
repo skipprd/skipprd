@@ -188,10 +188,10 @@ impl Ingest {
                         let skpr_partition = Helpers::parse_partition_field(&record);
                         let skpr_time = Helpers::parse_time_field(&record);
 
-                        let mut skpr_time_bucket = 0;
+                        let mut skpr_time_bucket: Option<i64> = None;
 
                         if skpr_time.is_some() {
-                            skpr_time_bucket = BufferChunker::event_time_bucket(skpr_time.unwrap());
+                            skpr_time_bucket = Some(BufferChunker::event_time_bucket(skpr_time.unwrap()));
                         }
 
                         // if Config::truth_value(faltten_events) {
@@ -202,7 +202,7 @@ impl Ingest {
                             "ingest",
                             Some(&skpr_namespace),
                             Some(&skpr_partition),
-                            Some(skpr_time_bucket),
+                            skpr_time_bucket,
                         );
                         let output_file = format!("{}/{}", output_dir.clone(), &output_file_name);
 

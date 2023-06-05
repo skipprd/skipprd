@@ -115,12 +115,16 @@ impl BufferChunker {
         time_bucket: Option<i64>,
     ) -> String {
         let string = time_bucket.unwrap_or_default().to_string();
-        let chunks = vec![
+        let mut chunks = vec![
             ("buffer", buffer_name),
             ("namespace", namespace.unwrap_or("")),
             ("partition", partition.unwrap_or("")),
             ("time", &string),
         ];
+        // if time_bucket.is_some() {
+        //     let string = time_bucket.unwrap_or_default().to_string().clone();
+        //     chunks.push(("time", &string));
+        // }
 
         let chunk_name = form_urlencoded::Serializer::new(String::new())
             .extend_pairs(chunks)
@@ -201,8 +205,12 @@ impl BufferChunker {
         let partition = BufferChunker::get_file_part(filename, "partition");
 
         if !partition.is_empty() {
-            let parts = partition.split('-');
+            // let parts = partition.split('-');
+            let parts = partition.split( "%2D"); // hyphen
+                // .next().unwrap();
+            // let parts = partition.split("%2D");
             let collection: Vec<&str> = parts.collect();
+            // let collection: Vec<&str> = parts.map(| val |val.rsplitn(1, "%3D").next().unwrap()).collect();
 
             path_parts = collection.join("/");
         }

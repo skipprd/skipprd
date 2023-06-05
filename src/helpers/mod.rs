@@ -214,22 +214,28 @@ impl Helpers {
 
             for entity_field_dot in Config::getenv("DATA_OUTPUT_PARTITION_BY_FIELDS", "").split(',')
             {
-                match Helpers::get_nested_value_from_dot_notation(message, entity_field_dot) {
+                let clean_entity_value = match Helpers::get_nested_value_from_dot_notation(message, entity_field_dot) {
                     Some(entity_value) => {
-                        let clean_entity_value =
                             Helpers::clean_field_name(match entity_value.as_str() {
                                 Some(val) => val.to_string(),
                                 None => "".to_string(),
-                            });
-                        let entity_name = match entity_field_dot.rfind('.') {
-                            Some(index) => &entity_field_dot[index + 1..],
-                            None => entity_field_dot,
-                        };
-                        let clean_entity_name = Helpers::clean_field_name(entity_name.to_string());
-                        partitions.push(format!("{}={}", clean_entity_name, clean_entity_value));
+                            })
+                        // let entity_name = match entity_field_dot.rfind('.') {
+                        //     Some(index) => &entity_field_dot[index + 1..],
+                        //     None => entity_field_dot,
+                        // };
+                        // let clean_entity_name = Helpers::clean_field_name(entity_name.to_string());
+                        // partitions.push(format!("{}={}", clean_entity_name, clean_entity_value));
                     }
-                    None => (),
-                }
+                    None => "".to_string(),
+                };
+
+                let entity_name = match entity_field_dot.rfind('.') {
+                    Some(index) => format!("p_{}", &entity_field_dot[index + 1..]),
+                    None => format!("p_{}", entity_field_dot),
+                };
+                let clean_entity_name = Helpers::clean_field_name(entity_name.to_string());
+                partitions.push(format!("{}={}", clean_entity_name, clean_entity_value));
             }
 
             clean_partition = partitions.join("/");
