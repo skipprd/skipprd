@@ -56,10 +56,10 @@ extern crate core;
 
 use clap::Parser;
 
-use signal_hook::{consts::SIGINT, iterator::Signals};
+use signal_hook::{iterator::Signals};
 
 use once_cell::sync::Lazy;
-use signal_hook::consts::{SIGABRT, SIGQUIT, SIGTERM};
+use signal_hook::consts::{SIGABRT, SIGQUIT, SIGTERM, SIGINT};
 
 mod ingest;
 
@@ -295,10 +295,14 @@ async fn sync() {
 
     let metrics_clone = metrics.clone();
 
-    let mut signals = Signals::new(&[SIGTERM, SIGQUIT, SIGABRT]).unwrap();
+    let mut signals = Signals::new(&[SIGINT, SIGTERM, SIGQUIT, SIGABRT]).unwrap();
 
     thread::spawn(move || {
         for sig in signals.forever() {
+            if !RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+                println!("Received another Ctrl+C signal - no worries, terminating immediately...");
+                std::process::exit(0);
+            }
             RUNNING.lock().unwrap().store(false, Ordering::SeqCst);
             println!("Received signal {:?}: Gracefully shutting down", sig);
             // println!("Flushing ingest buffers");
@@ -329,7 +333,7 @@ async fn sync() {
 
             let data_dir = Config::get_data_dir();
 
-            println!("Looking for temp files in {}", &format!("{}/finalised/*parquet.temp", data_dir));
+            // println!("Looking for temp files in {}", &format!("{}/finalised/*parquet.temp", data_dir));
 
             for entry in glob_with(&format!("{}/finalised/*parquet.temp", data_dir), options)
                 .expect("Failed to read glob 'finalised' pattern")
@@ -337,7 +341,7 @@ async fn sync() {
                 match entry {
                     Ok(path) => {
 
-                        println!("Removing file {}", path.display().to_string());
+                        // println!("Removing file {}", path.display().to_string());
 
                         match std::fs::remove_file(path) {
                             Ok(_t) => {}
@@ -350,41 +354,41 @@ async fn sync() {
             }
             ////////////// Cleanup part written parquet files END ////////
 
-            println!("Greaceful shutdown complete... bye");
+            println!("Graceful shutdown complete... bye");
             std::process::exit(0);
         }
     });
 
-    ctrlc::set_handler(move || {
-        if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
-            // println!("Received Ctrl+C: Gracefully shutting down");
-            // RUNNING.lock().unwrap().store(false, Ordering::SeqCst);
-
-            // Config::set_config(&newmeta_clone.lock().unwrap(),true);
-
-            // println!("Flushing ingest buffers");
-            // let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
-            // ingest_work::Ingest::flush_buffers(true, &mut output_files);
-            // println!("Flushing output buffers");
-            // output_sync(_newmeta_clone.lock().unwrap().clone());
-
-            // while !GRACEFUL_SHUTDOWN_COMPLETE.lock().unwrap().load(Ordering::SeqCst) {
-            //     sleep(Duration::from_secs(1));
-            // }
-
-            // let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
-            // Ingest::flush_buffers(true, &mut output_files);
-
-            // sleep(Duration::from_secs(30)); // wait for threads to flush
-            // println!("Greaceful shutdown complete... bye");
-            // std::process::exit(0);
-
-        } else {
-            println!("Received another Ctrl+C signal - no worries, terminating immediately...");
-            std::process::exit(0);
-        }
-    })
-    .expect("Error during graceful shutdown");
+    // ctrlc::set_handler(move || {
+    //     if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+    //         // println!("Received Ctrl+C: Gracefully shutting down");
+    //         // RUNNING.lock().unwrap().store(false, Ordering::SeqCst);
+    //
+    //         // Config::set_config(&newmeta_clone.lock().unwrap(),true);
+    //
+    //         // println!("Flushing ingest buffers");
+    //         // let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
+    //         // ingest_work::Ingest::flush_buffers(true, &mut output_files);
+    //         // println!("Flushing output buffers");
+    //         // output_sync(_newmeta_clone.lock().unwrap().clone());
+    //
+    //         // while !GRACEFUL_SHUTDOWN_COMPLETE.lock().unwrap().load(Ordering::SeqCst) {
+    //         //     sleep(Duration::from_secs(1));
+    //         // }
+    //
+    //         // let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
+    //         // Ingest::flush_buffers(true, &mut output_files);
+    //
+    //         // sleep(Duration::from_secs(30)); // wait for threads to flush
+    //         // println!("Greaceful shutdown complete... bye");
+    //         // std::process::exit(0);
+    //
+    //     } else {
+    //         println!("Received another Ctrl+C signal - no worries, terminating immediately...");
+    //         std::process::exit(0);
+    //     }
+    // })
+    // .expect("Error during graceful shutdown");
 
     // while running.load(Ordering::SeqCst) {
 
