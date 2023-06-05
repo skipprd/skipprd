@@ -59,6 +59,7 @@ stages:
 #    paths:
 #      - ./target
 
+
 dockerize:
   tags: [ saas-linux-medium-amd64 ]
   image: docker:latest
@@ -75,6 +76,9 @@ dockerize:
     - docker login -u skippr -p "$DOCKER_HUB_PASS"
     - docker tag $CONTAINER_IMAGE $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE
     - docker push $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE
+  artifacts:
+    paths:
+      - ~/cargo
   only:
     - master
     - tags
