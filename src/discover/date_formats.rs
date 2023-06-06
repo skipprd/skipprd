@@ -1,10 +1,11 @@
 use std::slice::Iter;
-use crate::discover::date_formats::DateFormats::{Asctime, Atom, AtomZ, Cookie, DateOnly, Iso8601, Iso8601_2, Mysql, Rfc1036, Rfc1123, Rfc2822, Rfc3339, Rfc7231, Rfc822, Rfc850, Rss, W3c};
+use crate::discover::date_formats::DateFormats::{Asctime, Atom, AtomZ, Cookie, DateOnly, Iso8601, Iso8601_2, Iso8601_3, Mysql, Rfc1036, Rfc1123, Rfc2822, Rfc3339, Rfc7231, Rfc822, Rfc850, Rss, W3c};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DateFormats {
     Iso8601,
     Iso8601_2,
+    Iso8601_3,
     Rfc2822,
     Rfc3339,
     Atom,
@@ -24,9 +25,10 @@ pub enum DateFormats {
 
 impl DateFormats {
     pub fn iterator() -> Iter<'static, DateFormats> {
-        static FORMATS: [DateFormats; 17] = [
+        static FORMATS: [DateFormats; 18] = [
             Iso8601,
             Iso8601_2,
+            Iso8601_3,
             Rfc2822,
             Rfc3339,
             Atom,
@@ -49,7 +51,8 @@ impl DateFormats {
     pub fn name(&self) -> &'static str {
         match self {
             DateFormats::Iso8601 => "Iso8601",
-            DateFormats::Iso8601_2 => "Iso8601",
+            DateFormats::Iso8601_2 => "Iso8601_2",
+            DateFormats::Iso8601_3 => "Iso8601_3",
             DateFormats::Rfc2822 => "Rfc2822",
             DateFormats::Rfc3339 => "Rfc3339",
             DateFormats::Atom => "Atom",
@@ -72,6 +75,7 @@ impl DateFormats {
         match self {
             DateFormats::Iso8601 => "%Y-%m-%dT%H:%M:%S.%fZ",
             DateFormats::Iso8601_2 => "%Y-%m-%dT%H:%M:%S%.3fZ",
+            DateFormats::Iso8601_3 => "%Y-%m-%dT%H:%M:%S.%f",
             DateFormats::Rfc2822 => "%a, %d %b %Y %T %z",
             DateFormats::Rfc3339 => "%Y-%m-%dT%H:%M:%S%.f%:z",
             DateFormats::Atom => "%Y-%m-%dT%H:%M:%S",
@@ -94,6 +98,7 @@ impl DateFormats {
         match input {
             "Iso8601" => Ok(DateFormats::Iso8601),
             "Iso8601_2" => Ok(DateFormats::Iso8601_2),
+            "Iso8601_3" => Ok(DateFormats::Iso8601_3),
             "Rfc2822" => Ok(DateFormats::Rfc2822),
             "Rfc3339" => Ok(DateFormats::Rfc3339),
             "Atom" => Ok(DateFormats::Atom),
