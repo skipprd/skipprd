@@ -731,12 +731,11 @@ impl AwsAthena {
                             println!("Created new Athena partition");
                         }
                         Err(err) => {
-                            println!("Key: {}", key);
-                            println!("Values: {:?}", partition_values);
                             println!(
                                 "Failed to create new Athena partition: {}",
                                 err.into_service_error()
                             );
+                            println!("Values: {:?}", partition_values);
                         }
                     }
                 } // ,
