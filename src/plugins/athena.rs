@@ -606,7 +606,7 @@ impl AwsAthena {
             .table_type("EXTERNAL_TABLE");
 
         if !partitions.is_empty() {
-            println!("Partition keys: {:?}", partitions);
+            // println!("Partition keys: {:?}", partitions);
             table_input = table_input.set_partition_keys(Some(partitions));
         }
 
