@@ -721,7 +721,7 @@ impl AwsAthena {
                     // partition does not exist, create it
                     match glue_client
                         .create_partition()
-                        .database_name(database)
+                        .database_name(database.clone())
                         .table_name(namespace)
                         .partition_input(partition_conf)
                         .send()
@@ -735,7 +735,7 @@ impl AwsAthena {
                                 "Failed to create new Athena partition: {}",
                                 err.into_service_error()
                             );
-                            println!("Values: {:?}", partition_values);
+                            println!("Database: {}, Table: {}, Values: {:?}", database, namespace, partition_values);
                         }
                     }
                 } // ,
