@@ -1,4 +1,4 @@
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use memory_stats::memory_stats;
 use regex::Regex;
 use std::collections::HashMap;
@@ -18,6 +18,7 @@ pub mod offsets;
 use crate::helpers::configuration::Config;
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
+use crate::discover::date_formats::DateFormats;
 use crate::discover::Metadata;
 
 // static clean_field_cache: Lazy<Mutex<i64>> = Lazy::new(|| Mutex::new(1));
@@ -318,12 +319,30 @@ impl Helpers {
                             None => time_field_value = None,
                         }
 
+                        // println!("1");
                         if time_field_value.is_none() {
                             // Handle datetime strings
                             match value.as_str() {
                                 Some(val) => {
-                                    if let Ok(dt) = DateTime::parse_from_rfc3339(val) {
-                                        time_field_value = Some(dt.with_timezone(&Utc).timestamp());
+                                    // println!("2");
+                                    for format in DateFormats::iterator() {
+
+                                        // println!("3: {} ? {}", val, format.as_str());
+                                        time_field_value = match NaiveDateTime::parse_from_str(val, format.as_str()) {
+                                            Ok(dt) => {
+                                                // println!("3.1: FOUND {}", format.as_str());
+                                                Some(DateTime::<Utc>::from_utc(dt, Utc).timestamp())
+                                            },
+                                            Err(err) => {
+                                                // println!("{:?}", err);
+                                                None
+                                            },
+                                        };
+
+                                        if time_field_value.is_some() {
+                                            // println!("4: {}", format.as_str());
+                                            return time_field_value;
+                                        }
                                     }
                                 }
                                 None => {

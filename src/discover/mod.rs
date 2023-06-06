@@ -779,24 +779,7 @@ impl AnalyseSchema {
     }
 
     pub(crate) fn is_valid_date(&self, value: &str) -> Option<&str> {
-        let valid_formats = [
-            DateFormats::Atom,
-            DateFormats::AtomZ,
-            DateFormats::Cookie,
-            DateFormats::Iso8601,
-            DateFormats::Rfc822,
-            DateFormats::Rfc850,
-            DateFormats::Rfc1036,
-            DateFormats::Rfc1123,
-            DateFormats::Rfc2822,
-            DateFormats::Rfc3339,
-            DateFormats::Rss,
-            DateFormats::W3c,
-            DateFormats::Mysql,
-            DateFormats::DateOnly,
-        ];
-
-        for format in valid_formats.iter() {
+        for format in DateFormats::iterator() {
             let found_format = match DateTime::parse_from_str(value, format.as_str()) {
                 Ok(_) => {
                     // println!("Value {} is format {}", value, format.as_str());

@@ -1,3 +1,6 @@
+use std::slice::Iter;
+use crate::discover::date_formats::DateFormats::{Asctime, Atom, AtomZ, Cookie, DateOnly, Iso8601, Iso8601_2, Mysql, Rfc1036, Rfc1123, Rfc2822, Rfc3339, Rfc7231, Rfc822, Rfc850, Rss, W3c};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DateFormats {
     Iso8601,
@@ -20,6 +23,29 @@ pub enum DateFormats {
 }
 
 impl DateFormats {
+    pub fn iterator() -> Iter<'static, DateFormats> {
+        static FORMATS: [DateFormats; 17] = [
+            Iso8601,
+            Iso8601_2,
+            Rfc2822,
+            Rfc3339,
+            Atom,
+            AtomZ,
+            Asctime,
+            Cookie,
+            Rfc822,
+            Rfc850,
+            Rfc1036,
+            Rfc1123,
+            Rfc7231,
+            Rss,
+            W3c,
+            Mysql,
+            DateOnly,
+        ];
+        FORMATS.iter()
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             DateFormats::Iso8601 => "Iso8601",
