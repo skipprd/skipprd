@@ -723,7 +723,7 @@ impl AwsAthena {
                     // partition does not exist, create it
                     match glue_client
                         .create_partition()
-                        .database_name(database.clone())
+                        .database_name(&database)
                         .table_name(namespace)
                         .partition_input(partition_conf)
                         .send()
