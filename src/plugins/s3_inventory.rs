@@ -481,50 +481,59 @@ impl DataSourceS3InventoryPlugin {
 
             // for thread in threads {
             for future in future_result {
-                let mut download = future.unwrap();
+                match future {
+                    Ok(mut download) => {
 
-                // println!("Downloading s3 object");
-                let mut data = Vec::new();
+                        // println!("Downloading s3 object");
+                        let mut data = Vec::new();
 
-                match download.response.body.take() {
-                    Some(body) => match body.into_blocking_read().read_to_end(&mut data) {
-                        Ok(_) => {}
-                        Err(err) => println!("{:?}", err),
+                        match download.response.body.take() {
+                            Some(body) => match body.into_blocking_read().read_to_end(&mut data) {
+                                Ok(_) => {}
+                                Err(err) => println!("{:?}", err),
+                            },
+                            None => println!("Empty S3 object body"),
+                        };
+
+                        if download.key.contains(".gz") {
+                            // Something that implements `std::io::Read`
+                            let c = Cursor::new(data);
+
+                            // To inflate on the fly, "pipe" the data through the decoder, i.e. wrap the reader
+                            let mut stream = GzDecoder::new(c);
+
+                            let mut decompressed_data = String::new();
+                            stream.read_to_string(&mut decompressed_data).unwrap();
+
+                            datas.lock().unwrap().push(IngestBatch {
+                                offset_key: OffsetKey {
+                                    namespace: bucket_name.to_string(),
+                                    partition: download.key,
+                                },
+                                data: decompressed_data,
+                            });
+                        } else {
+                            let mut c = Cursor::new(data);
+
+                            let mut str_data = String::new();
+                            c.read_to_string(&mut str_data).unwrap();
+
+                            datas.lock().unwrap().push(IngestBatch {
+                                offset_key: OffsetKey {
+                                    namespace: bucket_name.to_string(),
+                                    partition: download.key,
+                                },
+                                data: str_data,
+                            });
+                        }
+
                     },
-                    None => println!("Empty S3 object body"),
+                    Err(_) => {
+                        println!("Error getting S3 object");
+                    }
                 };
 
-                if download.key.contains(".gz") {
-                    // Something that implements `std::io::Read`
-                    let c = Cursor::new(data);
 
-                    // To inflate on the fly, "pipe" the data through the decoder, i.e. wrap the reader
-                    let mut stream = GzDecoder::new(c);
-
-                    let mut decompressed_data = String::new();
-                    stream.read_to_string(&mut decompressed_data).unwrap();
-
-                    datas.lock().unwrap().push(IngestBatch {
-                        offset_key: OffsetKey {
-                            namespace: bucket_name.to_string(),
-                            partition: download.key,
-                        },
-                        data: decompressed_data,
-                    });
-                } else {
-                    let mut c = Cursor::new(data);
-
-                    let mut str_data = String::new();
-                    c.read_to_string(&mut str_data).unwrap();
-
-                    datas.lock().unwrap().push(IngestBatch {
-                        offset_key: OffsetKey {
-                            namespace: bucket_name.to_string(),
-                            partition: download.key,
-                        },
-                        data: str_data,
-                    });
-                }
             }
 
             self::Ingest::ingest_file(
