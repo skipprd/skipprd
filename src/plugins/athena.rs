@@ -718,7 +718,8 @@ impl AwsAthena {
                     }
                 }
                 Err(_err) => {
-                    println!("Error Getting Partition: {:?}", _err);
+                    // println!("Error Getting Partition: {:?}", _err);
+                    // println!("Database: {}, Table: {}, Values: {:?}", database, namespace, partition_values);
 
                     // partition does not exist, create it
                     match glue_client
