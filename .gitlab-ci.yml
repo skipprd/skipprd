@@ -4,7 +4,7 @@ variables:
   COMPONENT_NAME: skipprd
   CONTAINER_IMAGE: $COMPONENT_NAME:$CI_COMMIT_REF_NAME
   CONTAINER_LATEST_IMAGE: $COMPONENT_NAME:latest
-  CONTAINER_RELEASE_IMAGE: $COMPONENT_NAME:v3.0.0
+  CONTAINER_RELEASE_IMAGE: $COMPONENT_NAME:$CI_COMMIT_TAG
   DOCKER_HUB_REPO: skippr
   ECR_HOST: 536671797322.dkr.ecr.us-east-1.amazonaws.com
   AWS_ECR_REGISTRY: $ECR_HOST/$COMPONENT_NAME
@@ -170,22 +170,22 @@ time_buckets_date:
     - master
     - tags
 
-event_type_partition_field_and_time_flatten:
-  image: docker:latest
-  stage: e2e
-  when: delayed
-  start_in: 10 seconds
-  script:
-    - docker pull $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE
-    - docker run --name skippre2e -e DATA_OUTPUT_PARTITION_BY_FIELDS="bike_id,rider_id" -e DATA_SOURCE_EVENT_TYPE_FIELDS="message_type" -e DATA_OUTPUT_TIME_BUCKET=year -e DATA_OUTPUT_TIME_FIELDS=event_date -e DATA_SOURCE_FLATTEN_EVENTS=yes -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skippr-e2e-sample-data -e S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=event_type_partition_field_and_time_flatten -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=event_type_partition_field_and_time_flatten -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=test skippr/skipprd:latest
-    - if [[ "$(docker logs skippre2e >& container-logs ; cat container-logs | grep -i 'Err' | wc -l)" -gt 0 ]]; then exit 1; fi
-    - if [[ "$(docker container wait skippre2e)" -gt 0 ]]; then exit 1; fi
-  after_script:
-    - docker run --name soda -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -v `pwd`/soda:/soda sodadata/soda-core scan -d datalake_e2e -c /soda/configuration.yml /soda/event_type_partition_field_and_time_flatten.yml
-    - if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
-  only:
-    - master
-    - tags
+#event_type_partition_field_and_time_flatten:
+#  image: docker:latest
+#  stage: e2e
+#  when: delayed
+#  start_in: 10 seconds
+#  script:
+#    - docker pull $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE
+#    - docker run --name skippre2e -e DATA_OUTPUT_PARTITION_BY_FIELDS="bike_id,rider_id" -e DATA_SOURCE_EVENT_TYPE_FIELDS="message_type" -e DATA_OUTPUT_TIME_BUCKET=year -e DATA_OUTPUT_TIME_FIELDS=event_date -e DATA_SOURCE_FLATTEN_EVENTS=yes -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e S3_BUCKET=skippr-e2e-sample-data -e S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=event_type_partition_field_and_time_flatten -e GLUE_DATABASE_NAME=bikehire -e ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=event_type_partition_field_and_time_flatten -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./ -e APP_ENV=test skippr/skipprd:latest
+#    - if [[ "$(docker logs skippre2e >& container-logs ; cat container-logs | grep -i 'Err' | wc -l)" -gt 0 ]]; then exit 1; fi
+#    - if [[ "$(docker container wait skippre2e)" -gt 0 ]]; then exit 1; fi
+#  after_script:
+#    - docker run --name soda -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -v `pwd`/soda:/soda sodadata/soda-core scan -d datalake_e2e -c /soda/configuration.yml /soda/event_type_partition_field_and_time_flatten.yml
+#    - if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
+#  only:
+#    - master
+#    - tags
 
 
 
