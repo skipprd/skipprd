@@ -231,7 +231,7 @@ impl DataSourceS3Plugin {
         loop {
             let get_request = GetObjectRequest {
                 bucket: bucket.clone(),
-                key: key.clone(),
+                key: urldecode::decode(key.clone()),
                 ..Default::default()
             };
 
@@ -283,7 +283,7 @@ impl DataSourceS3Plugin {
                 tokio::spawn(async move {
                     let _x_fut = s3_client.get_object(GetObjectRequest {
                         bucket: bucket_name.clone(),
-                        key: object_key.to_string(),
+                        key: urldecode::decode(object_key.to_string()),
                         ..Default::default()
                     });
 

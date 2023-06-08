@@ -153,7 +153,7 @@ impl DataSourceS3InventoryPlugin {
                                         .s3_client
                                         .get_object()
                                         .bucket(inventory_bucket.clone())
-                                        .key(object_key)
+                                        .key(urldecode::decode(object_key.to_string()))
                                         .send()
                                         .await;
 
@@ -193,7 +193,7 @@ impl DataSourceS3InventoryPlugin {
                                             .s3_client
                                             .get_object()
                                             .bucket(inventory_bucket.clone())
-                                            .key(file_key)
+                                            .key(urldecode::decode(file_key.to_string()))
                                             .send()
                                             .await;
 
@@ -387,7 +387,7 @@ impl DataSourceS3InventoryPlugin {
         loop {
             let get_request = GetObjectRequest {
                 bucket: bucket.clone(),
-                key: key.clone(),
+                key: urldecode::decode((key.clone())),
                 ..Default::default()
             };
 
@@ -439,7 +439,7 @@ impl DataSourceS3InventoryPlugin {
                 tokio::spawn(async move {
                     s3_client.get_object(GetObjectRequest {
                         bucket: bucket_name.clone(),
-                        key: object_key.to_string(),
+                        key: urldecode::decode(object_key.to_string()),
                         ..Default::default()
                     });
 
