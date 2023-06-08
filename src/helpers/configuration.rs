@@ -442,28 +442,34 @@ impl Config {
                   // }
             }
 
-            let flatten = Config::truth_value(&Config::getenv("DATA_SOURCE_FLATTEN_EVENTS", "no"));
-
-            for (namespace, schema) in metadata.into_iter() {
-
-                println!("Updating Hive '{}' schema", namespace);
-
-                if flatten {
-                    let mut out_meta: HashMap<String, Metadata> = HashMap::new();
-                    flatten_metadata(metadata.get(namespace).unwrap(), &mut out_meta);
-
-                    let mut output_metadata: HashMap<String, Metadata> = HashMap::new();
-                    let mut flat: Metadata = Metadata::new().unwrap();
-                    flat.fields = Box::new(out_meta);
-                    output_metadata.insert(namespace.clone(), flat);
-
-                    AwsAthena::create_or_update_schema(&namespace, &output_metadata.get(namespace).unwrap()).await;
-                } else {
-                    AwsAthena::create_or_update_schema(&namespace, &schema).await;
-                }
-            }
+            Config::sync_schema(metadata).await;
 
         }
+    }
+
+    pub async fn sync_schema(metadata: &HashMap<String, Metadata>) {
+
+        let flatten = Config::truth_value(&Config::getenv("DATA_SOURCE_FLATTEN_EVENTS", "no"));
+
+        for (namespace, schema) in metadata.into_iter() {
+
+            println!("Updating Hive '{}' schema", namespace);
+
+            if flatten {
+                let mut out_meta: HashMap<String, Metadata> = HashMap::new();
+                flatten_metadata(metadata.get(namespace).unwrap(), &mut out_meta);
+
+                let mut output_metadata: HashMap<String, Metadata> = HashMap::new();
+                let mut flat: Metadata = Metadata::new().unwrap();
+                flat.fields = Box::new(out_meta);
+                output_metadata.insert(namespace.clone(), flat);
+
+                AwsAthena::create_or_update_schema(&namespace, &output_metadata.get(namespace).unwrap()).await;
+            } else {
+                AwsAthena::create_or_update_schema(&namespace, &schema).await;
+            }
+        }
+
     }
 
     pub(crate) fn set_status(metrics: MutexGuard<Metrics>, exit_code: Option<i8>) {

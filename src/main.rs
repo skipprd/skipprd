@@ -258,12 +258,12 @@ async fn sync() {
         Ok(metadata) => {
             println!("Found Skippr metadata");
 
+            Config::sync_schema(&metadata).await;
+
             // let reader = BufReader::new(schema_file);
 
             // let u = serde_json::from_reader(reader).unwrap();
-            let u: HashMap<String, Metadata> = metadata;
-
-            u
+            metadata
         }
         Err(_e) => {
             println!("Could not find Skippr metadata, will disover and evolve schemas as we sync.");
