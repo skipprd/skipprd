@@ -420,14 +420,18 @@ fn fast_set_value(
 
         let discoverd_data_type = discover_ingest(&field.to_string(), value, metadata, updatedSchema, flatten);
 
-        fast_set_value(
-            &discoverd_data_type,
-            &field.to_string(),
-            value,
-            metadata,
-            updatedSchema,
-            flatten,
-        )
+        if discoverd_data_type != "" {
+            return fast_set_value(
+                &discoverd_data_type,
+                &field.to_string(),
+                value,
+                metadata,
+                updatedSchema,
+                flatten,
+            )
+        } else {
+            return Value::Null
+        }
     }
 }
 
@@ -459,6 +463,11 @@ fn discover_ingest(
     // AnalyseSchema::analyse_field(&foo, &field.to_string(), &mut jsonValue, metadata);
 
     ////
+
+    if value.is_null() || (value.is_string() && value.as_str().unwrap_or_default().is_empty()) {
+        return "".to_string()
+    }
+
 
     AnalyseSchema::analyse_field(
         &foo,
