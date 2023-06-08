@@ -31,7 +31,7 @@ use futures::StreamExt;
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::ingest_work::{Ingest, IngestBatch};
 use rusoto_core::{Region, RusotoError};
-use rusoto_s3::{GetObjectOutput, GetObjectRequest, S3Client, S3};
+use rusoto_s3::{GetObjectOutput, GetObjectRequest, S3Client, S3, GetObjectError};
 use crate::{INPUT_GRACEFUL_SHUTDOWN_COMPLETE, RUNNING};
 
 pub struct DataSourceS3InventoryPlugin {
@@ -404,7 +404,7 @@ impl DataSourceS3InventoryPlugin {
                     let wait_time = backoff_duration.as_secs_f64() * 2.0_f64.powi(retries);
                     thread::sleep(Duration::from_secs_f64(wait_time));
 
-                    backoff_duration *= 2;
+                    // backoff_duration *= 2;
 
                     println!(
                         "Failed to get object {}, retry back in {} seconds",
@@ -437,25 +437,25 @@ impl DataSourceS3InventoryPlugin {
                 let bucket_name = bucket_name.to_owned();
 
                 tokio::spawn(async move {
-                    let _x_fut = s3_client.get_object(GetObjectRequest {
+                    s3_client.get_object(GetObjectRequest {
                         bucket: bucket_name.clone(),
                         key: object_key.to_string(),
                         ..Default::default()
                     });
 
-                    let response = Self::download_s3_object_with_backoff(
+                    match Self::download_s3_object_with_backoff(
                         &s3_client,
                         &bucket_name,
                         &object_key,
-                    )
-                    .await
-                    .unwrap();
-                    // println!("Got s3 object");
-                    
+                    ).await {
+                        Ok(response) => {
 
-                    Download {
-                        key: object_key,
-                        response,
+                            Ok(Download {
+                                key: object_key,
+                                response,
+                            })
+                        },
+                        Err(_) => Err("Could not get object")
                     }
                 })
             })
@@ -481,7 +481,7 @@ impl DataSourceS3InventoryPlugin {
 
             // for thread in threads {
             for future in future_result {
-                match future {
+                match future.unwrap() {
                     Ok(mut download) => {
 
                         // println!("Downloading s3 object");
@@ -528,8 +528,8 @@ impl DataSourceS3InventoryPlugin {
                         }
 
                     },
-                    Err(_) => {
-                        println!("Error getting S3 object");
+                    Err(err) => {
+                        println!("{:?}", err);
                     }
                 };
 
