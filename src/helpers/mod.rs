@@ -275,11 +275,11 @@ impl Helpers {
                     }
                 }
 
-                clean_namespace = namespaces.join("_");
+                let join = namespaces.join("_").trim_matches('_').to_lowercase();
 
-                clean_namespace = clean_namespace.trim_matches('_').to_lowercase();
-
-                clean_namespace = Helpers::clean_field_name(clean_namespace);
+                if join != "" {
+                    clean_namespace = Helpers::clean_field_name(join);
+                }
             }
         }
 
@@ -493,11 +493,20 @@ mod parse_partition_tests {
 
     #[test]
     #[serial]
+    fn test_parse_partition_field_empty_field() {
+        let message = json!({"foo": "", "abc1": "def"});
+        std::env::set_var("DATA_OUTPUT_PARTITION_BY_FIELDS", "foo");
+        let partition = Helpers::parse_partition_field(&message);
+        assert_eq!(partition, "p_foo=");
+    }
+
+    #[test]
+    #[serial]
     fn test_parse_partition_field_single_field() {
         let message = json!({"foo": "bar", "abc1": "def"});
         std::env::set_var("DATA_OUTPUT_PARTITION_BY_FIELDS", "foo");
         let partition = Helpers::parse_partition_field(&message);
-        assert_eq!(partition, "foo=bar");
+        assert_eq!(partition, "p_foo=bar");
     }
 
     #[test]
@@ -506,7 +515,7 @@ mod parse_partition_tests {
         let message = json!({"foo": {"bar": "baz"}, "abc1": "def"});
         std::env::set_var("DATA_OUTPUT_PARTITION_BY_FIELDS", "foo.bar");
         let partition = Helpers::parse_partition_field(&message);
-        assert_eq!(partition, "bar=baz");
+        assert_eq!(partition, "p_bar=baz");
     }
 
     #[test]
@@ -515,7 +524,7 @@ mod parse_partition_tests {
         let message = json!({"foo": {"bar": "baz"}, "abc1": "def"});
         std::env::set_var("DATA_OUTPUT_PARTITION_BY_FIELDS", "foo.bar,abc1");
         let partition = Helpers::parse_partition_field(&message);
-        assert_eq!(partition, "bar=baz/abc1=def");
+        assert_eq!(partition, "p_bar=baz/p_abc1=def");
     }
 }
 
@@ -524,6 +533,30 @@ mod parse_namespace_field_tests {
     use super::*;
     use serde_json::json;
     use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn test_parse_namespace_field_with_empty_field() {
+        let mut cache = HashMap::new();
+        let message = json!({"my_field": ""});
+        let namespace = "my_namespace".to_string();
+        Config::setenv("DATA_SOURCE_EVENT_TYPE_FIELDS", "my_field");
+        let result = Helpers::parse_namespace_field(&message, namespace, &mut cache);
+        assert_eq!(result, "my_namespace");
+        assert_eq!(cache.get("my_namespace"), Some(&"no".to_string()));
+    }
+
+    #[test]
+    #[serial]
+    fn test_parse_namespace_field_with_missing_field() {
+        let mut cache = HashMap::new();
+        let message = json!({"my_field": "blah"});
+        let namespace = "my_namespace".to_string();
+        Config::setenv("DATA_SOURCE_EVENT_TYPE_FIELDS", "abc");
+        let result = Helpers::parse_namespace_field(&message, namespace, &mut cache);
+        assert_eq!(result, "my_namespace");
+        assert_eq!(cache.get("my_namespace"), Some(&"no".to_string()));
+    }
 
     #[test]
     #[serial]
