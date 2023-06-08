@@ -401,10 +401,10 @@ impl DataSourceS3InventoryPlugin {
                 Err(err) => {
                     retries += 1;
 
-                    let wait_time = backoff_duration.as_secs_f64() * 2.0_f64.powi(retries);
-                    thread::sleep(Duration::from_secs_f64(wait_time));
+                    // let wait_time = backoff_duration.as_secs_f64() * 2.0_f64.powi(retries);
+                    thread::sleep(Duration::from_secs_f64(backoff_duration.as_secs_f64()));
 
-                    // backoff_duration *= 2;
+                    backoff_duration *= 2;
 
                     println!(
                         "Failed to get object {}, retry back in {} seconds",
