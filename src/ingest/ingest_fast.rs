@@ -172,6 +172,8 @@ fn fast_set_value(
 
                         // only ingest fields enabled to sync to output
                         if metadata
+                            .get_mut(&field.to_string()).is_some()
+                            && metadata
                             .get_mut(&field.to_string())
                             .expect(&format!("No metadata for field: {} with value", &field))
                             .fields
@@ -232,6 +234,8 @@ fn fast_set_value(
 
                         // only ingest fields enabled to sync to output
                         if metadata
+                            .get_mut(&field.to_string()).is_some()
+                            && metadata
                             .get_mut(&field.to_string())
                             .unwrap()
                             .fields
@@ -300,6 +304,8 @@ fn fast_set_value(
 
                             // only ingest fields enabled to sync to output
                             if metadata
+                                .get_mut(&field.to_string()).is_some()
+                                && metadata
                                 .get_mut(field)
                                 .unwrap()
                                 .fields
