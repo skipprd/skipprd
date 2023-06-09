@@ -67,10 +67,10 @@ impl InternalFields {
     //         clean_namespace = clean_field_cache_lock.get(namespace).unwrap();
     //
     //         // optional: partition by composite key
-    //         if Config::getenv("DATA_SOURCE_EVENT_TYPE_FIELDS", "") != "" {
+    //         if Config::getenv("TRANSFORM_NAMESPACE_FIELDS", "") != "" {
     //             let mut namespaces = vec![<String>];
     //
-    //             for entity_field_dot in Config::getenv("DATA_SOURCE_EVENT_TYPE_FIELDS", "").split(",") {
+    //             for entity_field_dot in Config::getenv("TRANSFORM_NAMESPACE_FIELDS", "").split(",") {
     //                 if let Some(entity_value) = message.get(entity_field_dot) {
     //                     namespaces.push(clean_field_cache_lock.get(entity_value).unwrap());
     //                 }

@@ -216,7 +216,7 @@ async fn discover() {
         }
     }
 
-    let flatten = Config::truth_value(&Config::getenv("DATA_SOURCE_FLATTEN_EVENTS", "no"));
+    let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
 
     AnalyseSchema::determine_field_types(&mut skippr_metadata, None, None, flatten);
 
@@ -662,7 +662,7 @@ fn output_sync(metadata: HashMap<String, Metadata>) {
     }
     OUTPUT_RUNNING.lock().unwrap().store(true, Ordering::SeqCst);
 
-    let flatten = Config::truth_value(&Config::getenv("DATA_SOURCE_FLATTEN_EVENTS", "no"));
+    let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
 
         let data_dir = Config::get_data_dir();
         let output_dir = &format!("{}/output", data_dir);

@@ -127,7 +127,7 @@ impl Ingest {
         offset_db: &Arc<Offsets>,
     ) {
 
-        let flatten = Config::truth_value(&Config::getenv("DATA_SOURCE_FLATTEN_EVENTS", "no"));
+        let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
 
         let data_dir = Config::get_data_dir();
         let output_dir = format!("{}/output", data_dir);

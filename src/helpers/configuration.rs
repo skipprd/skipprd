@@ -286,7 +286,7 @@ impl Config {
         // config.flush_buffer_seconds = Config::getenv("DATA_OUTPUT_FLUSH_SECONDS", config.flush_buffer_seconds);
         // config.flush_buffer_records = Config::getenv("DATA_OUTPUT_FLUSH_RECORDS", config.flush_buffer_records);
         //
-        // config.event_time_bucket_duration = Config::getenv("DATA_OUTPUT_TIME_BUCKET", false);
+        // config.event_time_bucket_duration = Config::getenv("TRANSFORM_BATCH_TIME_UNIT", false);
         //
         // config.poll_interval_seconds = Config::getenv("DATA_SOURCE_POLL_INTERVAL_SECONDS", config.poll_interval_seconds);
         //
@@ -298,7 +298,7 @@ impl Config {
 
         // config.run_mode = Config::getenv("RUN_MODE", config.run_mode);
 
-        // config.flatten_events = Config::getenv("DATA_SOURCE_FLATTEN_EVENTS", config.flatten_events);
+        // config.flatten_events = Config::getenv("TRANSFORM_FLATTEN_EVENTS", config.flatten_events);
         //
         // config.task_id = Config::getenv("TASK_ID", "") as i64;
 
@@ -386,8 +386,8 @@ impl Config {
 
             let full_namespace = Config::get_full_namespace_name();
 
-            if !Config::getenv("DATA_OUTPUT_TIME_BUCKET", "").is_empty() && Config::getenv("DATA_OUTPUT_TIME_FIELDS", "").is_empty() {
-                println!("ERROR: Environment variable: 'DATA_OUTPUT_TIME_FIELDS' must be since you've set: 'DATA_OUTPUT_TIME_BUCKET'.");
+            if !Config::getenv("TRANSFORM_BATCH_TIME_UNIT", "").is_empty() && Config::getenv("TRANSFORM_BATCH_TIME_FIELDS", "").is_empty() {
+                println!("ERROR: Environment variable: 'TRANSFORM_BATCH_TIME_FIELDS' must be since you've set: 'TRANSFORM_BATCH_TIME_UNIT'.");
             }
 
             // let uri = Config::getenv("SKIPPR_API_ENDPOINT", "");
@@ -449,7 +449,7 @@ impl Config {
 
     pub async fn sync_schema(metadata: &HashMap<String, Metadata>) {
 
-        let flatten = Config::truth_value(&Config::getenv("DATA_SOURCE_FLATTEN_EVENTS", "no"));
+        let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
 
         for (namespace, schema) in metadata.into_iter() {
 

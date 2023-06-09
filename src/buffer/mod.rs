@@ -58,7 +58,7 @@ impl BufferChunker {
         // let mut bucket_rounded_timestamp: DateTime<Utc> = Utc.ymd(datetime.year(), 1, 1).and_hms(0, 0, 0);
         let mut bucket_rounded_timestamp = 0;
 
-        if let config_duration = Config::getenv("DATA_OUTPUT_TIME_BUCKET", "") {
+        if let config_duration = Config::getenv("TRANSFORM_BATCH_TIME_UNIT", "") {
             bucket_rounded_timestamp = match config_duration.as_str() {
                 "year" => {
                     let year = datetime.year();
@@ -329,42 +329,42 @@ mod event_time_bucket_tests {
     #[test]
     #[serial]
     fn test_event_time_bucket_year() {
-        Config::setenv("DATA_OUTPUT_TIME_BUCKET", "year");
+        Config::setenv("TRANSFORM_BATCH_TIME_UNIT", "year");
         assert_eq!(BufferChunker::event_time_bucket(1645296045), 1640995200);
     }
 
     #[test]
     #[serial]
     fn test_event_time_bucket_month() {
-        Config::setenv("DATA_OUTPUT_TIME_BUCKET", "month");
+        Config::setenv("TRANSFORM_BATCH_TIME_UNIT", "month");
         assert_eq!(BufferChunker::event_time_bucket(1645296045), 1643673600);
     }
 
     #[test]
     #[serial]
     fn test_event_time_bucket_day() {
-        Config::setenv("DATA_OUTPUT_TIME_BUCKET", "day");
+        Config::setenv("TRANSFORM_BATCH_TIME_UNIT", "day");
         assert_eq!(BufferChunker::event_time_bucket(1645296045), 1645228800);
     }
 
     #[test]
     #[serial]
     fn test_event_time_bucket_hour() {
-        Config::setenv("DATA_OUTPUT_TIME_BUCKET", "hour");
+        Config::setenv("TRANSFORM_BATCH_TIME_UNIT", "hour");
         assert_eq!(BufferChunker::event_time_bucket(1645296045), 1645293600);
     }
 
     #[test]
     #[serial]
     fn test_event_time_bucket_minute() {
-        Config::setenv("DATA_OUTPUT_TIME_BUCKET", "minute");
+        Config::setenv("TRANSFORM_BATCH_TIME_UNIT", "minute");
         assert_eq!(BufferChunker::event_time_bucket(1645296045), 1645296000);
     }
 
     #[test]
     #[serial]
     fn test_event_time_bucket_none() {
-        Config::setenv("DATA_OUTPUT_TIME_BUCKET", "");
+        Config::setenv("TRANSFORM_BATCH_TIME_UNIT", "");
         assert_eq!(BufferChunker::event_time_bucket(1645296045), 0);
     }
 }

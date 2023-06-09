@@ -91,8 +91,8 @@ impl DataSourceS3Plugin {
         // let mut outputs: HashMap<String, Vec<String>> = HashMap::new();
         let mut outputs: Vec<String> = Vec::new();
 
-        let inventory_bucket = Config::getenv("S3_BUCKET", "");
-        let mut inventory_prefix = Config::getenv("S3_PREFIX", "");
+        let inventory_bucket = Config::getenv("DATA_SOURCE_S3_BUCKET", "");
+        let mut inventory_prefix = Config::getenv("DATA_SOURCE_S3_PREFIX", "");
 
         println!(
             "Syncing from bucket: {} and prefix {}",

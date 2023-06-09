@@ -210,10 +210,10 @@ impl Helpers {
         let mut clean_partition: String = "".to_string();
 
         // optional: partition by composite key
-        if !Config::getenv("DATA_OUTPUT_PARTITION_BY_FIELDS", "").is_empty() {
+        if !Config::getenv("TRANSFORM_BATCH_PARTITION_FIELDS", "").is_empty() {
             let mut partitions = vec![];
 
-            for entity_field_dot in Config::getenv("DATA_OUTPUT_PARTITION_BY_FIELDS", "").split(',')
+            for entity_field_dot in Config::getenv("TRANSFORM_BATCH_PARTITION_FIELDS", "").split(',')
             {
                 let clean_entity_value = match Helpers::get_nested_value_from_dot_notation(message, entity_field_dot) {
                     Some(entity_value) => {
@@ -261,11 +261,11 @@ impl Helpers {
             clean_namespace = Helpers::clean_field_name(clean_namespace);
 
             // optional: partition by composite key
-            if !Config::getenv("DATA_SOURCE_EVENT_TYPE_FIELDS", "").is_empty() {
+            if !Config::getenv("TRANSFORM_NAMESPACE_FIELDS", "").is_empty() {
                 let mut namespaces = vec!["".to_string()];
 
                 for entity_field_dot in
-                    Config::getenv("DATA_SOURCE_EVENT_TYPE_FIELDS", "").split(',')
+                    Config::getenv("TRANSFORM_NAMESPACE_FIELDS", "").split(',')
                 {
                     match Helpers::get_nested_value_from_dot_notation(message, entity_field_dot) {
                         Some(entity_value) => {
@@ -300,10 +300,10 @@ impl Helpers {
         // default to beginning of epoch.
         let mut time_field_value: Option<i64> = None;
 
-        if !Config::getenv("DATA_OUTPUT_TIME_FIELDS", "").is_empty() {
+        if !Config::getenv("TRANSFORM_BATCH_TIME_FIELDS", "").is_empty() {
             // Support nested time fields via array dot notation
             // For user confirmed event time fields, use the first one that matches
-            for field_dot in Config::getenv("DATA_OUTPUT_TIME_FIELDS", "").split(',') {
+            for field_dot in Config::getenv("TRANSFORM_BATCH_TIME_FIELDS", "").split(',') {
                 match Helpers::get_nested_value_from_dot_notation(message, field_dot) {
                     Some(value) => {
                         // Handle millisecond timestamps
@@ -400,7 +400,7 @@ mod parse_time_field_tests {
     #[test]
     fn test_parse_time_field_no_time_fields() {
         // Mocking the environment variable.
-        env::set_var("DATA_OUTPUT_TIME_FIELDS", "");
+        env::set_var("TRANSFORM_BATCH_TIME_FIELDS", "");
 
         let message = json!({
             "key": "value"
@@ -412,7 +412,7 @@ mod parse_time_field_tests {
     #[test]
     fn test_parse_time_field_with_millisecond_timestamp() {
         // Mocking the environment variable.
-        env::set_var("DATA_OUTPUT_TIME_FIELDS", "time1");
+        env::set_var("TRANSFORM_BATCH_TIME_FIELDS", "time1");
 
         let time = Utc::now().timestamp_millis();
         println!("{}", time);
@@ -426,7 +426,7 @@ mod parse_time_field_tests {
     #[test]
     fn test_parse_time_field_with_invalid_millisecond_timestamp() {
         // Mocking the environment variable.
-        env::set_var("DATA_OUTPUT_TIME_FIELDS", "time2");
+        env::set_var("TRANSFORM_BATCH_TIME_FIELDS", "time2");
 
         let time: i64 = 999999999; // Invalid timestamp, less than 1000000000000
         let message = json!({
@@ -439,7 +439,7 @@ mod parse_time_field_tests {
     #[test]
     fn test_parse_time_field_with_valid_second_timestamp() {
         // Mocking the environment variable.
-        env::set_var("DATA_OUTPUT_TIME_FIELDS", "time3");
+        env::set_var("TRANSFORM_BATCH_TIME_FIELDS", "time3");
 
         let time: i64 = 1646901960;
         let message = json!({
@@ -452,7 +452,7 @@ mod parse_time_field_tests {
     #[test]
     fn test_parse_time_field_with_datetime_string() {
         // Mocking the environment variable.
-        env::set_var("DATA_OUTPUT_TIME_FIELDS", "time4");
+        env::set_var("TRANSFORM_BATCH_TIME_FIELDS", "time4");
 
         let dt = Utc::now();
         let time = dt.to_rfc3339();
@@ -466,7 +466,7 @@ mod parse_time_field_tests {
     #[test]
     fn test_parse_time_field_with_invalid_datetime_string() {
         // Mocking the environment variable.
-        env::set_var("DATA_OUTPUT_TIME_FIELDS", "time5");
+        env::set_var("TRANSFORM_BATCH_TIME_FIELDS", "time5");
 
         let time = "invalid datetime string";
         let message = json!({
@@ -486,7 +486,7 @@ mod parse_partition_tests {
     #[serial]
     fn test_parse_partition_field_no_config() {
         let message = json!({"foo": "bar", "abc1": "def"});
-        std::env::set_var("DATA_OUTPUT_PARTITION_BY_FIELDS", "");
+        std::env::set_var("TRANSFORM_BATCH_PARTITION_FIELDS", "");
         let partition = Helpers::parse_partition_field(&message);
         assert_eq!(partition, "");
     }
@@ -495,7 +495,7 @@ mod parse_partition_tests {
     #[serial]
     fn test_parse_partition_field_empty_field() {
         let message = json!({"foo": "", "abc1": "def"});
-        std::env::set_var("DATA_OUTPUT_PARTITION_BY_FIELDS", "foo");
+        std::env::set_var("TRANSFORM_BATCH_PARTITION_FIELDS", "foo");
         let partition = Helpers::parse_partition_field(&message);
         assert_eq!(partition, "p_foo=");
     }
@@ -504,7 +504,7 @@ mod parse_partition_tests {
     #[serial]
     fn test_parse_partition_field_single_field() {
         let message = json!({"foo": "bar", "abc1": "def"});
-        std::env::set_var("DATA_OUTPUT_PARTITION_BY_FIELDS", "foo");
+        std::env::set_var("TRANSFORM_BATCH_PARTITION_FIELDS", "foo");
         let partition = Helpers::parse_partition_field(&message);
         assert_eq!(partition, "p_foo=bar");
     }
@@ -513,7 +513,7 @@ mod parse_partition_tests {
     #[serial]
     fn test_parse_partition_field_composite_key() {
         let message = json!({"foo": {"bar": "baz"}, "abc1": "def"});
-        std::env::set_var("DATA_OUTPUT_PARTITION_BY_FIELDS", "foo.bar");
+        std::env::set_var("TRANSFORM_BATCH_PARTITION_FIELDS", "foo.bar");
         let partition = Helpers::parse_partition_field(&message);
         assert_eq!(partition, "p_bar=baz");
     }
@@ -522,7 +522,7 @@ mod parse_partition_tests {
     #[serial]
     fn test_parse_partition_field_several_composite_keys() {
         let message = json!({"foo": {"bar": "baz"}, "abc1": "def"});
-        std::env::set_var("DATA_OUTPUT_PARTITION_BY_FIELDS", "foo.bar,abc1");
+        std::env::set_var("TRANSFORM_BATCH_PARTITION_FIELDS", "foo.bar,abc1");
         let partition = Helpers::parse_partition_field(&message);
         assert_eq!(partition, "p_bar=baz/p_abc1=def");
     }
@@ -540,7 +540,7 @@ mod parse_namespace_field_tests {
         let mut cache = HashMap::new();
         let message = json!({"my_field": ""});
         let namespace = "my_namespace".to_string();
-        Config::setenv("DATA_SOURCE_EVENT_TYPE_FIELDS", "my_field");
+        Config::setenv("TRANSFORM_NAMESPACE_FIELDS", "my_field");
         let result = Helpers::parse_namespace_field(&message, namespace, &mut cache);
         assert_eq!(result, "my_namespace");
         assert_eq!(cache.get("my_namespace"), Some(&"no".to_string()));
@@ -552,7 +552,7 @@ mod parse_namespace_field_tests {
         let mut cache = HashMap::new();
         let message = json!({"my_field": "blah"});
         let namespace = "my_namespace".to_string();
-        Config::setenv("DATA_SOURCE_EVENT_TYPE_FIELDS", "abc");
+        Config::setenv("TRANSFORM_NAMESPACE_FIELDS", "abc");
         let result = Helpers::parse_namespace_field(&message, namespace, &mut cache);
         assert_eq!(result, "my_namespace");
         assert_eq!(cache.get("my_namespace"), Some(&"no".to_string()));
@@ -565,7 +565,7 @@ mod parse_namespace_field_tests {
         cache.insert("my_namespace".to_string(), "yes".to_string());
         let message = json!({"my_field": "my_value"});
         let namespace = "my_namespace".to_string();
-        Config::setenv("DATA_SOURCE_EVENT_TYPE_FIELDS", "");
+        Config::setenv("TRANSFORM_NAMESPACE_FIELDS", "");
         let result = Helpers::parse_namespace_field(&message, namespace, &mut cache);
         assert_eq!(result, "my_namespace");
         assert_eq!(cache.get("my_namespace"), Some(&"no".to_string()));
@@ -577,7 +577,7 @@ mod parse_namespace_field_tests {
         let mut cache = HashMap::new();
         let message = json!({"my_field": "my_value"});
         let namespace = "my_namespace".to_string();
-        Config::setenv("DATA_SOURCE_EVENT_TYPE_FIELDS", "");
+        Config::setenv("TRANSFORM_NAMESPACE_FIELDS", "");
         let result = Helpers::parse_namespace_field(&message, namespace, &mut cache);
         assert_eq!(result, "my_namespace");
         assert_eq!(cache.get("my_namespace"), Some(&"no".to_string()));
@@ -591,7 +591,7 @@ mod parse_namespace_field_tests {
             json!({"entity_field_1": "entity_value_1","entity_field_2": "entity_value_2"});
         let namespace = "my_namespace".to_string();
         Config::setenv(
-            "DATA_SOURCE_EVENT_TYPE_FIELDS",
+            "TRANSFORM_NAMESPACE_FIELDS",
             "entity_field_1,entity_field_2",
         );
         let result = Helpers::parse_namespace_field(&message, namespace, &mut cache);
@@ -613,7 +613,7 @@ mod parse_namespace_field_tests {
         });
         let namespace = "my_namespace".to_string();
         Config::setenv(
-            "DATA_SOURCE_EVENT_TYPE_FIELDS",
+            "TRANSFORM_NAMESPACE_FIELDS",
             "entity_field_1,entity_field_3.entity_field_3a",
         );
         let result = Helpers::parse_namespace_field(&message, namespace, &mut cache);

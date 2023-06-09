@@ -219,7 +219,7 @@ impl AnalyseSchema {
 
         let mut skpr_namespace: String = "".to_string();
 
-        let faltten_events = &Config::getenv("DATA_SOURCE_FLATTEN_EVENTS", "no");
+        let faltten_events = &Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no");
 
         // let mut newMeta: &mut HashMap<String, Metadata>;
         // let defaultMetadata = Metadata::new().unwrap();

@@ -41,7 +41,7 @@ impl DataOutputAwsAthenaPlugin {
 
         let s3_bucket = Config::getenv("DATA_OUTPUT_S3_BUCKET", "");
         let s3_prefix = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
-        let time_bucket = Config::getenv("DATA_OUTPUT_TIME_BUCKET", "");
+        let time_bucket = Config::getenv("TRANSFORM_BATCH_TIME_UNIT", "");
 
         Self {
             s3_client,
@@ -268,7 +268,7 @@ impl AwsAthena {
     }
 
     pub async fn get_work_group() -> Result<bool, String> {
-        let workgroup = Config::getenv("ATHENA_WORKGROUP_NAME", "");
+        let workgroup = Config::getenv("DATA_OUTPUT_ATHENA_WORKGROUP_NAME", "");
         let aws_config = aws_config::from_env().load().await;
 
         let athena_client = AthenaClient::new(&aws_config);
@@ -297,7 +297,7 @@ impl AwsAthena {
     }
 
     pub async fn glue_get_database() -> Result<bool, String> {
-        let database_name = Config::getenv("GLUE_DATABASE_NAME", "");
+        let database_name = Config::getenv("SCHEMA_OUTPUT_GLUE_DATABASE_NAME", "");
 
         let aws_config = aws_config::from_env().load().await;
 
@@ -316,7 +316,7 @@ impl AwsAthena {
     }
 
     pub async fn glue_get_table(namespace: &str) -> Result<bool, String> {
-        let database_name = Config::getenv("GLUE_DATABASE_NAME", "");
+        let database_name = Config::getenv("SCHEMA_OUTPUT_GLUE_DATABASE_NAME", "");
 
         let aws_config = aws_config::from_env().load().await;
 
@@ -341,7 +341,7 @@ impl AwsAthena {
     }
 
     pub async fn create_workgroup(_namespace: &str) -> Result<bool, String> {
-        let workgroup = Config::getenv("ATHENA_WORKGROUP_NAME", "");
+        let workgroup = Config::getenv("DATA_OUTPUT_ATHENA_WORKGROUP_NAME", "");
         let bucket = Config::getenv("DATA_OUTPUT_S3_BUCKET", "");
         let path = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
         let path = path.trim_matches('/');
@@ -382,7 +382,7 @@ impl AwsAthena {
     }
 
     pub async fn glue_create_database(_namespace: &str) -> Result<bool, String> {
-        let database = Config::getenv("GLUE_DATABASE_NAME", "");
+        let database = Config::getenv("SCHEMA_OUTPUT_GLUE_DATABASE_NAME", "");
         let bucket = Config::getenv("DATA_OUTPUT_S3_BUCKET", "");
         let path = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
         let path = path.trim_matches('/');
@@ -409,7 +409,7 @@ impl AwsAthena {
     }
 
     fn get_partition_by_fields(partitions: &mut Vec<Column>) {
-        let partition_config = Config::getenv("DATA_OUTPUT_PARTITION_BY_FIELDS", "");
+        let partition_config = Config::getenv("TRANSFORM_BATCH_PARTITION_FIELDS", "");
 
         if !partition_config.is_empty() {
             let partition_fields: Vec<&str> = partition_config.split(',').collect();
@@ -435,9 +435,9 @@ impl AwsAthena {
         namespace: &str,
         metadata: &discover::Metadata,
     ) -> Result<bool, String> {
-        let database = Config::getenv("GLUE_DATABASE_NAME", "");
+        let database = Config::getenv("SCHEMA_OUTPUT_GLUE_DATABASE_NAME", "");
         let bucket = Config::getenv("DATA_OUTPUT_S3_BUCKET", "");
-        let granularity_target = Config::getenv("DATA_OUTPUT_TIME_BUCKET", "");
+        let granularity_target = Config::getenv("TRANSFORM_BATCH_TIME_UNIT", "");
 
         let path = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
         let path = path.trim_matches('/');
@@ -534,9 +534,9 @@ impl AwsAthena {
         namespace: &str,
         metadata: &discover::Metadata,
     ) -> Result<bool, String> {
-        let database = Config::getenv("GLUE_DATABASE_NAME", "");
+        let database = Config::getenv("SCHEMA_OUTPUT_GLUE_DATABASE_NAME", "");
         let bucket = Config::getenv("DATA_OUTPUT_S3_BUCKET", "");
-        let granularity_target = Config::getenv("DATA_OUTPUT_TIME_BUCKET", "");
+        let granularity_target = Config::getenv("TRANSFORM_BATCH_TIME_UNIT", "");
 
         let path = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
         let path = path.trim_matches('/');
@@ -630,7 +630,7 @@ impl AwsAthena {
         partition_cache: &mut Vec<String>,
         metadata: &discover::Metadata,
     ) -> Result<bool, Error> {
-        let database = Config::getenv("GLUE_DATABASE_NAME", "");
+        let database = Config::getenv("SCHEMA_OUTPUT_GLUE_DATABASE_NAME", "");
         let bucket = Config::getenv("DATA_OUTPUT_S3_BUCKET", "");
 
         // let path = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
