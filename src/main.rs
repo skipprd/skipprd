@@ -781,7 +781,7 @@ pub fn flatten_metadata(metadata: &Metadata, flattened: &mut HashMap<String, Met
             flatten_metadata(val, flattened);
         } else {
             flattened.insert(val.out_field_name.clone(), val.clone());
-            flatten_metadata(val, flattened);
+            // flatten_metadata(val, flattened);
         }
     }
 }
