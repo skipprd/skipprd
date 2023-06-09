@@ -135,9 +135,11 @@ fn fast_set_value(
     //     None => ""
     // };
 
-    // if field == "" {
-    //     return Value::Null;
-    // } // edgecase seen in cloudcycle cubeevent, probably in a map?
+
+    // edgecase seen in cloudcycle cubeevent, probably in a map?
+    if value.is_string() && value.as_str().unwrap_or_default().is_empty() {
+        return Value::Null;
+    }
 
     // if data_type != "" || parent_type == "map" {
     if !data_type.is_empty() {
@@ -171,10 +173,10 @@ fn fast_set_value(
                         // only ingest fields enabled to sync to output
                         if metadata
                             .get_mut(&field.to_string())
-                            .unwrap()
+                            .expect(&format!("No metadata for field: {} with value", &field))
                             .fields
                             .get_mut(&sub_field.to_string())
-                            .unwrap()
+                            .expect(&format!("No metadata for field: {} with value: {:?}", &sub_field, sub_value))
                             .enabled
                         {
                             let newval = fast_set_value(
