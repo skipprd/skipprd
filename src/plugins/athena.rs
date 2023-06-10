@@ -1,6 +1,6 @@
 use crate::buffer::BufferChunker;
 use crate::converters::skippr_hive::SkipprHive;
-use crate::discover;
+use crate::{discover, flatten_metadata};
 use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
 use aws_sdk_athena::types::{
@@ -20,6 +20,7 @@ use std::fs;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
+use crate::discover::Metadata;
 
 pub struct DataOutputAwsAthenaPlugin {
     s3_client: S3Client,
@@ -133,18 +134,35 @@ impl DataOutputAwsAthenaPlugin {
             }
 
             if !partition_values.is_empty() {
-                match AwsAthena::glue_create_partition(
-                    &namespace,
-                    partition_values,
-                    &full_key,
-                    &mut partition_cache,
-                    metadata.get(&namespace).unwrap(),
-                )
-                .await
-                {
-                    Ok(_) => {}
-                    Err(_err) => {}
+                let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
+
+                let mut out_meta: HashMap<String, Metadata> = HashMap::new();
+
+                for (namespace, _schema) in &metadata {
+                    println!("Updating Hive '{}' schema", namespace);
+
+                    let partition_metadata = if flatten {
+                        flatten_metadata(metadata.get(namespace).unwrap(), &mut out_meta);
+                        out_meta.get(namespace)
+                    } else {
+                        metadata.get(namespace)
+                    };
+
+                    if let Err(_err) = AwsAthena::glue_create_partition(
+                        namespace,
+                        partition_values.clone(),
+                        &full_key,
+                        &mut partition_cache,
+                        partition_metadata.unwrap(),
+                    )
+                        .await
+                    {
+                        // Handle the error
+                    }
                 }
+
+
+
             }
 
             let final_key = format!("{}/{}", full_key, Helpers::random_password(32));
