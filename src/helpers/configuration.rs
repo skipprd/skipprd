@@ -456,6 +456,9 @@ impl Config {
             println!("Updating Hive '{}' schema", namespace);
 
             if flatten {
+
+                println!("Flattening '{}' schema", namespace);
+
                 let mut out_meta: HashMap<String, Metadata> = HashMap::new();
                 flatten_metadata(metadata.get(namespace).unwrap(), &mut out_meta);
 
