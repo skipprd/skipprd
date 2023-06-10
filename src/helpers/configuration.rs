@@ -333,7 +333,7 @@ impl Config {
 
         let client = Client::builder().default_headers(headers).build().unwrap();
 
-        let path = format!("{}/{}", full_namespace, "approved");
+        let path = format!("pipeline/{}/status/{}", full_namespace, "approved");
 
         let response = client.get(&format!("{}/{}", uri, path)).timeout(Duration::from_secs(15)).send().await;
 
