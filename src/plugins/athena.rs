@@ -148,16 +148,18 @@ impl DataOutputAwsAthenaPlugin {
                         metadata.get(namespace)
                     };
 
-                    if let Err(_err) = AwsAthena::glue_create_partition(
-                        namespace,
-                        partition_values.clone(),
-                        &full_key,
-                        &mut partition_cache,
-                        partition_metadata.unwrap(),
-                    )
-                        .await
-                    {
-                        // Handle the error
+                    if partition_metadata.is_some() {
+                        if let Err(_err) = AwsAthena::glue_create_partition(
+                            namespace,
+                            partition_values.clone(),
+                            &full_key,
+                            &mut partition_cache,
+                            partition_metadata.unwrap(),
+                        )
+                            .await
+                        {
+                            // Handle the error
+                        }
                     }
                 }
 
