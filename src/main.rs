@@ -776,6 +776,7 @@ fn output_sync(metadata: HashMap<String, Metadata>) {
 }
 
 pub fn flatten_metadata(metadata: &Metadata, flattened: &mut HashMap<String, Metadata>) {
+    println!("Flattening schema");
     for (key, val) in metadata.fields.iter() {
         if (val.determined_type == "record" || val.determined_type == "map") {
             flatten_metadata(val, flattened);
