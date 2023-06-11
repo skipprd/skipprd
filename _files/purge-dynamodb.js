@@ -27,7 +27,7 @@ docClient.scan(params, function onScan(err, data) {
                 TableName: params.TableName,
                 Key: {
                     tenant: item.tenant,
-                    id: item.id
+                    time: item.time
                 },
             };
 
