@@ -65,7 +65,6 @@ pub fn fast_path_ingest(
             value,
             metadata,
             updatedSchema,
-            flatten,
         );
 
         // println!("Setting message with field: {:?} and value {:?}", field, resolved_value);
@@ -127,8 +126,7 @@ fn fast_set_value(
     field: &str,
     value: &Value,
     metadata: &mut HashMap<String, Metadata>,
-    updatedSchema: &mut String,
-    flatten: bool,
+    updated_schema: &mut String,
 ) -> Value {
     // let _parent_type = match metadata.get_mut(field) {
     //     Some(pt) => &pt.parent_type,
@@ -165,7 +163,7 @@ fn fast_set_value(
                             Some(_t) => (),
                             None => {
                                 // println!("({}) no metadata for {} => {} with value: {}", data_type, field, &sub_field.to_string(), sub_value);
-                                discover_ingest(&sub_field.to_string(), sub_value, &mut metadata.get_mut(&field.to_string()).unwrap().fields, updatedSchema, flatten);
+                                discover_ingest(&sub_field.to_string(), sub_value, &mut metadata.get_mut(&field.to_string()).unwrap().fields, updated_schema);
                                 // discover_ingest(field, value, metadata, updatedSchema, flatten);
                             }
                         }
@@ -196,8 +194,7 @@ fn fast_set_value(
                                 // &mut sub_value.as_str().unwrap_or(&value.to_string()), // pass string val or string representation of map/array, etc
                                 sub_value,
                                 &mut metadata.get_mut(&field.to_string()).unwrap().fields,
-                                updatedSchema,
-                                flatten,
+                                updated_schema,
                             );
 
                             m.insert(
@@ -230,7 +227,7 @@ fn fast_set_value(
                             None => {
                                 // println!("({}.array) no metadata for {} => {} with value: {}", data_type, &field.to_string(), i.to_string(), sub_value);
                                 // discover_ingest(&field.to_string(), value, metadata, updatedSchema, flatten);
-                                discover_ingest(&i.to_string(), sub_value, &mut metadata.get_mut(&field.to_string()).unwrap().fields, updatedSchema, flatten);
+                                discover_ingest(&i.to_string(), sub_value, &mut metadata.get_mut(&field.to_string()).unwrap().fields, updated_schema);
                             }
                         }
 
@@ -260,8 +257,7 @@ fn fast_set_value(
                                 // &mut sub_value.as_str().unwrap_or(&value.to_string()), // pass string val or string representation of map/array, etc
                                 sub_value,
                                 &mut metadata.get_mut(&field.to_string()).unwrap().fields,
-                                updatedSchema,
-                                flatten,
+                                updated_schema,
                             );
 
                             m.insert(
@@ -302,7 +298,7 @@ fn fast_set_value(
                                 None => {
                                     // println!("({}) no metadata for {} => {} with value: {}", data_type, field, key, val);
                                     // discover_ingest(key, val, &mut metadata.get_mut(field).unwrap().fields, updatedSchema, flatten);
-                                    discover_ingest(field, value, metadata, updatedSchema, flatten);
+                                    discover_ingest(field, value, metadata, updated_schema);
                                 }
                             }
 
@@ -342,8 +338,7 @@ fn fast_set_value(
                                     &key.to_string(),
                                     val,
                                     &mut metadata.get_mut(field).unwrap().fields,
-                                    updatedSchema,
-                                    flatten,
+                                    updated_schema,
                                 );
 
                             }
@@ -432,7 +427,7 @@ fn fast_set_value(
 
         // println!("({}) no metadata for {} with value: {}", data_type, &field.to_string(), value);
 
-        let discoverd_data_type = discover_ingest(&field.to_string(), value, metadata, updatedSchema, flatten);
+        let discoverd_data_type = discover_ingest(&field.to_string(), value, metadata, updated_schema);
 
         if discoverd_data_type != "" {
             return fast_set_value(
@@ -440,8 +435,7 @@ fn fast_set_value(
                 &field.to_string(),
                 value,
                 metadata,
-                updatedSchema,
-                flatten,
+                updated_schema,
             )
         } else {
             return Value::Null
@@ -454,7 +448,6 @@ fn discover_ingest(
     value: &Value,
     metadata: &mut HashMap<String, Metadata>,
     updated_schema: &mut String,
-    flatten: bool,
 ) -> String {
     let foo: AnalyseSchema = AnalyseSchema { i: 0 };
 
@@ -489,6 +482,8 @@ fn discover_ingest(
         value.clone().borrow_mut(),
         metadata,
     );
+
+    let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
 
     AnalyseSchema::determine_field_types(metadata, None, None, flatten);
 
