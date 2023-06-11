@@ -9,7 +9,7 @@ AWS.config.update({
 const docClient = new AWS.DynamoDB.DocumentClient();
 
 const params = {
-    TableName: 'Test-MetadataService-Stack-MetadataTable8CB34826-XGZT4CFIJO8Y',
+    TableName: 'Test-MetadataService-Stack-MetadataTable8CB34826-1OBKKG0QKVLJC',
 };
 
 console.log('Scanning DynamoDB table.');
