@@ -317,7 +317,8 @@ impl Config {
             config.data_dir = data_dir;
         }
 
-        let full_namespace = Config::get_full_namespace_name();
+        let workspace = Config::getenv("WORKSPACE_NAME", "default");
+        let pipeline = Config::getenv("PIPELINE_NAME", "default");
 
         let env = Config::getenv("APP_ENV", "prod");
         let uri = if env != "prod" {
@@ -333,7 +334,7 @@ impl Config {
 
         let client = Client::builder().default_headers(headers).build().unwrap();
 
-        let path = format!("pipeline/{}/status/{}", full_namespace, "approved");
+        let path = format!("workspace/{}/pipeline/{}/status/{}", workspace, pipeline, "approved");
 
         let response = client.get(&format!("{}/{}", uri, path)).timeout(Duration::from_secs(15)).send().await;
 
@@ -384,7 +385,8 @@ impl Config {
 
             ///////////
 
-            let full_namespace = Config::get_full_namespace_name();
+            let workspace = Config::getenv("WORKSPACE_NAME", "default");
+            let pipeline = Config::getenv("PIPELINE_NAME", "default");
 
             if !Config::getenv("TRANSFORM_BATCH_TIME_UNIT", "").is_empty() && Config::getenv("TRANSFORM_BATCH_TIME_FIELDS", "").is_empty() {
                 println!("ERROR: Environment variable: 'TRANSFORM_BATCH_TIME_FIELDS' must be since you've set: 'TRANSFORM_BATCH_TIME_UNIT'.");
@@ -409,7 +411,8 @@ impl Config {
             let path = "";
 
             let data = json!({
-                "namespace": full_namespace,
+                "workspace": workspace,
+                "pipeline": pipeline,
                 "metadata": metadata,
                 "status": "approved",
             });
