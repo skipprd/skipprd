@@ -21,7 +21,7 @@ use reqwest::header::HeaderValue;
 use reqwest::header::{HeaderMap, HeaderName};
 use reqwest::{Client, StatusCode};
 
-use crate::discover::Metadata;
+use crate::discover::{AnalyseSchema, Metadata};
 use crate::{flatten_metadata, RUNNING};
 
 use crate::helpers::license::LicenseChecker;
@@ -364,7 +364,7 @@ impl Config {
         metadata
     }
 
-    pub async fn set_config(metadata: &HashMap<String, Metadata>, evolved: bool) {
+    pub async fn set_config(metadata: &mut HashMap<String, Metadata>, evolved: bool) {
         if evolved {
 
             // let data_dir = Config::get_data_dir();
@@ -382,6 +382,11 @@ impl Config {
             // serde_json::to_writer(writer, &metadata).unwrap();
             //
             // println!("saved metatat file");
+            // Ensure all types are discovered. Had issue where a new field would cause the out field names to un-flatten
+            let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
+
+            AnalyseSchema::determine_field_types(metadata, None, None, flatten);
+
 
             ///////////
 
