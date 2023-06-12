@@ -221,7 +221,7 @@ async fn discover() {
 
     AnalyseSchema::determine_field_types(&mut skippr_metadata, None, None, flatten);
 
-    Config::set_config(&mut skippr_metadata, false).await;
+    Config::set_config(&skippr_metadata, false).await;
 
     // let file = OpenOptions::new()
     //     .create(true)
@@ -786,13 +786,11 @@ fn output_sync(metadata: HashMap<String, Metadata>) {
 }
 
 pub fn flatten_metadata(metadata: &Metadata, flattened: &mut HashMap<String, Metadata>) {
-    println!("Flattening schema");
     for (key, val) in metadata.fields.iter() {
         if (val.determined_type == "record" || val.determined_type == "map") {
             flatten_metadata(val, flattened);
         } else {
             flattened.insert(val.out_field_name.clone(), val.clone());
-            // flatten_metadata(val, flattened);
         }
     }
 }

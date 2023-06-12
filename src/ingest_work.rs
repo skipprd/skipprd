@@ -305,7 +305,7 @@ impl Ingest {
                 .unwrap()
                 .block_on(async {
                     Config::set_config(
-                        &mut metadata_clone.lock().unwrap(),
+                        &metadata_clone.lock().unwrap(),
                         true,
                     )
                     .await;
