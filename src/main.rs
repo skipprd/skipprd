@@ -80,6 +80,7 @@ use crate::plugins::s3_input::DataSourceS3Plugin;
 use crate::plugins::s3_inventory::DataSourceS3InventoryPlugin;
 
 use crate::ingest_work::{Ingest, OUTPUT_FILES_STATIC};
+use crate::plugins::stdin_input::DataSourceStdinPlugin;
 
 pub static RUNNING: Lazy<Mutex<AtomicBool>> =
     Lazy::new(|| Mutex::new(AtomicBool::new(true)));
@@ -555,28 +556,37 @@ async fn sync() {
     let metrics_clone = metrics.clone();
 
     match Config::getenv("DATA_SOURCE_PLUGIN_NAME", "").as_str() {
-            "s3" => {
-                let mut ds3 = block_on(DataSourceS3Plugin::new());
-                ds3.sync(
-                    // &m1ut pool,
-                    input_metadata_clone,
-                    metrics_clone,
-                )
+        "stdin" => {
+            let mut input = block_on(DataSourceStdinPlugin::new());
+            input.sync(
+                // &m1ut pool,
+                input_metadata_clone,
+                metrics_clone,
+            )
                 .await;
-            }
-            "s3_inventory" => {
-                let mut ds3 = block_on(DataSourceS3InventoryPlugin::new());
-                ds3.sync(
-                    // &mut pool,
-                    input_metadata_clone,
-                    metrics_clone,
-                )
-                .await;
-            }
-            unknown => {
-                println!("Plugin {} not supported", unknown);
-            }
-        };
+        }
+        "s3" => {
+            let mut ds3 = block_on(DataSourceS3Plugin::new());
+            ds3.sync(
+                // &m1ut pool,
+                input_metadata_clone,
+                metrics_clone,
+            )
+            .await;
+        }
+        "s3_inventory" => {
+            let mut ds3 = block_on(DataSourceS3InventoryPlugin::new());
+            ds3.sync(
+                // &mut pool,
+                input_metadata_clone,
+                metrics_clone,
+            )
+            .await;
+        }
+        unknown => {
+            println!("Plugin {} not supported", unknown);
+        }
+    };
 
     // wait arbitrary time for ingest threads to complete
     // sleep(Duration::from_secs(30));
@@ -784,6 +794,56 @@ pub fn flatten_metadata(metadata: &Metadata, flattened: &mut HashMap<String, Met
             flattened.insert(val.out_field_name.clone(), val.clone());
             // flatten_metadata(val, flattened);
         }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_flatten_metadata() {
+        let mut fields: Box<HashMap<String, Metadata>> = Box::new(HashMap::new());
+
+        let mut metadata_child = Metadata {
+            count: 1,
+            types: HashMap::new(),
+            parent_type: "record".to_string(),
+            fields: Box::new(HashMap::new()),
+            date_candidate: None,
+            evolution: Box::new(HashMap::new()),
+            enabled: true,
+            out_field_name: "parent_child".to_string(),
+            determined_type: "string".to_string(),
+            determined_type_values: "".to_string(),
+        };
+
+        fields.insert("child".to_string(), metadata_child.clone());
+
+        let metadata = Metadata {
+            count: 1,
+            types: HashMap::new(),
+            parent_type: "".to_string(),
+            fields: fields,
+            date_candidate: None,
+            evolution: Box::new(HashMap::new()),
+            enabled: true,
+            out_field_name: "parent".to_string(),
+            determined_type: "record".to_string(),
+            determined_type_values: "".to_string(),
+        };
+
+        let mut flattened: HashMap<String, Metadata> = HashMap::new();
+
+        flatten_metadata(&metadata, &mut flattened);
+
+        println!("{:?}", flattened);
+
+        assert_eq!(flattened.len(), 1);
+        assert!(flattened.contains_key("parent_child"));
+        assert_eq!(flattened.get("parent_child").unwrap().count, metadata_child.count);
     }
 }
 
