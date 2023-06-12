@@ -33,23 +33,44 @@ impl DataSourceStdinPlugin {
     ) {
         let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel();
 
+        let buffer_size = self.buffer_size;
+        let buffer_timeout = self.buffer_timeout;
+
         thread::spawn(move || {
             let stdin = io::stdin();
             let reader = BufReader::new(stdin.lock());
 
+            let mut buffer = Vec::new();
+            let mut last_flush = Instant::now();
+
             for line_result in reader.lines() {
                 match line_result {
                     Ok(line) => {
-                        let bytes = line.into_bytes();
-                        if let Err(e) = tx.send(bytes) {
-                            eprintln!("Error sending to buffer channel: {}", e);
-                            break;
+                        buffer.extend(line.into_bytes());
+
+                        // Add newline after each line
+                        buffer.push('\n' as u8);
+
+                        if buffer.len() >= buffer_size || last_flush.elapsed() >= buffer_timeout {
+                            if let Err(e) = tx.send(buffer.clone()) {
+                                eprintln!("Error sending to buffer channel: {}", e);
+                                break;
+                            }
+                            buffer.clear();
+                            last_flush = Instant::now();
                         }
                     }
                     Err(e) => {
                         eprintln!("Error reading from stdin: {}", e);
                         break;
                     }
+                }
+            }
+
+            // Send any remaining data
+            if !buffer.is_empty() {
+                if let Err(e) = tx.send(buffer) {
+                    eprintln!("Error sending to buffer channel: {}", e);
                 }
             }
         });
@@ -72,8 +93,6 @@ impl DataSourceStdinPlugin {
                     thread::spawn(move || {
                         Ingest::ingest_file(vec![batch], &metadata, &metrics, &Arc::new(Offsets::init().unwrap()));
                     }).join().unwrap();
-                    let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
-                    Ingest::flush_buffers(true, &mut output_files);
                 }
                 Err(e) => {
                     eprintln!("Error receiving from buffer channel: {}", e);
