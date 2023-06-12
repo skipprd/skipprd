@@ -915,8 +915,8 @@ impl AnalyseSchema {
 
     pub fn determine_field_types(
         metadata: &mut HashMap<String, Metadata>,
-        parent_type: Option<&String>,
-        parent_field: Option<&String>,
+        parent_type: Option<&str>,
+        parent_field: Option<&str>,
         flatten: bool
     ) {
         let demoted_types = vec!["boolean", "date", "timestamp", "timestamp_milli"];

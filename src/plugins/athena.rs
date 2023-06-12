@@ -143,7 +143,7 @@ impl DataOutputAwsAthenaPlugin {
                     println!("Updating Hive '{}' schema", namespace);
 
                     let partition_metadata = if flatten {
-                        flatten_metadata(metadata.get(namespace).unwrap(), &mut out_meta);
+                        flatten_metadata(metadata.get(namespace).unwrap(), &mut out_meta.get_mut(namespace).unwrap().fields);
                         out_meta.get(namespace)
                     } else {
                         metadata.get(namespace)
