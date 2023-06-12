@@ -309,8 +309,7 @@ impl DataSourceS3InventoryPlugin {
 
                                                         i += 1;
 
-                                                        if i >= 20
-                                                            || chunk_size_current >= chunk_size
+                                                        if chunk_size_current >= chunk_size
                                                         {
                                                             Self::download_and_ingest(
                                                                 &mut self.s3_client_rusoto,

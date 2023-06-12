@@ -166,7 +166,7 @@ impl DataSourceS3Plugin {
 
                                 // println!("State {} = {} of {}", i, chunk_size_current, chunk_size);
 
-                                if i >= 20 || chunk_size_current >= chunk_size {
+                                if chunk_size_current >= chunk_size {
                                     Self::download_and_ingest(
                                         &mut self.s3_client_rusoto,
                                         &inventory_bucket,
