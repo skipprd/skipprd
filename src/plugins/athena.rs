@@ -120,7 +120,7 @@ impl DataOutputAwsAthenaPlugin {
                         &"hour" => date.hour(),
                         &"minute" => date.minute(),
                         _ => {
-                            panic!("Did not reconise date granularity of {}", granularity);
+                            panic!("Did not recognise date granularity of {}", granularity);
                         }
                     };
 
@@ -137,6 +137,7 @@ impl DataOutputAwsAthenaPlugin {
                 let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
 
                 let mut out_meta: HashMap<String, Metadata> = HashMap::new();
+                out_meta.insert(namespace, Metadata::new().unwrap());
 
                 for (namespace, _schema) in &metadata {
                     println!("Updating Hive '{}' schema", namespace);
@@ -162,9 +163,6 @@ impl DataOutputAwsAthenaPlugin {
                         }
                     }
                 }
-
-
-
             }
 
             let final_key = format!("{}/{}", full_key, Helpers::random_password(32));
@@ -766,6 +764,9 @@ impl AwsAthena {
                   //     println!("Failed to get Athena partition: {}", err);
                   // }
             }
+        } else {
+            println!("Partition already exists in cache");
+            println!("Database: {}, Table: {}, Values: {:?}", database, namespace, partition_values);
         }
 
         Ok(true)

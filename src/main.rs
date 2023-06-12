@@ -267,7 +267,7 @@ async fn sync() {
             metadata
         }
         Err(_e) => {
-            println!("Could not find Skippr metadata, will disover and evolve schemas as we sync.");
+            println!("Could not find Skippr metadata, will discover and evolve schemas as we sync.");
             let _empty_meta = Metadata::new().unwrap();
 
             
