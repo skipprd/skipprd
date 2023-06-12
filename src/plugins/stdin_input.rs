@@ -15,6 +15,7 @@ pub struct DataSourceStdinPlugin {
     ingest: Ingest,
     buffer_size: usize,
     buffer_timeout: Duration,
+    buffer_threshold: Duration,
 }
 
 impl DataSourceStdinPlugin {
@@ -23,6 +24,7 @@ impl DataSourceStdinPlugin {
             ingest: Ingest::new(),
             buffer_size: Config::getenv("DATA_SOURCE_BATCH_SIZE_BYTES", "1").parse().unwrap(),
             buffer_timeout: Duration::from_secs(Config::getenv("DATA_SOURCE_BATCH_SIZE_SECONDS", "1").parse().unwrap()),
+            buffer_threshold: Duration::from_secs(Config::getenv("BUFFER_THRESHOLD_SECONDS", "5").parse().unwrap()),
         }
     }
 
@@ -76,7 +78,7 @@ impl DataSourceStdinPlugin {
         });
 
         loop {
-            match rx.recv() {
+            match rx.recv_timeout(self.buffer_threshold) {
                 Ok(buffer) => {
                     let data = String::from_utf8_lossy(&buffer).to_string();
                     let batch = IngestBatch {
@@ -95,8 +97,16 @@ impl DataSourceStdinPlugin {
                     }).join().unwrap();
                 }
                 Err(e) => {
-                    eprintln!("Error receiving from buffer channel: {}", e);
-                    break;
+                    match e {
+                        mpsc::RecvTimeoutError::Timeout => {
+                            let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
+                            Ingest::flush_buffers(true, &mut output_files);
+                        },
+                        mpsc::RecvTimeoutError::Disconnected => {
+                            eprintln!("Error receiving from buffer channel: {}", e);
+                            break;
+                        }
+                    }
                 }
             }
         }
