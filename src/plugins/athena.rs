@@ -137,9 +137,10 @@ impl DataOutputAwsAthenaPlugin {
                 let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
 
                 let mut out_meta: HashMap<String, Metadata> = HashMap::new();
-                out_meta.insert(namespace, Metadata::new().unwrap());
 
                 for (namespace, _schema) in &metadata {
+                    out_meta.insert(namespace.to_string(), Metadata::new().unwrap());
+
                     println!("Updating Hive '{}' schema", namespace);
 
                     let partition_metadata = if flatten {
