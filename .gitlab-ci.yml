@@ -269,8 +269,12 @@ docker_push:
     # Push to Docker Hub
     - docker login -u skippr -p "$DOCKER_HUB_PASS"
     - docker pull $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE
+
     - docker tag $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE $DOCKER_HUB_REPO/$CONTAINER_RELEASE_IMAGE
     - docker push $DOCKER_HUB_REPO/$CONTAINER_RELEASE_IMAGE
+
+    - docker tag $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE $DOCKER_HUB_REPO/$COMPONENT_NAME:stable
+    - docker push $DOCKER_HUB_REPO/$COMPONENT_NAME:stable
 
     # Push to AWS ECR
 #    - pip install awscli
