@@ -102,30 +102,44 @@ pub struct AnalyseSchema {
 
 const DATE_FIELD_VALIDATION_MIN_SAMPLE: i32 = 100;
 
-fn get_type(value: &mut String) -> String {
+fn get_type(value: &str) -> String {
     let _foo = "";
-    match parse_bool(value) {
-        Err(_i32) => {
-            // println!("Not float");
-        }
-        Ok(_bool) => {
-            // println!("Is float");
-            return "boolean".to_string();
-        }
-    }
+
 
     match value.parse::<i32>() {
         Ok(_bool) => {
             return "integer".to_string();
         }
-        Err(..) => {}
+        Err(..) => {
+            let timmed_value = value.trim_matches('"');
+            let json_value: Result<i32, _> = serde_json::from_str(timmed_value);
+            match json_value {
+                Ok(_) => {
+                    return "integer".to_string();
+                }
+                Err(_) => {
+                }
+            }
+        }
     }
 
     match value.parse::<i64>() {
         Ok(_bool) => {
             return "long".to_string();
         }
-        Err(..) => {}
+        Err(..) => {
+
+            let timmed_value = value.trim_matches('"');
+            let json_value: Result<i128, _> = serde_json::from_str(timmed_value);
+            match json_value {
+                Ok(_) => {
+                    return "long".to_string();
+                }
+                Err(_) => {
+                }
+            }
+
+        }
     }
 
     match value.parse::<f32>() {
@@ -148,6 +162,13 @@ fn get_type(value: &mut String) -> String {
             return "array".to_string();
         }
         None => {}
+    }
+
+    match value.parse::<String>() {
+        Ok(_bool) => {
+            return "string".to_string();
+        }
+        Err(_String) => {}
     }
 
     match value.parse::<String>() {
