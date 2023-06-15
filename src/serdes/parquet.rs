@@ -17,6 +17,7 @@ use crate::buffer::BufferChunker;
 use crate::helpers::configuration::Config;
 use std::sync::Arc;
 use arrow::error::ArrowError;
+use parquet::basic::{Compression, Encoding};
 
 // #[derive(clap::ValueEnum, Clone)]
 // #[allow(non_camel_case_types, clippy::upper_case_acronyms)]
@@ -29,7 +30,7 @@ use arrow::error::ArrowError;
 //     LZ4,
 //     ZSTD,
 // }
-//
+
 // #[derive(clap::ValueEnum, Clone)]
 // #[allow(non_camel_case_types, clippy::upper_case_acronyms)]
 // enum ParquetEncoding {
@@ -41,7 +42,7 @@ use arrow::error::ArrowError;
 //     DELTA_BYTE_ARRAY,
 //     RLE_DICTIONARY,
 // }
-//
+
 // #[derive(clap::ValueEnum, Clone)]
 // #[allow(non_camel_case_types, clippy::upper_case_acronyms)]
 // enum ParquetEnabledStatistics {
@@ -160,7 +161,10 @@ impl SerdeParquet {
         // let opts: Opts = Opts::parse();
 
         // let mut props = WriterProperties::builder().set_dictionary_enabled(opts.dictionary);
-        let props = WriterProperties::builder().set_dictionary_enabled(false);
+        let props = WriterProperties::builder()
+            .set_dictionary_enabled(false)
+            .set_encoding(Encoding::PLAIN)
+            .set_compression(Compression::SNAPPY);
 
         // if let Some(statistics) = opts.statistics {
         //     let statistics = match statistics {

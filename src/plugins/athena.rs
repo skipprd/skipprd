@@ -138,21 +138,21 @@ impl DataOutputAwsAthenaPlugin {
 
                 let mut out_meta: HashMap<String, Metadata> = HashMap::new();
 
-                for (namespace, _schema) in &metadata {
+                // for (namespace, _schema) in &metadata {
                     out_meta.insert(namespace.to_string(), Metadata::new().unwrap());
 
-                    println!("Updating Hive '{}' schema", namespace);
-
                     let partition_metadata = if flatten {
-                        flatten_metadata(metadata.get(namespace).unwrap(), &mut out_meta.get_mut(namespace).unwrap().fields);
-                        out_meta.get(namespace)
+                        flatten_metadata(metadata.get(&namespace).unwrap(), &mut out_meta.get_mut(&namespace).unwrap().fields);
+                        out_meta.get(&namespace)
                     } else {
-                        metadata.get(namespace)
+                        metadata.get(&namespace)
                     };
+
+                    // println!("{:?}", partition_metadata);
 
                     if partition_metadata.is_some() {
                         if let Err(_err) = AwsAthena::glue_create_partition(
-                            namespace,
+                            &namespace,
                             partition_values.clone(),
                             &full_key,
                             &mut partition_cache,
@@ -163,7 +163,7 @@ impl DataOutputAwsAthenaPlugin {
                             // Handle the error
                         }
                     }
-                }
+                // }
             }
 
             let final_key = format!("{}/{}", full_key, Helpers::random_password(32));
@@ -268,7 +268,7 @@ impl AwsAthena {
 
         match AwsAthena::glue_get_table(namespace).await {
             Ok(true) => match AwsAthena::glue_update_table(namespace, schema).await {
-                Ok(_) => {}
+                Ok(_) => {println!("Update table {}", namespace)}
                 Err(err) => {
                     println!("ERROR updating Glue table: {}", err);
                 }
@@ -365,6 +365,14 @@ impl AwsAthena {
         let path = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
         let path = path.trim_matches('/');
 
+        let path = std::path::Path::new(&bucket)
+            .join(&path)
+            .join("query-results")
+            .to_str()
+            .unwrap()
+            .to_string();
+
+
         let aws_config = aws_config::from_env().load().await;
 
         let glue_client = AthenaClient::new(&aws_config);
@@ -387,7 +395,7 @@ impl AwsAthena {
                                     .encryption_option(EncryptionOption::SseS3)
                                     .build(),
                             )
-                            .output_location(format!("s3://{}/{}-query-results", bucket, path))
+                            .output_location(format!("s3://{}", path))
                             .build(),
                     )
                     .build(),
@@ -406,6 +414,12 @@ impl AwsAthena {
         let path = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
         let path = path.trim_matches('/');
 
+        let path = std::path::Path::new(&bucket)
+            .join(&path)
+            .to_str()
+            .unwrap()
+            .to_string();
+
         let aws_config = aws_config::from_env().load().await;
 
         let glue_client = GlueClient::new(&aws_config);
@@ -416,7 +430,7 @@ impl AwsAthena {
                 DatabaseInput::builder()
                     .name(&database)
                     .description(format!("{} managed by skippr.io", database))
-                    .location_uri(format!("s3://{}/{}", bucket, path))
+                    .location_uri(format!("s3://{}", path))
                     .build(),
             )
             .send()
@@ -458,9 +472,14 @@ impl AwsAthena {
         let bucket = Config::getenv("DATA_OUTPUT_S3_BUCKET", "");
         let granularity_target = Config::getenv("TRANSFORM_BATCH_TIME_UNIT", "");
 
-        let path = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
+        let mut path = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
         let path = path.trim_matches('/');
-        let path = format!("{}/{}", path, namespace);
+        let path = std::path::Path::new(&bucket)
+            .join(&path)
+            .join(&namespace)
+            .to_str()
+            .unwrap()
+            .to_string();
 
         let mut partitions: Vec<Column> = Vec::new();
         let mut partition_indexes: Vec<PartitionIndex> = Vec::new();
@@ -506,11 +525,12 @@ impl AwsAthena {
         let mut table_input = TableInput::builder()
             .name(namespace)
             .retention(0)
+            .parameters("parquet.compression", "SNAPPY")
             .storage_descriptor(
                 StorageDescriptor::builder()
                     .set_columns(Some(columns)) // @todo
-                    .compressed(false)
-                    .location(format!("s3://{}/{}", bucket, path))
+                    .compressed(true)
+                    .location(format!("s3://{}", path))
                     .input_format("org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat")
                     .output_format("org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat")
                     .serde_info(
@@ -557,9 +577,14 @@ impl AwsAthena {
         let bucket = Config::getenv("DATA_OUTPUT_S3_BUCKET", "");
         let granularity_target = Config::getenv("TRANSFORM_BATCH_TIME_UNIT", "");
 
-        let path = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
+        let mut path = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
         let path = path.trim_matches('/');
-        let path = format!("{}/{}", path, namespace);
+        let path = std::path::Path::new(&bucket)
+            .join(&path)
+            .join(&namespace)
+            .to_str()
+            .unwrap()
+            .to_string();
 
         let mut partitions: Vec<Column> = Vec::new();
         // let mut partition_indexes: Vec<PartitionIndex> = Vec::new();
@@ -603,11 +628,12 @@ impl AwsAthena {
         let mut table_input = TableInput::builder()
             .name(namespace)
             .retention(0)
+            .parameters("parquet.compression", "SNAPPY")
             .storage_descriptor(
                 StorageDescriptor::builder()
                     .set_columns(Some(columns)) // @todo
-                    .compressed(false)
-                    .location(format!("s3://{}/{}", bucket, path))
+                    .compressed(true)
+                    .location(format!("s3://{}", path))
                     .input_format("org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat")
                     .output_format("org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat")
                     .serde_info(
@@ -671,6 +697,13 @@ impl AwsAthena {
         // Replace "err" as it causes our e2e to fail since they check for 'err' string in logs - yes this happens often enough
         let md5_digest = md5_string.replace("err", "");
 
+
+        let path = std::path::Path::new(&bucket)
+            .join(&key)
+            .to_str()
+            .unwrap()
+            .to_string();
+
         // println!("partiton locaiton {}", format!("s3://{}/{}", bucket, key));
 
         // let mut schema: HashMap<String, Metadata> = HashMap::new();
@@ -683,12 +716,13 @@ impl AwsAthena {
 
         let partition_conf = PartitionInput::builder()
             .set_values(Some(partition_values.clone()))
+            .parameters("parquet.compression", "SNAPPY")
             .storage_descriptor(
                 StorageDescriptor::builder()
                     .set_columns(Some(columns)) // @todo
-                    .compressed(false)
+                    .compressed(true)
                     .input_format("org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat")
-                    .location(format!("s3://{}/{}", bucket, key))
+                    .location(format!("s3://{}", path))
                     .output_format("org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat")
                     .serde_info(
                         SerDeInfo::builder()
@@ -765,9 +799,9 @@ impl AwsAthena {
                   //     println!("Failed to get Athena partition: {}", err);
                   // }
             }
-        } else {
-            println!("Partition already exists in cache");
-            println!("Database: {}, Table: {}, Values: {:?}", database, namespace, partition_values);
+        // } else {
+        //     println!("Partition already exists in cache");
+        //     println!("Database: {}, Table: {}, Values: {:?}", database, namespace, partition_values);
         }
 
         Ok(true)

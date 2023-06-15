@@ -64,7 +64,7 @@ impl LicenseChecker {
 
         match self.license_is_valid {
             true => {
-                println!("Found valid license");
+                println!("Found valid license for API key");
                 Ok(())
             }
             _false => {
