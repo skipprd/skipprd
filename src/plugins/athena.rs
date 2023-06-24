@@ -231,8 +231,8 @@ impl DataOutputAwsAthenaPlugin {
                 // println!("data: {:?}", data.unwrap().into_bytes());
             }
             Err(e) => {
-                println!("Got an error parsing file:");
-                println!("{}", e);
+                println!("Failed to upload file: {}, will retry later.", filename);
+                // println!("{}", e);
             }
         }
 
