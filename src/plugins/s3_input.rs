@@ -134,7 +134,12 @@ impl DataSourceS3Plugin {
                 Err(err) => println!("S3 Error {}", err),
                 Ok(output) => {
 
-                    let objects = output.contents().unwrap();
+                    let objects = match output.contents() {
+                        Some(objects) => objects,
+                        None => {
+                            continue;
+                        }
+                    };
 
                     if !objects.is_empty() {
                         for object in objects {
@@ -239,16 +244,11 @@ impl DataSourceS3Plugin {
         let mut backoff_duration = Duration::from_millis(1000);
 
         loop {
-            // let get_request = GetObjectRequest::builder()
-            //     .bucket(bucket)
-            //     .key(urldecode::decode(key))
-            //     .build();
-
             let mut get_request =
                 s3_client
                 .get_object()
                 .bucket(bucket.clone())
-                .key(urldecode::decode(key.to_string()));;
+                .key(urldecode::decode(key.to_string()));
 
             match get_request.send().await {
                 Ok(result) => {
@@ -363,7 +363,7 @@ impl DataSourceS3Plugin {
                 // println!("Downloading s3 object");
                 let mut data = download.response.body;
 
-                // This part is new: convert the ByteStream into a Vec<u8>
+                // convert the ByteStream into a Vec<u8>
                 let mut data_vec = Vec::new();
                 while let Some(chunk) = data.next().await {
                     data_vec.extend_from_slice(&chunk.unwrap());

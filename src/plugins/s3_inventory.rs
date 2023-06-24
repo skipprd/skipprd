@@ -2,8 +2,8 @@ use crate::helpers::configuration::{Config, Metrics};
 
 use crate::serdes::json::SerdeJson;
 use aws_sdk_s3::Client;
+use aws_sdk_s3::Error as S3Error;
 pub use aws_smithy_http::byte_stream::AggregatedBytes;
-
 use csv::ReaderBuilder;
 use flate2::read::GzDecoder;
 use regex::internal::Input;
@@ -21,6 +21,8 @@ use std::{fs, thread};
 use std::sync::atomic::Ordering;
 use std::thread::sleep;
 use aws_sdk_s3::types::Object;
+use aws_sdk_s3::operation::get_object::{GetObjectError, GetObjectOutput};
+use aws_smithy_http::result::SdkError;
 
 use crate::discover::Metadata;
 use futures::future::join_all;
@@ -30,15 +32,14 @@ use futures::StreamExt;
 
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::ingest_work::{Ingest, IngestBatch};
-use rusoto_core::{Region, RusotoError};
-use rusoto_s3::{GetObjectOutput, GetObjectRequest, S3Client, S3, GetObjectError};
+use tokio::sync::{Semaphore};
+use std::sync::{RwLock};
 use crate::{INPUT_GRACEFUL_SHUTDOWN_COMPLETE, RUNNING};
 
 pub struct DataSourceS3InventoryPlugin {
     // config: HashMap<String, String>,
     // buffer: Sender<String>,
     s3_client: Client,
-    s3_client_rusoto: S3Client,
     ingest: Ingest,
     source_bucket: String,
     temp_dir: String,
@@ -61,7 +62,6 @@ impl DataSourceS3InventoryPlugin {
 
         DataSourceS3InventoryPlugin {
             s3_client,
-            s3_client_rusoto: S3Client::new(Region::default()),
             ingest: Ingest::new(),
             source_bucket: String::new(),
             temp_dir: temp_dir.to_string(),
@@ -312,7 +312,7 @@ impl DataSourceS3InventoryPlugin {
                                                         if chunk_size_current >= chunk_size
                                                         {
                                                             Self::download_and_ingest(
-                                                                &mut self.s3_client_rusoto,
+                                                                &mut self.s3_client,
                                                                 &target_bucket,
                                                                 &outputs,
                                                                 &self.temp_dir,
@@ -357,7 +357,7 @@ impl DataSourceS3InventoryPlugin {
                         if !outputs.is_empty() {
 
                             Self::download_and_ingest(
-                                &mut self.s3_client_rusoto,
+                                &mut self.s3_client,
                                 &inventory_bucket,
                                 &outputs,
                                 &self.temp_dir,
@@ -375,22 +375,22 @@ impl DataSourceS3InventoryPlugin {
     }
 
     async fn download_s3_object_with_backoff(
-        s3_client: &S3Client,
+        s3_client: &Client,
         bucket: &String,
         key: &String,
-    ) -> Result<GetObjectOutput, RusotoError<rusoto_s3::GetObjectError>> {
+    ) -> Result<GetObjectOutput, GetObjectError> {
         let mut retries = 0;
         let max_retries = 5;
         let mut backoff_duration = Duration::from_secs(1);
 
         loop {
-            let get_request = GetObjectRequest {
-                bucket: bucket.clone(),
-                key: urldecode::decode((key.clone())),
-                ..Default::default()
-            };
+            let mut get_request =
+                s3_client
+                    .get_object()
+                    .bucket(bucket.clone())
+                    .key(urldecode::decode(key.to_string()));
 
-            match s3_client.get_object(get_request).await {
+            match get_request.send().await {
                 Ok(result) => {
                     if retries > 0 {
                         println!("Successful retry of object {}", key);
@@ -412,7 +412,7 @@ impl DataSourceS3InventoryPlugin {
                     );
 
                     if retries >= max_retries {
-                        return Err(err);
+                        return Err(err.into_service_error());
                     }
                 }
             }
@@ -420,7 +420,7 @@ impl DataSourceS3InventoryPlugin {
     }
 
     async fn download_and_ingest(
-        s3_client: &mut S3Client,
+        s3_client: &mut Client,
         bucket_name: &String,
         object_keys: &Vec<String>,
         _output_dir: &String,
@@ -428,19 +428,25 @@ impl DataSourceS3InventoryPlugin {
         metrics: &Arc<Mutex<Metrics>>,
         offsets_clone: &Arc<Offsets>,
     ) {
+
+        let semaphore = Arc::new(Semaphore::new(2048));
+
         let futures: Vec<_> = object_keys
             .clone()
             .into_iter()
             .map(|object_key| {
+                let semaphore = Arc::clone(&semaphore);
                 let s3_client = s3_client.clone();
                 let bucket_name = bucket_name.to_owned();
 
                 tokio::spawn(async move {
-                    s3_client.get_object(GetObjectRequest {
-                        bucket: bucket_name.clone(),
-                        key: urldecode::decode(object_key.to_string()),
-                        ..Default::default()
-                    });
+                    let permit = semaphore.acquire().await.unwrap();
+
+                    let mut _x_fut =
+                        s3_client
+                            .get_object()
+                            .bucket(bucket_name.clone())
+                            .key(urldecode::decode(object_key.to_string()));
 
                     match Self::download_s3_object_with_backoff(
                         &s3_client,
@@ -460,7 +466,7 @@ impl DataSourceS3InventoryPlugin {
             })
             .collect();
 
-        let datas: Arc<Mutex<Vec<IngestBatch>>> = Arc::new(Mutex::new(Vec::new()));
+        let datas: Arc<RwLock<Vec<IngestBatch>>> = Arc::new(RwLock::new(Vec::new()));
 
         let future_result = tokio::join!(join_all(futures)).0;
 
@@ -469,34 +475,31 @@ impl DataSourceS3InventoryPlugin {
         let data_dir = Config::get_data_dir();
         let _temp_dir = &format!("{}/source_buffer", data_dir);
 
-        let datas = datas.clone();
+        let datas_clone = datas.clone();
 
         let bucket_name = bucket_name.clone();
         let metrics = metrics.clone();
         let metadata = metadata.clone();
         let offsets_clone = offsets_clone.clone();
 
-        threads.push(thread::spawn(move || {
-
+        tokio::spawn(async move {
             // for thread in threads {
             for future in future_result {
                 match future.unwrap() {
                     Ok(mut download) => {
 
                         // println!("Downloading s3 object");
-                        let mut data = Vec::new();
+                        let mut data = download.response.body;
 
-                        match download.response.body.take() {
-                            Some(body) => match body.into_blocking_read().read_to_end(&mut data) {
-                                Ok(_) => {}
-                                Err(err) => println!("{:?}", err),
-                            },
-                            None => println!("Empty S3 object body"),
-                        };
+                        // convert the ByteStream into a Vec<u8>
+                        let mut data_vec = Vec::new();
+                        while let Some(chunk) = data.next().await {
+                            data_vec.extend_from_slice(&chunk.unwrap());
+                        }
 
                         if download.key.contains(".gz") {
                             // Something that implements `std::io::Read`
-                            let c = Cursor::new(data);
+                            let c = Cursor::new(data_vec);
 
                             // To inflate on the fly, "pipe" the data through the decoder, i.e. wrap the reader
                             let mut stream = GzDecoder::new(c);
@@ -504,7 +507,7 @@ impl DataSourceS3InventoryPlugin {
                             let mut decompressed_data = String::new();
                             stream.read_to_string(&mut decompressed_data).unwrap();
 
-                            datas.lock().unwrap().push(IngestBatch {
+                            datas_clone.write().unwrap().push(IngestBatch {
                                 offset_key: OffsetKey {
                                     namespace: bucket_name.to_string(),
                                     partition: download.key,
@@ -512,12 +515,9 @@ impl DataSourceS3InventoryPlugin {
                                 data: decompressed_data,
                             });
                         } else {
-                            let mut c = Cursor::new(data);
+                            let str_data = String::from_utf8(data_vec).unwrap();
 
-                            let mut str_data = String::new();
-                            c.read_to_string(&mut str_data).unwrap();
-
-                            datas.lock().unwrap().push(IngestBatch {
+                            datas_clone.write().unwrap().push(IngestBatch {
                                 offset_key: OffsetKey {
                                     namespace: bucket_name.to_string(),
                                     partition: download.key,
@@ -535,8 +535,17 @@ impl DataSourceS3InventoryPlugin {
 
             }
 
+        }).await.unwrap();
+
+
+        // datas.lock().unwrap().push(batch.lock().unwrap().clone());
+        let datas = datas.clone();
+
+        threads.push(thread::spawn(move || {
+
+            let batch = datas.read().unwrap().to_vec();
             self::Ingest::ingest_file(
-                datas.lock().unwrap().to_vec(),
+                batch,
                 &metadata,
                 &metrics,
                 &offsets_clone,
