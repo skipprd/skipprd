@@ -93,6 +93,7 @@ s3_plugin:
     - if [[ "$(docker container wait skippre2e)" -gt 0 ]]; then exit 1; fi
   after_script:
     - docker run --name soda -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -v `pwd`/soda:/soda sodadata/soda-core scan -d datalake_e2e -c /soda/configuration.yml /soda/s3_plugin.yml
+    - if [[ "$(docker logs soda >& container-logs ; cat container-logs | grep 'All is good' | wc -l)" -gt 0 ]]; then exit 0; fi
     - if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
   only:
     - master
@@ -114,6 +115,7 @@ chaos_mode:
     - if [[ "$(docker container wait skippre2e5)" -gt 0 ]]; then exit 1; fi
   after_script:
     - docker run --name soda -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -v `pwd`/soda:/soda sodadata/soda-core scan -d datalake_e2e -c /soda/configuration.yml /soda/chaos_mode.yml
+    - if [[ "$(docker logs soda >& container-logs ; cat container-logs | grep 'All is good' | wc -l)" -gt 0 ]]; then exit 0; fi
     - if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
   only:
     - master
@@ -131,6 +133,7 @@ flatten:
     - if [[ "$(docker container wait skippre2e)" -gt 0 ]]; then exit 1; fi
   after_script:
     - docker run --name soda -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -v `pwd`/soda:/soda sodadata/soda-core scan -d datalake_e2e -c /soda/configuration.yml /soda/flatten.yml
+    - if [[ "$(docker logs soda >& container-logs ; cat container-logs | grep 'All is good' | wc -l)" -gt 0 ]]; then exit 0; fi
     - if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
   only:
     - master
@@ -148,6 +151,7 @@ event_types:
     - if [[ "$(docker container wait skippre2e)" -gt 0 ]]; then exit 1; fi
   after_script:
     - docker run --name soda -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -v `pwd`/soda:/soda sodadata/soda-core scan -d datalake_e2e -c /soda/configuration.yml /soda/event_types.yml
+    - if [[ "$(docker logs soda >& container-logs ; cat container-logs | grep 'All is good' | wc -l)" -gt 0 ]]; then exit 0; fi
     - if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
   only:
     - master
@@ -165,6 +169,7 @@ time_buckets_date:
     - if [[ "$(docker container wait skippre2e)" -gt 0 ]]; then exit 1; fi
   after_script:
     - docker run --name soda -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -v `pwd`/soda:/soda sodadata/soda-core scan -d datalake_e2e -c /soda/configuration.yml /soda/time_buckets_date.yml
+    - if [[ "$(docker logs soda >& container-logs ; cat container-logs | grep 'All is good' | wc -l)" -gt 0 ]]; then exit 0; fi
     - if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
   only:
     - master
@@ -182,6 +187,7 @@ small_files:
     - if [[ "$(docker container wait skippre2e)" -gt 0 ]]; then exit 1; fi
   after_script:
     - docker run --name soda -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -v `pwd`/soda:/soda sodadata/soda-core scan -d datalake_e2e -c /soda/configuration.yml /soda/small_files.yml
+    - if [[ "$(docker logs soda >& container-logs ; cat container-logs | grep 'All is good' | wc -l)" -gt 0 ]]; then exit 0; fi
     - if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
   only:
     - master
@@ -199,6 +205,7 @@ event_type_partition_field_and_time_flatten:
     - if [[ "$(docker container wait skippre2e)" -gt 0 ]]; then exit 1; fi
   after_script:
     - docker run --name soda -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -v `pwd`/soda:/soda sodadata/soda-core scan -d datalake_e2e -c /soda/configuration.yml /soda/event_type_partition_field_and_time_flatten.yml
+    - if [[ "$(docker logs soda >& container-logs ; cat container-logs | grep 'All is good' | wc -l)" -gt 0 ]]; then exit 0; fi
     - if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
   only:
     - master
@@ -232,6 +239,7 @@ s3_inventory_plugin:
     - if [[ "$(docker container wait skippre2e)" -gt 0 ]]; then exit 1; fi
   after_script:
     - docker run --name soda -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -v `pwd`/soda:/soda sodadata/soda-core scan -d datalake_e2e -c /soda/configuration.yml /soda/inventory_s3_plugin.yml
+    - if [[ "$(docker logs soda >& container-logs ; cat container-logs | grep 'All is good' | wc -l)" -gt 0 ]]; then exit 0; fi
     - if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
   only:
     - master
@@ -253,6 +261,7 @@ chaos_mode_s3_inventory_plugin:
     - if [[ "$(docker container wait skippre2e5)" -gt 0 ]]; then exit 1; fi
   after_script:
     - docker run --name soda -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -v `pwd`/soda:/soda sodadata/soda-core scan -d datalake_e2e -c /soda/configuration.yml /soda/chaos_mode_inventory_s3.yml
+    - if [[ "$(docker logs soda >& container-logs ; cat container-logs | grep 'All is good' | wc -l)" -gt 0 ]]; then exit 0; fi
     - if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
   only:
     - master

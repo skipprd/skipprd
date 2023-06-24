@@ -11,10 +11,10 @@ checks for small_files:
 
 
 #checks for cloudcycle_docket [hourly]:
-  - row_count = 500000:
+  - row_count = 751800:
       filter: year = 2020
 
-  - row_count = 500000:
+  - row_count = 747180:
       filter: year = 2021
 #  - :
 #      filter: from_iso8601_timestamp(detail_docket_datetime_batch_utc) between DATE_ADD('hour', -1, NOW()) AND NOW()
