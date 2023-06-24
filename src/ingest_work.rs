@@ -141,6 +141,10 @@ impl Ingest {
 
         let output_files = &mut OUTPUT_FILES_STATIC.lock().unwrap();
 
+        let mut bytes: u64 = 0;
+        let mut i = 0;
+        let mut j = 0;
+
         // thread::spawn(move || {
         for ingest_batch in datas {
             let mut buf_str: String = String::new();
@@ -150,10 +154,6 @@ impl Ingest {
             // relevant when processing a new file, which is most of the time
             let has_offsets =
                 offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Closed, 0);
-
-            let mut bytes: u64 = 0;
-            let mut i = 0;
-            let mut j = 0;
 
             let records: Vec<Value> = SerdeJson::deserialize(&ingest_batch.data);
 
@@ -193,10 +193,6 @@ impl Ingest {
                         if skpr_time.is_some() {
                             skpr_time_bucket = Some(BufferChunker::event_time_bucket(skpr_time.unwrap()));
                         }
-
-                        // if Config::truth_value(faltten_events) {
-                        //     record = Helpers::flatten(&record);
-                        // }
 
                         let output_file_name = BufferChunker::encode_chunk_name(
                             "ingest",
@@ -261,6 +257,10 @@ impl Ingest {
 
                         i += 1;
                         j += 1;
+
+                        offset_db_clone.set(&ingest_batch.offset_key, OffsetTypes::Line, i);
+
+
                     }
 
 
@@ -282,18 +282,17 @@ impl Ingest {
             // Retain only items that didn't qualify for flushing
             output_files.retain(|_filename, file| !Ingest::is_rotated(file));
 
-            offset_db_clone.set(&ingest_batch.offset_key, OffsetTypes::Line, i);
+            offset_db_clone.set(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
 
-            // if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
-                offset_db_clone.set(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
-            // }
-            offset_db_clone.flush();
 
-            let mut counter_lock = metrcis_clone.lock().unwrap();
-            counter_lock.ingeted_current += j;
-            counter_lock.messages_total += i;
-            counter_lock.bytes_current += bytes;
         }
+
+        offset_db_clone.flush();
+
+        let mut counter_lock = metrcis_clone.lock().unwrap();
+        counter_lock.ingeted_current += j;
+        counter_lock.messages_total += i;
+        counter_lock.bytes_current += bytes;
 
         if *updated_schema_clone.lock().unwrap() == "yes".to_string() {
 

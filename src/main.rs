@@ -442,18 +442,6 @@ async fn sync() {
         out_pnanner.add(
             move || {
                 if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
-                    // let mut metrics_lock = metrics_clone.lock().unwrap();
-                    //
-                    // // let mut metrics: Metrics = Metrics::new();
-                    // // metrics_lock.msgs_total += metrics_lock.msgs_current;
-                    // metrics_lock.bytes_total += metrics_lock.bytes_current;
-                    //
-                    // println!("Ingested Batch: {}", metrics_lock.ingeted_current);
-                    // println!("Ingested Messages: {}", metrics_lock.ingeted_total);
-                    // println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
-                    // println!("Bytes Batch: {}", metrics_lock.bytes_current);
-                    // println!("Bytes: {}", metrics_lock.bytes_total);
-
 
                     println!("Chaos mode throwing a random exit. You can disable this test mode buy removing CHAOS_MODE flag or setting to 'no'");
 
@@ -601,7 +589,7 @@ async fn sync() {
     //     }
     // }
 
-    sleep(Duration::from_secs(60));
+    // sleep(Duration::from_secs(60));
 
     println!("Flushing ingest buffers");
     let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();

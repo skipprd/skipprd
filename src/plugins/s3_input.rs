@@ -1,6 +1,7 @@
 use crate::helpers::configuration::{Config, Metrics};
 
 use aws_sdk_s3::Client;
+use aws_sdk_s3::Error as S3Error;
 pub use aws_smithy_http::byte_stream::AggregatedBytes;
 
 use flate2::read::GzDecoder;
@@ -11,23 +12,27 @@ use std::collections::HashMap;
 use std::io::{Cursor, Read};
 
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use std::time::Duration;
 use std::{fs, thread};
 use std::sync::atomic::Ordering;
 use std::thread::sleep;
+use aws_sdk_s3::operation::get_object::{GetObjectError, GetObjectOutput};
+use aws_smithy_http::result::SdkError;
 
 use crate::discover::Metadata;
 use futures::future::join_all;
-use futures::StreamExt;
+use futures::{AsyncReadExt, StreamExt};
 
 // use crate::thread_pool::ThreadPool;
 
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::ingest_work::{Ingest, IngestBatch};
 use rusoto_core::{Region, RusotoError};
-use rusoto_s3::{GetObjectOutput, GetObjectRequest, ListObjectsV2Request, S3Client, S3};
+use tokio::sync::Semaphore;
+// use rusoto_s3::{GetObjectOutput, GetObjectRequest, ListObjectsV2Request, S3Client, S3};
+
 use tokio::time::timeout;
 use crate::{INPUT_GRACEFUL_SHUTDOWN_COMPLETE, RUNNING};
 
@@ -35,10 +40,11 @@ pub struct DataSourceS3Plugin {
     // config: HashMap<String, String>,
     // buffer: Sender<String>,
     s3_client: Client,
-    s3_client_rusoto: S3Client,
+    // s3_client_rusoto: S3Client,
     ingest: Ingest,
     source_bucket: String,
     temp_dir: String,
+
 }
 
 impl DataSourceS3Plugin {
@@ -58,7 +64,7 @@ impl DataSourceS3Plugin {
 
         DataSourceS3Plugin {
             s3_client,
-            s3_client_rusoto: S3Client::new(Region::default()),
+            // s3_client_rusoto: S3Client::new(Region::default()),
             ingest: Ingest::new(),
             source_bucket: String::new(),
             temp_dir: temp_dir.to_string(),
@@ -119,7 +125,8 @@ impl DataSourceS3Plugin {
             .s3_client
             .list_objects_v2()
             .bucket(inventory_bucket.clone())
-            .prefix(inventory_prefix.clone());
+            .prefix(inventory_prefix.clone())
+            .max_keys(10000);
 
         loop {
 
@@ -167,8 +174,11 @@ impl DataSourceS3Plugin {
                                 // println!("State {} = {} of {}", i, chunk_size_current, chunk_size);
 
                                 if chunk_size_current >= chunk_size {
+
+                                    println!("Proccessing {} Objects = with size of {} (batch size config {})", i, chunk_size_current, chunk_size);
+
                                     Self::download_and_ingest(
-                                        &mut self.s3_client_rusoto,
+                                        &mut self.s3_client,
                                         &inventory_bucket,
                                         &outputs,
                                         &self.temp_dir,
@@ -200,7 +210,7 @@ impl DataSourceS3Plugin {
                         if !outputs.is_empty() {
 
                             Self::download_and_ingest(
-                                &mut self.s3_client_rusoto,
+                                &mut self.s3_client,
                                 &inventory_bucket,
                                 &outputs,
                                 &self.temp_dir,
@@ -220,22 +230,27 @@ impl DataSourceS3Plugin {
     }
 
     async fn download_s3_object_with_backoff(
-        s3_client: &S3Client,
+        s3_client: &Client,
         bucket: &String,
         key: &String,
-    ) -> Result<GetObjectOutput, RusotoError<rusoto_s3::GetObjectError>> {
+    ) -> Result<GetObjectOutput, GetObjectError> {
         let mut retries = 0;
         let max_retries = 5;
-        let mut backoff_duration = Duration::from_secs(1);
+        let mut backoff_duration = Duration::from_millis(1000);
 
         loop {
-            let get_request = GetObjectRequest {
-                bucket: bucket.clone(),
-                key: urldecode::decode(key.clone()),
-                ..Default::default()
-            };
+            // let get_request = GetObjectRequest::builder()
+            //     .bucket(bucket)
+            //     .key(urldecode::decode(key))
+            //     .build();
 
-            match s3_client.get_object(get_request).await {
+            let mut get_request =
+                s3_client
+                .get_object()
+                .bucket(bucket.clone())
+                .key(urldecode::decode(key.to_string()));;
+
+            match get_request.send().await {
                 Ok(result) => {
                     if retries > 0 {
                         println!("Successful retry of object {}", key);
@@ -246,18 +261,19 @@ impl DataSourceS3Plugin {
                     retries += 1;
 
                     let wait_time = backoff_duration.as_secs_f64() * 2.0_f64.powi(retries);
-                    thread::sleep(Duration::from_secs_f64(wait_time));
+                    tokio::time::sleep(Duration::from_secs_f64(wait_time)).await;
 
                     backoff_duration *= 2;
 
                     println!(
-                        "Failed to get object {}, retry back in {} seconds",
+                        "Failed to get object {}, retry back in {} seconds: {}",
                         key,
-                        backoff_duration.as_secs()
+                        backoff_duration.as_secs(),
+                        err.to_string()
                     );
 
                     if retries >= max_retries {
-                        return Err(err);
+                        return Err(err.into_service_error());
                     }
                 }
             }
@@ -265,7 +281,7 @@ impl DataSourceS3Plugin {
     }
 
     async fn download_and_ingest(
-        s3_client: &mut S3Client,
+        s3_client: &Client,
         bucket_name: &String,
         object_keys: &Vec<String>,
         _output_dir: &String,
@@ -273,38 +289,46 @@ impl DataSourceS3Plugin {
         metrics: &Arc<Mutex<Metrics>>,
         offsets_clone: &Arc<Offsets>,
     ) {
+
+        let semaphore = Arc::new(Semaphore::new(2048));
+
         let futures: Vec<_> = object_keys
             .clone()
             .into_iter()
             .map(|object_key| {
+                let semaphore = Arc::clone(&semaphore);
                 let s3_client = s3_client.clone();
                 let bucket_name = bucket_name.to_owned();
 
                 tokio::spawn(async move {
-                    let _x_fut = s3_client.get_object(GetObjectRequest {
-                        bucket: bucket_name.clone(),
-                        key: urldecode::decode(object_key.to_string()),
-                        ..Default::default()
-                    });
+                    let permit = semaphore.acquire().await.unwrap();
+
+                    let mut _x_fut =
+                        s3_client
+                            .get_object()
+                            .bucket(bucket_name.clone())
+                            .key(urldecode::decode(object_key.to_string()));
 
                     let response = Self::download_s3_object_with_backoff(
                         &s3_client,
                         &bucket_name,
                         &object_key,
                     )
-                    .await
-                    .unwrap();
+                        .await
+                        .unwrap();
                     // println!("Got s3 object");
 
                     Download {
                         key: object_key,
                         response,
                     }
+                    // We drop the permit here, allowing another future to acquire it
                 })
             })
             .collect();
 
-        let datas: Arc<Mutex<Vec<IngestBatch>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let datas: Arc<RwLock<Vec<IngestBatch>>> = Arc::new(RwLock::new(Vec::new()));
 
         let future_result = tokio::join!(join_all(futures)).0;
 
@@ -317,29 +341,37 @@ impl DataSourceS3Plugin {
         let metadata = metadata.clone();
         let offsets_clone = offsets_clone.clone();
         let bucket_name = bucket_name.clone();
-        let mut datas = datas.clone();
+        let datas_clone = datas.clone();
 
-        threads.push(thread::spawn(move || {
+        // threads.push(thread::spawn(move || {
 
+        // let mut batch: RwLock<IngestBatch> = RwLock::new(IngestBatch {
+        //     offset_key: OffsetKey {
+        //         namespace: bucket_name.to_string(),
+        //         partition: "".to_string(),
+        //     },
+        //     data: "".to_string(),
+        // });
+        // let mut batch_clone = batch.clone();
+
+
+        tokio::spawn(async move {
             // for thread in threads {
             for future in future_result {
-
                 let mut download = future.unwrap();
 
                 // println!("Downloading s3 object");
-                let mut data = Vec::new();
+                let mut data = download.response.body;
 
-                match download.response.body.take() {
-                    Some(body) => match body.into_blocking_read().read_to_end(&mut data) {
-                        Ok(_) => {}
-                        Err(err) => println!("{:?}", err),
-                    },
-                    None => println!("Empty S3 object body"),
-                };
+                // This part is new: convert the ByteStream into a Vec<u8>
+                let mut data_vec = Vec::new();
+                while let Some(chunk) = data.next().await {
+                    data_vec.extend_from_slice(&chunk.unwrap());
+                }
 
                 if download.key.contains(".gz") {
                     // Something that implements `std::io::Read`
-                    let c = Cursor::new(data);
+                    let c = Cursor::new(data_vec);
 
                     // To inflate on the fly, "pipe" the data through the decoder, i.e. wrap the reader
                     let mut stream = GzDecoder::new(c);
@@ -347,7 +379,8 @@ impl DataSourceS3Plugin {
                     let mut decompressed_data = String::new();
                     stream.read_to_string(&mut decompressed_data).unwrap();
 
-                    datas.lock().unwrap().push(IngestBatch {
+                    // batch_clone.lock().unwrap().data.push_str(&decompressed_data);
+                    datas_clone.write().unwrap().push(IngestBatch {
                         offset_key: OffsetKey {
                             namespace: bucket_name.to_string(),
                             partition: download.key,
@@ -355,12 +388,11 @@ impl DataSourceS3Plugin {
                         data: decompressed_data,
                     });
                 } else {
-                    let mut c = Cursor::new(data);
+                    // Convert Vec<u8> into a String
+                    let str_data = String::from_utf8(data_vec).unwrap();
 
-                    let mut str_data = String::new();
-                    c.read_to_string(&mut str_data).unwrap();
-
-                    datas.lock().unwrap().push(IngestBatch {
+                    // batch_clone.lock().unwrap().data.push_str(&str_data);
+                    datas_clone.write().unwrap().push(IngestBatch {
                         offset_key: OffsetKey {
                             namespace: bucket_name.to_string(),
                             partition: download.key,
@@ -369,9 +401,17 @@ impl DataSourceS3Plugin {
                     });
                 }
             }
+        }).await.unwrap();
 
+
+        // datas.lock().unwrap().push(batch.lock().unwrap().clone());
+        let datas = datas.clone();
+
+        threads.push(thread::spawn(move || {
+
+            let batch = datas.read().unwrap().to_vec();
             self::Ingest::ingest_file(
-                datas.lock().unwrap().to_vec(),
+                batch,
                 &metadata,
                 &metrics,
                 &offsets_clone,
@@ -381,14 +421,19 @@ impl DataSourceS3Plugin {
 
         // Wait for all threads to finish, else we will stampead the data source
         for handle in threads {
-            handle.join().unwrap();
+            match handle.join() {
+                Ok(_) => {},
+                Err(err) => {
+                    println!("ERROR: {:#?}", err);
+                },
+            }
         }
 
         if !RUNNING.lock().unwrap().load(Ordering::SeqCst) {
             INPUT_GRACEFUL_SHUTDOWN_COMPLETE.lock().unwrap().store(true, Ordering::SeqCst);
-            sleep(Duration::from_secs(120));
+            // sleep(Duration::from_secs(120));
         }
-        // println!("Ingested");
+        println!("Ingested");
     }
 }
 
