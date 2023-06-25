@@ -164,7 +164,10 @@ impl Config {
 
     pub fn getenv(name: &str, default: &str) -> String {
         match std::env::var(name.to_uppercase()) {
-            Ok(val) => val,
+            Ok(val) => match val {
+                v if v.is_empty() => default.to_string(),
+                _ => val,
+            },
             Err(_e) => default.to_string(),
         }
     }
@@ -573,6 +576,13 @@ mod tests {
 
     #[test]
     fn test_getenv() {
+        assert_eq!(Config::getenv("TEST", "default"), "default");
+    }
+
+    #[test]
+
+    fn test_getenv_empty_string() {
+        Config::setenv("TEST", "");
         assert_eq!(Config::getenv("TEST", "default"), "default");
     }
 
