@@ -506,7 +506,6 @@ impl Config {
 
         let data = json!({
             "metrics": {
-                "msgs_total": metrics.msgs_total,
                 "ingeted_total": metrics.messages_total,
                 "deadletters_total": metrics.deadletters_total,
                 "ingeted_current": metrics.ingeted_current,
@@ -515,6 +514,7 @@ impl Config {
                 "bytes_total": metrics.bytes_total,
             },
             "pipeline_name": pipeline_name,
+            "datetime": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             "logs": logs,
             "exit_code": exit_code
         });
@@ -546,7 +546,7 @@ impl Config {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Metrics {
-    pub msgs_total: u64,
+    // pub msgs_total: u64,
     pub messages_total: u64,
     pub deadletters_total: u64,
     pub ingeted_current: u64,
@@ -559,7 +559,7 @@ impl Metrics {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            msgs_total: 0,
+            // msgs_total: 0,
             messages_total: 0,
             deadletters_total: 0,
             ingeted_current: 0,
