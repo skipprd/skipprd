@@ -18,6 +18,7 @@ use crate::helpers::configuration::Config;
 use std::sync::Arc;
 use arrow::error::ArrowError;
 use parquet::basic::{Compression, Encoding};
+use crate::LOGS;
 
 // #[derive(clap::ValueEnum, Clone)]
 // #[allow(non_camel_case_types, clippy::upper_case_acronyms)]
@@ -339,6 +340,7 @@ impl SerdeParquet {
                 }
                 // Err(error) => return Err(error.into()),
                 Err(_error) => {
+                    LOGS.lock().unwrap().push(_error.to_string());
                     error_count += 1;
                     errors.insert(_error.to_string(), Err(_error));
                     // println!("Failed writing batch");

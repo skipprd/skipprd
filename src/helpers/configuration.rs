@@ -22,7 +22,7 @@ use reqwest::header::{HeaderMap, HeaderName};
 use reqwest::{Client, StatusCode};
 
 use crate::discover::Metadata;
-use crate::{flatten_metadata, RUNNING};
+use crate::{flatten_metadata, LOGS, RUNNING};
 
 use crate::helpers::license::LicenseChecker;
 use crate::helpers::Helpers;
@@ -479,7 +479,7 @@ impl Config {
 
     }
 
-    pub(crate) fn set_status(metrics: MutexGuard<Metrics>, exit_code: Option<i8>) {
+    pub(crate) async fn set_status<'a>(metrics: MutexGuard<'a, Metrics>, exit_code: Option<i8>) -> Result<(), Box<dyn std::error::Error>> {
         let pipeline_name = Config::get_full_namespace_name();
 
         let env = Config::getenv("APP_ENV", "prod");
@@ -494,36 +494,35 @@ impl Config {
         let auth_header = HeaderName::from_static("x-api-key");
         headers.insert(auth_header, HeaderValue::from_str(&token).unwrap());
 
-        let client = reqwest::blocking::Client::builder()
+        let client = reqwest::Client::builder()
             .default_headers(headers)
             // .timeout(Duration::from_secs(10))
-            .build()
-            .unwrap();
+            .build()?;
 
         let path = "";
 
-        let logs: HashMap<i16, String> = HashMap::new();
+        let logs = LOGS.lock().unwrap().clone();
 
         let data = json!({
-            "metrics": {
-                "ingeted_total": metrics.messages_total,
-                "deadletters_total": metrics.deadletters_total,
-                "ingeted_current": metrics.ingeted_current,
-                "run_time_seconds": metrics.run_time_seconds,
-                "bytes_current": metrics.bytes_current,
-                "bytes_total": metrics.bytes_total,
-            },
-            "pipeline_name": pipeline_name,
-            "datetime": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            "logs": logs,
-            "exit_code": exit_code
-        });
+        "metrics": {
+            "ingeted_total": metrics.messages_total,
+            "deadletters_total": metrics.deadletters_total,
+            "ingeted_current": metrics.ingeted_current,
+            "run_time_seconds": metrics.run_time_seconds,
+            "bytes_current": metrics.bytes_current,
+            "bytes_total": metrics.bytes_total,
+        },
+        "pipeline_name": pipeline_name,
+        "datetime": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "logs": logs,
+        "exit_code": exit_code
+    });
 
         // println!("Posting data: {:?}", data);
 
-        let response = client.put(format!("{}/{}", uri, path)).json(&data).send();
+        let response = client.put(format!("{}/{}", uri, path)).json(&data).send().await?;
 
-        match response {
+        match response.error_for_status() {
             Ok(_resp) => {
                 // println!("Status HTTP Success: {:?}", resp);
             }
@@ -533,6 +532,7 @@ impl Config {
         }
 
         println!("Notified task status API");
+        Ok(())
     }
 
     pub async fn init() {

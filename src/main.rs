@@ -91,6 +91,9 @@ pub static OUTPUT_RUNNING: Lazy<Mutex<AtomicBool>> =
 pub static OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE: Lazy<Mutex<AtomicBool>> =
     Lazy::new(|| Mutex::new(AtomicBool::new(false)));
 
+pub static LOGS: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
+
+
 #[tokio::main]
 async fn main() {
     env::set_var("RUST_BACKTRACE", "1");
@@ -640,13 +643,11 @@ async fn sync() {
     println!("Bytes per Min: {}", metrics_lock.bytes_current);
     println!("Bytes: {}", metrics_lock.bytes_total);
 
-    metrics_lock.bytes_current = 0;
-    metrics_lock.ingeted_current = 0;
 
-    // Config::set_status(metrics_lock, None)
-
-        // sleep(Duration::from_secs(5));
-    // }
+    match Config::set_status(metrics_lock, Some(0)).await {
+        Ok(_g) => {}
+        Err(_err) => {}
+    }
 
     println!("Shutting Down... bye");
 }
