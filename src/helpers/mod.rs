@@ -15,14 +15,14 @@ pub mod offsets;
 
 // let clean_field_cache = Arc::new(Mutex::new(HashMap<String, bool> = HashMap::new()));
 
+use crate::discover::date_formats::DateFormats;
+use crate::discover::Metadata;
 use crate::helpers::configuration::Config;
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
-use crate::discover::date_formats::DateFormats;
-use crate::discover::Metadata;
 
 // static clean_field_cache: Lazy<Mutex<i64>> = Lazy::new(|| Mutex::new(1));
-static clean_field_cache: Lazy<Mutex<HashMap<String, bool>>> =
+static clean_field_cache: Lazy<Mutex<HashMap<String, String>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 pub struct Helpers {}
@@ -69,7 +69,11 @@ impl Helpers {
 
         let clean_field_cache_lock = &mut *clean_field_cache.lock().unwrap();
 
-        if !clean_field_cache_lock.contains_key(&field) || clean_field_cache_lock[&field] {
+        if clean_field_cache_lock.contains_key(&field) && clean_field_cache_lock[&field] != "no".to_string()
+        {
+            return clean_field_cache_lock[&field].to_string();
+
+        } else if !clean_field_cache_lock.contains_key(&field) {
             if field.parse::<i32>().is_ok() {
                 clean = "item_".to_string() + &field;
             }
@@ -77,9 +81,11 @@ impl Helpers {
             clean = clean.to_lowercase();
 
             let re =
-                Regex::new(r"[^_0123456789_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ]")
+                Regex::new(r"[^_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ]")
                     .unwrap();
             clean = re.replace_all(&clean, "_").to_string();
+            clean = regex::Regex::new(r"_+").unwrap().replace_all(&clean, "_").to_string();
+
 
             // let pattern = "/[^" + preg_quote(
             //     "_0123456789_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ",
@@ -97,10 +103,10 @@ impl Helpers {
 
             if clean != field {
                 // println!("Cleaned {} field to {}", field, clean);
-                clean_field_cache_lock.insert(field, true);
+                clean_field_cache_lock.insert(field, clean.clone());
             } else {
                 // println!("Not cleaned {} field to {}", field, clean);
-                clean_field_cache_lock.insert(field, false);
+                clean_field_cache_lock.insert(field, "no".to_string());
             }
         }
 
@@ -174,7 +180,7 @@ impl Helpers {
             _ => {
                 // if metadata.determined_type != "record" {
                 //     result.insert(metadata.out_field_name.clone(), json.clone());
-                    result.insert(field.to_string(), json.clone());
+                result.insert(field.to_string(), json.clone());
                 // }
             }
         }
@@ -182,7 +188,7 @@ impl Helpers {
 
     pub fn flatten(json: &Value, metadata: &HashMap<String, Metadata>) -> Value {
         let mut result = Map::new();
-        for (key, value) in  json.as_object().unwrap() {
+        for (key, value) in json.as_object().unwrap() {
             Helpers::flatten_internal(key, value, &mut result);
         }
         // Helpers::flatten_internal(json, &mut result, metadata);
@@ -213,23 +219,25 @@ impl Helpers {
         if !Config::getenv("TRANSFORM_BATCH_PARTITION_FIELDS", "").is_empty() {
             let mut partitions = vec![];
 
-            for entity_field_dot in Config::getenv("TRANSFORM_BATCH_PARTITION_FIELDS", "").split(',')
+            for entity_field_dot in
+                Config::getenv("TRANSFORM_BATCH_PARTITION_FIELDS", "").split(',')
             {
-                let clean_entity_value = match Helpers::get_nested_value_from_dot_notation(message, entity_field_dot) {
-                    Some(entity_value) => {
+                let clean_entity_value =
+                    match Helpers::get_nested_value_from_dot_notation(message, entity_field_dot) {
+                        Some(entity_value) => {
                             Helpers::clean_field_name(match entity_value.as_str() {
                                 Some(val) => val.to_string(),
                                 None => "".to_string(),
                             })
-                        // let entity_name = match entity_field_dot.rfind('.') {
-                        //     Some(index) => &entity_field_dot[index + 1..],
-                        //     None => entity_field_dot,
-                        // };
-                        // let clean_entity_name = Helpers::clean_field_name(entity_name.to_string());
-                        // partitions.push(format!("{}={}", clean_entity_name, clean_entity_value));
-                    }
-                    None => "".to_string(),
-                };
+                            // let entity_name = match entity_field_dot.rfind('.') {
+                            //     Some(index) => &entity_field_dot[index + 1..],
+                            //     None => entity_field_dot,
+                            // };
+                            // let clean_entity_name = Helpers::clean_field_name(entity_name.to_string());
+                            // partitions.push(format!("{}={}", clean_entity_name, clean_entity_value));
+                        }
+                        None => "".to_string(),
+                    };
 
                 let entity_name = match entity_field_dot.rfind('.') {
                     Some(index) => format!("p_{}", &entity_field_dot[index + 1..]),
@@ -264,8 +272,7 @@ impl Helpers {
             if !Config::getenv("TRANSFORM_NAMESPACE_FIELDS", "").is_empty() {
                 let mut namespaces = vec!["".to_string()];
 
-                for entity_field_dot in
-                    Config::getenv("TRANSFORM_NAMESPACE_FIELDS", "").split(',')
+                for entity_field_dot in Config::getenv("TRANSFORM_NAMESPACE_FIELDS", "").split(',')
                 {
                     match Helpers::get_nested_value_from_dot_notation(message, entity_field_dot) {
                         Some(entity_value) => {
@@ -326,17 +333,19 @@ impl Helpers {
                                 Some(val) => {
                                     // println!("2");
                                     for format in DateFormats::iterator() {
-
                                         // println!("3: {} ? {}", val, format.as_str());
-                                        time_field_value = match NaiveDateTime::parse_from_str(val, format.as_str()) {
+                                        time_field_value = match NaiveDateTime::parse_from_str(
+                                            val,
+                                            format.as_str(),
+                                        ) {
                                             Ok(dt) => {
                                                 // println!("3.1: FOUND {}", format.as_str());
                                                 Some(DateTime::<Utc>::from_utc(dt, Utc).timestamp())
-                                            },
+                                            }
                                             Err(err) => {
                                                 // println!("{:?}", err);
                                                 None
-                                            },
+                                            }
                                         };
 
                                         if time_field_value.is_some() {
@@ -391,10 +400,69 @@ impl Helpers {
 }
 
 #[cfg(test)]
+mod clean_field_name_tests {
+    use super::*;
+
+    #[test]
+    fn test_clean_field_name() {
+        // Cache is empty, alphanumeric input
+        {
+            let mut clean_field_cache_lock = clean_field_cache.lock().unwrap();
+            clean_field_cache_lock.clear();
+        }
+        assert_eq!(Helpers::clean_field_name("testField".to_string()), "testfield".to_string());
+
+        // Cache is empty, input with special characters
+        {
+            let mut clean_field_cache_lock = clean_field_cache.lock().unwrap();
+            clean_field_cache_lock.clear();
+        }
+        assert_eq!(Helpers::clean_field_name("test!@#Field$%^&".to_string()), "test_field".to_string());
+
+        // Cache is empty, input starts with numbers
+        {
+            let mut clean_field_cache_lock = clean_field_cache.lock().unwrap();
+            clean_field_cache_lock.clear();
+        }
+        assert_eq!(Helpers::clean_field_name("123testField".to_string()), "testfield".to_string());
+
+        // Cache is empty, input starts with underscore and numbers
+        {
+            let mut clean_field_cache_lock = clean_field_cache.lock().unwrap();
+            clean_field_cache_lock.clear();
+        }
+        assert_eq!(Helpers::clean_field_name("_123testField".to_string()), "123testfield".to_string());
+
+        // Cache is empty, input is numbers
+        {
+            let mut clean_field_cache_lock = clean_field_cache.lock().unwrap();
+            clean_field_cache_lock.clear();
+        }
+        assert_eq!(Helpers::clean_field_name("1".to_string()), "item_1".to_string());
+
+
+        // Cache has a record
+        {
+            let mut clean_field_cache_lock = clean_field_cache.lock().unwrap();
+            clean_field_cache_lock.insert("cachedField".to_string(), "cachedfield".to_string());
+        }
+        assert_eq!(Helpers::clean_field_name("cachedField".to_string()), "cachedfield".to_string());
+
+        // Cache has a record marked as "no"
+        {
+            let mut clean_field_cache_lock = clean_field_cache.lock().unwrap();
+            clean_field_cache_lock.insert("no_change_field".to_string(), "no".to_string());
+        }
+        assert_eq!(Helpers::clean_field_name("no_change_field".to_string()), "no_change_field".to_string());
+    }
+}
+
+
+#[cfg(test)]
 mod parse_time_field_tests {
     use super::*;
-    use serde_json::json;
     use chrono::prelude::*;
+    use serde_json::json;
     use std::env;
 
     #[test]
@@ -416,9 +484,7 @@ mod parse_time_field_tests {
 
         let time = Utc::now().timestamp_millis();
         println!("{}", time);
-        let message = json!({
-            "time1": time
-        });
+        let message = json!({ "time1": time });
 
         assert_eq!(Helpers::parse_time_field(&message), Some(time / 1000));
     }
@@ -429,9 +495,7 @@ mod parse_time_field_tests {
         env::set_var("TRANSFORM_BATCH_TIME_FIELDS", "time2");
 
         let time: i64 = 999999999; // Invalid timestamp, less than 1000000000000
-        let message = json!({
-            "time2": time
-        });
+        let message = json!({ "time2": time });
 
         assert_eq!(Helpers::parse_time_field(&message), None);
     }
@@ -442,9 +506,7 @@ mod parse_time_field_tests {
         env::set_var("TRANSFORM_BATCH_TIME_FIELDS", "time3");
 
         let time: i64 = 1646901960;
-        let message = json!({
-            "time3": time
-        });
+        let message = json!({ "time3": time });
 
         assert_eq!(Helpers::parse_time_field(&message), Some(time));
     }
@@ -456,9 +518,7 @@ mod parse_time_field_tests {
 
         let dt = Utc::now();
         let time = dt.to_rfc3339();
-        let message = json!({
-            "time4": time
-        });
+        let message = json!({ "time4": time });
 
         assert_eq!(Helpers::parse_time_field(&message), Some(dt.timestamp()));
     }
@@ -469,14 +529,11 @@ mod parse_time_field_tests {
         env::set_var("TRANSFORM_BATCH_TIME_FIELDS", "time5");
 
         let time = "invalid datetime string";
-        let message = json!({
-            "time5": time
-        });
+        let message = json!({ "time5": time });
     }
 }
 
-
-        #[cfg(test)]
+#[cfg(test)]
 mod parse_partition_tests {
     use super::*;
     use serde_json::json;
@@ -663,46 +720,57 @@ mod flattern_tests {
             }
         );
         let mut metadata = HashMap::new();
-        metadata.insert("field".into(), Metadata {
-            count: 1,
-            types: HashMap::new(),
-            parent_type: "".into(),
-            fields: Box::new(HashMap::new()),
-            date_candidate: None,
-            evolution: Box::new(HashMap::new()),
-            enabled: true,
-            out_field_name: "field".into(),
-            determined_type: "".into(),
-            determined_type_values: "".into(),
-        });
-        metadata.insert("name".into(), Metadata {
-            count: 1,
-            types: HashMap::new(),
-            parent_type: "".into(),
-            fields: Box::new(HashMap::new()),
-            date_candidate: None,
-            evolution: Box::new(HashMap::new()),
-            enabled: true,
-            out_field_name: "contact_name".into(),
-            determined_type: "".into(),
-            determined_type_values: "".into(),
-        });
-        metadata.insert("tel".into(), Metadata {
-            count: 1,
-            types: HashMap::new(),
-            parent_type: "".into(),
-            fields: Box::new(HashMap::new()),
-            date_candidate: None,
-            evolution: Box::new(HashMap::new()),
-            enabled: true,
-            out_field_name: "contact_tel".into(),
-            determined_type: "".into(),
-            determined_type_values: "".into(),
-        });
+        metadata.insert(
+            "field".into(),
+            Metadata {
+                count: 1,
+                types: HashMap::new(),
+                parent_type: "".into(),
+                fields: Box::new(HashMap::new()),
+                date_candidate: None,
+                evolution: Box::new(HashMap::new()),
+                enabled: true,
+                out_field_name: "field".into(),
+                determined_type: "".into(),
+                determined_type_values: "".into(),
+            },
+        );
+        metadata.insert(
+            "name".into(),
+            Metadata {
+                count: 1,
+                types: HashMap::new(),
+                parent_type: "".into(),
+                fields: Box::new(HashMap::new()),
+                date_candidate: None,
+                evolution: Box::new(HashMap::new()),
+                enabled: true,
+                out_field_name: "contact_name".into(),
+                determined_type: "".into(),
+                determined_type_values: "".into(),
+            },
+        );
+        metadata.insert(
+            "tel".into(),
+            Metadata {
+                count: 1,
+                types: HashMap::new(),
+                parent_type: "".into(),
+                fields: Box::new(HashMap::new()),
+                date_candidate: None,
+                evolution: Box::new(HashMap::new()),
+                enabled: true,
+                out_field_name: "contact_tel".into(),
+                determined_type: "".into(),
+                determined_type_values: "".into(),
+            },
+        );
         let flattened = Helpers::flatten(&json, &metadata);
-        assert_eq!(flattened, json!({ "field": "value", "contact_name": "Dave", "contact_tel": "123" }));
+        assert_eq!(
+            flattened,
+            json!({ "field": "value", "contact_name": "Dave", "contact_tel": "123" })
+        );
     }
-
 
     // #[test]
     // fn test_flatten() {
