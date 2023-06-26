@@ -161,7 +161,10 @@ impl Ingest {
 
                 // if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
 
-                    if record.is_null() {
+                    if record.is_null()
+                        || (record.is_object() && record.as_object().unwrap().is_empty())
+                        || (record.is_array() && record.as_array().unwrap().is_empty())
+                    {
 
                         // println!("{}", &ingest_batch.data);
                         let mut counter_lock = metrcis_clone.lock().unwrap();

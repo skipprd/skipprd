@@ -326,8 +326,8 @@ async fn sync() {
                 // let mut metrics: Metrics = Metrics::new();
                 let metrics_lock = metrics_clone.lock().unwrap();
 
-                println!("Ingested Batch: {}", metrics_lock.ingeted_current);
-                println!("Ingested Messages: {}", metrics_lock.messages_total);
+                println!("Messages per Min: {}", metrics_lock.ingeted_current);
+                println!("Messages Total: {}", metrics_lock.messages_total);
 
                 ////////////// Cleanup part written parquet files START ////////
                 let options = MatchOptions {
@@ -413,10 +413,10 @@ async fn sync() {
                     metrics_lock.run_time_seconds = now_lock.elapsed().as_secs();
 
                     println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
-                    println!("Ingested Batch: {}", metrics_lock.ingeted_current);
-                    println!("Ingested Messages: {}", metrics_lock.messages_total);
+                    println!("Messages per Min: {}", metrics_lock.ingeted_current);
+                    println!("Messages Total: {}", metrics_lock.messages_total);
                     println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
-                    println!("Bytes Batch: {}", metrics_lock.bytes_current);
+                    println!("Bytes per Min: {}", metrics_lock.bytes_current);
                     println!("Bytes: {}", metrics_lock.bytes_total);
 
                     metrics_lock.bytes_current = 0;
@@ -612,7 +612,7 @@ async fn sync() {
         let guard = input_metadata_clone;
         guard.clone()
     };
-    data_output.sync(input_metadata_clone).await;
+    // data_output.sync(input_metadata_clone).await;
 
 
 
@@ -634,10 +634,10 @@ async fn sync() {
     metrics_lock.run_time_seconds = now_lock.elapsed().as_secs();
 
     println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
-    println!("Ingested Batch: {}", metrics_lock.ingeted_current);
-    println!("Ingested Messages: {}", metrics_lock.messages_total);
+    println!("Messages per Min: {}", metrics_lock.ingeted_current);
+    println!("Messages Total: {}", metrics_lock.messages_total);
     println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
-    println!("Bytes Batch: {}", metrics_lock.bytes_current);
+    println!("Bytes per Min: {}", metrics_lock.bytes_current);
     println!("Bytes: {}", metrics_lock.bytes_total);
 
     metrics_lock.bytes_current = 0;

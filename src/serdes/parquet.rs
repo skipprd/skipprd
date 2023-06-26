@@ -321,7 +321,7 @@ impl SerdeParquet {
         let mut writer =
             ArrowWriter::try_new(output, reader.schema(), Some(props.build())).unwrap();
 
-        let mut error: Result<bool, ArrowError> = Ok(true);
+        let mut errors: HashMap<String, Result<bool, ArrowError>> = HashMap::new();
 
         let mut error_count = 0;
 
@@ -340,7 +340,7 @@ impl SerdeParquet {
                 // Err(error) => return Err(error.into()),
                 Err(_error) => {
                     error_count += 1;
-                    error = Err(_error);
+                    errors.insert(_error.to_string(), Err(_error));
                     // println!("Failed writing batch");
                     // println!("{:?}", _error);
                     // AnalyseSchema::determine_field_types(&mut newMeta.get_mut(&ingest_record.skpr_namespace).unwrap().fields, None);
@@ -350,9 +350,9 @@ impl SerdeParquet {
             }
         }
 
-        if error.is_err() {
+        if !errors.is_empty() {
             println!("Failed writing parquet batch, {} errors", error_count);
-            println!("{:?}", error);
+            println!("{:?}", errors);
         }
 
         writer.close().unwrap();
