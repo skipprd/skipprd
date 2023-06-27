@@ -15,8 +15,10 @@ use std::{fs};
 use std::time::{Duration, SystemTime};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::sleep;
+use futures::SinkExt;
 use glob::{glob_with, GlobResult, MatchOptions};
-use crate::RUNNING;
+use nix::sys::signal::SIGTERM;
+use crate::{LOGS, RUNNING};
 // use crate::GRACEFUL_SHUTDOWN_COMPLETE;
 
 #[derive(Clone, Debug)]
@@ -139,7 +141,13 @@ impl Ingest {
         let metrcis_clone = metrics.clone();
         let offset_db_clone = offset_db.clone();
 
-        let output_files = &mut OUTPUT_FILES_STATIC.lock().unwrap();
+        let mut output_files = match OUTPUT_FILES_STATIC.lock() {
+            Ok(output_files) => output_files,
+            Err(_) => {
+                LOGS.lock().unwrap().push("Could not lock buffer files".to_string());
+                panic!("Could not lock buffer files")
+            },
+        };
 
         let mut bytes: u64 = 0;
         let mut i = 0;
@@ -167,7 +175,7 @@ impl Ingest {
                     {
 
                         // println!("{}", &ingest_batch.data);
-                        let mut counter_lock = metrcis_clone.lock().unwrap();
+                        let mut counter_lock = metrcis_clone.lock().expect("Could not lock metrics for deadletter stats");
                         counter_lock.deadletters_total += 1;
 
                         i += 1;
@@ -280,7 +288,7 @@ impl Ingest {
             //     }
             // }
 
-            Self::flush_buffers(false, output_files);
+            Self::flush_buffers(false, &mut output_files);
 
             // Retain only items that didn't qualify for flushing
             output_files.retain(|_filename, file| !Ingest::is_rotated(file));
