@@ -476,7 +476,7 @@ async fn sync() {
 
         planner.add(
             move || {
-                
+
                 if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
                     // match Config::list_dir_contents(data_dir.clone()) {
                     //     Err(e) => println!("Error occurred: {}", e),
