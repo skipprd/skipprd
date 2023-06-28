@@ -615,7 +615,7 @@ async fn sync() {
         let guard = input_metadata_clone;
         guard.clone()
     };
-    // data_output.sync(input_metadata_clone).await;
+    data_output.sync(input_metadata_clone).await;
 
 
 
