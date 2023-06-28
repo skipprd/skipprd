@@ -308,7 +308,8 @@ docker_push_release:
 
     - docker tag $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE $DOCKER_HUB_REPO/$CONTAINER_SNAPSHOT_IMAGE
     - docker push $DOCKER_HUB_REPO/$CONTAINER_SNAPSHOT_IMAGE
-
+  only:
+    - master
 
 cleanup:
   image: python:3.8-alpine
