@@ -288,6 +288,9 @@ chaos_mode_s3_inventory_plugin:
 docker_push_release:
   image: docker:latest
   stage: publish
+  rules:
+    - exists:
+        - $CI_COMMIT_TAG
   script:
 
     # Push to Docker Hub
@@ -301,7 +304,7 @@ docker_push_release:
     - docker push $DOCKER_HUB_REPO/$COMPONENT_NAME:stable
 
   only:
-    - tags
+    - master
 
 
 cleanup:
