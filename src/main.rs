@@ -325,7 +325,6 @@ async fn sync() {
 
                 let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
                 Ingest::flush_buffers(true, &mut output_files);
-                drop(output_files);
 
                 // let mut metrics: Metrics = Metrics::new();
                 let metrics_lock = metrics_clone.lock().unwrap();
@@ -598,7 +597,6 @@ async fn sync() {
     println!("Flushing ingest buffers");
     let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
     ingest_work::Ingest::flush_buffers(true, &mut output_files);
-    drop(output_files);
 
     while OUTPUT_RUNNING.lock().unwrap().load(Ordering::SeqCst) {
         sleep(Duration::from_secs(1));
