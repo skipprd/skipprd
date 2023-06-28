@@ -12,6 +12,7 @@ use serde_json::{Map, Value};
 pub mod configuration;
 pub mod license;
 pub mod offsets;
+pub mod logger;
 
 // let clean_field_cache = Arc::new(Mutex::new(HashMap<String, bool> = HashMap::new()));
 

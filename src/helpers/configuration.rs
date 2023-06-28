@@ -22,7 +22,7 @@ use reqwest::header::{HeaderMap, HeaderName};
 use reqwest::{Client, StatusCode};
 
 use crate::discover::Metadata;
-use crate::{flatten_metadata, LOGS, RUNNING};
+use crate::{flatten_metadata, RUNNING};
 
 use crate::helpers::license::LicenseChecker;
 use crate::helpers::Helpers;
@@ -299,6 +299,10 @@ impl Config {
             // SkipprLogger::info("Strict mutable mode enabled, will sync an exact copy of records.");
         }
 
+        if !Config::getenv("TRANSFORM_BATCH_TIME_UNIT", "").is_empty() && Config::getenv("TRANSFORM_BATCH_TIME_FIELDS", "").is_empty() {
+            println!("ERROR: Environment variable: 'TRANSFORM_BATCH_TIME_FIELDS' must be since you've set: 'TRANSFORM_BATCH_TIME_UNIT'.");
+        }
+
         // config.run_mode = Config::getenv("RUN_MODE", config.run_mode);
 
         // config.flatten_events = Config::getenv("TRANSFORM_FLATTEN_EVENTS", config.flatten_events);
@@ -391,9 +395,6 @@ impl Config {
             let workspace = Config::getenv("WORKSPACE_NAME", "default");
             let pipeline = Config::getenv("PIPELINE_NAME", "default");
 
-            if !Config::getenv("TRANSFORM_BATCH_TIME_UNIT", "").is_empty() && Config::getenv("TRANSFORM_BATCH_TIME_FIELDS", "").is_empty() {
-                println!("ERROR: Environment variable: 'TRANSFORM_BATCH_TIME_FIELDS' must be since you've set: 'TRANSFORM_BATCH_TIME_UNIT'.");
-            }
 
             // let uri = Config::getenv("SKIPPR_API_ENDPOINT", "");
             let env = Config::getenv("APP_ENV", "prod");
@@ -501,8 +502,6 @@ impl Config {
 
         let path = "";
 
-        let logs = LOGS.lock().unwrap().clone();
-
         let data = json!({
         "metrics": {
             "ingeted_total": metrics.messages_total,
@@ -514,7 +513,6 @@ impl Config {
         },
         "pipeline_name": pipeline_name,
         "datetime": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        "logs": logs,
         "exit_code": exit_code
     });
 
@@ -531,7 +529,7 @@ impl Config {
             }
         }
 
-        println!("Notified task status API");
+        println!("Notified Metrics API");
         Ok(())
     }
 

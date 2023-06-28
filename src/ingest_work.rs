@@ -18,7 +18,7 @@ use std::thread::sleep;
 use futures::SinkExt;
 use glob::{glob_with, GlobResult, MatchOptions};
 use nix::sys::signal::SIGTERM;
-use crate::{LOGS, RUNNING};
+use crate::{LOGGER, RUNNING};
 // use crate::GRACEFUL_SHUTDOWN_COMPLETE;
 
 #[derive(Clone, Debug)]
@@ -143,9 +143,8 @@ impl Ingest {
 
         let mut output_files = match OUTPUT_FILES_STATIC.lock() {
             Ok(output_files) => output_files,
-            Err(_) => {
-                LOGS.lock().unwrap().push("Could not lock buffer files".to_string());
-                panic!("Could not lock buffer files")
+            Err(err) => {
+                panic!("Could not lock buffer files, Error: {:?}", err);
             },
         };
 

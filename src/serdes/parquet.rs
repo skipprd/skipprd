@@ -18,7 +18,8 @@ use crate::helpers::configuration::Config;
 use std::sync::Arc;
 use arrow::error::ArrowError;
 use parquet::basic::{Compression, Encoding};
-use crate::LOGS;
+use crate::helpers::logger::LogLevel;
+use crate::LOGGER;
 
 // #[derive(clap::ValueEnum, Clone)]
 // #[allow(non_camel_case_types, clippy::upper_case_acronyms)]
@@ -322,7 +323,7 @@ impl SerdeParquet {
         let mut writer =
             ArrowWriter::try_new(output, reader.schema(), Some(props.build())).unwrap();
 
-        let mut errors: HashMap<String, Result<bool, ArrowError>> = HashMap::new();
+        // let mut errors: HashMap<String, Result<bool, ArrowError>> = HashMap::new();
 
         let mut error_count = 0;
 
@@ -340,9 +341,16 @@ impl SerdeParquet {
                 }
                 // Err(error) => return Err(error.into()),
                 Err(_error) => {
-                    LOGS.lock().unwrap().push(_error.to_string());
-                    error_count += 1;
-                    errors.insert(_error.to_string(), Err(_error));
+                    // LOGGER.lock().unwrap().push(_error.to_string());
+
+                    // error_count += 1;
+                    // errors.insert(_error.to_string(), Err(_error));
+
+                    tokio::spawn(async move {
+                        LOGGER.lock().await.log(LogLevel::Error, _error.to_string()).await;
+                    });
+
+
                     // println!("Failed writing batch");
                     // println!("{:?}", _error);
                     // AnalyseSchema::determine_field_types(&mut newMeta.get_mut(&ingest_record.skpr_namespace).unwrap().fields, None);
@@ -352,10 +360,10 @@ impl SerdeParquet {
             }
         }
 
-        if !errors.is_empty() {
-            println!("Failed writing parquet batch, {} errors", error_count);
-            println!("{:?}", errors);
-        }
+        // if !errors.is_empty() {
+        //     println!("Failed writing parquet batch, {} errors", error_count);
+        //     println!("{:?}", errors);
+        // }
 
         writer.close().unwrap();
 

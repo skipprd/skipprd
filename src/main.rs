@@ -55,8 +55,12 @@ extern crate clap;
 extern crate core;
 
 use clap::Parser;
+use nix::libc::signal;
 
 use signal_hook::{iterator::Signals};
+
+use std::panic;
+
 
 use once_cell::sync::Lazy;
 use signal_hook::consts::{SIGABRT, SIGQUIT, SIGTERM, SIGINT};
@@ -74,6 +78,8 @@ use crate::helpers::configuration::{Config, Metrics};
 
 use crate::buffer::BufferChunker;
 use crate::helpers::Helpers;
+use crate::helpers::logger::{Logger, LogLevel};
+use crate::helpers::offsets::Offsets;
 use crate::plugins::athena::DataOutputAwsAthenaPlugin;
 
 use crate::plugins::s3_input::DataSourceS3Plugin;
@@ -91,7 +97,7 @@ pub static OUTPUT_RUNNING: Lazy<Mutex<AtomicBool>> =
 pub static OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE: Lazy<Mutex<AtomicBool>> =
     Lazy::new(|| Mutex::new(AtomicBool::new(false)));
 
-pub static LOGS: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
+pub static LOGGER: Lazy<Arc<tokio::sync::Mutex<Logger>>> = Lazy::new(|| Logger::new(100));
 
 
 #[tokio::main]
@@ -120,10 +126,6 @@ async fn main() {
         }
     }
 
-    // for x in 1..20000 {
-    //     untyped_example();
-    // }
-    // blah();
 }
 
 async fn discover() {
@@ -252,6 +254,9 @@ async fn sync() {
 
     // let mut skippr_metadata = Arc::new(Mutex::new(HashMap::new()));
 
+
+    LOGGER.lock().await.log(LogLevel::Error, "An error occurred.".to_string()).await;
+
     let data_dir = Config::get_data_dir();
 
     // let _metadata_file = format!("{}/metadata.json", data_dir);
@@ -299,17 +304,74 @@ async fn sync() {
 
     let metrics_clone = metrics.clone();
 
+    let offsets = Arc::new(Offsets::init().unwrap());
+    let offsets_clone = offsets.clone();
+    // let logger_clone = Arc::clone(&logger);
+
+
+
+    /**
+     * Handle PANICS in threads
+     */
+    // take_hook() returns the default hook in case when a custom one is not set
+    let orig_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |panic_info| {
+        // invoke the default handler and exit the process
+        orig_hook(panic_info);
+        println!("{:?}", panic_info);
+        let panic_str = format!("{:?}", panic_info);
+
+
+        // process::exit(1);
+
+        // let logger_clone = Arc::clone(&logger_clone);
+
+        let panic_info_clone = panic_str.clone();
+
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .spawn(async {
+            LOGGER.lock().await.log(LogLevel::Error, panic_info_clone).await;
+            // logger_clone.lock().await.flush().await.unwrap();
+        });
+
+        let pid = process::id() as i32; // or replace with the PID of the target process
+
+        unsafe {
+            kill(Pid::from_raw(pid), Signal::SIGTERM).unwrap();
+        }
+
+        // sleep(Duration::from_secs(60)); // wait for graceful shutdown
+    }));
+
+    // thread::spawn(move || {
+    //     panic!("something bad happened");
+    // }).join();
+
+    // this line won't ever be invoked because of process::exit()
+    // println!("Won't be printed");
+
+
+    /**
+     * Handle SIGNALS
+     */
     let mut signals = Signals::new(&[SIGINT, SIGTERM, SIGQUIT, SIGABRT]).unwrap();
+
+    // let logger_clone = Arc::clone(&logger);
 
     thread::spawn(move || {
         for sig in signals.forever() {
             if !RUNNING.lock().unwrap().load(Ordering::SeqCst) {
-                println!("Received another Ctrl+C signal - no worries, terminating immediately...");
+                println!("Received another Ctrl+C signal - terminating immediately, this may result in data loss...");
                 std::process::exit(0);
             }
             RUNNING.lock().unwrap().store(false, Ordering::SeqCst);
 
             let metrics_clone = metrics_clone.clone();
+            let offsets_clone = offsets_clone.clone();
+            // let logger_clone = Arc::clone(&logger_clone);
 
             thread::spawn(move || {
                 println!("Received SIG: Gracefully shutting down");
@@ -325,6 +387,8 @@ async fn sync() {
 
                 let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
                 Ingest::flush_buffers(true, &mut output_files);
+
+                offsets_clone.flush();
 
                 // let mut metrics: Metrics = Metrics::new();
                 let metrics_lock = metrics_clone.lock().unwrap();
@@ -361,6 +425,24 @@ async fn sync() {
                 }
                 ////////////// Cleanup part written parquet files END ////////
 
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .spawn(async {
+                    match LOGGER.lock().await.flush().await {
+                        Ok(_t) => {
+
+                        }
+                        Err(err) => {
+                            // println!("Graceful shutdown complete... bye");
+                        }
+                    }
+
+                });
+
+                sleep(Duration::from_secs(15)); // wait for threads to flush
+
                 println!("Graceful shutdown complete... bye");
                 std::process::exit(0);
             });
@@ -394,8 +476,8 @@ async fn sync() {
 
         planner.add(
             move || {
+                
                 if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
-
                     // match Config::list_dir_contents(data_dir.clone()) {
                     //     Err(e) => println!("Error occurred: {}", e),
                     //     _ => (),
@@ -545,6 +627,7 @@ async fn sync() {
     let input_metadata_clone = skippr_metadata.clone();
 
     let metrics_clone = metrics.clone();
+    let offsets_clone = offsets.clone();
 
     match Config::getenv("DATA_SOURCE_PLUGIN_NAME", "").as_str() {
         "stdin" => {
@@ -553,6 +636,7 @@ async fn sync() {
                 // &m1ut pool,
                 input_metadata_clone,
                 metrics_clone,
+                offsets_clone
             )
                 .await;
         }
@@ -562,6 +646,7 @@ async fn sync() {
                 // &m1ut pool,
                 input_metadata_clone,
                 metrics_clone,
+                offsets_clone
             )
             .await;
         }
@@ -571,6 +656,7 @@ async fn sync() {
                 // &mut pool,
                 input_metadata_clone,
                 metrics_clone,
+                offsets_clone
             )
             .await;
         }

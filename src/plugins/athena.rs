@@ -1,6 +1,6 @@
 use crate::buffer::BufferChunker;
 use crate::converters::skippr_hive::SkipprHive;
-use crate::{discover, flatten_metadata, LOGS};
+use crate::{discover, flatten_metadata, LOGGER};
 use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
 use aws_sdk_athena::types::{
@@ -21,6 +21,7 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
 use crate::discover::Metadata;
+use crate::helpers::logger::LogLevel;
 
 pub struct DataOutputAwsAthenaPlugin {
     s3_client: S3Client,
@@ -221,12 +222,20 @@ impl DataOutputAwsAthenaPlugin {
                     Err(err) => {
                         println!("Failed to upload file: {}, will retry later.", filename);
 
-                        LOGS.lock().unwrap().push(format!(
-                            "Athena Plugin failed to upload file: {}, key: {} with error: {:?}",
-                            filename,
-                            key,
-                            err.into_service_error()
-                        ));
+                        // tokio::spawn(async move {
+                            LOGGER.lock().await.log(LogLevel::Error, format!(
+                                "Athena Plugin failed to upload file: {}, key: {} with error: {:?}",
+                                filename,
+                                key,
+                                err.into_service_error()
+                            )).await;
+                        // });
+                        // LOGGER.lock().unwrap().push(format!(
+                        //     "Athena Plugin failed to upload file: {}, key: {} with error: {:?}",
+                        //     filename,
+                        //     key,
+                        //     err.into_service_error()
+                        // ));
                     }
                 }
 

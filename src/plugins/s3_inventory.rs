@@ -73,11 +73,10 @@ impl DataSourceS3InventoryPlugin {
         // pool: &mut ThreadPool,
         metadata: Arc<Mutex<HashMap<String, Metadata>>>,
         metrics: Arc<Mutex<Metrics>>,
+        offsets: Arc<Offsets>,
     ) {
         let metadata = metadata.clone();
         let metrics = metrics.clone();
-
-        let offsets = Arc::new(Offsets::init().unwrap());
 
         let offsets_clone = offsets.clone();
 
