@@ -1,6 +1,6 @@
 use crate::buffer::BufferChunker;
 use crate::converters::skippr_hive::SkipprHive;
-use crate::{discover, flatten_metadata};
+use crate::{discover, flatten_metadata, LOGS};
 use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
 use aws_sdk_athena::types::{
@@ -219,8 +219,14 @@ impl DataOutputAwsAthenaPlugin {
                         };
                     }
                     Err(err) => {
-                        println!("Got an error uploading object:");
-                        println!("{:?}", err.into_service_error());
+                        println!("Failed to upload file: {}, will retry later.", filename);
+
+                        LOGS.lock().unwrap().push(format!(
+                            "Athena Plugin failed to upload file: {}, key: {} with error: {:?}",
+                            filename,
+                            key,
+                            err.into_service_error()
+                        ));
                     }
                 }
 
