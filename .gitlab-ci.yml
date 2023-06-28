@@ -81,7 +81,7 @@ dockerize:
       - ~/cargo
   only:
     - master
-    - tags
+#    - tags
 
 s3_plugin:
   image: docker:latest
@@ -97,7 +97,7 @@ s3_plugin:
     - if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
   only:
     - master
-    - tags
+#    - tags
 
 chaos_mode:
   image: docker:latest
@@ -110,7 +110,7 @@ chaos_mode:
     - docker run --name skippre2e2 -e CHAOS_MODE=yes -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e DATA_SOURCE_S3_BUCKET=skippr-e2e-sample-data -e DATA_SOURCE_S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e SCHEMA_OUTPUT_GLUE_DATABASE_NAME=bikehire -e DATA_OUTPUT_ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=chaos_mode -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./data -e APP_ENV=test -v `pwd`/data:/data skippr/skipprd:latest
     - docker run --name skippre2e3 -e CHAOS_MODE=yes -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e DATA_SOURCE_S3_BUCKET=skippr-e2e-sample-data -e DATA_SOURCE_S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e SCHEMA_OUTPUT_GLUE_DATABASE_NAME=bikehire -e DATA_OUTPUT_ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=chaos_mode -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./data -e APP_ENV=test -v `pwd`/data:/data skippr/skipprd:latest
     - docker run --name skippre2e4 -e CHAOS_MODE=yes -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e DATA_SOURCE_S3_BUCKET=skippr-e2e-sample-data -e DATA_SOURCE_S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e SCHEMA_OUTPUT_GLUE_DATABASE_NAME=bikehire -e DATA_OUTPUT_ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=chaos_mode -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./data -e APP_ENV=test -v `pwd`/data:/data skippr/skipprd:latest
-    - docker run --name skippre2e5 -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e DATA_SOURCE_S3_BUCKET=skippr-e2e-sample-data -e S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e SCHEMA_OUTPUT_GLUE_DATABASE_NAME=bikehire -e DATA_OUTPUT_ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=chaos_mode -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./data -e APP_ENV=test -v `pwd`/data:/data skippr/skipprd:latest
+    - docker run --name skippre2e5 -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -e DATA_SOURCE_PLUGIN_NAME=s3 -e DATA_SOURCE_S3_BUCKET=skippr-e2e-sample-data -e DATA_SOURCE_S3_PREFIX=bike-hire -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output -e DATA_OUTPUT_S3_PREFIX=bikehire -e SCHEMA_OUTPUT_GLUE_DATABASE_NAME=bikehire -e DATA_OUTPUT_ATHENA_WORKGROUP_NAME=bikehire -e PIPELINE_NAME=chaos_mode -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg -e DATA_DIR=./data -e APP_ENV=test -v `pwd`/data:/data skippr/skipprd:latest
     - if [[ "$(docker logs skippre2e5 >& container-logs ; cat container-logs | grep -i ' Err' | wc -l)" -gt 0 ]]; then exit 1; fi
     - if [[ "$(docker container wait skippre2e5)" -gt 0 ]]; then exit 1; fi
   after_script:
@@ -119,7 +119,7 @@ chaos_mode:
     - if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
   only:
     - master
-    - tags
+#    - tags
 
 flatten:
   image: docker:latest
@@ -137,7 +137,7 @@ flatten:
     - if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
   only:
     - master
-    - tags
+#    - tags
 
 event_types:
   image: docker:latest
@@ -155,7 +155,7 @@ event_types:
     - if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
   only:
     - master
-    - tags
+#    - tags
 
 time_buckets_date:
   image: docker:latest
@@ -173,7 +173,7 @@ time_buckets_date:
     - if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
   only:
     - master
-    - tags
+#    - tags
 
 small_files:
   image: docker:latest
@@ -191,7 +191,7 @@ small_files:
     - if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
   only:
     - master
-    - tags
+#    - tags
 
 very_small_files:
   image: docker:latest
@@ -209,7 +209,7 @@ very_small_files:
     - if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
   only:
     - master
-    - tags
+#    - tags
 
 event_type_partition_field_and_time_flatten:
   image: docker:latest
@@ -227,7 +227,7 @@ event_type_partition_field_and_time_flatten:
     - if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
   only:
     - master
-    - tags
+#    - tags
 
 
 
@@ -261,7 +261,7 @@ s3_inventory_plugin:
     - if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
   only:
     - master
-    - tags
+#    - tags
 
 chaos_mode_s3_inventory_plugin:
   image: docker:latest
@@ -283,15 +283,12 @@ chaos_mode_s3_inventory_plugin:
     - if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
   only:
     - master
-    - tags
+#    - tags
     
-docker_push:
+docker_push_release:
   image: docker:latest
   stage: publish
   script:
-#    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
-#    - docker tag $CONTAINER_IMAGE $CONTAINER_RELEASE_IMAGE
-#    - docker push $CONTAINER_RELEASE_IMAGE
 
     # Push to Docker Hub
     - docker login -u skippr -p "$DOCKER_HUB_PASS"
@@ -303,14 +300,9 @@ docker_push:
     - docker tag $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE $DOCKER_HUB_REPO/$COMPONENT_NAME:stable
     - docker push $DOCKER_HUB_REPO/$COMPONENT_NAME:stable
 
-    # Push to AWS ECR
-#    - pip install awscli
-#    - docker login --username AWS --password $(aws ecr get-login-password --region $AWS_REGION) 536671797322.dkr.ecr.eu-west-2.amazonaws.com
-##    - echo $AWS_ECR_PASSWORD | docker login --username AWS --password-stdin $AWS_ECR_REGISTRY
-#    - docker tag $CONTAINER_RELEASE_IMAGE $AWS_ECR_REGISTRY/$CONTAINER_RELEASE_IMAGE
-#    - docker push $AWS_ECR_REGISTRY/$CONTAINER_RELEASE_IMAGE
   only:
     - tags
+
 
 cleanup:
   image: python:3.8-alpine
@@ -328,7 +320,7 @@ cleanup:
 #      aws dynamodb delete-item --table-name Test-MetadataService-Stack-MetadataTable8CB34826-XGZT4CFIJO8Y --key '{"tenant": {"S": "skippr"}}'
   only:
     - master
-    - tags
+#    - tags
 
 purge_dynamodb:
   image: node:14
@@ -338,4 +330,4 @@ purge_dynamodb:
     - node _files/purge-dynamodb.js
   only:
     - master
-    - tags
+#    - tags
