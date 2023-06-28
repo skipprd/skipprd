@@ -76,7 +76,8 @@ impl Logger {
 
     pub(crate) async fn log_api<'a>(&mut self, logs: HashMap<Log, usize>, exit_code: Option<i8>) -> Result<(), Box<dyn std::error::Error>> {
 
-        let pipeline_name = Config::get_full_namespace_name();
+        let workspace = Config::getenv("WORKSPACE_NAME", "default");
+        let pipeline = Config::getenv("PIPELINE_NAME", "default");
 
         let env = Config::getenv("APP_ENV", "prod");
         let uri = if env != "prod" {
@@ -105,7 +106,8 @@ impl Logger {
                     "count": count
                 })
             }).collect::<Vec<_>>(),
-            "pipeline_name": pipeline_name,
+            "workspace_name": workspace,
+            "pipeline_name": pipeline,
             "datetime": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             "exit_code": exit_code
         });
@@ -116,14 +118,13 @@ impl Logger {
 
         match response.error_for_status() {
             Ok(_resp) => {
-                println!("Status HTTP Success");
+                println!("Notified Metrics API");
             }
             Err(err) => {
                 println!("Metrics HTTP Error: {:?}", err);
             }
         }
 
-        println!("Notified Metrics API");
         Ok(())
     }
 

@@ -12,14 +12,12 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::{fs};
-use std::time::{Duration, SystemTime};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::sleep;
-use futures::SinkExt;
-use glob::{glob_with, GlobResult, MatchOptions};
-use nix::sys::signal::SIGTERM;
-use crate::{LOGGER, RUNNING};
-// use crate::GRACEFUL_SHUTDOWN_COMPLETE;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use glob::{glob_with, MatchOptions};
+use crate::{RUNNING};
+use lru::LruCache;
+use std::num::NonZeroUsize;
+
 
 #[derive(Clone, Debug)]
 pub struct IngestBatch {
@@ -35,13 +33,15 @@ pub struct OutputFile {
     pub(crate) rotated: Option<bool>,
 }
 
-// const MAX_BUFFER_SIZE: u64 = 1024 * 1024 * 10;
+// Bare metal platforms usually have very small amounts of RAM
+// (in the order of hundreds of KB)
+pub const WRITE_BUF_SIZE: usize = if cfg!(target_os = "espidf") { 512 } else { 512 * 1024 };
 
 pub static PARSE_NAMESPACE_CACHE: Lazy<Mutex<HashMap<String, String>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-pub static OUTPUT_FILES_STATIC: Lazy<Mutex<HashMap<String, OutputFile>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+pub static OUTPUT_FILES_STATIC: Lazy<Mutex<LruCache<String, OutputFile>>> =
+    Lazy::new(|| Mutex::new(LruCache::new(NonZeroUsize::new(100).expect(""))));
 
 pub struct Ingest {}
 
@@ -51,19 +51,17 @@ impl Ingest {
         Ingest {}
     }
 
-    pub fn flush_buffers(force: bool, output_files: &mut MutexGuard<HashMap<String, OutputFile>>) {
-    // pub fn flush_buffers(force: bool) {
-    //     println!("Flushing ingest buffers");
+    pub fn flush_buffers(force: bool, output_files: &mut MutexGuard<LruCache<String, OutputFile>>) {
         let data_dir = Config::get_data_dir();
         let output_dir = format!("{}/output", data_dir);
 
         for (filename, output_file) in output_files.iter_mut() {
-
             output_file.file.flush().expect(&format!("Could not flush file {}", filename));
 
             if force || Ingest::is_file_size_exceeded(&output_file) || Ingest::is_file_time_exceeded(&output_file) {
-
                 if output_file.bytes > 0 { // don't flush empty files when forced
+                    output_file.bytes = 0;
+                    output_file.upated_at = UNIX_EPOCH;
                     output_file.rotated = Some(true);
 
                     let new_filename = format!(
@@ -79,7 +77,6 @@ impl Ingest {
                         Err(_) => {}
                     };
                 }
-                // println!("Rotated buffer file {}", new_filename);
             }
         }
 
@@ -134,6 +131,8 @@ impl Ingest {
         let data_dir = Config::get_data_dir();
         let output_dir = format!("{}/output", data_dir);
 
+        let aprox_now = SystemTime::now();
+
         let updated_schema: Arc<Mutex<String>> = Arc::new(Mutex::new("no".to_string()));
 
         let updated_schema_clone = updated_schema;
@@ -152,11 +151,9 @@ impl Ingest {
         let mut i = 0;
         let mut j = 0;
 
-        // thread::spawn(move || {
         for ingest_batch in datas {
             let mut buf_str: String = String::new();
 
-            // datas.par_iter().map( |ingest_batch| {
             // have offsets, don't bother checking each line offset if not.
             // relevant when processing a new file, which is most of the time
             let has_offsets =
@@ -165,8 +162,6 @@ impl Ingest {
             let records: Vec<Value> = SerdeJson::deserialize(&ingest_batch.data);
 
             for mut record in records {
-
-                // if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
 
                     if record.is_null()
                         || (record.is_object() && record.as_object().unwrap().is_empty())
@@ -212,7 +207,7 @@ impl Ingest {
                         );
                         let output_file = format!("{}/{}", output_dir.clone(), &output_file_name);
 
-                        if output_files.get(&output_file_name).is_none() {
+                        if output_files.peek(&output_file_name).is_none() {
                             let f = OpenOptions::new()
                                 .create(true)
                                 .write(true)
@@ -220,16 +215,39 @@ impl Ingest {
                                 .open(output_file.clone())
                                 .unwrap();
 
-                            let mut writer = BufWriter::new(f);
+                            let mut writer = BufWriter::with_capacity(WRITE_BUF_SIZE, f);
 
-                            let new_file = OutputFile {
-                                bytes: record_bytes,
-                                upated_at: SystemTime::now(),
-                                file: writer,
-                                rotated: None
+                            let new_file = match std::fs::metadata(&output_file) {
+                                Ok(metadata) => {
+
+                                    let secs_since_epoch = metadata.modified().unwrap().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                                    let time = UNIX_EPOCH + Duration::from_secs(secs_since_epoch);
+
+                                    OutputFile {
+                                        bytes: metadata.len(),
+                                        upated_at: time,
+                                        file: writer,
+                                        rotated: None
+                                    }
+                                },
+                                Err(err) => {
+                                    OutputFile {
+                                        bytes: record_bytes,
+                                        upated_at: aprox_now,
+                                        file: writer,
+                                        rotated: None
+                                    }
+                                }
                             };
 
-                            output_files.insert(output_file_name.clone(), new_file);
+                            // If the cache is full, remove and flush the least recently used item.
+                            if output_files.len() == output_files.cap().get() {
+                                if let Some((filename, mut evicted)) = output_files.pop_lru() {
+                                    evicted.file.flush().expect(&format!("Could not flush file {}", filename));
+                                }
+                            }
+
+                            output_files.put(output_file_name.clone(), new_file);
                         }
 
                         let mut meta = metadata_clone.lock().unwrap();
@@ -246,22 +264,14 @@ impl Ingest {
 
                         buf_str = msg.to_string() + "\n";
 
-                        output_files
-                            .get_mut(&output_file_name)
-                            .unwrap()
-                            .file
-                            .write_all(buf_str.as_bytes())
-                            .unwrap();
-
-                        output_files
-                            .get_mut(&output_file_name)
-                            .unwrap()
-                            .bytes += record_bytes;
-
-                        output_files
-                            .get_mut(&output_file_name)
-                            .unwrap()
-                            .upated_at = SystemTime::now();
+                        {
+                            let mut output_file = output_files
+                                .get_mut(&output_file_name)
+                                .unwrap();
+                            output_file.file.write_all(buf_str.as_bytes()).unwrap();
+                            output_file.bytes += record_bytes;
+                            output_file.upated_at = aprox_now;
+                        }
 
                         buf_str.clear();
 
@@ -270,32 +280,15 @@ impl Ingest {
 
                         offset_db_clone.set(&ingest_batch.offset_key, OffsetTypes::Line, i);
 
-
                     }
-
-
-                // } else {
-                //     println!("Stopping ingest");
-                //     break;
-                // }
             }
-
-            // let mut force = false;
-            // if !RUNNING.lock().unwrap().load(Ordering::SeqCst) {
-            //     for (filename, output_file) in output_files.iter_mut() {
-            //         output_file.file.flush().expect(&format!("Could not flush file {}", filename));
-            //     }
-            // }
-
-            Self::flush_buffers(false, &mut output_files);
-
-            // Retain only items that didn't qualify for flushing
-            output_files.retain(|_filename, file| !Ingest::is_rotated(file));
 
             offset_db_clone.set(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
 
-
         }
+
+        Self::flush_buffers(false, &mut output_files);
+        drop(output_files);
 
         offset_db_clone.flush();
 

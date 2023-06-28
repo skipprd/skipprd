@@ -481,7 +481,8 @@ impl Config {
     }
 
     pub(crate) async fn set_status<'a>(metrics: MutexGuard<'a, Metrics>, exit_code: Option<i8>) -> Result<(), Box<dyn std::error::Error>> {
-        let pipeline_name = Config::get_full_namespace_name();
+        let workspace = Config::getenv("WORKSPACE_NAME", "default");
+        let pipeline = Config::getenv("PIPELINE_NAME", "default");
 
         let env = Config::getenv("APP_ENV", "prod");
         let uri = if env != "prod" {
@@ -511,7 +512,8 @@ impl Config {
             "bytes_current": metrics.bytes_current,
             "bytes_total": metrics.bytes_total,
         },
-        "pipeline_name": pipeline_name,
+        "workspace_name": workspace,
+        "pipeline_name": pipeline,
         "datetime": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         "exit_code": exit_code
     });

@@ -332,7 +332,7 @@ async fn sync() {
             .enable_all()
             .build()
             .unwrap()
-            .spawn(async {
+            .block_on(async {
             LOGGER.lock().await.log(LogLevel::Error, panic_info_clone).await;
             // logger_clone.lock().await.flush().await.unwrap();
         });
@@ -429,7 +429,7 @@ async fn sync() {
                     .enable_all()
                     .build()
                     .unwrap()
-                    .spawn(async {
+                    .block_on(async {
                     match LOGGER.lock().await.flush().await {
                         Ok(_t) => {
 
@@ -441,7 +441,7 @@ async fn sync() {
 
                 });
 
-                sleep(Duration::from_secs(15)); // wait for threads to flush
+                // sleep(Duration::from_secs(15)); // wait for threads to flush
 
                 println!("Graceful shutdown complete... bye");
                 std::process::exit(0);
@@ -507,7 +507,16 @@ async fn sync() {
                     metrics_lock.bytes_current = 0;
                     metrics_lock.ingeted_current = 0;
 
-                    Config::set_status(metrics_lock, None);
+                    tokio::runtime::Builder::new_multi_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap()
+                        .block_on(async {
+                            match Config::set_status(metrics_lock, Some(0)).await {
+                                Ok(_g) => {}
+                                Err(_err) => {}
+                            }
+                        });
                 }
             },
             periodic::Every::new(Duration::from_secs(60)),
@@ -666,7 +675,7 @@ async fn sync() {
     };
 
     // wait arbitrary time for ingest threads to complete
-    // sleep(Duration::from_secs(30));
+    sleep(Duration::from_secs(120));
 
     // RUNNING.lock().unwrap().store(false, Ordering::SeqCst);
     //
@@ -682,7 +691,7 @@ async fn sync() {
 
     println!("Flushing ingest buffers");
     let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
-    ingest_work::Ingest::flush_buffers(true, &mut output_files);
+    Ingest::flush_buffers(true, &mut output_files);
 
     while OUTPUT_RUNNING.lock().unwrap().load(Ordering::SeqCst) {
         sleep(Duration::from_secs(1));
@@ -702,9 +711,6 @@ async fn sync() {
         guard.clone()
     };
     data_output.sync(input_metadata_clone).await;
-
-
-
 
     let metrics_clone = metrics.clone();
 

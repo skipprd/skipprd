@@ -181,7 +181,7 @@ impl DataSourceS3Plugin {
 
                                 if chunk_size_current >= chunk_size {
 
-                                    println!("Proccessing {} Objects = with size of {} (batch size config {})", i, chunk_size_current, chunk_size);
+                                    println!("Proccessing {} Objects, totalling {} bytes (batch size config {} bytes)", i, chunk_size_current, chunk_size);
 
                                     Self::download_and_ingest(
                                         &mut self.s3_client,
@@ -434,7 +434,6 @@ impl DataSourceS3Plugin {
             INPUT_GRACEFUL_SHUTDOWN_COMPLETE.lock().unwrap().store(true, Ordering::SeqCst);
             // sleep(Duration::from_secs(120));
         }
-        println!("Ingested");
     }
 }
 

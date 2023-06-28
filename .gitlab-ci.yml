@@ -61,7 +61,7 @@ stages:
 
 
 dockerize:
-  tags: [ saas-linux-medium-amd64 ]
+  tags: [ saas-linux-large-amd64 ]
   image: docker:latest
   stage: init
 #  before_script:
