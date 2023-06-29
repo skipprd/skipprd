@@ -35,7 +35,7 @@ pub struct OutputFile {
 
 // Bare metal platforms usually have very small amounts of RAM
 // (in the order of hundreds of KB)
-pub const WRITE_BUF_SIZE: usize = if cfg!(target_os = "espidf") { 512 } else { 512 * 1024 };
+pub const WRITE_BUF_SIZE: usize = if cfg!(target_os = "espidf") { 512 } else { 4 * 1024 };
 
 pub static PARSE_NAMESPACE_CACHE: Lazy<Mutex<HashMap<String, String>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
