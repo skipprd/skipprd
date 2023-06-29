@@ -516,7 +516,7 @@ impl Config {
             "bytes_total": metrics.bytes_total,
         },
         "type": "metric",
-        "tenant": tenant_id,
+        "tenant_id": tenant_id,
         "workspace_name": workspace,
         "pipeline_name": pipeline,
         "datetime": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
