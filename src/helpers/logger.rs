@@ -109,6 +109,7 @@ impl Logger {
                     "count": count
                 })
             }).collect::<Vec<_>>(),
+            "type": "log",
             "tenant_id": tenant_id,
             "workspace_name": workspace,
             "pipeline_name": pipeline,

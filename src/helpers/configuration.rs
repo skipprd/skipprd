@@ -515,6 +515,7 @@ impl Config {
             "bytes_current": metrics.bytes_current,
             "bytes_total": metrics.bytes_total,
         },
+        "type": "metric",
         "tenant": tenant_id,
         "workspace_name": workspace,
         "pipeline_name": pipeline,
