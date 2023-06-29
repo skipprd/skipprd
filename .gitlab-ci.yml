@@ -81,7 +81,7 @@ dockerize:
       - ~/cargo
   only:
     - master
-#    - tags
+    - tags
 
 s3_plugin:
   image: docker:latest
@@ -97,7 +97,7 @@ s3_plugin:
     - if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
   only:
     - master
-#    - tags
+    - tags
 
 chaos_mode:
   image: docker:latest
@@ -119,7 +119,7 @@ chaos_mode:
     - if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
   only:
     - master
-#    - tags
+    - tags
 
 flatten:
   image: docker:latest
@@ -137,7 +137,7 @@ flatten:
     - if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
   only:
     - master
-#    - tags
+    - tags
 
 event_types:
   image: docker:latest
@@ -155,7 +155,7 @@ event_types:
     - if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
   only:
     - master
-#    - tags
+    - tags
 
 time_buckets_date:
   image: docker:latest
@@ -173,7 +173,7 @@ time_buckets_date:
     - if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
   only:
     - master
-#    - tags
+    - tags
 
 small_files:
   image: docker:latest
@@ -191,7 +191,7 @@ small_files:
     - if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
   only:
     - master
-#    - tags
+    - tags
 
 very_small_files:
   image: docker:latest
@@ -209,7 +209,7 @@ very_small_files:
     - if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
   only:
     - master
-#    - tags
+    - tags
 
 event_type_partition_field_and_time_flatten:
   image: docker:latest
@@ -227,7 +227,7 @@ event_type_partition_field_and_time_flatten:
     - if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
   only:
     - master
-#    - tags
+    - tags
 
 
 
@@ -261,7 +261,7 @@ s3_inventory_plugin:
     - if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
   only:
     - master
-#    - tags
+    - tags
 
 chaos_mode_s3_inventory_plugin:
   image: docker:latest
@@ -283,7 +283,7 @@ chaos_mode_s3_inventory_plugin:
     - if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
   only:
     - master
-#    - tags
+    - tags
     
 docker_push_release:
   image: docker:latest
@@ -327,7 +327,7 @@ cleanup:
 #      aws dynamodb delete-item --table-name Test-MetadataService-Stack-MetadataTable8CB34826-XGZT4CFIJO8Y --key '{"tenant": {"S": "skippr"}}'
   only:
     - master
-#    - tags
+    - tags
 
 purge_dynamodb:
   image: node:14
@@ -337,4 +337,4 @@ purge_dynamodb:
     - node _files/purge-dynamodb.js
   only:
     - master
-#    - tags
+    - tags
