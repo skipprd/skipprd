@@ -1,11 +1,17 @@
 extern crate reqwest;
 extern crate serde_json;
 
-use crate::helpers::configuration::Config;
+use crate::helpers::configuration::{Config};
 use reqwest::{header::HeaderName, Client, Url};
 use std::collections::HashMap;
 use std::error::Error;
 use std::process::exit;
+use std::sync::Mutex;
+use once_cell::sync::Lazy;
+use serde_derive::{Deserialize, Serialize};
+
+pub static TENANT_ID: Lazy<Mutex<String>> =
+    Lazy::new(|| Mutex::new("".to_string()));
 
 const API_KEY_ENV_VAR: &str = "SKIPPR_API_TOKEN";
 const APP_ENV: &str = "APP_ENV";
@@ -14,8 +20,17 @@ const DEFAULT_ENV: &str = "prod";
 pub struct LicenseChecker {
     client: Client,
     pub license_is_valid: bool,
-    pub license: Option<HashMap<String, String>>,
+    pub license: Option<LicenseRecord>,
     api_key: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct LicenseRecord {
+    api_key: String,
+    username: String,
+    tenant: String,
+    valid_from: String,
+    valid_to: Option<String>,
 }
 
 impl LicenseChecker {
@@ -49,14 +64,16 @@ impl LicenseChecker {
         let response = req.send().await?;
 
         if response.status().is_success() {
-            let body = response.json::<HashMap<String, String>>().await?;
+            let body = response.json::<LicenseRecord>().await?;
             self.license = Some(body);
             // println!("{:?}", self.license);
+
+            TENANT_ID.lock().unwrap().push_str(&self.license.as_ref().unwrap().tenant);
 
             self.license_is_valid = self
                 .license
                 .as_ref()
-                .map_or(false, |l| l.get("api_key") == Some(&self.api_key));
+                .map_or(false, |l| &self.api_key == &l.api_key);
         } else {
             self.license_is_valid = false;
             // println!("{:?}", response.json::<HashMap<String, String>>().await?);

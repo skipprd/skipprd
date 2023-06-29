@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::fmt;
 use serde_derive::Serialize;
+use crate::helpers::license::TENANT_ID;
 
 #[derive(Debug, Clone, Serialize, Hash, PartialEq, Eq)]
 pub enum LogLevel {
@@ -98,6 +99,8 @@ impl Logger {
 
         let path = "";
 
+        let tenant_id = TENANT_ID.lock().unwrap().clone();
+
         let data = json!({
             "logs": logs.iter().map(|(log, count)| {
                 json!({
@@ -106,6 +109,7 @@ impl Logger {
                     "count": count
                 })
             }).collect::<Vec<_>>(),
+            "tenant_id": tenant_id,
             "workspace_name": workspace,
             "pipeline_name": pipeline,
             "datetime": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),

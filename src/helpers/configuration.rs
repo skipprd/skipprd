@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use yaml_rust::YamlLoader;
 
-use std::sync::MutexGuard;
+use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 use nix::libc::exit;
 
@@ -20,11 +20,12 @@ use reqwest::header::HeaderValue;
 
 use reqwest::header::{HeaderMap, HeaderName};
 use reqwest::{Client, StatusCode};
+use once_cell::sync::Lazy;
 
 use crate::discover::Metadata;
 use crate::{flatten_metadata, RUNNING};
 
-use crate::helpers::license::LicenseChecker;
+use crate::helpers::license::{LicenseChecker, TENANT_ID};
 use crate::helpers::Helpers;
 use crate::plugins::athena::AwsAthena;
 
@@ -317,7 +318,7 @@ impl Config {
 
         config.pipeline_name = Config::get_pipeline_name();
 
-        config.tenant_id = Config::getenv("TENANT_ID", Helpers::random_str(16).as_str());
+        // config.tenant_id = Config::getenv("TENANT_ID", Helpers::random_str(16).as_str());
 
         let data_dir = Config::get_data_dir();
         if !data_dir.is_empty() {
@@ -503,6 +504,8 @@ impl Config {
 
         let path = "";
 
+        let tenant_id = TENANT_ID.lock().unwrap().clone();
+
         let data = json!({
         "metrics": {
             "ingeted_total": metrics.messages_total,
@@ -512,6 +515,7 @@ impl Config {
             "bytes_current": metrics.bytes_current,
             "bytes_total": metrics.bytes_total,
         },
+        "tenant": tenant_id,
         "workspace_name": workspace,
         "pipeline_name": pipeline,
         "datetime": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
