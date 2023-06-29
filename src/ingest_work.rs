@@ -208,6 +208,9 @@ impl Ingest {
                         let output_file = format!("{}/{}", output_dir.clone(), &output_file_name);
 
                         if output_files.peek(&output_file_name).is_none() {
+
+                            println!("Creating new output file: {}", output_file_name);
+
                             let f = OpenOptions::new()
                                 .create(true)
                                 .write(true)
@@ -220,6 +223,8 @@ impl Ingest {
                             let new_file = match std::fs::metadata(&output_file) {
                                 Ok(metadata) => {
 
+                                    println!("Re-opening existing file: {}", output_file);
+
                                     let secs_since_epoch = metadata.modified().unwrap().duration_since(UNIX_EPOCH).unwrap().as_secs();
                                     let time = UNIX_EPOCH + Duration::from_secs(secs_since_epoch);
 
@@ -231,6 +236,9 @@ impl Ingest {
                                     }
                                 },
                                 Err(err) => {
+
+                                    println!("Creating new file: {}", output_file);
+
                                     OutputFile {
                                         bytes: record_bytes,
                                         upated_at: aprox_now,
@@ -243,6 +251,7 @@ impl Ingest {
                             // If the cache is full, remove and flush the least recently used item.
                             if output_files.len() == output_files.cap().get() {
                                 if let Some((filename, mut evicted)) = output_files.pop_lru() {
+                                    println!("Evicting and flushing file: {}", filename);
                                     evicted.file.flush().expect(&format!("Could not flush file {}", filename));
                                 }
                             }
