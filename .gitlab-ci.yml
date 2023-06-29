@@ -5,6 +5,7 @@ variables:
   CONTAINER_IMAGE: $COMPONENT_NAME:$CI_COMMIT_REF_NAME
   CONTAINER_LATEST_IMAGE: $COMPONENT_NAME:latest
   CONTAINER_RELEASE_IMAGE: $COMPONENT_NAME:$CI_COMMIT_TAG
+  CONTAINER_SNAPSHOT_IMAGE: $COMPONENT_NAME:stable
   DOCKER_HUB_REPO: skippr
   ECR_HOST: 536671797322.dkr.ecr.us-east-1.amazonaws.com
   AWS_ECR_REGISTRY: $ECR_HOST/$COMPONENT_NAME
@@ -288,15 +289,6 @@ chaos_mode_s3_inventory_plugin:
 docker_push_release:
   image: docker:latest
   stage: publish
-  rules:
-    - if: '$CI_COMMIT_BRANCH == $CI_COMMIT_TAG'
-      variables:
-        CONTAINER_RELEASE_IMAGE: $COMPONENT_NAME:$CI_COMMIT_TAG
-        CONTAINER_SNAPSHOT_IMAGE: $COMPONENT_NAME:stable
-    - if: '$CI_COMMIT_BRANCH == "master"'
-      variables:
-        CONTAINER_RELEASE_IMAGE: $COMPONENT_NAME:latest
-        CONTAINER_SNAPSHOT_IMAGE: $COMPONENT_NAME:latest
   script:
 
     # Push to Docker Hub
@@ -308,7 +300,9 @@ docker_push_release:
 
     - docker tag $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE $DOCKER_HUB_REPO/$CONTAINER_SNAPSHOT_IMAGE
     - docker push $DOCKER_HUB_REPO/$CONTAINER_SNAPSHOT_IMAGE
-
+  only:
+    - master
+    - tags
 
 
 
