@@ -255,7 +255,7 @@ async fn sync() {
     // let mut skippr_metadata = Arc::new(Mutex::new(HashMap::new()));
 
 
-    LOGGER.lock().await.log(LogLevel::Error, "An error occurred.".to_string()).await;
+    LOGGER.lock().await.log(LogLevel::Error, "Init Error Log.".to_string()).await;
 
     let data_dir = Config::get_data_dir();
 
@@ -504,9 +504,6 @@ async fn sync() {
                     println!("Bytes per Min: {}", metrics_lock.bytes_current);
                     println!("Bytes: {}", metrics_lock.bytes_total);
 
-                    metrics_lock.bytes_current = 0;
-                    metrics_lock.ingeted_current = 0;
-
                     tokio::runtime::Builder::new_multi_thread()
                         .enable_all()
                         .build()
@@ -517,6 +514,11 @@ async fn sync() {
                                 Err(_err) => {}
                             }
                         });
+
+                    let mut metrics_lock = metrics_clone.lock().unwrap();
+
+                    metrics_lock.bytes_current = 0;
+                    metrics_lock.ingeted_current = 0;
                 }
             },
             periodic::Every::new(Duration::from_secs(60)),
@@ -741,7 +743,7 @@ async fn sync() {
         Err(_err) => {}
     }
 
-    println!("Shutting Down... bye");
+    println!("Complete. Shutting Down... bye");
 }
 
 fn output_sync(metadata: HashMap<String, Metadata>) {

@@ -228,8 +228,6 @@ impl DataSourceS3Plugin {
 
                         break;
                     }
-
-                    // }
                 }
             }
         }
@@ -261,8 +259,8 @@ impl DataSourceS3Plugin {
                 Err(err) => {
                     retries += 1;
 
-                    let wait_time = backoff_duration.as_secs_f64() * 2.0_f64.powi(retries);
-                    tokio::time::sleep(Duration::from_secs_f64(wait_time)).await;
+                    // let wait_time = backoff_duration.as_secs_f64() * 2.0_f64.powi(retries);
+                    thread::sleep(Duration::from_secs_f64(backoff_duration.as_secs_f64()));
 
                     backoff_duration *= 2;
 
@@ -310,24 +308,24 @@ impl DataSourceS3Plugin {
                             .bucket(bucket_name.clone())
                             .key(urldecode::decode(object_key.to_string()));
 
-                    let response = Self::download_s3_object_with_backoff(
+                    match Self::download_s3_object_with_backoff(
                         &s3_client,
                         &bucket_name,
                         &object_key,
-                    )
-                        .await
-                        .unwrap();
-                    // println!("Got s3 object");
+                    ).await {
+                        Ok(response) => {
 
-                    Download {
-                        key: object_key,
-                        response,
+                            Ok(Download {
+                                key: object_key,
+                                response,
+                            })
+                        },
+                        Err(_) => Err("Could not get object")
                     }
                     // We drop the permit here, allowing another future to acquire it
                 })
             })
             .collect();
-
 
         let datas: Arc<RwLock<Vec<IngestBatch>>> = Arc::new(RwLock::new(Vec::new()));
 
@@ -338,6 +336,9 @@ impl DataSourceS3Plugin {
         let data_dir = Config::get_data_dir();
         let _temp_dir = &format!("{}/source_buffer", data_dir);
 
+        let datas_clone = datas.clone();
+
+        let bucket_name = bucket_name.clone();
         let metrics = metrics.clone();
         let metadata = metadata.clone();
         let offsets_clone = offsets_clone.clone();
@@ -359,49 +360,56 @@ impl DataSourceS3Plugin {
         tokio::spawn(async move {
             // for thread in threads {
             for future in future_result {
-                let mut download = future.unwrap();
+                match future.unwrap() {
+                    Ok(mut download) => {
 
-                // println!("Downloading s3 object");
-                let mut data = download.response.body;
+                        // println!("Downloading s3 object");
+                        let mut data = download.response.body;
 
-                // convert the ByteStream into a Vec<u8>
-                let mut data_vec = Vec::new();
-                while let Some(chunk) = data.next().await {
-                    data_vec.extend_from_slice(&chunk.unwrap());
-                }
+                        // convert the ByteStream into a Vec<u8>
+                        let mut data_vec = Vec::new();
+                        while let Some(chunk) = data.next().await {
+                            data_vec.extend_from_slice(&chunk.unwrap());
+                        }
 
-                if download.key.contains(".gz") {
-                    // Something that implements `std::io::Read`
-                    let c = Cursor::new(data_vec);
+                        if download.key.contains(".gz") {
+                            // Something that implements `std::io::Read`
+                            let c = Cursor::new(data_vec);
 
-                    // To inflate on the fly, "pipe" the data through the decoder, i.e. wrap the reader
-                    let mut stream = GzDecoder::new(c);
+                            // To inflate on the fly, "pipe" the data through the decoder, i.e. wrap the reader
+                            let mut stream = GzDecoder::new(c);
 
-                    let mut decompressed_data = String::new();
-                    stream.read_to_string(&mut decompressed_data).unwrap();
+                            let mut decompressed_data = String::new();
+                            stream.read_to_string(&mut decompressed_data).unwrap();
 
-                    // batch_clone.lock().unwrap().data.push_str(&decompressed_data);
-                    datas_clone.write().unwrap().push(IngestBatch {
-                        offset_key: OffsetKey {
-                            namespace: bucket_name.to_string(),
-                            partition: download.key,
-                        },
-                        data: decompressed_data,
-                    });
-                } else {
-                    // Convert Vec<u8> into a String
-                    let str_data = String::from_utf8(data_vec).unwrap();
+                            datas_clone.write().unwrap().push(IngestBatch {
+                                offset_key: OffsetKey {
+                                    namespace: bucket_name.to_string(),
+                                    partition: download.key,
+                                },
+                                data: decompressed_data,
+                            });
+                        } else {
+                            let str_data = String::from_utf8(data_vec).unwrap();
 
-                    // batch_clone.lock().unwrap().data.push_str(&str_data);
-                    datas_clone.write().unwrap().push(IngestBatch {
-                        offset_key: OffsetKey {
-                            namespace: bucket_name.to_string(),
-                            partition: download.key,
-                        },
-                        data: str_data,
-                    });
-                }
+                            datas_clone.write().unwrap().push(IngestBatch {
+                                offset_key: OffsetKey {
+                                    namespace: bucket_name.to_string(),
+                                    partition: download.key,
+                                },
+                                data: str_data,
+                            });
+                        }
+
+                    },
+                    Err(err) => {
+                        println!("{:?}", err);
+                    }
+                };
+
+
             }
+
         }).await.unwrap();
 
 

@@ -380,14 +380,14 @@ impl DataSourceS3InventoryPlugin {
     ) -> Result<GetObjectOutput, GetObjectError> {
         let mut retries = 0;
         let max_retries = 5;
-        let mut backoff_duration = Duration::from_secs(1);
+        let mut backoff_duration = Duration::from_millis(1000);
 
         loop {
             let mut get_request =
                 s3_client
-                    .get_object()
-                    .bucket(bucket.clone())
-                    .key(urldecode::decode(key.to_string()));
+                .get_object()
+                .bucket(bucket.clone())
+                .key(urldecode::decode(key.to_string()));
 
             match get_request.send().await {
                 Ok(result) => {
@@ -405,9 +405,10 @@ impl DataSourceS3InventoryPlugin {
                     backoff_duration *= 2;
 
                     println!(
-                        "Failed to get object {}, retry back in {} seconds",
+                        "Failed to get object {}, retry back in {} seconds: {}",
                         key,
-                        backoff_duration.as_secs()
+                        backoff_duration.as_secs(),
+                        err.to_string()
                     );
 
                     if retries >= max_retries {
@@ -419,7 +420,7 @@ impl DataSourceS3InventoryPlugin {
     }
 
     async fn download_and_ingest(
-        s3_client: &mut Client,
+        s3_client: &Client,
         bucket_name: &String,
         object_keys: &Vec<String>,
         _output_dir: &String,
@@ -461,6 +462,7 @@ impl DataSourceS3InventoryPlugin {
                         },
                         Err(_) => Err("Could not get object")
                     }
+                    // We drop the permit here, allowing another future to acquire it
                 })
             })
             .collect();
@@ -480,6 +482,20 @@ impl DataSourceS3InventoryPlugin {
         let metrics = metrics.clone();
         let metadata = metadata.clone();
         let offsets_clone = offsets_clone.clone();
+        let bucket_name = bucket_name.clone();
+        let datas_clone = datas.clone();
+
+        // threads.push(thread::spawn(move || {
+
+        // let mut batch: RwLock<IngestBatch> = RwLock::new(IngestBatch {
+        //     offset_key: OffsetKey {
+        //         namespace: bucket_name.to_string(),
+        //         partition: "".to_string(),
+        //     },
+        //     data: "".to_string(),
+        // });
+        // let mut batch_clone = batch.clone();
+
 
         tokio::spawn(async move {
             // for thread in threads {
@@ -554,14 +570,18 @@ impl DataSourceS3InventoryPlugin {
 
         // Wait for all threads to finish, else we will stampead the data source
         for handle in threads {
-            handle.join().unwrap();
+            match handle.join() {
+                Ok(_) => {},
+                Err(err) => {
+                    println!("ERROR: {:#?}", err);
+                },
+            }
         }
 
         if !RUNNING.lock().unwrap().load(Ordering::SeqCst) {
             INPUT_GRACEFUL_SHUTDOWN_COMPLETE.lock().unwrap().store(true, Ordering::SeqCst);
             // sleep(Duration::from_secs(120));
         }
-        // println!("Ingested");
     }
 }
 

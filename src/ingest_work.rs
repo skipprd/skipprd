@@ -288,7 +288,6 @@ impl Ingest {
         }
 
         Self::flush_buffers(false, &mut output_files);
-        drop(output_files);
 
         offset_db_clone.flush();
 
