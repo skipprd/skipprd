@@ -405,10 +405,9 @@ impl DataSourceS3InventoryPlugin {
                     backoff_duration *= 2;
 
                     println!(
-                        "Failed to get object {}, retry back in {} seconds: {}",
+                        "Failed to get object {}, retry back in {} seconds",
                         key,
-                        backoff_duration.as_secs(),
-                        err.to_string()
+                        backoff_duration.as_secs()
                     );
 
                     if retries >= max_retries {
