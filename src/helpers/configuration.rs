@@ -222,7 +222,13 @@ impl Config {
 
     pub fn get_pipeline_name() -> String {
 
-        Config::getenv("PIPELINE_NAME", "default")
+        Config::getenv("PIPELINE_NAME", "default").to_lowercase()
+
+    }
+
+    pub fn get_workspace_name() -> String {
+
+        Config::getenv("WORKSPACE_NAME", "default").to_lowercase()
 
     }
 
@@ -234,8 +240,8 @@ impl Config {
         // let default_pipeline_name = format!("{} to {}", input_plugin_name, output_plugin_name);
 
 
-        let workspace = Config::getenv("WORKSPACE_NAME", "default");
-        let pipeline = Config::getenv("PIPELINE_NAME", "default");
+        let workspace = Self::get_workspace_name();
+        let pipeline = Self::get_pipeline_name();
 
         format!("{}_{}", workspace, pipeline)
     }
@@ -325,8 +331,8 @@ impl Config {
             config.data_dir = data_dir;
         }
 
-        let workspace = Config::getenv("WORKSPACE_NAME", "default");
-        let pipeline = Config::getenv("PIPELINE_NAME", "default");
+        let workspace = Self::get_workspace_name();
+        let pipeline = Self::get_pipeline_name();
 
         let env = Config::getenv("APP_ENV", "prod");
         let uri = if env != "prod" {
@@ -393,8 +399,8 @@ impl Config {
 
             ///////////
 
-            let workspace = Config::getenv("WORKSPACE_NAME", "default");
-            let pipeline = Config::getenv("PIPELINE_NAME", "default");
+            let workspace = Self::get_workspace_name();
+            let pipeline = Self::get_pipeline_name();
 
 
             // let uri = Config::getenv("SKIPPR_API_ENDPOINT", "");
@@ -482,8 +488,8 @@ impl Config {
     }
 
     pub(crate) async fn set_status<'a>(metrics: MutexGuard<'a, Metrics>, exit_code: Option<i8>) -> Result<(), Box<dyn std::error::Error>> {
-        let workspace = Config::getenv("WORKSPACE_NAME", "default");
-        let pipeline = Config::getenv("PIPELINE_NAME", "default");
+        let workspace = Self::get_workspace_name();
+        let pipeline = Self::get_pipeline_name();
 
         let env = Config::getenv("APP_ENV", "prod");
         let uri = if env != "prod" {

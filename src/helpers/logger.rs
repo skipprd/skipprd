@@ -77,8 +77,8 @@ impl Logger {
 
     pub(crate) async fn log_api<'a>(&mut self, logs: HashMap<Log, usize>, exit_code: Option<i8>) -> Result<(), Box<dyn std::error::Error>> {
 
-        let workspace = Config::getenv("WORKSPACE_NAME", "default");
-        let pipeline = Config::getenv("PIPELINE_NAME", "default");
+        let workspace = Config::get_workspace_name();
+        let pipeline = Config::get_pipeline_name();
 
         let env = Config::getenv("APP_ENV", "prod");
         let uri = if env != "prod" {
