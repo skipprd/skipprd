@@ -582,12 +582,13 @@ async fn sync() {
                                  return;
                              }
 
-                             OUTPUT_RUNNING.lock().unwrap().store(true, Ordering::SeqCst);
+                             if !Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "").is_empty() {
+                                 OUTPUT_RUNNING.lock().unwrap().store(true, Ordering::SeqCst);
 
-                             data_output.sync(input_metadata_clone).await;
+                                 data_output.sync(input_metadata_clone).await;
 
-                             OUTPUT_RUNNING.lock().unwrap().store(false, Ordering::SeqCst);
-
+                                 OUTPUT_RUNNING.lock().unwrap().store(false, Ordering::SeqCst);
+                             }
                          });
                  }
             },
@@ -705,6 +706,7 @@ async fn sync() {
         let guard = input_metadata_clone.lock().unwrap();
         guard.clone()
     };
+
     output_sync(input_metadata_clone.clone());
 
     let data_output = DataOutputAwsAthenaPlugin::new().await;
@@ -712,7 +714,9 @@ async fn sync() {
         let guard = input_metadata_clone;
         guard.clone()
     };
-    data_output.sync(input_metadata_clone).await;
+    if !Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "").is_empty() {
+        data_output.sync(input_metadata_clone).await;
+    }
 
     let metrics_clone = metrics.clone();
 
