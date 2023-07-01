@@ -51,6 +51,8 @@ ctrlc = "3.2.5"
 signal-hook = "0.3.15"
 nix = "0.26.2"
 lru = "0.10.0"
+tar = "0.4.38"
+zip = "0.6.6"
 
 [dev-dependencies]
 serial_test = "1.0.0"

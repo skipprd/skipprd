@@ -31,7 +31,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::sleep;
 use std::time::{Instant, SystemTime};
 
-use futures::executor::block_on;
 use glob::glob_with;
 use glob::MatchOptions;
 
@@ -85,6 +84,7 @@ use crate::plugins::s3_input::DataSourceS3Plugin;
 use crate::plugins::s3_inventory::DataSourceS3InventoryPlugin;
 
 use crate::ingest_work::{Ingest, OUTPUT_FILES_STATIC};
+use crate::plugins::file_input::DataSourceLocalFilePlugin;
 use crate::plugins::stdin_input::DataSourceStdinPlugin;
 
 pub static RUNNING: Lazy<Mutex<AtomicBool>> = Lazy::new(|| Mutex::new(AtomicBool::new(true)));
@@ -643,7 +643,8 @@ async fn sync() {
 
     match Config::getenv("DATA_SOURCE_PLUGIN_NAME", "").as_str() {
         "stdin" => {
-            let mut input = block_on(DataSourceStdinPlugin::new());
+            tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(async {
+            let mut input = DataSourceStdinPlugin::new();
             input
                 .sync(
                     // &m1ut pool,
@@ -652,9 +653,23 @@ async fn sync() {
                     offsets_clone,
                 )
                 .await;
+            });
+        }
+        "file" => {
+            tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(async {
+            let mut input = DataSourceLocalFilePlugin::new();
+            input.sync(
+                // &m1ut pool,
+                input_metadata_clone,
+                metrics_clone,
+                offsets_clone
+            )
+                .await;
+            });
         }
         "s3" => {
-            let mut ds3 = block_on(DataSourceS3Plugin::new());
+            tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(async {
+            let mut ds3 = DataSourceS3Plugin::new();
             ds3.sync(
                 // &m1ut pool,
                 input_metadata_clone,
@@ -662,9 +677,11 @@ async fn sync() {
                 offsets_clone,
             )
             .await;
+            });
         }
         "s3_inventory" => {
-            let mut ds3 = block_on(DataSourceS3InventoryPlugin::new());
+            tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(async {
+            let mut ds3 = DataSourceS3InventoryPlugin::new();
             ds3.sync(
                 // &mut pool,
                 input_metadata_clone,
@@ -672,6 +689,7 @@ async fn sync() {
                 offsets_clone,
             )
             .await;
+            });
         }
         unknown => {
             println!("Plugin {} not supported", unknown);
