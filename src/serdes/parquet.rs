@@ -346,7 +346,11 @@ impl SerdeParquet {
                     // error_count += 1;
                     // errors.insert(_error.to_string(), Err(_error));
 
-                    tokio::spawn(async move {
+                    tokio::runtime::Builder::new_multi_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap()
+                        .block_on(async {
                         LOGGER.lock().await.log(LogLevel::Error, _error.to_string()).await;
                     });
 
