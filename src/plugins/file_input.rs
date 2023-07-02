@@ -66,8 +66,6 @@ impl DataSourceLocalFilePlugin {
         let file_path_pattern = format!("{}/**/*", self.source_directory);
 
         let mut data_batches_stream = Box::pin(self.prepare_data_for_processing(
-            &metadata,
-            &metrics,
             &offsets_clone,
             self.source_directory.clone(),
             self.chunk_size.clone()
@@ -118,8 +116,6 @@ impl DataSourceLocalFilePlugin {
 
     pub fn prepare_data_for_processing(
         &self,
-        metadata: &Arc<Mutex<HashMap<String, Metadata>>>,
-        metrics: &Arc<Mutex<Metrics>>,
         offsets_clone: &Arc<Offsets>,
         source_dir: String,
         chunk_size: i64,
@@ -252,7 +248,6 @@ impl DataSourceLocalFilePlugin {
                             }
 
                             if batch_bytes >= chunk_size {
-                                println!("Sending batch of size: {} meeting batch limit of {}", batch_bytes, chunk_size);
                                 tx.unbounded_send(current_batch.clone()).unwrap();
                                 current_batch.clear();
                                 batch_bytes = 0;
@@ -264,7 +259,6 @@ impl DataSourceLocalFilePlugin {
             }
 
             if !current_batch.is_empty() {
-                println!("Sending batch of size: {} meeting batch limit of {}", batch_bytes, chunk_size);
                 tx.unbounded_send(current_batch.clone()).unwrap();
                 current_batch.clear();
                 batch_bytes = 0;

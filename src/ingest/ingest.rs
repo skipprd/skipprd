@@ -21,13 +21,13 @@ pub struct IngestRecord {
     pub(crate) record: Value,
 }
 
-pub fn fast_path_ingest_buf<R: Read>(reader: &mut BufReader<R>) -> ValueIter<R> {
+pub fn ingest_buf<R: Read>(reader: &mut BufReader<R>) -> ValueIter<R> {
     ValueIter::new(reader, None)
 }
 
 // pub fn fast_path_ingest(unwrapped_message: &mut IngestRecord, metadata: &mut HashMap<String, Metadata>) -> HashMap<String, Message<Value>> {
 // pub fn fast_path_ingest(unwrapped_message: &mut IngestRecord, metadata: &mut HashMap<String, Metadata>) {
-pub fn fast_path_ingest(
+pub fn ingest(
     unwrapped_message: &Value,
     metadata: &mut HashMap<String, Metadata>,
     updatedSchema: &mut String,
@@ -59,7 +59,7 @@ pub fn fast_path_ingest(
             None => "".to_string(),
         };
 
-        let resolved_value = fast_set_value(
+        let resolved_value = set_value(
             &field_data_type,
             &field.to_string(),
             value,
@@ -127,7 +127,7 @@ pub fn fast_path_ingest(
  * @param $value string -  the actual field value
  * @return mixed|null - value data type on success or null on error
  */
-fn fast_set_value(
+fn set_value(
     data_type: &str,
     field: &str,
     value: &Value,
@@ -206,7 +206,7 @@ fn fast_set_value(
                                 ))
                                 .enabled
                         {
-                            let newval = fast_set_value(
+                            let newval = set_value(
                                 &metadata
                                     .get_mut(&field.to_string())
                                     .unwrap()
@@ -286,7 +286,7 @@ fn fast_set_value(
                                 .unwrap()
                                 .enabled
                         {
-                            let newval = fast_set_value(
+                            let newval = set_value(
                                 &metadata
                                     .get_mut(&field.to_string())
                                     .unwrap()
@@ -377,7 +377,7 @@ fn fast_set_value(
                                     .get(key)
                                     .unwrap()
                                     .clone()
-                                    .out_field_name] = fast_set_value(
+                                    .out_field_name] = set_value(
                                     &metadata
                                         .get_mut(field)
                                         .unwrap()
@@ -487,7 +487,7 @@ fn fast_set_value(
         );
 
         if discoverd_data_type != "" {
-            return fast_set_value(
+            return set_value(
                 &discoverd_data_type,
                 &field.to_string(),
                 value,
@@ -570,7 +570,7 @@ fn discover_ingest(
     discoverd_data_type.clone()
 }
 
-fn set_date(field: &str, value: &Value, metadata: &HashMap<String, Metadata>) -> Value {
+pub fn set_date(field: &str, value: &Value, metadata: &HashMap<String, Metadata>) -> Value {
     // Hive Timestamp doesn't support string dates
     match value.as_str() {
         Some(val) => {
@@ -702,7 +702,7 @@ mod test_discover_on_ingest {
 
     use crate::discover::AnalyseSchema;
 
-    use crate::ingest::ingest_fast::fast_path_ingest;
+    use crate::ingest::ingest::ingest;
     use crate::serdes::json;
     use crate::serdes::json::SerdeJson;
 
@@ -800,7 +800,7 @@ mod test_discover_on_ingest {
         let mut updatedSchema = "no".to_string();
 
         // NOTE: This schema is assert tested in discovery
-        let ingestValue = fast_path_ingest(
+        let ingestValue = ingest(
             records.first().unwrap(),
             &mut newMeta.get_mut("").unwrap().fields,
             &mut updatedSchema,

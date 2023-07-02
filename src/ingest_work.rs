@@ -3,7 +3,7 @@ use crate::discover::Metadata;
 use crate::helpers::configuration::{Config, Metrics};
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::helpers::Helpers;
-use crate::ingest::ingest_fast::fast_path_ingest;
+use crate::ingest::ingest::ingest;
 use crate::serdes::json::SerdeJson;
 use crate::RUNNING;
 use glob::{glob_with, MatchOptions};
@@ -17,6 +17,8 @@ use std::io::{BufWriter, Write};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use futures::executor::block_on;
+use crate::ingest::fast_ingest::fast_path_ingest;
 
 pub struct Buffer {
     data: Vec<u8>,
@@ -282,15 +284,28 @@ impl Ingest {
                     let msg = fast_path_ingest(
                         &record,
                         &mut meta.get_mut(&skpr_namespace).unwrap().fields,
-                        &mut updated_schema_clone.lock().unwrap(),
                         flatten,
                     );
 
-                    let buf_str = msg.to_string() + "\n";
-                    buffers.write(&output_file_name, buf_str.as_bytes());
-                    // .or_insert_with(Buffer::new);
-                    // buffer.write(buf_str.as_bytes());
-                    // buffer.bytes += record_bytes;
+                    match msg {
+                        Ok(msg) => {
+                            let buf_str = msg.to_string() + "\n";
+                            buffers.write(&output_file_name, buf_str.as_bytes());
+                        },
+                        Err(err) => {
+                            // println!("Falling back to slow path due to: {}", err);
+                            let msg = ingest(
+                                &record,
+                                &mut meta.get_mut(&skpr_namespace).unwrap().fields,
+                                &mut updated_schema_clone.lock().unwrap(),
+                                flatten,
+                            );
+
+                            let buf_str = msg.to_string() + "\n";
+                            buffers.write(&output_file_name, buf_str.as_bytes());
+
+                        }
+                    }
 
                     i += 1;
                     j += 1;

@@ -643,9 +643,9 @@ async fn sync() {
 
     match Config::getenv("DATA_SOURCE_PLUGIN_NAME", "").as_str() {
         "stdin" => {
-            tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(async {
-            let mut input = DataSourceStdinPlugin::new();
-            input
+            tokio::spawn(async {
+                let mut input = DataSourceStdinPlugin::new().await;
+                input
                 .sync(
                     // &m1ut pool,
                     input_metadata_clone,
@@ -653,46 +653,49 @@ async fn sync() {
                     offsets_clone,
                 )
                 .await;
-            });
+            }).await.unwrap();
         }
         "file" => {
-            tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(async {
-            let mut input = DataSourceLocalFilePlugin::new();
-            input.sync(
-                // &m1ut pool,
-                input_metadata_clone,
-                metrics_clone,
-                offsets_clone
-            )
+            tokio::spawn(async {
+                let mut input = DataSourceLocalFilePlugin::new().await;
+                input.sync(
+                    // &m1ut pool,
+                    input_metadata_clone,
+                    metrics_clone,
+                    offsets_clone
+                )
                 .await;
-            });
+            }).await.unwrap();
         }
         "s3" => {
-            tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(async {
-            let mut ds3 = DataSourceS3Plugin::new();
-            ds3.sync(
-                // &m1ut pool,
-                input_metadata_clone,
-                metrics_clone,
-                offsets_clone,
-            )
-            .await;
-            });
+            tokio::spawn(async {
+                let mut ds3 = DataSourceS3Plugin::new().await;
+                ds3.sync(
+                    // &m1ut pool,
+                    input_metadata_clone,
+                    metrics_clone,
+                    offsets_clone,
+                )
+                .await;
+            }).await.unwrap();
         }
         "s3_inventory" => {
-            tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(async {
-            let mut ds3 = DataSourceS3InventoryPlugin::new();
-            ds3.sync(
-                // &mut pool,
-                input_metadata_clone,
-                metrics_clone,
-                offsets_clone,
-            )
-            .await;
-            });
+            tokio::spawn(async {
+                let mut ds3 = DataSourceS3InventoryPlugin::new().await;
+                ds3.sync(
+                    // &mut pool,
+                    input_metadata_clone,
+                    metrics_clone,
+                    offsets_clone,
+                )
+                .await;
+            }).await.unwrap();
+        }
+        "" => {
+            println!("No Data Source plugin specified. You must specify a data source plugin, see documentation for the DATA_SOURCE_PLUGIN_NAME environment variable.");
         }
         unknown => {
-            println!("Plugin {} not supported", unknown);
+            println!("Data Source Plugin {} not supported", unknown);
         }
     };
 
@@ -897,7 +900,7 @@ fn output_sync(metadata: HashMap<String, Metadata>) {
 
 pub fn flatten_metadata(metadata: &Metadata, flattened: &mut HashMap<String, Metadata>) {
     for (key, val) in metadata.fields.iter() {
-        if (val.determined_type == "record" || val.determined_type == "map") {
+        if val.determined_type == "record" || val.determined_type == "map" {
             flatten_metadata(val, flattened);
         } else {
             flattened.insert(val.out_field_name.clone(), val.clone());

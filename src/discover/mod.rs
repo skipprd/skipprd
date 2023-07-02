@@ -22,7 +22,7 @@ mod filter_parse_int;
 
 pub mod arrow_schema;
 use crate::helpers::configuration::Config;
-use crate::ingest::ingest_fast::IngestRecord;
+use crate::ingest::ingest::IngestRecord;
 use crate::serdes::json::SerdeJson;
 
 #[derive(Default, Debug, Clone, Deserialize, Serialize)]
