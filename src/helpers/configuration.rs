@@ -23,7 +23,7 @@ use reqwest::header::{HeaderMap, HeaderName};
 use reqwest::{Client, StatusCode};
 
 use crate::discover::Metadata;
-use crate::{flatten_metadata, RUNNING};
+use crate::{flatten_metadata, METRICS, RUNNING};
 
 use crate::helpers::license::{LicenseChecker, TENANT_ID};
 use crate::helpers::Helpers;
@@ -498,9 +498,11 @@ impl Config {
     }
 
     pub(crate) async fn set_status<'a>(
-        metrics: MutexGuard<'a, Metrics>,
         exit_code: Option<i8>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+
+        let metrics = METRICS.lock().unwrap();
+
         let workspace = Self::get_workspace_name();
         let pipeline = Self::get_pipeline_name();
 

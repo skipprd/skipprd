@@ -1,11 +1,11 @@
 use crate::buffer::BufferChunker;
 use crate::discover::Metadata;
-use crate::helpers::configuration::{Config, Metrics};
+use crate::helpers::configuration::{Config};
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::helpers::Helpers;
 use crate::ingest::ingest::ingest;
 use crate::serdes::json::SerdeJson;
-use crate::RUNNING;
+use crate::{METRICS, RUNNING};
 use glob::{glob_with, MatchOptions};
 use lru::LruCache;
 use once_cell::sync::Lazy;
@@ -192,7 +192,6 @@ impl Ingest {
     pub fn ingest_file(
         datas: Vec<IngestBatch>,
         metadata: &Arc<Mutex<HashMap<String, Metadata>>>,
-        metrics: &Arc<Mutex<Metrics>>,
         offset_db: &Arc<Offsets>,
     ) {
         let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
@@ -206,7 +205,6 @@ impl Ingest {
 
         let updated_schema_clone = updated_schema;
         let metadata_clone = metadata.clone();
-        let metrcis_clone = metrics.clone();
         let offset_db_clone = offset_db.clone();
 
         let mut buffers: Buffers = Buffers::new();
@@ -221,6 +219,7 @@ impl Ingest {
         let mut bytes: u64 = 0;
         let mut i = 0;
         let mut j = 0;
+        let mut d = 0;
 
         for ingest_batch in datas {
             let mut buf_str: String = String::new();
@@ -235,13 +234,9 @@ impl Ingest {
                     || (record.is_object() && record.as_object().unwrap().is_empty())
                     || (record.is_array() && record.as_array().unwrap().is_empty())
                 {
-                    // println!("{}", &ingest_batch.data);
-                    let mut counter_lock = metrcis_clone
-                        .lock()
-                        .expect("Could not lock metrics for deadletter stats");
-                    counter_lock.deadletters_total += 1;
 
                     i += 1;
+                    d += 1;
 
                     continue;
                 }
@@ -383,7 +378,8 @@ impl Ingest {
 
         buffers.clear_all();
 
-        let mut counter_lock = metrcis_clone.lock().unwrap();
+        let mut counter_lock = METRICS.lock().unwrap();
+        counter_lock.deadletters_total += d;
         counter_lock.ingeted_current += j;
         counter_lock.messages_total += i;
         counter_lock.bytes_current += bytes;

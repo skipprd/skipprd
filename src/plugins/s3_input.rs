@@ -1,4 +1,4 @@
-use crate::helpers::configuration::{Config, Metrics};
+use crate::helpers::configuration::{Config};
 
 use aws_sdk_s3::Client;
 use aws_sdk_s3::Error as S3Error;
@@ -74,11 +74,9 @@ impl DataSourceS3Plugin {
         &mut self,
         // pool: &mut ThreadPool,
         metadata: Arc<Mutex<HashMap<String, Metadata>>>,
-        metrics: Arc<Mutex<Metrics>>,
         offsets: Arc<Offsets>,
     ) {
         let metadata = metadata.clone();
-        let metrics = metrics.clone();
 
         // let offsets = Arc::new(Offsets::init().unwrap());
 
@@ -185,8 +183,7 @@ impl DataSourceS3Plugin {
                                         &outputs,
                                         &self.temp_dir,
                                         &metadata,
-                                        &metrics,
-                                        &offsets_clone,
+                                        &offsets_clone
                                     )
                                     .await;
 
@@ -220,7 +217,6 @@ impl DataSourceS3Plugin {
                                 &outputs,
                                 &self.temp_dir,
                                 &metadata,
-                                &metrics,
                                 &offsets_clone,
                             )
                             .await;
@@ -284,7 +280,6 @@ impl DataSourceS3Plugin {
         object_keys: &Vec<String>,
         _output_dir: &String,
         metadata: &Arc<Mutex<HashMap<String, Metadata>>>,
-        metrics: &Arc<Mutex<Metrics>>,
         offsets_clone: &Arc<Offsets>,
     ) {
         let semaphore = Arc::new(Semaphore::new(2048));
@@ -335,7 +330,6 @@ impl DataSourceS3Plugin {
         let datas_clone = datas.clone();
 
         let bucket_name = bucket_name.clone();
-        let metrics = metrics.clone();
         let metadata = metadata.clone();
         let offsets_clone = offsets_clone.clone();
         let bucket_name = bucket_name.clone();
@@ -409,7 +403,7 @@ impl DataSourceS3Plugin {
 
         threads.push(thread::spawn(move || {
             let batch = datas.read().unwrap().to_vec();
-            self::Ingest::ingest_file(batch, &metadata, &metrics, &offsets_clone);
+            self::Ingest::ingest_file(batch, &metadata, &offsets_clone);
         }));
 
         // Wait for all threads to finish, else we will stampead the data source

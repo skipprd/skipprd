@@ -20,7 +20,7 @@ use std::fs::File;
 use std::io::BufReader;
 use std::ops::Add;
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::{env, thread};
 
 use std::fs;
@@ -96,6 +96,7 @@ pub static OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE: Lazy<Mutex<AtomicBool>> =
     Lazy::new(|| Mutex::new(AtomicBool::new(false)));
 
 pub static LOGGER: Lazy<Arc<tokio::sync::Mutex<Logger>>> = Lazy::new(|| Logger::new(100));
+pub static METRICS: Lazy<Arc<Mutex<Metrics>>> = Lazy::new(|| Arc::new(Mutex::new(Metrics::new())));
 
 #[tokio::main]
 async fn main() {
@@ -300,9 +301,9 @@ async fn sync() {
 
     let now = Arc::new(Mutex::new(Instant::now()));
 
-    let metrics: Arc<Mutex<Metrics>> = Arc::new(Mutex::new(Metrics::new()));
+    // let metrics: Arc<Mutex<Metrics>> = Arc::new(Mutex::new(Metrics::new()));
 
-    let metrics_clone = metrics.clone();
+    // let metrics_clone = metrics.clone();
 
     let offsets = Arc::new(Offsets::init().unwrap());
     let offsets_clone = offsets.clone();
@@ -369,7 +370,7 @@ async fn sync() {
             }
             RUNNING.lock().unwrap().store(false, Ordering::SeqCst);
 
-            let metrics_clone = metrics_clone.clone();
+            // let metrics_clone = METRICS.clone();
             let offsets_clone = offsets_clone.clone();
             // let logger_clone = Arc::clone(&logger_clone);
 
@@ -398,10 +399,18 @@ async fn sync() {
                 offsets_clone.flush();
 
                 // let mut metrics: Metrics = Metrics::new();
-                let metrics_lock = metrics_clone.lock().unwrap();
+                let metrics_lock = match METRICS.try_lock() {
+                    Ok(m) => {
+                        println!("Messages per Min: {}", m.ingeted_current);
+                        println!("Messages Total: {}", m.messages_total);
+                    },
+                    Err(_e) => {
+                        println!("Could not lock metrics, skipping flush");
+                        return;
+                    }
+                };
 
-                println!("Messages per Min: {}", metrics_lock.ingeted_current);
-                println!("Messages Total: {}", metrics_lock.messages_total);
+
 
                 ////////////// Cleanup part written parquet files START ////////
                 let options = MatchOptions {
@@ -468,7 +477,7 @@ async fn sync() {
 
     let mut planner = periodic::Planner::new();
 
-    let metrics_clone = metrics.clone();
+    // let metrics_clone = metrics.clone();
     let now_clone = now.clone();
 
     // match Config::list_dir_contents(data_dir.clone()) {
@@ -485,7 +494,9 @@ async fn sync() {
                 // }
 
                 // let mut metrics: Metrics = Metrics::new();
-                let mut metrics_lock = metrics_clone.lock().unwrap();
+
+                let mut metrics_lock = METRICS.lock().unwrap();
+
 
                 // let mut counter_lock = ingestMsgCount.lock().unwrap();
                 // let mut total_lock = ingestMsgTotal.lock().unwrap();
@@ -505,18 +516,21 @@ async fn sync() {
                 println!("Bytes per Min: {}", metrics_lock.bytes_current);
                 println!("Bytes: {}", metrics_lock.bytes_total);
 
+                drop(metrics_lock);
+
                 tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
                     .build()
                     .unwrap()
                     .block_on(async {
-                        match Config::set_status(metrics_lock, Some(0)).await {
+                        match Config::set_status(Some(0)).await {
                             Ok(_g) => {}
                             Err(_err) => {}
                         }
                     });
 
-                let mut metrics_lock = metrics_clone.lock().unwrap();
+                let mut metrics_lock = METRICS.lock().unwrap();
+
 
                 metrics_lock.bytes_current = 0;
                 metrics_lock.ingeted_current = 0;
@@ -532,7 +546,7 @@ async fn sync() {
 
     use rand::Rng; // 0.8.5
 
-    let metrics_clone = metrics.clone();
+    // let metrics_clone = metrics.clone();
 
     let chaos = Config::getenv("CHAOS_MODE", "no");
     if Config::truth_value(&chaos) {
@@ -638,7 +652,7 @@ async fn sync() {
 
     let input_metadata_clone = skippr_metadata.clone();
 
-    let metrics_clone = metrics.clone();
+    // let metrics_clone = metrics.clone();
     let offsets_clone = offsets.clone();
 
     match Config::getenv("DATA_SOURCE_PLUGIN_NAME", "").as_str() {
@@ -649,7 +663,6 @@ async fn sync() {
                 .sync(
                     // &m1ut pool,
                     input_metadata_clone,
-                    metrics_clone,
                     offsets_clone,
                 )
                 .await;
@@ -661,7 +674,6 @@ async fn sync() {
                 input.sync(
                     // &m1ut pool,
                     input_metadata_clone,
-                    metrics_clone,
                     offsets_clone
                 )
                 .await;
@@ -673,7 +685,6 @@ async fn sync() {
                 ds3.sync(
                     // &m1ut pool,
                     input_metadata_clone,
-                    metrics_clone,
                     offsets_clone,
                 )
                 .await;
@@ -685,7 +696,6 @@ async fn sync() {
                 ds3.sync(
                     // &mut pool,
                     input_metadata_clone,
-                    metrics_clone,
                     offsets_clone,
                 )
                 .await;
@@ -700,7 +710,7 @@ async fn sync() {
     };
 
     // wait arbitrary time for ingest threads to complete
-    sleep(Duration::from_secs(120));
+    // sleep(Duration::from_secs(120));
 
     // RUNNING.lock().unwrap().store(false, Ordering::SeqCst);
     //
@@ -740,10 +750,10 @@ async fn sync() {
         data_output.sync(input_metadata_clone).await;
     }
 
-    let metrics_clone = metrics.clone();
+    let mut metrics_lock = METRICS.lock().unwrap();
 
     // let mut metrics: Metrics = Metrics::new();
-    let mut metrics_lock = metrics_clone.lock().unwrap();
+    // let mut metrics_lock = metrics_clone.lock().unwrap();
 
     // let mut counter_lock = ingestMsgCount.lock().unwrap();
     // let mut total_lock = ingestMsgTotal.lock().unwrap();
@@ -763,7 +773,9 @@ async fn sync() {
     println!("Bytes per Min: {}", metrics_lock.bytes_current);
     println!("Bytes: {}", metrics_lock.bytes_total);
 
-    match Config::set_status(metrics_lock, Some(0)).await {
+    drop(metrics_lock);
+
+    match Config::set_status(Some(0)).await {
         Ok(_g) => {}
         Err(_err) => {}
     }

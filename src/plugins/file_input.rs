@@ -13,7 +13,7 @@ use flate2::read::GzDecoder;
 use tar::Archive;
 use zip::ZipArchive;
 
-use crate::helpers::configuration::{Config, Metrics};
+use crate::helpers::configuration::{Config};
 use crate::discover::Metadata;
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::ingest_work::{Ingest, IngestBatch};
@@ -56,11 +56,9 @@ impl DataSourceLocalFilePlugin {
     pub async fn sync(
         &mut self,
         metadata: Arc<Mutex<HashMap<String, Metadata>>>,
-        metrics: Arc<Mutex<Metrics>>,
         offsets: Arc<Offsets>,
     ) {
         let metadata = metadata.clone();
-        let metrics = metrics.clone();
         let offsets_clone = offsets.clone();
 
         let file_path_pattern = format!("{}/**/*", self.source_directory);
@@ -75,7 +73,6 @@ impl DataSourceLocalFilePlugin {
 
             let offsets_clone = offsets_clone.clone();
             let metadata = metadata.clone();
-            let metrics = metrics.clone();
 
             let ingest_handle = task::spawn_blocking(move || {
 
@@ -83,7 +80,7 @@ impl DataSourceLocalFilePlugin {
                 // let metadata = metadata.clone();
                 // let metrics = metrics.clone();
 
-                self::Ingest::ingest_file(batch, &metadata, &metrics, &offsets_clone);
+                self::Ingest::ingest_file(batch, &metadata, &offsets_clone);
             });
             ingest_handle.await.unwrap();
             // batch.clear();

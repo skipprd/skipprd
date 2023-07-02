@@ -1,5 +1,5 @@
 use crate::discover::Metadata;
-use crate::helpers::configuration::{Config, Metrics};
+use crate::helpers::configuration::{Config};
 use crate::helpers::offsets::{OffsetKey, Offsets};
 use crate::helpers::Helpers;
 use crate::ingest_work::{Ingest, IngestBatch, OUTPUT_FILES_STATIC};
@@ -41,7 +41,6 @@ impl DataSourceStdinPlugin {
     pub async fn sync(
         &mut self,
         metadata: Arc<Mutex<HashMap<String, Metadata>>>,
-        metrics: Arc<Mutex<Metrics>>,
         offsets: Arc<Offsets>,
     ) {
         let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel();
@@ -102,11 +101,10 @@ impl DataSourceStdinPlugin {
 
                     // Spawn a new task in the runtime for each batch received.
                     let metadata = Arc::clone(&metadata);
-                    let metrics = Arc::clone(&metrics);
                     let offsets_clone = offsets.clone();
 
                     thread::spawn(move || {
-                        Ingest::ingest_file(vec![batch], &metadata, &metrics, &offsets_clone)
+                        Ingest::ingest_file(vec![batch], &metadata, &offsets_clone)
                     })
                     .join()
                     .unwrap();
