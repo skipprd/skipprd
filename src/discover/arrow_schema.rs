@@ -73,13 +73,19 @@ fn set_object_scalar_field_type(
             hs.insert(ftype);
         }
         InferredType::Array(_) => {
-            return Err(ArrowError::JsonError("Only Scalar possible found Array instead of Scalar".to_string()));
+            return Err(ArrowError::JsonError(
+                "Only Scalar possible found Array instead of Scalar".to_string(),
+            ));
         }
         InferredType::Object(_) => {
-            return Err(ArrowError::JsonError("Only Scalar possible found Object instead of Scalar".to_string()));
+            return Err(ArrowError::JsonError(
+                "Only Scalar possible found Object instead of Scalar".to_string(),
+            ));
         }
         _Any => {
-            return Err(ArrowError::JsonError("Only Scalar possible found Any instead of Scalar".to_string()));
+            return Err(ArrowError::JsonError(
+                "Only Scalar possible found Any instead of Scalar".to_string(),
+            ));
         }
     }
     Ok(())
@@ -139,7 +145,11 @@ fn convert_skippr_to_arrow_field_types(
                 );
             }
             "boolean" => {
-                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Boolean);
+                set_object_scalar_field_type(
+                    &mut field_types,
+                    &v.out_field_name,
+                    DataType::Boolean,
+                );
             }
             "NULL" => {
                 set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Null);
@@ -151,7 +161,11 @@ fn convert_skippr_to_arrow_field_types(
                 set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Int64);
             }
             "double" => {
-                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Float64);
+                set_object_scalar_field_type(
+                    &mut field_types,
+                    &v.out_field_name,
+                    DataType::Float64,
+                );
             }
             "string" => {
                 set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Utf8);

@@ -1,17 +1,16 @@
 extern crate reqwest;
 extern crate serde_json;
 
-use crate::helpers::configuration::{Config};
+use crate::helpers::configuration::Config;
+use once_cell::sync::Lazy;
 use reqwest::{header::HeaderName, Client, Url};
+use serde_derive::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::error::Error;
 use std::process::exit;
 use std::sync::Mutex;
-use once_cell::sync::Lazy;
-use serde_derive::{Deserialize, Serialize};
 
-pub static TENANT_ID: Lazy<Mutex<String>> =
-    Lazy::new(|| Mutex::new("".to_string()));
+pub static TENANT_ID: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new("".to_string()));
 
 const API_KEY_ENV_VAR: &str = "SKIPPR_API_TOKEN";
 const APP_ENV: &str = "APP_ENV";
@@ -68,7 +67,10 @@ impl LicenseChecker {
             self.license = Some(body);
             // println!("{:?}", self.license);
 
-            TENANT_ID.lock().unwrap().push_str(&self.license.as_ref().unwrap().tenant);
+            TENANT_ID
+                .lock()
+                .unwrap()
+                .push_str(&self.license.as_ref().unwrap().tenant);
 
             self.license_is_valid = self
                 .license

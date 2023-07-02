@@ -105,7 +105,6 @@ const DATE_FIELD_VALIDATION_MIN_SAMPLE: i32 = 100;
 fn get_type(value: &str) -> String {
     let _foo = "";
 
-
     match value.parse::<i32>() {
         Ok(_bool) => {
             return "integer".to_string();
@@ -117,8 +116,7 @@ fn get_type(value: &str) -> String {
                 Ok(_) => {
                     return "integer".to_string();
                 }
-                Err(_) => {
-                }
+                Err(_) => {}
             }
         }
     }
@@ -128,17 +126,14 @@ fn get_type(value: &str) -> String {
             return "long".to_string();
         }
         Err(..) => {
-
             let timmed_value = value.trim_matches('"');
             let json_value: Result<i128, _> = serde_json::from_str(timmed_value);
             match json_value {
                 Ok(_) => {
                     return "long".to_string();
                 }
-                Err(_) => {
-                }
+                Err(_) => {}
             }
-
         }
     }
 
@@ -348,7 +343,10 @@ impl AnalyseSchema {
 
             jsonValue = value.clone();
 
-            if value.as_str().is_some() && serde_json::from_str(value.as_str().unwrap()).unwrap_or(false) && serde_json::from_str(value.as_str().unwrap()).unwrap() {
+            if value.as_str().is_some()
+                && serde_json::from_str(value.as_str().unwrap()).unwrap_or(false)
+                && serde_json::from_str(value.as_str().unwrap()).unwrap()
+            {
                 jsonValue = serde_json::from_str(value.as_str().unwrap()).unwrap();
             }
 
@@ -394,7 +392,11 @@ impl AnalyseSchema {
                     // &Helpers::clean_field_name(i.to_string()),
                     &i.to_string(),
                     &mut sv,
-                    metadata.get_mut(&field.to_string()).unwrap().fields.as_mut(),
+                    metadata
+                        .get_mut(&field.to_string())
+                        .unwrap()
+                        .fields
+                        .as_mut(),
                 );
                 i += 1;
             }
@@ -453,7 +455,10 @@ impl AnalyseSchema {
                     // parent field resolve type as `record`.
                     // When in fact we'd want to discover schema as [int, int, int] and
                     // parent field resolve as `array`.
-                    if type_count.len() == 2 && type_count.contains_key("integer") && type_count.contains_key("boolean") {
+                    if type_count.len() == 2
+                        && type_count.contains_key("integer")
+                        && type_count.contains_key("boolean")
+                    {
                         type_count.remove("boolean");
                     }
                 }
@@ -484,7 +489,10 @@ impl AnalyseSchema {
                     // parent field resolve type as `record`.
                     // When in fact we'd want to discover schema as [int, int, int] and
                     // parent field resolve as `array`.
-                    if type_count.len() == 2 && type_count.contains_key("integer") && type_count.contains_key("boolean") {
+                    if type_count.len() == 2
+                        && type_count.contains_key("integer")
+                        && type_count.contains_key("boolean")
+                    {
                         type_count.remove("boolean");
                     }
                 }
@@ -534,10 +542,7 @@ impl AnalyseSchema {
 
         let mut data_type = get_type(value);
 
-        if data_type == *"string"
-            || data_type == *"integer"
-            || data_type == *"double"
-        {
+        if data_type == *"string" || data_type == *"integer" || data_type == *"double" {
             // String really an int?
             data_type = self.check_string_or_int(value);
 
@@ -789,13 +794,11 @@ impl AnalyseSchema {
                             return true;
                         }
                         false
-                    },
+                    }
                     None => false,
                 }
-            },
-            Err(_) => {
-                false
             }
+            Err(_) => false,
         }
     }
 
@@ -839,18 +842,10 @@ impl AnalyseSchema {
         new_value: String,
     ) {
         match &*evolution {
-            "cast" => {
-                *data_type = new_value
-            }
-            "new" => {
-                *field = new_value
-            }
-            "rename" => {
-                *field = new_value
-            }
-            "merge" => {
-                *field = new_value
-            }
+            "cast" => *data_type = new_value,
+            "new" => *field = new_value,
+            "rename" => *field = new_value,
+            "merge" => *field = new_value,
             "default" => {}
             _ => {}
         }
@@ -938,7 +933,7 @@ impl AnalyseSchema {
         metadata: &mut HashMap<String, Metadata>,
         parent_type: Option<&str>,
         parent_field: Option<&str>,
-        flatten: bool
+        flatten: bool,
     ) {
         let demoted_types = vec!["boolean", "date", "timestamp", "timestamp_milli"];
 
@@ -950,11 +945,14 @@ impl AnalyseSchema {
 
             if flatten {
                 if let Some(parent_field) = parent_field {
-                    field.out_field_name = format!("{}_{}", parent_field, Helpers::clean_field_name(field_name.to_string()));
+                    field.out_field_name = format!(
+                        "{}_{}",
+                        parent_field,
+                        Helpers::clean_field_name(field_name.to_string())
+                    );
                 } else {
                     field.out_field_name = Helpers::clean_field_name(field_name.to_string());
                 }
-
             } else {
                 field.out_field_name = Helpers::clean_field_name(field_name.to_string());
             }
@@ -997,8 +995,13 @@ impl AnalyseSchema {
                 }
             }
 
-            if !field.determined_type.is_empty() && vec!["map", "array", "record"].contains(&field.determined_type.as_str()) && field.fields.len() > 0 {
-                if field.determined_type_values == "".to_string() && (field.determined_type == "array" || field.determined_type == "map") {
+            if !field.determined_type.is_empty()
+                && vec!["map", "array", "record"].contains(&field.determined_type.as_str())
+                && field.fields.len() > 0
+            {
+                if field.determined_type_values == "".to_string()
+                    && (field.determined_type == "array" || field.determined_type == "map")
+                {
                     // field.determined_type_values = "".to_string();
 
                     // Ignore sub-fields for Avro array, the values are just enumerated, their not fields themselves.
@@ -1061,7 +1064,7 @@ impl AnalyseSchema {
                         &mut field.fields,
                         Some(&field.determined_type),
                         Some(&field.out_field_name),
-                        flatten
+                        flatten,
                     );
                 }
             }
@@ -1070,7 +1073,10 @@ impl AnalyseSchema {
         // println!("Metadata {:?}", metadata);
     }
 
-    pub fn merge_metadata(foo: &mut HashMap<String, Metadata>, bar: &mut HashMap<String, Metadata>) {
+    pub fn merge_metadata(
+        foo: &mut HashMap<String, Metadata>,
+        bar: &mut HashMap<String, Metadata>,
+    ) {
         for (key, value) in bar.drain() {
             foo.entry(key.clone())
                 .and_modify(|metadata| {
@@ -1084,11 +1090,16 @@ impl AnalyseSchema {
                         metadata.parent_type = value.parent_type.clone();
                     }
                     for (field, field_metadata) in *value.fields {
-                        *metadata.fields.entry(field).or_insert( field_metadata) = field_metadata.clone();
+                        *metadata.fields.entry(field).or_insert(field_metadata) =
+                            field_metadata.clone();
                     }
-                    metadata.date_candidate = value.date_candidate.or(metadata.date_candidate.take());
+                    metadata.date_candidate =
+                        value.date_candidate.or(metadata.date_candidate.take());
                     for (evolution_key, evolution_value) in *value.evolution {
-                        *metadata.evolution.entry(evolution_key).or_insert(evolution_value) = evolution_value.clone();
+                        *metadata
+                            .evolution
+                            .entry(evolution_key)
+                            .or_insert(evolution_value) = evolution_value.clone();
                     }
                     metadata.enabled = metadata.enabled || value.enabled;
                     if !value.determined_type.is_empty() {
@@ -1213,8 +1224,6 @@ mod discover_date_formats_tests {
 
         date_str = "2022-02-22";
         assert_eq!(Some("DateOnly"), foo.is_valid_date(date_str));
-
-
     }
 }
 
@@ -1283,7 +1292,13 @@ mod tests {
         let mut metadata = HashMap::new();
         metadata.insert("foo".to_string(), Metadata::new().unwrap());
 
-        AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1), &mut metadata.get_mut("foo").unwrap().fields).unwrap();
+        AnalyseSchema::infer_json_schema(
+            &mut foo,
+            in_file,
+            Some(1),
+            &mut metadata.get_mut("foo").unwrap().fields,
+        )
+        .unwrap();
 
         AnalyseSchema::determine_field_types(&mut metadata, None, None, false);
 
@@ -1291,8 +1306,14 @@ mod tests {
 
         println!("{:?}", metadata);
         println!("{:?}", metadata.get("foo").unwrap().fields);
-        println!("{:?}", metadata.get("foo").unwrap().fields.get("abc1").unwrap());
-        println!("{:?}", metadata.get("foo").unwrap().fields.get("abc2").unwrap());
+        println!(
+            "{:?}",
+            metadata.get("foo").unwrap().fields.get("abc1").unwrap()
+        );
+        println!(
+            "{:?}",
+            metadata.get("foo").unwrap().fields.get("abc2").unwrap()
+        );
         // println!("{:?}", new_meta.get("foo").unwrap().fields.get("abc2").unwrap().determined_type);
         // println!("{:?}", new_meta.get("foo").unwrap().fields.get("abc2").unwrap().determined_type_values);
 

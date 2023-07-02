@@ -36,8 +36,7 @@ pub fn php_filter_parse_int(str: String, ret: &mut i64) -> bool {
         } else {
             signed_unsigned_int = 1;
         }
-        ctx_value =
-            signed_unsigned_int * cast_char_to_int(str.chars().nth(n).unwrap());
+        ctx_value = signed_unsigned_int * cast_char_to_int(str.chars().nth(n).unwrap());
 
         n += 1;
     } else {
@@ -95,41 +94,38 @@ fn test_php_filter_parse_int() {
     assert_eq!(ret, 0);
     assert!(php_filter_parse_int("0".to_string(), &mut ret));
     assert_eq!(ret, 0);
-    assert!(
-        php_filter_parse_int("2147483647".to_string(), &mut ret)
-    );
+    assert!(php_filter_parse_int("2147483647".to_string(), &mut ret));
     assert_eq!(ret, 2147483647);
-    assert!(
-        php_filter_parse_int("2147483648".to_string(), &mut ret)
-    );
+    assert!(php_filter_parse_int("2147483648".to_string(), &mut ret));
     assert_eq!(ret, 2147483648);
-    assert!(
-        php_filter_parse_int("-2147483648".to_string(), &mut ret)
-    );
+    assert!(php_filter_parse_int("-2147483648".to_string(), &mut ret));
     assert_eq!(ret, -2147483648);
-    assert!(
-        php_filter_parse_int("-2147483649".to_string(), &mut ret)
-    );
+    assert!(php_filter_parse_int("-2147483649".to_string(), &mut ret));
     assert_eq!(ret, -2147483649);
-    assert!(
-        php_filter_parse_int("9223372036854775807".to_string(), &mut ret)
-    );
+    assert!(php_filter_parse_int(
+        "9223372036854775807".to_string(),
+        &mut ret
+    ));
     assert_eq!(ret, 9223372036854775807);
-    assert!(
-        !php_filter_parse_int("9223372036854775808".to_string(), &mut ret)
-    );
+    assert!(!php_filter_parse_int(
+        "9223372036854775808".to_string(),
+        &mut ret
+    ));
     assert_eq!(ret, 9223372036854775807);
-    assert!(
-        php_filter_parse_int("-9223372036854775807".to_string(), &mut ret)
-    );
+    assert!(php_filter_parse_int(
+        "-9223372036854775807".to_string(),
+        &mut ret
+    ));
     assert_eq!(ret, -9223372036854775807);
-    assert!(
-        php_filter_parse_int("-9223372036854775808".to_string(), &mut ret)
-    );
+    assert!(php_filter_parse_int(
+        "-9223372036854775808".to_string(),
+        &mut ret
+    ));
     assert_eq!(ret, -9223372036854775808);
-    assert!(
-        !php_filter_parse_int("-9223372036854775809".to_string(), &mut ret)
-    );
+    assert!(!php_filter_parse_int(
+        "-9223372036854775809".to_string(),
+        &mut ret
+    ));
     assert_eq!(ret, -9223372036854775808);
 
     use serde_json::Value;
@@ -150,12 +146,8 @@ fn test_php_filter_parse_int() {
     assert!(php_filter_parse_int(v["age"].to_string(), &mut ret));
     assert_eq!(ret, 43);
     // print!("Return is {}", ret);
-    assert!(
-        !php_filter_parse_int(v["phones"][0].to_string(), &mut ret)
-    );
-    assert!(
-        !php_filter_parse_int(v["phones"].to_string(), &mut ret)
-    );
+    assert!(!php_filter_parse_int(v["phones"][0].to_string(), &mut ret));
+    assert!(!php_filter_parse_int(v["phones"].to_string(), &mut ret));
     // print!("Return is {}", ret);
     // assert_eq!(ret, "+44 1234567");
     assert!(!php_filter_parse_int(v["name"].to_string(), &mut ret));

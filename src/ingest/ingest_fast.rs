@@ -74,7 +74,11 @@ pub fn fast_path_ingest(
         // let foo = resolved_value;
         // ignore if null, use default message which has correct null for data type
         if !resolved_value.is_null() {
-            message[metadata.get(&field.to_string()).unwrap().clone().out_field_name] = resolved_value;
+            message[metadata
+                .get(&field.to_string())
+                .unwrap()
+                .clone()
+                .out_field_name] = resolved_value;
 
             // println!("{:?}", message);
             // match resolved_value {
@@ -137,7 +141,6 @@ fn fast_set_value(
     //     None => ""
     // };
 
-
     // edgecase seen in cloudcycle cubeevent, probably in a map?
     if value.is_string() && value.as_str().unwrap_or_default().is_empty() {
         return Value::Null;
@@ -163,27 +166,45 @@ fn fast_set_value(
 
                         // println!("({}) ingesting {} => {} with value: {}", data_type, field, &sub_field.to_string(), sub_value);
 
-                        match metadata.get(&field.to_string()).unwrap().fields.get(&sub_field.to_string()) {
+                        match metadata
+                            .get(&field.to_string())
+                            .unwrap()
+                            .fields
+                            .get(&sub_field.to_string())
+                        {
                             Some(_t) => (),
                             None => {
                                 // println!("({}) no metadata for {} => {} with value: {}", data_type, field, &sub_field.to_string(), sub_value);
-                                discover_ingest(&sub_field.to_string(), sub_value, Some(field), Some(data_type), &mut metadata.get_mut(&field.to_string()).unwrap().fields, updated_schema);
+                                discover_ingest(
+                                    &sub_field.to_string(),
+                                    sub_value,
+                                    Some(field),
+                                    Some(data_type),
+                                    &mut metadata.get_mut(&field.to_string()).unwrap().fields,
+                                    updated_schema,
+                                );
                                 // discover_ingest(field, value, metadata, updatedSchema, flatten);
                             }
                         }
 
                         // only ingest fields enabled to sync to output
-                        if metadata
-                            .get_mut(&field.to_string()).is_some()
+                        if metadata.get_mut(&field.to_string()).is_some()
                             && metadata
-                            .get_mut(&field.to_string()).unwrap().fields.get_mut(&sub_field.to_string()).is_some()
+                                .get_mut(&field.to_string())
+                                .unwrap()
+                                .fields
+                                .get_mut(&sub_field.to_string())
+                                .is_some()
                             && metadata
-                            .get_mut(&field.to_string())
-                            .unwrap()
-                            .fields
-                            .get_mut(&sub_field.to_string())
-                            .expect(&format!("No metadata for field: {} with value: {:?}", &sub_field, sub_value))
-                            .enabled
+                                .get_mut(&field.to_string())
+                                .unwrap()
+                                .fields
+                                .get_mut(&sub_field.to_string())
+                                .expect(&format!(
+                                    "No metadata for field: {} with value: {:?}",
+                                    &sub_field, sub_value
+                                ))
+                                .enabled
                         {
                             let newval = fast_set_value(
                                 &metadata
@@ -228,27 +249,42 @@ fn fast_set_value(
 
                         // println!("({}) ingesting {} => {} with value: {}", data_type, &field.to_string(), &i.to_string(), sub_value);
 
-                        match metadata.get(&field.to_string()).unwrap().fields.get(&i.to_string()) {
+                        match metadata
+                            .get(&field.to_string())
+                            .unwrap()
+                            .fields
+                            .get(&i.to_string())
+                        {
                             Some(_t) => (),
                             None => {
                                 // println!("({}.array) no metadata for {} => {} with value: {}", data_type, &field.to_string(), i.to_string(), sub_value);
                                 // discover_ingest(&field.to_string(), value, metadata, updatedSchema, flatten);
-                                discover_ingest(&i.to_string(), sub_value, Some(field), Some(data_type), &mut metadata.get_mut(&field.to_string()).unwrap().fields, updated_schema);
+                                discover_ingest(
+                                    &i.to_string(),
+                                    sub_value,
+                                    Some(field),
+                                    Some(data_type),
+                                    &mut metadata.get_mut(&field.to_string()).unwrap().fields,
+                                    updated_schema,
+                                );
                             }
                         }
 
                         // only ingest fields enabled to sync to output
-                        if metadata
-                            .get_mut(&field.to_string()).is_some()
+                        if metadata.get_mut(&field.to_string()).is_some()
                             && metadata
-                            .get_mut(&field.to_string()).unwrap().fields.get_mut(&i.to_string()).is_some()
+                                .get_mut(&field.to_string())
+                                .unwrap()
+                                .fields
+                                .get_mut(&i.to_string())
+                                .is_some()
                             && metadata
-                            .get_mut(&field.to_string())
-                            .unwrap()
-                            .fields
-                            .get_mut(&i.to_string())
-                            .unwrap()
-                            .enabled
+                                .get_mut(&field.to_string())
+                                .unwrap()
+                                .fields
+                                .get_mut(&i.to_string())
+                                .unwrap()
+                                .enabled
                         {
                             let newval = fast_set_value(
                                 &metadata
@@ -295,7 +331,6 @@ fn fast_set_value(
                         .iter()
                         .filter_map(|(k, v)| Some((k, v)))
                     {
-
                         // if field == "trip" {
                         //     println!("{:?}", metadata.get_mut(field));
                         // }
@@ -306,26 +341,34 @@ fn fast_set_value(
                                 None => {
                                     // println!("({}) no metadata for {} => {} with value: {}", data_type, field, key, val);
                                     // discover_ingest(key, val, &mut metadata.get_mut(field).unwrap().fields, updatedSchema, flatten);
-                                    discover_ingest(field, value, Some(field), Some(data_type), metadata, updated_schema);
+                                    discover_ingest(
+                                        field,
+                                        value,
+                                        Some(field),
+                                        Some(data_type),
+                                        metadata,
+                                        updated_schema,
+                                    );
                                 }
                             }
 
                             // only ingest fields enabled to sync to output
-                            if metadata
-                                .get_mut(&field.to_string()).is_some()
+                            if metadata.get_mut(&field.to_string()).is_some()
                                 && metadata
-                                .get_mut(&field.to_string()).unwrap().fields.get_mut(key).is_some()
+                                    .get_mut(&field.to_string())
+                                    .unwrap()
+                                    .fields
+                                    .get_mut(key)
+                                    .is_some()
                                 && metadata
-                                .get_mut(field)
-                                .unwrap()
-                                .fields
-                                .get_mut(key)
-                                .unwrap()
-                                .enabled
+                                    .get_mut(field)
+                                    .unwrap()
+                                    .fields
+                                    .get_mut(key)
+                                    .unwrap()
+                                    .enabled
                             {
-
                                 // println!("ingesting {} => {} with value: {}", field, key, val);
-
 
                                 new_value[metadata
                                     .get(field)
@@ -350,9 +393,7 @@ fn fast_set_value(
                                     &mut metadata.get_mut(field).unwrap().fields,
                                     updated_schema,
                                 );
-
                             }
-
                         }
                     }
                 }
@@ -434,10 +475,16 @@ fn fast_set_value(
         }
         new_value
     } else {
-
         // println!("({}) no metadata for {} with value: {}", data_type, &field.to_string(), value);
 
-        let discoverd_data_type = discover_ingest(&field.to_string(), value, parent_field, parent_data_type, metadata, updated_schema);
+        let discoverd_data_type = discover_ingest(
+            &field.to_string(),
+            value,
+            parent_field,
+            parent_data_type,
+            metadata,
+            updated_schema,
+        );
 
         if discoverd_data_type != "" {
             return fast_set_value(
@@ -448,9 +495,9 @@ fn fast_set_value(
                 parent_data_type,
                 metadata,
                 updated_schema,
-            )
+            );
         } else {
-            return Value::Null
+            return Value::Null;
         }
     }
 }
@@ -486,9 +533,8 @@ fn discover_ingest(
     ////
 
     if value.is_null() || (value.is_string() && value.as_str().unwrap_or_default().is_empty()) {
-        return "".to_string()
+        return "".to_string();
     }
-
 
     AnalyseSchema::analyse_field(
         &foo,
@@ -523,7 +569,6 @@ fn discover_ingest(
 
     discoverd_data_type.clone()
 }
-
 
 fn set_date(field: &str, value: &Value, metadata: &HashMap<String, Metadata>) -> Value {
     // Hive Timestamp doesn't support string dates
@@ -780,7 +825,10 @@ mod test_discover_on_ingest {
 
         let mut map = serde_json::Map::new();
         map.insert("end_temprature".to_string(), Value::Number(Number::from(2)));
-        map.insert("start_temprature".to_string(), Value::Number(Number::from(0)));
+        map.insert(
+            "start_temprature".to_string(),
+            Value::Number(Number::from(0)),
+        );
 
         let trip_map = ingestValue.get("trip").unwrap().as_object().unwrap();
 

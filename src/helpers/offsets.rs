@@ -1,6 +1,6 @@
 use sled;
-use Result;
 use std::process::exit;
+use Result;
 
 use crate::helpers::configuration::Config;
 use serde::__private::de::IdentifierDeserializer;
@@ -371,17 +371,10 @@ impl Offsets {
 
 #[cfg(test)]
 mod tests {
-    
+
     use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
-    
-    
-    
+
     use serial_test::serial;
-    
-    
-    
-    
-    
 
     #[test]
     #[serial]

@@ -7,9 +7,9 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use yaml_rust::YamlLoader;
 
+use nix::libc::exit;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
-use nix::libc::exit;
 
 // use aws_config::profile::profile_file::ProfileFileKind::Config;
 use serde_derive::{Deserialize, Serialize};
@@ -18,9 +18,9 @@ use serde_json::json;
 
 use reqwest::header::HeaderValue;
 
+use once_cell::sync::Lazy;
 use reqwest::header::{HeaderMap, HeaderName};
 use reqwest::{Client, StatusCode};
-use once_cell::sync::Lazy;
 
 use crate::discover::Metadata;
 use crate::{flatten_metadata, RUNNING};
@@ -28,7 +28,6 @@ use crate::{flatten_metadata, RUNNING};
 use crate::helpers::license::{LicenseChecker, TENANT_ID};
 use crate::helpers::Helpers;
 use crate::plugins::athena::AwsAthena;
-
 
 #[non_exhaustive]
 struct RunModes;
@@ -180,7 +179,8 @@ impl Config {
                 let path = entry.path();
                 if path.is_dir() {
                     println!("Directory: {}", path.display());
-                    Config::list_dir_contents(path.clone()).expect(format!("Couldn't list dir {}", path.display()).as_str());
+                    Config::list_dir_contents(path.clone())
+                        .expect(format!("Couldn't list dir {}", path.display()).as_str());
                 } else {
                     println!("File: {}", path.display());
                 }
@@ -200,7 +200,10 @@ impl Config {
         let data_dir = format!("{}/{}", data_dir, pipeline_name);
         match fs::create_dir_all(&data_dir) {
             Ok(_g) => {}
-            Err(err) => panic!("Error creating data dir {}, does the host path exist? {:?}", data_dir, err)
+            Err(err) => panic!(
+                "Error creating data dir {}, does the host path exist? {:?}",
+                data_dir, err
+            ),
         }
 
         data_dir
@@ -221,15 +224,11 @@ impl Config {
     }
 
     pub fn get_pipeline_name() -> String {
-
         Config::getenv("PIPELINE_NAME", "default").to_lowercase()
-
     }
 
     pub fn get_workspace_name() -> String {
-
         Config::getenv("WORKSPACE_NAME", "default").to_lowercase()
-
     }
 
     pub fn get_full_namespace_name() -> String {
@@ -238,7 +237,6 @@ impl Config {
         // let input_plugin_name = Helpers::clean_field_name(Config::getenv("DATA_SOURCE_PLUGIN_NAME", "unknown"));
         // let output_plugin_name = Helpers::clean_field_name(Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "unknown"));
         // let default_pipeline_name = format!("{} to {}", input_plugin_name, output_plugin_name);
-
 
         let workspace = Self::get_workspace_name();
         let pipeline = Self::get_pipeline_name();
@@ -306,7 +304,9 @@ impl Config {
             // SkipprLogger::info("Strict mutable mode enabled, will sync an exact copy of records.");
         }
 
-        if !Config::getenv("TRANSFORM_BATCH_TIME_UNIT", "").is_empty() && Config::getenv("TRANSFORM_BATCH_TIME_FIELDS", "").is_empty() {
+        if !Config::getenv("TRANSFORM_BATCH_TIME_UNIT", "").is_empty()
+            && Config::getenv("TRANSFORM_BATCH_TIME_FIELDS", "").is_empty()
+        {
             println!("ERROR: Environment variable: 'TRANSFORM_BATCH_TIME_FIELDS' must be since you've set: 'TRANSFORM_BATCH_TIME_UNIT'.");
         }
 
@@ -348,9 +348,16 @@ impl Config {
 
         let client = Client::builder().default_headers(headers).build().unwrap();
 
-        let path = format!("workspace/{}/pipeline/{}/status/{}", workspace, pipeline, "approved");
+        let path = format!(
+            "workspace/{}/pipeline/{}/status/{}",
+            workspace, pipeline, "approved"
+        );
 
-        let response = client.get(&format!("{}/{}", uri, path)).timeout(Duration::from_secs(15)).send().await;
+        let response = client
+            .get(&format!("{}/{}", uri, path))
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await;
 
         let metadata: Result<HashMap<String, Metadata>, bool> = match response {
             Ok(resp) => match resp.status() {
@@ -363,11 +370,15 @@ impl Config {
                     Err(false)
                 }
                 err => unsafe {
-                    println!("Metadata HTTP Error: {} - {:?}", err, resp.error_for_status());
+                    println!(
+                        "Metadata HTTP Error: {} - {:?}",
+                        err,
+                        resp.error_for_status()
+                    );
                     RUNNING.lock().unwrap().store(false, Ordering::SeqCst);
                     // Err(false)
                     exit(1);
-                }
+                },
             },
             Err(_err) => {
                 // println!("Metadata HTTP Error: {:?}", err);
@@ -380,7 +391,6 @@ impl Config {
 
     pub async fn set_config(metadata: &HashMap<String, Metadata>, evolved: bool) {
         if evolved {
-
             // let data_dir = Config::get_data_dir();
             // let metadata_file = format!("{}/metadata-{}.json", data_dir, Helpers::random_str(10));
             //
@@ -401,7 +411,6 @@ impl Config {
 
             let workspace = Self::get_workspace_name();
             let pipeline = Self::get_pipeline_name();
-
 
             // let uri = Config::getenv("SKIPPR_API_ENDPOINT", "");
             let env = Config::getenv("APP_ENV", "prod");
@@ -457,12 +466,10 @@ impl Config {
             }
 
             Config::sync_schema(metadata).await;
-
         }
     }
 
     pub async fn sync_schema(metadata: &HashMap<String, Metadata>) {
-
         if !Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "").is_empty() {
             let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
 
@@ -478,16 +485,22 @@ impl Config {
                     flat.fields = Box::new(out_meta);
                     output_metadata.insert(namespace.clone(), flat);
 
-                    AwsAthena::create_or_update_schema(&namespace, &output_metadata.get(namespace).unwrap()).await;
+                    AwsAthena::create_or_update_schema(
+                        &namespace,
+                        &output_metadata.get(namespace).unwrap(),
+                    )
+                    .await;
                 } else {
                     AwsAthena::create_or_update_schema(&namespace, &schema).await;
                 }
             }
         }
-
     }
 
-    pub(crate) async fn set_status<'a>(metrics: MutexGuard<'a, Metrics>, exit_code: Option<i8>) -> Result<(), Box<dyn std::error::Error>> {
+    pub(crate) async fn set_status<'a>(
+        metrics: MutexGuard<'a, Metrics>,
+        exit_code: Option<i8>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let workspace = Self::get_workspace_name();
         let pipeline = Self::get_pipeline_name();
 
@@ -513,25 +526,29 @@ impl Config {
         let tenant_id = TENANT_ID.lock().unwrap().clone();
 
         let data = json!({
-        "metrics": {
-            "ingeted_total": metrics.messages_total,
-            "deadletters_total": metrics.deadletters_total,
-            "ingeted_current": metrics.ingeted_current,
-            "run_time_seconds": metrics.run_time_seconds,
-            "bytes_current": metrics.bytes_current,
-            "bytes_total": metrics.bytes_total,
-        },
-        "type": "metric",
-        "tenant_id": tenant_id,
-        "workspace_name": workspace,
-        "pipeline_name": pipeline,
-        "datetime": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        "exit_code": exit_code
-    });
+            "metrics": {
+                "ingeted_total": metrics.messages_total,
+                "deadletters_total": metrics.deadletters_total,
+                "ingeted_current": metrics.ingeted_current,
+                "run_time_seconds": metrics.run_time_seconds,
+                "bytes_current": metrics.bytes_current,
+                "bytes_total": metrics.bytes_total,
+            },
+            "type": "metric",
+            "tenant_id": tenant_id,
+            "workspace_name": workspace,
+            "pipeline_name": pipeline,
+            "datetime": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            "exit_code": exit_code
+        });
 
         // println!("Posting data: {:?}", data);
 
-        let response = client.put(format!("{}/{}", uri, path)).json(&data).send().await?;
+        let response = client
+            .put(format!("{}/{}", uri, path))
+            .json(&data)
+            .send()
+            .await?;
 
         match response.error_for_status() {
             Ok(_resp) => {

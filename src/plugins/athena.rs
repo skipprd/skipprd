@@ -1,8 +1,10 @@
 use crate::buffer::BufferChunker;
 use crate::converters::skippr_hive::SkipprHive;
-use crate::{discover, flatten_metadata, LOGGER};
+use crate::discover::Metadata;
 use crate::helpers::configuration::Config;
+use crate::helpers::logger::LogLevel;
 use crate::helpers::Helpers;
+use crate::{discover, flatten_metadata, LOGGER};
 use aws_sdk_athena::types::{
     EncryptionConfiguration, EncryptionOption, ResultConfiguration, Tag, WorkGroupConfiguration,
 };
@@ -20,8 +22,6 @@ use std::fs;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
-use crate::discover::Metadata;
-use crate::helpers::logger::LogLevel;
 
 pub struct DataOutputAwsAthenaPlugin {
     s3_client: S3Client,
@@ -91,7 +91,6 @@ impl DataOutputAwsAthenaPlugin {
                 let collection: Vec<&str> = parts.collect();
 
                 for item in &collection {
-
                     // let value = item.rsplitn(1, '=').next().unwrap();
                     let mut value = item.split("=").last().unwrap(); // '='
 
@@ -135,35 +134,39 @@ impl DataOutputAwsAthenaPlugin {
             }
 
             if !partition_values.is_empty() {
-                let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
+                let flatten =
+                    Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
 
                 let mut out_meta: HashMap<String, Metadata> = HashMap::new();
 
                 // for (namespace, _schema) in &metadata {
-                    out_meta.insert(namespace.to_string(), Metadata::new().unwrap());
+                out_meta.insert(namespace.to_string(), Metadata::new().unwrap());
 
-                    let partition_metadata = if flatten {
-                        flatten_metadata(metadata.get(&namespace).unwrap(), &mut out_meta.get_mut(&namespace).unwrap().fields);
-                        out_meta.get(&namespace)
-                    } else {
-                        metadata.get(&namespace)
-                    };
+                let partition_metadata = if flatten {
+                    flatten_metadata(
+                        metadata.get(&namespace).unwrap(),
+                        &mut out_meta.get_mut(&namespace).unwrap().fields,
+                    );
+                    out_meta.get(&namespace)
+                } else {
+                    metadata.get(&namespace)
+                };
 
-                    // println!("{:?}", partition_metadata);
+                // println!("{:?}", partition_metadata);
 
-                    if partition_metadata.is_some() {
-                        if let Err(_err) = AwsAthena::glue_create_partition(
-                            &namespace,
-                            partition_values.clone(),
-                            &full_key,
-                            &mut partition_cache,
-                            partition_metadata.unwrap(),
-                        )
-                            .await
-                        {
-                            // Handle the error
-                        }
+                if partition_metadata.is_some() {
+                    if let Err(_err) = AwsAthena::glue_create_partition(
+                        &namespace,
+                        partition_values.clone(),
+                        &full_key,
+                        &mut partition_cache,
+                        partition_metadata.unwrap(),
+                    )
+                    .await
+                    {
+                        // Handle the error
                     }
+                }
                 // }
             }
 
@@ -223,12 +226,19 @@ impl DataOutputAwsAthenaPlugin {
                         println!("Failed to upload file: {}, will retry later.", filename);
 
                         // tokio::spawn(async move {
-                            LOGGER.lock().await.log(LogLevel::Error, format!(
+                        LOGGER
+                            .lock()
+                            .await
+                            .log(
+                                LogLevel::Error,
+                                format!(
                                 "Athena Plugin failed to upload file: {}, key: {} with error: {:?}",
                                 filename,
                                 key,
                                 err.into_service_error()
-                            )).await;
+                            ),
+                            )
+                            .await;
                         // });
                         // LOGGER.lock().unwrap().push(format!(
                         //     "Athena Plugin failed to upload file: {}, key: {} with error: {:?}",
@@ -283,7 +293,9 @@ impl AwsAthena {
 
         match AwsAthena::glue_get_table(namespace).await {
             Ok(true) => match AwsAthena::glue_update_table(namespace, schema).await {
-                Ok(_) => {println!("Update table {}", namespace)}
+                Ok(_) => {
+                    println!("Update table {}", namespace)
+                }
                 Err(err) => {
                     println!("ERROR updating Glue table: {}", err);
                 }
@@ -386,7 +398,6 @@ impl AwsAthena {
             .to_str()
             .unwrap()
             .to_string();
-
 
         let aws_config = aws_config::from_env().load().await;
 
@@ -712,7 +723,6 @@ impl AwsAthena {
         // Replace "err" as it causes our e2e to fail since they check for 'err' string in logs - yes this happens often enough
         let md5_digest = md5_string.replace("err", "");
 
-
         let path = std::path::Path::new(&bucket)
             .join(&key)
             .to_str()
@@ -806,7 +816,10 @@ impl AwsAthena {
                                 "Failed to create new Athena partition: {}",
                                 err.into_service_error()
                             );
-                            println!("Database: {}, Table: {}, Values: {:?}", database, namespace, partition_values);
+                            println!(
+                                "Database: {}, Table: {}, Values: {:?}",
+                                database, namespace, partition_values
+                            );
                         }
                     }
                 } // ,
@@ -814,9 +827,9 @@ impl AwsAthena {
                   //     println!("Failed to get Athena partition: {}", err);
                   // }
             }
-        // } else {
-        //     println!("Partition already exists in cache");
-        //     println!("Database: {}, Table: {}, Values: {:?}", database, namespace, partition_values);
+            // } else {
+            //     println!("Partition already exists in cache");
+            //     println!("Database: {}, Table: {}, Values: {:?}", database, namespace, partition_values);
         }
 
         Ok(true)

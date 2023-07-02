@@ -106,14 +106,12 @@ impl SkipprHive {
                 }
                 _ => {
                     match MAPPINGS.get(&v.determined_type) {
-                        Some(mapped_type) => {
-                            field_types.push(
-                                Column::builder()
-                                    .name(&v.out_field_name.to_string())
-                                    .r#type(mapped_type.to_string())
-                                    .build(),
-                            )
-                        },
+                        Some(mapped_type) => field_types.push(
+                            Column::builder()
+                                .name(&v.out_field_name.to_string())
+                                .r#type(mapped_type.to_string())
+                                .build(),
+                        ),
                         None => {
                             println!(
                                 "No Hive mapped type for field '{}' with type of '{}'",

@@ -26,10 +26,10 @@ use std::{env, thread};
 use std::fs;
 use std::process::exit;
 
+use chrono::Duration;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::sleep;
 use std::time::{Instant, SystemTime};
-use chrono::Duration;
 
 use futures::executor::block_on;
 use glob::glob_with;
@@ -57,13 +57,12 @@ extern crate core;
 use clap::Parser;
 use nix::libc::signal;
 
-use signal_hook::{iterator::Signals};
+use signal_hook::iterator::Signals;
 
 use std::panic;
 
-
 use once_cell::sync::Lazy;
-use signal_hook::consts::{SIGABRT, SIGQUIT, SIGTERM, SIGINT};
+use signal_hook::consts::{SIGABRT, SIGINT, SIGQUIT, SIGTERM};
 
 mod ingest;
 
@@ -77,9 +76,9 @@ use crate::discover::arrow_schema::convert_skippr_to_arrow;
 use crate::helpers::configuration::{Config, Metrics};
 
 use crate::buffer::BufferChunker;
-use crate::helpers::Helpers;
-use crate::helpers::logger::{Logger, LogLevel};
+use crate::helpers::logger::{LogLevel, Logger};
 use crate::helpers::offsets::Offsets;
+use crate::helpers::Helpers;
 use crate::plugins::athena::DataOutputAwsAthenaPlugin;
 
 use crate::plugins::s3_input::DataSourceS3Plugin;
@@ -88,8 +87,7 @@ use crate::plugins::s3_inventory::DataSourceS3InventoryPlugin;
 use crate::ingest_work::{Ingest, OUTPUT_FILES_STATIC};
 use crate::plugins::stdin_input::DataSourceStdinPlugin;
 
-pub static RUNNING: Lazy<Mutex<AtomicBool>> =
-    Lazy::new(|| Mutex::new(AtomicBool::new(true)));
+pub static RUNNING: Lazy<Mutex<AtomicBool>> = Lazy::new(|| Mutex::new(AtomicBool::new(true)));
 pub static INPUT_GRACEFUL_SHUTDOWN_COMPLETE: Lazy<Mutex<AtomicBool>> =
     Lazy::new(|| Mutex::new(AtomicBool::new(false)));
 pub static OUTPUT_RUNNING: Lazy<Mutex<AtomicBool>> =
@@ -98,7 +96,6 @@ pub static OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE: Lazy<Mutex<AtomicBool>> =
     Lazy::new(|| Mutex::new(AtomicBool::new(false)));
 
 pub static LOGGER: Lazy<Arc<tokio::sync::Mutex<Logger>>> = Lazy::new(|| Logger::new(100));
-
 
 #[tokio::main]
 async fn main() {
@@ -125,7 +122,6 @@ async fn main() {
             discover().await;
         }
     }
-
 }
 
 async fn discover() {
@@ -254,8 +250,11 @@ async fn sync() {
 
     // let mut skippr_metadata = Arc::new(Mutex::new(HashMap::new()));
 
-
-    LOGGER.lock().await.log(LogLevel::Error, "Init Error Log.".to_string()).await;
+    LOGGER
+        .lock()
+        .await
+        .log(LogLevel::Error, "Init Error Log.".to_string())
+        .await;
 
     let data_dir = Config::get_data_dir();
 
@@ -275,10 +274,11 @@ async fn sync() {
             metadata
         }
         Err(_e) => {
-            println!("Could not find Skippr metadata, will discover and evolve schemas as we sync.");
+            println!(
+                "Could not find Skippr metadata, will discover and evolve schemas as we sync."
+            );
             let _empty_meta = Metadata::new().unwrap();
 
-            
             // metadata.insert("example_ns".to_string(), empty_meta);
             // let skippr_metadata: HashMap<String, Metadata> = metadata;
             // skippr_metadata
@@ -308,8 +308,6 @@ async fn sync() {
     let offsets_clone = offsets.clone();
     // let logger_clone = Arc::clone(&logger);
 
-
-
     /**
      * Handle PANICS in threads
      */
@@ -320,7 +318,6 @@ async fn sync() {
         orig_hook(panic_info);
         println!("{:?}", panic_info);
         let panic_str = format!("{:?}", panic_info);
-
 
         // process::exit(1);
 
@@ -333,9 +330,13 @@ async fn sync() {
             .build()
             .unwrap()
             .block_on(async {
-            LOGGER.lock().await.log(LogLevel::Error, panic_info_clone).await;
-            // logger_clone.lock().await.flush().await.unwrap();
-        });
+                LOGGER
+                    .lock()
+                    .await
+                    .log(LogLevel::Error, panic_info_clone)
+                    .await;
+                // logger_clone.lock().await.flush().await.unwrap();
+            });
 
         let pid = process::id() as i32; // or replace with the PID of the target process
 
@@ -352,7 +353,6 @@ async fn sync() {
 
     // this line won't ever be invoked because of process::exit()
     // println!("Won't be printed");
-
 
     /**
      * Handle SIGNALS
@@ -380,8 +380,15 @@ async fn sync() {
                 // Ingest::flush_buffers(true, &mut output_files);
                 // sleep(Duration::from_secs(30)); // wait for threads to flush
 
-                while !INPUT_GRACEFUL_SHUTDOWN_COMPLETE.lock().unwrap().load(Ordering::SeqCst)
-                    && !OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE.lock().unwrap().load(Ordering::SeqCst) {
+                while !INPUT_GRACEFUL_SHUTDOWN_COMPLETE
+                    .lock()
+                    .unwrap()
+                    .load(Ordering::SeqCst)
+                    && !OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE
+                        .lock()
+                        .unwrap()
+                        .load(Ordering::SeqCst)
+                {
                     sleep(Duration::from_secs(1));
                 }
 
@@ -412,14 +419,13 @@ async fn sync() {
                 {
                     match entry {
                         Ok(path) => {
-
                             // println!("Removing file {}", path.display().to_string());
 
                             match std::fs::remove_file(path) {
                                 Ok(_t) => {}
                                 Err(err) => println!("{:?}", err),
                             }
-                        },
+                        }
                         Err(e) => println!("{:?}", e),
                     }
                 }
@@ -430,16 +436,13 @@ async fn sync() {
                     .build()
                     .unwrap()
                     .block_on(async {
-                    match LOGGER.lock().await.flush().await {
-                        Ok(_t) => {
-
+                        match LOGGER.lock().await.flush().await {
+                            Ok(_t) => {}
+                            Err(err) => {
+                                // println!("Graceful shutdown complete... bye");
+                            }
                         }
-                        Err(err) => {
-                            // println!("Graceful shutdown complete... bye");
-                        }
-                    }
-
-                });
+                    });
 
                 // sleep(Duration::from_secs(15)); // wait for threads to flush
 
@@ -459,73 +462,71 @@ async fn sync() {
 
     // while running.load(Ordering::SeqCst) {
 
+    // let mut pool = ThreadPool::new(4, skippr_metadata.clone());
 
-        // let mut pool = ThreadPool::new(4, skippr_metadata.clone());
+    use std::time::Duration;
 
-        use std::time::Duration;
+    let mut planner = periodic::Planner::new();
 
-        let mut planner = periodic::Planner::new();
+    let metrics_clone = metrics.clone();
+    let now_clone = now.clone();
 
-        let metrics_clone = metrics.clone();
-        let now_clone = now.clone();
+    // match Config::list_dir_contents(data_dir.clone()) {
+    //     Err(e) => println!("Error occurred: {}", e),
+    //     _ => (),
+    // }
 
-        // match Config::list_dir_contents(data_dir.clone()) {
-        //     Err(e) => println!("Error occurred: {}", e),
-        //     _ => (),
-        // }
+    planner.add(
+        move || {
+            if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+                // match Config::list_dir_contents(data_dir.clone()) {
+                //     Err(e) => println!("Error occurred: {}", e),
+                //     _ => (),
+                // }
 
-        planner.add(
-            move || {
+                // let mut metrics: Metrics = Metrics::new();
+                let mut metrics_lock = metrics_clone.lock().unwrap();
 
-                if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
-                    // match Config::list_dir_contents(data_dir.clone()) {
-                    //     Err(e) => println!("Error occurred: {}", e),
-                    //     _ => (),
-                    // }
+                // let mut counter_lock = ingestMsgCount.lock().unwrap();
+                // let mut total_lock = ingestMsgTotal.lock().unwrap();
+                let now_lock = now_clone.lock().unwrap();
 
-                    // let mut metrics: Metrics = Metrics::new();
-                    let mut metrics_lock = metrics_clone.lock().unwrap();
+                // metrics_lock.msgs_total += metrics_lock.msgs_current;
+                metrics_lock.bytes_total += metrics_lock.bytes_current;
 
-                    // let mut counter_lock = ingestMsgCount.lock().unwrap();
-                    // let mut total_lock = ingestMsgTotal.lock().unwrap();
-                    let now_lock = now_clone.lock().unwrap();
+                // metrics.msgs_total = *total_lock;
+                // metrics.msgs_current = *counter_lock;
+                metrics_lock.run_time_seconds = now_lock.elapsed().as_secs();
 
-                    // metrics_lock.msgs_total += metrics_lock.msgs_current;
-                    metrics_lock.bytes_total += metrics_lock.bytes_current;
+                println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
+                println!("Messages per Min: {}", metrics_lock.ingeted_current);
+                println!("Messages Total: {}", metrics_lock.messages_total);
+                println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
+                println!("Bytes per Min: {}", metrics_lock.bytes_current);
+                println!("Bytes: {}", metrics_lock.bytes_total);
 
-                    // metrics.msgs_total = *total_lock;
-                    // metrics.msgs_current = *counter_lock;
-                    metrics_lock.run_time_seconds = now_lock.elapsed().as_secs();
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        match Config::set_status(metrics_lock, Some(0)).await {
+                            Ok(_g) => {}
+                            Err(_err) => {}
+                        }
+                    });
 
-                    println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
-                    println!("Messages per Min: {}", metrics_lock.ingeted_current);
-                    println!("Messages Total: {}", metrics_lock.messages_total);
-                    println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
-                    println!("Bytes per Min: {}", metrics_lock.bytes_current);
-                    println!("Bytes: {}", metrics_lock.bytes_total);
+                let mut metrics_lock = metrics_clone.lock().unwrap();
 
-                    tokio::runtime::Builder::new_multi_thread()
-                        .enable_all()
-                        .build()
-                        .unwrap()
-                        .block_on(async {
-                            match Config::set_status(metrics_lock, Some(0)).await {
-                                Ok(_g) => {}
-                                Err(_err) => {}
-                            }
-                        });
+                metrics_lock.bytes_current = 0;
+                metrics_lock.ingeted_current = 0;
+            }
+        },
+        periodic::Every::new(Duration::from_secs(60)),
+    );
+    planner.start();
 
-                    let mut metrics_lock = metrics_clone.lock().unwrap();
-
-                    metrics_lock.bytes_current = 0;
-                    metrics_lock.ingeted_current = 0;
-                }
-            },
-            periodic::Every::new(Duration::from_secs(60)),
-        );
-        planner.start();
-
-        let input_metadata_clone = skippr_metadata.clone();
+    let input_metadata_clone = skippr_metadata.clone();
 
     let mut out_pnanner = periodic::Planner::new();
 
@@ -552,74 +553,73 @@ async fn sync() {
             }, periodic::Every::new(Duration::from_secs(rand::thread_rng().gen_range(15..60))),
         );
     }
-        out_pnanner.add(
-             move || {
+    out_pnanner.add(
+        move || {
+            if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+                let input_metadata_clone = input_metadata_clone.clone();
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        let input_metadata_clone = {
+                            let guard = input_metadata_clone.lock().unwrap();
+                            guard.clone()
+                        };
 
-                 if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+                        output_sync(input_metadata_clone.clone());
 
-                     let input_metadata_clone = input_metadata_clone.clone();
-                     tokio::runtime::Builder::new_multi_thread()
-                         .enable_all()
-                         .build()
-                         .unwrap()
-                         .block_on(async {
+                        let data_output = DataOutputAwsAthenaPlugin::new().await;
+                        let input_metadata_clone = {
+                            let guard = input_metadata_clone;
+                            guard.clone()
+                        };
 
-                             let input_metadata_clone = {
-                                 let guard = input_metadata_clone.lock().unwrap();
-                                 guard.clone()
-                             };
+                        while OUTPUT_RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+                            // sleep(Duration::from_secs(1));
+                            return;
+                        }
 
-                             output_sync(input_metadata_clone.clone());
+                        if !Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "").is_empty() {
+                            OUTPUT_RUNNING.lock().unwrap().store(true, Ordering::SeqCst);
 
-                             let data_output = DataOutputAwsAthenaPlugin::new().await;
-                             let input_metadata_clone = {
-                                 let guard = input_metadata_clone;
-                                 guard.clone()
-                             };
+                            data_output.sync(input_metadata_clone).await;
 
-                             while OUTPUT_RUNNING.lock().unwrap().load(Ordering::SeqCst) {
-                                 // sleep(Duration::from_secs(1));
-                                 return;
-                             }
+                            OUTPUT_RUNNING
+                                .lock()
+                                .unwrap()
+                                .store(false, Ordering::SeqCst);
+                        }
+                    });
+            }
+        },
+        periodic::Every::new(Duration::from_secs(60)),
+    );
+    out_pnanner.start();
 
-                             if !Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "").is_empty() {
-                                 OUTPUT_RUNNING.lock().unwrap().store(true, Ordering::SeqCst);
-
-                                 data_output.sync(input_metadata_clone).await;
-
-                                 OUTPUT_RUNNING.lock().unwrap().store(false, Ordering::SeqCst);
-                             }
-                         });
-                 }
-            },
-            periodic::Every::new(Duration::from_secs(60)),
-        );
-        out_pnanner.start();
-
-
-        // @todo - share across s3 ingests
-        let _parse_namespace_cache: HashMap<String, String> = HashMap::new();
-        let _output_files: HashMap<String, File> = HashMap::new();
-        let _options = MatchOptions {
-            case_sensitive: false,
-            require_literal_separator: false,
-            require_literal_leading_dot: false,
-        };
-        let data_dir = Config::get_data_dir();
-        let output_dir = &format!("{}/output", data_dir);
-        let finalised_dir = &format!("{}/finalised", data_dir);
-        match fs::create_dir(output_dir) {
-            Ok(_g) => {}
-            Err(_err) => {}
-        }
-        match fs::create_dir(format!("{}/done", output_dir)) {
-            Ok(_g) => {}
-            Err(_err) => {}
-        }
-        match fs::create_dir(finalised_dir) {
-            Ok(_g) => {}
-            Err(_err) => {}
-        }
+    // @todo - share across s3 ingests
+    let _parse_namespace_cache: HashMap<String, String> = HashMap::new();
+    let _output_files: HashMap<String, File> = HashMap::new();
+    let _options = MatchOptions {
+        case_sensitive: false,
+        require_literal_separator: false,
+        require_literal_leading_dot: false,
+    };
+    let data_dir = Config::get_data_dir();
+    let output_dir = &format!("{}/output", data_dir);
+    let finalised_dir = &format!("{}/finalised", data_dir);
+    match fs::create_dir(output_dir) {
+        Ok(_g) => {}
+        Err(_err) => {}
+    }
+    match fs::create_dir(format!("{}/done", output_dir)) {
+        Ok(_g) => {}
+        Err(_err) => {}
+    }
+    match fs::create_dir(finalised_dir) {
+        Ok(_g) => {}
+        Err(_err) => {}
+    }
 
     // flush last run before we start again
     // println!("Flushing ingest buffers");
@@ -644,12 +644,13 @@ async fn sync() {
     match Config::getenv("DATA_SOURCE_PLUGIN_NAME", "").as_str() {
         "stdin" => {
             let mut input = block_on(DataSourceStdinPlugin::new());
-            input.sync(
-                // &m1ut pool,
-                input_metadata_clone,
-                metrics_clone,
-                offsets_clone
-            )
+            input
+                .sync(
+                    // &m1ut pool,
+                    input_metadata_clone,
+                    metrics_clone,
+                    offsets_clone,
+                )
                 .await;
         }
         "s3" => {
@@ -658,7 +659,7 @@ async fn sync() {
                 // &m1ut pool,
                 input_metadata_clone,
                 metrics_clone,
-                offsets_clone
+                offsets_clone,
             )
             .await;
         }
@@ -668,7 +669,7 @@ async fn sync() {
                 // &mut pool,
                 input_metadata_clone,
                 metrics_clone,
-                offsets_clone
+                offsets_clone,
             )
             .await;
         }
@@ -741,7 +742,6 @@ async fn sync() {
     println!("Bytes per Min: {}", metrics_lock.bytes_current);
     println!("Bytes: {}", metrics_lock.bytes_total);
 
-
     match Config::set_status(metrics_lock, Some(0)).await {
         Ok(_g) => {}
         Err(_err) => {}
@@ -752,7 +752,7 @@ async fn sync() {
 
 fn output_sync(metadata: HashMap<String, Metadata>) {
     // thread::spawn(move || {
-        // println!("Arrow Schema: {:?}", arrowSchema);
+    // println!("Arrow Schema: {:?}", arrowSchema);
 
     if OUTPUT_RUNNING.lock().unwrap().load(Ordering::SeqCst) {
         return;
@@ -761,114 +761,119 @@ fn output_sync(metadata: HashMap<String, Metadata>) {
 
     let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
 
-        let data_dir = Config::get_data_dir();
-        let output_dir = &format!("{}/output", data_dir);
-        let finalised_dir = &format!("{}/finalised", data_dir);
+    let data_dir = Config::get_data_dir();
+    let output_dir = &format!("{}/output", data_dir);
+    let finalised_dir = &format!("{}/finalised", data_dir);
 
-        let options = MatchOptions {
-            case_sensitive: false,
-            require_literal_separator: false,
-            require_literal_leading_dot: false,
-        };
+    let options = MatchOptions {
+        case_sensitive: false,
+        require_literal_separator: false,
+        require_literal_leading_dot: false,
+    };
 
-        // println!("Finalising output files");
-        // Config::list_dir_contents(output_dir).expect(&format!("Could not list output dir {}", output_dir));
+    // println!("Finalising output files");
+    // Config::list_dir_contents(output_dir).expect(&format!("Could not list output dir {}", output_dir));
 
-        // loop {
-        for entry in glob_with(&format!("{}/done/*", output_dir), options)
-            .expect("Failed to read glob pattern")
-        {
+    // loop {
+    for entry in
+        glob_with(&format!("{}/done/*", output_dir), options).expect("Failed to read glob pattern")
+    {
+        if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+            match entry {
+                Ok(path) => {
+                    // println!("Finalising output file {}", path.display());
 
-            if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+                    // Always regenerate arrow schema incase updated skippr metadata, e.g. discovered a new field
+                    let mut arrow_schema: Result<Schema, ArrowError> = Ok(Schema::empty());
+                    let mut schema_ref = Arc::new(Schema::empty());
 
-                match entry {
-                    Ok(path) => {
-                        // println!("Finalising output file {}", path.display());
+                    let skpr_namespace =
+                        BufferChunker::decode_file_namespace(path.to_str().unwrap());
+                    // let skpr_partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
 
-                        // Always regenerate arrow schema incase updated skippr metadata, e.g. discovered a new field
-                        let mut arrow_schema: Result<Schema, ArrowError> = Ok(Schema::empty());
-                        let mut schema_ref = Arc::new(Schema::empty());
+                    if metadata.get(&skpr_namespace).is_some() {
+                        let mut output_metadata: HashMap<String, Metadata> = HashMap::new();
+                        if flatten {
+                            let mut meta: HashMap<String, Metadata> = HashMap::new();
 
-                        let skpr_namespace =
-                            BufferChunker::decode_file_namespace(path.to_str().unwrap());
-                        // let skpr_partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
+                            flatten_metadata(metadata.get(&skpr_namespace).unwrap(), &mut meta);
 
-                        if metadata.get(&skpr_namespace).is_some() {
-                            let mut output_metadata: HashMap<String, Metadata> = HashMap::new();
-                            if flatten {
-                                let mut meta: HashMap<String, Metadata> = HashMap::new();
+                            let mut flat: Metadata = Metadata::new().unwrap();
+                            flat.fields = Box::new(meta);
+                            output_metadata.insert(skpr_namespace.clone(), flat);
+                        } else {
+                            output_metadata = metadata.clone();
+                        }
 
-                                flatten_metadata(metadata.get(&skpr_namespace).unwrap(), &mut meta);
+                        // let mut skpr_namespace: String = "".to_string();
+                        // if let Some((a, b)) = path.display().to_string().split_once("done/") {
+                        //     if let Some((hash, namespace_part)) = b.to_string().split_once("-") {
+                        //         skpr_namespace = namespace_part.to_string()
+                        //     }
+                        // }
 
-                                let mut flat: Metadata = Metadata::new().unwrap();
-                                flat.fields = Box::new(meta);
-                                output_metadata.insert(skpr_namespace.clone(), flat);
-                            } else {
-                                output_metadata = metadata.clone();
-                            }
+                        // if metadata.get(&skpr_namespace).is_none() {
+                        //     metadata.insert(skpr_namespace.clone(), Metadata::new().unwrap());
+                        // }
 
-                            // let mut skpr_namespace: String = "".to_string();
-                            // if let Some((a, b)) = path.display().to_string().split_once("done/") {
-                            //     if let Some((hash, namespace_part)) = b.to_string().split_once("-") {
-                            //         skpr_namespace = namespace_part.to_string()
-                            //     }
-                            // }
+                        // println!("getting schema: {} from file: {}", skpr_namespace, path.to_str().unwrap());
 
-                            // if metadata.get(&skpr_namespace).is_none() {
-                            //     metadata.insert(skpr_namespace.clone(), Metadata::new().unwrap());
-                            // }
+                        // let skpr_namespace = BufferChunker::decode_file_namespace(path.to_str().unwrap());
+                        let skpr_partition =
+                            BufferChunker::decode_file_partition(path.to_str().unwrap());
+                        let source_time = BufferChunker::decode_file_time(path.to_str().unwrap());
 
-                            // println!("getting schema: {} from file: {}", skpr_namespace, path.to_str().unwrap());
+                        arrow_schema = convert_skippr_to_arrow(
+                            output_metadata.get(&skpr_namespace).unwrap().fields.clone(),
+                        );
 
-                            // let skpr_namespace = BufferChunker::decode_file_namespace(path.to_str().unwrap());
-                            let skpr_partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
-                            let source_time = BufferChunker::decode_file_time(path.to_str().unwrap());
+                        schema_ref = Arc::new(arrow_schema.unwrap());
 
-                            arrow_schema = convert_skippr_to_arrow(
-                                output_metadata.get(&skpr_namespace).unwrap().fields.clone(),
-                            );
+                        let tmp_file_path = SerdeParquet::serialize(path.clone(), schema_ref);
 
-                            schema_ref = Arc::new(arrow_schema.unwrap());
+                        let finalised_file_name = BufferChunker::encode_chunk_name(
+                            "ingest",
+                            Some(&skpr_namespace),
+                            Some(&skpr_partition),
+                            Some(source_time),
+                        );
 
-                            let tmp_file_path = SerdeParquet::serialize(path.clone(), schema_ref);
+                        let finalised_file_path = &format!(
+                            "{}/{}&part={}.parquet",
+                            finalised_dir,
+                            finalised_file_name,
+                            Helpers::random_str(12).as_str()
+                        );
 
-                            let finalised_file_name = BufferChunker::encode_chunk_name(
-                                "ingest",
-                                Some(&skpr_namespace),
-                                Some(&skpr_partition),
-                                Some(source_time),
-                            );
+                        match fs::rename(tmp_file_path, finalised_file_path) {
+                            Ok(_) => {}
+                            Err(_) => {}
+                        };
 
-                            let finalised_file_path = &format!(
-                                "{}/{}&part={}.parquet",
-                                finalised_dir,
-                                finalised_file_name,
-                                Helpers::random_str(12).as_str()
-                            );
-
-                            match fs::rename(tmp_file_path, finalised_file_path) {
-                                Ok(_) => {},
-                                Err(_) => {}
-                            };
-
-                            match std::fs::remove_file(path) {
-                                Ok(_t) => {}
-                                Err(err) => println!("{:?}", err),
-                            }
+                        match std::fs::remove_file(path) {
+                            Ok(_t) => {}
+                            Err(err) => println!("{:?}", err),
                         }
                     }
-                    Err(e) => println!("{:?}", e),
                 }
+                Err(e) => println!("{:?}", e),
             }
         }
+    }
 
-    OUTPUT_RUNNING.lock().unwrap().store(false, Ordering::SeqCst);
+    OUTPUT_RUNNING
+        .lock()
+        .unwrap()
+        .store(false, Ordering::SeqCst);
 
     if !RUNNING.lock().unwrap().load(Ordering::SeqCst) {
-        OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE.lock().unwrap().store(true, Ordering::SeqCst);
+        OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE
+            .lock()
+            .unwrap()
+            .store(true, Ordering::SeqCst);
     }
-        // sleep(Duration::from_secs(1));
-        // }
+    // sleep(Duration::from_secs(1));
+    // }
     // });
 }
 
@@ -881,7 +886,6 @@ pub fn flatten_metadata(metadata: &Metadata, flattened: &mut HashMap<String, Met
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -928,7 +932,9 @@ mod tests {
 
         assert_eq!(flattened.len(), 1);
         assert!(flattened.contains_key("parent_child"));
-        assert_eq!(flattened.get("parent_child").unwrap().count, metadata_child.count);
+        assert_eq!(
+            flattened.get("parent_child").unwrap().count,
+            metadata_child.count
+        );
     }
 }
-

@@ -15,11 +15,11 @@ use std::path::PathBuf;
 
 use crate::buffer::BufferChunker;
 use crate::helpers::configuration::Config;
-use std::sync::Arc;
-use arrow::error::ArrowError;
-use parquet::basic::{Compression, Encoding};
 use crate::helpers::logger::LogLevel;
 use crate::LOGGER;
+use arrow::error::ArrowError;
+use parquet::basic::{Compression, Encoding};
+use std::sync::Arc;
 
 // #[derive(clap::ValueEnum, Clone)]
 // #[allow(non_camel_case_types, clippy::upper_case_acronyms)]
@@ -237,7 +237,10 @@ impl SerdeParquet {
         let source_file = match File::open(path.clone()) {
             Ok(file) => Some(file),
             Err(err) => {
-                println!("Error opening file for serialisation, already processed? {}", err);
+                println!(
+                    "Error opening file for serialisation, already processed? {}",
+                    err
+                );
                 None
             }
         };
@@ -351,9 +354,12 @@ impl SerdeParquet {
                         .build()
                         .unwrap()
                         .block_on(async {
-                        LOGGER.lock().await.log(LogLevel::Error, _error.to_string()).await;
-                    });
-
+                            LOGGER
+                                .lock()
+                                .await
+                                .log(LogLevel::Error, _error.to_string())
+                                .await;
+                        });
 
                     // println!("Failed writing batch");
                     // println!("{:?}", _error);
@@ -372,7 +378,6 @@ impl SerdeParquet {
         writer.close().unwrap();
 
         output_file_path.to_string()
-
     }
 
     pub fn default_message(metadata: &mut HashMap<String, Metadata>) -> Result<Message, String> {

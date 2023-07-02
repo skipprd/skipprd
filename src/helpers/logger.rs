@@ -1,15 +1,14 @@
-use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
+use crate::helpers::configuration::Config;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::json;
-use crate::helpers::configuration::Config;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 
-
+use crate::helpers::license::TENANT_ID;
+use serde_derive::Serialize;
+use std::fmt;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use std::fmt;
-use serde_derive::Serialize;
-use crate::helpers::license::TENANT_ID;
 
 #[derive(Debug, Clone, Serialize, Hash, PartialEq, Eq)]
 pub enum LogLevel {
@@ -72,11 +71,13 @@ impl Logger {
         } else {
             Ok(())
         }
-
     }
 
-    pub(crate) async fn log_api<'a>(&mut self, logs: HashMap<Log, usize>, exit_code: Option<i8>) -> Result<(), Box<dyn std::error::Error>> {
-
+    pub(crate) async fn log_api<'a>(
+        &mut self,
+        logs: HashMap<Log, usize>,
+        exit_code: Option<i8>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let workspace = Config::get_workspace_name();
         let pipeline = Config::get_pipeline_name();
 
@@ -119,7 +120,11 @@ impl Logger {
 
         // println!("Posting data: {:?}", data);
 
-        let response = client.put(format!("{}/{}", uri, path)).json(&data).send().await?;
+        let response = client
+            .put(format!("{}/{}", uri, path))
+            .json(&data)
+            .send()
+            .await?;
 
         match response.error_for_status() {
             Ok(_resp) => {
@@ -132,5 +137,4 @@ impl Logger {
 
         Ok(())
     }
-
 }

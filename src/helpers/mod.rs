@@ -11,8 +11,8 @@ use serde_json::{Map, Value};
 
 pub mod configuration;
 pub mod license;
-pub mod offsets;
 pub mod logger;
+pub mod offsets;
 
 // let clean_field_cache = Arc::new(Mutex::new(HashMap<String, bool> = HashMap::new()));
 
@@ -70,10 +70,10 @@ impl Helpers {
 
         let clean_field_cache_lock = &mut *clean_field_cache.lock().unwrap();
 
-        if clean_field_cache_lock.contains_key(&field) && clean_field_cache_lock[&field] != "no".to_string()
+        if clean_field_cache_lock.contains_key(&field)
+            && clean_field_cache_lock[&field] != "no".to_string()
         {
             return clean_field_cache_lock[&field].to_string();
-
         } else if !clean_field_cache_lock.contains_key(&field) {
             if field.parse::<i32>().is_ok() {
                 clean = "item_".to_string() + &field;
@@ -85,8 +85,10 @@ impl Helpers {
                 Regex::new(r"[^_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ]")
                     .unwrap();
             clean = re.replace_all(&clean, "_").to_string();
-            clean = regex::Regex::new(r"_+").unwrap().replace_all(&clean, "_").to_string();
-
+            clean = regex::Regex::new(r"_+")
+                .unwrap()
+                .replace_all(&clean, "_")
+                .to_string();
 
             // let pattern = "/[^" + preg_quote(
             //     "_0123456789_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ",
@@ -411,53 +413,72 @@ mod clean_field_name_tests {
             let mut clean_field_cache_lock = clean_field_cache.lock().unwrap();
             clean_field_cache_lock.clear();
         }
-        assert_eq!(Helpers::clean_field_name("testField".to_string()), "testfield".to_string());
+        assert_eq!(
+            Helpers::clean_field_name("testField".to_string()),
+            "testfield".to_string()
+        );
 
         // Cache is empty, input with special characters
         {
             let mut clean_field_cache_lock = clean_field_cache.lock().unwrap();
             clean_field_cache_lock.clear();
         }
-        assert_eq!(Helpers::clean_field_name("test!@#Field$%^&".to_string()), "test_field".to_string());
+        assert_eq!(
+            Helpers::clean_field_name("test!@#Field$%^&".to_string()),
+            "test_field".to_string()
+        );
 
         // Cache is empty, input starts with numbers
         {
             let mut clean_field_cache_lock = clean_field_cache.lock().unwrap();
             clean_field_cache_lock.clear();
         }
-        assert_eq!(Helpers::clean_field_name("123testField".to_string()), "testfield".to_string());
+        assert_eq!(
+            Helpers::clean_field_name("123testField".to_string()),
+            "testfield".to_string()
+        );
 
         // Cache is empty, input starts with underscore and numbers
         {
             let mut clean_field_cache_lock = clean_field_cache.lock().unwrap();
             clean_field_cache_lock.clear();
         }
-        assert_eq!(Helpers::clean_field_name("_123testField".to_string()), "123testfield".to_string());
+        assert_eq!(
+            Helpers::clean_field_name("_123testField".to_string()),
+            "123testfield".to_string()
+        );
 
         // Cache is empty, input is numbers
         {
             let mut clean_field_cache_lock = clean_field_cache.lock().unwrap();
             clean_field_cache_lock.clear();
         }
-        assert_eq!(Helpers::clean_field_name("1".to_string()), "item_1".to_string());
-
+        assert_eq!(
+            Helpers::clean_field_name("1".to_string()),
+            "item_1".to_string()
+        );
 
         // Cache has a record
         {
             let mut clean_field_cache_lock = clean_field_cache.lock().unwrap();
             clean_field_cache_lock.insert("cachedField".to_string(), "cachedfield".to_string());
         }
-        assert_eq!(Helpers::clean_field_name("cachedField".to_string()), "cachedfield".to_string());
+        assert_eq!(
+            Helpers::clean_field_name("cachedField".to_string()),
+            "cachedfield".to_string()
+        );
 
         // Cache has a record marked as "no"
         {
             let mut clean_field_cache_lock = clean_field_cache.lock().unwrap();
             clean_field_cache_lock.insert("no_change_field".to_string(), "no".to_string());
         }
-        assert_eq!(Helpers::clean_field_name("no_change_field".to_string()), "no_change_field".to_string());
+        assert_eq!(
+            Helpers::clean_field_name("no_change_field".to_string()),
+            "no_change_field".to_string()
+        );
     }
 }
-
 
 #[cfg(test)]
 mod parse_time_field_tests {

@@ -8,10 +8,7 @@ mod tests {
         let expected_type = "boolean".to_string();
 
         let subject = 123;
-        assert_ne!(
-            get_type(&mut subject.to_string()),
-            expected_type
-        );
+        assert_ne!(get_type(&mut subject.to_string()), expected_type);
     }
 
     #[test]
@@ -19,10 +16,7 @@ mod tests {
         let expected_type = "boolean".to_string();
 
         let subject = 1;
-        assert_eq!(
-            get_type(&mut subject.to_string()),
-            expected_type
-        );
+        assert_eq!(get_type(&mut subject.to_string()), expected_type);
     }
 
     #[test]
@@ -30,10 +24,7 @@ mod tests {
         let expected_type = "boolean".to_string();
 
         let subject = 0;
-        assert_eq!(
-            get_type(&mut subject.to_string()),
-            expected_type
-        );
+        assert_eq!(get_type(&mut subject.to_string()), expected_type);
     }
 
     #[test]
@@ -41,10 +32,7 @@ mod tests {
         let expected_type = "boolean".to_string();
 
         let subject = true;
-        assert_eq!(
-            get_type(&mut subject.to_string()),
-            expected_type
-        );
+        assert_eq!(get_type(&mut subject.to_string()), expected_type);
     }
 
     #[test]
@@ -52,10 +40,7 @@ mod tests {
         let expected_type = "boolean".to_string();
 
         let subject = false;
-        assert_eq!(
-            get_type(&mut subject.to_string()),
-            expected_type
-        );
+        assert_eq!(get_type(&mut subject.to_string()), expected_type);
     }
 
     #[test]
@@ -63,10 +48,7 @@ mod tests {
         let expected_type = "boolean".to_string();
 
         let subject = "true";
-        assert_eq!(
-            get_type(&mut subject.to_string()),
-            expected_type
-        );
+        assert_eq!(get_type(&mut subject.to_string()), expected_type);
     }
 
     #[test]
@@ -74,10 +56,7 @@ mod tests {
         let expected_type = "boolean".to_string();
 
         let subject = "false";
-        assert_eq!(
-            get_type(&mut subject.to_string()),
-            expected_type
-        );
+        assert_eq!(get_type(&mut subject.to_string()), expected_type);
     }
 }
 

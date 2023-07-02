@@ -1,15 +1,15 @@
+use crate::discover::Metadata;
+use crate::helpers::configuration::{Config, Metrics};
+use crate::helpers::offsets::{OffsetKey, Offsets};
+use crate::helpers::Helpers;
+use crate::ingest_work::{Ingest, IngestBatch, OUTPUT_FILES_STATIC};
+use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader};
-use std::sync::mpsc::{self, Sender, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 use tokio::time::Duration;
-use crate::helpers::configuration::{Config, Metrics};
-use crate::ingest_work::{Ingest, IngestBatch, OUTPUT_FILES_STATIC};
-use std::collections::HashMap;
-use crate::discover::Metadata;
-use std::sync::{Arc, Mutex};
-use crate::helpers::Helpers;
-use crate::helpers::offsets::{OffsetKey, Offsets};
 
 pub struct DataSourceStdinPlugin {
     ingest: Ingest,
@@ -22,9 +22,19 @@ impl DataSourceStdinPlugin {
     pub async fn new() -> DataSourceStdinPlugin {
         DataSourceStdinPlugin {
             ingest: Ingest::new(),
-            buffer_size: Config::getenv("DATA_SOURCE_BATCH_SIZE_BYTES", "1").parse().unwrap(),
-            buffer_timeout: Duration::from_secs(Config::getenv("DATA_SOURCE_BATCH_SIZE_SECONDS", "1").parse().unwrap()),
-            buffer_threshold: Duration::from_secs(Config::getenv("BUFFER_THRESHOLD_SECONDS", "5").parse().unwrap()),
+            buffer_size: Config::getenv("DATA_SOURCE_BATCH_SIZE_BYTES", "1")
+                .parse()
+                .unwrap(),
+            buffer_timeout: Duration::from_secs(
+                Config::getenv("DATA_SOURCE_BATCH_SIZE_SECONDS", "1")
+                    .parse()
+                    .unwrap(),
+            ),
+            buffer_threshold: Duration::from_secs(
+                Config::getenv("BUFFER_THRESHOLD_SECONDS", "5")
+                    .parse()
+                    .unwrap(),
+            ),
         }
     }
 
@@ -85,7 +95,7 @@ impl DataSourceStdinPlugin {
                     let batch = IngestBatch {
                         offset_key: OffsetKey {
                             namespace: "stdin".to_string(),
-                            partition: Helpers::random_str(10),  // no partition for stdin
+                            partition: Helpers::random_str(10), // no partition for stdin
                         },
                         data,
                     };
@@ -97,20 +107,20 @@ impl DataSourceStdinPlugin {
 
                     thread::spawn(move || {
                         Ingest::ingest_file(vec![batch], &metadata, &metrics, &offsets_clone)
-                    }).join().unwrap();
+                    })
+                    .join()
+                    .unwrap();
                 }
-                Err(e) => {
-                    match e {
-                        mpsc::RecvTimeoutError::Timeout => {
-                            let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
-                            Ingest::flush_buffers(true, &mut output_files);
-                        },
-                        mpsc::RecvTimeoutError::Disconnected => {
-                            eprintln!("Error receiving from buffer channel: {}", e);
-                            break;
-                        }
+                Err(e) => match e {
+                    mpsc::RecvTimeoutError::Timeout => {
+                        let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
+                        Ingest::flush_buffers(true, &mut output_files);
                     }
-                }
+                    mpsc::RecvTimeoutError::Disconnected => {
+                        eprintln!("Error receiving from buffer channel: {}", e);
+                        break;
+                    }
+                },
             }
         }
     }

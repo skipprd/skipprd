@@ -96,8 +96,6 @@ impl BufferChunker {
             };
         }
 
-        
-
         if bucket_rounded_timestamp > 0 {
             // event_time - (event_time % bucket_seconds)
             event_time - ((event_time).rem_euclid(bucket_rounded_timestamp))
@@ -177,14 +175,10 @@ impl BufferChunker {
     pub fn decode_file_time_to_datetime_string(filename: &str) -> String {
         let time = BufferChunker::get_file_time(filename);
 
-        
-
         // println!("decoding buffer time {} file {}", date_string, filename);
 
         if time != 0 {
-            
-            DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp(time, 0), Utc)
-                .to_rfc3339()
+            DateTime::<Utc>::from_utc(NaiveDateTime::from_timestamp(time, 0), Utc).to_rfc3339()
         } else {
             "".to_string()
         }
@@ -206,9 +200,9 @@ impl BufferChunker {
 
         if !partition.is_empty() {
             // let parts = partition.split('-');
-            let parts = partition.split( "%2D"); // hyphen
-                // .next().unwrap();
-            // let parts = partition.split("%2D");
+            let parts = partition.split("%2D"); // hyphen
+                                                // .next().unwrap();
+                                                // let parts = partition.split("%2D");
             let collection: Vec<&str> = parts.collect();
             // let collection: Vec<&str> = parts.map(| val |val.rsplitn(1, "%3D").next().unwrap()).collect();
 
@@ -221,7 +215,6 @@ impl BufferChunker {
     pub fn decode_file_namespace(filename: &str) -> String {
         // let mut array = form_urlencoded::parse(filename.as_bytes());
         // let namespace = array.get("namespace").map(|s| s.to_string()).unwrap_or_default();
-        
 
         // println!("decoding buffer namespace {} from file {}", namespace, filename);
 

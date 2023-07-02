@@ -5,18 +5,18 @@ use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::helpers::Helpers;
 use crate::ingest::ingest_fast::fast_path_ingest;
 use crate::serdes::json::SerdeJson;
+use crate::RUNNING;
+use glob::{glob_with, MatchOptions};
+use lru::LruCache;
 use once_cell::sync::Lazy;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::{fs};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use glob::{glob_with, MatchOptions};
-use crate::{RUNNING};
-use lru::LruCache;
 use std::num::NonZeroUsize;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub struct Buffer {
     data: Vec<u8>,
@@ -81,7 +81,11 @@ pub struct OutputFile {
 
 // Bare metal platforms usually have very small amounts of RAM
 // (in the order of hundreds of KB)
-pub const WRITE_BUF_SIZE: usize = if cfg!(target_os = "espidf") { 512 } else { 512 * 1024 };
+pub const WRITE_BUF_SIZE: usize = if cfg!(target_os = "espidf") {
+    512
+} else {
+    512 * 1024
+};
 
 pub static PARSE_NAMESPACE_CACHE: Lazy<Mutex<HashMap<String, String>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
@@ -90,7 +94,6 @@ pub static OUTPUT_FILES_STATIC: Lazy<Mutex<LruCache<String, OutputFile>>> =
     Lazy::new(|| Mutex::new(LruCache::new(NonZeroUsize::new(100).expect(""))));
 
 pub struct Ingest {}
-
 
 impl Ingest {
     pub fn new() -> Ingest {
@@ -104,10 +107,17 @@ impl Ingest {
         let mut rotated_files: Vec<String> = Vec::new();
 
         for (filename, output_file) in output_files.iter_mut() {
-            output_file.file.flush().expect(&format!("Could not flush file {}", filename));
+            output_file
+                .file
+                .flush()
+                .expect(&format!("Could not flush file {}", filename));
 
-            if force || Ingest::is_file_size_exceeded(&output_file) || Ingest::is_file_time_exceeded(&output_file) {
-                if output_file.bytes > 0 { // don't flush empty files when forced
+            if force
+                || Ingest::is_file_size_exceeded(&output_file)
+                || Ingest::is_file_time_exceeded(&output_file)
+            {
+                if output_file.bytes > 0 {
+                    // don't flush empty files when forced
                     // output_file.bytes = 0;
                     // output_file.upated_at = UNIX_EPOCH;
                     // output_file.rotated = Some(true);
@@ -121,7 +131,7 @@ impl Ingest {
                     let old_path = format!("{}/{}", output_dir, &filename);
 
                     match fs::rename(&old_path, &new_filename) {
-                        Ok(_) => {},
+                        Ok(_) => {}
                         Err(_) => {}
                     };
 
@@ -135,7 +145,6 @@ impl Ingest {
         }
 
         if force {
-
             let options = MatchOptions {
                 case_sensitive: false,
                 require_literal_separator: false,
@@ -147,9 +156,8 @@ impl Ingest {
             {
                 match entry {
                     Ok(path) => {
-
                         if path.is_dir() {
-                           break;
+                            break;
                         }
 
                         let new_filename = format!(
@@ -160,11 +168,17 @@ impl Ingest {
                         );
                         let old_path = format!("{}", path.display().to_string());
 
-                        println!("Flushing orphaned ingest buffer: {} to output: {}", path.display().to_string(), new_filename);
+                        println!(
+                            "Flushing orphaned ingest buffer: {} to output: {}",
+                            path.display().to_string(),
+                            new_filename
+                        );
 
                         match fs::rename(&old_path, &new_filename) {
-                            Ok(_) => {},
-                            Err(err) => {println!("Error: {}", err)}
+                            Ok(_) => {}
+                            Err(err) => {
+                                println!("Error: {}", err)
+                            }
                         };
                     }
                     _ => {}
@@ -179,7 +193,6 @@ impl Ingest {
         metrics: &Arc<Mutex<Metrics>>,
         offset_db: &Arc<Offsets>,
     ) {
-
         let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
 
         let data_dir = Config::get_data_dir();
@@ -200,7 +213,7 @@ impl Ingest {
             Ok(output_files) => output_files,
             Err(err) => {
                 panic!("Could not lock buffer files, Error: {:?}", err);
-            },
+            }
         };
 
         let mut bytes: u64 = 0;
@@ -216,85 +229,82 @@ impl Ingest {
             let records: Vec<Value> = SerdeJson::deserialize(&ingest_batch.data);
 
             for mut record in records {
+                if record.is_null()
+                    || (record.is_object() && record.as_object().unwrap().is_empty())
+                    || (record.is_array() && record.as_array().unwrap().is_empty())
+                {
+                    // println!("{}", &ingest_batch.data);
+                    let mut counter_lock = metrcis_clone
+                        .lock()
+                        .expect("Could not lock metrics for deadletter stats");
+                    counter_lock.deadletters_total += 1;
 
-                    if record.is_null()
-                        || (record.is_object() && record.as_object().unwrap().is_empty())
-                        || (record.is_array() && record.as_array().unwrap().is_empty())
-                    {
+                    i += 1;
 
-                        // println!("{}", &ingest_batch.data);
-                        let mut counter_lock = metrcis_clone.lock().expect("Could not lock metrics for deadletter stats");
-                        counter_lock.deadletters_total += 1;
+                    continue;
+                }
 
-                        i += 1;
-
-                        continue;
-                    }
-
-                    if has_offsets.is_none()
-                        || Some(false)
+                if has_offsets.is_none()
+                    || Some(false)
                         != offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Line, i)
-                    {
-                        let usize = serde_json::to_vec(&record).unwrap().len();
-                        let record_bytes: u64 = usize.try_into().unwrap();
-                        bytes += record_bytes;
+                {
+                    let usize = serde_json::to_vec(&record).unwrap().len();
+                    let record_bytes: u64 = usize.try_into().unwrap();
+                    bytes += record_bytes;
 
-                        let skpr_namespace = Helpers::parse_namespace_field(
-                            &record,
-                            Config::get_pipeline_name(),
-                            &mut PARSE_NAMESPACE_CACHE.lock().unwrap(),
-                        );
-                        let skpr_partition = Helpers::parse_partition_field(&record);
-                        let skpr_time = Helpers::parse_time_field(&record);
+                    let skpr_namespace = Helpers::parse_namespace_field(
+                        &record,
+                        Config::get_pipeline_name(),
+                        &mut PARSE_NAMESPACE_CACHE.lock().unwrap(),
+                    );
+                    let skpr_partition = Helpers::parse_partition_field(&record);
+                    let skpr_time = Helpers::parse_time_field(&record);
 
-                        let mut skpr_time_bucket: Option<i64> = None;
+                    let mut skpr_time_bucket: Option<i64> = None;
 
-                        if skpr_time.is_some() {
-                            skpr_time_bucket = Some(BufferChunker::event_time_bucket(skpr_time.unwrap()));
-                        }
-
-                        let output_file_name = BufferChunker::encode_chunk_name(
-                            "ingest",
-                            Some(&skpr_namespace),
-                            Some(&skpr_partition),
-                            skpr_time_bucket,
-                        );
-
-
-                        let mut meta = metadata_clone.lock().unwrap();
-                        if meta.get(&skpr_namespace).is_none() {
-                            meta.insert(skpr_namespace.clone(), Metadata::new().unwrap());
-                        }
-
-                        let msg = fast_path_ingest(
-                            &record,
-                            &mut meta.get_mut(&skpr_namespace).unwrap().fields,
-                            &mut updated_schema_clone.lock().unwrap(),
-                            flatten
-                        );
-
-                        let buf_str = msg.to_string() + "\n";
-                        buffers.write(&output_file_name, buf_str.as_bytes());
-                            // .or_insert_with(Buffer::new);
-                        // buffer.write(buf_str.as_bytes());
-                        // buffer.bytes += record_bytes;
-
-                        i += 1;
-                        j += 1;
-
-                        offset_db_clone.set(&ingest_batch.offset_key, OffsetTypes::Line, i);
-
+                    if skpr_time.is_some() {
+                        skpr_time_bucket =
+                            Some(BufferChunker::event_time_bucket(skpr_time.unwrap()));
                     }
+
+                    let output_file_name = BufferChunker::encode_chunk_name(
+                        "ingest",
+                        Some(&skpr_namespace),
+                        Some(&skpr_partition),
+                        skpr_time_bucket,
+                    );
+
+                    let mut meta = metadata_clone.lock().unwrap();
+                    if meta.get(&skpr_namespace).is_none() {
+                        meta.insert(skpr_namespace.clone(), Metadata::new().unwrap());
+                    }
+
+                    let msg = fast_path_ingest(
+                        &record,
+                        &mut meta.get_mut(&skpr_namespace).unwrap().fields,
+                        &mut updated_schema_clone.lock().unwrap(),
+                        flatten,
+                    );
+
+                    let buf_str = msg.to_string() + "\n";
+                    buffers.write(&output_file_name, buf_str.as_bytes());
+                    // .or_insert_with(Buffer::new);
+                    // buffer.write(buf_str.as_bytes());
+                    // buffer.bytes += record_bytes;
+
+                    i += 1;
+                    j += 1;
+
+                    offset_db_clone.set(&ingest_batch.offset_key, OffsetTypes::Line, i);
+                }
             }
 
             offset_db_clone.set(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
-
         }
 
         // Flush all buffers to their respective files.
 
         for (filename, buffer) in buffers.buffers.iter() {
-
             let output_file = format!("{}/{}", output_dir.clone(), &filename);
 
             if output_files.peek(filename).is_none() {
@@ -309,31 +319,36 @@ impl Ingest {
 
                 let new_file = match std::fs::metadata(&output_file) {
                     Ok(metadata) => {
-
-                        let secs_since_epoch = metadata.modified().unwrap().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                        let secs_since_epoch = metadata
+                            .modified()
+                            .unwrap()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs();
                         let time = UNIX_EPOCH + Duration::from_secs(secs_since_epoch);
 
                         OutputFile {
                             bytes: metadata.len(),
                             upated_at: time,
                             file: writer,
-                            rotated: None
-                        }
-                    },
-                    Err(err) => {
-                        OutputFile {
-                            bytes: 0,
-                            upated_at: aprox_now,
-                            file: writer,
-                            rotated: None
+                            rotated: None,
                         }
                     }
+                    Err(err) => OutputFile {
+                        bytes: 0,
+                        upated_at: aprox_now,
+                        file: writer,
+                        rotated: None,
+                    },
                 };
 
                 // If the cache is full, remove and flush the least recently used item.
                 if output_files.len() == output_files.cap().get() {
                     if let Some((filename, mut evicted)) = output_files.pop_lru() {
-                        evicted.file.flush().expect(&format!("Could not flush file {}", filename));
+                        evicted
+                            .file
+                            .flush()
+                            .expect(&format!("Could not flush file {}", filename));
                     }
                 }
 
@@ -359,7 +374,6 @@ impl Ingest {
         counter_lock.bytes_current += bytes;
 
         if *updated_schema_clone.lock().unwrap() == "yes".to_string() {
-
             *updated_schema_clone.lock().unwrap() = "no".to_string();
 
             tokio::runtime::Builder::new_multi_thread()
@@ -367,15 +381,9 @@ impl Ingest {
                 .build()
                 .unwrap()
                 .block_on(async {
-                    Config::set_config(
-                        &metadata_clone.lock().unwrap(),
-                        true,
-                    )
-                    .await;
+                    Config::set_config(&metadata_clone.lock().unwrap(), true).await;
                 });
-
         }
-
     }
 
     fn is_file_size_exceeded(file: &OutputFile) -> bool {
@@ -385,7 +393,11 @@ impl Ingest {
 
     fn is_file_time_exceeded(file: &OutputFile) -> bool {
         let ttl = Config::getenv("BUFFER_THRESHOLD_SECONDS", "300"); // 10MB default
-        SystemTime::now().duration_since(file.upated_at).unwrap().as_secs() > ttl.parse::<u64>().unwrap()
+        SystemTime::now()
+            .duration_since(file.upated_at)
+            .unwrap()
+            .as_secs()
+            > ttl.parse::<u64>().unwrap()
     }
 
     fn is_rotated(file: &OutputFile) -> bool {
