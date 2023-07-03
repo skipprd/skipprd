@@ -55,10 +55,8 @@ impl DataSourceLocalFilePlugin {
 
     pub async fn sync(
         &mut self,
-        metadata: Arc<Mutex<HashMap<String, Metadata>>>,
         offsets: Arc<Offsets>,
     ) {
-        let metadata = metadata.clone();
         let offsets_clone = offsets.clone();
 
         let file_path_pattern = format!("{}/**/*", self.source_directory);
@@ -72,43 +70,15 @@ impl DataSourceLocalFilePlugin {
         while let Some(batch) = data_batches_stream.next().await {
 
             let offsets_clone = offsets_clone.clone();
-            let metadata = metadata.clone();
 
             let ingest_handle = task::spawn_blocking(move || {
 
-                // let offsets_clone = offsets_clone.clone();
-                // let metadata = metadata.clone();
-                // let metrics = metrics.clone();
-
-                self::Ingest::ingest_file(batch, &metadata, &offsets_clone);
+                self::Ingest::ingest_file(batch, &offsets_clone);
             });
             ingest_handle.await.unwrap();
-            // batch.clear();
 
         }
 
-        //     let data_batches_to_process = self.prepare_data_for_processing(
-        //         &metadata,
-        //         &metrics,
-        //         &offsets_clone,
-        //         self.source_directory.clone(),
-        //     );
-        //
-        // // thread::spawn(move || {
-        //
-        // for data_batch in data_batches_to_process {
-        //     let ingest_handle = task::spawn_blocking(move || {
-        //         self::Ingest::ingest_file(data_batch, &metadata, &metrics, &offsets_clone);
-        //     });
-        //     ingest_handle.await.unwrap();
-        // }
-        //
-        // // let ingest_handle = task::spawn_blocking(move || {
-        // //     self::Ingest::ingest_file(data_to_process, &metadata, &metrics, &offsets_clone);
-        // // });
-        //
-        // ingest_handle.await.unwrap();
-    // });
     }
 
     pub fn prepare_data_for_processing(

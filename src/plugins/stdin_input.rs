@@ -40,7 +40,6 @@ impl DataSourceStdinPlugin {
 
     pub async fn sync(
         &mut self,
-        metadata: Arc<Mutex<HashMap<String, Metadata>>>,
         offsets: Arc<Offsets>,
     ) {
         let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel();
@@ -100,11 +99,10 @@ impl DataSourceStdinPlugin {
                     };
 
                     // Spawn a new task in the runtime for each batch received.
-                    let metadata = Arc::clone(&metadata);
                     let offsets_clone = offsets.clone();
 
                     thread::spawn(move || {
-                        Ingest::ingest_file(vec![batch], &metadata, &offsets_clone)
+                        Ingest::ingest_file(vec![batch], &offsets_clone)
                     })
                     .join()
                     .unwrap();

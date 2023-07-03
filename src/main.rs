@@ -20,7 +20,7 @@ use std::fs::File;
 use std::io::BufReader;
 use std::ops::Add;
 
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::{env, thread};
 
 use std::fs;
@@ -97,6 +97,7 @@ pub static OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE: Lazy<Mutex<AtomicBool>> =
 
 pub static LOGGER: Lazy<Arc<tokio::sync::Mutex<Logger>>> = Lazy::new(|| Logger::new(100));
 pub static METRICS: Lazy<Arc<Mutex<Metrics>>> = Lazy::new(|| Arc::new(Mutex::new(Metrics::new())));
+pub static METADATA: Lazy<Arc<RwLock<HashMap<String, Metadata>>>> = Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
 
 #[tokio::main]
 async fn main() {
@@ -241,15 +242,6 @@ async fn discover() {
 }
 
 async fn sync() {
-    // let default_messages = Arc::new(Mutex::new(HashMap::new()));
-
-    // let emptyMeta = Metadata::new().unwrap();
-    // let mut metadata = HashMap::new();
-    // metadata.insert("example_ns".to_string(), emptyMeta);
-    // Config::set_config(&metadata, true).await;
-    // exit(0);
-
-    // let mut skippr_metadata = Arc::new(Mutex::new(HashMap::new()));
 
     LOGGER
         .lock()
@@ -259,19 +251,12 @@ async fn sync() {
 
     let data_dir = Config::get_data_dir();
 
-    // let _metadata_file = format!("{}/metadata.json", data_dir);
-
-    // let skippr_metadata = Arc::new(Mutex::new(match File::open(metadata_file.clone()) {
-    let skippr_metadata = Arc::new(Mutex::new(match Config::get_config().await {
-        // let mut skippr_metadata: HashMap<String, Metadata> = match File::open(metadata_file.clone()) {
+    let skippr_metadata = match Config::get_config().await {
         Ok(metadata) => {
             println!("Found Skippr metadata");
 
             Config::sync_schema(&metadata).await;
 
-            // let reader = BufReader::new(schema_file);
-
-            // let u = serde_json::from_reader(reader).unwrap();
             metadata
         }
         Err(_e) => {
@@ -280,24 +265,11 @@ async fn sync() {
             );
             let _empty_meta = Metadata::new().unwrap();
 
-            // metadata.insert("example_ns".to_string(), empty_meta);
-            // let skippr_metadata: HashMap<String, Metadata> = metadata;
-            // skippr_metadata
             HashMap::new()
-
-            // exit(1);
-            // discover();
-            //
-            // let file = File::open("metadata.json").unwrap();
-            // let reader = BufReader::new(file);
-            //
-            // let u = serde_json::from_reader(reader).unwrap();
-            //
-            // u
         }
-    }));
+    };
 
-    let _newmeta_clone = skippr_metadata.clone();
+    METADATA.write().unwrap().clone_from(&skippr_metadata);
 
     let now = Arc::new(Mutex::new(Instant::now()));
 
@@ -461,52 +433,22 @@ async fn sync() {
         }
     });
 
-    // ctrlc::set_handler(move || {
-    //     if !RUNNING.lock().unwrap().load(Ordering::SeqCst) {
-    //         println!("Received another Ctrl+C signal - no worries, terminating immediately...");
-    //         std::process::exit(0);
-    //     }
-    // })
-    // .expect("Error during graceful shutdown");
-
-    // while running.load(Ordering::SeqCst) {
-
-    // let mut pool = ThreadPool::new(4, skippr_metadata.clone());
-
     use std::time::Duration;
 
     let mut planner = periodic::Planner::new();
 
-    // let metrics_clone = metrics.clone();
     let now_clone = now.clone();
-
-    // match Config::list_dir_contents(data_dir.clone()) {
-    //     Err(e) => println!("Error occurred: {}", e),
-    //     _ => (),
-    // }
 
     planner.add(
         move || {
             if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
-                // match Config::list_dir_contents(data_dir.clone()) {
-                //     Err(e) => println!("Error occurred: {}", e),
-                //     _ => (),
-                // }
-
-                // let mut metrics: Metrics = Metrics::new();
 
                 let mut metrics_lock = METRICS.lock().unwrap();
 
-
-                // let mut counter_lock = ingestMsgCount.lock().unwrap();
-                // let mut total_lock = ingestMsgTotal.lock().unwrap();
                 let now_lock = now_clone.lock().unwrap();
 
-                // metrics_lock.msgs_total += metrics_lock.msgs_current;
                 metrics_lock.bytes_total += metrics_lock.bytes_current;
 
-                // metrics.msgs_total = *total_lock;
-                // metrics.msgs_current = *counter_lock;
                 metrics_lock.run_time_seconds = now_lock.elapsed().as_secs();
 
                 println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
@@ -540,8 +482,6 @@ async fn sync() {
     );
     planner.start();
 
-    let input_metadata_clone = skippr_metadata.clone();
-
     let mut out_pnanner = periodic::Planner::new();
 
     use rand::Rng; // 0.8.5
@@ -570,24 +510,15 @@ async fn sync() {
     out_pnanner.add(
         move || {
             if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
-                let input_metadata_clone = input_metadata_clone.clone();
                 tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
                     .build()
                     .unwrap()
                     .block_on(async {
-                        let input_metadata_clone = {
-                            let guard = input_metadata_clone.lock().unwrap();
-                            guard.clone()
-                        };
 
-                        output_sync(input_metadata_clone.clone());
+                        output_sync();
 
                         let data_output = DataOutputAwsAthenaPlugin::new().await;
-                        let input_metadata_clone = {
-                            let guard = input_metadata_clone;
-                            guard.clone()
-                        };
 
                         while OUTPUT_RUNNING.lock().unwrap().load(Ordering::SeqCst) {
                             // sleep(Duration::from_secs(1));
@@ -597,7 +528,7 @@ async fn sync() {
                         if !Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "").is_empty() {
                             OUTPUT_RUNNING.lock().unwrap().store(true, Ordering::SeqCst);
 
-                            data_output.sync(input_metadata_clone).await;
+                            data_output.sync().await;
 
                             OUTPUT_RUNNING
                                 .lock()
@@ -635,24 +566,6 @@ async fn sync() {
         Err(_err) => {}
     }
 
-    // flush last run before we start again
-    // println!("Flushing ingest buffers");
-    // let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
-    // ingest_work::Ingest::flush_buffers(true, &mut output_files);
-    // drop(output_files);
-
-    // println!("Flushing output buffers");
-    // let input_metadata_clone = skippr_metadata.clone();
-    // let input_metadata_clone = {
-    //     let guard = input_metadata_clone.lock().unwrap();
-    //     guard.clone()
-    // };
-    // output_sync(input_metadata_clone.clone());
-    //
-
-    let input_metadata_clone = skippr_metadata.clone();
-
-    // let metrics_clone = metrics.clone();
     let offsets_clone = offsets.clone();
 
     match Config::getenv("DATA_SOURCE_PLUGIN_NAME", "").as_str() {
@@ -661,8 +574,6 @@ async fn sync() {
                 let mut input = DataSourceStdinPlugin::new().await;
                 input
                 .sync(
-                    // &m1ut pool,
-                    input_metadata_clone,
                     offsets_clone,
                 )
                 .await;
@@ -672,8 +583,6 @@ async fn sync() {
             tokio::spawn(async {
                 let mut input = DataSourceLocalFilePlugin::new().await;
                 input.sync(
-                    // &m1ut pool,
-                    input_metadata_clone,
                     offsets_clone
                 )
                 .await;
@@ -683,8 +592,6 @@ async fn sync() {
             tokio::spawn(async {
                 let mut ds3 = DataSourceS3Plugin::new().await;
                 ds3.sync(
-                    // &m1ut pool,
-                    input_metadata_clone,
                     offsets_clone,
                 )
                 .await;
@@ -694,8 +601,6 @@ async fn sync() {
             tokio::spawn(async {
                 let mut ds3 = DataSourceS3InventoryPlugin::new().await;
                 ds3.sync(
-                    // &mut pool,
-                    input_metadata_clone,
                     offsets_clone,
                 )
                 .await;
@@ -709,21 +614,6 @@ async fn sync() {
         }
     };
 
-    // wait arbitrary time for ingest threads to complete
-    // sleep(Duration::from_secs(120));
-
-    // RUNNING.lock().unwrap().store(false, Ordering::SeqCst);
-    //
-    // let elapsed = SystemTime::now();
-    // while !GRACEFUL_SHUTDOWN_COMPLETE.lock().unwrap().load(Ordering::SeqCst) {
-    //     sleep(Duration::from_secs(1));
-    //     if elapsed.elapsed().unwrap() > Duration::from_secs(15) {
-    //         GRACEFUL_SHUTDOWN_COMPLETE.lock().unwrap().store(true, Ordering::SeqCst);
-    //     }
-    // }
-
-    // sleep(Duration::from_secs(60));
-
     println!("Flushing ingest buffers");
     let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
     Ingest::flush_buffers(true, &mut output_files);
@@ -733,37 +623,21 @@ async fn sync() {
     }
 
     println!("Flushing output buffers");
-    let input_metadata_clone = skippr_metadata.clone();
-    let input_metadata_clone = {
-        let guard = input_metadata_clone.lock().unwrap();
-        guard.clone()
-    };
 
-    output_sync(input_metadata_clone.clone());
+    output_sync();
 
     let data_output = DataOutputAwsAthenaPlugin::new().await;
-    let input_metadata_clone = {
-        let guard = input_metadata_clone;
-        guard.clone()
-    };
+
     if !Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "").is_empty() {
-        data_output.sync(input_metadata_clone).await;
+        data_output.sync().await;
     }
 
     let mut metrics_lock = METRICS.lock().unwrap();
 
-    // let mut metrics: Metrics = Metrics::new();
-    // let mut metrics_lock = metrics_clone.lock().unwrap();
-
-    // let mut counter_lock = ingestMsgCount.lock().unwrap();
-    // let mut total_lock = ingestMsgTotal.lock().unwrap();
     let now_lock = now.lock().unwrap();
 
-    // metrics_lock.msgs_total += metrics_lock.msgs_current;
     metrics_lock.bytes_total += metrics_lock.bytes_current;
 
-    // metrics.msgs_total = *total_lock;
-    // metrics.msgs_current = *counter_lock;
     metrics_lock.run_time_seconds = now_lock.elapsed().as_secs();
 
     println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
@@ -783,7 +657,7 @@ async fn sync() {
     println!("Complete. Shutting Down... bye");
 }
 
-fn output_sync(metadata: HashMap<String, Metadata>) {
+fn output_sync() {
     // thread::spawn(move || {
     // println!("Arrow Schema: {:?}", arrowSchema);
 
@@ -824,6 +698,8 @@ fn output_sync(metadata: HashMap<String, Metadata>) {
                         BufferChunker::decode_file_namespace(path.to_str().unwrap());
                     // let skpr_partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
 
+                    let metadata = METADATA.read().unwrap();
+
                     if metadata.get(&skpr_namespace).is_some() {
                         let mut output_metadata: HashMap<String, Metadata> = HashMap::new();
                         if flatten {
@@ -838,20 +714,6 @@ fn output_sync(metadata: HashMap<String, Metadata>) {
                             output_metadata = metadata.clone();
                         }
 
-                        // let mut skpr_namespace: String = "".to_string();
-                        // if let Some((a, b)) = path.display().to_string().split_once("done/") {
-                        //     if let Some((hash, namespace_part)) = b.to_string().split_once("-") {
-                        //         skpr_namespace = namespace_part.to_string()
-                        //     }
-                        // }
-
-                        // if metadata.get(&skpr_namespace).is_none() {
-                        //     metadata.insert(skpr_namespace.clone(), Metadata::new().unwrap());
-                        // }
-
-                        // println!("getting schema: {} from file: {}", skpr_namespace, path.to_str().unwrap());
-
-                        // let skpr_namespace = BufferChunker::decode_file_namespace(path.to_str().unwrap());
                         let skpr_partition =
                             BufferChunker::decode_file_partition(path.to_str().unwrap());
                         let source_time = BufferChunker::decode_file_time(path.to_str().unwrap());

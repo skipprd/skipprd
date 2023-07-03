@@ -5,7 +5,7 @@ use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::helpers::Helpers;
 use crate::ingest::ingest::ingest;
 use crate::serdes::json::SerdeJson;
-use crate::{METRICS, RUNNING};
+use crate::{METADATA, METRICS, RUNNING};
 use glob::{glob_with, MatchOptions};
 use lru::LruCache;
 use once_cell::sync::Lazy;
@@ -191,7 +191,6 @@ impl Ingest {
 
     pub fn ingest_file(
         datas: Vec<IngestBatch>,
-        metadata: &Arc<Mutex<HashMap<String, Metadata>>>,
         offset_db: &Arc<Offsets>,
     ) {
         let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
@@ -204,7 +203,7 @@ impl Ingest {
         let updated_schema: Arc<Mutex<String>> = Arc::new(Mutex::new("no".to_string()));
 
         let updated_schema_clone = updated_schema;
-        let metadata_clone = metadata.clone();
+        let metadata = METADATA.read().unwrap();
         let offset_db_clone = offset_db.clone();
 
         let mut buffers: Buffers = Buffers::new();
@@ -271,14 +270,13 @@ impl Ingest {
                         skpr_time_bucket,
                     );
 
-                    let mut meta = metadata_clone.lock().unwrap();
-                    if meta.get(&skpr_namespace).is_none() {
-                        meta.insert(skpr_namespace.clone(), Metadata::new().unwrap());
+                    if metadata.get(&skpr_namespace).is_none() {
+                        METADATA.write().unwrap().insert(skpr_namespace.clone(), Metadata::new().unwrap());
                     }
 
                     let msg = fast_path_ingest(
                         &record,
-                        &mut meta.get_mut(&skpr_namespace).unwrap().fields,
+                        &metadata.get(&skpr_namespace).unwrap().fields,
                         flatten,
                     );
 
@@ -288,10 +286,12 @@ impl Ingest {
                             buffers.write(&output_file_name, buf_str.as_bytes());
                         },
                         Err(err) => {
+
+                            let mut metadata = METADATA.write().unwrap();
                             // println!("Falling back to slow path due to: {}", err);
                             let msg = ingest(
                                 &record,
-                                &mut meta.get_mut(&skpr_namespace).unwrap().fields,
+                                &mut metadata.get_mut(&skpr_namespace).unwrap().fields,
                                 &mut updated_schema_clone.lock().unwrap(),
                                 flatten,
                             );
@@ -392,7 +392,7 @@ impl Ingest {
                 .build()
                 .unwrap()
                 .block_on(async {
-                    Config::set_config(&metadata_clone.lock().unwrap(), true).await;
+                    Config::set_config(&metadata, true).await;
                 });
         }
     }

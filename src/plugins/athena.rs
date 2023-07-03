@@ -4,7 +4,7 @@ use crate::discover::Metadata;
 use crate::helpers::configuration::Config;
 use crate::helpers::logger::LogLevel;
 use crate::helpers::Helpers;
-use crate::{discover, flatten_metadata, LOGGER};
+use crate::{discover, flatten_metadata, LOGGER, METADATA};
 use aws_sdk_athena::types::{
     EncryptionConfiguration, EncryptionOption, ResultConfiguration, Tag, WorkGroupConfiguration,
 };
@@ -54,7 +54,7 @@ impl DataOutputAwsAthenaPlugin {
         }
     }
 
-    pub async fn sync(&self, metadata: HashMap<std::string::String, discover::Metadata>) {
+    pub async fn sync(&self) {
         let mut partition_cache: Vec<String> = vec![];
 
         while let Some(filename) = BufferChunker::next_file() {
@@ -142,6 +142,8 @@ impl DataOutputAwsAthenaPlugin {
                 // for (namespace, _schema) in &metadata {
                 out_meta.insert(namespace.to_string(), Metadata::new().unwrap());
 
+                let metadata = METADATA.read().unwrap();
+
                 let partition_metadata = if flatten {
                     flatten_metadata(
                         metadata.get(&namespace).unwrap(),
@@ -151,8 +153,6 @@ impl DataOutputAwsAthenaPlugin {
                 } else {
                     metadata.get(&namespace)
                 };
-
-                // println!("{:?}", partition_metadata);
 
                 if partition_metadata.is_some() {
                     if let Err(_err) = AwsAthena::glue_create_partition(
@@ -540,8 +540,6 @@ impl AwsAthena {
             }
         }
 
-        // let mut schema: HashMap<String, Metadata> = HashMap::new();
-        // schema.insert(namespace.to_string(), metadata.clone());
         let columns = SkipprHive::convert_skippr_to_hive(metadata).unwrap();
 
         let aws_config = aws_config::from_env().load().await;
@@ -643,8 +641,6 @@ impl AwsAthena {
             }
         }
 
-        // let mut schema: HashMap<String, Metadata> = HashMap::new();
-        // schema.insert(namespace.to_string(), metadata.clone());
         let columns = SkipprHive::convert_skippr_to_hive(metadata).unwrap();
 
         let aws_config = aws_config::from_env().load().await;
@@ -729,10 +725,6 @@ impl AwsAthena {
             .unwrap()
             .to_string();
 
-        // println!("partiton locaiton {}", format!("s3://{}/{}", bucket, key));
-
-        // let mut schema: HashMap<String, Metadata> = HashMap::new();
-        // schema.insert(namespace.to_string(), metadata.clone());
         let columns = SkipprHive::convert_skippr_to_hive(metadata).unwrap();
 
         let aws_config = aws_config::from_env().load().await;
@@ -796,8 +788,6 @@ impl AwsAthena {
                     }
                 }
                 Err(_err) => {
-                    // println!("Error Getting Partition: {:?}", _err);
-                    // println!("Database: {}, Table: {}, Values: {:?}", database, namespace, partition_values);
 
                     // partition does not exist, create it
                     match glue_client
