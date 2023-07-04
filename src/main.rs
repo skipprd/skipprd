@@ -269,7 +269,9 @@ async fn sync() {
         }
     };
 
-    METADATA.write().unwrap().clone_from(&skippr_metadata);
+    {
+        METADATA.write().unwrap().clone_from(&skippr_metadata);
+    }
 
     let now = Arc::new(Mutex::new(Instant::now()));
 

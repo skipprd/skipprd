@@ -5,7 +5,7 @@ use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::helpers::Helpers;
 use crate::ingest::ingest::ingest;
 use crate::serdes::json::SerdeJson;
-use crate::{METADATA, METRICS, RUNNING};
+use crate::{METADATA, METRICS};
 use glob::{glob_with, MatchOptions};
 use lru::LruCache;
 use once_cell::sync::Lazy;
@@ -203,7 +203,6 @@ impl Ingest {
         let updated_schema: Arc<Mutex<String>> = Arc::new(Mutex::new("no".to_string()));
 
         let updated_schema_clone = updated_schema;
-        let metadata = METADATA.read().unwrap();
         let offset_db_clone = offset_db.clone();
 
         let mut buffers: Buffers = Buffers::new();
@@ -270,13 +269,15 @@ impl Ingest {
                         skpr_time_bucket,
                     );
 
-                    if metadata.get(&skpr_namespace).is_none() {
-                        METADATA.write().unwrap().insert(skpr_namespace.clone(), Metadata::new().unwrap());
+                    if METADATA.read().unwrap().get(&skpr_namespace).is_none() {
+                        {
+                            METADATA.write().unwrap().insert(skpr_namespace.clone(), Metadata::new().unwrap());
+                        }
                     }
 
                     let msg = fast_path_ingest(
                         &record,
-                        &metadata.get(&skpr_namespace).unwrap().fields,
+                        &METADATA.read().unwrap().get(&skpr_namespace).unwrap().fields,
                         flatten,
                     );
 
@@ -286,7 +287,6 @@ impl Ingest {
                             buffers.write(&output_file_name, buf_str.as_bytes());
                         },
                         Err(err) => {
-
                             let mut metadata = METADATA.write().unwrap();
                             // println!("Falling back to slow path due to: {}", err);
                             let msg = ingest(
@@ -298,7 +298,6 @@ impl Ingest {
 
                             let buf_str = msg.to_string() + "\n";
                             buffers.write(&output_file_name, buf_str.as_bytes());
-
                         }
                     }
 
@@ -392,7 +391,7 @@ impl Ingest {
                 .build()
                 .unwrap()
                 .block_on(async {
-                    Config::set_config(&metadata, true).await;
+                    Config::set_config(&METADATA.read().unwrap(), true).await;
                 });
         }
     }
