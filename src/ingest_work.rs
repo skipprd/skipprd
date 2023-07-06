@@ -18,6 +18,7 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use futures::executor::block_on;
+use parquet::data_type::AsBytes;
 use crate::ingest::fast_ingest::fast_path_ingest;
 
 pub struct Buffer {
@@ -278,10 +279,11 @@ impl Ingest {
                         flatten,
                     );
 
-                    let buf_str = match msg {
+                    let record_value = match msg {
                         Ok(msg) => {
-                            msg.to_string() + "\n"
+                            // msg.to_string() + "\n"
                             // buffers.write(&output_file_name, buf_str.as_bytes());
+                            msg
                         },
                         Err(err) => {
                             let mut metadata = METADATA.write().unwrap();
@@ -293,14 +295,16 @@ impl Ingest {
                                 flatten,
                             );
 
-                            msg.to_string() + "\n"
+                            msg
+                            // msg.to_string() + "\n"
 
                         }
                     };
 
-                    // let record_str = record.to_string();
-                    bytes += buf_str.as_bytes().len() as u64;
-                    buffers.write(&output_file_name, buf_str.as_bytes());
+                    let record_vec = serde_json::to_vec(&record_value).unwrap();
+                    bytes += record_vec.len() as u64;
+                    buffers.write(&output_file_name, &record_vec);
+                    buffers.write(&output_file_name, "\n".as_bytes());
 
                     i += 1;
                     j += 1;
