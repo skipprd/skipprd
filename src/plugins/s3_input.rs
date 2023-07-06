@@ -196,10 +196,10 @@ impl DataSourceS3Plugin {
                     if output.clone().next_continuation_token.is_some() {
                         continuation_token = output.clone().next_continuation_token;
 
-                        println!(
-                            "Listing with next continuation token {}",
-                            continuation_token.clone().unwrap()
-                        );
+                        // println!(
+                        //     "Listing with next continuation token {}",
+                        //     continuation_token.clone().unwrap()
+                        // );
 
                         list_obj_req =
                             list_obj_req.set_continuation_token(continuation_token.clone());
