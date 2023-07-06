@@ -2,7 +2,7 @@ use crate::helpers::configuration::{Config};
 
 use crate::serdes::json::SerdeJson;
 use aws_sdk_s3::Client;
-use aws_sdk_s3::Error as S3Error;
+
 pub use aws_smithy_http::byte_stream::AggregatedBytes;
 use csv::ReaderBuilder;
 use flate2::read::GzDecoder;
@@ -14,17 +14,17 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Cursor, Read, Write};
 
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc};
 
 use aws_sdk_s3::operation::get_object::{GetObjectError, GetObjectOutput};
-use aws_sdk_s3::types::Object;
-use aws_smithy_http::result::SdkError;
+
+
 use std::sync::atomic::Ordering;
-use std::thread::sleep;
+
 use std::time::Duration;
 use std::{fs, thread};
 
-use crate::discover::Metadata;
+
 use futures::future::join_all;
 use futures::StreamExt;
 
@@ -372,7 +372,7 @@ impl DataSourceS3InventoryPlugin {
         let mut backoff_duration = Duration::from_millis(1000);
 
         loop {
-            let mut get_request = s3_client
+            let get_request = s3_client
                 .get_object()
                 .bucket(bucket.clone())
                 .key(urldecode::decode(key.to_string()));
@@ -424,7 +424,7 @@ impl DataSourceS3InventoryPlugin {
                 let bucket_name = bucket_name.to_owned();
 
                 tokio::spawn(async move {
-                    let permit = semaphore.acquire().await.unwrap();
+                    let _permit = semaphore.acquire().await.unwrap();
 
                     let mut _x_fut = s3_client
                         .get_object()
@@ -458,7 +458,7 @@ impl DataSourceS3InventoryPlugin {
         let data_dir = Config::get_data_dir();
         let _temp_dir = &format!("{}/source_buffer", data_dir);
 
-        let datas_clone = datas.clone();
+        let _datas_clone = datas.clone();
 
         let bucket_name = bucket_name.clone();
         let offsets_clone = offsets_clone.clone();
@@ -480,7 +480,7 @@ impl DataSourceS3InventoryPlugin {
             // for thread in threads {
             for future in future_result {
                 match future.unwrap() {
-                    Ok(mut download) => {
+                    Ok(download) => {
                         // println!("Downloading s3 object");
                         let mut data = download.response.body;
 

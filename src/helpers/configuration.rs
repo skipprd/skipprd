@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::fs;
-use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Read};
+use std::fs::{File};
+use std::io::{Read};
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use yaml_rust::YamlLoader;
 
 use nix::libc::exit;
-use std::sync::{Mutex, MutexGuard};
+
 use std::time::Duration;
 
 // use aws_config::profile::profile_file::ProfileFileKind::Config;
@@ -18,7 +18,7 @@ use serde_json::json;
 
 use reqwest::header::HeaderValue;
 
-use once_cell::sync::Lazy;
+
 use reqwest::header::{HeaderMap, HeaderName};
 use reqwest::{Client, StatusCode};
 
@@ -26,7 +26,7 @@ use crate::discover::Metadata;
 use crate::{flatten_metadata, METRICS, RUNNING};
 
 use crate::helpers::license::{LicenseChecker, TENANT_ID};
-use crate::helpers::Helpers;
+
 use crate::plugins::athena::AwsAthena;
 
 #[non_exhaustive]

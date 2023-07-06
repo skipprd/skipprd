@@ -1,4 +1,4 @@
-use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use memory_stats::memory_stats;
 use regex::Regex;
 use std::collections::HashMap;
@@ -189,7 +189,7 @@ impl Helpers {
         }
     }
 
-    pub fn flatten(json: &Value, metadata: &HashMap<String, Metadata>) -> Value {
+    pub fn flatten(json: &Value, _metadata: &HashMap<String, Metadata>) -> Value {
         let mut result = Map::new();
         for (key, value) in json.as_object().unwrap() {
             Helpers::flatten_internal(key, value, &mut result);
@@ -345,7 +345,7 @@ impl Helpers {
                                                 // println!("3.1: FOUND {}", format.as_str());
                                                 Some(DateTime::<Utc>::from_utc(dt, Utc).timestamp())
                                             }
-                                            Err(err) => {
+                                            Err(_err) => {
                                                 // println!("{:?}", err);
                                                 None
                                             }
@@ -483,7 +483,7 @@ mod clean_field_name_tests {
 #[cfg(test)]
 mod parse_time_field_tests {
     use super::*;
-    use chrono::prelude::*;
+    
     use serde_json::json;
     use std::env;
 
@@ -551,7 +551,7 @@ mod parse_time_field_tests {
         env::set_var("TRANSFORM_BATCH_TIME_FIELDS", "time5");
 
         let time = "invalid datetime string";
-        let message = json!({ "time5": time });
+        let _message = json!({ "time5": time });
     }
 }
 

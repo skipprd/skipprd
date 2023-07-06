@@ -5,7 +5,7 @@ use crate::helpers::configuration::Config;
 use once_cell::sync::Lazy;
 use reqwest::{header::HeaderName, Client, Url};
 use serde_derive::{Deserialize, Serialize};
-use std::collections::HashMap;
+
 use std::error::Error;
 use std::process::exit;
 use std::sync::Mutex;

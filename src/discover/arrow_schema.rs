@@ -122,7 +122,7 @@ fn convert_skippr_to_arrow_field_types(
 ) -> Result<HashMap<String, InferredType>, ArrowError> {
     let mut field_types: HashMap<String, InferredType> = HashMap::new();
 
-    for (k, v) in metadata.iter() {
+    for (_k, v) in metadata.iter() {
         let _foo = &*v.determined_type;
 
         match &*v.determined_type {

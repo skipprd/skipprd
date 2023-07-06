@@ -8,8 +8,8 @@ use serde_json::{Map, Value};
 use std::borrow::BorrowMut;
 use std::collections::HashMap;
 use std::io::{BufReader, Read};
-use std::ops::Index;
-use std::process::exit;
+
+
 
 #[derive(Default)]
 pub struct IngestRecord {
@@ -607,7 +607,7 @@ mod tests {
     use super::*;
     use crate::discover::DateCandidate;
     use chrono::NaiveDateTime;
-    use serde_json::Number;
+    
     use std::collections::HashMap;
 
     fn generate_metadata(field: &str, format_name: &str) -> HashMap<String, Metadata> {
@@ -649,7 +649,7 @@ mod tests {
         let format_name = foo.is_valid_date(date_str).unwrap();
         let format = DateFormats::from_str(format_name).unwrap().as_str();
 
-        let mut meta = generate_metadata(field, format);
+        let meta = generate_metadata(field, format);
 
         let value = Value::String(String::from(date_str));
 
@@ -672,7 +672,7 @@ mod tests {
         let format_name = foo.is_valid_date(date_str).unwrap();
         let format = DateFormats::from_str(format_name).unwrap().as_str();
 
-        let mut meta = generate_metadata(field, format);
+        let meta = generate_metadata(field, format);
 
         let value = Value::String(String::from(date_str));
 
@@ -692,7 +692,7 @@ mod test_discover_on_ingest {
     use std::collections::HashMap;
     use std::fs::{remove_file, File, OpenOptions};
     use std::io::{Seek, Write};
-    use std::iter::Map;
+    
 
     use parquet::data_type::AsBytes;
     use rand::Rng;
@@ -703,7 +703,7 @@ mod test_discover_on_ingest {
     use crate::discover::AnalyseSchema;
 
     use crate::ingest::ingest::ingest;
-    use crate::serdes::json;
+    
     use crate::serdes::json::SerdeJson;
 
     #[test]

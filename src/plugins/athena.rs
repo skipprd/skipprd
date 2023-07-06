@@ -16,7 +16,7 @@ use aws_sdk_glue::Client as GlueClient;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::{Client as S3Client, Error};
 use chrono::prelude::*;
-use md5::Digest;
+
 use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
@@ -213,7 +213,7 @@ impl DataOutputAwsAthenaPlugin {
                     .send()
                     .await
                 {
-                    Ok(resp) => {
+                    Ok(_resp) => {
                         println!("Uploaded to S3: {}", key);
                         match fs::remove_file(Path::new(&filename)) {
                             Ok(_) => {}
@@ -255,7 +255,7 @@ impl DataOutputAwsAthenaPlugin {
                 // let data = resp.body.collect().await;
                 // println!("data: {:?}", data.unwrap().into_bytes());
             }
-            Err(e) => {
+            Err(_e) => {
                 println!("Failed to upload file: {}, will retry later.", filename);
                 // println!("{}", e);
             }
@@ -498,7 +498,7 @@ impl AwsAthena {
         let bucket = Config::getenv("DATA_OUTPUT_S3_BUCKET", "");
         let granularity_target = Config::getenv("TRANSFORM_BATCH_TIME_UNIT", "");
 
-        let mut path = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
+        let path = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
         let path = path.trim_matches('/');
         let path = std::path::Path::new(&bucket)
             .join(&path)
@@ -601,7 +601,7 @@ impl AwsAthena {
         let bucket = Config::getenv("DATA_OUTPUT_S3_BUCKET", "");
         let granularity_target = Config::getenv("TRANSFORM_BATCH_TIME_UNIT", "");
 
-        let mut path = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
+        let path = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
         let path = path.trim_matches('/');
         let path = std::path::Path::new(&bucket)
             .join(&path)

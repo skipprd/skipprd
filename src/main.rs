@@ -20,16 +20,16 @@ use std::fs::File;
 use std::io::BufReader;
 use std::ops::Add;
 
-use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::{env, thread};
 
 use std::fs;
-use std::process::exit;
 
-use chrono::Duration;
+
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::sleep;
-use std::time::{Instant, SystemTime};
+use std::time::{Instant};
 
 use glob::glob_with;
 use glob::MatchOptions;
@@ -54,7 +54,7 @@ extern crate clap;
 extern crate core;
 
 use clap::Parser;
-use nix::libc::signal;
+
 
 use signal_hook::iterator::Signals;
 
@@ -249,7 +249,7 @@ async fn sync() {
         .log(LogLevel::Error, "Init Error Log.".to_string())
         .await;
 
-    let data_dir = Config::get_data_dir();
+    let _data_dir = Config::get_data_dir();
 
     let skippr_metadata = match Config::get_config().await {
         Ok(metadata) => {
@@ -337,7 +337,7 @@ async fn sync() {
     // let logger_clone = Arc::clone(&logger);
 
     thread::spawn(move || {
-        for sig in signals.forever() {
+        for _sig in signals.forever() {
             if !RUNNING.lock().unwrap().load(Ordering::SeqCst) {
                 println!("Received another Ctrl+C signal - terminating immediately, this may result in data loss...");
                 std::process::exit(0);
@@ -373,7 +373,7 @@ async fn sync() {
                 offsets_clone.flush();
 
                 // let mut metrics: Metrics = Metrics::new();
-                let metrics_lock = match METRICS.try_lock() {
+                let _metrics_lock = match METRICS.try_lock() {
                     Ok(m) => {
                         println!("Messages per Min: {}", m.ingeted_current);
                         println!("Messages Total: {}", m.messages_total);
@@ -421,7 +421,7 @@ async fn sync() {
                     .block_on(async {
                         match LOGGER.lock().await.flush().await {
                             Ok(_t) => {}
-                            Err(err) => {
+                            Err(_err) => {
                                 // println!("Graceful shutdown complete... bye");
                             }
                         }
@@ -775,7 +775,7 @@ fn output_sync() {
 }
 
 pub fn flatten_metadata(metadata: &Metadata, flattened: &mut HashMap<String, Metadata>) {
-    for (key, val) in metadata.fields.iter() {
+    for (_key, val) in metadata.fields.iter() {
         if val.determined_type == "record" || val.determined_type == "map" {
             flatten_metadata(val, flattened);
         } else {
@@ -793,7 +793,7 @@ mod tests {
     fn test_flatten_metadata() {
         let mut fields: Box<HashMap<String, Metadata>> = Box::new(HashMap::new());
 
-        let mut metadata_child = Metadata {
+        let metadata_child = Metadata {
             count: 1,
             types: HashMap::new(),
             parent_type: "record".to_string(),

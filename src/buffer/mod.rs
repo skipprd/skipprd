@@ -113,7 +113,7 @@ impl BufferChunker {
         time_bucket: Option<i64>,
     ) -> String {
         let string = time_bucket.unwrap_or_default().to_string();
-        let mut chunks = vec![
+        let chunks = vec![
             ("buffer", buffer_name),
             ("namespace", namespace.unwrap_or("")),
             ("partition", partition.unwrap_or("")),

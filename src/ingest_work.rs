@@ -17,7 +17,7 @@ use std::io::{BufWriter, Write};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use futures::executor::block_on;
+
 use parquet::data_type::AsBytes;
 use crate::ingest::fast_ingest::fast_path_ingest;
 
@@ -221,14 +221,13 @@ impl Ingest {
         let mut d = 0;
 
         for ingest_batch in datas {
-            let mut buf_str: String = String::new();
 
             let has_offsets =
                 offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Closed, 0);
 
             let records: Vec<Value> = SerdeJson::deserialize(&ingest_batch.data);
 
-            for mut record in records {
+            for record in records {
                 if record.is_null()
                     || (record.is_object() && record.as_object().unwrap().is_empty())
                     || (record.is_array() && record.as_array().unwrap().is_empty())
@@ -285,7 +284,7 @@ impl Ingest {
                             // buffers.write(&output_file_name, buf_str.as_bytes());
                             msg
                         },
-                        Err(err) => {
+                        Err(_err) => {
                             let mut metadata = METADATA.write().unwrap();
                             // println!("Falling back to slow path due to: {}", err);
                             let msg = ingest(
@@ -329,7 +328,7 @@ impl Ingest {
                     .open(output_file.clone())
                     .unwrap();
 
-                let mut writer = BufWriter::with_capacity(WRITE_BUF_SIZE, f);
+                let writer = BufWriter::with_capacity(WRITE_BUF_SIZE, f);
 
                 let new_file = match std::fs::metadata(&output_file) {
                     Ok(metadata) => {
@@ -348,7 +347,7 @@ impl Ingest {
                             rotated: None,
                         }
                     }
-                    Err(err) => OutputFile {
+                    Err(_err) => OutputFile {
                         bytes: 0,
                         upated_at: aprox_now,
                         file: writer,

@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::Read;
 
-use chrono::{DateTime, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use serde_derive::{Deserialize, Serialize};
 
 use serde_json::Value;
@@ -235,7 +235,7 @@ impl AnalyseSchema {
 
         let mut skpr_namespace: String = "".to_string();
 
-        let faltten_events = &Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no");
+        let _faltten_events = &Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no");
 
         // let mut newMeta: &mut HashMap<String, Metadata>;
         // let defaultMetadata = Metadata::new().unwrap();
@@ -251,7 +251,7 @@ impl AnalyseSchema {
 
         let mut i = 0;
 
-        for mut v in records {
+        for v in records {
             let source_namespace = Config::getenv("S3_BUCKET", "");
 
             // let source_namespace = BufferChunker::decode_file_namespace(path.to_str().unwrap());
@@ -1196,8 +1196,8 @@ mod is_valid_date_tests {
 mod discover_date_formats_tests {
     use crate::discover::date_formats::DateFormats;
     use crate::discover::AnalyseSchema;
-    use chrono::{DateTime, NaiveDate, NaiveDateTime};
-    use serde_json::Value;
+    use chrono::{NaiveDateTime};
+    
 
     #[test]
     fn test_valid_date_formats() {

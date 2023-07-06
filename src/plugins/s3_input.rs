@@ -1,27 +1,27 @@
 use crate::helpers::configuration::{Config};
 
 use aws_sdk_s3::Client;
-use aws_sdk_s3::Error as S3Error;
+
 pub use aws_smithy_http::byte_stream::AggregatedBytes;
 
 use flate2::read::GzDecoder;
 use regex::internal::Input;
 
-use std::collections::HashMap;
+
 
 use std::io::{Cursor, Read};
 
 use std::future::Future;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
 use aws_sdk_s3::operation::get_object::{GetObjectError, GetObjectOutput};
-use aws_smithy_http::result::SdkError;
+
 use std::sync::atomic::Ordering;
-use std::thread::sleep;
+
 use std::time::Duration;
 use std::{fs, thread};
 
-use crate::discover::Metadata;
+
 use futures::future::join_all;
 use futures::{AsyncReadExt, StreamExt};
 
@@ -29,12 +29,12 @@ use futures::{AsyncReadExt, StreamExt};
 
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::ingest_work::{Ingest, IngestBatch};
-use rusoto_core::{Region, RusotoError};
+
 use tokio::sync::Semaphore;
 // use rusoto_s3::{GetObjectOutput, GetObjectRequest, ListObjectsV2Request, S3Client, S3};
 
 use crate::{INPUT_GRACEFUL_SHUTDOWN_COMPLETE, RUNNING};
-use tokio::time::timeout;
+
 
 pub struct DataSourceS3Plugin {
     // config: HashMap<String, String>,
@@ -93,7 +93,7 @@ impl DataSourceS3Plugin {
         let mut outputs: Vec<String> = Vec::new();
 
         let inventory_bucket = Config::getenv("DATA_SOURCE_S3_BUCKET", "");
-        let mut inventory_prefix = Config::getenv("DATA_SOURCE_S3_PREFIX", "");
+        let inventory_prefix = Config::getenv("DATA_SOURCE_S3_PREFIX", "");
 
         println!(
             "Syncing from bucket: {} and prefix {}",
@@ -234,7 +234,7 @@ impl DataSourceS3Plugin {
         let mut backoff_duration = Duration::from_millis(1000);
 
         loop {
-            let mut get_request = s3_client
+            let get_request = s3_client
                 .get_object()
                 .bucket(bucket.clone())
                 .key(urldecode::decode(key.to_string()));
@@ -287,7 +287,7 @@ impl DataSourceS3Plugin {
                 let bucket_name = bucket_name.to_owned();
 
                 tokio::spawn(async move {
-                    let permit = semaphore.acquire().await.unwrap();
+                    let _permit = semaphore.acquire().await.unwrap();
 
                     let mut _x_fut = s3_client
                         .get_object()
@@ -321,7 +321,7 @@ impl DataSourceS3Plugin {
         let data_dir = Config::get_data_dir();
         let _temp_dir = &format!("{}/source_buffer", data_dir);
 
-        let datas_clone = datas.clone();
+        let _datas_clone = datas.clone();
 
         let bucket_name = bucket_name.clone();
         let offsets_clone = offsets_clone.clone();
@@ -343,7 +343,7 @@ impl DataSourceS3Plugin {
             // for thread in threads {
             for future in future_result {
                 match future.unwrap() {
-                    Ok(mut download) => {
+                    Ok(download) => {
                         // println!("Downloading s3 object");
                         let mut data = download.response.body;
 

@@ -1,12 +1,12 @@
-use crate::discover::Metadata;
+
 use crate::helpers::configuration::{Config};
 use crate::helpers::offsets::{OffsetKey, Offsets};
 use crate::helpers::Helpers;
 use crate::ingest_work::{Ingest, IngestBatch, OUTPUT_FILES_STATIC};
-use std::collections::HashMap;
+
 use std::io::{self, BufRead, BufReader};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc};
 use std::thread;
 use std::time::Instant;
 use tokio::time::Duration;

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{Read};
+
 use serde_json::Value;
 use std::error::Error;
 use serde_json::Map;
@@ -50,8 +50,8 @@ fn fast_set_value(
     data_type: &str,
     field: &str,
     value: &Value,
-    parent_field: Option<&str>,
-    parent_data_type: Option<&str>,
+    _parent_field: Option<&str>,
+    _parent_data_type: Option<&str>,
     metadata: &HashMap<String, Metadata>,
 ) -> Result<Value, Box<dyn Error>> {
     if value.is_string() && value.as_str().unwrap_or_default().is_empty() {

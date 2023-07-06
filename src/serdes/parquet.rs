@@ -17,7 +17,7 @@ use crate::buffer::BufferChunker;
 use crate::helpers::configuration::Config;
 use crate::helpers::logger::LogLevel;
 use crate::LOGGER;
-use arrow::error::ArrowError;
+
 use parquet::basic::{Compression, Encoding};
 use std::sync::Arc;
 
@@ -328,7 +328,7 @@ impl SerdeParquet {
 
         // let mut errors: HashMap<String, Result<bool, ArrowError>> = HashMap::new();
 
-        let mut error_count = 0;
+        let _error_count = 0;
 
         for batch in reader {
             // for i in batch.iter() {

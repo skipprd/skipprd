@@ -1,24 +1,24 @@
-use std::path::Path;
+
 use std::fs::File;
 use std::io::prelude::*;
-use std::collections::HashMap;
-use std::{fs, thread};
-use std::future::Future;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use std::sync::atomic::Ordering;
-use std::thread::sleep;
+
+use std::{fs};
+
+use std::sync::{Arc};
+
+
+
 
 use flate2::read::GzDecoder;
 use tar::Archive;
 use zip::ZipArchive;
 
 use crate::helpers::configuration::{Config};
-use crate::discover::Metadata;
+
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::ingest_work::{Ingest, IngestBatch};
 
-use glob::{glob, glob_with};
+use glob::{glob_with};
 use tokio::task;
 
 use futures::stream::StreamExt;
@@ -59,7 +59,7 @@ impl DataSourceLocalFilePlugin {
     ) {
         let offsets_clone = offsets.clone();
 
-        let file_path_pattern = format!("{}/**/*", self.source_directory);
+        let _file_path_pattern = format!("{}/**/*", self.source_directory);
 
         let mut data_batches_stream = Box::pin(self.prepare_data_for_processing(
             &offsets_clone,
@@ -97,7 +97,7 @@ impl DataSourceLocalFilePlugin {
 
         let offsets_clone = offsets_clone.clone();
 
-        let mut current_batch: Vec<IngestBatch> = Vec::new();
+        let current_batch: Vec<IngestBatch> = Vec::new();
         let mut batch_bytes: i64 = 0;
 
         tokio::spawn(async move {
@@ -163,7 +163,7 @@ impl DataSourceLocalFilePlugin {
                                     continue;
                                 },
                                 "tar.gz" => {
-                                    let mut decoder = GzDecoder::new(file);
+                                    let decoder = GzDecoder::new(file);
                                     let mut archive = Archive::new(decoder);
                                     for entry in archive.entries().unwrap() {
                                         let mut entry = entry.unwrap();
