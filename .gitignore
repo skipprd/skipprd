@@ -17,3 +17,4 @@ skippr_data_tmp/
 /target/
 /legacy/test-tmp/
 /legacy/test-data/
+/flamegraph*
