@@ -294,12 +294,13 @@ impl Ingest {
                             );
 
                             msg.to_string() + "\n"
-                            // buffers.write(&output_file_name, buf_str.as_bytes());
+
                         }
                     };
 
                     // let record_str = record.to_string();
                     bytes += buf_str.as_bytes().len() as u64;
+                    buffers.write(&output_file_name, buf_str.as_bytes());
 
                     i += 1;
                     j += 1;
