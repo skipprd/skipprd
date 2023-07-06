@@ -172,7 +172,7 @@ impl DataSourceS3Plugin {
                                 // println!("State {} = {} of {}", i, chunk_size_current, chunk_size);
 
                                 if chunk_size_current >= chunk_size {
-                                    println!("Proccessing {} Objects, totalling {} bytes (batch size config {} bytes)", i, chunk_size_current, chunk_size);
+                                    // println!("Proccessing {} Objects, totalling {} bytes (batch size config {} bytes)", i, chunk_size_current, chunk_size);
 
                                     Self::download_and_ingest(
                                         &mut self.s3_client,

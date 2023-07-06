@@ -304,15 +304,15 @@ impl Ingest {
                     i += 1;
                     j += 1;
 
-                    offset_db_clone.set(&ingest_batch.offset_key, OffsetTypes::Line, i);
+                    offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, i);
+
                 }
             }
 
-            offset_db_clone.set(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
+            offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
         }
 
         // Flush all buffers to their respective files.
-
         for (filename, buffer) in buffers.buffers.iter() {
             let output_file = format!("{}/{}", output_dir.clone(), &filename);
 
