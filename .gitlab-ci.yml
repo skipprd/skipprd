@@ -85,6 +85,7 @@ dockerize:
     - tags
 
 s3_plugin:
+  tags: [ saas-linux-large-amd64 ]
   image: docker:latest
   stage: e2e
   script:
