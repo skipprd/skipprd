@@ -71,11 +71,11 @@ impl DataSourceLocalFilePlugin {
 
             let offsets_clone = offsets_clone.clone();
 
-            let ingest_handle = task::spawn_blocking(move || {
+            // let ingest_handle = task::spawn_blocking(move || {
 
-                self::Ingest::ingest_file(batch, &offsets_clone);
-            });
-            ingest_handle.await.unwrap();
+                self.ingest.ingest_file(batch, &offsets_clone);
+            // });
+            // ingest_handle.await.unwrap();
 
         }
 

@@ -101,11 +101,11 @@ impl DataSourceStdinPlugin {
                     // Spawn a new task in the runtime for each batch received.
                     let offsets_clone = offsets.clone();
 
-                    thread::spawn(move || {
-                        Ingest::ingest_file(vec![batch], &offsets_clone)
-                    })
-                    .join()
-                    .unwrap();
+                    // thread::spawn(move || {
+                        self.ingest.ingest_file(vec![batch], &offsets_clone)
+                    // })
+                    // .join()
+                    // .unwrap();
                 }
                 Err(e) => match e {
                     mpsc::RecvTimeoutError::Timeout => {

@@ -108,6 +108,18 @@ pub struct Ingest {
     active_count: Arc<AtomicUsize>,
 }
 
+impl Drop for Ingest {
+    fn drop(&mut self) {
+        while self.active_count.load(Ordering::SeqCst) > 0 {
+            println!("Waiting for {} ingest tasks to finish", self.active_count.load(Ordering::SeqCst));
+
+            // Here you can do other work while waiting for threads to finish,
+            // or just sleep for a while if there's nothing else to do.
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+}
+
 impl Ingest {
     pub fn new() -> Ingest {
         let num_cpus = num_cpus::get();
@@ -223,7 +235,7 @@ impl Ingest {
         datas: Vec<IngestBatch>,
         offset_db: &Arc<Offsets>,
     ) {
-        println!("Ingesting {} events", datas.len());
+        // println!("Ingesting {} events", datas.len());
 
         // Wait for an available thread if there's no capacity
         while self.active_count.load(Ordering::SeqCst) >= self.num_cpus {
@@ -247,7 +259,7 @@ impl Ingest {
                 let core_count = self.thread_pool.active_count();
 
                 self.thread_pool.execute(move || {
-                    println!("Processing batch of {} events on core {}", datas_clone.len(), core_count);
+                    // println!("Processing batch of {} events on core {}", datas_clone.len(), core_count);
                     Ingest::process_batch(datas_clone, &offset_db_clone);
                     tx.send(()).unwrap();
                 });
