@@ -208,13 +208,6 @@ impl Ingest {
 
         let mut buffers: Buffers = Buffers::new();
 
-        let mut output_files = match OUTPUT_FILES_STATIC.lock() {
-            Ok(output_files) => output_files,
-            Err(err) => {
-                panic!("Could not lock buffer files, Error: {:?}", err);
-            }
-        };
-
         let mut bytes: u64 = 0;
         let mut i = 0;
         let mut j = 0;
@@ -315,6 +308,13 @@ impl Ingest {
 
             offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
         }
+
+        let mut output_files = match OUTPUT_FILES_STATIC.lock() {
+            Ok(output_files) => output_files,
+            Err(err) => {
+                panic!("Could not lock buffer files, Error: {:?}", err);
+            }
+        };
 
         // Flush all buffers to their respective files.
         for (filename, buffer) in buffers.buffers.iter() {
