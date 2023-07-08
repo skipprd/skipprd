@@ -41,7 +41,12 @@ pub fn fast_path_ingest(
         }
     }
     if flatten {
-        message = Helpers::flatten(&message, &metadata);
+        message = match Helpers::flatten(&message, &metadata) {
+            Ok(m) => m,
+            Err(e) => {
+                return Err(e);
+            }
+        };
     }
     Ok(message)
 }

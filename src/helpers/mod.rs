@@ -8,6 +8,7 @@ use std::str;
 
 use rand::Rng;
 use serde_json::{Map, Value};
+use std::error::Error;
 
 pub mod configuration;
 pub mod license;
@@ -189,13 +190,13 @@ impl Helpers {
         }
     }
 
-    pub fn flatten(json: &Value, _metadata: &HashMap<String, Metadata>) -> Value {
+    pub fn flatten(json: &Value, _metadata: &HashMap<String, Metadata>) -> Result<Value, Box<dyn Error>> {
         let mut result = Map::new();
-        for (key, value) in json.as_object().unwrap() {
+        for (key, value) in json.as_object().ok_or("Invalid JSON object")? {
             Helpers::flatten_internal(key, value, &mut result);
         }
         // Helpers::flatten_internal(json, &mut result, metadata);
-        Value::Object(result)
+        Ok(Value::Object(result))
     }
 
     pub fn mem_limit_reached() -> bool {
@@ -727,7 +728,7 @@ mod flattern_tests {
         let json = json!({});
         let metadata = HashMap::new();
         let flattened = Helpers::flatten(&json, &metadata);
-        assert_eq!(flattened, json!({}));
+        assert_eq!(flattened.unwrap(), json!({}));
     }
 
     #[test]
@@ -789,7 +790,7 @@ mod flattern_tests {
         );
         let flattened = Helpers::flatten(&json, &metadata);
         assert_eq!(
-            flattened,
+            flattened.unwrap(),
             json!({ "field": "value", "contact_name": "Dave", "contact_tel": "123" })
         );
     }

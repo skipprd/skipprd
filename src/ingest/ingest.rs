@@ -114,7 +114,7 @@ pub fn ingest(
 
     // println!("{:?}", message);
     if flatten {
-        message = Helpers::flatten(&message, &metadata);
+        message = Helpers::flatten(&message, &metadata).unwrap();
     }
     // println!("{:?}", message);
     // exit(0);
