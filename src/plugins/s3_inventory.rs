@@ -304,11 +304,9 @@ impl DataSourceS3InventoryPlugin {
                                                         i += 1;
 
                                                         if chunk_size_current >= chunk_size {
-                                                            Self::download_and_ingest(
-                                                                &mut self.s3_client,
+                                                            self.download_and_ingest(
                                                                 &target_bucket,
                                                                 &outputs,
-                                                                &self.temp_dir,
                                                                 &offsets_clone,
                                                             )
                                                             .await;
@@ -345,11 +343,9 @@ impl DataSourceS3InventoryPlugin {
                         println!("Reached end of S3 pagination");
 
                         if !outputs.is_empty() {
-                            Self::download_and_ingest(
-                                &mut self.s3_client,
+                            self.download_and_ingest(
                                 &inventory_bucket,
                                 &outputs,
-                                &self.temp_dir,
                                 &offsets_clone,
                             )
                             .await;
@@ -407,12 +403,14 @@ impl DataSourceS3InventoryPlugin {
     }
 
     async fn download_and_ingest(
-        s3_client: &Client,
+        &self,
         bucket_name: &String,
         object_keys: &Vec<String>,
-        _output_dir: &String,
         offsets_clone: &Arc<Offsets>,
     ) {
+
+        let s3_client = self.s3_client.clone();
+
         let semaphore = Arc::new(Semaphore::new(2048));
 
         let futures: Vec<_> = object_keys
@@ -453,7 +451,7 @@ impl DataSourceS3InventoryPlugin {
 
         let future_result = tokio::join!(join_all(futures)).0;
 
-        let mut threads: Vec<_> = Vec::new();
+        // let mut threads: Vec<_> = Vec::new();
 
         let data_dir = Config::get_data_dir();
         let _temp_dir = &format!("{}/source_buffer", data_dir);
@@ -531,20 +529,20 @@ impl DataSourceS3InventoryPlugin {
         // datas.lock().unwrap().push(batch.lock().unwrap().clone());
         let datas = datas.clone();
 
-        threads.push(thread::spawn(move || {
+        // threads.push(thread::spawn(move || {
             let batch = datas.read().unwrap().to_vec();
-            self::Ingest::ingest_file(batch, &offsets_clone);
-        }));
+            self.ingest.ingest_file(batch, &offsets_clone);
+        // }));
 
         // Wait for all threads to finish, else we will stampead the data source
-        for handle in threads {
-            match handle.join() {
-                Ok(_) => {}
-                Err(err) => {
-                    println!("ERROR: {:#?}", err);
-                }
-            }
-        }
+        // for handle in threads {
+        //     match handle.join() {
+        //         Ok(_) => {}
+        //         Err(err) => {
+        //             println!("ERROR: {:#?}", err);
+        //         }
+        //     }
+        // }
 
         if !RUNNING.lock().unwrap().load(Ordering::SeqCst) {
             INPUT_GRACEFUL_SHUTDOWN_COMPLETE

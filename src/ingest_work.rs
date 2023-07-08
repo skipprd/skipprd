@@ -17,6 +17,11 @@ use std::io::{BufWriter, Write};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use threadpool::ThreadPool;
+use std::sync::mpsc::channel;
+extern crate num_cpus;
+use std::sync::mpsc::Sender;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use parquet::data_type::AsBytes;
 use crate::ingest::fast_ingest::fast_path_ingest;
@@ -96,11 +101,34 @@ pub static PARSE_NAMESPACE_CACHE: Lazy<Mutex<HashMap<String, String>>> =
 pub static OUTPUT_FILES_STATIC: Lazy<Mutex<LruCache<String, OutputFile>>> =
     Lazy::new(|| Mutex::new(LruCache::new(NonZeroUsize::new(100).expect(""))));
 
-pub struct Ingest {}
+pub struct Ingest {
+    thread_pool: ThreadPool,
+    num_cpus: usize,
+    tx: Sender<()>,
+    active_count: Arc<AtomicUsize>,
+}
 
 impl Ingest {
     pub fn new() -> Ingest {
-        Ingest {}
+        let num_cpus = num_cpus::get();
+        // let num_cpus = 1 as usize;
+        let (tx, rx) = channel();
+        let active_count = Arc::new(AtomicUsize::new(0));
+        let active_count_clone = active_count.clone();
+
+        let thread_pool = ThreadPool::new(num_cpus);
+        thread_pool.execute(move || {
+            while let Ok(()) = rx.recv() {
+                active_count_clone.fetch_sub(1, Ordering::SeqCst);
+            }
+        });
+
+        Ingest {
+            num_cpus,
+            thread_pool,
+            tx,
+            active_count,
+        }
     }
 
     pub fn flush_buffers(force: bool, output_files: &mut MutexGuard<LruCache<String, OutputFile>>) {
@@ -191,9 +219,49 @@ impl Ingest {
     }
 
     pub fn ingest_file(
+        &self,
         datas: Vec<IngestBatch>,
         offset_db: &Arc<Offsets>,
     ) {
+        println!("Ingesting {} events", datas.len());
+
+        // Wait for an available thread if there's no capacity
+        while self.active_count.load(Ordering::SeqCst) >= self.num_cpus {
+            // println!("Waiting for {} tasks to finish", self.active_count.load(Ordering::SeqCst));
+
+            // Here you can do other work while waiting for threads to finish,
+            // or just sleep for a while if there's nothing else to do.
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        // Spawn a new thread for this 'datas' if there's capacity
+        // while self.active_count.load(Ordering::SeqCst) <= self.num_cpus {
+            // if self.thread_pool.queued_count() < self.num_cpus {
+                let tx = self.tx.clone();
+                let offset_db_clone = offset_db.clone();
+
+                self.active_count.fetch_add(1, Ordering::SeqCst);
+
+                let datas_clone = datas.clone();
+
+                let core_count = self.thread_pool.active_count();
+
+                self.thread_pool.execute(move || {
+                    println!("Processing batch of {} events on core {}", datas_clone.len(), core_count);
+                    Ingest::process_batch(datas_clone, &offset_db_clone);
+                    tx.send(()).unwrap();
+                });
+
+            // }
+        // }
+
+    }
+
+    fn process_batch(
+        datas: Vec<IngestBatch>,
+        offset_db_clone: &Arc<Offsets>
+    ) {
+
         let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
 
         let data_dir = Config::get_data_dir();
@@ -204,7 +272,7 @@ impl Ingest {
         let updated_schema: Arc<Mutex<String>> = Arc::new(Mutex::new("no".to_string()));
 
         let updated_schema_clone = updated_schema;
-        let offset_db_clone = offset_db.clone();
+        // let offset_db_clone = offset_db.clone();
 
         let mut buffers: Buffers = Buffers::new();
 

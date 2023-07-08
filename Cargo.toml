@@ -53,6 +53,8 @@ nix = "0.26.2"
 lru = "0.10.0"
 tar = "0.4.38"
 zip = "0.6.6"
+threadpool = "1.8.1"
+num_cpus = "1.16.0"
 
 [dev-dependencies]
 serial_test = "1.0.0"

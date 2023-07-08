@@ -3122,6 +3122,7 @@ dependencies = [
  "md5",
  "memory-stats",
  "nix",
+ "num_cpus",
  "once_cell",
  "parquet",
  "periodic",
@@ -3140,6 +3141,7 @@ dependencies = [
  "signal-hook",
  "sled",
  "tar",
+ "threadpool",
  "tokio",
  "url",
  "urldecode",
@@ -3302,6 +3304,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.22",
+]
+
+[[package]]
+name = "threadpool"
+version = "1.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d050e60b33d41c19108b32cea32164033a9013fe3b46cbd4457559bfbf77afaa"
+dependencies = [
+ "num_cpus",
 ]
 
 [[package]]

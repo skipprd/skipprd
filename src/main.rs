@@ -84,8 +84,8 @@ use crate::plugins::s3_input::DataSourceS3Plugin;
 use crate::plugins::s3_inventory::DataSourceS3InventoryPlugin;
 
 use crate::ingest_work::{Ingest, OUTPUT_FILES_STATIC};
-use crate::plugins::file_input::DataSourceLocalFilePlugin;
-use crate::plugins::stdin_input::DataSourceStdinPlugin;
+// use crate::plugins::file_input::DataSourceLocalFilePlugin;
+// use crate::plugins::stdin_input::DataSourceStdinPlugin;
 
 pub static RUNNING: Lazy<Mutex<AtomicBool>> = Lazy::new(|| Mutex::new(AtomicBool::new(true)));
 pub static INPUT_GRACEFUL_SHUTDOWN_COMPLETE: Lazy<Mutex<AtomicBool>> =
@@ -571,42 +571,42 @@ async fn sync() {
     let offsets_clone = offsets.clone();
 
     match Config::getenv("DATA_SOURCE_PLUGIN_NAME", "").as_str() {
-        "stdin" => {
-            tokio::spawn(async {
-                let mut input = DataSourceStdinPlugin::new().await;
-                input
-                .sync(
-                    offsets_clone,
-                )
-                .await;
-            }).await.unwrap();
-        }
-        "file" => {
-            tokio::spawn(async {
-                let mut input = DataSourceLocalFilePlugin::new().await;
-                input.sync(
-                    offsets_clone
-                )
-                .await;
-            }).await.unwrap();
-        }
+        // "stdin" => {
+        //     tokio::spawn(async {
+        //         let mut input = DataSourceStdinPlugin::new().await;
+        //         input
+        //         .sync(
+        //             offsets_clone,
+        //         )
+        //         .await;
+        //     }).await.unwrap();
+        // }
+        // "file" => {
+        //     tokio::spawn(async {
+        //         let mut input = DataSourceLocalFilePlugin::new().await;
+        //         input.sync(
+        //             offsets_clone
+        //         )
+        //         .await;
+        //     }).await.unwrap();
+        // }
         "s3" => {
-            tokio::spawn(async {
+            // tokio::spawn(async {
                 let mut ds3 = DataSourceS3Plugin::new().await;
                 ds3.sync(
                     offsets_clone,
                 )
                 .await;
-            }).await.unwrap();
+            // }).await.unwrap();
         }
         "s3_inventory" => {
-            tokio::spawn(async {
+            // tokio::spawn(async {
                 let mut ds3 = DataSourceS3InventoryPlugin::new().await;
                 ds3.sync(
                     offsets_clone,
                 )
                 .await;
-            }).await.unwrap();
+            // }).await.unwrap();
         }
         "" => {
             println!("No Data Source plugin specified. You must specify a data source plugin, see documentation for the DATA_SOURCE_PLUGIN_NAME environment variable.");
