@@ -15,6 +15,7 @@ use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::num::NonZeroUsize;
+use std::ops::Deref;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use threadpool::ThreadPool;
@@ -22,9 +23,14 @@ use std::sync::mpsc::channel;
 extern crate num_cpus;
 use std::sync::mpsc::Sender;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use arrow::json::ReaderBuilder;
 
 use parquet::data_type::AsBytes;
 use crate::ingest::fast_ingest::fast_path_ingest;
+
+use avro_rs::{Writer, Schema};
+use nix::libc::exit;
+// use crate::converters::skippr_avro::convert_skippr_to_avro_field_types;
 
 pub struct Buffer {
     data: Vec<u8>,
@@ -100,6 +106,18 @@ pub static PARSE_NAMESPACE_CACHE: Lazy<Mutex<HashMap<String, String>>> =
 
 pub static OUTPUT_FILES_STATIC: Lazy<Mutex<LruCache<String, OutputFile>>> =
     Lazy::new(|| Mutex::new(LruCache::new(NonZeroUsize::new(100).expect(""))));
+
+// static AVRO_SCHEMA: Lazy<Mutex<HashMap<String, Schema>>> = Lazy::new(|| {
+//
+//     let mut avro_schemas: HashMap<String, Schema> = HashMap::new();
+//
+//     for (namespace, schema) in METADATA.read().unwrap().iter() {
+//         let raw_schema = convert_skippr_to_avro_field_types(&schema.fields);
+//         avro_schemas.insert(namespace.to_string(), raw_schema.unwrap());
+//     }
+//
+//     Mutex::new(avro_schemas)
+// });
 
 pub struct Ingest {
     thread_pool: ThreadPool,
@@ -274,6 +292,8 @@ impl Ingest {
         offset_db_clone: &Arc<Offsets>
     ) {
 
+        // let mut avro_schemas = AVRO_SCHEMA.lock().unwrap();
+
         let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
 
         let data_dir = Config::get_data_dir();
@@ -292,6 +312,7 @@ impl Ingest {
         let mut i = 0;
         let mut j = 0;
         let mut d = 0;
+        let mut x = 0;
 
         for ingest_batch in datas {
 
@@ -345,6 +366,86 @@ impl Ingest {
                         }
                     }
 
+                    // let mut writer = Writer::new(&avro_schemas.get(&skpr_namespace).unwrap(), Vec::new());
+                    //
+                    // let record_value = {
+                    //     match  writer.append_ser(&record) {
+                    //         Ok(_) => {
+                    //             writer.flush().expect("Failed to flush");
+                    //             match writer.into_inner() {
+                    //                 Ok(bytes) => bytes,
+                    //                 Err(err) => {
+                    //                     d += 1;
+                    //
+                    //                     println!("Error 1: {}", err);
+                    //                     continue;
+                    //                 }
+                    //             }
+                    //         },
+                    //         Err(err) => {
+                    //             let mut metadata = METADATA.write().unwrap();
+                    //             // println!("Falling back to slow path due to: {}", err);
+                    //             let msg = ingest(
+                    //                 &record,
+                    //                 &mut metadata.get_mut(&skpr_namespace).unwrap().fields,
+                    //                 &mut updated_schema_clone.lock().unwrap(),
+                    //                 flatten,
+                    //             );
+                    //
+                    //             // if *updated_schema_clone.lock().unwrap() == "yes".to_string() {
+                    //             //     *updated_schema_clone.lock().unwrap() = "no".to_string();
+                    //             // {
+                    //                 // tokio::runtime::Builder::new_multi_thread()
+                    //                 //     .enable_all()
+                    //                 //     .build()
+                    //                 //     .unwrap()
+                    //                 //     .block_on(async {
+                    //                 //         Config::set_config(&METADATA.read().unwrap(), true).await;
+                    //                 //     });
+                    //
+                    //                 // let mut avro_schemas: HashMap<String, Schema> = HashMap::new();
+                    //
+                    //                 // for (namespace, schema) in metadata.iter() {
+                    //                 //     let raw_schema = convert_skippr_to_avro_field_types(&schema.fields);
+                    //                 //     avro_schemas.insert(namespace.to_string(), raw_schema.unwrap());
+                    //                 // }
+                    //
+                    //             avro_schemas.insert(skpr_namespace.clone(), convert_skippr_to_avro_field_types(&skpr_namespace, &metadata.get(&skpr_namespace).unwrap().fields).unwrap());
+                    //
+                    //                 // *AVRO_SCHEMA.lock().unwrap() = avro_schemas.clone();
+                    //
+                    //                 let mut writer = Writer::new(avro_schemas.get(&skpr_namespace).unwrap(), Vec::new());
+                    //
+                    //             // }
+                    //
+                    //             match writer.append_ser(msg) {
+                    //                 Ok(_) => {
+                    //                     writer.flush().expect("Failed to flush");
+                    //                     match writer.into_inner() {
+                    //                         Ok(bytes) => bytes,
+                    //                         Err(err) => {
+                    //                             d += 1;
+                    //
+                    //                             println!("Error 2: {}", err);
+                    //
+                    //                             continue;
+                    //                         }
+                    //                     }
+                    //                 },
+                    //                 Err(err) => {
+                    //                     d += 1;
+                    //
+                    //                     println!("Error 3: {} Schema: {}", err, avro_schemas.get(&skpr_namespace).unwrap().canonical_form());
+                    //
+                    //                     continue;
+                    //                 }
+                    //             }
+                    //         }
+                    //     }
+                    //
+                    // };
+                    //
+                    // println!("Record: {}", record_value.len());
                     let msg = fast_path_ingest(
                         &record,
                         &METADATA.read().unwrap().get(&skpr_namespace).unwrap().fields,
@@ -357,9 +458,9 @@ impl Ingest {
                             // buffers.write(&output_file_name, buf_str.as_bytes());
                             msg
                         },
-                        Err(_err) => {
+                        Err(err) => {
                             let mut metadata = METADATA.write().unwrap();
-                            // println!("Falling back to slow path due to: {}", err);
+                            println!("Falling back to slow path due to: {}", err);
                             let msg = ingest(
                                 &record,
                                 &mut metadata.get_mut(&skpr_namespace).unwrap().fields,
@@ -367,8 +468,10 @@ impl Ingest {
                                 flatten,
                             );
 
+                            x += 1;
+
                             msg
-                            // msg.to_string() + "\n"
+                            // Value::Null
 
                         }
                     };
@@ -388,6 +491,7 @@ impl Ingest {
 
             offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
         }
+
 
         let mut output_files = match OUTPUT_FILES_STATIC.lock() {
             Ok(output_files) => output_files,
@@ -464,6 +568,7 @@ impl Ingest {
         let mut counter_lock = METRICS.lock().unwrap();
         counter_lock.deadletters_total += d;
         counter_lock.ingeted_current += j;
+        counter_lock.ingeted_slow_current += x;
         counter_lock.messages_total += i;
         counter_lock.bytes_current += bytes;
 

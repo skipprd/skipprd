@@ -307,48 +307,23 @@ impl SerdeParquet {
             // .open("parquet")
             .unwrap();
 
-        // let mut output = File::open("finalised").unwrap();
-
-        // println!("\n\n{:?}", schema_ref);
-
         let builder = ReaderBuilder::new().with_schema(schema_ref);
 
         let reader = builder.build(input_file).unwrap();
-
-        // println!("\n{:?}\n\n", reader.schema());
-
+        
         schema_ref = reader.schema();
-
-        // let output = File::create("./foo/".to_string() + &Helpers::random_str(10)).unwrap();
-
-        // println!("Serialising to parquet file: {}", output_file_path);
-
+        
         let mut writer =
             ArrowWriter::try_new(output, reader.schema(), Some(props.build())).unwrap();
-
-        // let mut errors: HashMap<String, Result<bool, ArrowError>> = HashMap::new();
-
         let _error_count = 0;
 
         for batch in reader {
-            // for i in batch.iter() {
-            //     println!("Batch part: {:?}", i);
-            // }
             match batch {
                 Ok(batch) => {
-                    // println!("Writing batch");
-                    // println!("{:?}", batch);
-                    // let mut counter_lock = ingestMsgCountClone.lock().unwrap();
-                    // *counter_lock = *counter_lock + batch.num_rows();
+                    
                     writer.write(&batch).unwrap()
                 }
-                // Err(error) => return Err(error.into()),
                 Err(_error) => {
-                    // LOGGER.lock().unwrap().push(_error.to_string());
-
-                    // error_count += 1;
-                    // errors.insert(_error.to_string(), Err(_error));
-
                     tokio::runtime::Builder::new_multi_thread()
                         .enable_all()
                         .build()
@@ -360,20 +335,9 @@ impl SerdeParquet {
                                 .log(LogLevel::Error, _error.to_string())
                                 .await;
                         });
-
-                    // println!("Failed writing batch");
-                    // println!("{:?}", _error);
-                    // AnalyseSchema::determine_field_types(&mut newMeta.get_mut(&ingest_record.skpr_namespace).unwrap().fields, None);
-                    // println!("{:?}", newMeta);
-                    // let arrowSchema = convert_skippr_to_arrow(&mut newMeta);
                 }
             }
         }
-
-        // if !errors.is_empty() {
-        //     println!("Failed writing parquet batch, {} errors", error_count);
-        //     println!("{:?}", errors);
-        // }
 
         writer.close().unwrap();
 

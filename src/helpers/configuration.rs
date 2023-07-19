@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::fs;
-use std::fs::{File};
-use std::io::{Read};
+use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, Read};
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use yaml_rust::YamlLoader;
@@ -24,6 +24,7 @@ use reqwest::{Client, StatusCode};
 
 use crate::discover::Metadata;
 use crate::{flatten_metadata, METRICS, RUNNING};
+use crate::helpers::Helpers;
 
 use crate::helpers::license::{LicenseChecker, TENANT_ID};
 
@@ -391,6 +392,7 @@ impl Config {
 
     pub async fn set_config(metadata: &HashMap<String, Metadata>, evolved: bool) {
         if evolved {
+
             // let data_dir = Config::get_data_dir();
             // let metadata_file = format!("{}/metadata-{}.json", data_dir, Helpers::random_str(10));
             //
@@ -580,6 +582,7 @@ pub struct Metrics {
     pub messages_total: u64,
     pub deadletters_total: u64,
     pub ingeted_current: u64,
+    pub ingeted_slow_current: u64,
     pub run_time_seconds: u64,
     pub bytes_current: u64,
     pub bytes_total: u64,
@@ -593,6 +596,7 @@ impl Metrics {
             messages_total: 0,
             deadletters_total: 0,
             ingeted_current: 0,
+            ingeted_slow_current: 0,
             run_time_seconds: 0,
             bytes_current: 0,
             bytes_total: 0,

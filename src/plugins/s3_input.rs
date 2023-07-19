@@ -397,8 +397,6 @@ impl DataSourceS3Plugin {
             self.ingest.ingest_file(batch, &offsets_clone);
         // }));
 
-        println!("Proceedign to next batch");
-
         // Wait for all threads to finish, else we will stampead the data source
         // for handle in threads {
         //     match handle.join() {

@@ -1,5 +1,5 @@
 use crate::discover::date_formats::DateFormats;
-use crate::discover::{AnalyseSchema, Metadata};
+use crate::discover::{AnalyseSchema, Evolution, Metadata};
 use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
 use arrow::json::reader::ValueIter;
@@ -127,7 +127,7 @@ pub fn ingest(
  * @param $value string -  the actual field value
  * @return mixed|null - value data type on success or null on error
  */
-fn set_value(
+pub fn set_value(
     data_type: &str,
     field: &str,
     value: &Value,
@@ -422,15 +422,16 @@ fn set_value(
                 if data_type == "date" {
                     new_value = set_date(field, value, metadata);
                 } else {
-                    let scalar_value = match data_type {
-                        "string" => value.as_str().map(|s| Value::String(s.to_string())),
-                        "timestamp" | "timestamp_milli" | "int" | "integer" | "long" => {
-                            value.as_i64().map(Value::from)
-                        }
-                        "double" => value.as_f64().map(Value::from),
-                        "boolean" => value.as_bool().map(Value::from),
-                        _ => None,
-                    };
+                    // let scalar_value = match data_type {
+                    //     "string" => value.as_str().map(|s| Value::String(s.to_string())),
+                    //     "timestamp" | "timestamp_milli" | "int" | "integer" | "long" => {
+                    //         value.as_i64().map(Value::from)
+                    //     }
+                    //     "double" => value.as_f64().map(Value::from),
+                    //     "boolean" => value.as_bool().map(Value::from),
+                    //     _ => None,
+                    // };
+                    let scalar_value = match_scalar_value(field, data_type, value, metadata, updated_schema);
 
                     new_value = scalar_value.unwrap_or(Value::Null);
                 }
@@ -502,7 +503,94 @@ fn set_value(
     }
 }
 
-fn discover_ingest(
+fn match_scalar_value(
+    field: &str,
+    data_type: &str,
+    value: &Value,
+    metadata: &mut HashMap<String, Metadata>,
+    mut updated_schema: &mut String,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    match data_type {
+        "string" => match value.as_str().map(Value::from) {
+            Some(v) => Ok(v),
+            None => match value.as_i64().map(|v| v.to_string()).map(Value::from) {
+                Some(v) => Ok(v),
+                None => match value.as_f64().map(|v| v.to_string()).map(Value::from) {
+                    Some(v) => Ok(v),
+                    None => match value.as_bool().map(|v| v.to_string()).map(Value::from) {
+                        Some(v) => Ok(v),
+                        // None => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a string", value)))),
+                        None => {
+                            // Handle the value error applying the Evolution Strategy
+                            *updated_schema = "yes".to_string();
+                            Evolution::handle_value_error(&field.to_string(), value, metadata)
+                        }
+                    }
+                }
+            }
+        }
+        "timestamp" | "timestamp_milli" | "int" | "integer" | "long" => match value.as_i64().map(Value::from) {
+            Some(v) => Ok(v),
+            None => match value.as_str().and_then(|v| v.parse::<i64>().ok()).map(Value::from) {
+                Some(v) => Ok(v),
+                None => match value.as_f64().and_then(|v| v.to_string().parse::<i64>().ok()).map(Value::from) {
+                    Some(v) => Ok(v),
+                    None => match value.as_bool().and_then(|v| v.to_string().parse::<i64>().ok()).map(Value::from) {
+                        Some(v) => Ok(v),
+                        // None => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not an integer", value)))),
+                        None => {
+                            // Handle the value error applying the Evolution Strategy
+                            *updated_schema = "yes".to_string();
+                            Evolution::handle_value_error(&field.to_string(), value, metadata)
+                        }
+                    }
+                }
+            }
+            // Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not an integer", value)))),
+        }
+        "double" => match value.as_f64().map(Value::from) {
+            Some(v) => Ok(v),
+            None => match value.as_str().and_then(|v| v.parse::<f64>().ok()).map(Value::from) {
+                Some(v) => Ok(v),
+                None => match value.as_i64().and_then(|v| v.to_string().parse::<f64>().ok()).map(Value::from) {
+                    Some(v) => Ok(v),
+                    None => match value.as_bool().and_then(|v| v.to_string().parse::<f64>().ok()).map(Value::from) {
+                        Some(v) => Ok(v),
+                        // None => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a double", value)))),
+                        None => {
+                            // Handle the value error applying the Evolution Strategy
+                            *updated_schema = "yes".to_string();
+                            Evolution::handle_value_error(&field.to_string(), value, metadata)
+                        }
+                    }
+                }
+            }
+            // Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData,  format!("Value {} is not a double", value)))),
+        }
+        "boolean" => match value.as_bool().map(Value::from) {
+            Some(v) => Ok(v),
+            None => match value.as_str().and_then(|v| v.parse::<bool>().ok()).map(Value::from) {
+                Some(v) => Ok(v),
+                None => match value.as_i64().and_then(|v| v.to_string().parse::<bool>().ok()).map(Value::from) {
+                    Some(v) => Ok(v),
+                    None => match value.as_f64().and_then(|v| v.to_string().parse::<bool>().ok()).map(Value::from) {
+                        Some(v) => Ok(v),
+                        // None => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a boolean", value)))),
+                        None => {
+                            // Handle the value error applying the Evolution Strategy
+                            *updated_schema = "yes".to_string();
+                            Evolution::handle_value_error(&field.to_string(), value, metadata)
+                        }
+                    }
+                }
+            }
+        }
+        _ => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Unknown data type '{}'", data_type)))),
+    }
+
+}
+
+pub fn discover_ingest(
     field: &str,
     value: &Value,
     parent_field: Option<&str>,

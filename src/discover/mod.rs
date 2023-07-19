@@ -1,10 +1,15 @@
 use arrow::error::ArrowError;
 use std::any::Any;
+use std::borrow::BorrowMut;
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::Read;
+use std::ops::Deref;
+use std::str::FromStr;
+use std::sync::Mutex;
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
+use lazy_static::lazy_static;
 use serde_derive::{Deserialize, Serialize};
 
 use serde_json::Value;
@@ -22,8 +27,16 @@ mod filter_parse_int;
 
 pub mod arrow_schema;
 use crate::helpers::configuration::Config;
-use crate::ingest::ingest::IngestRecord;
+use crate::ingest::fast_ingest::{fast_path_ingest, match_scalar_value_fast};
+use crate::ingest::ingest::{IngestRecord, set_value};
+use crate::ingest_work::Ingest;
 use crate::serdes::json::SerdeJson;
+
+use once_cell::sync::Lazy;
+
+thread_local! {
+    static LAST_SUCCESSFUL_EVOLUTION: std::cell::RefCell<HashMap<String, String>> = std::cell::RefCell::new(HashMap::new());
+}
 
 #[derive(Default, Debug, Clone, Deserialize, Serialize)]
 pub struct DateCandidate {
@@ -38,6 +51,230 @@ pub struct Evolution {
     type_string: String,
     new_value: String,
     sovled: bool,
+}
+
+#[derive(Clone, Debug)]
+enum EvolutionType {
+    // Cast,
+    New,
+    Rename,
+    Merge,
+    Default,
+}
+
+impl FromStr for EvolutionType {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            // "cast" => Ok(EvolutionType::Cast),
+            "new" => Ok(EvolutionType::New),
+            "rename" => Ok(EvolutionType::Rename),
+            "merge" => Ok(EvolutionType::Merge),
+            "default" => Ok(EvolutionType::Default),
+            _ => Err(()),
+        }
+    }
+
+
+}
+
+pub fn discover_ingest(
+    field: &str,
+    value: &mut Value,
+    parent_field: Option<&str>,
+    parent_data_type: Option<&str>,
+    metadata: &mut HashMap<String, Metadata>,
+    updated_schema: &mut String,
+) -> String {
+    let foo: AnalyseSchema = AnalyseSchema { i: 0 };
+
+    if value.is_null() || (value.is_string() && value.as_str().unwrap_or_default().is_empty()) {
+        return "".to_string();
+    }
+
+    AnalyseSchema::analyse_field(
+        &foo,
+        &field.to_string(),
+        &mut value.clone(),
+        metadata,
+    );
+
+    let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
+
+    AnalyseSchema::determine_field_types(metadata, parent_data_type, parent_field, flatten);
+
+    let discoverd_data_type = &metadata.get(field).unwrap().determined_type;
+
+    // println!(
+    //     "Discovered new field: '{}' of type: '{}'",
+    //     field, discoverd_data_type
+    // );
+
+    *updated_schema = "yes".to_string();
+
+    discoverd_data_type.clone()
+}
+
+impl EvolutionType {
+    fn to_string(&self) -> String {
+        match *self {
+            // EvolutionType::Cast => "cast",
+            EvolutionType::New => "new".to_string(),
+            EvolutionType::Rename => "rename".to_string(),
+            EvolutionType::Merge => "merge".to_string(),
+            EvolutionType::Default => "default".to_string(),
+        }
+    }
+}
+
+impl Evolution {
+
+    pub fn handle_value_error(
+        field: &String,
+        value: &Value,
+        metadata: &mut HashMap<String, Metadata>
+    ) -> Result<Value, Box<dyn std::error::Error>> {
+
+        println!("Handling value error for field: '{}'", field);
+
+        let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
+        let discoverd_data_type = foo.resolve_field_type(metadata.clone().borrow_mut(), &field.to_string(), value.clone().borrow_mut());
+
+        println!("Discovered data type: '{}' for value {}", discoverd_data_type, value);
+
+        if discoverd_data_type != "" {
+
+            let new_feild = &format!("{}_{}", field, discoverd_data_type);
+
+            let evolution = match metadata.get(field).unwrap().evolution.get(&discoverd_data_type) {
+                Some(evolution) => {
+                    // println!("Evolving field: '{}' to type: '{}'", field, discoverd_data_type);
+
+                    if evolution.new_value == "" {
+                        let evo = Evolution {
+                            type_string: discoverd_data_type.clone(),
+                            new_value: new_feild.clone(),
+                            sovled: true,
+                        };
+
+                        metadata.get_mut(field).unwrap().evolution.insert(discoverd_data_type.clone(), evo.clone());
+
+                        evo
+                    } else {
+                        evolution.clone()
+                    }
+                },
+                None => {
+                    println!("Creating new evolution for field: '{}' to type: '{}'", field, discoverd_data_type);
+                    let evo = Evolution {
+                        type_string: discoverd_data_type.clone(),
+                        new_value: new_feild.clone(),
+                        sovled: true,
+                    };
+
+                    metadata.get_mut(field).unwrap().evolution.insert(discoverd_data_type.clone(), evo.clone());
+
+                    evo
+                }
+            };
+
+            // let evolution_type = match evolution.type_string.parse::<EvolutionType>() {
+            //     Ok(evolution_type) => evolution_type,
+            //     Err(_) => EvolutionType::New,
+            // };
+
+
+            // Ok(evolution_type.to_string())
+
+            match Evolution::apply_evolution_factory(field, value, metadata) {
+                Ok(v) => Ok(v),
+                Err(e) => Err(e),
+            }
+
+            // println!("Setting value: '{:?}' for field: '{}'", value, field);
+
+            // match_scalar_value(field, &discoverd_data_type, value).unwrap()
+            // set_value(
+            //     &discoverd_data_type,
+            //     &new_feild,
+            //     value,
+            //     None,
+            //     None,
+            //     metadata,
+            //     &mut "no".to_string(),
+            // )
+
+        } else {
+            // Value::Null
+            Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Unable to determine data type",
+            )))
+        }
+
+    }
+
+
+    pub fn apply_evolution_factory(
+        field: &str,
+        value: &Value,
+        metadata: &HashMap<String, Metadata>,
+    ) -> Result<Value, Box<dyn std::error::Error>> {
+
+        // println!("Applying evolution factory for field: '{}'", field);
+
+        // get the cached last successful evolution for this field and try it first
+        let mut found_value: Option<Result<Value, Box<dyn std::error::Error>>> = None;
+        LAST_SUCCESSFUL_EVOLUTION.with(|last_evolution_refcell| {
+            let last_evolution_guard = last_evolution_refcell.borrow();
+            if let Some(evolution_key) = last_evolution_guard.get(field) {
+                if let Some(field_metadata) = metadata.get(field) {
+                    if let Some(evolution) = field_metadata.evolution.get(evolution_key) {
+                        match match_scalar_value_fast(&evolution.new_value, &evolution_key, value, metadata, false) {
+                            Ok(v) => {
+                                // set value if the evolution succeeds
+                                // println!("Cached evolution succeeded for field: '{}' with evolution: '{}'", field, evolution_key);
+                                found_value = Some(Ok(v));
+                            },
+                            Err(_) => { }
+                        }
+                    }
+                }
+            }
+        });
+        if let Some(value) = found_value {
+            return value;
+        }
+
+        // iterate through the evolutions and try the existing ones
+        match metadata.get(field) {
+            Some(field_metadata) => {
+                for (evolution_key, evolution) in field_metadata.evolution.iter() {
+                    match match_scalar_value_fast(&evolution.new_value, evolution_key, value, metadata, false) {
+                        Ok(v) => {
+                            // cache the last evolution that worked
+                            LAST_SUCCESSFUL_EVOLUTION.with(|last_evolution_refcell| {
+                                let mut last_evolution_guard = last_evolution_refcell.borrow_mut();
+                                last_evolution_guard.insert(field.to_string(), evolution_key.clone());
+                            });
+                            // println!("Evolution succeeded for field: '{}' with evolution: '{}'", field, evolution_key);
+                            return Ok(v);
+                        },
+                        Err(_) => { }
+                    }
+                }
+                // throw Err() if no evolutions are Ok()
+                println!("No evolutions succeeded for field: '{}'", field);
+                Err(Box::new(ArrowError::ParseError("Unable to parse value".to_string())))
+            },
+            None => {
+                println!("No metadata for field: '{}'", field);
+                Err(Box::new(ArrowError::ParseError("Unable to parse value".to_string())))
+            }
+        }
+    }
+
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -833,23 +1070,23 @@ impl AnalyseSchema {
         None
     }
 
-    pub fn apply_evolution_factory(
-        &self,
-        field: &mut std::string::String,
-        _value: &mut String,
-        evolution: String,
-        data_type: &mut String,
-        new_value: String,
-    ) {
-        match &*evolution {
-            "cast" => *data_type = new_value,
-            "new" => *field = new_value,
-            "rename" => *field = new_value,
-            "merge" => *field = new_value,
-            "default" => {}
-            _ => {}
-        }
-    }
+    // pub fn apply_evolution_factory(
+    //     &self,
+    //     field: &mut std::string::String,
+    //     _value: &mut String,
+    //     evolution: String,
+    //     data_type: &mut String,
+    //     new_value: String,
+    // ) {
+    //     match &*evolution {
+    //         "cast" => *data_type = new_value,
+    //         "new" => *field = new_value,
+    //         "rename" => *field = new_value,
+    //         "merge" => *field = new_value,
+    //         "default" => {}
+    //         _ => {}
+    //     }
+    // }
 
     // pub fn handle_value_error(&self, field: &String, value: &mut String, field_occurrence: &mut HashMap<String, Metadata>) {
     //     let data_type: &mut String = self.get_logical_type(field, value, field_occurrence, false);
