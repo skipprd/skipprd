@@ -460,7 +460,7 @@ impl Ingest {
                         },
                         Err(err) => {
                             let mut metadata = METADATA.write().unwrap();
-                            println!("Falling back to slow path due to: {}", err);
+                            // println!("Falling back to slow path due to: {}", err);
                             let msg = ingest(
                                 &record,
                                 &mut metadata.get_mut(&skpr_namespace).unwrap().fields,
