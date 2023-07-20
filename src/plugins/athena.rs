@@ -294,7 +294,7 @@ impl AwsAthena {
         match AwsAthena::glue_get_table(namespace).await {
             Ok(true) => match AwsAthena::glue_update_table(namespace, schema).await {
                 Ok(_) => {
-                    println!("Update table {}", namespace)
+                    // println!("Update table {}", namespace)
                 }
                 Err(err) => {
                     println!("ERROR updating Glue table: {}", err);
