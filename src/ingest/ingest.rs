@@ -523,7 +523,7 @@ fn match_scalar_value(
                         None => {
                             // Handle the value error applying the Evolution Strategy
                             *updated_schema = "yes".to_string();
-                            Evolution::handle_value_error(&field.to_string(), value, metadata)
+                            Evolution::evolve_field(&field.to_string(), value, metadata)
                         }
                     }
                 }
@@ -541,7 +541,7 @@ fn match_scalar_value(
                         None => {
                             // Handle the value error applying the Evolution Strategy
                             *updated_schema = "yes".to_string();
-                            Evolution::handle_value_error(&field.to_string(), value, metadata)
+                            Evolution::evolve_field(&field.to_string(), value, metadata)
                         }
                     }
                 }
@@ -560,7 +560,7 @@ fn match_scalar_value(
                         None => {
                             // Handle the value error applying the Evolution Strategy
                             *updated_schema = "yes".to_string();
-                            Evolution::handle_value_error(&field.to_string(), value, metadata)
+                            Evolution::evolve_field(&field.to_string(), value, metadata)
                         }
                     }
                 }
@@ -579,7 +579,7 @@ fn match_scalar_value(
                         None => {
                             // Handle the value error applying the Evolution Strategy
                             *updated_schema = "yes".to_string();
-                            Evolution::handle_value_error(&field.to_string(), value, metadata)
+                            Evolution::evolve_field(&field.to_string(), value, metadata)
                         }
                     }
                 }

@@ -130,18 +130,18 @@ impl EvolutionType {
 
 impl Evolution {
 
-    pub fn handle_value_error(
+    pub fn evolve_field(
         field: &String,
         value: &Value,
         metadata: &mut HashMap<String, Metadata>
     ) -> Result<Value, Box<dyn std::error::Error>> {
 
-        println!("Handling value error for field: '{}'", field);
+        // println!("Handling value error for field: '{}'", field);
 
         let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
         let discoverd_data_type = foo.resolve_field_type(metadata.clone().borrow_mut(), &field.to_string(), value.clone().borrow_mut());
 
-        println!("Discovered data type: '{}' for value {}", discoverd_data_type, value);
+        println!("Evolving new data type: '{}' for field {} with value {}", discoverd_data_type, field, value);
 
         if discoverd_data_type != "" {
 
@@ -150,7 +150,7 @@ impl Evolution {
             let evolution = match metadata.get(field).unwrap().evolution.get(&discoverd_data_type) {
                 Some(evolution) => {
                     // println!("Evolving field: '{}' to type: '{}'", field, discoverd_data_type);
-
+                    // @todo - should we ever overwrite an evolution? Is it event possible to be in this state?
                     if evolution.new_value == "" {
                         let evo = Evolution {
                             type_string: discoverd_data_type.clone(),
