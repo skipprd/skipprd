@@ -375,7 +375,7 @@ async fn sync() {
                 // let mut metrics: Metrics = Metrics::new();
                 let _metrics_lock = match METRICS.read() {
                     Ok(m) => {
-                        println!("Messages per Min: {}", m.ingeted_current);
+                        // println!("Messages per Min: {}", m.ingeted_current);
                         println!("Messages Total: {}", m.messages_total);
                     },
                     Err(_e) => {
@@ -445,16 +445,19 @@ async fn sync() {
         move || {
             if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
 
-                let mut metrics_lock = METRICS.read().unwrap();
+                let mut metrics_lock = match METRICS.write() {
+                    Ok(lock) => lock,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
 
                 let now_lock = now_clone.lock().unwrap();
 
                 // metrics_lock.bytes_total += metrics_lock.bytes_current;
 
-                // metrics_lock.run_time_seconds = now_lock.elapsed().as_secs();
+                metrics_lock.run_time_seconds = now_lock.elapsed().as_secs();
 
                 println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
-                // println!("Messages per Min: {}", metrics_lock.ingeted_current);
+                println!("Messages per Min: {}", metrics_lock.ingeted_current);
                 println!("Messages fixed per Min: {}", metrics_lock.ingeted_slow_current);
                 println!("Messages Total: {}", metrics_lock.messages_total);
                 println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
