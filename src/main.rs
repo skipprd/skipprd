@@ -464,6 +464,9 @@ async fn sync() {
                 // println!("Bytes per Min: {}", metrics_lock.bytes_current);
                 println!("Bytes: {}", metrics_lock.bytes_total);
 
+                metrics_lock.bytes_current = 0;
+                metrics_lock.ingeted_current = 0;
+
                 drop(metrics_lock);
 
                 tokio::runtime::Builder::new_multi_thread()
@@ -480,8 +483,7 @@ async fn sync() {
                 // let mut metrics_lock = METRICS.read().unwrap();
 
 
-                // metrics_lock.bytes_current = 0;
-                // metrics_lock.ingeted_current = 0;
+
             }
         },
         periodic::Every::new(Duration::from_secs(60)),
