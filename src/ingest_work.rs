@@ -572,7 +572,6 @@ impl Ingest {
         counter_lock.messages_total += i;
         counter_lock.bytes_current += bytes;
         counter_lock.bytes_total += bytes;
-        counter_lock.messages_total += j;
 
         println!("Batch Msg Ingested: {}", j);
         println!("Batch Msg Fixed: {}", x);
