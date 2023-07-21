@@ -140,8 +140,8 @@ impl Drop for Ingest {
 
 impl Ingest {
     pub fn new() -> Ingest {
-        let num_cpus = num_cpus::get();
-        // let num_cpus = 1 as usize;
+        // get number of cpus with a minimum of 2
+        let num_cpus = num_cpus::get().max(2);
         let (tx, rx) = channel();
         let active_count = Arc::new(AtomicUsize::new(0));
         let active_count_clone = active_count.clone();
