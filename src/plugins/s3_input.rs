@@ -125,7 +125,7 @@ impl DataSourceS3Plugin {
 
         loop {
             match list_obj_req.clone().send().await {
-                Err(err) => println!("S3 Error {}", err),
+                Err(err) => println!("S3 Error {}", err.into_service_error()),
                 Ok(output) => {
                     let objects = match output.contents() {
                         Some(objects) => objects,
