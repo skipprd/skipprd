@@ -503,7 +503,7 @@ impl Config {
         exit_code: Option<i8>,
     ) -> Result<(), Box<dyn std::error::Error>> {
 
-        let metrics = METRICS.lock().unwrap();
+        let metrics = METRICS.read().unwrap();
 
         let workspace = Self::get_workspace_name();
         let pipeline = Self::get_pipeline_name();

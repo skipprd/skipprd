@@ -565,12 +565,14 @@ impl Ingest {
 
         buffers.clear_all();
 
-        let mut counter_lock = METRICS.lock().unwrap();
+        let mut counter_lock = METRICS.write().unwrap();
         counter_lock.deadletters_total += d;
         counter_lock.ingeted_current += j;
         counter_lock.ingeted_slow_current += x;
         counter_lock.messages_total += i;
         counter_lock.bytes_current += bytes;
+        counter_lock.bytes_total += bytes;
+        counter_lock.messages_total += j;
 
         println!("Batch Msg Ingested: {}", j);
         println!("Batch Msg Fixed: {}", x);

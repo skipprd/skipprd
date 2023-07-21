@@ -96,7 +96,7 @@ pub static OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE: Lazy<Mutex<AtomicBool>> =
     Lazy::new(|| Mutex::new(AtomicBool::new(false)));
 
 pub static LOGGER: Lazy<Arc<tokio::sync::Mutex<Logger>>> = Lazy::new(|| Logger::new(100));
-pub static METRICS: Lazy<Arc<Mutex<Metrics>>> = Lazy::new(|| Arc::new(Mutex::new(Metrics::new())));
+pub static METRICS: Lazy<Arc<RwLock<Metrics>>> = Lazy::new(|| Arc::new(RwLock::new(Metrics::new())));
 pub static METADATA: Lazy<Arc<RwLock<HashMap<String, Metadata>>>> = Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
 
 #[tokio::main]
@@ -373,7 +373,7 @@ async fn sync() {
                 offsets_clone.flush();
 
                 // let mut metrics: Metrics = Metrics::new();
-                let _metrics_lock = match METRICS.try_lock() {
+                let _metrics_lock = match METRICS.read() {
                     Ok(m) => {
                         println!("Messages per Min: {}", m.ingeted_current);
                         println!("Messages Total: {}", m.messages_total);
@@ -445,20 +445,20 @@ async fn sync() {
         move || {
             if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
 
-                let mut metrics_lock = METRICS.lock().unwrap();
+                let mut metrics_lock = METRICS.read().unwrap();
 
                 let now_lock = now_clone.lock().unwrap();
 
-                metrics_lock.bytes_total += metrics_lock.bytes_current;
+                // metrics_lock.bytes_total += metrics_lock.bytes_current;
 
-                metrics_lock.run_time_seconds = now_lock.elapsed().as_secs();
+                // metrics_lock.run_time_seconds = now_lock.elapsed().as_secs();
 
                 println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
-                println!("Messages per Min: {}", metrics_lock.ingeted_current);
+                // println!("Messages per Min: {}", metrics_lock.ingeted_current);
                 println!("Messages fixed per Min: {}", metrics_lock.ingeted_slow_current);
                 println!("Messages Total: {}", metrics_lock.messages_total);
                 println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
-                println!("Bytes per Min: {}", metrics_lock.bytes_current);
+                // println!("Bytes per Min: {}", metrics_lock.bytes_current);
                 println!("Bytes: {}", metrics_lock.bytes_total);
 
                 drop(metrics_lock);
@@ -474,11 +474,11 @@ async fn sync() {
                         }
                     });
 
-                let mut metrics_lock = METRICS.lock().unwrap();
+                // let mut metrics_lock = METRICS.read().unwrap();
 
 
-                metrics_lock.bytes_current = 0;
-                metrics_lock.ingeted_current = 0;
+                // metrics_lock.bytes_current = 0;
+                // metrics_lock.ingeted_current = 0;
             }
         },
         periodic::Every::new(Duration::from_secs(60)),
@@ -635,11 +635,11 @@ async fn sync() {
         data_output.sync().await;
     }
 
-    let mut metrics_lock = METRICS.lock().unwrap();
+    let mut metrics_lock = METRICS.write().unwrap();
 
     let now_lock = now.lock().unwrap();
 
-    metrics_lock.bytes_total += metrics_lock.bytes_current;
+    // metrics_lock.bytes_total += metrics_lock.bytes_current;
 
     metrics_lock.run_time_seconds = now_lock.elapsed().as_secs();
 
