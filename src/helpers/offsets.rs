@@ -174,19 +174,40 @@ impl Offsets {
         }
     }
 
-    pub fn insert(&self, key: &OffsetKey, _offset_type: OffsetTypes, _offset: u64) -> Option<IVec> {
+    pub fn insert(&self, key: &OffsetKey, offset_type: OffsetTypes, offset: u64) -> Option<IVec> {
         let key = self.build_key(key);
         let bytes: &[u8] = key.as_bytes();
         // let bytes: &[u8] = unsafe { self.any_as_u8_slice(&key) };
 
-        let new_val = sled::IVec::from(
-            OffsetValue {
-                filesize: U64::new(0),
-                line: U64::new(0),
-                closed: U64::new(0),
+        let new_val = match offset_type {
+            OffsetTypes::Filesize => {
+                 sled::IVec::from(
+                    OffsetValue {
+                        filesize: U64::new(offset),
+                        line: U64::new(0),
+                        closed: U64::new(0),
+                    }.as_bytes(),
+                )
             }
-            .as_bytes(),
-        );
+            OffsetTypes::Line => {
+                sled::IVec::from(
+                    OffsetValue {
+                        filesize: U64::new(0),
+                        line: U64::new(offset),
+                        closed: U64::new(0),
+                    }.as_bytes(),
+                )
+            }
+            OffsetTypes::Closed => {
+                sled::IVec::from(
+                    OffsetValue {
+                        filesize: U64::new(0),
+                        line: U64::new(0),
+                        closed: U64::new(offset),
+                    }.as_bytes(),
+                )
+            }
+        };
 
         self.tree.insert(bytes, &new_val).unwrap();
 

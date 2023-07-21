@@ -158,9 +158,12 @@ impl DataSourceS3Plugin {
                                 partition: object_key.to_string(),
                             };
 
-                            if Some(true)
-                                != offsets_clone.validate(&offset_key, OffsetTypes::Closed, 1)
-                            {
+                            // Check offset is not already processed
+                            let has_offsets= offsets_clone.validate(&offset_key, OffsetTypes::Closed, 1);
+
+                            // println!("has_offsets: {:?}", has_offsets);
+
+                            if Some(true) != has_offsets {
                                 // println!("getting key: {}", object_key);
 
                                 outputs.push(object_key.to_string());

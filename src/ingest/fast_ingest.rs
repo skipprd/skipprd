@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn test_match_scalar_value_string() {
 
-        let metadata = HashMap::new();
+        let mut metadata = HashMap::new();
         metadata.insert("field".to_string(), Metadata::new().unwrap());
 
         assert_eq!(
@@ -338,7 +338,7 @@ mod tests {
     #[test]
     fn test_match_scalar_value_fast_int() {
 
-        let metadata = HashMap::new();
+        let mut metadata = HashMap::new();
         metadata.insert("field".to_string(), Metadata::new().unwrap());
 
         assert_eq!(
@@ -354,7 +354,7 @@ mod tests {
     #[test]
     fn test_match_scalar_value_fast_double() {
 
-        let metadata = HashMap::new();
+        let mut metadata = HashMap::new();
         metadata.insert("field".to_string(), Metadata::new().unwrap());
 
         assert_eq!(
@@ -370,7 +370,7 @@ mod tests {
     #[test]
     fn test_match_scalar_value_fast_boolean() {
 
-        let metadata = HashMap::new();
+        let mut metadata = HashMap::new();
         metadata.insert("field".to_string(), Metadata::new().unwrap());
 
         assert_eq!(
@@ -399,7 +399,7 @@ mod tests {
     #[should_panic(expected = "Unknown data type 'unknown'")]
     fn test_match_scalar_value_fast_unknown() {
 
-        let metadata = HashMap::new();
+        let mut metadata = HashMap::new();
         metadata.insert("field".to_string(), Metadata::new().unwrap());
 
         get_or_panic(match_scalar_value_fast("field", "unknown", &str_to_val("hello"), &metadata, true));

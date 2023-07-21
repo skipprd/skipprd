@@ -140,9 +140,14 @@ impl DataSourceS3InventoryPlugin {
                                     namespace: inventory_bucket.clone(),
                                     partition: object_key.to_string(),
                                 };
-                                if Some(true)
-                                    != offsets_clone.validate(&offset_key, OffsetTypes::Closed, 1)
-                                {
+
+                                let has_offsets = offsets_clone.validate(
+                                    &offset_key,
+                                    OffsetTypes::Closed,
+                                    1,
+                                );
+
+                                if Some(true) != has_offsets {
                                     let inventory_manifest = self
                                         .s3_client
                                         .get_object()

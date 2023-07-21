@@ -119,9 +119,9 @@ impl DataSourceLocalFilePlugin {
                             partition: path.to_str().unwrap().to_string(),
                         };
 
-                        if Some(true)
-                            != offsets_clone.validate(&offset_key, OffsetTypes::Closed, 1)
-                        {
+                        let has_offsets = offsets_clone.validate(&offset_key, OffsetTypes::Closed, 1);
+
+                        if Some(true) != has_offsets {
                             let mut file = match File::open(&path) {
                                 Err(why) => {
                                     println!("couldn't open {}: {}", path.display(), why);
