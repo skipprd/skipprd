@@ -85,7 +85,10 @@ use crate::plugins::s3_inventory::DataSourceS3InventoryPlugin;
 
 use crate::ingest_work::{Ingest, OUTPUT_FILES_STATIC};
 use crate::plugins::file_input::DataSourceLocalFilePlugin;
+use crate::plugins::file_output::DataOutputFilePlugin;
+use crate::plugins::s3_output::DataOutputS3Plugin;
 use crate::plugins::stdin_input::DataSourceStdinPlugin;
+use crate::plugins::stdout_output::DataOutputStdoutPlugin;
 
 pub static RUNNING: Lazy<Mutex<AtomicBool>> = Lazy::new(|| Mutex::new(AtomicBool::new(true)));
 pub static INPUT_GRACEFUL_SHUTDOWN_COMPLETE: Lazy<Mutex<AtomicBool>> =
@@ -395,9 +398,9 @@ async fn sync() {
 
                 let data_dir = Config::get_data_dir();
 
-                // println!("Looking for temp files in {}", &format!("{}/finalised/*parquet.temp", data_dir));
+                // println!("Looking for temp files in {}", &format!("{}/output_buffer/*parquet.temp", data_dir));
 
-                for entry in glob_with(&format!("{}/finalised/*parquet.temp", data_dir), options)
+                for entry in glob_with(&format!("{}/output_buffer/*parquet.temp", data_dir), options)
                     .expect("Failed to read glob 'finalised' pattern")
                 {
                     match entry {
@@ -526,8 +529,6 @@ async fn sync() {
 
                         output_sync();
 
-                        let data_output = DataOutputAwsAthenaPlugin::new().await;
-
                         while OUTPUT_RUNNING.lock().unwrap().load(Ordering::SeqCst) {
                             // sleep(Duration::from_secs(1));
                             return;
@@ -536,7 +537,7 @@ async fn sync() {
                         if !Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "").is_empty() {
                             OUTPUT_RUNNING.lock().unwrap().store(true, Ordering::SeqCst);
 
-                            data_output.sync().await;
+                            sync_output_plugin(&Config::getenv("DATA_OUTPUT_PLUGIN_NAME", ""), "ingest".to_string()).await;
 
                             OUTPUT_RUNNING
                                 .lock()
@@ -559,8 +560,13 @@ async fn sync() {
         require_literal_leading_dot: false,
     };
     let data_dir = Config::get_data_dir();
-    let output_dir = &format!("{}/output", data_dir);
-    let finalised_dir = &format!("{}/finalised", data_dir);
+    let output_dir = &format!("{}/ingest_buffer", data_dir);
+    let deadletter_dir = &format!("{}/deadletter_buffer", data_dir);
+    let finalised_dir = &format!("{}/output_buffer", data_dir);
+    match fs::create_dir(deadletter_dir) {
+        Ok(_g) => {}
+        Err(_err) => {}
+    }
     match fs::create_dir(output_dir) {
         Ok(_g) => {}
         Err(_err) => {}
@@ -576,51 +582,7 @@ async fn sync() {
 
     let offsets_clone = offsets.clone();
 
-    match Config::getenv("DATA_SOURCE_PLUGIN_NAME", "").as_str() {
-        "stdin" => {
-            // tokio::spawn(async {
-                let mut input = DataSourceStdinPlugin::new().await;
-                input
-                .sync(
-                    offsets_clone,
-                )
-                .await;
-            // }).await.unwrap();
-        }
-        "file" => {
-            // tokio::spawn(async {
-                let mut input = DataSourceLocalFilePlugin::new().await;
-                input.sync(
-                    offsets_clone
-                )
-                .await;
-            // }).await.unwrap();
-        }
-        "s3" => {
-            // tokio::spawn(async {
-                let mut ds3 = DataSourceS3Plugin::new().await;
-                ds3.sync(
-                    offsets_clone,
-                )
-                .await;
-            // }).await.unwrap();
-        }
-        "s3_inventory" => {
-            // tokio::spawn(async {
-                let mut ds3 = DataSourceS3InventoryPlugin::new().await;
-                ds3.sync(
-                    offsets_clone,
-                )
-                .await;
-            // }).await.unwrap();
-        }
-        "" => {
-            println!("No Data Source plugin specified. You must specify a data source plugin, see documentation for the DATA_SOURCE_PLUGIN_NAME environment variable.");
-        }
-        unknown => {
-            println!("Data Source Plugin {} not supported", unknown);
-        }
-    };
+    sync_input_plugin(offsets_clone).await;
 
     println!("Flushing ingest buffers");
     let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
@@ -634,10 +596,12 @@ async fn sync() {
 
     output_sync();
 
-    let data_output = DataOutputAwsAthenaPlugin::new().await;
-
     if !Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "").is_empty() {
-        data_output.sync().await;
+        sync_output_plugin(&Config::getenv("DATA_OUTPUT_PLUGIN_NAME", ""), "ingest".to_string()).await;
+    }
+
+    if !Config::getenv("DATA_DEADLETTER_PLUGIN_NAME", "").is_empty() {
+        sync_output_plugin(&Config::getenv("DATA_DEADLETTER_PLUGIN_NAME", ""), "deadletter".to_string()).await;
     }
 
     let mut metrics_lock = METRICS.write().unwrap();
@@ -677,8 +641,8 @@ fn output_sync() {
     let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
 
     let data_dir = Config::get_data_dir();
-    let output_dir = &format!("{}/output", data_dir);
-    let finalised_dir = &format!("{}/finalised", data_dir);
+    let output_dir = &format!("{}/ingest_buffer", data_dir);
+    let finalised_dir = &format!("{}/output_buffer", data_dir);
 
     let options = MatchOptions {
         case_sensitive: false,
@@ -786,6 +750,81 @@ pub fn flatten_metadata(metadata: &Metadata, flattened: &mut HashMap<String, Met
             flatten_metadata(val, flattened);
         } else {
             flattened.insert(val.out_field_name.clone(), val.clone());
+        }
+    }
+}
+
+pub async fn sync_output_plugin(plugin_name: &str, buffer_name: String) {
+    match plugin_name {
+        "stdout" => {
+            let mut output = DataOutputStdoutPlugin::new(buffer_name).await;
+            output
+                .sync()
+                .await;
+        }
+        "file" => {
+            let mut output = DataOutputFilePlugin::new(buffer_name).await;
+            output
+                .sync()
+                .await;
+        }
+        "s3" => {
+            let mut output = DataOutputS3Plugin::new(buffer_name).await;
+            output
+                .sync()
+                .await;
+        }
+        "athena" => {
+            let mut output = DataOutputAwsAthenaPlugin::new(buffer_name).await;
+            output
+                .sync()
+                .await;
+        }
+        "" => {
+            println!("No Data Output plugin specified");
+        }
+        _ => {
+            println!("Unknown Data Output plugin specified");
+        }
+    }
+}
+
+pub async fn sync_input_plugin(offsets_clone: Arc<Offsets>) {
+    match Config::getenv("DATA_SOURCE_PLUGIN_NAME", "").as_str() {
+        "stdin" => {
+            let mut input = DataSourceStdinPlugin::new().await;
+            input
+                .sync(
+                    offsets_clone,
+                )
+                .await;
+        }
+        "file" => {
+            let mut input = DataSourceLocalFilePlugin::new().await;
+            input.sync(
+                offsets_clone
+            )
+                .await;
+        }
+        "s3" => {
+            let mut ds3 = DataSourceS3Plugin::new().await;
+            ds3.sync(
+                offsets_clone,
+            )
+                .await;
+        }
+        "s3_inventory" => {
+            let mut ds3 = DataSourceS3InventoryPlugin::new().await;
+            ds3.sync(
+                offsets_clone,
+            )
+                .await;
+        }
+        "" => {
+            println!("No Data Source plugin specified. You must specify a data source plugin, see documentation for the DATA_SOURCE_PLUGIN_NAME environment variable.");
+        }
+        unknown => {
+            println!("Data Source Plugin {} not supported", unknown);
         }
     }
 }

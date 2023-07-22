@@ -9,7 +9,10 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc};
 use std::thread;
 use std::time::Instant;
+// use async_trait::async_trait;
 use tokio::time::Duration;
+// use crate::plugins::DataSourcePlugin;
+
 
 pub struct DataSourceStdinPlugin {
     ingest: Ingest,
@@ -18,6 +21,8 @@ pub struct DataSourceStdinPlugin {
     buffer_threshold: Duration,
 }
 
+// #[async_trait]
+// impl DataSourcePlugin for DataSourceStdinPlugin  {
 impl DataSourceStdinPlugin {
     pub async fn new() -> DataSourceStdinPlugin {
         DataSourceStdinPlugin {

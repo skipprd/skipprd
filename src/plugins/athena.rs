@@ -26,7 +26,7 @@ use std::path::Path;
 pub struct DataOutputAwsAthenaPlugin {
     s3_client: S3Client,
     athena_client: AthenaClient,
-    // config: Config,
+    buffer_name: String,
     s3_bucket: String,
     s3_prefix: String,
     time_bucket: String,
@@ -35,7 +35,7 @@ pub struct DataOutputAwsAthenaPlugin {
 const GRANULARITIES: [&str; 5] = ["year", "month", "day", "hour", "minute"];
 
 impl DataOutputAwsAthenaPlugin {
-    pub async fn new() -> DataOutputAwsAthenaPlugin {
+    pub async fn new(buffer_name: String,) -> DataOutputAwsAthenaPlugin {
         let aws_config = aws_config::from_env().load().await;
 
         let s3_client = S3Client::new(&aws_config);
@@ -51,13 +51,14 @@ impl DataOutputAwsAthenaPlugin {
             s3_bucket,
             s3_prefix,
             time_bucket,
+            buffer_name: buffer_name,
         }
     }
 
     pub async fn sync(&self) {
         let mut partition_cache: Vec<String> = vec![];
 
-        while let Some(filename) = BufferChunker::next_file() {
+        while let Some(filename) = BufferChunker::next_file(&self.buffer_name) {
             let mut file = BufReader::new(File::open(&filename).unwrap());
 
             let mut contents = Vec::new();

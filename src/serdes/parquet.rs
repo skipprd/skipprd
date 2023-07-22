@@ -285,7 +285,7 @@ impl SerdeParquet {
             Some(source_time),
         );
 
-        let output_dir = &format!("{}/finalised", data_dir);
+        let output_dir = &format!("{}/output_buffer", data_dir);
 
         match fs::create_dir(output_dir) {
             Ok(_g) => {}

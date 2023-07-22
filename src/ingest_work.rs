@@ -16,6 +16,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::num::NonZeroUsize;
 use std::ops::Deref;
+use std::string::ToString;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use threadpool::ThreadPool;
@@ -107,6 +108,12 @@ pub static PARSE_NAMESPACE_CACHE: Lazy<Mutex<HashMap<String, String>>> =
 pub static OUTPUT_FILES_STATIC: Lazy<Mutex<LruCache<String, OutputFile>>> =
     Lazy::new(|| Mutex::new(LruCache::new(NonZeroUsize::new(100).expect(""))));
 
+pub static deadletter_file_name: Lazy<String> = Lazy::new(|| BufferChunker::encode_chunk_name(
+    "deadletters",
+    Some(Config::get_pipeline_name().as_str()),
+    None,
+    None));
+
 // static AVRO_SCHEMA: Lazy<Mutex<HashMap<String, Schema>>> = Lazy::new(|| {
 //
 //     let mut avro_schemas: HashMap<String, Schema> = HashMap::new();
@@ -163,7 +170,7 @@ impl Ingest {
 
     pub fn flush_buffers(force: bool, output_files: &mut MutexGuard<LruCache<String, OutputFile>>) {
         let data_dir = Config::get_data_dir();
-        let output_dir = format!("{}/output", data_dir);
+        let output_dir = format!("{}/ingest_buffer", data_dir);
 
         let mut rotated_files: Vec<String> = Vec::new();
 
@@ -297,7 +304,8 @@ impl Ingest {
         let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
 
         let data_dir = Config::get_data_dir();
-        let output_dir = format!("{}/output", data_dir);
+        let output_dir = format!("{}/ingest_buffer", data_dir);
+        let deadletter_dir = format!("{}/deadletter_buffer", data_dir);
 
         let aprox_now = SystemTime::now();
 
@@ -326,6 +334,11 @@ impl Ingest {
                     || (record.is_object() && record.as_object().unwrap().is_empty())
                     || (record.is_array() && record.as_array().unwrap().is_empty())
                 {
+
+                    let output_file = format!("{}/{}", deadletter_dir.clone(), &deadletter_file_name.as_str());
+
+                    buffers.write(&output_file, record.to_string().as_bytes());
+                    buffers.write(&output_file, "\n".as_bytes());
 
                     i += 1;
                     d += 1;
@@ -366,86 +379,6 @@ impl Ingest {
                         }
                     }
 
-                    // let mut writer = Writer::new(&avro_schemas.get(&skpr_namespace).unwrap(), Vec::new());
-                    //
-                    // let record_value = {
-                    //     match  writer.append_ser(&record) {
-                    //         Ok(_) => {
-                    //             writer.flush().expect("Failed to flush");
-                    //             match writer.into_inner() {
-                    //                 Ok(bytes) => bytes,
-                    //                 Err(err) => {
-                    //                     d += 1;
-                    //
-                    //                     println!("Error 1: {}", err);
-                    //                     continue;
-                    //                 }
-                    //             }
-                    //         },
-                    //         Err(err) => {
-                    //             let mut metadata = METADATA.write().unwrap();
-                    //             // println!("Falling back to slow path due to: {}", err);
-                    //             let msg = ingest(
-                    //                 &record,
-                    //                 &mut metadata.get_mut(&skpr_namespace).unwrap().fields,
-                    //                 &mut updated_schema_clone.lock().unwrap(),
-                    //                 flatten,
-                    //             );
-                    //
-                    //             // if *updated_schema_clone.lock().unwrap() == "yes".to_string() {
-                    //             //     *updated_schema_clone.lock().unwrap() = "no".to_string();
-                    //             // {
-                    //                 // tokio::runtime::Builder::new_multi_thread()
-                    //                 //     .enable_all()
-                    //                 //     .build()
-                    //                 //     .unwrap()
-                    //                 //     .block_on(async {
-                    //                 //         Config::set_config(&METADATA.read().unwrap(), true).await;
-                    //                 //     });
-                    //
-                    //                 // let mut avro_schemas: HashMap<String, Schema> = HashMap::new();
-                    //
-                    //                 // for (namespace, schema) in metadata.iter() {
-                    //                 //     let raw_schema = convert_skippr_to_avro_field_types(&schema.fields);
-                    //                 //     avro_schemas.insert(namespace.to_string(), raw_schema.unwrap());
-                    //                 // }
-                    //
-                    //             avro_schemas.insert(skpr_namespace.clone(), convert_skippr_to_avro_field_types(&skpr_namespace, &metadata.get(&skpr_namespace).unwrap().fields).unwrap());
-                    //
-                    //                 // *AVRO_SCHEMA.lock().unwrap() = avro_schemas.clone();
-                    //
-                    //                 let mut writer = Writer::new(avro_schemas.get(&skpr_namespace).unwrap(), Vec::new());
-                    //
-                    //             // }
-                    //
-                    //             match writer.append_ser(msg) {
-                    //                 Ok(_) => {
-                    //                     writer.flush().expect("Failed to flush");
-                    //                     match writer.into_inner() {
-                    //                         Ok(bytes) => bytes,
-                    //                         Err(err) => {
-                    //                             d += 1;
-                    //
-                    //                             println!("Error 2: {}", err);
-                    //
-                    //                             continue;
-                    //                         }
-                    //                     }
-                    //                 },
-                    //                 Err(err) => {
-                    //                     d += 1;
-                    //
-                    //                     println!("Error 3: {} Schema: {}", err, avro_schemas.get(&skpr_namespace).unwrap().canonical_form());
-                    //
-                    //                     continue;
-                    //                 }
-                    //             }
-                    //         }
-                    //     }
-                    //
-                    // };
-                    //
-                    // println!("Record: {}", record_value.len());
                     let msg = fast_path_ingest(
                         &record,
                         &METADATA.read().unwrap().get(&skpr_namespace).unwrap().fields,
@@ -476,10 +409,12 @@ impl Ingest {
                         }
                     };
 
+                    let output_file = format!("{}/{}", output_dir.clone(), &output_file_name);
+
                     let record_vec = serde_json::to_vec(&record_value).unwrap();
                     bytes += record_vec.len() as u64;
-                    buffers.write(&output_file_name, &record_vec);
-                    buffers.write(&output_file_name, "\n".as_bytes());
+                    buffers.write(&output_file, &record_vec);
+                    buffers.write(&output_file, "\n".as_bytes());
 
                     i += 1;
                     j += 1;
@@ -502,19 +437,22 @@ impl Ingest {
 
         // Flush all buffers to their respective files.
         for (filename, buffer) in buffers.buffers.iter() {
-            let output_file = format!("{}/{}", output_dir.clone(), &filename);
 
             if output_files.peek(filename).is_none() {
-                let f = OpenOptions::new()
+                let f = match OpenOptions::new()
                     .create(true)
                     .write(true)
                     .append(true)
-                    .open(output_file.clone())
-                    .unwrap();
+                    .open(filename.clone()) {
+                        Ok(f) => f,
+                        Err(err) => {
+                            panic!("Could not open file: {}, Error: {:?}", filename, err);
+                        }
+                    };
 
                 let writer = BufWriter::with_capacity(WRITE_BUF_SIZE, f);
 
-                let new_file = match std::fs::metadata(&output_file) {
+                let new_file = match std::fs::metadata(&filename) {
                     Ok(metadata) => {
                         let secs_since_epoch = metadata
                             .modified()

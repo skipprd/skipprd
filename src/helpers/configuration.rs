@@ -472,7 +472,9 @@ impl Config {
     }
 
     pub async fn sync_schema(metadata: &HashMap<String, Metadata>) {
-        if !Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "").is_empty() {
+        if !Config::getenv("SCHEMA_OUTPUT_PLUGIN_NAME", "").is_empty()
+            && Config::getenv("SCHEMA_OUTPUT_PLUGIN_NAME", "") == "glue"
+        {
             let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
 
             for (namespace, schema) in metadata.into_iter() {
