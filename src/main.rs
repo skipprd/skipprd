@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::fs::File;
 
 use std::io::BufReader;
-use std::ops::Add;
+use std::ops::{Add, Deref};
 
 use std::sync::{Arc, Mutex, RwLock};
 use std::{env, thread};
@@ -78,6 +78,7 @@ use crate::buffer::BufferChunker;
 use crate::helpers::logger::{LogLevel, Logger};
 use crate::helpers::offsets::Offsets;
 use crate::helpers::Helpers;
+use crate::helpers::license::HAS_LICENSE;
 use crate::plugins::athena::DataOutputAwsAthenaPlugin;
 
 use crate::plugins::s3_input::DataSourceS3Plugin;
@@ -263,9 +264,7 @@ async fn sync() {
             metadata
         }
         Err(_e) => {
-            println!(
-                "Could not find Skippr metadata, will discover and evolve schemas as we sync."
-            );
+            println!("No exisitng Skippr metadata, will discover and evolve schemas as we sync");
             let _empty_meta = Metadata::new().unwrap();
 
             HashMap::new()
@@ -769,16 +768,25 @@ pub async fn sync_output_plugin(plugin_name: &str, buffer_name: String) {
                 .await;
         }
         "s3" => {
-            let mut output = DataOutputS3Plugin::new(buffer_name).await;
-            output
-                .sync()
-                .await;
+            if *HAS_LICENSE.read().unwrap() {
+                let mut output = DataOutputS3Plugin::new(buffer_name).await;
+                output
+                    .sync()
+                    .await;
+            } else {
+                println!("No license found for S3 output plugin. Visit https://skippr.io to get a license.");
+            }
+
         }
         "athena" => {
-            let mut output = DataOutputAwsAthenaPlugin::new(buffer_name).await;
-            output
-                .sync()
-                .await;
+            if *HAS_LICENSE.read().unwrap() {
+                let mut output = DataOutputAwsAthenaPlugin::new(buffer_name).await;
+                output
+                    .sync()
+                    .await;
+            } else {
+                println!("No license found for Athena output plugin. Visit https://skippr.io to get a license.");
+            }
         }
         "" => {
             println!("No Data Output plugin specified");
@@ -807,18 +815,27 @@ pub async fn sync_input_plugin(offsets_clone: Arc<Offsets>) {
                 .await;
         }
         "s3" => {
-            let mut ds3 = DataSourceS3Plugin::new().await;
-            ds3.sync(
-                offsets_clone,
-            )
-                .await;
+            if *HAS_LICENSE.read().unwrap() {
+                let mut input = DataSourceS3Plugin::new().await;
+                input.sync(
+                    offsets_clone,
+                )
+                    .await;
+            } else {
+                println!("No license found for S3 input plugin. Visit https://skippr.io to get a license.");
+            }
+
         }
         "s3_inventory" => {
-            let mut ds3 = DataSourceS3InventoryPlugin::new().await;
-            ds3.sync(
-                offsets_clone,
-            )
-                .await;
+            if *HAS_LICENSE.read().unwrap() {
+                let mut input = DataSourceS3InventoryPlugin::new().await;
+                input.sync(
+                    offsets_clone,
+                )
+                    .await;
+            } else {
+                println!("No license found for S3 Inventory input plugin. Visit https://skippr.io to get a license.");
+            }
         }
         "" => {
             println!("No Data Source plugin specified. You must specify a data source plugin, see documentation for the DATA_SOURCE_PLUGIN_NAME environment variable.");

@@ -100,7 +100,7 @@ impl Logger {
 
         let path = "";
 
-        let tenant_id = TENANT_ID.lock().unwrap().clone();
+        let tenant_id = TENANT_ID.read().unwrap().clone();
 
         let data = json!({
             "logs": logs.iter().map(|(log, count)| {

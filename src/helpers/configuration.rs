@@ -26,7 +26,7 @@ use crate::discover::Metadata;
 use crate::{flatten_metadata, METRICS, RUNNING};
 use crate::helpers::Helpers;
 
-use crate::helpers::license::{LicenseChecker, TENANT_ID};
+use crate::helpers::license::{HAS_LICENSE, LicenseChecker, TENANT_ID};
 
 use crate::plugins::athena::AwsAthena;
 
@@ -301,6 +301,11 @@ impl Config {
         //
         // config.mutable_mode = Config::getenv("DATA_SOURCE_MUTABLE_MODE", config.mutable_mode);
 
+        if !*HAS_LICENSE.read().unwrap() {
+            // println!("ERROR: No license found, please set the 'LICENSE' environment variable.");
+            return Err(false);
+        }
+
         if config.mutable_mode == config.mutable_mode {
             // SkipprLogger::info("Strict mutable mode enabled, will sync an exact copy of records.");
         }
@@ -411,6 +416,11 @@ impl Config {
 
             ///////////
 
+            if !*HAS_LICENSE.read().unwrap() {
+                // println!("ERROR: No license found, please set the 'LICENSE' environment variable.");
+                return;
+            }
+
             let workspace = Self::get_workspace_name();
             let pipeline = Self::get_pipeline_name();
 
@@ -475,28 +485,32 @@ impl Config {
         if !Config::getenv("SCHEMA_OUTPUT_PLUGIN_NAME", "").is_empty()
             && Config::getenv("SCHEMA_OUTPUT_PLUGIN_NAME", "") == "glue"
         {
-            let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
+            if *HAS_LICENSE.read().unwrap() {
+                let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
 
-            for (namespace, schema) in metadata.into_iter() {
-                println!("Updating Hive '{}' schema", namespace);
+                for (namespace, schema) in metadata.into_iter() {
+                    println!("Updating Hive '{}' schema", namespace);
 
-                if flatten {
-                    let mut out_meta: HashMap<String, Metadata> = HashMap::new();
-                    flatten_metadata(metadata.get(namespace).unwrap(), &mut out_meta);
+                    if flatten {
+                        let mut out_meta: HashMap<String, Metadata> = HashMap::new();
+                        flatten_metadata(metadata.get(namespace).unwrap(), &mut out_meta);
 
-                    let mut output_metadata: HashMap<String, Metadata> = HashMap::new();
-                    let mut flat: Metadata = Metadata::new().unwrap();
-                    flat.fields = Box::new(out_meta);
-                    output_metadata.insert(namespace.clone(), flat);
+                        let mut output_metadata: HashMap<String, Metadata> = HashMap::new();
+                        let mut flat: Metadata = Metadata::new().unwrap();
+                        flat.fields = Box::new(out_meta);
+                        output_metadata.insert(namespace.clone(), flat);
 
-                    AwsAthena::create_or_update_schema(
-                        &namespace,
-                        &output_metadata.get(namespace).unwrap(),
-                    )
-                    .await;
-                } else {
-                    AwsAthena::create_or_update_schema(&namespace, &schema).await;
+                        AwsAthena::create_or_update_schema(
+                            &namespace,
+                            &output_metadata.get(namespace).unwrap(),
+                        )
+                            .await;
+                    } else {
+                        AwsAthena::create_or_update_schema(&namespace, &schema).await;
+                    }
                 }
+            } else {
+                println!("No license found for AWS Glue schema plugin. Visit https://skippr.io to get a license.");
             }
         }
     }
@@ -516,7 +530,14 @@ impl Config {
         } else {
             String::from("https://metrics.api.skippr.io")
         };
-        let token = Config::getenv("SKIPPR_API_TOKEN", "");
+
+        let mut default_api_key = "";
+
+        if !*HAS_LICENSE.read().unwrap() {
+            default_api_key = "XxIVftJXN4LF6ARrRqJvKAsv30vhIZHR"
+        }
+
+        let token = Config::getenv("SKIPPR_API_TOKEN", default_api_key);
 
         let mut headers = HeaderMap::new();
         let auth_header = HeaderName::from_static("x-api-key");
@@ -529,7 +550,7 @@ impl Config {
 
         let path = "";
 
-        let tenant_id = TENANT_ID.lock().unwrap().clone();
+        let tenant_id = TENANT_ID.read().unwrap().clone();
 
         let data = json!({
             "metrics": {
@@ -559,13 +580,14 @@ impl Config {
         match response.error_for_status() {
             Ok(_resp) => {
                 // println!("Status HTTP Success: {:?}", resp);
+                // println!("Notified Metrics API");
             }
             Err(err) => {
                 println!("Metrics HTTP Error: {:?}", err);
             }
         }
 
-        println!("Notified Metrics API");
+
         Ok(())
     }
 

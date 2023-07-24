@@ -8,9 +8,10 @@ use serde_derive::{Deserialize, Serialize};
 
 use std::error::Error;
 use std::process::exit;
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 
-pub static TENANT_ID: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new("".to_string()));
+pub static TENANT_ID: Lazy<RwLock<String>> = Lazy::new(|| RwLock::new("".to_string()));
+pub static HAS_LICENSE: Lazy<RwLock<bool>> = Lazy::new(|| RwLock::new(false));
 
 const API_KEY_ENV_VAR: &str = "SKIPPR_API_TOKEN";
 const APP_ENV: &str = "APP_ENV";
@@ -68,7 +69,7 @@ impl LicenseChecker {
             // println!("{:?}", self.license);
 
             TENANT_ID
-                .lock()
+                .write()
                 .unwrap()
                 .push_str(&self.license.as_ref().unwrap().tenant);
 
@@ -76,6 +77,19 @@ impl LicenseChecker {
                 .license
                 .as_ref()
                 .map_or(false, |l| &self.api_key == &l.api_key);
+
+            let mut has_license = match HAS_LICENSE.write() {
+                Ok(mut val) => {
+                    val
+                },
+                Err(err) => {
+                    println!("Error: {:?}", err);
+                    std::process::exit(1)
+                }
+            };
+
+            *has_license = self.license_is_valid;
+
         } else {
             self.license_is_valid = false;
             // println!("{:?}", response.json::<HashMap<String, String>>().await?);
@@ -87,8 +101,9 @@ impl LicenseChecker {
                 Ok(())
             }
             _false => {
-                println!("No valid license found for API Key");
-                exit(1);
+                // Free local developer version, visit https://skippr.io to get a license
+                println!("Free local developer version. Visit https://skippr.io/upgrade to upgrade pluigns and metadata api at anytime");
+                Ok(())
             }
         }
     }
