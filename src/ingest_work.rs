@@ -367,7 +367,7 @@ impl Ingest {
                     }
 
                     let output_file_name = BufferChunker::encode_chunk_name(
-                        "ingest",
+                        "output",
                         Some(&skpr_namespace),
                         Some(&skpr_partition),
                         skpr_time_bucket,

@@ -537,7 +537,7 @@ async fn sync() {
                         if !Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "").is_empty() {
                             OUTPUT_RUNNING.lock().unwrap().store(true, Ordering::SeqCst);
 
-                            sync_output_plugin(&Config::getenv("DATA_OUTPUT_PLUGIN_NAME", ""), "ingest".to_string()).await;
+                            sync_output_plugin(&Config::getenv("DATA_OUTPUT_PLUGIN_NAME", ""), "output".to_string()).await;
 
                             OUTPUT_RUNNING
                                 .lock()
@@ -597,7 +597,7 @@ async fn sync() {
     output_sync();
 
     if !Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "").is_empty() {
-        sync_output_plugin(&Config::getenv("DATA_OUTPUT_PLUGIN_NAME", ""), "ingest".to_string()).await;
+        sync_output_plugin(&Config::getenv("DATA_OUTPUT_PLUGIN_NAME", ""), "output".to_string()).await;
     }
 
     if !Config::getenv("DATA_DEADLETTER_PLUGIN_NAME", "").is_empty() {
@@ -699,7 +699,7 @@ fn output_sync() {
                         let tmp_file_path = SerdeParquet::serialize(path.clone(), schema_ref);
 
                         let finalised_file_name = BufferChunker::encode_chunk_name(
-                            "ingest",
+                            "output",
                             Some(&skpr_namespace),
                             Some(&skpr_partition),
                             Some(source_time),
