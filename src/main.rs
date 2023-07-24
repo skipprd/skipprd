@@ -370,7 +370,7 @@ async fn sync() {
                     sleep(Duration::from_secs(1));
                 }
 
-                let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
+                let mut output_files = OUTPUT_FILES_STATIC.write().unwrap();
                 Ingest::flush_buffers(true, &mut output_files);
 
                 offsets_clone.flush();
@@ -585,7 +585,7 @@ async fn sync() {
     sync_input_plugin(offsets_clone).await;
 
     println!("Flushing ingest buffers");
-    let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
+    let mut output_files = OUTPUT_FILES_STATIC.write().unwrap();
     Ingest::flush_buffers(true, &mut output_files);
 
     while OUTPUT_RUNNING.lock().unwrap().load(Ordering::SeqCst) {

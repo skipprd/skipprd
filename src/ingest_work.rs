@@ -17,7 +17,7 @@ use std::io::{BufWriter, Write};
 use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::string::ToString;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockWriteGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use threadpool::ThreadPool;
 use std::sync::mpsc::channel;
@@ -102,11 +102,11 @@ pub const WRITE_BUF_SIZE: usize = if cfg!(target_os = "espidf") {
     512 * 1024
 };
 
-pub static PARSE_NAMESPACE_CACHE: Lazy<Mutex<HashMap<String, String>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+pub static PARSE_NAMESPACE_CACHE: Lazy<RwLock<HashMap<String, String>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
 
-pub static OUTPUT_FILES_STATIC: Lazy<Mutex<LruCache<String, OutputFile>>> =
-    Lazy::new(|| Mutex::new(LruCache::new(NonZeroUsize::new(100).expect(""))));
+pub static OUTPUT_FILES_STATIC: Lazy<RwLock<LruCache<String, OutputFile>>> =
+    Lazy::new(|| RwLock::new(LruCache::new(NonZeroUsize::new(100).expect(""))));
 
 pub static deadletter_file_name: Lazy<String> = Lazy::new(|| BufferChunker::encode_chunk_name(
     "deadletters",
@@ -168,7 +168,7 @@ impl Ingest {
         }
     }
 
-    pub fn flush_buffers(force: bool, output_files: &mut MutexGuard<LruCache<String, OutputFile>>) {
+    pub fn flush_buffers(force: bool, output_files: &mut RwLockWriteGuard<LruCache<String, OutputFile>>) {
         let data_dir = Config::get_data_dir();
         let output_dir = format!("{}/ingest_buffer", data_dir);
 
@@ -351,11 +351,18 @@ impl Ingest {
                         != offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Line, i)
                 {
 
+                    let mut namesapce_cache =  PARSE_NAMESPACE_CACHE.read().unwrap().clone();
                     let skpr_namespace = Helpers::parse_namespace_field(
                         &record,
                         Config::get_pipeline_name(),
-                        &mut PARSE_NAMESPACE_CACHE.lock().unwrap(),
+                        &mut namesapce_cache,
                     );
+
+                    if namesapce_cache != PARSE_NAMESPACE_CACHE.read().unwrap().clone() {
+                        PARSE_NAMESPACE_CACHE.write().unwrap().clear();
+                        PARSE_NAMESPACE_CACHE.write().unwrap().extend(namesapce_cache);
+                    }
+
                     let skpr_partition = Helpers::parse_partition_field(&record);
                     let skpr_time = Helpers::parse_time_field(&record);
 
@@ -428,7 +435,7 @@ impl Ingest {
         }
 
 
-        let mut output_files = match OUTPUT_FILES_STATIC.lock() {
+        let mut output_files = match OUTPUT_FILES_STATIC.write() {
             Ok(output_files) => output_files,
             Err(err) => {
                 panic!("Could not lock buffer files, Error: {:?}", err);
