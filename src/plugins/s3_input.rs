@@ -410,15 +410,15 @@ impl DataSourceS3Plugin {
         //     }
         // }
 
-        if !RUNNING.read().unwrap().load(Ordering::SeqCst) {
-           self.ingest.wait_for_completion();
-            // drop(self.ingest);
-            INPUT_GRACEFUL_SHUTDOWN_COMPLETE
-                .write()
-                .unwrap()
-                .store(true, Ordering::SeqCst);
-            // sleep(Duration::from_secs(120));
-        }
+        // if !RUNNING.read().unwrap().load(Ordering::SeqCst) {
+        //    // self.ingest.wait_for_completion();
+        //     // drop(self.ingest);
+        //     INPUT_GRACEFUL_SHUTDOWN_COMPLETE
+        //         .write()
+        //         .unwrap()
+        //         .store(true, Ordering::SeqCst);
+        //     // sleep(Duration::from_secs(120));
+        // }
     }
 }
 

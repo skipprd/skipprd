@@ -5,7 +5,7 @@ use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::helpers::Helpers;
 use crate::ingest::ingest::ingest;
 use crate::serdes::json::SerdeJson;
-use crate::{METADATA, METRICS};
+use crate::{INPUT_GRACEFUL_SHUTDOWN_COMPLETE, METADATA, METRICS, RUNNING};
 use glob::{glob_with, MatchOptions};
 use lru::LruCache;
 use once_cell::sync::Lazy;
@@ -277,6 +277,13 @@ impl Ingest {
     ) {
         // println!("Ingesting {} events", datas.len());
 
+        if !RUNNING.read().unwrap().load(Ordering::SeqCst) {
+            self.wait_for_completion();
+            INPUT_GRACEFUL_SHUTDOWN_COMPLETE.write()
+                    .unwrap()
+                    .store(true, Ordering::SeqCst);
+        } else {
+
         // Wait for an available thread if there's no capacity
         while self.active_count.load(Ordering::SeqCst) >= self.num_cpus {
             // println!("Waiting for {} tasks to finish", self.active_count.load(Ordering::SeqCst));
@@ -305,7 +312,7 @@ impl Ingest {
                 });
 
             // }
-        // }
+        }
 
     }
 

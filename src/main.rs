@@ -366,11 +366,12 @@ async fn sync() {
 
                 RUNNING.write().unwrap().store(false, Ordering::SeqCst);
 
-                while !INPUT_GRACEFUL_SHUTDOWN_COMPLETE
+                while
+                !INPUT_GRACEFUL_SHUTDOWN_COMPLETE
                     .read()
                     .unwrap()
-                    .load(Ordering::SeqCst)
-                    && !OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE
+                    .load(Ordering::SeqCst) &&
+                    !OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE
                         .read()
                         .unwrap()
                         .load(Ordering::SeqCst)

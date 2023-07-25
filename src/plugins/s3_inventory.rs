@@ -549,14 +549,14 @@ impl DataSourceS3InventoryPlugin {
         //     }
         // }
 
-        if !RUNNING.read().unwrap().load(Ordering::SeqCst) {
-            drop(&self.ingest);
-            INPUT_GRACEFUL_SHUTDOWN_COMPLETE
-                .write()
-                .unwrap()
-                .store(true, Ordering::SeqCst);
-            // sleep(Duration::from_secs(120));
-        }
+        // if !RUNNING.read().unwrap().load(Ordering::SeqCst) {
+        //     // drop(&self.ingest);
+        //     INPUT_GRACEFUL_SHUTDOWN_COMPLETE
+        //         .write()
+        //         .unwrap()
+        //         .store(true, Ordering::SeqCst);
+        //     // sleep(Duration::from_secs(120));
+        // }
     }
 }
 
