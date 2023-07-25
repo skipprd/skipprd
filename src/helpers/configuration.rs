@@ -381,7 +381,7 @@ impl Config {
                         err,
                         resp.error_for_status()
                     );
-                    RUNNING.lock().unwrap().store(false, Ordering::SeqCst);
+                    RUNNING.write().unwrap().store(false, Ordering::SeqCst);
                     // Err(false)
                     exit(1);
                 },

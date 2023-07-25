@@ -151,7 +151,7 @@ impl DataOutputS3Plugin {
                         println!("Failed to upload file: {}, will retry later.", filename);
 
                         LOGGER
-                            .lock()
+                            .write()
                             .await
                             .log(
                                 LogLevel::Error,

@@ -228,7 +228,7 @@ impl DataOutputAwsAthenaPlugin {
 
                         // tokio::spawn(async move {
                         LOGGER
-                            .lock()
+                            .write()
                             .await
                             .log(
                                 LogLevel::Error,

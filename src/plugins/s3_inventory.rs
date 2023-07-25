@@ -549,9 +549,10 @@ impl DataSourceS3InventoryPlugin {
         //     }
         // }
 
-        if !RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+        if !RUNNING.read().unwrap().load(Ordering::SeqCst) {
+            drop(&self.ingest);
             INPUT_GRACEFUL_SHUTDOWN_COMPLETE
-                .lock()
+                .write()
                 .unwrap()
                 .store(true, Ordering::SeqCst);
             // sleep(Duration::from_secs(120));

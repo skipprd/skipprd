@@ -410,9 +410,11 @@ impl DataSourceS3Plugin {
         //     }
         // }
 
-        if !RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+        if !RUNNING.read().unwrap().load(Ordering::SeqCst) {
+           self.ingest.wait_for_completion();
+            // drop(self.ingest);
             INPUT_GRACEFUL_SHUTDOWN_COMPLETE
-                .lock()
+                .write()
                 .unwrap()
                 .store(true, Ordering::SeqCst);
             // sleep(Duration::from_secs(120));

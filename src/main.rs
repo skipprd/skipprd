@@ -59,6 +59,8 @@ use clap::Parser;
 use signal_hook::iterator::Signals;
 
 use std::panic;
+use std::process::abort;
+use futures::TryFutureExt;
 
 use once_cell::sync::Lazy;
 use signal_hook::consts::{SIGABRT, SIGINT, SIGQUIT, SIGTERM};
@@ -91,15 +93,17 @@ use crate::plugins::s3_output::DataOutputS3Plugin;
 use crate::plugins::stdin_input::DataSourceStdinPlugin;
 use crate::plugins::stdout_output::DataOutputStdoutPlugin;
 
-pub static RUNNING: Lazy<Mutex<AtomicBool>> = Lazy::new(|| Mutex::new(AtomicBool::new(true)));
-pub static INPUT_GRACEFUL_SHUTDOWN_COMPLETE: Lazy<Mutex<AtomicBool>> =
-    Lazy::new(|| Mutex::new(AtomicBool::new(false)));
-pub static OUTPUT_RUNNING: Lazy<Mutex<AtomicBool>> =
-    Lazy::new(|| Mutex::new(AtomicBool::new(false)));
-pub static OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE: Lazy<Mutex<AtomicBool>> =
-    Lazy::new(|| Mutex::new(AtomicBool::new(false)));
 
-pub static LOGGER: Lazy<Arc<tokio::sync::Mutex<Logger>>> = Lazy::new(|| Logger::new(100));
+
+pub static RUNNING: Lazy<RwLock<AtomicBool>> = Lazy::new(|| RwLock::new(AtomicBool::new(true)));
+pub static INPUT_GRACEFUL_SHUTDOWN_COMPLETE: Lazy<RwLock<AtomicBool>> =
+    Lazy::new(|| RwLock::new(AtomicBool::new(false)));
+pub static OUTPUT_RUNNING: Lazy<RwLock<AtomicBool>> =
+    Lazy::new(|| RwLock::new(AtomicBool::new(false)));
+pub static OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE: Lazy<RwLock<AtomicBool>> =
+    Lazy::new(|| RwLock::new(AtomicBool::new(false)));
+
+pub static LOGGER: Lazy<Arc<tokio::sync::RwLock<Logger>>> = Lazy::new(|| Logger::new(100));
 pub static METRICS: Lazy<Arc<RwLock<Metrics>>> = Lazy::new(|| Arc::new(RwLock::new(Metrics::new())));
 pub static METADATA: Lazy<Arc<RwLock<HashMap<String, Metadata>>>> = Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
 
@@ -246,12 +250,12 @@ async fn discover() {
 }
 
 async fn sync() {
-
-    LOGGER
-        .lock()
-        .await
-        .log(LogLevel::Error, "Init Error Log.".to_string())
-        .await;
+    {
+        LOGGER.write()
+            .await
+            .log(LogLevel::Error, "Init Error Log.".to_string())
+            .await;
+    }
 
     let _data_dir = Config::get_data_dir();
 
@@ -308,7 +312,7 @@ async fn sync() {
             .unwrap()
             .block_on(async {
                 LOGGER
-                    .lock()
+                    .write()
                     .await
                     .log(LogLevel::Error, panic_info_clone)
                     .await;
@@ -340,11 +344,14 @@ async fn sync() {
 
     thread::spawn(move || {
         for _sig in signals.forever() {
-            if !RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+            if !RUNNING.read().unwrap().load(Ordering::SeqCst) {
                 println!("Received another Ctrl+C signal - terminating immediately, this may result in data loss...");
                 std::process::exit(0);
             }
-            RUNNING.lock().unwrap().store(false, Ordering::SeqCst);
+
+            {
+                RUNNING.write().unwrap().store(false, Ordering::SeqCst);
+            }
 
             // let metrics_clone = METRICS.clone();
             let offsets_clone = offsets_clone.clone();
@@ -358,11 +365,11 @@ async fn sync() {
                 // sleep(Duration::from_secs(30)); // wait for threads to flush
 
                 while !INPUT_GRACEFUL_SHUTDOWN_COMPLETE
-                    .lock()
+                    .read()
                     .unwrap()
                     .load(Ordering::SeqCst)
                     && !OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE
-                        .lock()
+                        .read()
                         .unwrap()
                         .load(Ordering::SeqCst)
                 {
@@ -387,8 +394,8 @@ async fn sync() {
                 };
 
 
-
                 ////////////// Cleanup part written parquet files START ////////
+
                 let options = MatchOptions {
                     case_sensitive: false,
                     require_literal_separator: false,
@@ -421,13 +428,14 @@ async fn sync() {
                     .build()
                     .unwrap()
                     .block_on(async {
-                        match LOGGER.lock().await.flush().await {
+                        match LOGGER.write().await.flush().await {
                             Ok(_t) => {}
                             Err(_err) => {
                                 // println!("Graceful shutdown complete... bye");
                             }
                         }
                     });
+
 
                 // sleep(Duration::from_secs(15)); // wait for threads to flush
 
@@ -445,7 +453,7 @@ async fn sync() {
 
     planner.add(
         move || {
-            if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+            if RUNNING.read().unwrap().load(Ordering::SeqCst) {
 
                 let mut metrics_lock = match METRICS.write() {
                     Ok(lock) => lock,
@@ -502,7 +510,7 @@ async fn sync() {
     if Config::truth_value(&chaos) {
         out_pnanner.add(
             move || {
-                if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+                if RUNNING.read().unwrap().load(Ordering::SeqCst) {
 
                     println!("Chaos mode throwing a random exit. You can disable this test mode buy removing CHAOS_MODE flag or setting to 'no'");
 
@@ -519,7 +527,7 @@ async fn sync() {
     }
     out_pnanner.add(
         move || {
-            if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+            if RUNNING.read().unwrap().load(Ordering::SeqCst) {
                 tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
                     .build()
@@ -528,18 +536,19 @@ async fn sync() {
 
                         output_sync();
 
-                        while OUTPUT_RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+                        while OUTPUT_RUNNING.read().unwrap().load(Ordering::SeqCst) {
                             // sleep(Duration::from_secs(1));
                             return;
                         }
 
                         if !Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "").is_empty() {
-                            OUTPUT_RUNNING.lock().unwrap().store(true, Ordering::SeqCst);
-
+                            {
+                                OUTPUT_RUNNING.write().unwrap().store(true, Ordering::SeqCst);
+                            }
                             sync_output_plugin(&Config::getenv("DATA_OUTPUT_PLUGIN_NAME", ""), "output".to_string()).await;
 
                             OUTPUT_RUNNING
-                                .lock()
+                                .write()
                                 .unwrap()
                                 .store(false, Ordering::SeqCst);
                         }
@@ -583,15 +592,14 @@ async fn sync() {
 
     sync_input_plugin(offsets_clone).await;
 
-    println!("Flushing ingest buffers");
+    RUNNING.write().unwrap().store(false, Ordering::SeqCst);
+
     let mut output_files = OUTPUT_FILES_STATIC.write().unwrap();
     Ingest::flush_buffers(true, &mut output_files);
 
-    while OUTPUT_RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+    while OUTPUT_RUNNING.read().unwrap().load(Ordering::SeqCst) {
         sleep(Duration::from_secs(1));
     }
-
-    println!("Flushing output buffers");
 
     output_sync();
 
@@ -632,10 +640,11 @@ fn output_sync() {
     // thread::spawn(move || {
     // println!("Arrow Schema: {:?}", arrowSchema);
 
-    if OUTPUT_RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+    if OUTPUT_RUNNING.read().unwrap().load(Ordering::SeqCst) {
         return;
+    } else {
+        OUTPUT_RUNNING.write().unwrap().store(true, Ordering::SeqCst);
     }
-    OUTPUT_RUNNING.lock().unwrap().store(true, Ordering::SeqCst);
 
     let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
 
@@ -656,7 +665,7 @@ fn output_sync() {
     for entry in
         glob_with(&format!("{}/done/*", output_dir), options).expect("Failed to read glob pattern")
     {
-        if RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+        if RUNNING.read().unwrap().load(Ordering::SeqCst) {
             match entry {
                 Ok(path) => {
                     // println!("Finalising output file {}", path.display());
@@ -728,16 +737,18 @@ fn output_sync() {
     }
 
     OUTPUT_RUNNING
-        .lock()
+        .write()
         .unwrap()
         .store(false, Ordering::SeqCst);
 
-    if !RUNNING.lock().unwrap().load(Ordering::SeqCst) {
+    if !RUNNING.read().unwrap().load(Ordering::SeqCst) {
         OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE
-            .lock()
+            .write()
             .unwrap()
             .store(true, Ordering::SeqCst);
     }
+
+
     // sleep(Duration::from_secs(1));
     // }
     // });

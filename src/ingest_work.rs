@@ -135,13 +135,9 @@ pub struct Ingest {
 
 impl Drop for Ingest {
     fn drop(&mut self) {
-        while self.active_count.load(Ordering::SeqCst) > 0 {
-            println!("Waiting for {} ingest tasks to finish", self.active_count.load(Ordering::SeqCst));
+        println!("Waiting for {} ingest tasks to finish", self.active_count.load(Ordering::SeqCst));
 
-            // Here you can do other work while waiting for threads to finish,
-            // or just sleep for a while if there's nothing else to do.
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
+        self.wait_for_completion();
     }
 }
 
@@ -166,6 +162,25 @@ impl Ingest {
             tx,
             active_count,
         }
+    }
+
+    pub fn wait_for_completion(&self) {
+
+        let mut current_active_count = self.active_count.load(Ordering::SeqCst);
+
+        while self.active_count.load(Ordering::SeqCst) > 0 {
+
+            if (current_active_count != self.active_count.load(Ordering::SeqCst)) {
+                println!("Waiting for {} ingest tasks to finish", self.active_count.load(Ordering::SeqCst));
+                current_active_count = self.active_count.load(Ordering::SeqCst);
+            }
+
+            // Here you can do other work while waiting for threads to finish,
+            // or just sleep for a while if there's nothing else to do.
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        println!("All ingest tasks finished");
     }
 
     pub fn flush_buffers(force: bool, output_files: &mut RwLockWriteGuard<LruCache<String, OutputFile>>) {
@@ -518,17 +533,17 @@ impl Ingest {
         counter_lock.bytes_current += bytes;
         counter_lock.bytes_total += bytes;
 
-        println!("Batch Msg Ingested: {}", j);
-        println!("Batch Msg Fixed: {}", x);
-        println!("Batch Deadletters: {}", d);
-        // Summarize the bytes, rounding to the nearest MB/GB/TB as appropriate.
-        let rounded_bytes = match bytes {
-            0..=999_999 => format!("{}B", bytes),
-            1_000_000..=999_999_999 => format!("{:.1}MB", bytes as f64 / 1_000_000.0),
-            1_000_000_000..=999_999_999_999 => format!("{:.1}GB", bytes as f64 / 1_000_000_000.0),
-            _ => format!("{:.1}TB", bytes as f64 / 1_000_000_000_000.0),
-        };
-        println!("Batch Bytes: {}", rounded_bytes);
+        // println!("Batch Msg Ingested: {}", j);
+        // println!("Batch Msg Fixed: {}", x);
+        // println!("Batch Deadletters: {}", d);
+        // // Summarize the bytes, rounding to the nearest MB/GB/TB as appropriate.
+        // let rounded_bytes = match bytes {
+        //     0..=999_999 => format!("{}B", bytes),
+        //     1_000_000..=999_999_999 => format!("{:.1}MB", bytes as f64 / 1_000_000.0),
+        //     1_000_000_000..=999_999_999_999 => format!("{:.1}GB", bytes as f64 / 1_000_000_000.0),
+        //     _ => format!("{:.1}TB", bytes as f64 / 1_000_000_000_000.0),
+        // };
+        // println!("Batch Bytes: {}", rounded_bytes);
 
         if *updated_schema_clone.lock().unwrap() == "yes".to_string() {
             *updated_schema_clone.lock().unwrap() = "no".to_string();

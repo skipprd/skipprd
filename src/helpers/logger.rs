@@ -8,7 +8,7 @@ use crate::helpers::license::TENANT_ID;
 use serde_derive::Serialize;
 use std::fmt;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{RwLock};
 
 #[derive(Debug, Clone, Serialize, Hash, PartialEq, Eq)]
 pub enum LogLevel {
@@ -36,8 +36,8 @@ pub struct Logger {
 }
 
 impl Logger {
-    pub fn new(buffer_limit: usize) -> Arc<Mutex<Self>> {
-        Arc::new(Mutex::new(Self {
+    pub fn new(buffer_limit: usize) -> Arc<RwLock<Self>> {
+        Arc::new(RwLock::new(Self {
             logs: HashMap::new(),
             buffer_limit,
         }))
