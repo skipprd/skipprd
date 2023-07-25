@@ -102,7 +102,7 @@ impl LicenseChecker {
             }
             _false => {
                 // Free local developer version, visit https://skippr.io to get a license
-                println!("Free local developer version. Visit https://skippr.io/upgrade to upgrade pluigns and metadata api at anytime");
+                println!("Free local developer version. Visit https://skippr.io/upgrade for additional plugins, schema evolution and metadata api.");
                 Ok(())
             }
         }

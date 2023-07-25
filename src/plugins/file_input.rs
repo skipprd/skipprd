@@ -3,6 +3,7 @@ use std::fs::File;
 use std::io::prelude::*;
 
 use std::{fs};
+use std::path::Path;
 
 use std::sync::{Arc};
 
@@ -34,7 +35,7 @@ impl DataSourceLocalFilePlugin {
     pub async fn new() -> DataSourceLocalFilePlugin {
         let data_dir = Config::get_data_dir();
         let temp_dir = &format!("{}/source_buffer", data_dir);
-        let source_directory = Config::getenv("DATA_SOURCE_DIR", "");
+        let source_directory = Config::getenv("DATA_SOURCE_FILE_DIR", "");
 
         match fs::create_dir(temp_dir) {
             Ok(_g) => {}
@@ -90,8 +91,11 @@ impl DataSourceLocalFilePlugin {
 
         // let mut datas: Vec<IngestBatch> = Vec::new();
 
-        let file_path_pattern = format!("{}/**/*", &source_dir);
-
+        let file_path_pattern = if Path::new(&source_dir).is_file() {
+            source_dir.to_string()
+        } else {
+            format!("{}/**/*", &source_dir)
+        };
 
         let (tx, rx) = futures::channel::mpsc::unbounded();
 

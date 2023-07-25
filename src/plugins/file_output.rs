@@ -51,7 +51,7 @@ impl DataOutputFilePlugin {
 
             match fs::copy(format!("./{}", &filename), &output_file) {
                 Ok(_) => {
-                    println!("Data copied to: {}", output_file.display());
+                    println!("Created output file: {}", output_file.display());
                     match fs::remove_file(&filename) {
                         Ok(_) => {}
                         Err(_) => {

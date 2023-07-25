@@ -236,11 +236,11 @@ impl Ingest {
                         );
                         let old_path = format!("{}", path.display().to_string());
 
-                        println!(
-                            "Flushing orphaned ingest buffer: {} to output: {}",
-                            path.display().to_string(),
-                            new_filename
-                        );
+                        // println!(
+                        //     "Flushing orphaned ingest buffer: {} to output: {}",
+                        //     path.display().to_string(),
+                        //     new_filename
+                        // );
 
                         match fs::rename(&old_path, &new_filename) {
                             Ok(_) => {}
