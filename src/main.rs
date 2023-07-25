@@ -364,6 +364,8 @@ async fn sync() {
                 // Ingest::flush_buffers(true, &mut output_files);
                 // sleep(Duration::from_secs(30)); // wait for threads to flush
 
+                RUNNING.write().unwrap().store(false, Ordering::SeqCst);
+
                 while !INPUT_GRACEFUL_SHUTDOWN_COMPLETE
                     .read()
                     .unwrap()
