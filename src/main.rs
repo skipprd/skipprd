@@ -594,7 +594,7 @@ async fn sync() {
 
     sync_input_plugin(offsets_clone).await;
 
-    RUNNING.write().unwrap().store(false, Ordering::SeqCst);
+    // RUNNING.write().unwrap().store(false, Ordering::SeqCst); // the prevents metrics from printing while shutting down, BUT also prevents
 
     let mut output_files = OUTPUT_FILES_STATIC.write().unwrap();
     Ingest::flush_buffers(true, &mut output_files);
