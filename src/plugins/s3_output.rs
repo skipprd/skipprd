@@ -4,7 +4,7 @@ use crate::discover::Metadata;
 use crate::helpers::configuration::Config;
 use crate::helpers::logger::LogLevel;
 use crate::helpers::Helpers;
-use crate::{discover, flatten_metadata, LOGGER, METADATA};
+use crate::{discover, flatten_metadata, METADATA};
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::{Client as S3Client, Error};
 use chrono::prelude::*;
@@ -150,19 +150,19 @@ impl DataOutputS3Plugin {
                     Err(err) => {
                         println!("Failed to upload file: {}, will retry later.", filename);
 
-                        LOGGER
-                            .write()
-                            .await
-                            .log(
-                                LogLevel::Error,
-                                format!(
-                                "Athena Plugin failed to upload file: {}, key: {} with error: {:?}",
-                                filename,
-                                key,
-                                err.into_service_error()
-                            ),
-                            )
-                            .await;
+                        // LOGGER
+                        //     .write()
+                        //     .await
+                        //     .log(
+                        //         LogLevel::Error,
+                        //         format!(
+                        //         "Athena Plugin failed to upload file: {}, key: {} with error: {:?}",
+                        //         filename,
+                        //         key,
+                        //         err.into_service_error()
+                        //     ),
+                        //     )
+                        //     .await;
                     }
                 }
 

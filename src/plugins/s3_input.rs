@@ -20,6 +20,8 @@ use std::sync::atomic::Ordering;
 
 use std::time::Duration;
 use std::{fs, thread};
+use aws_sdk_s3::operation::list_objects_v2::{ListObjectsV2Error, ListObjectsV2Output};
+use aws_smithy_http::result::SdkError;
 
 
 use futures::future::join_all;
@@ -123,9 +125,11 @@ impl DataSourceS3Plugin {
             .prefix(inventory_prefix.clone())
             .max_keys(10000);
 
+
         loop {
             match list_obj_req.clone().send().await {
-                Err(err) => println!("S3 Error {}", err.into_service_error()),
+
+                Err(err) => println!("S3 Error: {}", err),
                 Ok(output) => {
                     let objects = match output.contents() {
                         Some(objects) => objects,
@@ -223,6 +227,7 @@ impl DataSourceS3Plugin {
         }
     }
 
+
     async fn download_s3_object_with_backoff(
         s3_client: &Client,
         bucket: &String,
@@ -246,21 +251,25 @@ impl DataSourceS3Plugin {
                     return Ok(result);
                 }
                 Err(err) => {
-                    retries += 1;
 
-                    // let wait_time = backoff_duration.as_secs_f64() * 2.0_f64.powi(retries);
-                    thread::sleep(Duration::from_secs_f64(backoff_duration.as_secs_f64()));
+                    retries += 1;
 
                     backoff_duration *= 2;
 
                     println!(
-                        "Failed to get object {}, retry back in {} seconds: {}",
+                        "Failed to get object {}, retry {} of {} in {} seconds: {}",
                         key,
+                        retries,
+                        max_retries,
                         backoff_duration.as_secs(),
                         err.to_string()
                     );
 
+                    // let wait_time = backoff_duration.as_secs_f64() * 2.0_f64.powi(retries);
+                    thread::sleep(Duration::from_secs_f64(backoff_duration.as_secs_f64()));
+
                     if retries >= max_retries {
+                        println!("Max retries reached for object {}", key);
                         return Err(err.into_service_error());
                     }
                 }

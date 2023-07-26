@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use crate::buffer::BufferChunker;
 use crate::helpers::configuration::Config;
 use crate::helpers::logger::LogLevel;
-use crate::LOGGER;
+// use crate::LOGGER;
 
 use parquet::basic::{Compression, Encoding};
 use std::sync::Arc;
@@ -332,11 +332,11 @@ impl SerdeParquet {
 
                             println!("Error reading batch: {} while serialising to parquet", _error.to_string());
 
-                            LOGGER
-                                .write()
-                                .await
-                                .log(LogLevel::Error, _error.to_string())
-                                .await;
+                            // LOGGER
+                            //     .write()
+                            //     .await
+                            //     .log(LogLevel::Error, _error.to_string())
+                            //     .await;
                         });
                 }
             }

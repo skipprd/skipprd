@@ -103,7 +103,7 @@ pub static OUTPUT_RUNNING: Lazy<RwLock<AtomicBool>> =
 pub static OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE: Lazy<RwLock<AtomicBool>> =
     Lazy::new(|| RwLock::new(AtomicBool::new(false)));
 
-pub static LOGGER: Lazy<Arc<tokio::sync::RwLock<Logger>>> = Lazy::new(|| Logger::new(100));
+// pub static LOGGER: Lazy<Arc<tokio::sync::RwLock<Logger>>> = Lazy::new(|| Logger::new(100));
 pub static METRICS: Lazy<Arc<RwLock<Metrics>>> = Lazy::new(|| Arc::new(RwLock::new(Metrics::new())));
 pub static METADATA: Lazy<Arc<RwLock<HashMap<String, Metadata>>>> = Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
 
@@ -250,12 +250,12 @@ async fn discover() {
 }
 
 async fn sync() {
-    {
-        LOGGER.write()
-            .await
-            .log(LogLevel::Error, "Init Error Log.".to_string())
-            .await;
-    }
+    // {
+    //     LOGGER.write()
+    //         .await
+    //         .log(LogLevel::Error, "Init Error Log.".to_string())
+    //         .await;
+    // }
 
     let _data_dir = Config::get_data_dir();
 
@@ -281,10 +281,6 @@ async fn sync() {
 
     let now = Arc::new(Mutex::new(Instant::now()));
 
-    // let metrics: Arc<Mutex<Metrics>> = Arc::new(Mutex::new(Metrics::new()));
-
-    // let metrics_clone = metrics.clone();
-
     let offsets = Arc::new(Offsets::init().unwrap());
     let offsets_clone = offsets.clone();
     // let logger_clone = Arc::clone(&logger);
@@ -306,18 +302,18 @@ async fn sync() {
 
         let panic_info_clone = panic_str.clone();
 
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
-                LOGGER
-                    .write()
-                    .await
-                    .log(LogLevel::Error, panic_info_clone)
-                    .await;
-                // logger_clone.lock().await.flush().await.unwrap();
-            });
+        // tokio::runtime::Builder::new_multi_thread()
+        //     .enable_all()
+        //     .build()
+        //     .unwrap()
+        //     .block_on(async {
+        //         LOGGER
+        //             .write()
+        //             .await
+        //             .log(LogLevel::Error, panic_info_clone)
+        //             .await;
+        //         // logger_clone.lock().await.flush().await.unwrap();
+        //     });
 
         let pid = process::id() as i32; // or replace with the PID of the target process
 
@@ -353,7 +349,6 @@ async fn sync() {
                 RUNNING.write().unwrap().store(false, Ordering::SeqCst);
             }
 
-            // let metrics_clone = METRICS.clone();
             let offsets_clone = offsets_clone.clone();
             // let logger_clone = Arc::clone(&logger_clone);
 
@@ -366,8 +361,7 @@ async fn sync() {
 
                 RUNNING.write().unwrap().store(false, Ordering::SeqCst);
 
-                while
-                !INPUT_GRACEFUL_SHUTDOWN_COMPLETE
+                while !INPUT_GRACEFUL_SHUTDOWN_COMPLETE
                     .read()
                     .unwrap()
                     .load(Ordering::SeqCst) &&
@@ -384,7 +378,6 @@ async fn sync() {
 
                 offsets_clone.flush();
 
-                // let mut metrics: Metrics = Metrics::new();
                 let _metrics_lock = match METRICS.read() {
                     Ok(m) => {
                         // println!("Messages per Min: {}", m.ingeted_current);
@@ -426,18 +419,18 @@ async fn sync() {
                 }
                 ////////////// Cleanup part written parquet files END ////////
 
-                tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap()
-                    .block_on(async {
-                        match LOGGER.write().await.flush().await {
-                            Ok(_t) => {}
-                            Err(_err) => {
-                                // println!("Graceful shutdown complete... bye");
-                            }
-                        }
-                    });
+                // tokio::runtime::Builder::new_multi_thread()
+                //     .enable_all()
+                //     .build()
+                //     .unwrap()
+                //     .block_on(async {
+                //         match LOGGER.write().await.flush().await {
+                //             Ok(_t) => {}
+                //             Err(_err) => {
+                //                 // println!("Graceful shutdown complete... bye");
+                //             }
+                //         }
+                //     });
 
 
                 // sleep(Duration::from_secs(15)); // wait for threads to flush
@@ -614,13 +607,13 @@ async fn sync() {
         sync_output_plugin(&Config::getenv("DATA_DEADLETTER_PLUGIN_NAME", ""), "deadletter".to_string()).await;
     }
 
-    let mut metrics_lock = METRICS.write().unwrap();
+    let mut metrics_lock = METRICS.read().unwrap();
 
     let now_lock = now.lock().unwrap();
 
     // metrics_lock.bytes_total += metrics_lock.bytes_current;
 
-    metrics_lock.run_time_seconds = now_lock.elapsed().as_secs();
+    // metrics_lock.run_time_seconds = now_lock.elapsed().as_secs();
 
     println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
     println!("Messages per Min: {}", metrics_lock.ingeted_current);
