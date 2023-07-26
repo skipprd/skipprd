@@ -5,7 +5,7 @@ use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::helpers::Helpers;
 use crate::ingest::ingest::ingest;
 use crate::serdes::json::SerdeJson;
-use crate::{INPUT_GRACEFUL_SHUTDOWN_COMPLETE, METADATA, METRICS, RUNNING};
+use crate::{METADATA, METRICS, RUNNING};
 use glob::{glob_with, MatchOptions};
 use lru::LruCache;
 use once_cell::sync::Lazy;
@@ -16,9 +16,10 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::num::NonZeroUsize;
 use std::ops::Deref;
+use std::process::exit;
 use std::string::ToString;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockWriteGuard};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use threadpool::ThreadPool;
 use std::sync::mpsc::channel;
 extern crate num_cpus;
@@ -30,7 +31,6 @@ use parquet::data_type::AsBytes;
 use crate::ingest::fast_ingest::fast_path_ingest;
 
 use avro_rs::{Writer, Schema};
-use nix::libc::exit;
 // use crate::converters::skippr_avro::convert_skippr_to_avro_field_types;
 
 pub struct Buffer {
@@ -102,8 +102,9 @@ pub const WRITE_BUF_SIZE: usize = if cfg!(target_os = "espidf") {
     512 * 1024
 };
 
-pub static PARSE_NAMESPACE_CACHE: Lazy<RwLock<HashMap<String, String>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
+thread_local! {
+    pub static PARSE_NAMESPACE_CACHE: Lazy<RwLock<HashMap<String, String>>> = Lazy::new(|| RwLock::new(HashMap::new()));
+}
 
 pub static OUTPUT_FILES_STATIC: Lazy<RwLock<LruCache<String, OutputFile>>> =
     Lazy::new(|| RwLock::new(LruCache::new(NonZeroUsize::new(100).expect(""))));
@@ -131,6 +132,7 @@ pub struct Ingest {
     num_cpus: usize,
     tx: Sender<()>,
     active_count: Arc<AtomicUsize>,
+
 }
 
 impl Drop for Ingest {
@@ -279,9 +281,10 @@ impl Ingest {
 
         if !RUNNING.read().unwrap().load(Ordering::SeqCst) {
             self.wait_for_completion();
-            INPUT_GRACEFUL_SHUTDOWN_COMPLETE.write()
-                    .unwrap()
-                    .store(true, Ordering::SeqCst);
+            // INPUT_GRACEFUL_SHUTDOWN_COMPLETE.write()
+            //         .unwrap()
+            //         .store(true, Ordering::SeqCst);
+            exit(0);
         } else {
 
         // Wait for an available thread if there's no capacity
@@ -373,16 +376,16 @@ impl Ingest {
                         != offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Line, i)
                 {
 
-                    let mut namesapce_cache =  PARSE_NAMESPACE_CACHE.read().unwrap().clone();
+                    let mut namesapce_cache =  PARSE_NAMESPACE_CACHE.with(|cache| cache.read().unwrap().clone());
                     let skpr_namespace = Helpers::parse_namespace_field(
                         &record,
                         Config::get_pipeline_name(),
                         &mut namesapce_cache,
                     );
 
-                    if namesapce_cache != PARSE_NAMESPACE_CACHE.read().unwrap().clone() {
-                        PARSE_NAMESPACE_CACHE.write().unwrap().clear();
-                        PARSE_NAMESPACE_CACHE.write().unwrap().extend(namesapce_cache);
+                    if namesapce_cache != PARSE_NAMESPACE_CACHE.with(|cache| cache.read().unwrap().clone()) {
+                        PARSE_NAMESPACE_CACHE.with(|cache| cache.write().unwrap().clear());
+                        PARSE_NAMESPACE_CACHE.with(|cache| cache.write().unwrap().extend(namesapce_cache));
                     }
 
                     let skpr_partition = Helpers::parse_partition_field(&record);
@@ -534,7 +537,6 @@ impl Ingest {
 
         let mut counter_lock = METRICS.write().unwrap();
         counter_lock.deadletters_total += d;
-        counter_lock.ingeted_current += j;
         counter_lock.ingeted_slow_current += x;
         counter_lock.messages_total += i;
         counter_lock.bytes_current += bytes;

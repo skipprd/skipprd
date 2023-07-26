@@ -32,7 +32,7 @@ use futures::StreamExt;
 
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::ingest_work::{Ingest, IngestBatch};
-use crate::{INPUT_GRACEFUL_SHUTDOWN_COMPLETE, RUNNING};
+use crate::{RUNNING};
 use std::sync::RwLock;
 use tokio::sync::Semaphore;
 

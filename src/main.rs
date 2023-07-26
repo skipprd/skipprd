@@ -96,8 +96,6 @@ use crate::plugins::stdout_output::DataOutputStdoutPlugin;
 
 
 pub static RUNNING: Lazy<RwLock<AtomicBool>> = Lazy::new(|| RwLock::new(AtomicBool::new(true)));
-pub static INPUT_GRACEFUL_SHUTDOWN_COMPLETE: Lazy<RwLock<AtomicBool>> =
-    Lazy::new(|| RwLock::new(AtomicBool::new(false)));
 pub static OUTPUT_RUNNING: Lazy<RwLock<AtomicBool>> =
     Lazy::new(|| RwLock::new(AtomicBool::new(false)));
 pub static OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE: Lazy<RwLock<AtomicBool>> =
@@ -359,12 +357,13 @@ async fn sync() {
                 // Ingest::flush_buffers(true, &mut output_files);
                 // sleep(Duration::from_secs(30)); // wait for threads to flush
 
-                RUNNING.write().unwrap().store(false, Ordering::SeqCst);
+                // RUNNING.write().unwrap().store(false, Ordering::SeqCst);
 
-                while !INPUT_GRACEFUL_SHUTDOWN_COMPLETE
-                    .read()
-                    .unwrap()
-                    .load(Ordering::SeqCst) &&
+                while
+                // !INPUT_GRACEFUL_SHUTDOWN_COMPLETE
+                //     .read()
+                //     .unwrap()
+                //     .load(Ordering::SeqCst) &&
                     !OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE
                         .read()
                         .unwrap()
@@ -380,7 +379,6 @@ async fn sync() {
 
                 let _metrics_lock = match METRICS.read() {
                     Ok(m) => {
-                        // println!("Messages per Min: {}", m.ingeted_current);
                         println!("Messages Total: {}", m.messages_total);
                     },
                     Err(_e) => {
@@ -447,11 +445,13 @@ async fn sync() {
 
     let now_clone = now.clone();
 
+    let last_messages_total = Arc::new(Mutex::new(0));
+
     planner.add(
         move || {
             if RUNNING.read().unwrap().load(Ordering::SeqCst) {
 
-                let mut metrics_lock = match METRICS.write() {
+                let mut metrics_lock = match METRICS.read() {
                     Ok(lock) => lock,
                     Err(poisoned) => poisoned.into_inner(),
                 };
@@ -460,18 +460,23 @@ async fn sync() {
 
                 // metrics_lock.bytes_total += metrics_lock.bytes_current;
 
-                metrics_lock.run_time_seconds = now_lock.elapsed().as_secs();
+                // metrics_lock.run_time_seconds = now_lock.elapsed().as_secs();
 
                 println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
-                println!("Messages per Min: {}", metrics_lock.ingeted_current);
+
+                let last_messages_total_val = *last_messages_total.lock().unwrap();
+                let ingested_current = metrics_lock.messages_total - last_messages_total_val;
+                *last_messages_total.lock().unwrap() = metrics_lock.messages_total;
+
+
+                println!("Messages per Min: {}", ingested_current);
                 println!("Messages fixed per Min: {}", metrics_lock.ingeted_slow_current);
                 println!("Messages Total: {}", metrics_lock.messages_total);
                 println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
                 // println!("Bytes per Min: {}", metrics_lock.bytes_current);
                 println!("Bytes: {}", metrics_lock.bytes_total);
 
-                metrics_lock.bytes_current = 0;
-                metrics_lock.ingeted_current = 0;
+                // metrics_lock.bytes_current = 0;
 
                 drop(metrics_lock);
 
@@ -616,7 +621,6 @@ async fn sync() {
     // metrics_lock.run_time_seconds = now_lock.elapsed().as_secs();
 
     println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
-    println!("Messages per Min: {}", metrics_lock.ingeted_current);
     println!("Messages Total: {}", metrics_lock.messages_total);
     println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
     println!("Bytes per Min: {}", metrics_lock.bytes_current);

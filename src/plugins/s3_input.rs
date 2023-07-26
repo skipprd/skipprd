@@ -35,7 +35,7 @@ use crate::ingest_work::{Ingest, IngestBatch};
 use tokio::sync::Semaphore;
 // use rusoto_s3::{GetObjectOutput, GetObjectRequest, ListObjectsV2Request, S3Client, S3};
 
-use crate::{INPUT_GRACEFUL_SHUTDOWN_COMPLETE, RUNNING};
+use crate::{RUNNING};
 
 
 pub struct DataSourceS3Plugin {

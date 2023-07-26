@@ -9,7 +9,7 @@ use yaml_rust::YamlLoader;
 
 use nix::libc::exit;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 // use aws_config::profile::profile_file::ProfileFileKind::Config;
 use serde_derive::{Deserialize, Serialize};
@@ -381,7 +381,7 @@ impl Config {
                         err,
                         resp.error_for_status()
                     );
-                    RUNNING.write().unwrap().store(false, Ordering::SeqCst);
+                    // RUNNING.write().unwrap().store(false, Ordering::SeqCst);
                     // Err(false)
                     exit(1);
                 },
@@ -556,7 +556,6 @@ impl Config {
             "metrics": {
                 "ingeted_total": metrics.messages_total,
                 "deadletters_total": metrics.deadletters_total,
-                "ingeted_current": metrics.ingeted_current,
                 "run_time_seconds": metrics.run_time_seconds,
                 "bytes_current": metrics.bytes_current,
                 "bytes_total": metrics.bytes_total,
@@ -605,11 +604,11 @@ pub struct Metrics {
     // pub msgs_total: u64,
     pub messages_total: u64,
     pub deadletters_total: u64,
-    pub ingeted_current: u64,
     pub ingeted_slow_current: u64,
     pub run_time_seconds: u64,
     pub bytes_current: u64,
     pub bytes_total: u64,
+    pub last_update: u64
 }
 impl Metrics {
     #[inline]
@@ -619,11 +618,11 @@ impl Metrics {
             // msgs_total: 0,
             messages_total: 0,
             deadletters_total: 0,
-            ingeted_current: 0,
             ingeted_slow_current: 0,
             run_time_seconds: 0,
             bytes_current: 0,
             bytes_total: 0,
+            last_update: 0
         }
     }
 }
