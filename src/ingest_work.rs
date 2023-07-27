@@ -191,21 +191,24 @@ impl Ingest {
 
         let mut rotated_files: Vec<String> = Vec::new();
 
-        for (filename, output_file) in output_files.iter_mut() {
+        for (filepath, output_file) in output_files.iter_mut() {
             output_file
                 .file
                 .flush()
-                .expect(&format!("Could not flush file {}", filename));
+                .expect(&format!("Could not flush file {}", filepath));
 
             if force
                 || Ingest::is_file_size_exceeded(&output_file)
                 || Ingest::is_file_time_exceeded(&output_file)
             {
                 if output_file.bytes > 0 {
+
                     // don't flush empty files when forced
                     // output_file.bytes = 0;
                     // output_file.upated_at = UNIX_EPOCH;
                     // output_file.rotated = Some(true);
+
+                    let filename = filepath.split("/").last().unwrap();
 
                     let new_filename = format!(
                         "{}/done/{}-{}",
@@ -213,14 +216,17 @@ impl Ingest {
                         Helpers::random_str(12),
                         &filename
                     );
-                    let old_path = format!("{}/{}", output_dir, &filename);
 
-                    match fs::rename(&old_path, &new_filename) {
-                        Ok(_) => {}
-                        Err(_) => {}
+                    match fs::rename(&filepath, &new_filename) {
+                        Ok(_) => {
+                            // println!("Rotated file {}", filepath);
+                        }
+                        Err(err) => {
+                            println!("Failed to rotate buffer file {} to {}, Error {:?}", filepath, new_filename, err);
+                        }
                     };
 
-                    rotated_files.push(filename.to_string());
+                    rotated_files.push(filepath.to_string());
                 }
             }
         }
@@ -406,9 +412,7 @@ impl Ingest {
                     );
 
                     if METADATA.read().unwrap().get(&skpr_namespace).is_none() {
-                        {
-                            METADATA.write().unwrap().insert(skpr_namespace.clone(), Metadata::new().unwrap());
-                        }
+                        METADATA.write().unwrap().insert(skpr_namespace.clone(), Metadata::new().unwrap());
                     }
 
                     let msg = fast_path_ingest(
@@ -460,6 +464,10 @@ impl Ingest {
         }
 
 
+        // @todo - I'd rather not lock the whole hashmap here, instead we should lock the individual files.
+        // @todo - We should also be able to flush the buffers to disk in parallel.
+        // @todo - Ideally this would not be a blocking operation.
+        // @todo - We probably want to track file metadata in a persistent store, so we can recover from crashes. FS metadata is not reliably available.
         let mut output_files = match OUTPUT_FILES_STATIC.write() {
             Ok(output_files) => output_files,
             Err(err) => {
@@ -484,6 +492,7 @@ impl Ingest {
 
                 let writer = BufWriter::with_capacity(WRITE_BUF_SIZE, f);
 
+                // Be aware metadata will often not return a filesize on various filesystems. So we'll end up with larger buffer files than intended.
                 let new_file = match std::fs::metadata(&filename) {
                     Ok(metadata) => {
                         let secs_since_epoch = metadata
@@ -493,6 +502,8 @@ impl Ingest {
                             .unwrap()
                             .as_secs();
                         let time = UNIX_EPOCH + Duration::from_secs(secs_since_epoch);
+
+                        // println!("File: {} already exists, size: {}, updated_at: {}", filename, metadata.len(), time.duration_since(UNIX_EPOCH).unwrap().as_secs());
 
                         OutputFile {
                             bytes: metadata.len(),
@@ -537,7 +548,7 @@ impl Ingest {
 
         let mut counter_lock = METRICS.write().unwrap();
         counter_lock.deadletters_total += d;
-        counter_lock.ingeted_slow_current += x;
+        counter_lock.ingeted_slow_total += x;
         counter_lock.messages_total += i;
         counter_lock.bytes_current += bytes;
         counter_lock.bytes_total += bytes;

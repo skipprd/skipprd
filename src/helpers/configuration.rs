@@ -1,15 +1,19 @@
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read};
+use std::ops::Deref;
 use std::path::Path;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::RwLock;
 use yaml_rust::YamlLoader;
 
 use nix::libc::exit;
 
 use std::time::{Duration, Instant};
+use once_cell::sync::Lazy;
 
 // use aws_config::profile::profile_file::ProfileFileKind::Config;
 use serde_derive::{Deserialize, Serialize};
@@ -32,6 +36,9 @@ use crate::plugins::athena::AwsAthena;
 
 #[non_exhaustive]
 struct RunModes;
+
+pub static LAST_MESSAGES_TOTAL: AtomicU64 = AtomicU64::new(0);
+
 
 impl RunModes {
     pub const RUN_MODE_SYNC: &'static str = "sync";
@@ -552,10 +559,16 @@ impl Config {
 
         let tenant_id = TENANT_ID.read().unwrap().clone();
 
+        let last_messages_total = LAST_MESSAGES_TOTAL.load(Ordering::Relaxed);
+        let ingested_current = metrics.messages_total - last_messages_total;
+        LAST_MESSAGES_TOTAL.store(metrics.messages_total, Ordering::Relaxed);
+
         let data = json!({
             "metrics": {
                 "ingeted_total": metrics.messages_total,
+                "ingeted_fixed": metrics.ingeted_slow_total,
                 "deadletters_total": metrics.deadletters_total,
+                "ingeted_current": ingested_current,
                 "run_time_seconds": metrics.run_time_seconds,
                 "bytes_current": metrics.bytes_current,
                 "bytes_total": metrics.bytes_total,
@@ -604,7 +617,7 @@ pub struct Metrics {
     // pub msgs_total: u64,
     pub messages_total: u64,
     pub deadletters_total: u64,
-    pub ingeted_slow_current: u64,
+    pub ingeted_slow_total: u64,
     pub run_time_seconds: u64,
     pub bytes_current: u64,
     pub bytes_total: u64,
@@ -618,7 +631,7 @@ impl Metrics {
             // msgs_total: 0,
             messages_total: 0,
             deadletters_total: 0,
-            ingeted_slow_current: 0,
+            ingeted_slow_total: 0,
             run_time_seconds: 0,
             bytes_current: 0,
             bytes_total: 0,

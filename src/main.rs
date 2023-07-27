@@ -470,7 +470,7 @@ async fn sync() {
 
 
                 println!("Messages per Min: {}", ingested_current);
-                println!("Messages fixed per Min: {}", metrics_lock.ingeted_slow_current);
+                println!("Messages Fixed: {}", metrics_lock.ingeted_slow_total);
                 println!("Messages Total: {}", metrics_lock.messages_total);
                 println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
                 // println!("Bytes per Min: {}", metrics_lock.bytes_current);

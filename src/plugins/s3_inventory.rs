@@ -89,7 +89,7 @@ impl DataSourceS3InventoryPlugin {
         let mut outputs: Vec<String> = Vec::new();
 
         let inventory_bucket = Config::getenv("DATA_SOURCE_S3_INVENTORY_BUCKET", "");
-        let inventory_prefix = Config::getenv("DATA_SOURCE_S3_INVENTORY_S3_PREFIX", "");
+        let inventory_prefix = Config::getenv("DATA_SOURCE_S3_INVENTORY_PREFIX", "");
 
         println!(
             "Syncing inventory from bucket: {} and prefix {}",
