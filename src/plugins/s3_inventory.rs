@@ -104,6 +104,12 @@ impl DataSourceS3InventoryPlugin {
         //     params.push(("Prefix".to_string(), s3_inventory_prefix.to_string()));
         // }
 
+        let mut inventory_prefix = inventory_prefix.trim_matches('/').to_string();
+
+        if inventory_prefix == "/".to_string() || inventory_prefix == "./".to_string() {
+            inventory_prefix = "".to_string();
+        }
+
         let results = self
             .s3_client
             .list_objects()
@@ -113,7 +119,7 @@ impl DataSourceS3InventoryPlugin {
             .await;
 
         match results {
-            Err(err) => println!("S3 Error {}", err.to_string()),
+            Err(err) => println!("S3 Error: {}", err.to_string()),
             Ok(..) => {
                 for result in results {
                     let objects = match result.contents() {

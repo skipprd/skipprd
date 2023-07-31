@@ -593,7 +593,7 @@ async fn sync() {
 
     sync_input_plugin(offsets_clone).await;
 
-    // RUNNING.write().unwrap().store(false, Ordering::SeqCst); // the prevents metrics from printing while shutting down, BUT also prevents
+    // RUNNING.write().unwrap().store(false, Ordering::SeqCst); // the prevents metrics from printing while shutting down, BUT also prevents output serialisatin
 
     let mut output_files = OUTPUT_FILES_STATIC.write().unwrap();
     Ingest::flush_buffers(true, &mut output_files);
@@ -623,7 +623,6 @@ async fn sync() {
     println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
     println!("Messages Total: {}", metrics_lock.messages_total);
     println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
-    println!("Bytes per Min: {}", metrics_lock.bytes_current);
     println!("Bytes: {}", metrics_lock.bytes_total);
 
     drop(metrics_lock);

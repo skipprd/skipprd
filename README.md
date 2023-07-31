@@ -4,13 +4,15 @@
 ```bash
 AWS_PROFILE=skippr-test \
 DATA_SOURCE_PLUGIN_NAME=s3_inventory \
-S3_BUCKET=skippr-e2e-sample-data \
-S3_PREFIX=skippr-e2e-sample-data/inventory-bike-hire \
+DATA_SOURCE_S3_INVENTORY_BUCKET=skippr-e2e-sample-data \
+DATA_SOURCE_S3_INVENTORY_PREFIX=skippr-e2e-sample-data/inventory-bike-hire \
 DATA_SOURCE_BATCH_SIZE_BYTES=2048000 \
+DATA_OUTPUT_PLUGIN_NAME=athena \
 DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output \
 DATA_OUTPUT_S3_PREFIX=bikehire \
-GLUE_DATABASE_NAME=test123_db \
-ATHENA_WORKGROUP_NAME=test123 \
+SCHEMA_OUTPUT_PLUGIN_NAME=glue \
+SCHEMA_OUTPUT_GLUE_DATABASE_NAME=test123_db \
+DATA_OUTPUT_ATHENA_WORKGROUP_NAME=test123 \
 PIPELINE_NAME=s3_inventory \
 SKIPPR_API_TOKEN=9kLhlh43vc0NbNc6QW3mZ9lF9NzuQz23 \
 APP_ENV=dev \
@@ -96,8 +98,10 @@ DATA_SOURCE_BATCH_SIZE_BYTES=10048000 \
 TRANSFORM_BATCH_PARTITION_FIELDS=event_type \
 TRANSFORM_BATCH_TIME_FIELDS=event_date \
 TRANSFORM_BATCH_TIME_UNIT=day \
+DATA_OUTPUT_PLUGIN_NAME=athena \
 DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output \
 DATA_OUTPUT_S3_PREFIX=test \
+SCHEMA_OUTPUT_PLUGIN_NAME=glue \
 SCHEMA_OUTPUT_GLUE_DATABASE_NAME=bikehire \
 DATA_OUTPUT_ATHENA_WORKGROUP_NAME=bikehire \
 PIPELINE_NAME=bikehire \
@@ -137,6 +141,8 @@ DATA_SOURCE_PLUGIN_NAME=s3 \
 DATA_SOURCE_S3_BUCKET=skpr-sample-data \
 DATA_SOURCE_S3_PREFIX=small-files \
 DATA_SOURCE_BATCH_SIZE_BYTES=2048000 \
+DATA_SOURCE_PLUGIN_NAME=s3 \
+DATA_OUTPUT_PLUGIN_NAME=athena \
 DATA_OUTPUT_S3_BUCKET=production-datalake-stac-datalakeskipprbucket4a91-db0ekzd8fkz0 \
 DATA_OUTPUT_S3_PREFIX=bikehire \
 GLUE_DATABASE_NAME=bikehire \
@@ -175,6 +181,24 @@ DATA_DIR=./data \
 cargo run sync
 ```
 
+```bash
+AWS_PROFILE=cloudcycle-dev \
+DATA_SOURCE_PLUGIN_NAME=s3 \
+DATA_SOURCE_S3_BUCKET=dev-datastorage-stack-cubeevents9ad2ae37-ufazj652azlb \
+DATA_SOURCE_S3_PREFIX=/2022/ \
+DATA_SOURCE_BATCH_SIZE_BYTES=2048000 \
+BUFFER_THRESHOLD_BYTES=2000000 \
+BUFFER_THRESHOLD_SECONDS=10 \
+TRANSFORM_NAMESPACE_FIELDS='detail-type' \
+TRANSFORM_FLATTEN_EVENTS=yes \
+WORKSPACE_NAME=sadf \
+PIPELINE_NAME=cubeevents \
+SKIPPR_API_TOKEN=9kLhlh43vc0NbNc6QW3mZ9lF9NzuQz23 \
+APP_ENV=dev \
+DATA_DIR=./data \
+cargo run sync
+```
+
 production-datastorage-stac-rawdevicejson568138dc-1djhnp70ebsko
 
 ```bash
@@ -201,6 +225,27 @@ DATA_DIR=./data \
 cargo run sync
 ```
 
+AWS_PROFILE=skippr-test \
+TRANSFORM_BATCH_TIME_UNIT=year \
+TRANSFORM_BATCH_TIME_FIELDS=event_date \
+TRANSFORM_FLATTEN_EVENTS=yes \
+AWS_DEFAULT_REGION=us-east-1 \
+AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID \
+AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
+DATA_SOURCE_PLUGIN_NAME=s3 \
+DATA_SOURCE_S3_BUCKET=skippr-e2e-sample-data \
+DATA_SOURCE_S3_PREFIX=very-small-files \
+DATA_SOURCE_BATCH_SIZE_BYTES=2048000 \
+DATA_OUTPUT_PLUGIN_NAME=athena \
+DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output \
+DATA_OUTPUT_S3_PREFIX=bikehire \
+SCHEMA_OUTPUT_GLUE_DATABASE_NAME=bikehire \
+DATA_OUTPUT_ATHENA_WORKGROUP_NAME=bikehire \
+PIPELINE_NAME=very-small_files \
+SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg \
+DATA_DIR=./data \
+APP_ENV=test \
+cargo run sync
 
 docker run --platform=linux/x86_64 \
 -e AWS_DEFAULT_REGION=eu-west-1 \
@@ -210,7 +255,7 @@ docker run --platform=linux/x86_64 \
 -e S3_BUCKET=SOUR_BUCKET_NAME \
 -e S3_PREFIX=/example/inventory-dir \
 -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 \
--e DATA_OUTPUT_S3_BUCKET=example\
+-e DATA_OUTPUT_S3_BUCKET=example \
 -e DATA_OUTPUT_S3_PREFIX=example \
 -e GLUE_DATABASE_NAME=test123 \
 -e ATHENA_WORKGROUP_NAME=test123 \

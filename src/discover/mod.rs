@@ -141,7 +141,7 @@ impl Evolution {
         let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
         let discoverd_data_type = foo.resolve_field_type(metadata.clone().borrow_mut(), &field.to_string(), value.clone().borrow_mut());
 
-        println!("Evolving new data type: '{}' for field {} with value {}", discoverd_data_type, field, value);
+        println!("Evolving new data type: '{}' for field {} with value {} with current data type of: {}", discoverd_data_type, field, value, metadata.get(field).unwrap().determined_type);
 
         if discoverd_data_type != "" {
 
