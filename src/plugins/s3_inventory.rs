@@ -351,10 +351,13 @@ impl DataSourceS3InventoryPlugin {
                             }
                         }
 
-                        println!(
-                            "Skipped {} inventory manifests... already processed",
-                            skipped_manifests
-                        );
+                        if skipped_manifests > 0 {
+                            println!(
+                                "Skipped {} inventory manifests... already processed",
+                                skipped_manifests
+                            );
+                            skipped_manifests = 0;
+                        }
 
                     } else {
                         println!("Reached end of S3 pagination");

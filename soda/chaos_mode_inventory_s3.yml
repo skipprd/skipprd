@@ -11,7 +11,7 @@ checks for chaos_mode_inventory_s3:
 
 
 #checks for cloudcycle_docket [hourly]:
-  - row_count = 1000000
+  - row_count = 5100000
 #  - :
 #      filter: from_iso8601_timestamp(detail_docket_datetime_batch_utc) between DATE_ADD('hour', -1, NOW()) AND NOW()
 

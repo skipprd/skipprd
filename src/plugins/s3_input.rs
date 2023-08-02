@@ -200,7 +200,10 @@ impl DataSourceS3Plugin {
                             }
                         }
 
-                        println!("Skipped {} objects... already processed", skipped_objects);
+                        if skipped_objects > 0 {
+                            println!("Skipped {} objects... already processed", skipped_objects);
+                            skipped_objects = 0;
+                        }
                     }
 
                     if output.clone().next_continuation_token.is_some() {

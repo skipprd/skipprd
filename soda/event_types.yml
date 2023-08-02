@@ -1,8 +1,8 @@
 checks for trip_start:
-  - row_count = 250186
+  - row_count = 1274214
 checks for trip_pause:
-  - row_count = 250090
+  - row_count = 1275590
 checks for trip_resume:
-  - row_count = 249862
+  - row_count = 1275136
 checks for trip_end:
-  - row_count = 249862
+  - row_count = 1275060
