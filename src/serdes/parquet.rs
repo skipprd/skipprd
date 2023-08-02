@@ -20,6 +20,13 @@ use crate::helpers::logger::LogLevel;
 
 use parquet::basic::{Compression, Encoding};
 use std::sync::Arc;
+use once_cell::sync::Lazy;
+
+pub static DEADLETTER_FILE_NAME: Lazy<String> = Lazy::new(|| BufferChunker::encode_chunk_name(
+    "deadletters",
+    Some(Config::get_pipeline_name().as_str()),
+    Some("parquet-error"),
+    None));
 
 // #[derive(clap::ValueEnum, Clone)]
 // #[allow(non_camel_case_types, clippy::upper_case_acronyms)]
@@ -235,7 +242,9 @@ impl SerdeParquet {
         // }
 
         let source_file = match File::open(path.clone()) {
-            Ok(file) => Some(file),
+            Ok(file) => {
+                Some(file)
+            },
             Err(err) => {
                 println!(
                     "Error opening file for serialisation, already processed? {}",
@@ -320,8 +329,37 @@ impl SerdeParquet {
         for batch in reader {
             match batch {
                 Ok(batch) => {
-                    
-                    writer.write(&batch).unwrap()
+
+                    match writer.write(&batch) {
+                        Ok(_g) => {}
+                        Err(_err) => {
+                            println!("Error writing batch: {}", _err.to_string());
+
+                            // let data_dir = Config::get_data_dir();
+                            // let deadletter_dir = format!("{}/deadletter_buffer", data_dir);
+                            // let output_file = format!("{}/{}", deadletter_dir.clone(), &DEADLETTER_FILE_NAME.as_str());
+                            //
+                            // let mut output = OpenOptions::new()
+                            //     .create(true)
+                            //     .write(true)
+                            //     .append(true)
+                            //     .open(output_file)
+                            //     .unwrap();
+                            //
+                            // match output.write_all(batch.to_string().as_bytes()) {
+                            //     Ok(_g) => {}
+                            //     Err(_err) => {
+                            //         println!("Error writing batch to deadletter: {}", _err.to_string());
+                            //     }
+                            // }
+
+                            // LOGGER
+                            //     .write()
+                            //     .await
+                            //     .log(LogLevel::Error, _err.to_string())
+                            //     .await;
+                        }
+                    }
                 }
                 Err(_error) => {
                     tokio::runtime::Builder::new_multi_thread()

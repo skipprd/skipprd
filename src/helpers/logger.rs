@@ -1,3 +1,4 @@
+use std::collections::btree_map::BTreeMap;
 use crate::helpers::configuration::Config;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::json;
@@ -26,28 +27,32 @@ impl fmt::Display for LogLevel {
 
 #[derive(Debug, Clone, Serialize, Hash, PartialEq, Eq)]
 pub struct Log {
+    time: chrono::DateTime<chrono::Utc>,
     level: LogLevel,
     message: String,
 }
 
 pub struct Logger {
-    logs: HashMap<Log, usize>,
+    logs: BTreeMap<chrono::DateTime<chrono::Utc>, Log>,
     buffer_limit: usize,
 }
 
 impl Logger {
     pub fn new(buffer_limit: usize) -> Arc<RwLock<Self>> {
         Arc::new(RwLock::new(Self {
-            logs: HashMap::new(),
+            logs: BTreeMap::new(),
             buffer_limit,
         }))
     }
 
     pub async fn log(&mut self, level: LogLevel, message: String) {
-        let log = Log { level, message };
+        let log = Log {
+            time: chrono::Utc::now(),
+            level,
+            message
+        };
 
-        let count = self.logs.entry(log).or_insert(0);
-        *count += 1;
+        self.logs.insert(log.clone().time, log.clone());
 
         if self.logs.len() >= self.buffer_limit {
             self.flush().await.unwrap();
@@ -75,7 +80,7 @@ impl Logger {
 
     pub(crate) async fn log_api<'a>(
         &mut self,
-        logs: HashMap<Log, usize>,
+        logs: BTreeMap<chrono::DateTime<chrono::Utc>, Log>,
         exit_code: Option<i8>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let workspace = Config::get_workspace_name();
@@ -103,11 +108,11 @@ impl Logger {
         let tenant_id = TENANT_ID.read().unwrap().clone();
 
         let data = json!({
-            "logs": logs.iter().map(|(log, count)| {
+            "logs": logs.iter().map(|(time, log)| {
                 json!({
                     "level": log.level.to_string(),
                     "message": log.message,
-                    "count": count
+                    "time": log.time.to_string(),
                 })
             }).collect::<Vec<_>>(),
             "type": "log",

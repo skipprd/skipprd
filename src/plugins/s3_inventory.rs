@@ -110,6 +110,8 @@ impl DataSourceS3InventoryPlugin {
             inventory_prefix = "".to_string();
         }
 
+        let mut skipped_manifests = 0;
+
         let results = self
             .s3_client
             .list_objects()
@@ -334,10 +336,8 @@ impl DataSourceS3InventoryPlugin {
                                         };
                                     }
                                 } else {
-                                    println!(
-                                        "Skipping inventory: {} already processed",
-                                        object_key
-                                    );
+                                    skipped_manifests += 1;
+
                                 }
 
                                 offsets.set(
@@ -350,6 +350,12 @@ impl DataSourceS3InventoryPlugin {
                                 );
                             }
                         }
+
+                        println!(
+                            "Skipped {} inventory manifests... already processed",
+                            skipped_manifests
+                        );
+
                     } else {
                         println!("Reached end of S3 pagination");
 

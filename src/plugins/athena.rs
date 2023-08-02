@@ -59,10 +59,30 @@ impl DataOutputAwsAthenaPlugin {
         let mut partition_cache: Vec<String> = vec![];
 
         while let Some(filename) = BufferChunker::next_file(&self.buffer_name) {
-            let mut file = BufReader::new(File::open(&filename).unwrap());
+            let mut file = BufReader::new(match File::open(&filename) {
+                Ok(file) => file,
+                Err(err) => {
+                    println!(
+                        "Failed to open file {} for reading, Error: {}",
+                        filename,
+                        err.to_string()
+                    );
+                    continue;
+                }
+            });
 
             let mut contents = Vec::new();
-            file.read_to_end(&mut contents).unwrap();
+            match file.read_to_end(&mut contents) {
+                Ok(_bytes) => {}
+                Err(err) => {
+                    println!(
+                        "Failed to read file {}, Error: {}",
+                        filename,
+                        err.to_string()
+                    );
+                    continue;
+                }
+            }
 
             let _bucket = &self.s3_bucket;
             let key = &self.s3_prefix;
@@ -92,8 +112,10 @@ impl DataOutputAwsAthenaPlugin {
                 let collection: Vec<&str> = parts.collect();
 
                 for item in &collection {
-                    // let value = item.rsplitn(1, '=').next().unwrap();
-                    let mut value = item.split("=").last().unwrap(); // '='
+                    let mut value = match item.split("=").last() {
+                        Some(value) => value,
+                        None => "",
+                    };
 
                     if value == "" {
                         value = "none";
@@ -111,7 +133,17 @@ impl DataOutputAwsAthenaPlugin {
             if !time_partition_str.is_empty() {
                 let granularity_target = &self.time_bucket;
 
-                let date = DateTime::parse_from_rfc3339(&time_partition_str).unwrap();
+                let date = match DateTime::parse_from_rfc3339(&time_partition_str) {
+                    Ok(date) => date,
+                    Err(err) => {
+                        println!(
+                            "Failed to parse time partition string {}, Error: {}",
+                            time_partition_str,
+                            err.to_string()
+                        );
+                        continue;
+                    }
+                };
 
                 for granularity in GRANULARITIES.iter() {
                     let foo: u32 = match granularity {

@@ -64,6 +64,7 @@ use futures::TryFutureExt;
 
 use once_cell::sync::Lazy;
 use signal_hook::consts::{SIGABRT, SIGINT, SIGQUIT, SIGTERM};
+use tokio::runtime;
 
 mod ingest;
 
@@ -101,7 +102,7 @@ pub static OUTPUT_RUNNING: Lazy<RwLock<AtomicBool>> =
 pub static OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE: Lazy<RwLock<AtomicBool>> =
     Lazy::new(|| RwLock::new(AtomicBool::new(false)));
 
-// pub static LOGGER: Lazy<Arc<tokio::sync::RwLock<Logger>>> = Lazy::new(|| Logger::new(100));
+pub static LOGGER: Lazy<Arc<tokio::sync::RwLock<Logger>>> = Lazy::new(|| Logger::new(100));
 pub static METRICS: Lazy<Arc<RwLock<Metrics>>> = Lazy::new(|| Arc::new(RwLock::new(Metrics::new())));
 pub static METADATA: Lazy<Arc<RwLock<HashMap<String, Metadata>>>> = Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
 
@@ -248,12 +249,12 @@ async fn discover() {
 }
 
 async fn sync() {
-    // {
-    //     LOGGER.write()
-    //         .await
-    //         .log(LogLevel::Error, "Init Error Log.".to_string())
-    //         .await;
-    // }
+    {
+        LOGGER.write()
+            .await
+            .log(LogLevel::Info, "Init Error Log.".to_string())
+            .await;
+    }
 
     let _data_dir = Config::get_data_dir();
 
@@ -300,18 +301,22 @@ async fn sync() {
 
         let panic_info_clone = panic_str.clone();
 
-        // tokio::runtime::Builder::new_multi_thread()
-        //     .enable_all()
-        //     .build()
-        //     .unwrap()
-        //     .block_on(async {
-        //         LOGGER
-        //             .write()
-        //             .await
-        //             .log(LogLevel::Error, panic_info_clone)
-        //             .await;
-        //         // logger_clone.lock().await.flush().await.unwrap();
-        //     });
+        thread::spawn(move || {
+            let rt = runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+
+            rt.block_on(async {
+                LOGGER
+                    .write()
+                    .await
+                    .log(LogLevel::Error, panic_info_clone)
+                    .await;
+                LOGGER.write().await.flush().await.unwrap();
+                // logger_clone.lock().await.flush().await.unwrap();
+            });
+        }).join().unwrap();
 
         let pid = process::id() as i32; // or replace with the PID of the target process
 
@@ -485,10 +490,14 @@ async fn sync() {
                     .build()
                     .unwrap()
                     .block_on(async {
+
                         match Config::set_status(Some(0)).await {
                             Ok(_g) => {}
                             Err(_err) => {}
                         }
+
+                        LOGGER.write().await.flush().await.unwrap();
+
                     });
 
                 // let mut metrics_lock = METRICS.read().unwrap();
@@ -631,6 +640,8 @@ async fn sync() {
         Ok(_g) => {}
         Err(_err) => {}
     }
+
+    LOGGER.write().await.flush().await.unwrap();
 
     println!("Complete. Shutting Down... bye");
 }

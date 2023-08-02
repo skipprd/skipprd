@@ -103,6 +103,8 @@ impl DataSourceS3Plugin {
             inventory_prefix
         );
 
+        let mut skipped_objects = 0;
+
         let mut continuation_token: Option<String> = None;
 
         let chunk_size = Config::getenv("DATA_SOURCE_BATCH_SIZE_BYTES", "1024000")
@@ -193,9 +195,12 @@ impl DataSourceS3Plugin {
                                     chunk_size_current = 0;
                                 }
                             } else {
-                                // println!("Skipping object: {} already processed", object_key);
+                                skipped_objects += 1;
+
                             }
                         }
+
+                        println!("Skipped {} objects... already processed", skipped_objects);
                     }
 
                     if output.clone().next_continuation_token.is_some() {
