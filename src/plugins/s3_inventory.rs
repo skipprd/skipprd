@@ -6,7 +6,6 @@ use aws_sdk_s3::Client;
 pub use aws_smithy_http::byte_stream::AggregatedBytes;
 use csv::ReaderBuilder;
 use flate2::read::GzDecoder;
-use regex::internal::Input;
 
 use std::collections::HashMap;
 use std::fs::File;
