@@ -75,7 +75,7 @@ use crate::serdes::parquet::SerdeParquet;
 mod plugins;
 
 use crate::discover::arrow_schema::convert_skippr_to_arrow;
-use crate::helpers::configuration::{Config, Metrics};
+use crate::helpers::configuration::{Config};
 
 use crate::buffer::BufferChunker;
 use crate::helpers::logger::{LogLevel, Logger};
@@ -88,6 +88,7 @@ use crate::plugins::s3_input::DataSourceS3Plugin;
 use crate::plugins::s3_inventory::DataSourceS3InventoryPlugin;
 
 use crate::ingest_work::{Ingest, OUTPUT_FILES_STATIC};
+use crate::metrics::{Metrics, MetricsStatus};
 use crate::plugins::file_input::DataSourceLocalFilePlugin;
 use crate::plugins::file_output::DataOutputFilePlugin;
 use crate::plugins::s3_output::DataOutputS3Plugin;
@@ -252,8 +253,23 @@ async fn sync() {
     {
         LOGGER.write()
             .await
-            .log(LogLevel::Info, "Init Error Log.".to_string())
+            .log(LogLevel::Info, "Starting Skippr".to_string())
             .await;
+
+        let mut counter_lock = METRICS.write().unwrap();
+        counter_lock.status = MetricsStatus::Running;
+    }
+
+    {
+        match Metrics::send_config().await {
+            Ok(_res) => (),
+            Err(e) => {
+                LOGGER.write()
+                    .await
+                    .log(LogLevel::Error, format!("Failed to send config to Skippr API: {}", e))
+                    .await;
+            }
+        }
     }
 
     let _data_dir = Config::get_data_dir();
@@ -275,6 +291,7 @@ async fn sync() {
     };
 
     {
+
         METADATA.write().unwrap().clone_from(&skippr_metadata);
     }
 
@@ -301,6 +318,11 @@ async fn sync() {
 
         let panic_info_clone = panic_str.clone();
 
+        {
+            let mut counter_lock = METRICS.write().unwrap();
+            counter_lock.status = MetricsStatus::Error;
+        }
+
         thread::spawn(move || {
             let rt = runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -314,7 +336,6 @@ async fn sync() {
                     .log(LogLevel::Error, panic_info_clone)
                     .await;
                 LOGGER.write().await.flush().await.unwrap();
-                // logger_clone.lock().await.flush().await.unwrap();
             });
         }).join().unwrap();
 
@@ -343,6 +364,28 @@ async fn sync() {
 
     thread::spawn(move || {
         for _sig in signals.forever() {
+
+            {
+                let mut counter_lock = METRICS.write().unwrap();
+                counter_lock.status = MetricsStatus::Stopped;
+            }
+
+            thread::spawn(move || {
+                let rt = runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+
+                rt.block_on(async {
+                    LOGGER
+                        .write()
+                        .await
+                        .log(LogLevel::Info, "Received SIG: Gracefully shutting down".to_string())
+                        .await;
+                    LOGGER.write().await.flush().await.unwrap();
+                });
+            }).join().unwrap();
+
             if !RUNNING.read().unwrap().load(Ordering::SeqCst) {
                 println!("Received another Ctrl+C signal - terminating immediately, this may result in data loss...");
                 std::process::exit(0);
@@ -491,7 +534,7 @@ async fn sync() {
                     .unwrap()
                     .block_on(async {
 
-                        match Config::set_status(Some(0)).await {
+                        match Metrics::send_metrics(Some(0)).await {
                             Ok(_g) => {}
                             Err(_err) => {}
                         }
@@ -602,6 +645,20 @@ async fn sync() {
 
     sync_input_plugin(offsets_clone).await;
 
+    println!("Ingest completed, flushing remianing buffers to output plugin {}", Config::getenv("DATA_OUTPUT_PLUGIN_NAME", ""));
+
+    {
+        LOGGER.write()
+            .await
+            .log(LogLevel::Info, format!("Ingest completed, flushing remianing buffers to output plugin {}", Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "")))
+            .await;
+
+        let mut counter_lock = METRICS.write().unwrap();
+        counter_lock.status = MetricsStatus::Finishing;
+
+    }
+
+
     // RUNNING.write().unwrap().store(false, Ordering::SeqCst); // the prevents metrics from printing while shutting down, BUT also prevents output serialisatin
 
     let mut output_files = OUTPUT_FILES_STATIC.write().unwrap();
@@ -636,7 +693,18 @@ async fn sync() {
 
     drop(metrics_lock);
 
-    match Config::set_status(Some(0)).await {
+    {
+        LOGGER.write()
+            .await
+            .log(LogLevel::Info, "Complete, shutting down".to_string())
+            .await;
+
+        let mut counter_lock = METRICS.write().unwrap();
+        counter_lock.status = MetricsStatus::Completed;
+
+    }
+
+    match Metrics::send_metrics(Some(0)).await {
         Ok(_g) => {}
         Err(_err) => {}
     }

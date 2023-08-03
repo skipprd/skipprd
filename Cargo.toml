@@ -1,6 +1,6 @@
 [package]
 name = "skipprd"
-version = "3.0.0"
+version = "0.0.0-git"
 edition = "2021"
 
 [dependencies]

@@ -112,7 +112,7 @@ impl Logger {
                 json!({
                     "level": log.level.to_string(),
                     "message": log.message,
-                    "time": log.time.to_string(),
+                    "time": log.time.to_string()
                 })
             }).collect::<Vec<_>>(),
             "type": "log",

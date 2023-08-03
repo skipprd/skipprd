@@ -76,8 +76,13 @@ dockerize:
   tags: [ saas-linux-large-amd64 ]
   image: docker:latest
   stage: init
-#  before_script:
+  before_script:
 #    - rustup update && cargo update
+    - mv Cargo.toml Cargo.toml.orig
+    - sed "s/0\\.0\\.0-git/${CI_COMMIT_TAG##*\/v}/" Cargo.toml.orig > Cargo.toml
+    - mv Cargo.lock Cargo.lock.orig
+    - sed "s/0\\.0\\.0-git/${CI_COMMIT_TAG##*\/v}/" Cargo.lock.orig > Cargo.lock
+
   script:
     - docker pull $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE || true
     - docker build --cache-from $DOCKER_HUB_REPO/$CONTAINER_LATEST_IMAGE -t $CONTAINER_IMAGE -f Dockerfile .

@@ -37,8 +37,6 @@ use crate::plugins::athena::AwsAthena;
 #[non_exhaustive]
 struct RunModes;
 
-pub static LAST_MESSAGES_TOTAL: AtomicU64 = AtomicU64::new(0);
-
 
 impl RunModes {
     pub const RUN_MODE_SYNC: &'static str = "sync";
@@ -522,87 +520,6 @@ impl Config {
         }
     }
 
-    pub(crate) async fn set_status<'a>(
-        exit_code: Option<i8>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-
-        let metrics = METRICS.read().unwrap();
-
-        let workspace = Self::get_workspace_name();
-        let pipeline = Self::get_pipeline_name();
-
-        let env = Config::getenv("APP_ENV", "prod");
-        let uri = if env != "prod" {
-            format!("https://metrics.{}.api.skippr.io", env)
-        } else {
-            String::from("https://metrics.api.skippr.io")
-        };
-
-        let mut default_api_key = "";
-
-        if !*HAS_LICENSE.read().unwrap() {
-            default_api_key = "XxIVftJXN4LF6ARrRqJvKAsv30vhIZHR"
-        }
-
-        let token = Config::getenv("SKIPPR_API_TOKEN", default_api_key);
-
-        let mut headers = HeaderMap::new();
-        let auth_header = HeaderName::from_static("x-api-key");
-        headers.insert(auth_header, HeaderValue::from_str(&token).unwrap());
-
-        let client = reqwest::Client::builder()
-            .default_headers(headers)
-            // .timeout(Duration::from_secs(10))
-            .build()?;
-
-        let path = "";
-
-        let tenant_id = TENANT_ID.read().unwrap().clone();
-
-        let last_messages_total = LAST_MESSAGES_TOTAL.load(Ordering::Relaxed);
-        let ingested_current = metrics.messages_total - last_messages_total;
-        LAST_MESSAGES_TOTAL.store(metrics.messages_total, Ordering::Relaxed);
-
-        let data = json!({
-            "metrics": {
-                "ingeted_total": metrics.messages_total,
-                "ingeted_fixed": metrics.ingeted_slow_total,
-                "deadletters_total": metrics.deadletters_total,
-                "ingeted_current": ingested_current,
-                "run_time_seconds": metrics.run_time_seconds,
-                "bytes_current": metrics.bytes_current,
-                "bytes_total": metrics.bytes_total,
-            },
-            "type": "metric",
-            "tenant_id": tenant_id,
-            "workspace_name": workspace,
-            "pipeline_name": pipeline,
-            "datetime": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            "exit_code": exit_code
-        });
-
-        // println!("Posting data: {:?}", data);
-
-        let response = client
-            .put(format!("{}/{}", uri, path))
-            .json(&data)
-            .send()
-            .await?;
-
-        match response.error_for_status() {
-            Ok(_resp) => {
-                // println!("Status HTTP Success: {:?}", resp);
-                // println!("Notified Metrics API");
-            }
-            Err(err) => {
-                println!("Metrics HTTP Error: {:?}", err);
-            }
-        }
-
-
-        Ok(())
-    }
-
     pub async fn init() {
         let license = LicenseChecker::new();
         license.unwrap().get_license().await.unwrap();
@@ -612,33 +529,7 @@ impl Config {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub struct Metrics {
-    // pub msgs_total: u64,
-    pub messages_total: u64,
-    pub deadletters_total: u64,
-    pub ingeted_slow_total: u64,
-    pub run_time_seconds: u64,
-    pub bytes_current: u64,
-    pub bytes_total: u64,
-    pub last_update: u64
-}
-impl Metrics {
-    #[inline]
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            // msgs_total: 0,
-            messages_total: 0,
-            deadletters_total: 0,
-            ingeted_slow_total: 0,
-            run_time_seconds: 0,
-            bytes_current: 0,
-            bytes_total: 0,
-            last_update: 0
-        }
-    }
-}
+
 
 #[cfg(test)]
 mod tests {
