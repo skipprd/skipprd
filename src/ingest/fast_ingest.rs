@@ -5,9 +5,11 @@ use std::error::Error;
 use std::ops::Deref;
 use chrono::NaiveDateTime;
 use serde_json::Map;
-use crate::discover::date_formats::DateFormats;
 
-use crate::discover::{Evolution, Metadata};
+use crate::discover::{Metadata};
+use crate::discover::date_formats::DateFormats;
+use crate::discover::evolution::Evolution;
+
 use crate::helpers::Helpers;
 use crate::ingest::ingest::set_date;
 
@@ -35,33 +37,34 @@ pub fn fast_path_ingest(
             &field_data_type,
             field,
             value,
-            None,
-            None,
             metadata,
+            None
         )?;
         if !resolved_value.is_null() {
             message[meta_data.out_field_name.clone()] = resolved_value;
         }
     }
-    if flatten {
-        message = match Helpers::flatten(&message, &metadata) {
-            Ok(m) => m,
-            Err(e) => {
-                return Err(e);
-            }
-        };
-    }
+    // if flatten {
+    //     message = match Helpers::flatten(&message, &metadata) {
+    //         Ok(m) => m,
+    //         Err(e) => {
+    //             return Err(e);
+    //         }
+    //     };
+    // }
     Ok(message)
 }
 
-fn fast_set_value(
+pub fn fast_set_value(
     data_type: &str,
     field: &str,
     value: &Value,
-    _parent_field: Option<&str>,
-    _parent_data_type: Option<&str>,
     metadata: &HashMap<String, Metadata>,
+    apply_evolution: Option<bool>,
 ) -> Result<Value, Box<dyn Error>> {
+    if value.is_null() {
+        return Ok(Value::Null);
+    }
     if value.is_string() && value.as_str().unwrap_or_default().is_empty() {
         return Ok(Value::Null);
     }
@@ -69,12 +72,14 @@ fn fast_set_value(
         return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, "No data type specified")));
     }
 
+    let apply_evolution_bool = apply_evolution.unwrap_or(true);
+
     match data_type {
         "record" => process_record_field(field, value, metadata),
         "map" => process_map_field(&field.to_string(), value, metadata),
         "array" => process_array_field(&field.to_string(), value, metadata),
         "date" => fast_set_date(field, value, metadata),
-        _ => match_scalar_value_fast(field, data_type, value, metadata, true),
+        _ => match_scalar_value_fast(field, data_type, value, metadata, apply_evolution_bool),
     }
 }
 
@@ -92,9 +97,8 @@ fn process_record_field(
                     &meta_field.determined_type,
                     sub_field,
                     sub_value,
-                    Some(field),
-                    Some("record"),
-                    &metadata.get(field).unwrap().fields
+                    &metadata.get(field).unwrap().fields,
+                    None
                 )?;
                 m.insert(meta_field.out_field_name.clone(), newval);
             }
@@ -117,9 +121,8 @@ fn process_map_field(
                     &meta_field.determined_type,
                     key,
                     val,
-                    Some(field),
-                    Some("map"),
                     &metadata.get(field).unwrap().fields,
+                    None
                 )?;
                 new_value[meta_field.out_field_name.clone()] = new_val;
             }
@@ -143,9 +146,8 @@ fn process_array_field(
                     &meta_field.determined_type_values,
                     &idx.to_string(),
                     val,
-                    Some(field),
-                    Some("array"),
                     &metadata.get(field).unwrap().fields,
+                    None
                 )?;
                 array.push(new_val);
             }
@@ -180,10 +182,10 @@ pub fn match_scalar_value_fast(
                             if apply_evolution {
                                 match Evolution::apply_evolution_factory(field, value, metadata) {
                                     Ok(v) => Ok(v),
-                                    Err(e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a string", value)))),
+                                    Err(e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type)))),
                                 }
                             } else {
-                                Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a string", value))))
+                                Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type))))
                             }
                         }
                     }
@@ -198,10 +200,10 @@ pub fn match_scalar_value_fast(
                     if apply_evolution {
                         match Evolution::apply_evolution_factory(field, value, metadata) {
                             Ok(v) => Ok(v),
-                            Err(e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not an integer", value)))),
+                            Err(e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not an {}", value, data_type)))),
                         }
                     } else {
-                        Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a string", value))))
+                        Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type))))
                     }
                 }
             }
@@ -214,10 +216,10 @@ pub fn match_scalar_value_fast(
                     if apply_evolution {
                         match Evolution::apply_evolution_factory(field, value, metadata) {
                             Ok(v) => Ok(v),
-                            Err(e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a double", value)))),
+                            Err(e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type)))),
                         }
                     } else {
-                        Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a string", value))))
+                        Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type))))
                     }
                 }
             }
@@ -227,22 +229,24 @@ pub fn match_scalar_value_fast(
             Some(v) => Ok(v),
             None => match value.as_str().and_then(|v| v.parse::<bool>().ok()).map(Value::from) {
                 Some(v) => Ok(v),
-                None => match value.as_i64().and_then(|v| {
-                    if v == 0 || v == 1 {
-                        Some((v == 1).to_string().parse::<bool>().ok()).map(Value::from)
-                    } else {
-                        None
-                    }
-                }) {
-                    Some(v) => Ok(v),
-                    None => {
-                        if apply_evolution {
-                            match Evolution::apply_evolution_factory(field, value, metadata) {
-                                Ok(v) => Ok(v),
-                                Err(e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a boolean", value)))),
-                            }
+                None => {
+                    match value.as_i64().and_then(|v| {
+                        if v == 0 || v == 1 {
+                            Some((v == 1).to_string().parse::<bool>().ok()).map(Value::from)
                         } else {
-                            Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a string", value))))
+                            None
+                        }
+                    }) {
+                        Some(v) => Ok(v),
+                        None => {
+                            if apply_evolution {
+                                match Evolution::apply_evolution_factory(field, value, metadata) {
+                                    Ok(v) => Ok(v),
+                                    Err(e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type)))),
+                                }
+                            } else {
+                                Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type))))
+                            }
                         }
                     }
                 }
@@ -257,13 +261,20 @@ pub fn fast_set_date(field: &str, value: &Value, metadata: &HashMap<String, Meta
     // Hive Timestamp doesn't support string dates
     match value.as_str() {
         Some(val) => {
-            let fmt = &metadata
-                .get(field)
-                .unwrap()
-                .date_candidate
-                .as_ref()
-                .unwrap()
-                .format;
+            let parent_field_meta = match metadata
+                .get(field) {
+                    Some(m) => m,
+                    None => return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Could not find field metadata for {}", field)))),
+                };
+
+            let date_meta = match parent_field_meta.date_candidate
+                .as_ref() {
+                    Some(f) => f,
+                    None => return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Could not find date candidate in metadata for {}", field)))),
+                };
+
+            let fmt = &date_meta.format;
+
             match DateFormats::from_str(fmt) {
                 Ok(f) => match NaiveDateTime::parse_from_str(val, f.as_str()) {
                     Ok(date) => {
@@ -279,14 +290,13 @@ pub fn fast_set_date(field: &str, value: &Value, metadata: &HashMap<String, Meta
             }
         },
         None => {
-            // println!("Could not format date to int using format");
-            Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, "Could not format date to int using format")))
+            Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Could not format date, expected value {} to parse as a string", value))))
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
+mod tests_match_scalar_value_fast {
     use std::fs::metadata;
     use super::*;
     use serde_json::Value;
@@ -403,5 +413,113 @@ mod tests {
         metadata.insert("field".to_string(), Metadata::new().unwrap());
 
         get_or_panic(match_scalar_value_fast("field", "unknown", &str_to_val("hello"), &metadata, true));
+    }
+}
+
+
+#[cfg(test)]
+mod tests_process_array_field {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_process_array_field_ints() -> Result<(), Box<dyn Error>> {
+        let field = "test_field";
+        let value = json!([1, 2, 3]);
+        let mut metadata = HashMap::new();
+        let mut meta_data_item = Metadata::new()?;
+        meta_data_item.determined_type_values = "int".to_string();
+        metadata.insert(field.to_string(), meta_data_item);
+
+        let result = process_array_field(field, &value, &metadata)?;
+
+        assert_eq!(result, json!([1, 2, 3]));
+        Ok(())
+    }
+
+    #[test]
+    fn test_process_array_field_floats() -> Result<(), Box<dyn Error>> {
+        let field = "test_field";
+        let value = json!([1.2, 2.3, 3.4]);
+        let mut metadata = HashMap::new();
+        let mut meta_data_item = Metadata::new()?;
+        meta_data_item.determined_type_values = "double".to_string();
+        metadata.insert(field.to_string(), meta_data_item);
+
+        let result = process_array_field(field, &value, &metadata)?;
+
+        assert_eq!(result, json!([1.2, 2.3, 3.4]));
+        Ok(())
+    }
+
+    #[test]
+    fn test_process_array_field_booleans() -> Result<(), Box<dyn Error>> {
+        let field = "test_field";
+        let value = json!([true, false, true]);
+        let mut metadata = HashMap::new();
+        let mut meta_data_item = Metadata::new()?;
+        meta_data_item.determined_type_values = "boolean".to_string();
+        metadata.insert(field.to_string(), meta_data_item);
+
+        let result = process_array_field(field, &value, &metadata)?;
+
+        assert_eq!(result, json!([true, false, true]));
+        Ok(())
+    }
+
+    #[test]
+    fn test_process_array_field_booleans_int() -> Result<(), Box<dyn Error>> {
+        let field = "test_field";
+        let value = json!([1, 0, 1]);
+        let mut metadata = HashMap::new();
+        let mut meta_data_item = Metadata::new()?;
+        meta_data_item.determined_type_values = "boolean".to_string();
+        metadata.insert(field.to_string(), meta_data_item);
+
+        let result = process_array_field(field, &value, &metadata)?;
+
+        assert_eq!(result, json!([true, false, true]));
+        Ok(())
+    }
+
+    #[test]
+    fn test_process_array_field_null() -> Result<(), Box<dyn Error>> {
+        let field = "test_field";
+        let value = json!([null, null, null]);
+        let mut metadata = HashMap::new();
+        let mut meta_data_item = Metadata::new()?;
+        meta_data_item.determined_type_values = "null".to_string();
+        metadata.insert(field.to_string(), meta_data_item);
+
+        let result = process_array_field(field, &value, &metadata)?;
+
+        assert_eq!(result, json!([null, null, null]));
+        Ok(())
+    }
+
+    #[test]
+    fn test_process_array_field_strings() -> Result<(), Box<dyn Error>> {
+        let field = "test_field";
+        let value = json!(["one", "two", "three"]);
+        let mut metadata = HashMap::new();
+        let mut meta_data_item = Metadata::new()?;
+        meta_data_item.determined_type_values = "string".to_string();
+        metadata.insert(field.to_string(), meta_data_item);
+
+        let result = process_array_field(field, &value, &metadata)?;
+
+        assert_eq!(result, json!(["one", "two", "three"]));
+        Ok(())
+    }
+
+    #[test]
+    fn test_process_array_field_field_not_found() {
+        let field = "test_field";
+        let value = json!([1, 2, 3]);
+        let metadata = HashMap::new();
+
+        let result = process_array_field(field, &value, &metadata);
+
+        assert!(result.is_err());
     }
 }

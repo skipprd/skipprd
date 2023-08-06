@@ -7,6 +7,8 @@ use std::io::Read;
 use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::Mutex;
+use std::thread::sleep;
+use std::time::Duration;
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use lazy_static::lazy_static;
@@ -19,6 +21,8 @@ use serde_json::Value;
 use crate::helpers::Helpers;
 pub(crate) mod date_formats;
 use crate::discover::date_formats::DateFormats;
+
+pub mod evolution;
 mod filter_float;
 
 mod filter_bool;
@@ -27,12 +31,14 @@ mod filter_parse_int;
 
 pub mod arrow_schema;
 use crate::helpers::configuration::Config;
-use crate::ingest::fast_ingest::{fast_path_ingest, match_scalar_value_fast};
+use crate::ingest::fast_ingest::{fast_path_ingest, fast_set_value, match_scalar_value_fast};
 use crate::ingest::ingest::{IngestRecord, set_value};
 use crate::ingest_work::Ingest;
 use crate::serdes::json::SerdeJson;
 
 use once_cell::sync::Lazy;
+use crate::discover::evolution::Evolution;
+
 
 thread_local! {
     static LAST_SUCCESSFUL_EVOLUTION: std::cell::RefCell<HashMap<String, String>> = std::cell::RefCell::new(HashMap::new());
@@ -44,39 +50,6 @@ pub struct DateCandidate {
     pub(crate) valid_count: i32,
     pub(crate) field: String,
     pub(crate) format: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct Evolution {
-    type_string: String,
-    new_value: String,
-    sovled: bool,
-}
-
-#[derive(Clone, Debug)]
-enum EvolutionType {
-    // Cast,
-    New,
-    Rename,
-    Merge,
-    Default,
-}
-
-impl FromStr for EvolutionType {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            // "cast" => Ok(EvolutionType::Cast),
-            "new" => Ok(EvolutionType::New),
-            "rename" => Ok(EvolutionType::Rename),
-            "merge" => Ok(EvolutionType::Merge),
-            "default" => Ok(EvolutionType::Default),
-            _ => Err(()),
-        }
-    }
-
-
 }
 
 pub fn discover_ingest(
@@ -116,167 +89,6 @@ pub fn discover_ingest(
     discoverd_data_type.clone()
 }
 
-impl EvolutionType {
-    fn to_string(&self) -> String {
-        match *self {
-            // EvolutionType::Cast => "cast",
-            EvolutionType::New => "new".to_string(),
-            EvolutionType::Rename => "rename".to_string(),
-            EvolutionType::Merge => "merge".to_string(),
-            EvolutionType::Default => "default".to_string(),
-        }
-    }
-}
-
-impl Evolution {
-
-    pub fn evolve_field(
-        field: &String,
-        value: &Value,
-        metadata: &mut HashMap<String, Metadata>
-    ) -> Result<Value, Box<dyn std::error::Error>> {
-
-        // println!("Handling value error for field: '{}'", field);
-
-        let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
-        let discoverd_data_type = foo.resolve_field_type(metadata.clone().borrow_mut(), &field.to_string(), value.clone().borrow_mut());
-
-        println!("Evolving new data type: '{}' for field {} with value {} with current data type of: {}", discoverd_data_type, field, value, metadata.get(field).unwrap().determined_type);
-
-        if discoverd_data_type != "" {
-
-            let new_feild = &format!("{}_{}", field, discoverd_data_type);
-
-            let evolution = match metadata.get(field).unwrap().evolution.get(&discoverd_data_type) {
-                Some(evolution) => {
-                    // println!("Evolving field: '{}' to type: '{}'", field, discoverd_data_type);
-                    // @todo - should we ever overwrite an evolution? Is it event possible to be in this state?
-                    if evolution.new_value == "" {
-                        let evo = Evolution {
-                            type_string: discoverd_data_type.clone(),
-                            new_value: new_feild.clone(),
-                            sovled: true,
-                        };
-
-                        metadata.get_mut(field).unwrap().evolution.insert(discoverd_data_type.clone(), evo.clone());
-
-                        evo
-                    } else {
-                        evolution.clone()
-                    }
-                },
-                None => {
-                    println!("Creating new evolution for field: '{}' to type: '{}'", field, discoverd_data_type);
-                    let evo = Evolution {
-                        type_string: discoverd_data_type.clone(),
-                        new_value: new_feild.clone(),
-                        sovled: true,
-                    };
-
-                    metadata.get_mut(field).unwrap().evolution.insert(discoverd_data_type.clone(), evo.clone());
-
-                    evo
-                }
-            };
-
-            // let evolution_type = match evolution.type_string.parse::<EvolutionType>() {
-            //     Ok(evolution_type) => evolution_type,
-            //     Err(_) => EvolutionType::New,
-            // };
-
-
-            // Ok(evolution_type.to_string())
-
-            match Evolution::apply_evolution_factory(field, value, metadata) {
-                Ok(v) => Ok(v),
-                Err(e) => Err(e),
-            }
-
-            // println!("Setting value: '{:?}' for field: '{}'", value, field);
-
-            // match_scalar_value(field, &discoverd_data_type, value).unwrap()
-            // set_value(
-            //     &discoverd_data_type,
-            //     &new_feild,
-            //     value,
-            //     None,
-            //     None,
-            //     metadata,
-            //     &mut "no".to_string(),
-            // )
-
-        } else {
-            // Value::Null
-            Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Unable to determine data type",
-            )))
-        }
-
-    }
-
-
-    pub fn apply_evolution_factory(
-        field: &str,
-        value: &Value,
-        metadata: &HashMap<String, Metadata>,
-    ) -> Result<Value, Box<dyn std::error::Error>> {
-
-        // println!("Applying evolution factory for field: '{}'", field);
-
-        // get the cached last successful evolution for this field and try it first
-        let mut found_value: Option<Result<Value, Box<dyn std::error::Error>>> = None;
-        LAST_SUCCESSFUL_EVOLUTION.with(|last_evolution_refcell| {
-            let last_evolution_guard = last_evolution_refcell.borrow();
-            if let Some(evolution_key) = last_evolution_guard.get(field) {
-                if let Some(field_metadata) = metadata.get(field) {
-                    if let Some(evolution) = field_metadata.evolution.get(evolution_key) {
-                        match match_scalar_value_fast(&evolution.new_value, &evolution_key, value, metadata, false) {
-                            Ok(v) => {
-                                // set value if the evolution succeeds
-                                // println!("Cached evolution succeeded for field: '{}' with evolution: '{}'", field, evolution_key);
-                                found_value = Some(Ok(v));
-                            },
-                            Err(_) => { }
-                        }
-                    }
-                }
-            }
-        });
-        if let Some(value) = found_value {
-            return value;
-        }
-
-        // iterate through the evolutions and try the existing ones
-        match metadata.get(field) {
-            Some(field_metadata) => {
-                for (evolution_key, evolution) in field_metadata.evolution.iter() {
-                    match match_scalar_value_fast(&evolution.new_value, evolution_key, value, metadata, false) {
-                        Ok(v) => {
-                            // cache the last evolution that worked
-                            LAST_SUCCESSFUL_EVOLUTION.with(|last_evolution_refcell| {
-                                let mut last_evolution_guard = last_evolution_refcell.borrow_mut();
-                                last_evolution_guard.insert(field.to_string(), evolution_key.clone());
-                            });
-                            // println!("Evolution succeeded for field: '{}' with evolution: '{}'", field, evolution_key);
-                            return Ok(v);
-                        },
-                        Err(_) => { }
-                    }
-                }
-                // throw Err() if no evolutions are Ok()
-                println!("No evolutions succeeded for field: '{}'", field);
-                Err(Box::new(ArrowError::ParseError("Unable to parse value".to_string())))
-            },
-            None => {
-                println!("No metadata for field: '{}'", field);
-                Err(Box::new(ArrowError::ParseError("Unable to parse value".to_string())))
-            }
-        }
-    }
-
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Metadata {
     pub(crate) count: i32,
@@ -290,24 +102,6 @@ pub struct Metadata {
     pub(crate) determined_type: String,
     pub(crate) determined_type_values: String,
 }
-
-// pub struct IterMut<'a, Met> {
-//     obj: &'a mut Metadata,
-//     cursor: usize,
-// }
-//
-//
-// impl<'a, T> Iterator for IterMut<'a, T> {
-//     // type Item = &'a T;
-//     type Item = &'a mut T;
-//
-//     fn next(&mut self) -> Option<Self::Item> {
-//         self.next.take().map(|node| {
-//             self.next = node.next.as_deref_mut();
-//             &mut node.elem
-//         })
-//     }
-// }
 
 impl Metadata {
     #[inline]
@@ -453,10 +247,10 @@ impl AnalyseSchema {
         &mut self,
         input_file: File,
         _max_read_records: Option<usize>,
-        newMeta: &mut HashMap<std::string::String, Metadata>,
-    ) -> Result<HashMap<std::string::String, Metadata>, ArrowError> {
+        metadata: &mut HashMap<std::string::String, Metadata>,
+    ) {
         // self.infer_json_schema_from_iterator(ValueIter::new(reader, max_read_records))
-        self.infer_json_schema_from_iterator(input_file, newMeta)
+        self.infer_json_schema_from_iterator(input_file, metadata);
     }
 
     // pub fn infer_json_schema_from_iterator<I>(&mut self, value_iter: I) -> Result<HashMap<std::string::String, Metadata>, ArrowError>
@@ -466,11 +260,12 @@ impl AnalyseSchema {
     pub fn infer_json_schema_from_iterator(
         &mut self,
         mut input_file: File,
-        newMeta: &mut HashMap<std::string::String, Metadata>,
-    ) -> Result<HashMap<std::string::String, Metadata>, ArrowError> {
+        metadata: &mut HashMap<std::string::String, Metadata>,
+    ) {
         let mut parse_namespace_cache: HashMap<String, String> = HashMap::new();
 
         let mut skpr_namespace: String = "".to_string();
+        let pipeline_name = Config::get_pipeline_name();
 
         let _faltten_events = &Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no");
 
@@ -482,25 +277,22 @@ impl AnalyseSchema {
         let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
 
         let str: &mut String = &mut "".to_string();
-        input_file.read_to_string(str);
+        input_file.read_to_string(str).unwrap();
 
         let records: Vec<Value> = SerdeJson::deserialize(str);
 
         let mut i = 0;
 
         for v in records {
-            let source_namespace = Config::getenv("S3_BUCKET", "");
 
-            // let source_namespace = BufferChunker::decode_file_namespace(path.to_str().unwrap());
-            // let source_partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
             skpr_namespace = Helpers::parse_namespace_field(
                 &v,
-                source_namespace.clone(),
+                pipeline_name.clone(),
                 &mut parse_namespace_cache,
             );
 
-            if !newMeta.contains_key(&skpr_namespace) {
-                newMeta.insert(skpr_namespace.clone(), Metadata::new().unwrap());
+            if !metadata.contains_key(&skpr_namespace) {
+                metadata.insert(skpr_namespace.clone(), Metadata::new().unwrap());
                 // newMeta = &mut metadata.clone();
             }
 
@@ -508,11 +300,13 @@ impl AnalyseSchema {
             //     v = Helpers::flatten(&v);
             // }
 
-            i += 1;
 
             if i >= min_discovery_records {
                 break;
             }
+
+            i += 1;
+
             // let string = record.unwrap().to_string();
 
             // println!("record: {:?}", v);
@@ -533,7 +327,7 @@ impl AnalyseSchema {
             match v.type_id() {
                 _Value => {
                     let mut ingest_record = IngestRecord {
-                        source_namespace,
+                        source_namespace: "".to_string(),
                         source_partition: "".to_string(),
                         skpr_event_ts: 0,
                         skpr_namespace: skpr_namespace.clone(),
@@ -544,17 +338,18 @@ impl AnalyseSchema {
                     AnalyseSchema::analyse_payload(
                         &mut foo,
                         &mut ingest_record.record,
-                        &mut newMeta
+                        &mut metadata
                             .get_mut(&ingest_record.skpr_namespace)
                             .unwrap()
                             .fields,
                     );
                 }
                 value => {
-                    return Err(ArrowError::ParseError(format!(
-                        "Expected serde Value, found {:?}",
-                        value
-                    )));
+                    panic!("Could not infer type. Expected serde Value, found {:?}", value);
+                    // return Err(ArrowError::ParseError(format!(
+                    //     "Expected serde Value, found {:?}",
+                    //     value
+                    // )));
                 }
             };
             // }
@@ -562,7 +357,7 @@ impl AnalyseSchema {
 
         // let metadata = newMeta.clone();
 
-        Ok(newMeta.clone())
+        // Ok(newMeta.clone())
     }
 
     // pub fn analyse_payload(&mut self, message: &HashMap<String, String>, metadata: &mut HashMap<String, Metadata>) {
@@ -848,7 +643,7 @@ impl AnalyseSchema {
         }
 
         // @todo
-        if data_type == *"integer" {
+        if data_type == *"integer" || data_type == *"string" {
             match parse_bool(value) {
                 Err(_i32) => {
                     // println!("Not float");
@@ -1131,7 +926,7 @@ impl AnalyseSchema {
                 data_type.to_string(),
                 Evolution {
                     type_string: "".to_string(),
-                    new_value: "".to_string(),
+                    new_field: "".to_string(),
                     sovled: false,
                 },
             );
@@ -1217,6 +1012,15 @@ impl AnalyseSchema {
                                 // - if there's multiple discovered types
                                 // - and the most common type is a demoted type
                                 // - select the next most common, non-date type
+
+                                // hacky, support inference on they fly when we only infer on one record.
+                                // much more likely to be an integer than a boolean
+                                if field.types.len() == 1 && field.types.contains_key("boolean") {
+                                    highest_type = "integer".to_string();
+                                    highest_count = *data_type_count;
+                                    break;
+                                }
+
                                 if field.types.len() == 1
                                     || (field.types.len() > 1
                                         && !demoted_types.contains(&data_type.as_str()))
@@ -1260,6 +1064,14 @@ impl AnalyseSchema {
                             // - and the most common type is a demoted type
                             // - select the next most common, non-date type
                             //                                if (!in_array($dataType, $demotedTypes)) {
+
+                            // hacky, support inference on they fly when we only infer on one record.
+                            // much more likely to be an integer than a boolean
+                            if type_count.len() == 1 && type_count.contains_key("boolean") {
+                                type_count.insert("integer".to_string(), *data_type_count);
+                                break;
+                            }
+
                             if type_count.len() <= 1
                                 || (type_count.len() > 1
                                     && !demoted_types.contains(&data_type.as_str()))
@@ -1288,7 +1100,7 @@ impl AnalyseSchema {
                     field.determined_type_values = values_type.to_string();
 
                     if field.determined_type == *"array" {
-                        field.fields.clear();
+                        // field.fields.clear();
                     }
                 }
 
@@ -1351,6 +1163,8 @@ impl AnalyseSchema {
     }
 }
 
+
+
 #[cfg(test)]
 mod is_valid_date_tests {
     use crate::discover::date_formats::DateFormats;
@@ -1376,7 +1190,7 @@ mod is_valid_date_tests {
         NaiveDateTime::parse_from_str(date_str, fmt.as_str()).unwrap();
 
         let date_str = "2022-01-07T08:28:07Z";
-        assert_eq!(Some("AtomZ"), foo.is_valid_date(date_str));
+        assert_eq!(Some("Iso8601_2"), foo.is_valid_date(date_str));
 
         let date_str = "2022-02-22T22:22:22";
         assert_eq!(Some("Atom"), foo.is_valid_date(date_str));
@@ -1417,7 +1231,7 @@ mod is_valid_date_tests {
         let foo: AnalyseSchema = AnalyseSchema { i: 0 };
         let date_str = "2022-02-22T22:22:22Z";
         let _dt = DateTime::parse_from_rfc3339(date_str).unwrap();
-        assert_eq!(Some("AtomZ"), foo.is_valid_date(date_str));
+        assert_eq!(Some("Iso8601_2"), foo.is_valid_date(date_str));
     }
 
     #[test]
@@ -1433,7 +1247,7 @@ mod is_valid_date_tests {
 mod discover_date_formats_tests {
     use crate::discover::date_formats::DateFormats;
     use crate::discover::AnalyseSchema;
-    use chrono::{NaiveDateTime};
+    use chrono::NaiveDateTime;
     
 
     #[test]
@@ -1448,7 +1262,7 @@ mod discover_date_formats_tests {
         NaiveDateTime::parse_from_str(date_str, fmt.as_str()).unwrap();
 
         let date_str = "2022-01-07T08:28:07Z";
-        assert_eq!(Some("AtomZ"), foo.is_valid_date(date_str));
+        assert_eq!(Some("Iso8601_2"), foo.is_valid_date(date_str));
 
         let date_str = "2022-02-22T22:22:22";
         assert_eq!(Some("Atom"), foo.is_valid_date(date_str));
@@ -1468,7 +1282,7 @@ mod discover_date_formats_tests {
 mod tests {
     use serial_test::serial;
     use std::collections::HashMap;
-    use std::fs::{remove_file, File, OpenOptions};
+    use std::fs::{File, OpenOptions, remove_file};
     use std::io::{Seek, Write};
 
     use crate::discover::{AnalyseSchema, Metadata};
@@ -1527,36 +1341,35 @@ mod tests {
         // let mut buf_reader = BufReader::new(in_file);
 
         let mut metadata = HashMap::new();
-        metadata.insert("foo".to_string(), Metadata::new().unwrap());
+        // metadata.insert("foo".to_string(), Metadata::new().unwrap());
 
         AnalyseSchema::infer_json_schema(
             &mut foo,
             in_file,
             Some(1),
-            &mut metadata.get_mut("foo").unwrap().fields,
-        )
-        .unwrap();
+            &mut metadata,
+        );
 
-        AnalyseSchema::determine_field_types(&mut metadata, None, None, false);
+        AnalyseSchema::determine_field_types(&mut metadata.get_mut("default").unwrap().fields, None, None, false);
 
         remove_file(Path::new(&format!("./{}", random_tmp_file_name))).unwrap();
 
         println!("{:?}", metadata);
-        println!("{:?}", metadata.get("foo").unwrap().fields);
+        println!("{:?}", metadata.get("default").unwrap().fields);
         println!(
             "{:?}",
-            metadata.get("foo").unwrap().fields.get("abc1").unwrap()
+            metadata.get("default").unwrap().fields.get("abc1").unwrap()
         );
         println!(
             "{:?}",
-            metadata.get("foo").unwrap().fields.get("abc2").unwrap()
+            metadata.get("default").unwrap().fields.get("abc2").unwrap()
         );
-        // println!("{:?}", new_meta.get("foo").unwrap().fields.get("abc2").unwrap().determined_type);
-        // println!("{:?}", new_meta.get("foo").unwrap().fields.get("abc2").unwrap().determined_type_values);
+        // println!("{:?}", new_meta.get("default").unwrap().fields.get("abc2").unwrap().determined_type);
+        // println!("{:?}", new_meta.get("default").unwrap().fields.get("abc2").unwrap().determined_type_values);
 
         assert_eq!(
             metadata
-                .get("foo")
+                .get("default")
                 .unwrap()
                 .fields
                 .get("abc1")
@@ -1566,7 +1379,7 @@ mod tests {
         );
         assert_eq!(
             metadata
-                .get("foo")
+                .get("default")
                 .unwrap()
                 .fields
                 .get("abc1")
@@ -1576,7 +1389,7 @@ mod tests {
         );
         assert_eq!(
             metadata
-                .get("foo")
+                .get("default")
                 .unwrap()
                 .fields
                 .get("abc2")
@@ -1586,7 +1399,7 @@ mod tests {
         );
         assert_eq!(
             metadata
-                .get("foo")
+                .get("default")
                 .unwrap()
                 .fields
                 .get("abc2")
@@ -1596,7 +1409,7 @@ mod tests {
         );
         assert_eq!(
             metadata
-                .get("foo")
+                .get("default")
                 .unwrap()
                 .fields
                 .get("abc3")
@@ -1606,7 +1419,7 @@ mod tests {
         );
         assert_eq!(
             metadata
-                .get("foo")
+                .get("default")
                 .unwrap()
                 .fields
                 .get("abc3")
@@ -1616,7 +1429,7 @@ mod tests {
         );
         assert_eq!(
             metadata
-                .get("foo")
+                .get("default")
                 .unwrap()
                 .fields
                 .get("abc4")
@@ -1626,7 +1439,7 @@ mod tests {
         );
         assert_eq!(
             metadata
-                .get("foo")
+                .get("default")
                 .unwrap()
                 .fields
                 .get("abc4")
@@ -1636,7 +1449,7 @@ mod tests {
         );
         assert_eq!(
             metadata
-                .get("foo")
+                .get("default")
                 .unwrap()
                 .fields
                 .get("abc5")
@@ -1646,7 +1459,7 @@ mod tests {
         );
         assert_eq!(
             metadata
-                .get("foo")
+                .get("default")
                 .unwrap()
                 .fields
                 .get("abc5")
@@ -1656,7 +1469,7 @@ mod tests {
         );
         assert_eq!(
             metadata
-                .get("foo")
+                .get("default")
                 .unwrap()
                 .fields
                 .get("abc6")
@@ -1666,7 +1479,7 @@ mod tests {
         );
         assert_eq!(
             metadata
-                .get("foo")
+                .get("default")
                 .unwrap()
                 .fields
                 .get("abc7")
@@ -1674,6 +1487,7 @@ mod tests {
                 .determined_type,
             "record"
         );
+
     }
 
     #[test]
@@ -1724,16 +1538,15 @@ mod tests {
 
         let mut metadata = HashMap::new();
 
-        let mut newMeta =
-            AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1), &mut metadata).unwrap();
+        AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1), &mut metadata);
 
-        AnalyseSchema::determine_field_types(&mut newMeta, None, None, false);
+        AnalyseSchema::determine_field_types(&mut metadata.get_mut("default").unwrap().fields, None, None, false);
 
         remove_file(Path::new(&format!("./{}", random_tmp_file_name)));
 
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("default")
                 .unwrap()
                 .fields
                 .get("boolean")
@@ -1742,8 +1555,8 @@ mod tests {
             "array"
         );
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("default")
                 .unwrap()
                 .fields
                 .get("boolean")
@@ -1752,8 +1565,8 @@ mod tests {
             "boolean"
         );
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("default")
                 .unwrap()
                 .fields
                 .get("boolean2")
@@ -1762,8 +1575,8 @@ mod tests {
             "array"
         );
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("default")
                 .unwrap()
                 .fields
                 .get("boolean2")
@@ -1774,8 +1587,8 @@ mod tests {
         // assert_eq!(newMeta.get("").unwrap().fields.get("date").unwrap().determined_type, "array");
         // assert_eq!(newMeta.get("").unwrap().fields.get("date").unwrap().determined_type_values, "date");
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("default")
                 .unwrap()
                 .fields
                 .get("timestamp")
@@ -1784,8 +1597,8 @@ mod tests {
             "array"
         );
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("default")
                 .unwrap()
                 .fields
                 .get("timestamp")
@@ -1794,8 +1607,8 @@ mod tests {
             "integer"
         );
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("default")
                 .unwrap()
                 .fields
                 .get("timestamp_milli")
@@ -1805,8 +1618,8 @@ mod tests {
         );
         // assert_eq!(newMeta.get("").unwrap().fields.get("timestamp_milli").unwrap().determined_type_values, "timestamp_milli");
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("default")
                 .unwrap()
                 .fields
                 .get("abc3")
@@ -1815,8 +1628,8 @@ mod tests {
             "array"
         );
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("default")
                 .unwrap()
                 .fields
                 .get("abc3")
@@ -1825,8 +1638,8 @@ mod tests {
             "integer"
         );
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("default")
                 .unwrap()
                 .fields
                 .get("abc4")
@@ -1835,8 +1648,8 @@ mod tests {
             "array"
         );
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("default")
                 .unwrap()
                 .fields
                 .get("abc4")
@@ -1930,16 +1743,15 @@ mod tests {
 
         let mut metadata = HashMap::new();
 
-        let mut newMeta =
-            AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1), &mut metadata).unwrap();
+        AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1), &mut metadata);
 
-        AnalyseSchema::determine_field_types(&mut newMeta, None, None, false);
+        AnalyseSchema::determine_field_types(&mut metadata.get_mut("default").unwrap().fields, None, None, false);
 
-        remove_file(Path::new(&format!("./{}", random_tmp_file_name)));
+        remove_file(Path::new(&format!("./{}", random_tmp_file_name))).unwrap();
 
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("default")
                 .unwrap()
                 .fields
                 .get("sheep")
@@ -1948,8 +1760,8 @@ mod tests {
             "string"
         );
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("default")
                 .unwrap()
                 .fields
                 .get("arable")
@@ -1959,8 +1771,8 @@ mod tests {
         );
 
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("default")
                 .unwrap()
                 .fields
                 .get("crank")
@@ -1969,8 +1781,8 @@ mod tests {
             "record"
         );
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("default")
                 .unwrap()
                 .fields
                 .get("crank")
@@ -1982,8 +1794,8 @@ mod tests {
             "array"
         );
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("default")
                 .unwrap()
                 .fields
                 .get("crank")
@@ -1996,8 +1808,8 @@ mod tests {
         );
 
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("default")
                 .unwrap()
                 .fields
                 .get("crank")
@@ -2009,8 +1821,8 @@ mod tests {
             "record"
         );
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("default")
                 .unwrap()
                 .fields
                 .get("crank")
@@ -2028,8 +1840,8 @@ mod tests {
         // println!("{:?}", newMeta.get("").unwrap().fields.get("crank_torques").unwrap());
 
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("default")
                 .unwrap()
                 .fields
                 .get("crank_torques")
@@ -2039,61 +1851,61 @@ mod tests {
         );
 
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("default")
                 .unwrap()
                 .fields
                 .get("crank_torques")
                 .unwrap()
                 .fields
-                .get("item_0")
+                .get("0")
                 .unwrap()
                 .determined_type,
             "array"
         );
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("default")
                 .unwrap()
                 .fields
                 .get("crank_torques")
                 .unwrap()
                 .fields
-                .get("item_0")
+                .get("0")
                 .unwrap()
                 .determined_type_values,
             "integer"
         );
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("default")
                 .unwrap()
                 .fields
                 .get("crank_torques")
                 .unwrap()
                 .fields
-                .get("item_1")
+                .get("1")
                 .unwrap()
                 .determined_type,
             "array"
         );
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("default")
                 .unwrap()
                 .fields
                 .get("crank_torques")
                 .unwrap()
                 .fields
-                .get("item_1")
+                .get("1")
                 .unwrap()
                 .determined_type_values,
             "integer"
         );
 
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("default")
                 .unwrap()
                 .fields
                 .get("metadata")
@@ -2105,8 +1917,8 @@ mod tests {
             "record"
         );
         assert_eq!(
-            newMeta
-                .get("")
+            metadata
+                .get("default")
                 .unwrap()
                 .fields
                 .get("metadata")
@@ -2115,7 +1927,7 @@ mod tests {
                 .get("tags")
                 .unwrap()
                 .fields
-                .get("item_0")
+                .get("0")
                 .unwrap()
                 .determined_type,
             "map"

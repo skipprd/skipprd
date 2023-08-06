@@ -204,8 +204,8 @@ production-datastorage-stac-rawdevicejson568138dc-1djhnp70ebsko
 ```bash
 AWS_PROFILE=cloudcycle \
 DATA_SOURCE_PLUGIN_NAME=s3 \
-S3_BUCKET=production-datastorage-stac-rawdevicejson568138dc-1djhnp70ebsko \
-S3_PREFIX=data/2022/08/10 \
+DATA_SOURCE_S3_BUCKET=production-datastorage-stac-rawdevicejson568138dc-1djhnp70ebsko \
+DATA_SOURCE_S3_PREFIX=data/ \
 DATA_SOURCE_BATCH_SIZE_BYTES=2048000 \
 BUFFER_THRESHOLD_BYTES=2000000 \
 BUFFER_THRESHOLD_SECONDS=300 \

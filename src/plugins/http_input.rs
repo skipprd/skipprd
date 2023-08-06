@@ -15,7 +15,7 @@ use reqwest::Client;
 use tar::Archive;
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
-use crate::{INPUT_GRACEFUL_SHUTDOWN_COMPLETE, RUNNING};
+use crate::{RUNNING};
 use std::path::Path;
 use flate2::read::GzDecoder;
 

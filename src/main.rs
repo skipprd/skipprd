@@ -109,7 +109,7 @@ pub static METADATA: Lazy<Arc<RwLock<HashMap<String, Metadata>>>> = Lazy::new(||
 
 #[tokio::main]
 async fn main() {
-    env::set_var("RUST_BACKTRACE", "1");
+
     Config::init().await;
 
     // let now = Instant::now();
@@ -196,13 +196,12 @@ async fn discover() {
                         // skippr_metadata =
                         //     AnalyseSchema::infer_json_schema(&mut foo, &mut buf_reader, Some(1000))
                         //         .unwrap();
-                        skippr_metadata = AnalyseSchema::infer_json_schema(
+                        AnalyseSchema::infer_json_schema(
                             &mut foo,
                             input_file,
                             Some(1000),
                             &mut skippr_metadata,
-                        )
-                        .unwrap();
+                        );
 
                         // println!("Skippr schema: {:?}", skippr_metadata);
 
@@ -309,12 +308,8 @@ async fn sync() {
     panic::set_hook(Box::new(move |panic_info| {
         // invoke the default handler and exit the process
         orig_hook(panic_info);
-        println!("{:?}", panic_info);
+        // println!("{:?}", panic_info);
         let panic_str = format!("{:?}", panic_info);
-
-        // process::exit(1);
-
-        // let logger_clone = Arc::clone(&logger_clone);
 
         let panic_info_clone = panic_str.clone();
 
@@ -339,13 +334,17 @@ async fn sync() {
             });
         }).join().unwrap();
 
-        let pid = process::id() as i32; // or replace with the PID of the target process
+        if !RUNNING.read().unwrap().load(Ordering::SeqCst) {
+            println!("Received another panic - already gracefully shutting down");
+        } else {
 
-        unsafe {
-            kill(Pid::from_raw(pid), Signal::SIGTERM).unwrap();
+            let pid = process::id() as i32; // or replace with the PID of the target process
+
+            unsafe {
+                kill(Pid::from_raw(pid), Signal::SIGTERM).unwrap();
+            }
         }
 
-        // sleep(Duration::from_secs(60)); // wait for graceful shutdown
     }));
 
     // thread::spawn(move || {
@@ -363,7 +362,7 @@ async fn sync() {
     // let logger_clone = Arc::clone(&logger);
 
     thread::spawn(move || {
-        for _sig in signals.forever() {
+        for sig in signals.forever() {
 
             {
                 let mut counter_lock = METRICS.write().unwrap();
@@ -380,7 +379,7 @@ async fn sync() {
                     LOGGER
                         .write()
                         .await
-                        .log(LogLevel::Info, "Received SIG: Gracefully shutting down".to_string())
+                        .log(LogLevel::Info, format!("Received SIG: {} - Gracefully shutting down", sig.to_string()))
                         .await;
                     LOGGER.write().await.flush().await.unwrap();
                 });
@@ -399,7 +398,7 @@ async fn sync() {
             // let logger_clone = Arc::clone(&logger_clone);
 
             thread::spawn(move || {
-                println!("Received SIG: Gracefully shutting down");
+                println!("Received SIG: {} - Gracefully shutting down", sig.to_string());
                 // println!("Flushing ingest buffers");
                 // let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
                 // Ingest::flush_buffers(true, &mut output_files);
@@ -408,10 +407,10 @@ async fn sync() {
                 // RUNNING.write().unwrap().store(false, Ordering::SeqCst);
 
                 while
-                // !INPUT_GRACEFUL_SHUTDOWN_COMPLETE
-                //     .read()
-                //     .unwrap()
-                //     .load(Ordering::SeqCst) &&
+                    OUTPUT_RUNNING
+                        .read()
+                        .unwrap()
+                        .load(Ordering::SeqCst) &&
                     !OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE
                         .read()
                         .unwrap()
@@ -424,6 +423,7 @@ async fn sync() {
                 Ingest::flush_buffers(true, &mut output_files);
 
                 offsets_clone.flush();
+                println!("Flushed offsets");
 
                 let _metrics_lock = match METRICS.read() {
                     Ok(m) => {
@@ -645,12 +645,12 @@ async fn sync() {
 
     sync_input_plugin(offsets_clone).await;
 
-    println!("Ingest completed, flushing remianing buffers to output plugin {}", Config::getenv("DATA_OUTPUT_PLUGIN_NAME", ""));
+    println!("Ingest completed, flushing remaining buffers to output plugin {}", Config::getenv("DATA_OUTPUT_PLUGIN_NAME", ""));
 
     {
         LOGGER.write()
             .await
-            .log(LogLevel::Info, format!("Ingest completed, flushing remianing buffers to output plugin {}", Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "")))
+            .log(LogLevel::Info, format!("Ingest completed, flushing remaining buffers to output plugin {}", Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "")))
             .await;
 
         let mut counter_lock = METRICS.write().unwrap();

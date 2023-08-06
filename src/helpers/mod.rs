@@ -190,14 +190,15 @@ impl Helpers {
         }
     }
 
-    pub fn flatten(json: &Value, _metadata: &HashMap<String, Metadata>) -> Result<Value, Box<dyn Error>> {
-        let mut result = Map::new();
-        for (key, value) in json.as_object().ok_or("Invalid JSON object")? {
-            Helpers::flatten_internal(key, value, &mut result);
-        }
-        // Helpers::flatten_internal(json, &mut result, metadata);
-        Ok(Value::Object(result))
-    }
+    // deprecated - we now use the metadata to determine the field names
+    // pub fn flatten(json: &Value, _metadata: &HashMap<String, Metadata>) -> Result<Value, Box<dyn Error>> {
+    //     let mut result = Map::new();
+    //     for (key, value) in json.as_object().ok_or(format!("Invalid JSON object: {}", json))? {
+    //         Helpers::flatten_internal(key, value, &mut result);
+    //     }
+    //     // Helpers::flatten_internal(json, &mut result, metadata);
+    //     Ok(Value::Object(result))
+    // }
 
     pub fn mem_limit_reached() -> bool {
         let mem_limit = env::var("MEM_LIMIT")
@@ -717,83 +718,83 @@ mod flattern_tests {
         assert!(default_metadata.fields.is_empty());
         assert!(default_metadata.date_candidate.is_none());
         assert!(default_metadata.evolution.is_empty());
-        assert!(!default_metadata.enabled);
+        assert!(default_metadata.enabled);
         assert_eq!(default_metadata.out_field_name, "");
         assert_eq!(default_metadata.determined_type, "");
         assert_eq!(default_metadata.determined_type_values, "");
     }
 
-    #[test]
-    fn test_flatten_empty_object() {
-        let json = json!({});
-        let metadata = HashMap::new();
-        let flattened = Helpers::flatten(&json, &metadata);
-        assert_eq!(flattened.unwrap(), json!({}));
-    }
-
-    #[test]
-    fn test_flatten_simple_object() {
-        let json = json!(
-            {
-                "field": "value",
-                "contact": {
-                    "name": "Dave",
-                    "tel": "123"
-                }
-            }
-        );
-        let mut metadata = HashMap::new();
-        metadata.insert(
-            "field".into(),
-            Metadata {
-                count: 1,
-                types: HashMap::new(),
-                parent_type: "".into(),
-                fields: Box::new(HashMap::new()),
-                date_candidate: None,
-                evolution: Box::new(HashMap::new()),
-                enabled: true,
-                out_field_name: "field".into(),
-                determined_type: "".into(),
-                determined_type_values: "".into(),
-            },
-        );
-        metadata.insert(
-            "name".into(),
-            Metadata {
-                count: 1,
-                types: HashMap::new(),
-                parent_type: "".into(),
-                fields: Box::new(HashMap::new()),
-                date_candidate: None,
-                evolution: Box::new(HashMap::new()),
-                enabled: true,
-                out_field_name: "contact_name".into(),
-                determined_type: "".into(),
-                determined_type_values: "".into(),
-            },
-        );
-        metadata.insert(
-            "tel".into(),
-            Metadata {
-                count: 1,
-                types: HashMap::new(),
-                parent_type: "".into(),
-                fields: Box::new(HashMap::new()),
-                date_candidate: None,
-                evolution: Box::new(HashMap::new()),
-                enabled: true,
-                out_field_name: "contact_tel".into(),
-                determined_type: "".into(),
-                determined_type_values: "".into(),
-            },
-        );
-        let flattened = Helpers::flatten(&json, &metadata);
-        assert_eq!(
-            flattened.unwrap(),
-            json!({ "field": "value", "contact_name": "Dave", "contact_tel": "123" })
-        );
-    }
+    // #[test]
+    // fn test_flatten_empty_object() {
+    //     let json = json!({});
+    //     let metadata = HashMap::new();
+    //     let flattened = Helpers::flatten(&json, &metadata);
+    //     assert_eq!(flattened.unwrap(), json!({}));
+    // }
+    //
+    // #[test]
+    // fn test_flatten_simple_object() {
+    //     let json = json!(
+    //         {
+    //             "field": "value",
+    //             "contact": {
+    //                 "name": "Dave",
+    //                 "tel": "123"
+    //             }
+    //         }
+    //     );
+    //     let mut metadata = HashMap::new();
+    //     metadata.insert(
+    //         "field".into(),
+    //         Metadata {
+    //             count: 1,
+    //             types: HashMap::new(),
+    //             parent_type: "".into(),
+    //             fields: Box::new(HashMap::new()),
+    //             date_candidate: None,
+    //             evolution: Box::new(HashMap::new()),
+    //             enabled: true,
+    //             out_field_name: "field".into(),
+    //             determined_type: "".into(),
+    //             determined_type_values: "".into(),
+    //         },
+    //     );
+    //     metadata.insert(
+    //         "name".into(),
+    //         Metadata {
+    //             count: 1,
+    //             types: HashMap::new(),
+    //             parent_type: "".into(),
+    //             fields: Box::new(HashMap::new()),
+    //             date_candidate: None,
+    //             evolution: Box::new(HashMap::new()),
+    //             enabled: true,
+    //             out_field_name: "contact_name".into(),
+    //             determined_type: "".into(),
+    //             determined_type_values: "".into(),
+    //         },
+    //     );
+    //     metadata.insert(
+    //         "tel".into(),
+    //         Metadata {
+    //             count: 1,
+    //             types: HashMap::new(),
+    //             parent_type: "".into(),
+    //             fields: Box::new(HashMap::new()),
+    //             date_candidate: None,
+    //             evolution: Box::new(HashMap::new()),
+    //             enabled: true,
+    //             out_field_name: "contact_tel".into(),
+    //             determined_type: "".into(),
+    //             determined_type_values: "".into(),
+    //         },
+    //     );
+    //     let flattened = Helpers::flatten(&json, &metadata);
+    //     assert_eq!(
+    //         flattened.unwrap(),
+    //         json!({ "field": "value", "contact_name": "Dave", "contact_tel": "123" })
+    //     );
+    // }
 
     // #[test]
     // fn test_flatten() {

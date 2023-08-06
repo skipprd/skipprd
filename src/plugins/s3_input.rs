@@ -8,32 +8,24 @@ use flate2::read::GzDecoder;
 
 use std::io::{Cursor, Read};
 
-use std::future::Future;
 use std::sync::{Arc, RwLock};
 
 use aws_sdk_s3::operation::get_object::{GetObjectError, GetObjectOutput};
 
-use std::sync::atomic::Ordering;
+
 
 use std::time::Duration;
 use std::{fs, thread};
-use aws_sdk_s3::operation::list_objects_v2::{ListObjectsV2Error, ListObjectsV2Output};
-use aws_smithy_http::result::SdkError;
 
 
 use futures::future::join_all;
-use futures::{AsyncReadExt, StreamExt};
+use futures::{StreamExt};
 
-// use crate::thread_pool::ThreadPool;
 
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::ingest_work::{Ingest, IngestBatch};
 
 use tokio::sync::Semaphore;
-// use rusoto_s3::{GetObjectOutput, GetObjectRequest, ListObjectsV2Request, S3Client, S3};
-
-use crate::{RUNNING};
-
 
 pub struct DataSourceS3Plugin {
     // config: HashMap<String, String>,
@@ -271,7 +263,7 @@ impl DataSourceS3Plugin {
                     );
 
                     // let wait_time = backoff_duration.as_secs_f64() * 2.0_f64.powi(retries);
-                    thread::sleep(Duration::from_secs_f64(backoff_duration.as_secs_f64()));
+                    tokio::time::sleep(Duration::from_secs_f64(backoff_duration.as_secs_f64())).await;
 
                     if retries >= max_retries {
                         println!("Max retries reached for object {}", key);
@@ -288,7 +280,6 @@ impl DataSourceS3Plugin {
         object_keys: &Vec<String>,
         offsets_clone: &Arc<Offsets>,
     ) {
-
         let s3_client = self.s3_client.clone();
 
         let semaphore = Arc::new(Semaphore::new(2048));
@@ -304,17 +295,12 @@ impl DataSourceS3Plugin {
                 tokio::spawn(async move {
                     let _permit = semaphore.acquire().await.unwrap();
 
-                    let mut _x_fut = s3_client
-                        .get_object()
-                        .bucket(bucket_name.clone())
-                        .key(urldecode::decode(object_key.to_string()));
-
                     match Self::download_s3_object_with_backoff(
                         &s3_client,
                         &bucket_name,
                         &object_key,
                     )
-                    .await
+                        .await
                     {
                         Ok(response) => Ok(Download {
                             key: object_key,
@@ -329,44 +315,29 @@ impl DataSourceS3Plugin {
 
         let datas: Arc<RwLock<Vec<IngestBatch>>> = Arc::new(RwLock::new(Vec::new()));
 
-        let future_result = tokio::join!(join_all(futures)).0;
+        let future_result = join_all(futures).await;
 
-        // let mut threads: Vec<_> = Vec::new();
-
-        let data_dir = Config::get_data_dir();
-        let _temp_dir = &format!("{}/source_buffer", data_dir);
-
-        let _datas_clone = datas.clone();
-
-        let bucket_name = bucket_name.clone();
-        let offsets_clone = offsets_clone.clone();
         let bucket_name = bucket_name.clone();
         let datas_clone = datas.clone();
 
-        // threads.push(thread::spawn(move || {
+        for future in future_result {
+            match future.unwrap() {
+                Ok(download) => {
 
-        // let mut batch: RwLock<IngestBatch> = RwLock::new(IngestBatch {
-        //     offset_key: OffsetKey {
-        //         namespace: bucket_name.to_string(),
-        //         partition: "".to_string(),
-        //     },
-        //     data: "".to_string(),
-        // });
-        // let mut batch_clone = batch.clone();
+                    // println!("Downloading s3 object");
+                    let mut data = download.response.body;
 
-        tokio::spawn(async move {
-            // for thread in threads {
-            for future in future_result {
-                match future.unwrap() {
-                    Ok(download) => {
-                        // println!("Downloading s3 object");
-                        let mut data = download.response.body;
+                    // convert the ByteStream into a Vec<u8>
+                    let mut data_vec = Vec::new();
+                    while let Some(chunk) = data.next().await {
+                        data_vec.extend_from_slice(&chunk.unwrap());
+                    }
 
-                        // convert the ByteStream into a Vec<u8>
-                        let mut data_vec = Vec::new();
-                        while let Some(chunk) = data.next().await {
-                            data_vec.extend_from_slice(&chunk.unwrap());
-                        }
+                    let datas_clone = datas_clone.clone();
+                    let bucket_name_clone = bucket_name.clone();
+
+                    // Spawning a blocking task to handle CPU-bound decompression
+                    tokio::task::spawn_blocking(move || {
 
                         if download.key.contains(".gz") {
                             // Something that implements `std::io::Read`
@@ -380,7 +351,7 @@ impl DataSourceS3Plugin {
 
                             datas_clone.write().unwrap().push(IngestBatch {
                                 offset_key: OffsetKey {
-                                    namespace: bucket_name.to_string(),
+                                    namespace: bucket_name_clone.to_string(),
                                     partition: download.key,
                                 },
                                 data: decompressed_data,
@@ -390,50 +361,28 @@ impl DataSourceS3Plugin {
 
                             datas_clone.write().unwrap().push(IngestBatch {
                                 offset_key: OffsetKey {
-                                    namespace: bucket_name.to_string(),
+                                    namespace: bucket_name_clone.to_string(),
                                     partition: download.key,
                                 },
                                 data: str_data,
                             });
                         }
-                    }
-                    Err(err) => {
-                        println!("{:?}", err);
-                    }
-                };
-            }
-        })
-        .await
-        .unwrap();
 
-        // datas.lock().unwrap().push(batch.lock().unwrap().clone());
-        let datas = datas.clone();
 
-        // threads.push(thread::spawn(move || {
-            let batch = datas.read().unwrap().to_vec();
-            self.ingest.ingest_file(batch, &offsets_clone);
-        // }));
+                    }).await.unwrap();
 
-        // Wait for all threads to finish, else we will stampead the data source
-        // for handle in threads {
-        //     match handle.join() {
-        //         Ok(_) => {}
-        //         Err(err) => {
-        //             println!("ERROR: {:#?}", err);
-        //         }
-        //     }
-        // }
+                }
+                Err(err) => {
+                    println!("{:?}", err);
+                }
+            };
+        }
 
-        // if !RUNNING.read().unwrap().load(Ordering::SeqCst) {
-        //    // self.ingest.wait_for_completion();
-        //     // drop(self.ingest);
-        //     INPUT_GRACEFUL_SHUTDOWN_COMPLETE
-        //         .write()
-        //         .unwrap()
-        //         .store(true, Ordering::SeqCst);
-        //     // sleep(Duration::from_secs(120));
-        // }
+        // @todo - pass datas to ingest_file without cloning
+        let batch = datas.read().unwrap().clone();
+        self.ingest.ingest_file(batch, &offsets_clone);
     }
+
 }
 
 struct Download {

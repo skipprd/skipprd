@@ -292,7 +292,7 @@ impl Metrics {
 
         match response.error_for_status() {
             Ok(_resp) => {
-                // println!("Status HTTP Success: {:?}", resp);
+                // println!("Status HTTP Success: {:?}", _resp);
                 // println!("Notified Metrics API");
             }
             Err(err) => {

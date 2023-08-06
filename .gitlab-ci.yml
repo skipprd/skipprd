@@ -3,6 +3,7 @@ include:
   - local: '/ci-e2e/event_type_partition_field_and_time_flatten.yml'
   - local: '/ci-e2e/event_types.yml'
   - local: '/ci-e2e/flatten.yml'
+  - local: '/ci-e2e/messy.yml'
   - local: '/ci-e2e/s3_inventory_plugin.yml'
   - local: '/ci-e2e/s3_plugin.yml'
   - local: '/ci-e2e/small_files.yml'

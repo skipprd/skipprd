@@ -147,6 +147,7 @@ impl Ingest {
     pub fn new() -> Ingest {
         // get number of cpus with a minimum of 2
         let num_cpus = num_cpus::get().max(2);
+        println!("Ingesting with {} threads", num_cpus);
         let (tx, rx) = channel();
         let active_count = Arc::new(AtomicUsize::new(0));
         let active_count_clone = active_count.clone();
@@ -287,9 +288,6 @@ impl Ingest {
 
         if !RUNNING.read().unwrap().load(Ordering::SeqCst) {
             self.wait_for_completion();
-            // INPUT_GRACEFUL_SHUTDOWN_COMPLETE.write()
-            //         .unwrap()
-            //         .store(true, Ordering::SeqCst);
             exit(0);
         } else {
 
@@ -596,3 +594,5 @@ impl Ingest {
         file.rotated.is_some()
     }
 }
+
+

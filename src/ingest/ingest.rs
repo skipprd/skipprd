@@ -1,5 +1,5 @@
 use crate::discover::date_formats::DateFormats;
-use crate::discover::{AnalyseSchema, Evolution, Metadata};
+use crate::discover::{AnalyseSchema, Metadata};
 use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
 use arrow::json::reader::ValueIter;
@@ -8,7 +8,7 @@ use serde_json::{Map, Value};
 use std::borrow::BorrowMut;
 use std::collections::HashMap;
 use std::io::{BufReader, Read};
-
+use crate::discover::evolution::Evolution;
 
 
 #[derive(Default)]
@@ -30,7 +30,7 @@ pub fn ingest_buf<R: Read>(reader: &mut BufReader<R>) -> ValueIter<R> {
 pub fn ingest(
     unwrapped_message: &Value,
     metadata: &mut HashMap<String, Metadata>,
-    updatedSchema: &mut String,
+    updated_schema: &mut String,
     flatten: bool,
 ) -> Value {
     // let mut helpers = Helpers { clean_field_cache: Default::default() };
@@ -66,7 +66,7 @@ pub fn ingest(
             None,
             None,
             metadata,
-            updatedSchema,
+            updated_schema,
         );
 
         // println!("Setting message with field: {:?} and value {:?}", field, resolved_value);
@@ -113,15 +113,17 @@ pub fn ingest(
     // let message = message[..];
 
     // println!("{:?}", message);
-    if flatten {
-        message = Helpers::flatten(&message, &metadata).unwrap();
-    }
+    // if flatten {
+    //     message = Helpers::flatten(&message, &metadata).unwrap();
+    // }
     // println!("{:?}", message);
     // exit(0);
     message
 }
 
 /**
+ * @todo - handle return Result<Value, Error>
+
  * @param $dataType string - the expected data type of the field value
  * @param $field string - field name
  * @param $value string -  the actual field value
@@ -141,7 +143,10 @@ pub fn set_value(
     //     None => ""
     // };
 
-    // edgecase seen in cloudcycle cubeevent, probably in a map?
+
+    if value.is_null() {
+        return Value::Null;
+    }
     if value.is_string() && value.as_str().unwrap_or_default().is_empty() {
         return Value::Null;
     }
@@ -420,7 +425,8 @@ pub fn set_value(
                 // println!("data_type is {}", data_type);
 
                 if data_type == "date" {
-                    new_value = set_date(field, value, metadata);
+                    let date_new_value = set_date(field, value, metadata, updated_schema);
+                    new_value = date_new_value.unwrap_or(Value::Null);
                 } else {
                     // let scalar_value = match data_type {
                     //     "string" => value.as_str().map(|s| Value::String(s.to_string())),
@@ -431,6 +437,8 @@ pub fn set_value(
                     //     "boolean" => value.as_bool().map(Value::from),
                     //     _ => None,
                     // };
+
+                    // @todo - handle return Result<Value, Error>
                     let scalar_value = match_scalar_value(field, data_type, value, metadata, updated_schema);
 
                     new_value = scalar_value.unwrap_or(Value::Null);
@@ -522,8 +530,7 @@ fn match_scalar_value(
                         // None => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a string", value)))),
                         None => {
                             // Handle the value error applying the Evolution Strategy
-                            *updated_schema = "yes".to_string();
-                            Evolution::evolve_field(&field.to_string(), value, metadata)
+                            Evolution::evolve_field(&field.to_string(), value, metadata, updated_schema)
                         }
                     }
                 }
@@ -540,8 +547,7 @@ fn match_scalar_value(
                         // None => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not an integer", value)))),
                         None => {
                             // Handle the value error applying the Evolution Strategy
-                            *updated_schema = "yes".to_string();
-                            Evolution::evolve_field(&field.to_string(), value, metadata)
+                            Evolution::evolve_field(&field.to_string(), value, metadata, updated_schema)
                         }
                     }
                 }
@@ -559,8 +565,7 @@ fn match_scalar_value(
                         // None => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a double", value)))),
                         None => {
                             // Handle the value error applying the Evolution Strategy
-                            *updated_schema = "yes".to_string();
-                            Evolution::evolve_field(&field.to_string(), value, metadata)
+                            Evolution::evolve_field(&field.to_string(), value, metadata, updated_schema)
                         }
                     }
                 }
@@ -573,13 +578,19 @@ fn match_scalar_value(
                 Some(v) => Ok(v),
                 None => match value.as_i64().and_then(|v| v.to_string().parse::<bool>().ok()).map(Value::from) {
                     Some(v) => Ok(v),
-                    None => match value.as_f64().and_then(|v| v.to_string().parse::<bool>().ok()).map(Value::from) {
+                    None => match value.as_i64().and_then(|v| {
+                        if v == 0 || v == 1 {
+                            Some((v == 1).to_string().parse::<bool>().ok()).map(Value::from)
+                        } else {
+                            None
+                        }
+                    }) {
                         Some(v) => Ok(v),
                         // None => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a boolean", value)))),
                         None => {
+                            println!("Value {} is not a boolean", value);
                             // Handle the value error applying the Evolution Strategy
-                            *updated_schema = "yes".to_string();
-                            Evolution::evolve_field(&field.to_string(), value, metadata)
+                            Evolution::evolve_field(&field.to_string(), value, metadata, updated_schema)
                         }
                     }
                 }
@@ -599,26 +610,6 @@ pub fn discover_ingest(
     updated_schema: &mut String,
 ) -> String {
     let foo: AnalyseSchema = AnalyseSchema { i: 0 };
-
-    /////
-
-    // let mut jsonValue: Value;
-    //
-    // jsonValue = value.clone();
-    //
-    // if value.as_str().is_some() {
-    //     if serde_json::from_str(value.as_str().unwrap()).unwrap_or(false) {
-    //         if serde_json::from_str(value.as_str().unwrap()).unwrap() {
-    //             jsonValue = serde_json::from_str(value.as_str().unwrap()).unwrap();
-    //         }
-    //     }
-    // }
-
-    // AnalyseSchema::analyse_payload(&mut foo, &mut jsonValue, metadata);
-
-    // AnalyseSchema::analyse_field(&foo, &field.to_string(), &mut jsonValue, metadata);
-
-    ////
 
     if value.is_null() || (value.is_string() && value.as_str().unwrap_or_default().is_empty()) {
         return "".to_string();
@@ -658,9 +649,14 @@ pub fn discover_ingest(
     discoverd_data_type.clone()
 }
 
-pub fn set_date(field: &str, value: &Value, metadata: &HashMap<String, Metadata>) -> Value {
+pub fn set_date(
+    field: &str,
+    value: &Value,
+    metadata: &mut HashMap<String, Metadata>,
+    mut updated_schema: &mut String
+) -> Result<Value, Box<dyn std::error::Error>> {
     // Hive Timestamp doesn't support string dates
-    match value.as_str() {
+    match value.clone().as_str() {
         Some(val) => {
             let fmt = &metadata
                 .get(field)
@@ -673,19 +669,21 @@ pub fn set_date(field: &str, value: &Value, metadata: &HashMap<String, Metadata>
                 Ok(f) => match NaiveDateTime::parse_from_str(val, f.as_str()) {
                     Ok(date) => {
                         let millis = date.timestamp() * 1000;
-                        millis.into()
+                        Ok(millis.into())
                     }
-                    Err(_) => Value::Null,
+                    Err(_) => Ok(Value::Null),
                 },
                 Err(err) => {
                     println!("Error date: {}", err);
-                    Value::Null
+                    Ok(Value::Null)
                 }
             }
         }
         None => {
             // println!("Could not format date to int using format");
-            Value::Null
+            // Handle the value error applying the Evolution Strategy
+            Evolution::evolve_field(&field.to_string(), value, metadata, updated_schema)
+            // Value::Null
         }
     }
 }
@@ -737,17 +735,20 @@ mod tests {
         let format_name = foo.is_valid_date(date_str).unwrap();
         let format = DateFormats::from_str(format_name).unwrap().as_str();
 
-        let meta = generate_metadata(field, format);
+        let mut meta = generate_metadata(field, format);
 
         let value = Value::String(String::from(date_str));
 
-        let result = set_date(field, &value, &meta);
+        let mut updated_schema = "no".to_string();
+
+        let result = set_date(field, &value, &mut meta, &mut updated_schema);
 
         let expected_date = NaiveDateTime::parse_from_str(date_str, format).unwrap();
         let expected_millis =
             Value::Number(serde_json::Number::from(expected_date.timestamp() * 1000));
 
-        assert_eq!(result, expected_millis);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), expected_millis);
     }
 
     #[test]
@@ -760,17 +761,20 @@ mod tests {
         let format_name = foo.is_valid_date(date_str).unwrap();
         let format = DateFormats::from_str(format_name).unwrap().as_str();
 
-        let meta = generate_metadata(field, format);
+        let mut meta = generate_metadata(field, format);
 
         let value = Value::String(String::from(date_str));
 
-        let result = set_date(field, &value, &meta);
+        let mut updated_schema = "no".to_string();
+
+        let result = set_date(field, &value, &mut meta, &mut updated_schema);
 
         let expected_date = NaiveDateTime::parse_from_str(date_str, format).unwrap();
         let expected_millis =
             Value::Number(serde_json::Number::from(expected_date.timestamp() * 1000));
 
-        assert_eq!(result, expected_millis);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), expected_millis);
     }
 }
 
@@ -878,8 +882,7 @@ mod test_discover_on_ingest {
 
         let mut metadata = HashMap::new();
 
-        let mut newMeta =
-            AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1), &mut metadata).unwrap();
+        AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1), &mut metadata);
 
         let str = r#"{"rider_id":"10e974bf-4a43-305a-9e39-1636c43cb22a","bike_id":"8b86f753-05f8-3254-aba6-739188a3c0b6","isbn":"9407496597","trip":{"start_temprature":0,"end_temprature":2},"last_crank":[2,15,33,45,56,57,47,36,19,5],"crank_torques":[[2,15,33,45,56,57,47,36,19,5],[1,13,33,48,56,58,45,35,15,6]],"hardware":{"manufacturer":"Beier, Emmerich and Rutherford","model":"synergize ubiquitous e-commerce","maintenance":{"last_rebuild":"20\/04\/2010","last_service":"12\/07\/1973"}},"metadata":{"rcvd_time":1615474895,"sent_time":1615474930,"prcd_micro_time":1615474853.999185,"tags":[{"name":"type","value":"trip"},{"name":"auto","value":false}]}}"#;
 
@@ -890,7 +893,7 @@ mod test_discover_on_ingest {
         // NOTE: This schema is assert tested in discovery
         let ingestValue = ingest(
             records.first().unwrap(),
-            &mut newMeta.get_mut("").unwrap().fields,
+            &mut metadata.get_mut("default").unwrap().fields,
             &mut updatedSchema,
             false,
         );
