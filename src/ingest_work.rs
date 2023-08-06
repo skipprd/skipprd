@@ -260,11 +260,11 @@ impl Ingest {
                         );
                         let old_path = format!("{}", path.display().to_string());
 
-                        // println!(
-                        //     "Flushing orphaned ingest buffer: {} to output: {}",
-                        //     path.display().to_string(),
-                        //     new_filename
-                        // );
+                        println!(
+                            "Force flushing ingest buffer: {} to output: {}",
+                            path.display().to_string(),
+                            new_filename
+                        );
 
                         match fs::rename(&old_path, &new_filename) {
                             Ok(_) => {}
@@ -427,6 +427,7 @@ impl Ingest {
                         },
                         Err(err) => {
                             let mut metadata = METADATA.write().unwrap();
+
                             // println!("Falling back to slow path due to: {}", err);
                             let msg = ingest(
                                 &record,
@@ -544,6 +545,18 @@ impl Ingest {
 
         buffers.clear_all();
 
+        if *updated_schema_clone.lock().unwrap() == "yes".to_string() {
+            *updated_schema_clone.lock().unwrap() = "no".to_string();
+
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    Config::set_config(&METADATA.read().unwrap(), true).await;
+                });
+        }
+
         let mut counter_lock = METRICS.write().unwrap();
         counter_lock.deadletters_total += d;
         counter_lock.ingeted_slow_total += x;
@@ -563,17 +576,7 @@ impl Ingest {
         // };
         // println!("Batch Bytes: {}", rounded_bytes);
 
-        if *updated_schema_clone.lock().unwrap() == "yes".to_string() {
-            *updated_schema_clone.lock().unwrap() = "no".to_string();
 
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(async {
-                    Config::set_config(&METADATA.read().unwrap(), true).await;
-                });
-        }
     }
 
     fn is_file_size_exceeded(file: &OutputFile) -> bool {
