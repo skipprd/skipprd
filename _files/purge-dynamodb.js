@@ -14,6 +14,9 @@ const params = {
 
 console.log('Scanning DynamoDB table.');
 
+let deleteCount = 0;
+let start = new Date().getTime();
+
 docClient.scan(params, function onScan(err, data) {
     if (err) {
         console.error('Unable to scan the table:', JSON.stringify(err, null, 2));
@@ -21,7 +24,7 @@ docClient.scan(params, function onScan(err, data) {
         console.log('Scan succeeded.');
 
         data.Items.forEach((item) => {
-            console.log('Deleting item:', item);
+            // console.log('Deleting item:', item);
 
             const deleteParams = {
                 TableName: params.TableName,
@@ -32,10 +35,18 @@ docClient.scan(params, function onScan(err, data) {
             };
 
             docClient.delete(deleteParams, function(err, data) {
-                if (err) console.error('Unable to delete item:', JSON.stringify(err, null, 2));
-                else console.log('Delete succeeded.');
+                if (err) {
+                    console.error('Unable to delete item:', JSON.stringify(err, null, 2));
+                } else {
+                    deleteCount++;
+                    // console.log('Delete succeeded.');
+                }
             });
         });
+
+        if ( new Date().getTime() - start > 1000 * 15) {
+            console.log('Deleted ' + deleteCount + ' items in ' + (new Date().getTime() - start) + 'ms');
+        }
 
         // Continue scanning if we have more items
         if (typeof data.LastEvaluatedKey !== 'undefined') {
