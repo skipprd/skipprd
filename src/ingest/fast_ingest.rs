@@ -44,14 +44,14 @@ pub fn fast_path_ingest(
             message[meta_data.out_field_name.clone()] = resolved_value;
         }
     }
-    // if flatten {
-    //     message = match Helpers::flatten(&message, &metadata) {
-    //         Ok(m) => m,
-    //         Err(e) => {
-    //             return Err(e);
-    //         }
-    //     };
-    // }
+    if flatten {
+        message = match Helpers::flatten(&message, &metadata) {
+            Ok(m) => m,
+            Err(e) => {
+                return Err(e);
+            }
+        };
+    }
     Ok(message)
 }
 

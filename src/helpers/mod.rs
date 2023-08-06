@@ -191,14 +191,14 @@ impl Helpers {
     }
 
     // deprecated - we now use the metadata to determine the field names
-    // pub fn flatten(json: &Value, _metadata: &HashMap<String, Metadata>) -> Result<Value, Box<dyn Error>> {
-    //     let mut result = Map::new();
-    //     for (key, value) in json.as_object().ok_or(format!("Invalid JSON object: {}", json))? {
-    //         Helpers::flatten_internal(key, value, &mut result);
-    //     }
-    //     // Helpers::flatten_internal(json, &mut result, metadata);
-    //     Ok(Value::Object(result))
-    // }
+    pub fn flatten(json: &Value, _metadata: &HashMap<String, Metadata>) -> Result<Value, Box<dyn Error>> {
+        let mut result = Map::new();
+        for (key, value) in json.as_object().ok_or(format!("Invalid JSON object: {}", json))? {
+            Helpers::flatten_internal(key, value, &mut result);
+        }
+        // Helpers::flatten_internal(json, &mut result, metadata);
+        Ok(Value::Object(result))
+    }
 
     pub fn mem_limit_reached() -> bool {
         let mem_limit = env::var("MEM_LIMIT")

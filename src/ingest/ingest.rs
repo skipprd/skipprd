@@ -113,9 +113,9 @@ pub fn ingest(
     // let message = message[..];
 
     // println!("{:?}", message);
-    // if flatten {
-    //     message = Helpers::flatten(&message, &metadata).unwrap();
-    // }
+    if flatten {
+        message = Helpers::flatten(&message, &metadata).unwrap();
+    }
     // println!("{:?}", message);
     // exit(0);
     message
