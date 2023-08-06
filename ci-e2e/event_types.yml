@@ -1,4 +1,5 @@
 event_types:
+  tags: [ saas-linux-large-amd64 ]
   extends: .e2e
   when: delayed
   start_in: 10 seconds

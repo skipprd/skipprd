@@ -1,4 +1,5 @@
 time_buckets_date:
+  tags: [ saas-linux-large-amd64 ]
   image: docker:latest
   extends: .e2e
   when: delayed

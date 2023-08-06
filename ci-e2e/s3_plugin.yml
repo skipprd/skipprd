@@ -1,4 +1,5 @@
 s3_plugin:
+  tags: [ saas-linux-large-amd64 ]
   extends: .e2e
   tags: [ saas-linux-large-amd64 ]
   script:

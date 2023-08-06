@@ -1,0 +1,58 @@
+name: Rust Build Release
+description: 'Rust release'
+inputs:
+  rust-version:
+    description: 'version of rust to install (e.g. stable)'
+    required: true
+    default: 'stable'
+  architecture_name:
+    description: 'macos_arm64, macos-x86, linux_x86'
+    required: true
+    default: 'stable'
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/checkout@v3
+      with:
+        submodules: true
+    - name: Setup Rust toolchain
+      shell: bash
+      run: |
+        rustup toolchain install stable
+        rustup default stable
+        rustup component add rustfmt
+    - name: Configure version if tag commit
+      shell: bash
+      if: startsWith(github.ref, 'refs/tags/')
+      run: |
+        mv Cargo.toml Cargo.toml.orig
+        sed "s/0\\.0\\.0-git/${{ github.ref_name }}/" Cargo.toml.orig > Cargo.toml
+        mv Cargo.lock Cargo.lock.orig
+        sed "s/0\\.0\\.0-git/${{ github.ref_name }}/" Cargo.lock.orig > Cargo.lock
+    - name: Build release
+      shell: bash
+      run: |
+        cargo build --release
+        mkdir -p skippr-${{ inputs.architecture_name }}
+        cp target/release/skippr skippr-${{ inputs.architecture_name }}/skippr
+        ls -la skippr-${{ inputs.architecture_name }}
+      env:
+        # do not produce debug symbols to keep memory usage down
+        RUSTFLAGS: "-C debuginfo=0"
+#    - name: Verify release
+#      shell: bash
+#      run: |
+#        AWS_DEFAULT_REGION=us-east-1 AWS_ACCESS_KEY_ID=${{secrets.AWS_ACCESS_KEY_ID}} AWS_SECRET_ACCESS_KEY=${{secrets.AWS_SECRET_ACCESS_KEY}} DATA_SOURCE_PLUGIN_NAME=s3 DATA_SOURCE_S3_BUCKET=skippr-e2e-sample-data DATA_SOURCE_S3_PREFIX=bike-hire DATA_SOURCE_BATCH_SIZE_BYTES=2048000 PIPELINE_NAME=bikehire SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg DATA_DIR=./data APP_ENV=test target/release/skippr sync
+#        target/release/skippr query 'SELECT * FROM bikehire LIMIT 10'
+#        target/release/skippr query 'SELECT * FROM bikehire LIMIT 10' | wc -l
+#        if [ $(target/release/skippr query 'SELECT * FROM bikehire LIMIT 10' | wc -l) -ne 10 ]; then echo "Query did not return 10 rows"; exit 1; fi
+#
+#        target/release/skippr query 'SELECT COUNT(*) FROM bikehire'
+#        target/release/skippr query 'SELECT COUNT(*) FROM bikehire' | tail -n 1
+#        if [ $(target/release/skippr query 'SELECT COUNT(*) FROM bikehire' | tail -n 1) -ne 5100000 ]; then echo "Query did not return 5100000 rows"; exit 1; fi
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: skippr-${{ inputs.architecture_name }}
+        path: skippr-${{ inputs.architecture_name }}
+        retention-days: 30

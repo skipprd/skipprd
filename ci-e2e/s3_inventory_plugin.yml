@@ -1,4 +1,5 @@
 s3_inventory_plugin:
+  tags: [ saas-linux-large-amd64 ]
   image: docker:latest
   extends: .e2e
   when: delayed

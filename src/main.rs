@@ -60,6 +60,8 @@ use signal_hook::iterator::Signals;
 
 use std::panic;
 use std::process::abort;
+use datafusion::config::ConfigOptions;
+use datafusion::physical_plan::Statistics;
 use futures::TryFutureExt;
 
 use once_cell::sync::Lazy;
@@ -95,6 +97,7 @@ use crate::plugins::s3_output::DataOutputS3Plugin;
 use crate::plugins::stdin_input::DataSourceStdinPlugin;
 use crate::plugins::stdout_output::DataOutputStdoutPlugin;
 
+use datafusion::prelude::*;
 
 
 pub static RUNNING: Lazy<RwLock<AtomicBool>> = Lazy::new(|| RwLock::new(AtomicBool::new(true)));
@@ -110,8 +113,6 @@ pub static METADATA: Lazy<Arc<RwLock<HashMap<String, Metadata>>>> = Lazy::new(||
 #[tokio::main]
 async fn main() {
 
-    Config::init().await;
-
     // let now = Instant::now();
 
     // lazy_static! {
@@ -125,13 +126,96 @@ async fn main() {
     match cli.mode {
         Mode::Sync => {
             // println!("Command sync");
+            Config::init().await;
             sync().await;
         }
         Mode::Discover => {
             // println!("Command discover");
+            Config::init().await;
             discover().await;
         }
+        Mode::Query => {
+            // println!("Command query");
+
+            // pass the query cli arg to the query function query()
+            query(&cli.query.unwrap()).await;
+
+
+        }
     }
+}
+
+async fn query(sql: &str) {
+    // register the table
+    // let mut options = ConfigOptions::default();
+    // options.catalog.information_schema = true;
+
+    let mut session_config = SessionConfig::new();
+    session_config = session_config.set("datafusion.catalog.information_schema", "true".into());
+    session_config = session_config.set("datafusion.catalog.default_catalog", "skippr".into());
+    session_config = session_config.set("datafusion.execution.collect_statistics", "true".into());
+
+    let ctx = SessionContext::with_config(session_config);
+
+    let table_name = sql.to_lowercase().split("from").collect::<Vec<&str>>()[1].split(" ").collect::<Vec<&str>>()[1].trim().replace(";", "");
+
+    let workspace = Config::get_workspace_name();
+    Config::setenv("PIPELINE_NAME", &table_name);
+    let full_table_name = format!("{}.{}", workspace, table_name);
+
+    // @todo - check dir exists for provided table name, otherwise we end up creating erroneous dirs
+
+
+    // itterate over data dir output buffers
+    let data_dir = Config::get_data_dir();
+    let output_dir = format!("{}/output_buffer", data_dir);
+
+    // println!("Loading data dir: {}", output_dir);
+
+    ctx.register_parquet(&table_name, &output_dir, ParquetReadOptions::default()).await.unwrap();
+
+    // println!("Executing query: {}", sql);
+
+    let df = match ctx.sql(sql).await {
+        Ok(df) => df,
+        Err(e) => {
+            println!("Error: {}", e);
+            process::exit(1);
+        }
+    };
+
+    // create a plan to run a SQL query
+    // let df = ctx.sql("SELECT \"A\", MIN(b) FROM example WHERE \"A\" <= c GROUP BY \"A\" LIMIT 100").await?;
+
+    // execute and print results
+    // df.clone().write_csv("/tmp/output.csv").await.unwrap();
+
+
+
+    // let stats = df.clone().explain(true, true).unwrap();
+    // stats.select_columns(&["Duration", "Output Rows"]).unwrap().show().await.unwrap();
+
+    let df_clone = df.clone();
+
+    match df_clone.show().await {
+        Ok(res) => {
+            res
+        }
+        Err(e) => {
+            println!("Error: {}", e);
+            process::exit(1);
+        }
+    }
+
+    // let df_clone = df.clone();
+    // let df_stats = df_clone.explain(true, true).unwrap();
+    // println!("Stats: {}", df_stats.show().await.unwrap());
+
+    // let df_clone = df.clone();
+    // let statistics: Statistics = df_clone.create_physical_plan().await.unwrap().statistics();
+    // println!("Statistics: {:?}", statistics);
+
+
 }
 
 async fn discover() {

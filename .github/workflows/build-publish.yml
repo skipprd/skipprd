@@ -1,0 +1,169 @@
+name: Rust CI/CD Pipeline
+
+concurrency:
+  group: ${{ github.repository }}-${{ github.head_ref || github.sha }}-${{ github.workflow }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches:
+      - master
+      - 'v*'
+    tags:
+      - '*'
+
+env:
+  COMPONENT_NAME: skippr
+  CONTAINER_IMAGE: skippr:v${{ github.ref_name }}
+  CONTAINER_LATEST_IMAGE: skippr:latest
+  DOCKER_HUB_REPO: skippr
+  ECR_HOST: 536671797322.dkr.ecr.us-east-1.amazonaws.com
+  AWS_ECR_REGISTRY: $ECR_HOST/$COMPONENT_NAME
+#  CARGO_HOME: "${{ github.workspace }}/cargo"
+#  GITHUB_REF: ${{ startsWith(github.ref, 'refs/tags/') && replace(github.ref, 'refs/tags/', '') || '1.1.1' }}
+
+jobs:
+  # Check crate compiles
+#  cargo_check:
+#    name: cargo check
+#    runs-on: ubuntu-latest
+#    container:
+#      image: amd64/rust
+#    steps:
+#      - uses: actions/checkout@v3
+#      - name: Cache Cargo
+#        uses: actions/cache@v3
+#        with:
+#          # these represent dependencies downloaded by cargo
+#          # and thus do not depend on the OS, arch nor rust version.
+#          path: /github/home/.cargo
+#          key: cargo-cache-
+#      - name: Setup Rust toolchain
+#        uses: ./.github/actions/setup-builder
+#        with:
+#          rust-version: stable
+#
+#      - name: Check workspace in debug mode
+#        run: cargo check
+
+  macos_arm64:
+#    needs: cargo_check
+    name: cargo build (mac arm64)
+    runs-on:
+      - macOS
+      - self-hosted
+      - ARM64 #MacBook-Pro-3
+    steps:
+      - uses: actions/checkout@v3
+      - name: Build macOS arm64 release
+        uses: ./.github/actions/rust-build-release
+        with:
+          rust-version: stable
+          architecture_name: macos_arm64
+
+  macos_x86:
+#    needs: cargo_check
+    name: cargo build (mac x86)
+    runs-on:
+      - macOS
+      - self-hosted
+      - X64 #MacBook-Pro-4
+    steps:
+      - uses: actions/checkout@v3
+      - name: Build macOS x86 release
+        uses: ./.github/actions/rust-build-release
+        with:
+          rust-version: stable
+          architecture_name: macos_x86
+
+  linux_x86:
+#    needs: cargo_check
+    name: cargo build (linux x86)
+    runs-on:
+      - ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Build linux x86 release
+        uses: ./.github/actions/rust-build-release
+        with:
+          rust-version: stable
+          architecture_name: linux_x86
+
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs:
+      - macos_arm64
+      - macos_x86
+      - linux_x86
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v3
+
+      - name: Download Artifacts
+        uses: actions/download-artifact@v3
+
+      - name: Compress Release Artifacts
+        run: |
+          ls -la .
+          tar -czvf skippr-macos_arm64.tar.gz skippr-macos_arm64/
+          tar -czvf skippr-macos_x86.tar.gz skippr-macos_x86/
+          tar -czvf skippr-linux_x86.tar.gz skippr-linux_x86/
+
+      - name: Release builds to GitHub
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            install.sh
+            ./skippr-macos_arm64.tar.gz
+            ./skippr-macos_x86.tar.gz
+            ./skippr-linux_x86.tar.gz
+          tag_name: ${{ github.ref_name }}
+          body: ${{ github.event.head_commit.message }}
+          body_path: CHANGELOG.txt
+          draft: false
+          prerelease: false
+          #          target_commitish: ${{ github.sha }}
+          name: Release ${{ github.ref_name }}
+          token: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
+          repository: skipprd/skipprd
+          fail_on_unmatched_files: true
+
+  dockerize:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs:
+#      - macos_arm64
+#      - macos_x86
+      - linux_x86
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v3
+
+      - name: Download Artifacts
+        uses: actions/download-artifact@v3
+
+      - name: Docker Login
+        uses: docker/login-action@v2
+        with:
+          username: skippr
+          password: ${{ secrets.DOCKER_HUB_PASS }}
+
+      - name: ls artifacts
+        run: |
+          ls -la .
+
+      - name: Build and push Docker image
+        run: |
+          docker build -t ${{ env.CONTAINER_IMAGE }} -f Dockerfile .
+          
+          docker tag ${{ env.CONTAINER_IMAGE }} ${{ env.DOCKER_HUB_REPO }}/${{ env.CONTAINER_IMAGE }}
+          docker push ${{ env.DOCKER_HUB_REPO }}/${{ env.CONTAINER_IMAGE }}
+
+#          docker tag ${{ env.CONTAINER_IMAGE }} ${{ env.DOCKER_HUB_REPO }}/${{ env.CONTAINER_LATEST_IMAGE }}
+#          docker tag ${{ env.CONTAINER_IMAGE }} ${{ env.DOCKER_HUB_REPO }}/skippr:stable
+          
+#          docker push ${{ env.DOCKER_HUB_REPO }}/${{ env.CONTAINER_LATEST_IMAGE }}
+
+#          docker push ${{ env.DOCKER_HUB_REPO }}/skippr:stable

@@ -1,11 +1,11 @@
 # Use the official Rust image as Base
-FROM rust:latest as builder
+#FROM rust:latest as builder
 
 # Set the working directory in the Docker image
-WORKDIR /usr/src/skipprd
+#WORKDIR /usr/src/skipprd
 
 # Copy the Rust project to the image
-COPY . .
+#COPY . .
 
 # Download the cross-compilation tools
 #RUN rustup target add x86_64-unknown-linux-gnu
@@ -15,7 +15,7 @@ COPY . .
 #ENV RUSTFLAGS="-C target-cpu=native"
 
 # Build the Rust project
-RUN cargo build --release
+#RUN cargo build --release
 #RUN cargo build --target x86_64-unknown-linux-gnu
 
 # Set the start command to run your binary
@@ -24,5 +24,6 @@ RUN cargo build --release
 
 FROM debian:bullseye-20230522-slim
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /usr/src/skipprd/target/release/skipprd /usr/bin/skipprd
-CMD ["skipprd", "sync"]
+COPY skipprd-linux_x86 /usr/bin/skipprd
+ENTRYPOINT ["skipprd"]
+CMD ["sync"]
