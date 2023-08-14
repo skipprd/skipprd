@@ -2,8 +2,8 @@
 
 [![Rust CI/CD Pipeline](https://github.com/skipprd/skipprd-private/actions/workflows/build-publish.yml/badge.svg?branch=master)](https://github.com/skipprd/skipprd-private/actions/workflows/build-publish.yml)
 
-![Arrow Logo]([URL_TO_ARROW_LOGO](https://github.com/skipprd/skipprd-private/blob/master/_files/arrow-logo.png) "Arrow Logo")
-![Rust Logo]([URL_TO_RUST_LOGO](https://github.com/skipprd/skipprd-private/blob/master/_files/rust-logo.png) "Rust Logo")
+![Arrow Logo](https://github.com/skipprd/skipprd-private/blob/master/_files/arrow-logo.png "Arrow Logo")
+![Rust Logo](https://github.com/skipprd/skipprd-private/blob/master/_files/rust-logo.png "Rust Logo")
 
 
 ### Hi from Skippr 👋
