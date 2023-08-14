@@ -1,9 +1,10 @@
-[![Rust CI/CD Pipeline](https://github.com/skipprd/skipprd-private/actions/workflows/build-publish.yml/badge.svg?branch=master&event=release)](https://github.com/skipprd/skipprd-private/actions/workflows/build-publish.yml)
-
 [![Rust CI/CD Pipeline](https://github.com/skipprd/skipprd-private/actions/workflows/build-publish.yml/badge.svg?branch=master)](https://github.com/skipprd/skipprd-private/actions/workflows/build-publish.yml)
+[![Release](https://github.com/skipprd/skipprd-private/actions/workflows/build-publish.yml/badge.svg?branch=master&event=release)](https://github.com/skipprd/skipprd-private/actions/workflows/build-publish.yml)
+[![Twitter Follow](https://img.shields.io/twitter/follow/apachearrow.svg?style=social&label=Follow)]([https://twitter.com/apachearrow](https://twitter.com/skipprdata))
 
 ![Arrow Logo](https://github.com/skipprd/skipprd-private/blob/master/_files/arrow-logo.png "Arrow Logo")
 ![Rust Logo](https://github.com/skipprd/skipprd-private/blob/master/_files/rust-logo.png "Rust Logo")
+
 
 
 ### Hi from Skippr 👋
