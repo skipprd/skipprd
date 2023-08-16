@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -e
 
@@ -18,16 +18,17 @@ DEST="/usr/local/bin"
 
 # Define the binary asset pattern based on OS and Architecture
 if [[ "$OS" == "Darwin" && "$ARCH" == "arm64" ]]; then
-  ASSET_PATTERN="skippr-macos_arm64.tar.gz"
+  ASSET_PATTERN="macos_arm64.tar.gz"
 elif [[ "$OS" == "Darwin" ]]; then
-  ASSET_PATTERN="skippr-macos_x86.tar.gz"
+  ASSET_PATTERN="macos_x86.tar.gz"
 elif [[ "$OS" == "Linux" ]]; then
-  ASSET_PATTERN="skippr-linux_x86.tar.gz"
+  ASSET_PATTERN="linux_x86.tar.gz"
 else
   echo "Unsupported OS or Architecture. Exiting."
   exit 1
 fi
 
+echo "looking for $ASSET_PATTERN in https://api.github.com/repos/$OWNER/$REPO/releases/latest"
 # Get the latest release download URL for the binary based on the defined pattern.
 DOWNLOAD_URL=$(curl -s "https://api.github.com/repos/$OWNER/$REPO/releases/latest" | grep "browser_download_url.*$ASSET_PATTERN" | cut -d "\"" -f 4)
 
