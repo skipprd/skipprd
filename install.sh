@@ -18,11 +18,11 @@ DEST="/usr/local/bin"
 
 # Define the binary asset pattern based on OS and Architecture
 if [[ "$OS" == "Darwin" && "$ARCH" == "arm64" ]]; then
-  ASSET_PATTERN="macos_arm64.tar.gz"
+  ASSET_PATTERN="skippr-macos_arm64.tar.gz"
 elif [[ "$OS" == "Darwin" ]]; then
-  ASSET_PATTERN="macos_x86.tar.gz"
+  ASSET_PATTERN="skippr-macos_x86.tar.gz"
 elif [[ "$OS" == "Linux" ]]; then
-  ASSET_PATTERN="linux_x86.tar.gz"
+  ASSET_PATTERN="skippr-linux_x86.tar.gz"
 else
   echo "Unsupported OS or Architecture. Exiting."
   exit 1
