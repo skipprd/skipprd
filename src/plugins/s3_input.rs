@@ -15,7 +15,7 @@ use aws_sdk_s3::operation::get_object::{GetObjectError, GetObjectOutput};
 
 
 use std::time::Duration;
-use std::{fs, thread};
+use std::{fs};
 
 
 use futures::future::join_all;
@@ -54,7 +54,6 @@ impl DataSourceS3Plugin {
 
         DataSourceS3Plugin {
             s3_client,
-            // s3_client_rusoto: S3Client::new(Region::default()),
             ingest: Ingest::new(),
             source_bucket: String::new(),
             temp_dir: temp_dir.to_string(),

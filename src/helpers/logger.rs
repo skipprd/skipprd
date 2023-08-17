@@ -5,7 +5,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
-use crate::helpers::license::TENANT_ID;
+use crate::helpers::license::{HAS_LICENSE, TENANT_ID};
 use serde_derive::Serialize;
 use std::fmt;
 use std::sync::Arc;
@@ -92,7 +92,14 @@ impl Logger {
         } else {
             String::from("https://metrics.api.skippr.io")
         };
-        let token = Config::getenv("SKIPPR_API_TOKEN", "");
+
+        let mut default_api_key = "";
+
+        if !*HAS_LICENSE.read().unwrap() {
+            default_api_key = "XxIVftJXN4LF6ARrRqJvKAsv30vhIZHR"
+        }
+
+        let token = Config::getenv("SKIPPR_API_TOKEN", default_api_key);
 
         let mut headers = HeaderMap::new();
         let auth_header = HeaderName::from_static("x-api-key");

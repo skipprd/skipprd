@@ -988,15 +988,15 @@ pub async fn sync_input_plugin(offsets_clone: Arc<Offsets>) {
                 .await;
         }
         "s3" => {
-            if *HAS_LICENSE.read().unwrap() {
+            // if *HAS_LICENSE.read().unwrap() {
                 let mut input = DataSourceS3Plugin::new().await;
                 input.sync(
                     offsets_clone,
                 )
                     .await;
-            } else {
-                println!("No license found for S3 input plugin. Visit https://skippr.io to get a license.");
-            }
+            // } else {
+            //     println!("No license found for S3 input plugin. Visit https://skippr.io to get a license.");
+            // }
 
         }
         "s3_inventory" => {
