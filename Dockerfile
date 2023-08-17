@@ -22,7 +22,7 @@
 #CMD ["./target/x86_64-unknown-linux-gnu/debug/skipprd"]
 #CMD ["./target/release/skipprd"]
 
-FROM debian:bullseye-20230522-slim
+FROM ubuntu:latest
 RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*
 #COPY skipprd-linux_x86 /usr/bin/skipprd
 RUN curl -sL "https://raw.githubusercontent.com/skipprd/skipprd/main/install.sh" | bash

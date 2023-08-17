@@ -170,7 +170,7 @@ async fn query(sql: &str) {
     let data_dir = Config::get_data_dir();
     let output_dir = format!("{}/output_buffer", data_dir);
 
-    // println!("Loading data dir: {}", output_dir);
+    println!("Querying data dir: {}", output_dir);
 
     ctx.register_parquet(&table_name, &output_dir, ParquetReadOptions::default()).await.unwrap();
 
