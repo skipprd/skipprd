@@ -161,9 +161,8 @@ jobs:
           docker tag ${{ env.CONTAINER_IMAGE }} ${{ env.DOCKER_HUB_REPO }}/${{ env.CONTAINER_IMAGE }}
           docker push ${{ env.DOCKER_HUB_REPO }}/${{ env.CONTAINER_IMAGE }}
 
-#          docker tag ${{ env.CONTAINER_IMAGE }} ${{ env.DOCKER_HUB_REPO }}/${{ env.CONTAINER_LATEST_IMAGE }}
-#          docker tag ${{ env.CONTAINER_IMAGE }} ${{ env.DOCKER_HUB_REPO }}/skippr:stable
-          
-#          docker push ${{ env.DOCKER_HUB_REPO }}/${{ env.CONTAINER_LATEST_IMAGE }}
+          docker tag ${{ env.CONTAINER_IMAGE }} ${{ env.DOCKER_HUB_REPO }}/${{ env.CONTAINER_LATEST_IMAGE }}
+          docker push ${{ env.DOCKER_HUB_REPO }}/${{ env.CONTAINER_LATEST_IMAGE }}
 
-#          docker push ${{ env.DOCKER_HUB_REPO }}/skippr:stable
+          docker tag ${{ env.CONTAINER_IMAGE }} ${{ env.DOCKER_HUB_REPO }}/skippr:stable
+          docker push ${{ env.DOCKER_HUB_REPO }}/skippr:stable
