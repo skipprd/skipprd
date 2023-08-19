@@ -101,8 +101,14 @@ impl LicenseChecker {
                 Ok(())
             }
             _false => {
-                // Free local developer version, visit https://skippr.io to get a license
-                println!("Free local developer version. Visit https://skippr.io/upgrade for additional plugins, schema evolution and metadata API.");
+                // ASCI art generated from http://patorjk.com/software/taag/#p=display&f=ANSI%20Shadow&t=Skippr
+
+                println!("Free local developer version. Visit https://skippr.io/pricing for additional plugins, schema evolution and metadata API.");
+                println!("");
+                println!("By using this software, you agree to the terms of the End User License Agreement (EULA) available at https://skippr.io/terms/eula");
+                println!("");
+
+
                 Ok(())
             }
         }
