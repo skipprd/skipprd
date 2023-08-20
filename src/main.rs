@@ -135,13 +135,14 @@ async fn main() {
             discover().await;
         }
         Mode::Query => {
-            // println!("Command query");
 
-            // pass the query cli arg to the query function query()
+            // Track and report query runtime in seconds
+            let now = Instant::now();
             query(&cli.query.unwrap()).await;
-
-
+            let elapsed = now.elapsed();
+            println!("Query time: {} seconds", elapsed.as_secs());
         }
+
     }
 }
 
