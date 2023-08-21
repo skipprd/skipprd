@@ -613,8 +613,10 @@ pub fn discover_ingest(
 
     let mut discoverd_data_type = &"string".to_string().clone();
 
+    // For null values, we need to create a new field and default to string
+    // This is to avoid constantly trying to discover the field and slowing ingestion
+    // One could argue we should accept the speed penalty and simply ignore the field till we discover a type (if ever)
     if value.is_null() || (value.is_string() && value.as_str().unwrap_or_default().is_empty()) {
-        // insert new metadata entry
 
         let mut new_field: Metadata = Metadata::new().unwrap();
         new_field.determined_type = "string".to_string();
