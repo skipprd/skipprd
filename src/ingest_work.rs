@@ -358,10 +358,12 @@ impl Ingest {
             let has_offsets =
                 offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Closed, 0);
 
-            // let records: Vec<Value> = SerdeJson::deserialize(&ingest_batch.data);
-            // println!("Processing batch of {} events", ingest_batch.data.len());
-            let records: Vec<Value> = SerderCsv::deserialize(&ingest_batch.data);
-            // println!("Processing records of {} events", records.len());
+            let mut records: Vec<Value> = Vec::new();
+            if Config::getenv("DATA_SOURCE_FORMAT", "json") == "csv" {
+                records = SerderCsv::deserialize(&ingest_batch.data);
+            } else {
+                records = SerdeJson::deserialize(&ingest_batch.data);
+            }
 
             for record in records {
                 if record.is_null()
@@ -435,7 +437,7 @@ impl Ingest {
                         Err(err) => {
                             let mut metadata = METADATA.write().unwrap();
 
-                            println!("Falling back to slow path due to: {}", err);
+                            // println!("Falling back to slow path due to: {}", err);
                             let msg = ingest(
                                 &record,
                                 &mut metadata.get_mut(&skpr_namespace).unwrap().fields,
