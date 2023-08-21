@@ -633,14 +633,14 @@ pub fn discover_ingest(
 
         let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
 
-        AnalyseSchema::determine_field_types(metadata, parent_data_type, parent_field, flatten);
+        AnalyseSchema::determine_field_types(metadata, None, None, flatten);
 
         discoverd_data_type = &metadata.get(field).unwrap().determined_type;
     }
 
     println!(
-        "Discovered new field: '{}' of type: '{}'",
-        field, discoverd_data_type
+        "Discovered new field: '{}' of type: '{}' with parent: '{}'",
+        field, discoverd_data_type, parent_field.unwrap_or_default()
     );
 
     // let handle = tokio::runtime::Handle::current();
