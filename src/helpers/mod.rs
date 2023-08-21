@@ -724,77 +724,77 @@ mod flattern_tests {
         assert_eq!(default_metadata.determined_type_values, "");
     }
 
-    // #[test]
-    // fn test_flatten_empty_object() {
-    //     let json = json!({});
-    //     let metadata = HashMap::new();
-    //     let flattened = Helpers::flatten(&json, &metadata);
-    //     assert_eq!(flattened.unwrap(), json!({}));
-    // }
-    //
-    // #[test]
-    // fn test_flatten_simple_object() {
-    //     let json = json!(
-    //         {
-    //             "field": "value",
-    //             "contact": {
-    //                 "name": "Dave",
-    //                 "tel": "123"
-    //             }
-    //         }
-    //     );
-    //     let mut metadata = HashMap::new();
-    //     metadata.insert(
-    //         "field".into(),
-    //         Metadata {
-    //             count: 1,
-    //             types: HashMap::new(),
-    //             parent_type: "".into(),
-    //             fields: Box::new(HashMap::new()),
-    //             date_candidate: None,
-    //             evolution: Box::new(HashMap::new()),
-    //             enabled: true,
-    //             out_field_name: "field".into(),
-    //             determined_type: "".into(),
-    //             determined_type_values: "".into(),
-    //         },
-    //     );
-    //     metadata.insert(
-    //         "name".into(),
-    //         Metadata {
-    //             count: 1,
-    //             types: HashMap::new(),
-    //             parent_type: "".into(),
-    //             fields: Box::new(HashMap::new()),
-    //             date_candidate: None,
-    //             evolution: Box::new(HashMap::new()),
-    //             enabled: true,
-    //             out_field_name: "contact_name".into(),
-    //             determined_type: "".into(),
-    //             determined_type_values: "".into(),
-    //         },
-    //     );
-    //     metadata.insert(
-    //         "tel".into(),
-    //         Metadata {
-    //             count: 1,
-    //             types: HashMap::new(),
-    //             parent_type: "".into(),
-    //             fields: Box::new(HashMap::new()),
-    //             date_candidate: None,
-    //             evolution: Box::new(HashMap::new()),
-    //             enabled: true,
-    //             out_field_name: "contact_tel".into(),
-    //             determined_type: "".into(),
-    //             determined_type_values: "".into(),
-    //         },
-    //     );
-    //     let flattened = Helpers::flatten(&json, &metadata);
-    //     assert_eq!(
-    //         flattened.unwrap(),
-    //         json!({ "field": "value", "contact_name": "Dave", "contact_tel": "123" })
-    //     );
-    // }
+    #[test]
+    fn test_flatten_empty_object() {
+        let json = json!({});
+        let metadata = HashMap::new();
+        let flattened = Helpers::flatten(&json, &metadata);
+        assert_eq!(flattened.unwrap(), json!({}));
+    }
+
+    #[test]
+    fn test_flatten_simple_object() {
+        let json = json!(
+            {
+                "field": "value",
+                "contact": {
+                    "name": "Dave",
+                    "tel": "123"
+                }
+            }
+        );
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "field".into(),
+            Metadata {
+                count: 1,
+                types: HashMap::new(),
+                parent_type: "".into(),
+                fields: Box::new(HashMap::new()),
+                date_candidate: None,
+                evolution: Box::new(HashMap::new()),
+                enabled: true,
+                out_field_name: "field".into(),
+                determined_type: "".into(),
+                determined_type_values: "".into(),
+            },
+        );
+        metadata.insert(
+            "name".into(),
+            Metadata {
+                count: 1,
+                types: HashMap::new(),
+                parent_type: "".into(),
+                fields: Box::new(HashMap::new()),
+                date_candidate: None,
+                evolution: Box::new(HashMap::new()),
+                enabled: true,
+                out_field_name: "contact_name".into(),
+                determined_type: "".into(),
+                determined_type_values: "".into(),
+            },
+        );
+        metadata.insert(
+            "tel".into(),
+            Metadata {
+                count: 1,
+                types: HashMap::new(),
+                parent_type: "".into(),
+                fields: Box::new(HashMap::new()),
+                date_candidate: None,
+                evolution: Box::new(HashMap::new()),
+                enabled: true,
+                out_field_name: "contact_tel".into(),
+                determined_type: "".into(),
+                determined_type_values: "".into(),
+            },
+        );
+        let flattened = Helpers::flatten(&json, &metadata);
+        assert_eq!(
+            flattened.unwrap(),
+            json!({ "field": "value", "contact_name": "Dave", "contact_tel": "123" })
+        );
+    }
 
     // #[test]
     // fn test_flatten() {
@@ -814,7 +814,10 @@ mod flattern_tests {
     //         "key2_key4_key5": "value5",
     //         "key6": ["value6", "value7"]
     //     });
-    //     assert_eq!(Helpers::flatten(&input), expected_output);
+    //
+    //     let flattened = Helpers::flatten(&input, &metadata);
+    //     assert_eq!(flattened.unwrap(), json!({}));
+    //     assert_eq!(Helpers::flatten(&input).unwrap(), json!(expected_output));
     //
     //
     //     let input = json!({
