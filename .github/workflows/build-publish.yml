@@ -135,7 +135,7 @@ jobs:
     needs:
 #      - macos_arm64
 #      - macos_x86
-      - linux_x86
+      - release
     runs-on: ubuntu-latest
     steps:
       - name: Check out code
