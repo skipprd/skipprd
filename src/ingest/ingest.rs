@@ -641,8 +641,8 @@ pub fn discover_ingest(
     }
 
     println!(
-        "Discovered new field: '{}' of type: '{}' with parent: '{}'",
-        field, discoverd_data_type, parent_field.unwrap_or_default()
+        "Discovered new field: {} of type: {}{}{}",
+        field, discoverd_data_type, if parent_field.is_some() { " of parent field: " } else { "" }, if parent_field.is_some() { parent_field.unwrap() } else { "" }
     );
 
     // let handle = tokio::runtime::Handle::current();
