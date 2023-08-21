@@ -3,11 +3,13 @@ use std::fs::File;
 use std::io::prelude::*;
 
 use std::{fs};
+use std::io::BufReader;
 use std::path::Path;
+use std::process::exit;
 
 use std::sync::{Arc};
-
-
+use std::thread::sleep;
+use std::time::Duration;
 
 
 use flate2::read::GzDecoder;
@@ -74,6 +76,7 @@ impl DataSourceLocalFilePlugin {
 
             // let ingest_handle = task::spawn_blocking(move || {
 
+                // println!("Ingesting batch: {:?}", batch);
                 self.ingest.ingest_file(batch, &offsets_clone);
             // });
             // ingest_handle.await.unwrap();
@@ -145,76 +148,180 @@ impl DataSourceLocalFilePlugin {
                             match file_ext {
                                 "gz" => {
                                     let mut decoder = GzDecoder::new(file);
-                                    decoder.read_to_string(&mut file_content).unwrap();
-                                    batch_bytes += file_content.len() as i64;
-                                    current_batch.push(IngestBatch {
-                                        offset_key: offset_key.clone(),
-                                        data: file_content,
-                                    });
+                                    let reader = BufReader::new(decoder);
+
+                                    for line in reader.lines() {
+                                        let line = line.unwrap();
+                                        let line_len = line.len() as i64;
+
+                                        if batch_bytes + line_len > chunk_size && !current_batch.is_empty() {
+                                            tx.unbounded_send(current_batch.clone()).unwrap();
+                                            current_batch.clear();
+                                            batch_bytes = 0;
+                                        }
+
+                                        let ingest_data = format!("{}{}", if batch_bytes == 0 { "" } else { "\n" }, line);
+                                        batch_bytes += ingest_data.len() as i64;
+
+                                        current_batch.push(IngestBatch {
+                                            offset_key: offset_key.clone(),
+                                            data: ingest_data,
+                                        });
+                                    }
+
+                                    if !current_batch.is_empty() {
+                                        tx.unbounded_send(current_batch.clone()).unwrap();
+                                        current_batch.clear();
+                                        batch_bytes = 0;
+                                    }
                                 },
                                 "tar" => {
                                     let mut archive = Archive::new(file);
                                     for entry in archive.entries().unwrap() {
-                                        let mut entry = entry.unwrap();
-                                        let mut file_content = String::new();
-                                        entry.read_to_string(&mut file_content).unwrap();
-                                        batch_bytes += file_content.len() as i64;
-                                        current_batch.push(IngestBatch {
-                                            offset_key: offset_key.clone(),
-                                            data: file_content,
-                                        });
+                                        let mut file_entry = entry.unwrap();
+                                        let reader = BufReader::new(file_entry);
+
+                                        for line in reader.lines() {
+                                            let line = line.unwrap();
+                                            let line_len = line.len() as i64;
+
+                                            if batch_bytes + line_len > chunk_size && !current_batch.is_empty() {
+                                                tx.unbounded_send(current_batch.clone()).unwrap();
+                                                current_batch.clear();
+                                                batch_bytes = 0;
+                                            }
+
+                                            let ingest_data = format!("{}{}", if batch_bytes == 0 { "" } else { "\n" }, line);
+                                            batch_bytes += ingest_data.len() as i64;
+
+                                            current_batch.push(IngestBatch {
+                                                offset_key: offset_key.clone(),
+                                                data: ingest_data,
+                                            });
+                                        }
+
+                                        if !current_batch.is_empty() {
+                                            tx.unbounded_send(current_batch.clone()).unwrap();
+                                            current_batch.clear();
+                                            batch_bytes = 0;
+                                        }
                                     }
-                                    continue;
                                 },
                                 "tar.gz" => {
                                     let decoder = GzDecoder::new(file);
                                     let mut archive = Archive::new(decoder);
                                     for entry in archive.entries().unwrap() {
-                                        let mut entry = entry.unwrap();
-                                        let mut file_content = String::new();
-                                        entry.read_to_string(&mut file_content).unwrap();
-                                        batch_bytes += file_content.len() as i64;
-                                        current_batch.push(IngestBatch {
-                                            offset_key: offset_key.clone(),
-                                            data: file_content,
-                                        });
+                                        let mut file_entry = entry.unwrap();
+                                        let reader = BufReader::new(file_entry);
+
+                                        for line in reader.lines() {
+                                            let line = line.unwrap();
+                                            let line_len = line.len() as i64;
+
+                                            if batch_bytes + line_len > chunk_size && !current_batch.is_empty() {
+                                                tx.unbounded_send(current_batch.clone()).unwrap();
+                                                current_batch.clear();
+                                                batch_bytes = 0;
+                                            }
+
+                                            let ingest_data = format!("{}{}", if batch_bytes == 0 { "" } else { "\n" }, line);
+                                            batch_bytes += ingest_data.len() as i64;
+
+                                            current_batch.push(IngestBatch {
+                                                offset_key: offset_key.clone(),
+                                                data: ingest_data,
+                                            });
+                                        }
+
+                                        if !current_batch.is_empty() {
+                                            tx.unbounded_send(current_batch.clone()).unwrap();
+                                            current_batch.clear();
+                                            batch_bytes = 0;
+                                        }
                                     }
                                 },
                                 "zip" => {
                                     let mut archive = ZipArchive::new(file).unwrap();
+
+                                    let mut ingest_data = format!("");
+
                                     for i in 0..archive.len() {
                                         let mut file = archive.by_index(i).unwrap();
-                                        let mut file_content = String::new();
-                                        file.read_to_string(&mut file_content).unwrap();
-                                        batch_bytes += file_content.len() as i64;
-                                        current_batch.push(IngestBatch {
-                                            offset_key: offset_key.clone(),
-                                            data: file_content,
-                                        });
+                                        let reader = BufReader::new(file);
+
+                                        for line in reader.lines() {
+                                            let line = line.unwrap();
+                                            // println!("{}", line);
+                                            // current_batch.push(IngestBatch {
+                                            //     offset_key: offset_key.clone(),
+                                            //     data: line,
+                                            // });
+                                            // tx.unbounded_send(current_batch.clone()).unwrap();
+                                            // sleep(Duration::from_millis(10000));
+                                            // exit(0);
+                                            let line_len = line.len() as i64;
+
+                                            ingest_data = format!("{}{}{}", ingest_data, line, "\n");
+                                            // ingest_data = format!("{}{}", ingest_data, line);
+
+                                            // println!("ingest_data {}", ingest_data);
+                                            // exit(0);
+
+                                            batch_bytes += ingest_data.len() as i64;
+
+                                            if batch_bytes > chunk_size && !ingest_data.is_empty() {
+
+                                                // println!("ingest_data {}", ingest_data);
+                                                // exit(0);
+                                                // println!("line: {}, events: {}", line_len, ingest_data);
+
+                                                current_batch.push(IngestBatch {
+                                                    offset_key: offset_key.clone(),
+                                                    data: ingest_data,
+                                                });
+
+                                                tx.unbounded_send(current_batch.clone()).unwrap();
+                                                current_batch.clear();
+                                                batch_bytes = 0;
+                                                ingest_data = format!("");
+                                            }
+
+
+                                        }
+
+                                        if !current_batch.is_empty() {
+                                            tx.unbounded_send(current_batch.clone()).unwrap();
+                                            current_batch.clear();
+                                            batch_bytes = 0;
+                                        }
                                     }
-                                    continue;
                                 },
                                 _ => {
-                                    match file.read_to_string(&mut file_content) {
-                                        Err(why) => {
-                                            println!("couldn't read {}: {}", path.display(), why);
-                                            continue;
+                                    let reader = BufReader::new(file);
 
-                                            // if why.kind() == std::io::ErrorKind::IsADirectory {
-                                            //     continue;
-                                            // } else if why.kind() == std::io::ErrorKind::Other {
-                                            //     println!("couldn't read {}: {}", path.display(), why);
-                                            //
-                                            //     continue;
-                                            // }
-                                        },
-                                        Ok(_) => {}
-                                    };
-                                    batch_bytes += file_content.len() as i64;
-                                    current_batch.push(IngestBatch {
-                                        offset_key: offset_key.clone(),
-                                        data: file_content,
-                                    });
+                                    for line in reader.lines() {
+                                        let line = line.unwrap();
+                                        let line_len = line.len() as i64;
+                                        if batch_bytes + line_len > chunk_size && !current_batch.is_empty() {
+                                            tx.unbounded_send(current_batch.clone()).unwrap();
+                                            current_batch.clear();
+                                            batch_bytes = 0;
+                                        }
+
+                                        let ingest_data = format!("{}{}", if batch_bytes == 0 { "" } else { "\n" }, line);
+                                        batch_bytes += ingest_data.len() as i64;
+
+                                        current_batch.push(IngestBatch {
+                                            offset_key: offset_key.clone(),
+                                            data: ingest_data,
+                                        });
+                                    }
+
+                                    if !current_batch.is_empty() {
+                                        tx.unbounded_send(current_batch.clone()).unwrap();
+                                        current_batch.clear();
+                                        batch_bytes = 0;
+                                    }
                                 },
                             }
 

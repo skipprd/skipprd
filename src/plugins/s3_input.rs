@@ -26,6 +26,7 @@ use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::ingest_work::{Ingest, IngestBatch};
 
 use tokio::sync::Semaphore;
+use crate::helpers::timed_rwlock::TimedRwLock;
 
 pub struct DataSourceS3Plugin {
     // config: HashMap<String, String>,
@@ -312,7 +313,7 @@ impl DataSourceS3Plugin {
             })
             .collect();
 
-        let datas: Arc<RwLock<Vec<IngestBatch>>> = Arc::new(RwLock::new(Vec::new()));
+        let datas: Arc<TimedRwLock<Vec<IngestBatch>>> = Arc::new(TimedRwLock::new("datas".to_string(), Vec::new()));
 
         let future_result = join_all(futures).await;
 

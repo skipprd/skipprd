@@ -60,6 +60,7 @@ use signal_hook::iterator::Signals;
 
 use std::panic;
 use std::process::abort;
+use std::string::ToString;
 use datafusion::config::ConfigOptions;
 use datafusion::physical_plan::Statistics;
 use futures::TryFutureExt;
@@ -98,17 +99,20 @@ use crate::plugins::stdin_input::DataSourceStdinPlugin;
 use crate::plugins::stdout_output::DataOutputStdoutPlugin;
 
 use datafusion::prelude::*;
+use crate::helpers::timed_rwlock::TimedRwLock;
 
+// pub static DISPLAY_METRICS: Lazy<TimedRwLock<AtomicBool>> =
+//     Lazy::new(|| TimedRwLock::new("display_metrics".to_string(), AtomicBool::new(false)));
 
-pub static RUNNING: Lazy<RwLock<AtomicBool>> = Lazy::new(|| RwLock::new(AtomicBool::new(true)));
-pub static OUTPUT_RUNNING: Lazy<RwLock<AtomicBool>> =
-    Lazy::new(|| RwLock::new(AtomicBool::new(false)));
-pub static OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE: Lazy<RwLock<AtomicBool>> =
-    Lazy::new(|| RwLock::new(AtomicBool::new(false)));
+pub static RUNNING: Lazy<TimedRwLock<AtomicBool>> = Lazy::new(|| TimedRwLock::new("running".to_string(),AtomicBool::new(true)));
+pub static OUTPUT_RUNNING: Lazy<TimedRwLock<AtomicBool>> =
+    Lazy::new(|| TimedRwLock::new("output_running".to_string(), AtomicBool::new(false)));
+pub static OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE: Lazy<TimedRwLock<AtomicBool>> =
+    Lazy::new(|| TimedRwLock::new("output_graceful_shutdown_complete".to_string(), AtomicBool::new(false)));
 
 pub static LOGGER: Lazy<Arc<tokio::sync::RwLock<Logger>>> = Lazy::new(|| Logger::new(100));
-pub static METRICS: Lazy<Arc<RwLock<Metrics>>> = Lazy::new(|| Arc::new(RwLock::new(Metrics::new())));
-pub static METADATA: Lazy<Arc<RwLock<HashMap<String, Metadata>>>> = Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
+pub static METRICS: Lazy<Arc<TimedRwLock<Metrics>>> = Lazy::new(|| Arc::new(TimedRwLock::new("metrics".to_string(),Metrics::new())));
+pub static METADATA: Lazy<Arc<TimedRwLock<HashMap<String, Metadata>>>> = Lazy::new(|| Arc::new(TimedRwLock::new("metadata".to_string(), HashMap::new())));
 
 #[tokio::main]
 async fn main() {
@@ -125,6 +129,12 @@ async fn main() {
 
     match cli.mode {
         Mode::Sync => {
+
+            // set DISPLAY_METRICS if --display-metrics flag is set
+            // if cli.display_metrics {
+            //     DISPLAY_METRICS.write().unwrap().store(true, Ordering::SeqCst);
+            // }
+
             // println!("Command sync");
             Config::init().await;
             sync().await;
@@ -173,9 +183,13 @@ async fn query(sql: &str) {
 
     println!("Querying data dir: {}", output_dir);
 
-    ctx.register_parquet(&table_name, &output_dir, ParquetReadOptions::default()).await.unwrap();
-
-    // println!("Executing query: {}", sql);
+    match ctx.register_parquet(&table_name, &output_dir, ParquetReadOptions::default()).await {
+        Ok(_) => {}
+        Err(e) => {
+            println!("Can't find data for table: {} in dir: {}", table_name, output_dir);
+            process::exit(1);
+        }
+    }
 
     let df = match ctx.sql(sql).await {
         Ok(df) => df,
@@ -185,20 +199,7 @@ async fn query(sql: &str) {
         }
     };
 
-    // create a plan to run a SQL query
-    // let df = ctx.sql("SELECT \"A\", MIN(b) FROM example WHERE \"A\" <= c GROUP BY \"A\" LIMIT 100").await?;
-
-    // execute and print results
-    // df.clone().write_csv("/tmp/output.csv").await.unwrap();
-
-
-
-    // let stats = df.clone().explain(true, true).unwrap();
-    // stats.select_columns(&["Duration", "Output Rows"]).unwrap().show().await.unwrap();
-
-    let df_clone = df.clone();
-
-    match df_clone.show().await {
+    match df.show().await {
         Ok(res) => {
             res
         }
@@ -207,15 +208,6 @@ async fn query(sql: &str) {
             process::exit(1);
         }
     }
-
-    // let df_clone = df.clone();
-    // let df_stats = df_clone.explain(true, true).unwrap();
-    // println!("Stats: {}", df_stats.show().await.unwrap());
-
-    // let df_clone = df.clone();
-    // let statistics: Statistics = df_clone.create_physical_plan().await.unwrap().statistics();
-    // println!("Statistics: {:?}", statistics);
-
 
 }
 
@@ -520,6 +512,11 @@ async fn sync() {
                     }
                 };
 
+                let total_times: HashMap<String, Duration> = TimedRwLock::<()>::get_total_wait_times();
+                for (key, value) in total_times.iter() {
+                    println!("{}: {}ms", key, value.as_millis());
+                }
+
 
                 ////////////// Cleanup part written parquet files START ////////
 
@@ -602,14 +599,21 @@ async fn sync() {
                 *last_messages_total.lock().unwrap() = metrics_lock.messages_total;
 
 
-                println!("Messages per Min: {}", ingested_current);
-                println!("Messages Fixed: {}", metrics_lock.ingeted_slow_total);
-                println!("Messages Total: {}", metrics_lock.messages_total);
-                println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
-                // println!("Bytes per Min: {}", metrics_lock.bytes_current);
-                println!("Bytes: {}", metrics_lock.bytes_total);
-
+                // if DISPLAY_METRICS.read().unwrap().load(Ordering::SeqCst) {
+                    println!("Messages per Min: {}", ingested_current);
+                    println!("Messages Fixed: {}", metrics_lock.ingeted_slow_total);
+                    println!("Messages Total: {}", metrics_lock.messages_total);
+                    println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
+                    // println!("Bytes per Min: {}", metrics_lock.bytes_current);
+                    println!("Bytes: {}", metrics_lock.bytes_total);
+                // }
                 // metrics_lock.bytes_current = 0;
+
+                let total_times: HashMap<String, Duration> = TimedRwLock::<()>::get_total_wait_times();
+                for (key, value) in total_times.iter() {
+                    println!("{}: {}ms", key, value.as_millis());
+                }
+
 
                 drop(metrics_lock);
 
@@ -777,6 +781,12 @@ async fn sync() {
     println!("Bytes: {}", metrics_lock.bytes_total);
 
     drop(metrics_lock);
+
+    let total_times: HashMap<String, Duration> = TimedRwLock::<()>::get_total_wait_times();
+    for (key, value) in total_times.iter() {
+        println!("{}: {}ms", key, value.as_millis());
+    }
+
 
     {
         LOGGER.write()

@@ -5,7 +5,7 @@ use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::helpers::Helpers;
 use crate::ingest::ingest::ingest;
 use crate::serdes::json::SerdeJson;
-use crate::{METADATA, METRICS, RUNNING};
+use crate::{helpers, METADATA, METRICS, RUNNING};
 use glob::{glob_with, MatchOptions};
 use lru::LruCache;
 use once_cell::sync::Lazy;
@@ -31,6 +31,8 @@ use parquet::data_type::AsBytes;
 use crate::ingest::fast_ingest::fast_path_ingest;
 
 use avro_rs::{Writer, Schema};
+use helpers::timed_rwlock::TimedRwLock;
+use crate::serdes::csv::SerderCsv;
 // use crate::converters::skippr_avro::convert_skippr_to_avro_field_types;
 
 pub struct Buffer {
@@ -106,8 +108,8 @@ thread_local! {
     pub static PARSE_NAMESPACE_CACHE: Lazy<RwLock<HashMap<String, String>>> = Lazy::new(|| RwLock::new(HashMap::new()));
 }
 
-pub static OUTPUT_FILES_STATIC: Lazy<RwLock<LruCache<String, OutputFile>>> =
-    Lazy::new(|| RwLock::new(LruCache::new(NonZeroUsize::new(100).expect(""))));
+pub static OUTPUT_FILES_STATIC: Lazy<TimedRwLock<LruCache<String, OutputFile>>> =
+    Lazy::new(|| TimedRwLock::new("output_files_static".to_string(), LruCache::new(NonZeroUsize::new(100).expect(""))));
 
 pub static deadletter_file_name: Lazy<String> = Lazy::new(|| BufferChunker::encode_chunk_name(
     "deadletters",
@@ -356,7 +358,10 @@ impl Ingest {
             let has_offsets =
                 offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Closed, 0);
 
-            let records: Vec<Value> = SerdeJson::deserialize(&ingest_batch.data);
+            // let records: Vec<Value> = SerdeJson::deserialize(&ingest_batch.data);
+            // println!("Processing batch of {} events", ingest_batch.data.len());
+            let records: Vec<Value> = SerderCsv::deserialize(&ingest_batch.data);
+            // println!("Processing records of {} events", records.len());
 
             for record in records {
                 if record.is_null()
@@ -366,8 +371,10 @@ impl Ingest {
 
                     let output_file = format!("{}/{}", deadletter_dir.clone(), &deadletter_file_name.as_str());
 
-                    buffers.write(&output_file, record.to_string().as_bytes());
-                    buffers.write(&output_file, "\n".as_bytes());
+                    // println!("Skipping empty record: {} {} of {}", record, d, i);
+
+                    // buffers.write(&output_file, record.to_string().as_bytes());
+                    // buffers.write(&output_file, "\n".as_bytes());
 
                     i += 1;
                     d += 1;
@@ -428,7 +435,7 @@ impl Ingest {
                         Err(err) => {
                             let mut metadata = METADATA.write().unwrap();
 
-                            // println!("Falling back to slow path due to: {}", err);
+                            println!("Falling back to slow path due to: {}", err);
                             let msg = ingest(
                                 &record,
                                 &mut metadata.get_mut(&skpr_namespace).unwrap().fields,

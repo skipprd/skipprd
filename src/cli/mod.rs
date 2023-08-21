@@ -13,6 +13,9 @@ pub struct Cli {
     #[arg(requires_if("mode", "query"))]
     pub(crate) query: Option<String>,
 
+    // #[arg(short, long, requires_if("mode", "sync"))]
+    // pub(crate) display_metrics: bool,
+
 
 }
 

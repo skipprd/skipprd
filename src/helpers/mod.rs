@@ -14,6 +14,7 @@ pub mod configuration;
 pub mod license;
 pub mod logger;
 pub mod offsets;
+pub mod timed_rwlock;
 
 // let clean_field_cache = Arc::new(Mutex::new(HashMap<String, bool> = HashMap::new()));
 

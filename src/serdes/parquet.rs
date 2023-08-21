@@ -362,11 +362,11 @@ impl SerdeParquet {
                     }
                 }
                 Err(_error) => {
-                    tokio::runtime::Builder::new_multi_thread()
-                        .enable_all()
-                        .build()
-                        .unwrap()
-                        .block_on(async {
+                    // tokio::runtime::Builder::new_multi_thread()
+                    //     .enable_all()
+                    //     .build()
+                    //     .unwrap()
+                    //     .block_on(async {
 
                             println!("Error reading batch: {} while serialising to parquet", _error.to_string());
 
@@ -375,7 +375,7 @@ impl SerdeParquet {
                             //     .await
                             //     .log(LogLevel::Error, _error.to_string())
                             //     .await;
-                        });
+                        // });
                 }
             }
         }

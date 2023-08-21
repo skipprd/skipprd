@@ -143,16 +143,16 @@ pub fn set_value(
     //     None => ""
     // };
 
-
-    if value.is_null() {
-        return Value::Null;
-    }
-    if value.is_string() && value.as_str().unwrap_or_default().is_empty() {
-        return Value::Null;
-    }
-
     // if data_type != "" || parent_type == "map" {
     if !data_type.is_empty() {
+
+        if value.is_null() {
+            return Value::Null;
+        }
+        if value.is_string() && value.as_str().unwrap_or_default().is_empty() {
+            return Value::Null;
+        }
+
         // let data_type: &str = &metadata.get_mut(field).unwrap().determined_type;
         // let data_type = "record";
 
@@ -611,24 +611,32 @@ pub fn discover_ingest(
 ) -> String {
     let foo: AnalyseSchema = AnalyseSchema { i: 0 };
 
+    let mut discoverd_data_type = &"string".to_string().clone();
+
     if value.is_null() || (value.is_string() && value.as_str().unwrap_or_default().is_empty()) {
-        return "".to_string();
+        // insert new metadata entry
+
+        let mut new_field: Metadata = Metadata::new().unwrap();
+        new_field.determined_type = "string".to_string();
+
+        metadata.insert(
+            field.to_string(),
+            new_field
+        );
+    } else {
+        AnalyseSchema::analyse_field(
+            &foo,
+            &field.to_string(),
+            value.clone().borrow_mut(),
+            metadata,
+        );
+
+        let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
+
+        AnalyseSchema::determine_field_types(metadata, parent_data_type, parent_field, flatten);
+
+        discoverd_data_type = &metadata.get(field).unwrap().determined_type;
     }
-
-    AnalyseSchema::analyse_field(
-        &foo,
-        &field.to_string(),
-        value.clone().borrow_mut(),
-        metadata,
-    );
-
-    let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
-
-    AnalyseSchema::determine_field_types(metadata, parent_data_type, parent_field, flatten);
-
-    // println!("{:?}", metadata.get_mut(field).unwrap());
-
-    let discoverd_data_type = &metadata.get(field).unwrap().determined_type;
 
     println!(
         "Discovered new field: '{}' of type: '{}'",
