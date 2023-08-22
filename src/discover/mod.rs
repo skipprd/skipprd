@@ -1112,7 +1112,7 @@ impl AnalyseSchema {
                     field.determined_type_values = values_type.to_string();
 
                     if field.determined_type == *"array" {
-                        // field.fields.clear();
+                        field.fields.clear();
                     }
                 }
 
