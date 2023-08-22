@@ -22,6 +22,7 @@ use std::ops::{Add, Deref};
 
 use std::sync::{Arc, Mutex, RwLock};
 use std::{env, thread};
+use std::fmt::Debug;
 
 use std::fs;
 
@@ -61,6 +62,8 @@ use signal_hook::iterator::Signals;
 use std::panic;
 use std::process::abort;
 use std::string::ToString;
+use arrow_schema::DataType;
+use datafusion::common::ExprSchema;
 use datafusion::config::ConfigOptions;
 use datafusion::physical_plan::Statistics;
 use futures::TryFutureExt;
@@ -152,7 +155,62 @@ async fn main() {
             let elapsed = now.elapsed();
             println!("Query time: {} seconds", elapsed.as_secs());
         }
+        Mode::Schema => {
+            // println!("Command schema");
+            Config::init().await;
+            schema(&cli.schema.unwrap()).await;
+        }
 
+    }
+}
+
+async fn schema(schema_name: &str) {
+    // register the table
+    // let mut options = ConfigOptions::default();
+    // options.catalog.information_schema = true;
+
+    let mut session_config = SessionConfig::new();
+    session_config = session_config.set("datafusion.catalog.information_schema", "true".into());
+    session_config = session_config.set("datafusion.catalog.default_catalog", "skippr".into());
+    session_config = session_config.set("datafusion.execution.collect_statistics", "true".into());
+
+    let ctx = SessionContext::with_config(session_config);
+
+    Config::setenv("PIPELINE_NAME", schema_name);
+
+    let workspace = Config::get_workspace_name();
+    let full_table_name = format!("{}.{}", workspace, schema_name);
+
+    // @todo - check dir exists for provided table name, otherwise we end up creating erroneous dirs
+
+
+    // itterate over data dir output buffers
+    let data_dir = Config::get_data_dir();
+    let output_dir = format!("{}/output_buffer", data_dir);
+
+    println!("Querying data dir: {}", output_dir);
+
+    match ctx.register_parquet(&schema_name, &output_dir, ParquetReadOptions::default()).await {
+        Ok(_) => {}
+        Err(e) => {
+            println!("Can't find data for table: {} in dir: {}", schema_name, output_dir);
+            process::exit(1);
+        }
+    }
+
+    let dfn = ctx.table(schema_name).await.unwrap();
+
+    // print each field and type for schema:
+    let schema = dfn.schema();
+    let mut fields: Vec<String> = Vec::new();
+    for i in 0..schema.fields().len() {
+        fields.push(format!("{}: {}", schema.field(i).name(), schema.field(i).data_type().to_string()));
+    }
+
+    fields.sort();
+
+    for field in fields {
+        println!("{}", field);
     }
 }
 
@@ -209,6 +267,8 @@ async fn query(sql: &str) {
         }
     }
 
+
+
 }
 
 async fn discover() {
@@ -247,6 +307,9 @@ async fn discover() {
             HashMap::new()
         }
     };
+
+    // @todo - invoke data input plugin in a mode that doesn't ingest data... just pipe it here
+    // @todo - we will probably still want to source_buffer, but won't want check pointing
 
     let _arrow_schema: Result<Schema, ArrowError> = Ok(Schema::empty());
 

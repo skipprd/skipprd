@@ -13,6 +13,9 @@ pub struct Cli {
     #[arg(requires_if("mode", "query"))]
     pub(crate) query: Option<String>,
 
+    #[arg(requires_if("mode", "schema"))]
+    pub(crate) schema: Option<String>,
+
     // #[arg(short, long, requires_if("mode", "sync"))]
     // pub(crate) display_metrics: bool,
 
@@ -24,5 +27,11 @@ pub(crate) enum Mode {
     Discover,
     Sync,
     Query,
+    Schema,
+    // Dump,
+    // Head,
+    // Tail,
+    // Diff,
+
 }
 
