@@ -540,10 +540,15 @@ impl AnalyseSchema {
 
             // Multiple type within array values?
             // Must be a record then.
+            let demoted_types = vec!["boolean".to_string(), "date".to_string(), "timestamp".to_string(), "timestamp_milli".to_string()];
+
             if type_count.len() > 1 {
-                data_type = "record".to_string();
-                // Array of Arrays? Use a Record for the parent.
-            } else if type_count.contains_key("array") {
+                for (type_1, count) in type_count.clone() {
+                    if demoted_types.contains(&type_1) {
+                        type_count.remove(&type_1);
+                    }
+                }
+            }
                 data_type = "record".to_string();
             } else if is_sequential {
                 // array of sequential int keys is an avro array
@@ -1015,7 +1020,10 @@ impl AnalyseSchema {
 
                                 // hacky, support inference on they fly when we only infer on one record.
                                 // much more likely to be an integer than a boolean
-                                if field.types.len() == 1 && field.types.contains_key("boolean") {
+                                if field.types.len() == 1
+                                    && field.types.contains_key("boolean")
+                                    && field.types.get("boolean").unwrap() == &1
+                                {
                                     highest_type = "integer".to_string();
                                     highest_count = *data_type_count;
                                     break;
@@ -1067,7 +1075,11 @@ impl AnalyseSchema {
 
                             // hacky, support inference on they fly when we only infer on one record.
                             // much more likely to be an integer than a boolean
-                            if type_count.len() == 1 && type_count.contains_key("boolean") {
+                            if sub_value.types.len() == 1
+                                && sub_value.types.contains_key("boolean")
+                                && sub_value.types.get("boolean").unwrap() == &1
+
+                            {
                                 type_count.insert("integer".to_string(), *data_type_count);
                                 break;
                             }
