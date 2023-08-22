@@ -197,13 +197,25 @@ pub fn match_scalar_value_fast(
             None => match value.as_str().and_then(|v| v.parse::<i64>().ok()).map(Value::from) {
                 Some(v) => Ok(v),
                 None => {
-                    if apply_evolution {
-                        match Evolution::apply_evolution_factory(field, value, metadata) {
-                            Ok(v) => Ok(v),
-                            Err(e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not an {}", value, data_type)))),
+                    // handle boolean values
+                    match value.as_bool().and_then(|v| {
+                        if v {
+                            Some(1)
+                        } else {
+                            Some(0)
                         }
-                    } else {
-                        Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type))))
+                    }).map(Value::from) {
+                        Some(v) => Ok(v),
+                        None => {
+                            if apply_evolution {
+                                match Evolution::apply_evolution_factory(field, value, metadata) {
+                                    Ok(v) => Ok(v),
+                                    Err(e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not an {}", value, data_type)))),
+                                }
+                            } else {
+                                Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not an {}", value, data_type))))
+                            }
+                        }
                     }
                 }
             }
