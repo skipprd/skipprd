@@ -190,9 +190,9 @@ fn get_type(value: &str) -> String {
         None => {}
     }
 
-    match value.parse::<String>() {
+    match value.parse::<bool>() {
         Ok(_bool) => {
-            return "string".to_string();
+            return "boolean".to_string();
         }
         Err(_String) => {}
     }
