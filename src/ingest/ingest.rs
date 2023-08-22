@@ -425,7 +425,7 @@ pub fn set_value(
                 // println!("data_type is {}", data_type);
 
                 if data_type == "date" {
-                    let date_new_value = set_date(field, value, metadata, updated_schema);
+                    let date_new_value = set_date(field, value, parent_field, parent_data_type, metadata, updated_schema);
                     new_value = date_new_value.unwrap_or(Value::Null);
                 } else {
                     // let scalar_value = match data_type {
@@ -439,7 +439,7 @@ pub fn set_value(
                     // };
 
                     // @todo - handle return Result<Value, Error>
-                    let scalar_value = match_scalar_value(field, data_type, value, metadata, updated_schema);
+                    let scalar_value = match_scalar_value(field, data_type, value, parent_field, parent_data_type, metadata, updated_schema);
 
                     new_value = scalar_value.unwrap_or(Value::Null);
                 }
@@ -515,6 +515,8 @@ fn match_scalar_value(
     field: &str,
     data_type: &str,
     value: &Value,
+    parent_field: Option<&str>,
+    parent_data_type: Option<&str>,
     metadata: &mut HashMap<String, Metadata>,
     mut updated_schema: &mut String,
 ) -> Result<Value, Box<dyn std::error::Error>> {
@@ -530,7 +532,7 @@ fn match_scalar_value(
                         // None => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a string", value)))),
                         None => {
                             // Handle the value error applying the Evolution Strategy
-                            Evolution::evolve_field(&field.to_string(), value, metadata, updated_schema)
+                            Evolution::evolve_field(&field.to_string(), value, parent_field, parent_data_type, metadata, updated_schema)
                         }
                     }
                 }
@@ -547,7 +549,7 @@ fn match_scalar_value(
                         // None => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not an integer", value)))),
                         None => {
                             // Handle the value error applying the Evolution Strategy
-                            Evolution::evolve_field(&field.to_string(), value, metadata, updated_schema)
+                            Evolution::evolve_field(&field.to_string(), value, parent_field, parent_data_type, metadata, updated_schema)
                         }
                     }
                 }
@@ -565,7 +567,7 @@ fn match_scalar_value(
                         // None => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a double", value)))),
                         None => {
                             // Handle the value error applying the Evolution Strategy
-                            Evolution::evolve_field(&field.to_string(), value, metadata, updated_schema)
+                            Evolution::evolve_field(&field.to_string(), value, parent_field, parent_data_type, metadata, updated_schema)
                         }
                     }
                 }
@@ -588,9 +590,9 @@ fn match_scalar_value(
                         Some(v) => Ok(v),
                         // None => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a boolean", value)))),
                         None => {
-                            println!("Value {} is not a boolean", value);
+                            // println!("Value {} is not a boolean", value);
                             // Handle the value error applying the Evolution Strategy
-                            Evolution::evolve_field(&field.to_string(), value, metadata, updated_schema)
+                            Evolution::evolve_field(&field.to_string(), value, parent_field, parent_data_type, metadata, updated_schema)
                         }
                     }
                 }
@@ -611,7 +613,7 @@ pub fn discover_ingest(
 ) -> String {
     let foo: AnalyseSchema = AnalyseSchema { i: 0 };
 
-    let mut discoverd_data_type = &"string".to_string().clone();
+    let mut discoverd_data_type = "string".to_string().clone();
 
     // For null values, we need to create a new field and default to string
     // This is to avoid constantly trying to discover the field and slowing ingestion
@@ -619,7 +621,7 @@ pub fn discover_ingest(
     if value.is_null() || (value.is_string() && value.as_str().unwrap_or_default().is_empty()) {
 
         let mut new_field: Metadata = Metadata::new().unwrap();
-        new_field.determined_type = "string".to_string();
+        new_field.determined_type = discoverd_data_type;
 
         metadata.insert(
             field.to_string(),
@@ -633,16 +635,27 @@ pub fn discover_ingest(
             metadata,
         );
 
-        let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
+        // println!("Determining field types for field: {} with type: {} and Parent: {}", field, metadata.get(field).unwrap().determined_type, parent_field.unwrap_or_default());
 
-        AnalyseSchema::determine_field_types(metadata, None, None, flatten);
+        // if (parent_field.is_some()) {
+        //     AnalyseSchema::determine_field_types(metadata.get_mut(field).unwrap().fields.as_mut(), parent_data_type, parent_field, flatten);
+        // } else {
 
-        discoverd_data_type = &metadata.get(field).unwrap().determined_type;
     }
+
+    let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
+
+    if parent_field.is_some() && parent_data_type != Some("array")  {
+        AnalyseSchema::determine_field_types(metadata, parent_data_type, parent_field, flatten);
+    } else {
+        AnalyseSchema::determine_field_types(metadata, None, None, flatten);
+    }
+
+    // discoverd_data_type = metadata.get(field).unwrap().determined_type;
 
     println!(
         "Discovered new field: {} of type: {}{}{}",
-        field, discoverd_data_type, if parent_field.is_some() { " of parent field: " } else { "" }, if parent_field.is_some() { parent_field.unwrap() } else { "" }
+        field, metadata.get(field).unwrap().determined_type, if parent_field.is_some() { " of parent field: " } else { "" }, if parent_field.is_some() { parent_field.unwrap() } else { "" }
     );
 
     // let handle = tokio::runtime::Handle::current();
@@ -656,12 +669,14 @@ pub fn discover_ingest(
 
     *updated_schema = "yes".to_string();
 
-    discoverd_data_type.clone()
+    metadata.get(field).unwrap().determined_type.clone()
 }
 
 pub fn set_date(
     field: &str,
     value: &Value,
+    parent_field: Option<&str>,
+    parent_data_type: Option<&str>,
     metadata: &mut HashMap<String, Metadata>,
     mut updated_schema: &mut String
 ) -> Result<Value, Box<dyn std::error::Error>> {
@@ -692,7 +707,7 @@ pub fn set_date(
         None => {
             // println!("Could not format date to int using format");
             // Handle the value error applying the Evolution Strategy
-            Evolution::evolve_field(&field.to_string(), value, metadata, updated_schema)
+            Evolution::evolve_field(&field.to_string(), value, parent_field, parent_data_type, metadata, updated_schema)
             // Value::Null
         }
     }
@@ -705,6 +720,7 @@ mod tests {
     use chrono::NaiveDateTime;
     
     use std::collections::HashMap;
+    use datafusion::common::tree_node::Transformed::No;
 
     fn generate_metadata(field: &str, format_name: &str) -> HashMap<String, Metadata> {
         let date_candidate = DateCandidate {
@@ -751,7 +767,7 @@ mod tests {
 
         let mut updated_schema = "no".to_string();
 
-        let result = set_date(field, &value, &mut meta, &mut updated_schema);
+        let result = set_date(field, &value, None, None, &mut meta, &mut updated_schema);
 
         let expected_date = NaiveDateTime::parse_from_str(date_str, format).unwrap();
         let expected_millis =
@@ -777,7 +793,7 @@ mod tests {
 
         let mut updated_schema = "no".to_string();
 
-        let result = set_date(field, &value, &mut meta, &mut updated_schema);
+        let result = set_date(field, &value, None, None, &mut meta, &mut updated_schema);
 
         let expected_date = NaiveDateTime::parse_from_str(date_str, format).unwrap();
         let expected_millis =
