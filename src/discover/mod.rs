@@ -530,16 +530,7 @@ impl AnalyseSchema {
                 }
             }
 
-            // if is_sequential {
-            //     // array of sequential int keys is an avro array
-            //     data_type = "array".to_string();
-            // } else if !is_sequential {
-            //     // associative array is an avro map
-            //     data_type = "map".to_string();
-            // }
 
-            // Multiple type within array values?
-            // Must be a record then.
             let demoted_types = vec!["boolean".to_string(), "date".to_string(), "timestamp".to_string(), "timestamp_milli".to_string()];
 
             if type_count.len() > 1 {
@@ -549,17 +540,30 @@ impl AnalyseSchema {
                     }
                 }
             }
+
+
+            if type_count.contains_key("array")  {
                 data_type = "record".to_string();
             } else if is_sequential {
                 // array of sequential int keys is an avro array
                 data_type = "array".to_string();
-            } else if !is_sequential {
-                // associative array is an avro map
-                data_type = "map".to_string();
+            } else
+            // if type_count.len() > 1
+            {
+                data_type = "record".to_string();
             }
-
-            // println!("{:?}", field);
-            // println!("{:?}", data_type);
+            // NOTE:
+            //  - maps sometimes become records, any previously loaded data will be invalid.
+            //       which has to be handled by evolution. Resulting in the original map field (e.g. `foo`)
+            //       and a new field `foo_record`. The user might reasonably expect to add fields and already conside the map a record.
+            //  - Also, maps seemed to make ingesting slower with nested data... but not when flattening data.
+            //  - Also, I'm not sure how to query a map in datafusion. Athena is fine. I just don't have confidence the complexity was worth it.
+            //  - At the time of writing, Maps are fully supported however and the intention is to maintain that support so users can opt-in to maps.
+            // else if !is_sequential {
+                // associative array is an avro map
+                // data_type = "map".to_string();
+            // }
+            // Array of Arrays? Use a Record for the parent.
         }
 
         self.set_discovered_occurrence(metadata, field, &data_type, &mut value.to_string());
