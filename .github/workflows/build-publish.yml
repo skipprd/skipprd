@@ -46,8 +46,59 @@ jobs:
 #      - name: Check workspace in debug mode
 #        run: cargo check
 
+  cleanup:
+    runs-on: ubuntu-latest
+    container:
+      image: python:3.8-alpine
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: Install dependencies
+        run: |
+          apk add --no-cache groff less jq
+          pip install awscli
+      - name: Configure AWS and clean resources
+        run: |
+          aws configure set aws_access_key_id ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws configure set aws_secret_access_key ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws configure set default.region us-east-1          
+          aws s3 rm s3://skippr-e2e-sample-data-output/bikehire --recursive
+          aws s3 rm s3://skippr-metadata-test --recursive
+          aws glue delete-database --catalog-id 353855562591 --name bikehire || true
+
+#  seed:
+#    runs-on: ubuntu-latest
+#    env:
+#      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+#      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+#      AWS_DEFAULT_REGION: us-east-1
+#    steps:
+#      - name: Checkout code
+#        uses: actions/checkout@v2
+#      - name: Install dependencies
+#        shell: bash
+#        run: |
+#          for i in {1..1000}; do aws s3api put-object --bucket skippr-e2e-sample-data --key bike-hire-many/bikehire$i.json.gz --body ./output/bike-hire-many/bikehire-many.json.gz &> /dev/null; done
+
+  purge_dynamodb:
+    runs-on: ubuntu-latest
+    container:
+      image: node:14
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: us-east-1
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: Install dependencies
+        run: |
+          npm install aws-sdk
+      - name: Run script
+        run: node _files/purge-dynamodb.js
+
   macos_arm64:
-#    needs: cargo_check
+#    needs: linux_x86_test
     name: cargo build (mac arm64)
     runs-on:
       - macOS
@@ -61,8 +112,31 @@ jobs:
           rust-version: stable
           architecture_name: macos_arm64
 
+#  macos_arm64_test:
+#    needs:
+#      - cleanup
+#      - purge_dynamodb
+#      - macos_arm64
+#    name: test build (mac arm64)
+#    runs-on:
+#      - macOS
+#      - self-hosted
+#      - ARM64 #MacBook-Pro-3
+#    steps:
+#      - uses: actions/checkout@v3
+#
+#      - name: Download Artifacts
+#        uses: actions/download-artifact@v3
+#
+#      - name: Test Mac arm release
+#        uses: ./.github/actions/e2e/chaos_mode
+#        with:
+#          architecture_name: macos_arm64
+#          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+#          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+#          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
+
   macos_x86:
-#    needs: cargo_check
     name: cargo build (mac x86)
     runs-on:
       - macOS
@@ -77,10 +151,11 @@ jobs:
           architecture_name: macos_x86
 
   linux_x86:
-#    needs: cargo_check
+#    needs: macos_arm64_test
     name: cargo build (linux x86)
     runs-on:
-      - ubuntu-latest
+      - ubuntu-latest-32-cores
+#      - ubuntu-latest
     steps:
       - uses: actions/checkout@v3
       - name: Build linux x86 release
@@ -89,13 +164,36 @@ jobs:
           rust-version: stable
           architecture_name: linux_x86
 
+  linux_x86_test:
+    needs:
+      - dockerize
+      - cleanup
+      - purge_dynamodb
+      - linux_x86
+    name: test build (linux x86)
+    runs-on:
+      - ubuntu-latest-16-cores
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Download Artifacts
+        uses: actions/download-artifact@v3
+
+      - name: Test linux x86 release
+        uses: ./.github/actions/e2e/bike_hire_many
+        with:
+          architecture_name: linux_x86
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
+
 
   release:
     if: startsWith(github.ref, 'refs/tags/')
     needs:
-      - macos_arm64
-      - macos_x86
-      - linux_x86
+#      - macos_arm64
+#      - macos_x86
+      - linux_x86_test
     runs-on: ubuntu-latest
     steps:
       - name: Check out code
@@ -131,11 +229,11 @@ jobs:
           fail_on_unmatched_files: true
 
   dockerize:
-    if: startsWith(github.ref, 'refs/tags/')
+#    if: startsWith(github.ref, 'refs/tags/')
     needs:
 #      - macos_arm64
 #      - macos_x86
-      - release
+      - linux_x86
     runs-on: ubuntu-latest
     steps:
       - name: Check out code
@@ -166,3 +264,9 @@ jobs:
 
           docker tag ${{ env.CONTAINER_IMAGE }} ${{ env.DOCKER_HUB_REPO }}/skippr:stable
           docker push ${{ env.DOCKER_HUB_REPO }}/skippr:stable
+
+
+
+
+
+

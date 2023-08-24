@@ -203,7 +203,12 @@ impl DataOutputAwsAthenaPlugin {
                 // }
             }
 
-            let final_key = format!("{}/{}", full_key, Helpers::random_password(32));
+            // md5 hash of the filename
+            let md5_digest = md5::compute(&filename);
+            let md5_string = format!("{:x}", md5_digest);
+            let object_name = format!("{}/{}", full_key, md5_string);
+
+            let final_key = format!("{}/{}", full_key, object_name);
 
             DataOutputAwsAthenaPlugin::upload_object(
                 &self.s3_client,
