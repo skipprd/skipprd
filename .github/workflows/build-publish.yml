@@ -66,20 +66,6 @@ jobs:
           aws s3 rm s3://skippr-metadata-test --recursive
           aws glue delete-database --catalog-id 353855562591 --name bikehire || true
 
-#  seed:
-#    runs-on: ubuntu-latest
-#    env:
-#      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-#      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-#      AWS_DEFAULT_REGION: us-east-1
-#    steps:
-#      - name: Checkout code
-#        uses: actions/checkout@v2
-#      - name: Install dependencies
-#        shell: bash
-#        run: |
-#          for i in {1..1000}; do aws s3api put-object --bucket skippr-e2e-sample-data --key bike-hire-many/bikehire$i.json.gz --body ./output/bike-hire-many/bikehire-many.json.gz &> /dev/null; done
-
   purge_dynamodb:
     runs-on: ubuntu-latest
     container:
@@ -166,7 +152,6 @@ jobs:
 
   linux_x86_test:
     needs:
-      - dockerize
       - cleanup
       - purge_dynamodb
       - linux_x86
@@ -180,7 +165,7 @@ jobs:
         uses: actions/download-artifact@v3
 
       - name: Test linux x86 release
-        uses: ./.github/actions/e2e/bike_hire_many
+        uses: ./.github/actions/e2e/chaos_mode
         with:
           architecture_name: linux_x86
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -191,9 +176,10 @@ jobs:
   release:
     if: startsWith(github.ref, 'refs/tags/')
     needs:
-#      - macos_arm64
-#      - macos_x86
       - linux_x86_test
+      - macos_x86
+      - macos_arm64
+#      - macos_arm64_test
     runs-on: ubuntu-latest
     steps:
       - name: Check out code
@@ -231,9 +217,10 @@ jobs:
   dockerize:
 #    if: startsWith(github.ref, 'refs/tags/')
     needs:
+      - release
 #      - macos_arm64
 #      - macos_x86
-      - linux_x86
+#      - linux_x86
     runs-on: ubuntu-latest
     steps:
       - name: Check out code

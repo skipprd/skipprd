@@ -28,6 +28,11 @@ else
   exit 1
 fi
 
+if [ ! -w "/usr/local/bin" ]; then
+    echo "Please run this script with sudo or as root."
+    exit 1
+fi
+
 echo "looking for $ASSET_PATTERN in https://api.github.com/repos/$OWNER/$REPO/releases/latest"
 # Get the latest release download URL for the binary based on the defined pattern.
 DOWNLOAD_URL=$(curl -s "https://api.github.com/repos/$OWNER/$REPO/releases/latest" | grep "browser_download_url.*$ASSET_PATTERN" | cut -d "\"" -f 4)
