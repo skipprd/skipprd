@@ -366,6 +366,9 @@ impl Ingest {
             }
 
             for record in records {
+
+                i += 1;
+
                 if record.is_null()
                     || (record.is_object() && record.as_object().unwrap().is_empty())
                     || (record.is_array() && record.as_array().unwrap().is_empty())
@@ -375,10 +378,9 @@ impl Ingest {
 
                     // println!("Skipping empty record: {} {} of {}", record, d, i);
 
-                    // buffers.write(&output_file, record.to_string().as_bytes());
-                    // buffers.write(&output_file, "\n".as_bytes());
+                    buffers.write(&output_file, record.to_string().as_bytes());
+                    buffers.write(&output_file, "\n".as_bytes());
 
-                    i += 1;
                     d += 1;
 
                     continue;
@@ -460,7 +462,7 @@ impl Ingest {
                     buffers.write(&output_file, &record_vec);
                     buffers.write(&output_file, "\n".as_bytes());
 
-                    i += 1;
+                    // i += 1;
                     j += 1;
 
                     offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, i);

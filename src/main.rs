@@ -245,7 +245,7 @@ async fn query(sql: &str) {
     match ctx.register_parquet(&table_name, &output_dir, ParquetReadOptions::default()).await {
         Ok(_) => {}
         Err(e) => {
-            println!("Can't find data for table: {} in dir: {}", table_name, output_dir);
+            println!("Can't find data for table: {} in dir: {}. Error: {:?}", table_name, output_dir, e);
             process::exit(1);
         }
     }
