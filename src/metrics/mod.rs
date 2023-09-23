@@ -16,6 +16,7 @@ pub static LAST_MESSAGES_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static LAST_FIXED_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static LAST_DEADLETTERS_TOTAL: AtomicU64 = AtomicU64::new(0);
 
+
 const VERSION: Option<&str> = option_env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -97,7 +98,7 @@ pub struct Metrics {
     pub messages_total: u64,
     pub deadletters_total: u64,
     pub ingeted_slow_total: u64,
-    pub start_time: Instant,
+    pub start_time: DateTime<chrono::Utc>,
     pub bytes_current: u64,
     pub bytes_total: u64,
     pub status: MetricsStatus,
@@ -115,7 +116,7 @@ impl Metrics {
             messages_total: 0,
             deadletters_total: 0,
             ingeted_slow_total: 0,
-            start_time: Instant::now(),
+            start_time: DateTime::<chrono::Utc>::from(SystemTime::now()),
             bytes_current: 0,
             bytes_total: 0,
             status: MetricsStatus::Unknown,
@@ -172,12 +173,11 @@ impl Metrics {
         let deadletters_current = metrics.deadletters_total - last_deadletters_total;
         LAST_DEADLETTERS_TOTAL.store(metrics.deadletters_total, Ordering::Relaxed);
 
-        let run_time_seconds = metrics.start_time.elapsed().as_secs();
+        let start_time_utc_str = metrics.start_time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
-
-        let start_time_utc_str = DateTime::<chrono::Utc>::from(SystemTime::now())
-            .sub(chrono::Duration::seconds(run_time_seconds as i64))
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        // get runtime in seocds from metrics.start_time
+        let current_time = chrono::Utc::now();
+        let run_time_seconds = (current_time - metrics.start_time).num_seconds();
 
 
         let data = json!({
@@ -261,7 +261,8 @@ impl Metrics {
 
         let tenant_id = TENANT_ID.read().unwrap().clone();
 
-        let run_time_seconds = metrics.start_time.elapsed().as_secs();
+        let current_time = chrono::Utc::now();
+        let run_time_seconds = (current_time - metrics.start_time).num_seconds();
 
         let start_time_utc_str = DateTime::<chrono::Utc>::from(SystemTime::now())
             .sub(chrono::Duration::seconds(run_time_seconds as i64))
