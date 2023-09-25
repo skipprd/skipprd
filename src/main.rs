@@ -423,7 +423,7 @@ async fn sync() {
             metadata
         }
         Err(_e) => {
-            println!("No exisitng Skippr metadata, will discover and evolve schemas as we sync");
+            println!("No existing Skippr metadata, will discover and evolve schemas as we sync");
             let _empty_meta = Metadata::new().unwrap();
 
             HashMap::new()
