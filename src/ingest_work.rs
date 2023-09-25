@@ -33,6 +33,7 @@ use crate::ingest::fast_ingest::fast_path_ingest;
 use avro_rs::{Writer, Schema};
 use helpers::timed_rwlock::TimedRwLock;
 use crate::serdes::csv::SerderCsv;
+use crate::serdes::xml::SerdeXml;
 // use crate::converters::skippr_avro::convert_skippr_to_avro_field_types;
 
 pub struct Buffer {
@@ -310,13 +311,13 @@ impl Ingest {
 
                 self.active_count.fetch_add(1, Ordering::SeqCst);
 
-                let datas_clone = datas.clone();
+                let mut datas_clone = datas.clone();
 
                 let core_count = self.thread_pool.active_count();
 
                 self.thread_pool.execute(move || {
                     // println!("Processing batch of {} events on core {}", datas_clone.len(), core_count);
-                    Ingest::process_batch(datas_clone, &offset_db_clone);
+                    Ingest::process_batch(&mut datas_clone, &offset_db_clone);
                     tx.send(()).unwrap();
                 });
 
@@ -326,7 +327,7 @@ impl Ingest {
     }
 
     fn process_batch(
-        datas: Vec<IngestBatch>,
+        datas: &mut Vec<IngestBatch>,
         offset_db_clone: &Arc<Offsets>
     ) {
 
@@ -353,17 +354,39 @@ impl Ingest {
         let mut d = 0;
         let mut x = 0;
 
+        if Config::getenv("DATA_SOURCE_FORMAT", "json") == "xml" {
+            let foo = IngestBatch {
+                offset_key: datas[0].offset_key.clone(),
+                data: datas.iter().map(|v| v.data.as_str()).collect::<Vec<&str>>().join(""),
+            };
+            datas.clear();
+            datas.push(foo);
+            // convert serde_json::Value to serde_value::Value
+            // records = foo.iter().map(|v| {
+            //     let str_val = serde_xml_rs::to_string(v).unwrap(); // Convert to string
+            //     serde_json::from_str(&str_val).unwrap() // Deserialize into serde_json::Value
+            // }).collect();
+
+        }
+
         for ingest_batch in datas {
 
             let has_offsets =
                 offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Closed, 0);
 
+            println!("{:?}", ingest_batch.data);
+
             let mut records: Vec<Value> = Vec::new();
             if Config::getenv("DATA_SOURCE_FORMAT", "json") == "csv" {
                 records = SerderCsv::deserialize(&ingest_batch.data);
+            } else if Config::getenv("DATA_SOURCE_FORMAT", "json") == "xml" {
+                records = SerdeXml::deserialize(ingest_batch.data.as_bytes());
             } else {
                 records = SerdeJson::deserialize(&ingest_batch.data);
             }
+
+            println!("Processing batch of {} events", records.len());
+            println!("{:?}", records);
 
             for record in records {
 
