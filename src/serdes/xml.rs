@@ -204,3 +204,32 @@ fn test_xml_serde() {
         // assert_eq!(msg["body".to_string()], &Value::String("jj".to_string()));
     // }
 }
+
+#[test]
+fn test_xml_repeate_fields_serde() {
+    // #[test]
+    // fn test_basic_valid_xml() {
+        let record: String = r#"<items>
+   <item id="0001" type="donut">
+      <name>Cake</name>
+      <ppu>0.55</ppu>
+      <batters>
+         <batter id="1001">Regular</batter>
+         <batter id="1002">Chocolate</batter>
+         <batter id="1003">Blueberry</batter>
+      </batters>
+      <topping id="5001">None</topping>
+      <topping id="5002">Glazed</topping>
+      <topping id="5005">Sugar</topping>
+      <topping id="5006">Sprinkles</topping>
+      <topping id="5003">Chocolate</topping>
+      <topping id="5004">Maple</topping>
+   </item>
+</items>"#.to_string();
+        println!("{:?}", record);
+        let msg = SerdeXml::deserialize(record.as_bytes());
+        // println!("{:?}", msg);
+        // assert_eq!(msg.first().unwrap()., "Tove");
+        // assert_eq!(msg["body".to_string()], &Value::String("jj".to_string()));
+    // }
+}
