@@ -487,12 +487,13 @@ impl Ingest {
                             );
 
                             // update metadata in runtime and ingest message
-                            if updated_schema_clone.lock().unwrap().as_str() == "yes" &&
-                                Config::getenv("SCHMEA_AUTO_APPROVE", "yes") == "yes" {
+                            if Config::getenv("SCHMEA_AUTO_APPROVE", "yes") == "yes" {
 
-                                {
-                                    METADATA.write().unwrap().clear();
-                                    METADATA.write().unwrap().extend(NEW_METADATA.read().unwrap().clone());
+                                if updated_schema_clone.lock().unwrap().as_str() == "yes" {
+                                    {
+                                        METADATA.write().unwrap().clear();
+                                        METADATA.write().unwrap().extend(NEW_METADATA.read().unwrap().clone());
+                                    }
                                 }
 
                                 x += 1;
