@@ -102,8 +102,9 @@ use crate::plugins::stdin_input::DataSourceStdinPlugin;
 use crate::plugins::stdout_output::DataOutputStdoutPlugin;
 
 use datafusion::prelude::*;
+use nix::libc::{exit, signal};
 use crate::helpers::timed_rwlock::TimedRwLock;
-use crate::plugins::pcap_input::DataSourcePcapPlugin;
+// use crate::plugins::pcap_input::DataSourcePcapPlugin;
 
 // pub static DISPLAY_METRICS: Lazy<TimedRwLock<AtomicBool>> =
 //     Lazy::new(|| TimedRwLock::new("display_metrics".to_string(), AtomicBool::new(false)));
@@ -1053,12 +1054,13 @@ pub async fn sync_output_plugin(plugin_name: &str, buffer_name: String) {
 pub async fn sync_input_plugin(offsets_clone: Arc<Offsets>) {
     match Config::getenv("DATA_SOURCE_PLUGIN_NAME", "").as_str() {
         "pcap" => {
-            let mut input = DataSourcePcapPlugin::new().await;
-            input
-                .sync(
-                    offsets_clone,
-                )
-                .await;
+            panic!("PCAP input plugin not installed, please contact support")
+            // let mut input = DataSourcePcapPlugin::new().await;
+            // input
+            //     .sync(
+            //         offsets_clone,
+            //     )
+            //     .await;
         }
         "stdin" => {
             let mut input = DataSourceStdinPlugin::new().await;

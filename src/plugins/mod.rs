@@ -11,7 +11,7 @@ pub mod file_input;
 pub mod s3_output;
 pub mod file_output;
 pub mod stdout_output;
-pub mod pcap_input;
+// pub mod pcap_input;
 
 // #[async_trait]
 // trait DataSourcePlugin {
