@@ -5,7 +5,7 @@ use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::helpers::Helpers;
 use crate::ingest::ingest::ingest;
 use crate::serdes::json::SerdeJson;
-use crate::{helpers, METADATA, METRICS, RUNNING};
+use crate::{helpers, METADATA, METRICS, NEW_METADATA, RUNNING};
 use glob::{glob_with, MatchOptions};
 use lru::LruCache;
 use once_cell::sync::Lazy;
@@ -326,6 +326,19 @@ impl Ingest {
 
     }
 
+    fn deadletter(record: Value, buffers: &mut Buffers) {
+        let data_dir = Config::get_data_dir();
+        let deadletter_dir = format!("{}/deadletter_buffer", data_dir);
+
+        let output_file = format!("{}/{}", deadletter_dir.clone(), &DEADLETTER_FILE_NAME.as_str());
+
+        // println!("Skipping empty record: {} {} of {}", record, d, i);
+
+        buffers.write(&output_file, record.to_string().as_bytes());
+        buffers.write(&output_file, "\n".as_bytes());
+
+    }
+
     fn process_batch(
         datas: &mut Vec<IngestBatch>,
         offset_db_clone: &Arc<Offsets>
@@ -374,8 +387,6 @@ impl Ingest {
             let has_offsets =
                 offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Closed, 0);
 
-            println!("{:?}", ingest_batch.data);
-
             let mut records: Vec<Value> = Vec::new();
             if Config::getenv("DATA_SOURCE_FORMAT", "json") == "csv" {
                 records = SerderCsv::deserialize(&ingest_batch.data);
@@ -384,9 +395,6 @@ impl Ingest {
             } else {
                 records = SerdeJson::deserialize(&ingest_batch.data);
             }
-
-            println!("Processing batch of {} events", records.len());
-            println!("{:?}", records);
 
             for record in records {
 
@@ -397,12 +405,7 @@ impl Ingest {
                     || (record.is_array() && record.as_array().unwrap().is_empty())
                 {
 
-                    let output_file = format!("{}/{}", deadletter_dir.clone(), &deadletter_file_name.as_str());
-
-                    // println!("Skipping empty record: {} {} of {}", record, d, i);
-
-                    buffers.write(&output_file, record.to_string().as_bytes());
-                    buffers.write(&output_file, "\n".as_bytes());
+                    Self::deadletter(record, &mut buffers);
 
                     d += 1;
 
@@ -460,19 +463,43 @@ impl Ingest {
                             msg
                         },
                         Err(err) => {
-                            let mut metadata = METADATA.write().unwrap();
+
+                            // let old_metadata = NEW_METADATA.read().unwrap().clone();
+
+                            if NEW_METADATA.read().unwrap().get(&skpr_namespace).is_none() {
+                                NEW_METADATA.write().unwrap().extend(METADATA.read().unwrap().clone());
+                            }
 
                             // println!("Falling back to slow path due to: {}", err);
                             let msg = ingest(
                                 &record,
-                                &mut metadata.get_mut(&skpr_namespace).unwrap().fields,
+                                &mut NEW_METADATA.write().unwrap().get_mut(&skpr_namespace).unwrap().fields,
                                 &mut updated_schema_clone.lock().unwrap(),
                                 flatten,
                             );
 
-                            x += 1;
+                            // update metadata in runtime and ingest message
+                            if updated_schema_clone.lock().unwrap().as_str() == "yes" &&
+                                Config::getenv("SCHMEA_AUTO_APPROVE", "yes") == "yes" {
 
-                            msg
+                                {
+                                    METADATA.write().unwrap().clear();
+                                    METADATA.write().unwrap().extend(NEW_METADATA.read().unwrap().clone());
+                                }
+
+                                x += 1;
+
+                                msg
+
+                            } else { // or just deadletter message for later approval
+                                Self::deadletter(record, &mut buffers);
+
+                                d += 1;
+
+                                continue;
+                            }
+
+
                             // Value::Null
 
                         }
@@ -582,6 +609,7 @@ impl Ingest {
         if *updated_schema_clone.lock().unwrap() == "yes".to_string() {
             *updated_schema_clone.lock().unwrap() = "no".to_string();
 
+            // update metadata at control pane, this may or may not be automatically approved
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()

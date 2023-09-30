@@ -447,11 +447,21 @@ impl Config {
 
             let path = "";
 
+            let auto_approve_evolution = Config::getenv("SCHMEA_AUTO_APPROVE", "yes") == "yes";
+
+            let schema_status = if !evolved {
+                "approved"
+            } else if !auto_approve_evolution && evolved {
+                "pending"
+            } else {
+                "approved"
+            };
+
             let data = json!({
                 "workspace": workspace,
                 "pipeline": pipeline,
                 "metadata": metadata,
-                "status": "approved",
+                "status": schema_status
             });
 
             // println!("Posting data: {:?}", data);

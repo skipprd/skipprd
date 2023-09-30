@@ -9,7 +9,7 @@ use serde_derive::{Deserialize, Serialize};
 use crate::ingest::ingest::discover_ingest;
 
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Evolution {
     pub type_string: String,
     pub new_field: String,

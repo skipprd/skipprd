@@ -44,7 +44,7 @@ thread_local! {
     static LAST_SUCCESSFUL_EVOLUTION: std::cell::RefCell<HashMap<String, String>> = std::cell::RefCell::new(HashMap::new());
 }
 
-#[derive(Default, Debug, Clone, Deserialize, Serialize)]
+#[derive(Default, Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct DateCandidate {
     pub(crate) check_count: i32,
     pub(crate) valid_count: i32,
@@ -89,7 +89,7 @@ pub fn discover_ingest(
     discoverd_data_type.clone()
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Metadata {
     pub(crate) count: i32,
     pub(crate) types: HashMap<String, u32>,
