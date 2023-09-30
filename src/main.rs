@@ -775,22 +775,26 @@ async fn sync() {
         require_literal_leading_dot: false,
     };
     let data_dir = Config::get_data_dir();
-    let output_dir = &format!("{}/ingest_buffer", data_dir);
+    let ingest_dir = &format!("{}/ingest_buffer", data_dir);
     let deadletter_dir = &format!("{}/deadletter_buffer", data_dir);
-    let finalised_dir = &format!("{}/output_buffer", data_dir);
+    let output_dir = &format!("{}/output_buffer", data_dir);
     match fs::create_dir(deadletter_dir) {
         Ok(_g) => {}
         Err(_err) => {}
     }
+    match fs::create_dir(format!("{}/done", deadletter_dir)) {
+        Ok(_g) => {}
+        Err(_err) => {}
+    }
+    match fs::create_dir(ingest_dir) {
+        Ok(_g) => {}
+        Err(_err) => {}
+    }
+    match fs::create_dir(format!("{}/done", ingest_dir)) {
+        Ok(_g) => {}
+        Err(_err) => {}
+    }
     match fs::create_dir(output_dir) {
-        Ok(_g) => {}
-        Err(_err) => {}
-    }
-    match fs::create_dir(format!("{}/done", output_dir)) {
-        Ok(_g) => {}
-        Err(_err) => {}
-    }
-    match fs::create_dir(finalised_dir) {
         Ok(_g) => {}
         Err(_err) => {}
     }

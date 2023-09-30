@@ -112,7 +112,7 @@ thread_local! {
 pub static OUTPUT_FILES_STATIC: Lazy<TimedRwLock<LruCache<String, OutputFile>>> =
     Lazy::new(|| TimedRwLock::new("output_files_static".to_string(), LruCache::new(NonZeroUsize::new(100).expect(""))));
 
-pub static deadletter_file_name: Lazy<String> = Lazy::new(|| BufferChunker::encode_chunk_name(
+pub static DEADLETTER_FILE_NAME: Lazy<String> = Lazy::new(|| BufferChunker::encode_chunk_name(
     "deadletters",
     Some(Config::get_pipeline_name().as_str()),
     None,
@@ -191,7 +191,7 @@ impl Ingest {
 
     pub fn flush_buffers(force: bool, output_files: &mut RwLockWriteGuard<LruCache<String, OutputFile>>) {
         let data_dir = Config::get_data_dir();
-        let output_dir = format!("{}/ingest_buffer", data_dir);
+        // let output_dir = format!("{}/ingest_buffer", data_dir);
 
         let mut rotated_files: Vec<String> = Vec::new();
 
@@ -216,7 +216,7 @@ impl Ingest {
 
                     let new_filename = format!(
                         "{}/done/{}-{}",
-                        output_dir,
+                        filepath.split("/").take(filepath.split("/").count() - 1).collect::<Vec<&str>>().join("/"),
                         Helpers::random_str(12),
                         &filename
                     );
@@ -246,37 +246,42 @@ impl Ingest {
                 require_literal_leading_dot: false,
             };
 
-            for entry in glob_with(&format!("{}/*", output_dir), options)
-                .expect("Failed to read glob pattern")
-            {
-                match entry {
-                    Ok(path) => {
-                        if path.is_dir() {
-                            break;
-                        }
+            for dir in [
+                format!("{}/ingest_buffer", data_dir),
+                format!("{}/deadletter_buffer", data_dir)] {
 
-                        let new_filename = format!(
-                            "{}/done/{}-{}",
-                            output_dir,
-                            Helpers::random_str(12),
-                            path.file_name().unwrap().to_str().unwrap()
-                        );
-                        let old_path = format!("{}", path.display().to_string());
-
-                        println!(
-                            "Force flushing ingest buffer: {} to output: {}",
-                            path.display().to_string(),
-                            new_filename
-                        );
-
-                        match fs::rename(&old_path, &new_filename) {
-                            Ok(_) => {}
-                            Err(err) => {
-                                println!("Error: {}", err)
+                for entry in glob_with(&format!("{}/*", dir), options)
+                    .expect("Failed to read glob pattern")
+                {
+                    match entry {
+                        Ok(path) => {
+                            if path.is_dir() {
+                                break;
                             }
-                        };
+
+                            let new_filename = format!(
+                                "{}/done/{}-{}",
+                                dir,
+                                Helpers::random_str(12),
+                                path.file_name().unwrap().to_str().unwrap()
+                            );
+                            let old_path = format!("{}", path.display().to_string());
+
+                            println!(
+                                "Force flushing ingest buffer: {} to output: {}",
+                                path.display().to_string(),
+                                new_filename
+                            );
+
+                            match fs::rename(&old_path, &new_filename) {
+                                Ok(_) => {}
+                                Err(err) => {
+                                    println!("Error: {}", err)
+                                }
+                            };
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
         }
