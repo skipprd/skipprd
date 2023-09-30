@@ -373,18 +373,12 @@ impl Ingest {
         let mut x = 0;
 
         if Config::getenv("DATA_SOURCE_FORMAT", "json") == "xml" {
-            let foo = IngestBatch {
+            let batch = IngestBatch {
                 offset_key: datas[0].offset_key.clone(),
                 data: datas.iter().map(|v| v.data.as_str()).collect::<Vec<&str>>().join(""),
             };
             datas.clear();
-            datas.push(foo);
-            // convert serde_json::Value to serde_value::Value
-            // records = foo.iter().map(|v| {
-            //     let str_val = serde_xml_rs::to_string(v).unwrap(); // Convert to string
-            //     serde_json::from_str(&str_val).unwrap() // Deserialize into serde_json::Value
-            // }).collect();
-
+            datas.push(batch);
         }
 
         let entity_field_dot = Config::getenv("TRANSFORM_RECORD_FIELD_PATH", "");
