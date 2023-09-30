@@ -62,7 +62,7 @@ jobs:
           aws configure set aws_access_key_id ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws configure set aws_secret_access_key ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws configure set default.region us-east-1          
-          aws s3 rm s3://skippr-e2e-sample-data-output/bikehire --recursive
+          aws s3 rm s3://skippr-e2e-sample-data-output --recursive
           aws s3 rm s3://skippr-metadata-test --recursive
           aws glue delete-database --catalog-id 353855562591 --name bikehire || true
 

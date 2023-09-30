@@ -387,6 +387,8 @@ impl Ingest {
 
         }
 
+        let entity_field_dot = Config::getenv("TRANSFORM_RECORD_FIELD_PATH", "");
+
         for ingest_batch in datas {
 
             let has_offsets =
@@ -399,6 +401,13 @@ impl Ingest {
                 records = SerdeXml::deserialize(ingest_batch.data.as_bytes());
             } else {
                 records = SerdeJson::deserialize(&ingest_batch.data);
+            }
+
+            if entity_field_dot != "" {
+                records = match Helpers::process_values(&records, &entity_field_dot) {
+                    Some(records) => records,
+                    None => records
+                };
             }
 
             for record in records {

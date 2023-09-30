@@ -401,8 +401,18 @@ impl Helpers {
         }
 
         // Return the final value found at the end of the traversal
-        Some(current_value.clone())
+
+        match current_value {
+            Value::Array(_) | Value::Object(_) => Some(current_value.clone()),
+            _ => None,
+        }
+        // Some(current_value.clone())
     }
+
+    pub fn process_values(values: &Vec<Value>, field_str: &str) -> Option<Vec<Value>> {
+        values.iter().map(|value| Helpers::get_nested_value_from_dot_notation(value, field_str)).collect()
+    }
+
 }
 
 #[cfg(test)]
