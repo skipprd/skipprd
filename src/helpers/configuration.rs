@@ -7,18 +7,19 @@ use std::io::{BufWriter, Read};
 use std::ops::Deref;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::RwLock;
+use std::sync::{Arc, Mutex, RwLock};
 use yaml_rust::YamlLoader;
 
 use nix::libc::exit;
 
 use std::time::{Duration, Instant};
+use lazy_static::lazy_static;
 use once_cell::sync::Lazy;
 
 // use aws_config::profile::profile_file::ProfileFileKind::Config;
 use serde_derive::{Deserialize, Serialize};
 
-use serde_json::json;
+use serde_json::{json, Value};
 
 use reqwest::header::HeaderValue;
 
@@ -32,136 +33,608 @@ use crate::helpers::Helpers;
 
 use crate::helpers::license::{HAS_LICENSE, LicenseChecker, TENANT_ID};
 
-use crate::plugins::athena::AwsAthena;
+use crate::plugins::athena::{AwsAthena, DataOutputAwsAthenaPluginConfig};
 
-#[non_exhaustive]
-struct RunModes;
+use toml;
+use crate::helpers::timed_rwlock::TimedRwLock;
+use crate::plugins::file_input::{DataSourceLocalFilePlugin, DataSourceLocalFilePluginConfig};
+use crate::plugins::s3_input::DataSourceS3PluginConfig;
 
 
-impl RunModes {
-    pub const RUN_MODE_SYNC: &'static str = "sync";
-    pub const RUN_MODE_VALIDATE_CONNECTION: &'static str = "validate_connection";
-    pub const RUN_MODE_VALIDATE_CONFIG: &'static str = "validate_config";
-    pub const RUN_MODE_SAVE: &'static str = "save";
-    pub const RUN_MODE_RESET_SOURCE_OFFSETS: &'static str = "reset_source_offsets";
-    pub const RUN_MODE_DELETE_PLUGIN: &'static str = "delete_plugin";
-    // output plugins only
-    pub const RUN_MODE_CREATE_UPDATE_DEST_SCHEMA: &'static str = "sync_schema";
-    pub const RUN_MODE_DELETE_DEST_SCHEMA: &'static str = "delete_schema";
-
-    pub const RUN_MODE_VALIDATE_SCHEMA: &'static str = "validate_schema";
+#[derive(Debug, Deserialize, Clone)]
+pub struct Skippr {
+    pub api_token: Option<String>,
 }
 
-#[non_exhaustive]
-struct MutableModes;
-
-impl MutableModes {
-    pub const MUTABLE_MODE_STRICT: &'static str = "strict";
-    pub const MUTABLE_MODE_RESOLVE: &'static str = "resolve";
-    pub const MUTABLE_MODE_EVOLVE: &'static str = "evolve";
+#[derive(Debug, Deserialize, Clone)]
+pub struct Transform {
+    pub batch_time_fields: Option<String>,
+    pub batch_time_unit: Option<String>,
+    pub flatten_events: Option<String>,
+    pub record_field_path: Option<String>,
+    pub batch_partition_fields: Option<String>,
+    pub namespace_fields: Option<String>,
 }
 
-#[derive(Deserialize, Debug)]
+
+#[derive(Debug, Deserialize, Clone)]
+pub enum PluginConfig {
+    s3(DataSourceS3PluginConfig),
+    athena(DataOutputAwsAthenaPluginConfig),
+    file(DataSourceLocalFilePluginConfig),
+    // ... any other plugin types
+}
+
+impl PluginConfig {
+    pub fn format(&self) -> String {
+        match self {
+            PluginConfig::s3(s3_config) => s3_config.format.clone().or(Some("json".to_string())).as_ref().unwrap().clone(),
+            PluginConfig::athena(athena_config) => athena_config.format.clone().or(Some("json".to_string())).unwrap(),
+            PluginConfig::file(file_config) => file_config.format.clone().or(Some("json".to_string())).unwrap(),
+        }
+    }
+
+    pub fn plugin_name(&self) -> String {
+        match self {
+            PluginConfig::s3(s3_config) => s3_config.plugin_name.clone().or(Some("".to_string())).as_ref().unwrap().clone(),
+            PluginConfig::athena(athena_config) => athena_config.plugin_name.clone().or(Some("".to_string())).unwrap(),
+            PluginConfig::file(file_config) => file_config.plugin_name.clone().or(Some("".to_string())).unwrap(),
+        }
+    }
+
+    pub fn batch_size_bytes(&self) -> i64 {
+        match self {
+            PluginConfig::s3(s3_config) => s3_config.batch_size_bytes.or(Some(1000000)).unwrap(),
+            PluginConfig::athena(athena_config) => athena_config.batch_size_bytes.or(Some(1000000)).unwrap(),
+            PluginConfig::file(file_config) => file_config.batch_size_bytes.or(Some(1000000)).unwrap(),
+        }
+    }
+
+    pub fn batch_size_seconds(&self) -> i64 {
+        match self {
+            PluginConfig::s3(s3_config) => s3_config.batch_size_seconds.or(Some(60)).unwrap(),
+            PluginConfig::athena(athena_config) => athena_config.batch_size_seconds.or(Some(60)).unwrap(),
+            PluginConfig::file(file_config) => file_config.batch_size_seconds.or(Some(60)).unwrap(),
+        }
+    }
+}
+
+impl From<PluginConfig> for DataOutputAwsAthenaPluginConfig {
+    fn from(plugin_config: PluginConfig) -> Self {
+        match plugin_config {
+            PluginConfig::athena(athena_config) => athena_config,
+            _ => panic!("Invalid plugin type"),
+        }
+    }
+}
+
+impl From<PluginConfig> for DataSourceS3PluginConfig {
+    fn from(plugin_config: PluginConfig) -> Self {
+        match plugin_config {
+            PluginConfig::s3(s3_config) => s3_config,
+            _ => panic!("Invalid plugin type"),
+        }
+    }
+}
+
+impl From<PluginConfig> for DataSourceLocalFilePluginConfig {
+    fn from(plugin_config: PluginConfig) -> Self {
+        match plugin_config {
+            PluginConfig::file(file_config) => file_config,
+            _ => panic!("Invalid plugin type"),
+        }
+    }
+}
+
+
+
+// pub struct InputOutput {
+//     pub plugin: Plugins,
+// }
+
+// #[derive(Debug, Deserialize, Clone)]
+// pub struct Plugins {
+//     pub plugin_name: String,
+//     pub format: Option<String>,
+//     pub athena: Option<DataOutputAwsAthenaPluginConfig>,
+//     pub s3: Option<DataSourceS3PluginConfig>,
+// }
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct Pipeline {
+    pub workspace: String,
+    pub auto_approve: Option<String>,
+    pub env: Option<String>,
+    pub buffer_threshold_bytes: Option<i64>,
+    pub buffer_threshold_seconds: Option<i64>,
+    pub chaos_mode: Option<String>,
+    pub data_dir: Option<String>,
+    pub transform: Option<Transform>,
+    pub input: Option<String>,
+    pub output: Option<String>,
+    pub schema: Option<String>,
+    pub deadletter: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
 pub struct Config {
-    pub run_mode: String,
-    pub anonymous_metrics: bool,
-    pub log_level: String,
-    pub data_dir: String,
-    pub container_mem: u64,
-    pub pipeline_name: String,
-    pub pipeline_id: String,
-    pub tenant_id: String,
-    pub task_id: u64,
-    pub task_logs: Vec<String>,
-    pub exit_code: i32,
-    pub sync_mode: String,
-    pub mutable_mode_strict: String,
-    pub mutable_mode_resolve: String,
-    pub mutable_mode_evolve: String,
-    pub mutable_mode: String,
-    pub offsets: Vec<u8>,
-    pub source_format: Option<String>,
-    pub output_format: Option<String>,
-    pub analysing: bool,
-    pub min_discovery_records: u32,
-    pub max_discovery_seconds: u32,
-    pub id_fields: Vec<String>,
-    pub date_field_candidates: Vec<String>,
-    pub discovered_field_occurrence: Vec<String>,
-    pub schema: Vec<String>,
-    pub filters: bool,
-    pub flush_mem_buffer_bytes: i32,
-    pub flush_buffer_bytes: i32,
-    pub flush_mem_buffer_seconds: i32,
-    pub flush_buffer_seconds: i32,
-    pub flush_mem_buffer_records: i32,
-    pub flush_buffer_records: i32,
-    pub event_time_bucket_duration: i32,
-    pub poll_interval_seconds: i32,
-    pub avro_schemas: Vec<String>,
-    pub output_schemas: Vec<String>,
-    pub partition_by_fields: bool,
-    pub event_type_fields: Vec<String>,
-    pub event_path: bool,
-    pub flatten_events: bool,
-    pub time_fields: bool,
-    pub system_user_api_token: String,
-    pub enable_dead_letters: bool,
+    pub skippr: Skippr,
+    pub pipelines: HashMap<String, Pipeline>,
+    pub data_inputs: Option<HashMap<String, PluginConfig>>,
+    pub data_outputs: Option<HashMap<String, PluginConfig>>,
+    pub data_deadletters: Option<HashMap<String, PluginConfig>>,
+    pub schema_outputs: Option<HashMap<String, PluginConfig>>,
 }
+
+pub static APP_CONFIG: Lazy<Arc<TimedRwLock<Option<Config>>>> = Lazy::new(|| Arc::new(TimedRwLock::new("config".to_string(),None)));
+pub static PIPELINE_NAME: Lazy<Arc<TimedRwLock<String>>> = Lazy::new(|| Arc::new(TimedRwLock::new("config".to_string(),"default".to_string())));
 
 impl Config {
-    pub fn new() -> Config {
-        Config {
-            anonymous_metrics: true,
-            log_level: String::from("INFO"),
-            data_dir: String::from(""),
-            container_mem: 0,
-            pipeline_name: String::from(""),
-            pipeline_id: String::from(""),
-            tenant_id: String::from(""),
-            task_id: 0,
-            system_user_api_token: String::new(),
-            enable_dead_letters: true,
-            poll_interval_seconds: 0,
 
-            source_format: None,
-            filters: false,
-            partition_by_fields: false,
-            event_path: false,
+    pub fn find_config_file() -> String {
 
-            output_format: None,
-            flatten_events: false,
+        let valid_locations = vec![
+            "./skippr.yml",
+            "./skippr.yaml",
+            "./skippr.toml",
+            "./skippr.json"
+        ];
 
-            analysing: true,
-            sync_mode: String::from("sync"),
-            mutable_mode_strict: String::from("strict"),
-            mutable_mode_resolve: String::from("resolve"),
-            mutable_mode_evolve: String::from("evolve"),
-            mutable_mode: MutableModes::MUTABLE_MODE_STRICT.to_string(),
-            run_mode: RunModes::RUN_MODE_SYNC.to_string(),
+        let mut file_path = String::new();
 
-            offsets: Vec::new(),
-            task_logs: Vec::new(),
-            exit_code: 0,
-            id_fields: Vec::new(),
-            event_type_fields: Vec::new(),
-            time_fields: false,
-            date_field_candidates: vec![],
-            discovered_field_occurrence: vec![],
-            schema: vec![],
-            avro_schemas: Vec::new(),
-            output_schemas: Vec::new(),
-
-            min_discovery_records: 10000,
-            max_discovery_seconds: 300,
-            flush_mem_buffer_bytes: 200000000,
-            flush_buffer_bytes: 200000000,
-            flush_mem_buffer_seconds: 300,
-            flush_buffer_seconds: 300,
-            flush_mem_buffer_records: 5000000,
-            flush_buffer_records: 5000000,
-            event_time_bucket_duration: 0,
+        if file_path.is_empty() {
+            for location in valid_locations {
+                if Path::new(location).exists() {
+                    file_path = location.to_string();
+                    break;
+                }
+            }
         }
+
+        file_path
+
+    }
+
+    pub fn build_config() {
+
+        let file_path = Config::find_config_file();
+
+        let mut file = File::open(&file_path)
+            .expect("File not found");
+
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)
+            .expect("Something went wrong reading the file");
+
+        let config: serde_value::Value = if file_path.ends_with(".json") {
+            serde_json::from_str(&contents).unwrap()
+        } else if file_path.ends_with(".yml") || file_path.ends_with(".yaml") {
+            serde_yaml::from_str(&contents).unwrap()
+        } else if file_path.ends_with(".toml") {
+            toml::from_str(&contents).unwrap()
+        } else {
+            panic!("Unsupported file format");
+        };
+
+        // Serialize the serde_value::Value into a String
+        let string_val = serde_json::to_string(&config).unwrap();
+
+        // Deserialize the String back into serde_json::Value
+        let config: Value = serde_json::from_str(&string_val).unwrap();
+
+        // recusively merge config with any set ENV vars
+        let config = Config::merge_config_with_env(config);
+
+        let string_val = serde_json::to_string(&config).unwrap();
+        // Deserialize the String back into Config
+        let mut config: Config = serde_json::from_str(&string_val).unwrap();
+
+        // println!("config: {:?}", config);
+
+        {
+            let mut app_config = APP_CONFIG.write().unwrap();
+            *app_config = Some(config);
+        }
+
+        // panic!("test");
+
+
+    }
+
+    fn merge_env_vars(val: &mut Value, prefix: String) {
+        match val {
+            Value::Object(map) => {
+                for (k, v) in map.iter_mut() {
+                    let env_key = format!("{}_{}", prefix, k).to_uppercase();
+                    Config::merge_env_vars(v, env_key);
+                }
+            }
+            Value::Array(arr) => {
+                for (i, v) in arr.iter_mut().enumerate() {
+                    let env_key = format!("{}_{}", prefix, i).to_uppercase();
+                    Config::merge_env_vars(v, env_key);
+                }
+            }
+            _ => {
+                if let Ok(env_val) = std::env::var(&prefix) {
+                    *val = Value::String(env_val);
+                }
+            }
+        }
+    }
+
+    pub fn merge_config_with_env(mut config: Value) -> Value {
+        Config::merge_env_vars(&mut config, "SKIPPR".to_string());
+        config
+    }
+
+    pub fn get_pipeline_input_plugin_name() -> String {
+        let config = Config::get();
+
+        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+
+        if pipline.input.is_some() {
+            // split dot string
+            let input_plugin_name = pipline.input.as_ref().unwrap().split('.').collect::<Vec<&str>>()[1].to_string();
+
+            match config.data_inputs.as_ref() {
+                Some(data_inputs) => {
+                    match data_inputs.get(&input_plugin_name) {
+                        Some(plugin_config) => {
+                            plugin_config.plugin_name().clone()
+                        },
+                        None => {
+                            "".to_string()
+                        }
+                    }
+                }
+                None => {
+                    "".to_string()
+                }
+            }
+        } else {
+            "".to_string()
+        }
+    }
+
+    pub fn get_pipeline_output_plugin_name() -> String {
+        let config = Config::get();
+
+        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+
+        if pipline.output.is_some() {
+            // split dot string
+            let input_plugin_name = pipline.output.as_ref().unwrap().split('.').collect::<Vec<&str>>()[1].to_string();
+
+            match config.data_outputs.as_ref() {
+                Some(data_outputs) => {
+                    match data_outputs.get(&input_plugin_name) {
+                        Some(plugin_config) => {
+                            plugin_config.plugin_name().clone()
+                        },
+                        None => {
+                            "".to_string()
+                        }
+                    }
+                }
+                None => {
+                    "".to_string()
+                }
+            }
+        } else {
+            "".to_string()
+        }
+    }
+
+    pub fn get_pipeline_schema_plugin_name() -> String {
+        let config = Config::get();
+
+        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+
+        if pipline.schema.is_some() {
+            // split dot string
+            let input_plugin_name = pipline.schema.as_ref().unwrap().split('.').collect::<Vec<&str>>()[1].to_string();
+
+            match config.schema_outputs.as_ref() {
+                Some(schema_outputs) => {
+                    match schema_outputs.get(&input_plugin_name) {
+                        Some(plugin_config) => {
+                            plugin_config.plugin_name().clone()
+                        },
+                        None => {
+                            "".to_string()
+                        }
+                    }
+                }
+                None => {
+                    "".to_string()
+                }
+            }
+        } else {
+            "".to_string()
+        }
+
+    }
+
+    pub fn get_pipeline_deadletter_plugin_name() -> String {
+        let config = Config::get();
+
+        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+
+        if pipline.deadletter.is_some() {
+            // split dot string
+            let input_plugin_name = pipline.deadletter.as_ref().unwrap().split('.').collect::<Vec<&str>>()[1].to_string();
+
+            match config.data_deadletters.as_ref() {
+                Some(data_deadletters) => {
+                    match data_deadletters.get(&input_plugin_name) {
+                        Some(plugin_config) => {
+                            plugin_config.plugin_name().clone()
+                        },
+                        None => {
+                            "".to_string()
+                        }
+                    }
+                }
+                None => {
+                    "".to_string()
+                }
+            }
+        } else {
+            "".to_string()
+        }
+
+    }
+
+    pub fn get_skippr_api_token() -> String {
+        let config = Config::get();
+
+        config.skippr.api_token.as_ref().unwrap().to_string()
+    }
+
+    pub fn get_pipeline_config() -> Pipeline {
+        let config = Config::get();
+
+        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+
+        pipline.clone()
+    }
+
+    pub fn get_transform_config() -> Transform {
+        let config = Config::get();
+
+        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+
+        pipline.transform.as_ref().unwrap().clone()
+    }
+
+    pub fn get_transform_batch_partition_fields() -> String {
+        let config = Config::get();
+
+        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+
+        let default_batch_partition_fields = &"".to_string();
+        let batch_partition_fields = pipline.transform.as_ref().unwrap().batch_partition_fields.as_ref().unwrap_or(default_batch_partition_fields);
+
+        batch_partition_fields.to_string()
+    }
+
+    pub fn get_transform_namespace_fields() -> String {
+        let config = Config::get();
+
+        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+
+        let default_namespace_fields = &"".to_string();
+        let namespace_fields = pipline.transform.as_ref().unwrap().namespace_fields.as_ref().unwrap_or(default_namespace_fields);
+
+        namespace_fields.to_string()
+    }
+
+    pub fn get_transform_flatten_events() -> bool {
+        let config = Config::get();
+
+        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+
+        let default_flatten_events = &"no".to_string();
+
+        let flatten_events = pipline.transform.as_ref().unwrap().flatten_events.as_ref().unwrap_or(default_flatten_events);
+
+        Config::truth_value(flatten_events)
+    }
+
+    pub fn get_transform_record_field_path() -> String {
+        let config = Config::get();
+
+        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+
+        let default_record_field_path = &"".to_string();
+
+        let record_field_path = pipline.transform.as_ref().unwrap().record_field_path.as_ref().unwrap_or(default_record_field_path);
+
+        record_field_path.to_string()
+    }
+
+    pub fn get_transform_batch_time_fields() -> String {
+        let config = Config::get();
+
+        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+
+        let default_batch_time_fields = &"".to_string();
+
+        let batch_time_fields = pipline.transform.as_ref().unwrap().batch_time_fields.as_ref().unwrap_or(default_batch_time_fields);
+
+        batch_time_fields.to_string()
+    }
+
+    pub fn get_transform_batch_time_unit() -> String {
+        let config = Config::get();
+
+        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+
+        let default_batch_time_unit = &"".to_string();
+
+        let batch_time_unit = pipline.transform.as_ref().unwrap().batch_time_unit.as_ref().unwrap_or(default_batch_time_unit);
+
+        batch_time_unit.to_string()
+    }
+
+    pub fn get_pipeline_chaos_mode() -> bool {
+        let config = Config::get();
+
+        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+
+        let default_chaos_mode = &"no".to_string();
+        let chaos_mode = pipline.chaos_mode.as_ref().unwrap_or(default_chaos_mode);
+
+        Config::truth_value(chaos_mode)
+    }
+
+    pub fn get_pipeline_data_dir() -> String {
+        let config = Config::get();
+
+        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+
+        let default_data_dir = &"./data".to_string();
+        let data_dir = pipline.data_dir.as_ref().unwrap_or(default_data_dir);
+
+        data_dir.to_string()
+    }
+
+    pub fn get_pipeline_env() -> String {
+        let config = Config::get();
+
+        let pipeline_name = PIPELINE_NAME.read().unwrap().clone();
+
+        let pipline = config.pipelines.get(pipeline_name.as_str()).unwrap();
+
+        pipline.env.as_ref().unwrap_or(&"prod".to_string()).to_string()
+    }
+
+    pub fn get_auto_approve() -> bool {
+        let config = Config::get();
+
+        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+
+        pipline.auto_approve == Some("yes".to_string())
+    }
+
+    pub fn get_pipeline_buffer_threshold_bytes() -> i64 {
+        let config = Config::get();
+
+        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+
+        // @todo: default to 10485760
+        pipline.buffer_threshold_bytes.or(Some(10485760)).unwrap()
+
+    }
+
+    pub fn get_pipeline_buffer_threshold_seconds() -> i64 {
+        let config = Config::get();
+
+        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+
+        // @todo default to 60
+        pipline.buffer_threshold_seconds.or(Some(60)).unwrap()
+    }
+
+    // pub fn get_pipline_plugin_config(plugin_type: &str) -> Result<PluginConfig, String> {
+    //     let config = Config::get();
+    //
+    //     let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+    //
+    //     match plugin_type {
+    //         "input" => config.data_inputs.as_ref().unwrap().get(&pipline.input.as_ref().unwrap().to_string()).cloned().ok_or("Input not found".to_string()),
+    //         "output" => config.data_outputs.as_ref().unwrap().get(&pipline.output.as_ref().unwrap().to_string()).cloned().ok_or("Output not found".to_string()),
+    //         "deadletter" => config.data_deadletters.as_ref().unwrap().get(&pipline.deadletter.as_ref().unwrap().to_string()).cloned().ok_or("Deadletter not found".to_string()),
+    //         "schema" => config.schema_outputs.as_ref().unwrap().get(&pipline.schema.as_ref().unwrap().to_string()).cloned().ok_or("Schema not found".to_string()),
+    //         _ => Err("Invalid plugin type".to_string()),
+    //     }
+    // }
+
+    pub fn get_pipline_plugin_config(plugin_type: &str) -> Result<PluginConfig, String> {
+
+        let pipeline_name = PIPELINE_NAME.read().unwrap().as_str();
+
+        let pipeline_config = Config::get_pipeline_config();
+
+        let config = Config::get();
+
+        match plugin_type {
+            "input" => {
+                if let Some(data_inputs) = config.data_inputs {
+
+                    let plugin_name = pipeline_config.input.as_ref().unwrap().split('.').collect::<Vec<&str>>()[1].to_string();
+
+                    if let Some(config) = data_inputs.get(&plugin_name) {
+                        match config {
+                            PluginConfig::s3(s3_config) => Ok(PluginConfig::s3(s3_config.clone())),
+                            _ => Err("Invalid plugin type".to_string()),
+                        }
+                    } else {
+                        Err("Input not found".to_string())
+                    }
+                } else {
+                    Err("Input not found".to_string())
+                }
+            }
+            "output" => {
+                if let Some(data_outputs) = config.data_outputs {
+
+                    let plugin_name = pipeline_config.output.as_ref().unwrap().split('.').collect::<Vec<&str>>()[1].to_string();
+
+                    if let Some(config) = data_outputs.get(&plugin_name) {
+                        match config {
+                            PluginConfig::athena(athena_config) => Ok(PluginConfig::athena(athena_config.clone())),
+                            _ => Err("Invalid plugin type".to_string()),
+                        }
+                    } else {
+                        Err("Output not found".to_string())
+                    }
+                } else {
+                    Err("Output not found".to_string())
+                }
+            }
+            "deadletter" => {
+                if let Some(data_deadletters) = config.data_deadletters {
+
+                    let plugin_name = pipeline_config.deadletter.as_ref().unwrap().split('.').collect::<Vec<&str>>()[1].to_string();
+
+                    if let Some(config) = data_deadletters.get(&plugin_name) {
+                        match config {
+                            // PluginConfig::S3(s3_config) => Ok(PluginConfig::S3(s3_config.clone())),
+                            _ => Err("Invalid plugin type".to_string()),
+                        }
+                    } else {
+                        Err("Deadletter not found".to_string())
+                    }
+                } else {
+                    Err("Deadletter not found".to_string())
+                }
+            }
+            "schema" => {
+                if let Some(schema_outputs) = config.schema_outputs {
+
+                    let plugin_name = pipeline_config.input.as_ref().unwrap().split('.').collect::<Vec<&str>>()[1].to_string();
+
+                    if let Some(config) = schema_outputs.get(&plugin_name) {
+                        match config {
+                            // PluginConfig::Athena(athena_config) => Ok(PluginConfig::Athena(athena_config.clone())),
+                            _ => Err("Invalid plugin type".to_string()),
+                        }
+                    } else {
+                        Err("Schema not found".to_string())
+                    }
+                } else {
+                    Err("Schema not found".to_string())
+                }
+            }
+            _ => Err("Invalid plugin type".to_string()),
+        }
+    }
+
+    // Function to access the config anywhere in the code.
+    pub fn get() -> Config {
+        APP_CONFIG.read().unwrap().as_ref().unwrap().clone()
     }
 
     pub fn setenv(name: &str, value: &str) {
@@ -196,7 +669,7 @@ impl Config {
     }
 
     pub fn get_data_dir() -> String {
-        let mut data_dir = Config::getenv("DATA_DIR", "./data");
+        let mut data_dir = Config::get_pipeline_data_dir();
         if data_dir.ends_with('/') {
             data_dir.pop();
         }
@@ -230,11 +703,11 @@ impl Config {
     }
 
     pub fn get_pipeline_name() -> String {
-        Config::getenv("PIPELINE_NAME", "default").to_lowercase()
+        PIPELINE_NAME.read().unwrap().clone()
     }
 
     pub fn get_workspace_name() -> String {
-        Config::getenv("WORKSPACE_NAME", "default").to_lowercase()
+        Config::get_pipeline_config().workspace
     }
 
     pub fn get_full_namespace_name() -> String {
@@ -267,91 +740,32 @@ impl Config {
     }
 
     pub async fn get_config() -> Result<HashMap<String, Metadata>, bool> {
-        let mut config = Config::new();
-
-        config = match envy::from_env::<Config>() {
-            Err(_) => config,
-            Ok(config) => config,
-        };
-        // .expect("Please provide env vars");
-
-        // println!("{:#?}", config);
-
-        // let file_config = Self::load_file();
-
-        // config.
-        // println!("{:#?}", config);
-        // let config_file = File::open("config/connections.yml").unwrap();
-        //
-        // let yaml_str: String = serde_yaml::from_reader(config_file).unwrap();
-        //
-        // let configuration: Value = serde_yaml::from_str(&yaml_str).unwrap();
-        // println!("{:#?}", configuration);
-
-        // config.pipeline_id = Config::getenv("PIPELINE_ID", "");
-        //
-        // config.log_level = Config::getenv("LOG_LEVEL", "INFO");
-        //
-        // config.container_mem = Config::getenv("MEM", "1024");
-        // config.container_mem = config.container_mem * 0.8; // allow some overhead
-        // ini_set("memory_limit", config.container_mem "M");
-
-        // config.flush_buffer_bytes = Config::getenv("DATA_OUTPUT_FLUSH_BYTES", config.flush_buffer_bytes);
-        // config.flush_buffer_seconds = Config::getenv("DATA_OUTPUT_FLUSH_SECONDS", config.flush_buffer_seconds);
-        // config.flush_buffer_records = Config::getenv("DATA_OUTPUT_FLUSH_RECORDS", config.flush_buffer_records);
-        //
-        // config.event_time_bucket_duration = Config::getenv("TRANSFORM_BATCH_TIME_UNIT", false);
-        //
-        // config.poll_interval_seconds = Config::getenv("DATA_SOURCE_POLL_INTERVAL_SECONDS", config.poll_interval_seconds);
-        //
-        // config.mutable_mode = Config::getenv("DATA_SOURCE_MUTABLE_MODE", config.mutable_mode);
 
         if !*HAS_LICENSE.read().unwrap() {
             // println!("ERROR: No license found, please set the 'LICENSE' environment variable.");
             return Err(false);
         }
 
-        if config.mutable_mode == config.mutable_mode {
-            // SkipprLogger::info("Strict mutable mode enabled, will sync an exact copy of records.");
-        }
 
-        if !Config::getenv("TRANSFORM_BATCH_TIME_UNIT", "").is_empty()
-            && Config::getenv("TRANSFORM_BATCH_TIME_FIELDS", "").is_empty()
+        if Config::get_transform_batch_time_unit() != ""
+            && Config::get_transform_batch_time_fields() == ""
         {
-            println!("ERROR: Environment variable: 'TRANSFORM_BATCH_TIME_FIELDS' must be since you've set: 'TRANSFORM_BATCH_TIME_UNIT'.");
+            println!("ERROR: Config: 'TRANSFORM_BATCH_TIME_FIELDS' must be since you've set: 'TRANSFORM_BATCH_TIME_UNIT'.");
         }
-
-        // config.run_mode = Config::getenv("RUN_MODE", config.run_mode);
-
-        // config.flatten_events = Config::getenv("TRANSFORM_FLATTEN_EVENTS", config.flatten_events);
-        //
-        // config.task_id = Config::getenv("TASK_ID", "") as i64;
-
-        let _avro_arr: HashMap<String, String> = HashMap::new();
-
-        config.discovered_field_occurrence = Vec::new();
-
-        // config.anonymous_metrics = Config::getenv("ANONYMOUS_METRICS", "true");
-
-        config.pipeline_name = Config::get_pipeline_name();
-
-        // config.tenant_id = Config::getenv("TENANT_ID", Helpers::random_str(16).as_str());
 
         let data_dir = Config::get_data_dir();
-        if !data_dir.is_empty() {
-            config.data_dir = data_dir;
-        }
+
 
         let workspace = Self::get_workspace_name();
         let pipeline = Self::get_pipeline_name();
 
-        let env = Config::getenv("APP_ENV", "prod");
+        let env = Config::get_pipeline_env();
         let uri = if env != "prod" {
             format!("https://metadata.{}.api.skippr.io", env)
         } else {
             String::from("https://metadata.api.skippr.io")
         };
-        let token = Config::getenv("SKIPPR_API_TOKEN", "");
+        let token = Config::get_skippr_api_token();
 
         let mut headers = HeaderMap::new();
         let auth_header = HeaderName::from_static("x-api-key");
@@ -430,13 +844,13 @@ impl Config {
             let pipeline = Self::get_pipeline_name();
 
             // let uri = Config::getenv("SKIPPR_API_ENDPOINT", "");
-            let env = Config::getenv("APP_ENV", "prod");
+            let env = Config::get_pipeline_env();
             let uri = if env != "prod" {
                 format!("https://metadata.{}.api.skippr.io", env)
             } else {
                 String::from("https://metadata.api.skippr.io")
             };
-            let token = Config::getenv("SKIPPR_API_TOKEN", "");
+            let token = Config::get_skippr_api_token();
 
             let mut headers = HeaderMap::new();
             let auth_header = HeaderName::from_static("x-api-key");
@@ -447,7 +861,7 @@ impl Config {
 
             let path = "";
 
-            let auto_approve_evolution = Config::getenv("SCHMEA_AUTO_APPROVE", "yes") == "yes";
+            let auto_approve_evolution = Config::get_auto_approve();
 
             let schema_status = if !evolved {
                 "approved"
@@ -497,11 +911,11 @@ impl Config {
     }
 
     pub async fn sync_schema(metadata: &HashMap<String, Metadata>) {
-        if !Config::getenv("SCHEMA_OUTPUT_PLUGIN_NAME", "").is_empty()
-            && Config::getenv("SCHEMA_OUTPUT_PLUGIN_NAME", "") == "glue"
+        if Config::get_pipeline_output_plugin_name() != ""
+            && Config::get_pipeline_output_plugin_name() == "athena"
         {
             if *HAS_LICENSE.read().unwrap() {
-                let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
+                let flatten = Config::get_transform_flatten_events();
 
                 for (namespace, schema) in metadata.into_iter() {
                     println!("Updating Hive '{}' schema", namespace);
@@ -531,11 +945,13 @@ impl Config {
     }
 
     pub async fn init() {
+
         let license = LicenseChecker::new();
         license.unwrap().get_license().await.unwrap();
 
-        // let config: Config = Config::get_config().await;
         Config::get_data_dir();
+
+
     }
 }
 

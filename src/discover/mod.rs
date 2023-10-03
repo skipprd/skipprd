@@ -73,7 +73,7 @@ pub fn discover_ingest(
         metadata,
     );
 
-    let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
+    let flatten = Config::get_transform_flatten_events();
 
     AnalyseSchema::determine_field_types(metadata, parent_data_type, parent_field, flatten);
 
@@ -267,7 +267,7 @@ impl AnalyseSchema {
         let mut skpr_namespace: String = "".to_string();
         let pipeline_name = Config::get_pipeline_name();
 
-        let _faltten_events = &Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no");
+        let _faltten_events = &Config::get_transform_flatten_events();
 
         // let mut newMeta: &mut HashMap<String, Metadata>;
         // let defaultMetadata = Metadata::new().unwrap();

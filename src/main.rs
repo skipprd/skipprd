@@ -81,7 +81,7 @@ use crate::serdes::parquet::SerdeParquet;
 mod plugins;
 
 use crate::discover::arrow_schema::convert_skippr_to_arrow;
-use crate::helpers::configuration::{Config};
+use crate::helpers::configuration::{Config, PIPELINE_NAME};
 
 use crate::buffer::BufferChunker;
 use crate::helpers::logger::{LogLevel, Logger};
@@ -131,37 +131,47 @@ async fn main() {
     //     // static ref my_mutex: Mutex<i32> = Mutex::new(0i32);
     // }
 
-    let cli = Cli::parse();
+    let cli: Cli = Cli::parse();
 
     match cli.mode {
-        Mode::Sync => {
 
-            // set DISPLAY_METRICS if --display-metrics flag is set
-            // if cli.display_metrics {
-            //     DISPLAY_METRICS.write().unwrap().store(true, Ordering::SeqCst);
-            // }
+        Mode::Sync(options) => {
 
-            // println!("Command sync");
-            Config::init().await;
-            sync().await;
+            Config::build_config();
+
+
+            if options.pipeline.is_some() {
+                // println!("Syncing pipeline: {}", options.pipeline.unwrap().clone());
+                PIPELINE_NAME.write().unwrap().clear();
+                PIPELINE_NAME.write().unwrap().push_str(&options.pipeline.unwrap().clone());
+                Config::init().await;
+
+                sync().await;
+            } else {
+                println!("Syncing all pipelines");
+                Config::init().await;
+                sync().await;
+            }
+
+
         }
         Mode::Discover => {
             // println!("Command discover");
             Config::init().await;
             discover().await;
         }
-        Mode::Query => {
+        Mode::Query(options) => {
 
             // Track and report query runtime in seconds
             let now = Instant::now();
-            query(&cli.query.unwrap()).await;
+            query(&options.query).await;
             let elapsed = now.elapsed();
             println!("Query time: {} seconds", elapsed.as_secs());
         }
-        Mode::Schema => {
+        Mode::Schema(options) => {
             // println!("Command schema");
             Config::init().await;
-            schema(&cli.schema.unwrap()).await;
+            schema(&options.schema).await;
         }
 
     }
@@ -370,7 +380,7 @@ async fn discover() {
         }
     }
 
-    let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
+    let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.unwrap());
 
     AnalyseSchema::determine_field_types(&mut skippr_metadata, None, None, flatten);
 
@@ -714,7 +724,7 @@ async fn sync() {
 
     // let metrics_clone = metrics.clone();
 
-    let chaos = Config::getenv("CHAOS_MODE", "no");
+    let chaos = Config::get_pipeline_config().chaos_mode.or(Some("no".to_string())).unwrap();
     if Config::truth_value(&chaos) {
         out_pnanner.add(
             move || {
@@ -749,11 +759,15 @@ async fn sync() {
                             return;
                         }
 
-                        if !Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "").is_empty() {
+                        if Config::get_pipeline_config().output.is_some() {
                             {
                                 OUTPUT_RUNNING.write().unwrap().store(true, Ordering::SeqCst);
                             }
-                            sync_output_plugin(&Config::getenv("DATA_OUTPUT_PLUGIN_NAME", ""), "output".to_string()).await;
+                            {
+                                OUTPUT_RUNNING.write().unwrap().store(true, Ordering::SeqCst);
+                            }
+
+                            sync_output_plugin(Config::get_pipeline_output_plugin_name().as_str(), "output".to_string()).await;
 
                             OUTPUT_RUNNING
                                 .write()
@@ -804,12 +818,12 @@ async fn sync() {
 
     sync_input_plugin(offsets_clone).await;
 
-    println!("Ingest completed, flushing remaining buffers to output plugin {}", Config::getenv("DATA_OUTPUT_PLUGIN_NAME", ""));
+    println!("Ingest completed, flushing remaining buffers to output plugin {}", Config::get_pipeline_config().output.or(Some("".to_string())).unwrap());
 
     {
         LOGGER.write()
             .await
-            .log(LogLevel::Info, format!("Ingest completed, flushing remaining buffers to output plugin {}", Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "")))
+            .log(LogLevel::Info, format!("Ingest completed, flushing remaining buffers to output plugin {}", Config::get_pipeline_config().output.or(Some("".to_string())).unwrap()))
             .await;
 
         let mut counter_lock = METRICS.write().unwrap();
@@ -829,12 +843,12 @@ async fn sync() {
 
     output_sync();
 
-    if !Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "").is_empty() {
-        sync_output_plugin(&Config::getenv("DATA_OUTPUT_PLUGIN_NAME", ""), "output".to_string()).await;
+    if Config::get_pipeline_config().output.is_some() {
+        sync_output_plugin(Config::get_pipeline_output_plugin_name().as_str(), "output".to_string()).await;
     }
 
-    if !Config::getenv("DATA_DEADLETTER_PLUGIN_NAME", "").is_empty() {
-        sync_output_plugin(&Config::getenv("DATA_DEADLETTER_PLUGIN_NAME", ""), "deadletter".to_string()).await;
+    if Config::get_pipeline_config().deadletter.is_some() {
+        sync_output_plugin(&Config::get_pipeline_deadletter_plugin_name(), "deadletter".to_string()).await;
     }
 
     let mut metrics_lock = METRICS.read().unwrap();
@@ -889,7 +903,7 @@ fn output_sync() {
         OUTPUT_RUNNING.write().unwrap().store(true, Ordering::SeqCst);
     }
 
-    let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
+    let flatten = Config::get_transform_flatten_events();
 
     let data_dir = Config::get_data_dir();
     let output_dir = &format!("{}/ingest_buffer", data_dir);
@@ -1052,7 +1066,7 @@ pub async fn sync_output_plugin(plugin_name: &str, buffer_name: String) {
 }
 
 pub async fn sync_input_plugin(offsets_clone: Arc<Offsets>) {
-    match Config::getenv("DATA_SOURCE_PLUGIN_NAME", "").as_str() {
+    match Config::get_pipeline_input_plugin_name().as_str() {
         "pcap" => {
             panic!("PCAP input plugin not installed, please contact support")
             // let mut input = DataSourcePcapPlugin::new().await;

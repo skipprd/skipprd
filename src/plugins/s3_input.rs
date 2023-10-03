@@ -20,6 +20,7 @@ use std::{fs};
 
 use futures::future::join_all;
 use futures::{StreamExt};
+use serde_derive::Deserialize;
 
 
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
@@ -28,13 +29,27 @@ use crate::ingest_work::{Ingest, IngestBatch};
 use tokio::sync::Semaphore;
 use crate::helpers::timed_rwlock::TimedRwLock;
 
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct DataSourceS3PluginConfig {
+    pub plugin_name: Option<String>,
+    pub format: Option<String>,
+    pub batch_size_seconds: Option<i64>,
+    pub batch_size_bytes: Option<i64>,
+
+    s3_bucket: String,
+    s3_prefix: String,
+}
+
+
+
 pub struct DataSourceS3Plugin {
     // config: HashMap<String, String>,
     // buffer: Sender<String>,
     s3_client: Client,
     // s3_client_rusoto: S3Client,
     ingest: Ingest,
-    source_bucket: String,
+    config: DataSourceS3PluginConfig,
     temp_dir: String,
 }
 
@@ -53,10 +68,12 @@ impl DataSourceS3Plugin {
 
         let s3_client = Client::new(&s3_config);
 
+        let config: DataSourceS3PluginConfig = Config::get_pipline_plugin_config("input").unwrap().into();
+
         DataSourceS3Plugin {
             s3_client,
             ingest: Ingest::new(),
-            source_bucket: String::new(),
+            config,
             temp_dir: temp_dir.to_string(),
         }
     }
@@ -83,8 +100,8 @@ impl DataSourceS3Plugin {
         // let mut outputs: HashMap<String, Vec<String>> = HashMap::new();
         let mut outputs: Vec<String> = Vec::new();
 
-        let inventory_bucket = Config::getenv("DATA_SOURCE_S3_BUCKET", "");
-        let inventory_prefix = Config::getenv("DATA_SOURCE_S3_PREFIX", "");
+        let inventory_bucket = self.config.s3_bucket.clone();
+        let inventory_prefix = self.config.s3_prefix.clone();
 
         println!(
             "Syncing from bucket: {} and prefix {}",
@@ -96,9 +113,7 @@ impl DataSourceS3Plugin {
 
         let mut continuation_token: Option<String> = None;
 
-        let chunk_size = Config::getenv("DATA_SOURCE_BATCH_SIZE_BYTES", "1024000")
-            .parse::<i64>()
-            .unwrap();
+        let chunk_size = self.config.batch_size_bytes.clone().unwrap_or(10000000);
 
         let mut i = 0;
         let mut chunk_size_current = 0;

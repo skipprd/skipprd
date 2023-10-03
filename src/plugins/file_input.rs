@@ -25,34 +25,40 @@ use glob::{glob_with};
 use tokio::task;
 
 use futures::stream::StreamExt;
+use serde_derive::Deserialize;
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct DataSourceLocalFilePluginConfig {
+    pub plugin_name: Option<String>,
+    pub format: Option<String>,
+    pub batch_size_seconds: Option<i64>,
+    pub batch_size_bytes: Option<i64>,
+
+    path: String,
+}
 
 pub struct DataSourceLocalFilePlugin {
     ingest: Ingest,
-    source_directory: String,
     temp_dir: String,
-    chunk_size: i64,
+    config: DataSourceLocalFilePluginConfig,
 }
 
 impl DataSourceLocalFilePlugin {
     pub async fn new() -> DataSourceLocalFilePlugin {
         let data_dir = Config::get_data_dir();
         let temp_dir = &format!("{}/source_buffer", data_dir);
-        let source_directory = Config::getenv("DATA_SOURCE_FILE_DIR", "");
 
         match fs::create_dir(temp_dir) {
             Ok(_g) => {}
             Err(_err) => {}
         }
 
-        let chunk_size = Config::getenv("DATA_SOURCE_BATCH_SIZE_BYTES", "1024000")
-            .parse::<i64>()
-            .unwrap();
+        let config: DataSourceLocalFilePluginConfig = Config::get_pipline_plugin_config("input").unwrap().into();
 
         DataSourceLocalFilePlugin {
             ingest: Ingest::new(),
-            source_directory: source_directory.to_string(),
             temp_dir: temp_dir.to_string(),
-            chunk_size,
+            config
         }
     }
 
@@ -62,12 +68,12 @@ impl DataSourceLocalFilePlugin {
     ) {
         let offsets_clone = offsets.clone();
 
-        let _file_path_pattern = format!("{}/**/*", self.source_directory);
+        let _file_path_pattern = format!("{}/**/*", self.config.path);
 
         let mut data_batches_stream = Box::pin(self.prepare_data_for_processing(
             &offsets_clone,
-            self.source_directory.clone(),
-            self.chunk_size.clone()
+            self.config.path.clone(),
+            self.config.batch_size_bytes.unwrap_or(1000000) as i64
         ));
 
         while let Some(batch) = data_batches_stream.next().await {

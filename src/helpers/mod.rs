@@ -222,11 +222,11 @@ impl Helpers {
         let mut clean_partition: String = "".to_string();
 
         // optional: partition by composite key
-        if !Config::getenv("TRANSFORM_BATCH_PARTITION_FIELDS", "").is_empty() {
+        if !Config::get_transform_batch_partition_fields().is_empty() {
             let mut partitions = vec![];
 
             for entity_field_dot in
-                Config::getenv("TRANSFORM_BATCH_PARTITION_FIELDS", "").split(',')
+                Config::get_transform_batch_partition_fields().split(',')
             {
                 let clean_entity_value =
                     match Helpers::get_nested_value_from_dot_notation(message, entity_field_dot) {
@@ -275,10 +275,10 @@ impl Helpers {
             clean_namespace = Helpers::clean_field_name(clean_namespace);
 
             // optional: partition by composite key
-            if !Config::getenv("TRANSFORM_NAMESPACE_FIELDS", "").is_empty() {
+            if !Config::get_transform_namespace_fields().is_empty() {
                 let mut namespaces = vec!["".to_string()];
 
-                for entity_field_dot in Config::getenv("TRANSFORM_NAMESPACE_FIELDS", "").split(',')
+                for entity_field_dot in Config::get_transform_namespace_fields().split(',')
                 {
                     match Helpers::get_nested_value_from_dot_notation(message, entity_field_dot) {
                         Some(entity_value) => {
@@ -313,23 +313,32 @@ impl Helpers {
         // default to beginning of epoch.
         let mut time_field_value: Option<i64> = None;
 
-        if !Config::getenv("TRANSFORM_BATCH_TIME_FIELDS", "").is_empty() {
+        // println!("message: {:?}", message);
+        if !Config::get_transform_batch_time_fields().is_empty() {
             // Support nested time fields via array dot notation
             // For user confirmed event time fields, use the first one that matches
-            for field_dot in Config::getenv("TRANSFORM_BATCH_TIME_FIELDS", "").split(',') {
+            for field_dot in Config::get_transform_batch_time_fields().split(',') {
                 match Helpers::get_nested_value_from_dot_notation(message, field_dot) {
                     Some(value) => {
+                        // println!("field_dot: {} value: {}", field_dot, value);
+
                         // Handle millisecond timestamps
                         match value.as_i64() {
                             Some(i64_val) => {
+                                // println!("a i64_val: {}", i64_val);
                                 if Helpers::is_millisecond_timestamp(i64_val) {
                                     time_field_value = Some(i64_val / 1000);
+                                    // println!("b i64_val: {}", i64_val);
                                 } else {
                                     // Handle second timestamps
                                     time_field_value = Some(i64_val);
+                                    // println!("c i64_val: {}", i64_val);
                                 }
                             }
-                            None => time_field_value = None,
+                            None => {
+                                // println!("d");
+                                time_field_value = None
+                            },
                         }
 
                         // println!("1");
@@ -349,7 +358,7 @@ impl Helpers {
                                                 Some(DateTime::<Utc>::from_utc(dt, Utc).timestamp())
                                             }
                                             Err(_err) => {
-                                                // println!("{:?}", err);
+                                                // println!("{:?}", _err);
                                                 None
                                             }
                                         };
@@ -361,18 +370,21 @@ impl Helpers {
                                     }
                                 }
                                 None => {
+                                    // println!("5");
                                     time_field_value = None;
                                 }
                             };
                         }
                     }
                     None => {
+                        // println!("6");
                         time_field_value = None;
                     }
                 };
             }
         }
 
+        // println!("time_field_value: {:?}", time_field_value);
         time_field_value
     }
 
@@ -401,19 +413,64 @@ impl Helpers {
         }
 
         // Return the final value found at the end of the traversal
-
-        match current_value {
-            Value::Array(_) | Value::Object(_) => Some(current_value.clone()),
-            _ => None,
-        }
-        // Some(current_value.clone())
+        Some(current_value.clone())
     }
 
     pub fn process_values(values: &Vec<Value>, field_str: &str) -> Option<Vec<Value>> {
-        values.iter().map(|value| Helpers::get_nested_value_from_dot_notation(value, field_str)).collect()
+        values.iter().map(|value| {
+            let current_value = Helpers::get_nested_value_from_dot_notation(value, field_str);
+            match current_value {
+                Some(Value::Array(_)) => current_value.clone(),
+                Some(Value::Object(_)) => current_value.clone(),
+                _ => None,
+            }
+        }).collect()
     }
 
 }
+
+#[cfg(test)]
+mod tests_get_nested_value_from_dot_notation {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_get_nested_value_from_dot_notation() {
+        let data = json!({
+            "name": "Alice",
+            "info": {
+                "age": 30,
+                "address": {
+                    "city": "Wonderland"
+                }
+            }
+        });
+
+        // Test case: Value exists
+        let result = Helpers::get_nested_value_from_dot_notation(&data, "info.address.city");
+        assert_eq!(result, Some(json!("Wonderland")));
+
+        // Test case: Value does not exist
+        let result = Helpers::get_nested_value_from_dot_notation(&data, "info.address.country");
+        assert_eq!(result, None);
+
+        // Test case: Final value is an object
+        let result = Helpers::get_nested_value_from_dot_notation(&data, "info.address");
+        assert_eq!(result, Some(json!({"city": "Wonderland"})));
+
+        // Test case: Final value is an array
+        let data = json!({
+            "array_field": [{"a": 1}, {"b": 2}]
+        });
+        let result = Helpers::get_nested_value_from_dot_notation(&data, "array_field");
+        assert_eq!(result, Some(json!([{"a": 1}, {"b": 2}])));
+
+        // Test case: Traversal of non-object field
+        let result = Helpers::get_nested_value_from_dot_notation(&data, "name.city");
+        assert_eq!(result, None);
+    }
+}
+
 
 #[cfg(test)]
 mod clean_field_name_tests {

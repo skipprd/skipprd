@@ -351,7 +351,7 @@ impl Ingest {
 
         // let mut avro_schemas = AVRO_SCHEMA.lock().unwrap();
 
-        let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
+        let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.or(Some("no".to_string())).unwrap());
 
         let data_dir = Config::get_data_dir();
         let output_dir = format!("{}/ingest_buffer", data_dir);
@@ -372,7 +372,8 @@ impl Ingest {
         let mut d = 0;
         let mut x = 0;
 
-        if Config::getenv("DATA_SOURCE_FORMAT", "json") == "xml" {
+        // @todo - check PluginConfig format is xml
+        if Config::get_pipline_plugin_config("input").unwrap().format() == "xml" {
             let batch = IngestBatch {
                 offset_key: datas[0].offset_key.clone(),
                 data: datas.iter().map(|v| v.data.as_str()).collect::<Vec<&str>>().join(""),
@@ -381,7 +382,10 @@ impl Ingest {
             datas.push(batch);
         }
 
-        let entity_field_dot = Config::getenv("TRANSFORM_RECORD_FIELD_PATH", "");
+        let entity_field_dot = match Config::get_transform_config().record_field_path {
+            Some(ref field) => field.clone(),
+            None => "".to_string()
+        };
 
         for ingest_batch in datas {
 
@@ -389,15 +393,15 @@ impl Ingest {
                 offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Closed, 0);
 
             let mut records: Vec<Value> = Vec::new();
-            if Config::getenv("DATA_SOURCE_FORMAT", "json") == "csv" {
+            if Config::get_pipline_plugin_config("input").unwrap().format() == "csv" {
                 records = SerderCsv::deserialize(&ingest_batch.data);
-            } else if Config::getenv("DATA_SOURCE_FORMAT", "json") == "xml" {
+            } else if Config::get_pipline_plugin_config("input").unwrap().format() == "xml" {
                 records = SerdeXml::deserialize(ingest_batch.data.as_bytes());
             } else {
                 records = SerdeJson::deserialize(&ingest_batch.data);
             }
 
-            if entity_field_dot != "" {
+            if !entity_field_dot.is_empty() {
                 records = match Helpers::process_values(&records, &entity_field_dot) {
                     Some(records) => records,
                     None => records
@@ -487,7 +491,7 @@ impl Ingest {
                             );
 
                             // update metadata in runtime and ingest message
-                            if Config::getenv("SCHMEA_AUTO_APPROVE", "yes") == "yes" {
+                            if Config::get_auto_approve() {
 
                                 if updated_schema_clone.lock().unwrap().as_str() == "yes" {
                                     {
@@ -651,17 +655,17 @@ impl Ingest {
     }
 
     fn is_file_size_exceeded(file: &OutputFile) -> bool {
-        let buffer_size = Config::getenv("BUFFER_THRESHOLD_BYTES", "10485760"); // 10MB default
-        file.bytes > buffer_size.parse::<u64>().unwrap()
+        let buffer_size = Config::get_pipeline_buffer_threshold_bytes(); // 10MB default
+        file.bytes > buffer_size as u64
     }
 
     fn is_file_time_exceeded(file: &OutputFile) -> bool {
-        let ttl = Config::getenv("BUFFER_THRESHOLD_SECONDS", "300"); // 10MB default
+        let ttl = Config::get_pipeline_buffer_threshold_seconds(); // 10MB default
         SystemTime::now()
             .duration_since(file.upated_at)
             .unwrap()
             .as_secs()
-            > ttl.parse::<u64>().unwrap()
+            > ttl as u64
     }
 
     fn is_rotated(file: &OutputFile) -> bool {

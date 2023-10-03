@@ -58,7 +58,7 @@ impl BufferChunker {
         // let mut bucket_rounded_timestamp: DateTime<Utc> = Utc.ymd(datetime.year(), 1, 1).and_hms(0, 0, 0);
         let mut bucket_rounded_timestamp = 0;
 
-        if let config_duration = Config::getenv("TRANSFORM_BATCH_TIME_UNIT", "") {
+        if let config_duration = Config::get_transform_batch_time_unit() {
             bucket_rounded_timestamp = match config_duration.as_str() {
                 "year" => {
                     let year = datetime.year();

@@ -25,8 +25,8 @@ struct MetricsEnvConfig {
     data_output_plugin_name: String,
     schema_output_plugin_name: String,
     data_deadletter_plugin_name: String,
-    data_source_batch_size_bytes: u64,
-    data_source_batch_size_seconds: u64,
+    data_source_batch_size_bytes: i64,
+    data_source_batch_size_seconds: i64,
     buffer_threshold_bytes: u64,
     buffer_threshold_seconds: u64,
     transform_namespace_fields: String,
@@ -38,33 +38,41 @@ struct MetricsEnvConfig {
     chaos_mode: String,
     input_format: String,
     output_format: String,
-
-    schema_output_glue_database_name: String,
 }
 
 impl MetricsEnvConfig {
     // default()
     fn new() -> Self {
         Self {
-            data_source_plugin_name: Config::getenv("DATA_SOURCE_PLUGIN_NAME", ""),
-            data_output_plugin_name: Config::getenv("DATA_OUTPUT_PLUGIN_NAME", ""),
-            schema_output_plugin_name: Config::getenv("SCHEMA_OUTPUT_PLUGIN_NAME", ""),
-            data_deadletter_plugin_name: Config::getenv("DATA_DEADLETTER_PLUGIN_NAME", ""),
-            data_source_batch_size_bytes: Config::getenv("DATA_SOURCE_BATCH_SIZE_BYTES", "0").parse::<u64>().unwrap(),
-            data_source_batch_size_seconds: Config::getenv("DATA_SOURCE_BATCH_SIZE_SECONDS", "0").parse::<u64>().unwrap(),
-            buffer_threshold_bytes: Config::getenv("BUFFER_THRESHOLD_BYTES", "0").parse::<u64>().unwrap(),
-            buffer_threshold_seconds: Config::getenv("BUFFER_THRESHOLD_SECONDS", "0").parse::<u64>().unwrap(),
-            transform_namespace_fields: Config::getenv("TRANSFORM_NAMESPACE_FIELDS", ""),
-            transform_batch_partition_fields: Config::getenv("TRANSFORM_BATCH_PARTITION_FIELDS", ""),
-            transform_flatten_events: Config::getenv("TRANSFORM_FLATTEN_EVENTS", "false"),
-            transform_batch_time_fields: Config::getenv("TRANSFORM_BATCH_TIME_FIELDS", ""),
-            transform_batch_time_units: Config::getenv("TRANSFORM_BATCH_TIME_UNITS", ""),
-            data_dir: Config::getenv("DATA_DIR", ""),
-            chaos_mode: Config::getenv("CHAOS_MODE", "false"),
-            input_format: Config::getenv("INPUT_FORMAT", ""),
-            output_format: Config::getenv("OUTPUT_FORMAT", ""),
-
-            schema_output_glue_database_name: Config::getenv("SCHEMA_OUTPUT_GLUE_DATABASE_NAME", ""),
+            data_source_plugin_name: Config::get_pipeline_input_plugin_name(),
+            data_output_plugin_name: Config::get_pipeline_output_plugin_name(),
+            schema_output_plugin_name: Config::get_pipeline_schema_plugin_name(),
+            data_deadletter_plugin_name: Config::get_pipeline_deadletter_plugin_name(),
+            data_source_batch_size_bytes: match Config::get_pipline_plugin_config("input") {
+                Ok(config) => config.batch_size_bytes(),
+                Err(_) => 0
+            },
+            data_source_batch_size_seconds: match Config::get_pipline_plugin_config("input") {
+                Ok(config) => config.batch_size_seconds(),
+                Err(_) => 0
+            },
+            buffer_threshold_bytes: Config::get_pipeline_buffer_threshold_bytes() as u64,
+            buffer_threshold_seconds: Config::get_pipeline_buffer_threshold_seconds() as u64,
+            transform_namespace_fields: Config::get_transform_namespace_fields(),
+            transform_batch_partition_fields: Config::get_transform_batch_partition_fields(),
+            transform_flatten_events: Config::get_transform_flatten_events().to_string(),
+            transform_batch_time_fields: Config::get_transform_batch_time_fields(),
+            transform_batch_time_units: Config::get_transform_batch_time_unit(),
+            data_dir: Config::get_pipeline_data_dir(),
+            chaos_mode: Config::get_pipeline_chaos_mode().to_string(),
+            input_format: match Config::get_pipline_plugin_config("input") {
+                Ok(config) => config.format().to_string(),
+                Err(_) => String::from("")
+            },
+            output_format: match Config::get_pipline_plugin_config("output") {
+                Ok(config) => config.format().to_string(),
+                Err(_) => String::from("")
+            },
         }
     }
 }
@@ -133,7 +141,7 @@ impl Metrics {
         let workspace = Config::get_workspace_name();
         let pipeline = Config::get_pipeline_name();
 
-        let env = Config::getenv("APP_ENV", "prod");
+        let env = Config::get_pipeline_env();
         let uri = if env != "prod" {
             format!("https://metrics.{}.api.skippr.io", env)
         } else {
@@ -146,7 +154,10 @@ impl Metrics {
             default_api_key = "XxIVftJXN4LF6ARrRqJvKAsv30vhIZHR"
         }
 
-        let token = Config::getenv("SKIPPR_API_TOKEN", default_api_key);
+        let mut token = Config::get_skippr_api_token();
+        if token == "" {
+            token = default_api_key.to_string();
+        }
 
         let mut headers = HeaderMap::new();
         let auth_header = HeaderName::from_static("x-api-key");
@@ -233,7 +244,7 @@ impl Metrics {
         let workspace = Config::get_workspace_name();
         let pipeline = Config::get_pipeline_name();
 
-        let env = Config::getenv("APP_ENV", "prod");
+        let env = Config::get_pipeline_env();
         let uri = if env != "prod" {
             format!("https://metrics.{}.api.skippr.io", env)
         } else {
@@ -246,7 +257,10 @@ impl Metrics {
             default_api_key = "XxIVftJXN4LF6ARrRqJvKAsv30vhIZHR"
         }
 
-        let token = Config::getenv("SKIPPR_API_TOKEN", default_api_key);
+        let mut token = Config::get_skippr_api_token();
+        if token == "" {
+            token = default_api_key.to_string();
+        }
 
         let mut headers = HeaderMap::new();
         let auth_header = HeaderName::from_static("x-api-key");

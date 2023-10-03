@@ -1,37 +1,38 @@
-use clap::{Parser, ValueEnum};
-
-// support commands `skippr query 'SELECT * FROM table'`
+use clap::Parser;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
-    /// What mode to run the program in
-    #[arg(value_enum)]
+    #[command(subcommand)]
     pub(crate) mode: Mode,
-
-    /// The SQL query to run
-    #[arg(requires_if("mode", "query"))]
-    pub(crate) query: Option<String>,
-
-    #[arg(requires_if("mode", "schema"))]
-    pub(crate) schema: Option<String>,
-
-    // #[arg(short, long, requires_if("mode", "sync"))]
-    // pub(crate) display_metrics: bool,
-
-
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
-pub(crate) enum Mode {
+#[derive(Parser)]
+pub enum Mode {
     Discover,
-    Sync,
-    Query,
-    Schema,
-    // Dump,
-    // Head,
-    // Tail,
-    // Diff,
-
+    Sync(SyncOptions),
+    Query(QueryOptions),
+    Schema(SchemaOptions),
+    // ... other modes
 }
 
+#[derive(Parser)]
+pub struct SyncOptions {
+    /// The pipeline to use
+    #[arg(short, long)]
+    pub(crate) pipeline: Option<String>,
+}
+
+#[derive(Parser)]
+pub struct QueryOptions {
+    /// The SQL query to run
+    #[arg(short, long)]
+    pub(crate) query: String,
+}
+
+#[derive(Parser)]
+pub struct SchemaOptions {
+    /// The schema to use
+    #[arg(short, long)]
+    pub(crate) schema: String,
+}

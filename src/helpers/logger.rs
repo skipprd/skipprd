@@ -86,7 +86,7 @@ impl Logger {
         let workspace = Config::get_workspace_name();
         let pipeline = Config::get_pipeline_name();
 
-        let env = Config::getenv("APP_ENV", "prod");
+        let env = Config::get_pipeline_env();
         let uri = if env != "prod" {
             format!("https://metrics.{}.api.skippr.io", env)
         } else {
@@ -99,7 +99,10 @@ impl Logger {
             default_api_key = "XxIVftJXN4LF6ARrRqJvKAsv30vhIZHR"
         }
 
-        let token = Config::getenv("SKIPPR_API_TOKEN", default_api_key);
+        let mut token = Config::get_skippr_api_token();
+        if token.is_empty() {
+           token = default_api_key.to_string();
+        }
 
         let mut headers = HeaderMap::new();
         let auth_header = HeaderName::from_static("x-api-key");

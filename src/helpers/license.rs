@@ -35,7 +35,7 @@ pub struct LicenseRecord {
 
 impl LicenseChecker {
     pub fn new() -> Result<Self, Box<dyn Error>> {
-        let api_key = Config::getenv(API_KEY_ENV_VAR, "");
+        let api_key = Config::get_skippr_api_token();
         Ok(Self {
             client: Client::new(),
             license_is_valid: false,
@@ -45,7 +45,7 @@ impl LicenseChecker {
     }
 
     pub async fn get_license(&mut self) -> Result<(), Box<dyn Error>> {
-        let env = Config::getenv(APP_ENV, DEFAULT_ENV);
+        let env = Config::get_pipeline_env();
         let base_url = if env != DEFAULT_ENV {
             format!("https://license.{}.api.skippr.io", env)
         } else {

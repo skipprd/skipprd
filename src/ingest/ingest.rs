@@ -643,7 +643,7 @@ pub fn discover_ingest(
 
     }
 
-    let flatten = Config::truth_value(&Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no"));
+    let flatten = Config::get_transform_flatten_events();
 
     if parent_field.is_some() && parent_data_type != Some("array")  {
         AnalyseSchema::determine_field_types(metadata, parent_data_type, parent_field, flatten);
