@@ -974,7 +974,7 @@ fn output_sync() {
                             "{}/{}&part={}.parquet",
                             finalised_dir,
                             finalised_file_name,
-                            Helpers::random_str(12).as_str()
+                            Helpers::random_str(32).as_str()
                         );
 
                         match fs::rename(tmp_file_path, finalised_file_path) {
