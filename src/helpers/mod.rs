@@ -6,6 +6,7 @@ use std::env;
 
 use std::str;
 
+use rand::seq::SliceRandom;
 use rand::Rng;
 use serde_json::{Map, Value};
 use std::error::Error;
@@ -142,13 +143,17 @@ impl Helpers {
 
     pub fn random_str(length: usize) -> String {
         let mut rng = rand::thread_rng();
-        let alphabet = "abcdefghijklmnopqrstuvwxyz";
-        let mut pass = String::new();
-        let alpha_length = alphabet.len() - 1;
+        let alphabet: Vec<char> = "abcdefghijklmnopqrstuvwxyz".chars().collect();
+        let mut pass = String::with_capacity(length);
+
         for _ in 0..length {
-            let n = rng.gen_range(0..alpha_length);
-            pass.push(alphabet.chars().nth(n).unwrap());
+            let c = alphabet.choose(&mut rng).unwrap();
+            pass.push(*c);
         }
+
+        // add timestamp to the end of the string
+        let timestamp = Utc::now().timestamp_millis();
+        pass.push_str(&timestamp.to_string());
         pass
     }
 
