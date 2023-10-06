@@ -588,7 +588,7 @@ impl Ingest {
                         Err(err) => {
                             // println!("Could not open file: {}, Error: {:?}", filename, err);
                             // Create file
-                            println!("Creating new file: {}", filename);
+                            // println!("Creating new file: {}", filename);
                             let f = match OpenOptions::new()
                                 .create(true)
                                 .append(true)
