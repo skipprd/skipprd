@@ -139,7 +139,6 @@ async fn main() {
 
             Config::build_config();
 
-
             if options.pipeline.is_some() {
                 // println!("Syncing pipeline: {}", options.pipeline.unwrap().clone());
                 PIPELINE_NAME.write().unwrap().clear();
@@ -148,9 +147,28 @@ async fn main() {
 
                 sync().await;
             } else {
-                println!("Syncing all pipelines");
-                Config::init().await;
-                sync().await;
+                let pipeline_name = Config::getenv("PIPELINE_NAME", "");
+                if !pipeline_name.is_empty() {
+                    // println!("Syncing pipeline: {}", Config::getenv("PIPELINE_NAME").unwrap());
+                    PIPELINE_NAME.write().unwrap().clear();
+                    PIPELINE_NAME.write().unwrap().push_str(&pipeline_name);
+                    Config::init().await;
+                    sync().await;
+                } else {
+                    println!("No pipeline name provided, syncing all pipelines");
+                    let pipelines = Config::get_pipelines();
+                    for pipeline in pipelines {
+                        println!("Syncing pipeline: {}", pipeline);
+                        PIPELINE_NAME.write().unwrap().clear();
+                        PIPELINE_NAME.write().unwrap().push_str(&pipeline);
+                        Config::init().await;
+                        sync().await;
+                    }
+                }
+                // PIPELINE_NAME.write().unwrap().clear();
+                // PIPELINE_NAME.write().unwrap().push_str(&options.pipeline.unwrap().clone());
+                // Config::init().await;
+                // sync().await;
             }
 
 
