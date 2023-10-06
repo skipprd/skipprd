@@ -392,6 +392,18 @@ impl Config {
         config.skippr.api_token.as_ref().unwrap().to_string()
     }
 
+    pub fn get_pipelines() -> Vec<String> {
+        let config = Config::get();
+
+        let mut pipelines = vec![];
+
+        for (key, _value) in config.pipelines.iter() {
+            pipelines.push(key.to_string());
+        }
+
+        pipelines
+    }
+
     pub fn get_pipeline_config() -> Pipeline {
         let config = Config::get();
 
@@ -405,7 +417,21 @@ impl Config {
 
         let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
 
-        pipline.transform.as_ref().unwrap().clone()
+        match pipline.transform.as_ref() {
+            Some(transform) => {
+                transform.clone()
+            }
+            None => {
+                Transform {
+                    batch_time_fields: None,
+                    batch_time_unit: None,
+                    flatten_events: None,
+                    record_field_path: None,
+                    batch_partition_fields: None,
+                    namespace_fields: None,
+                }
+            }
+        }
     }
 
     pub fn get_transform_batch_partition_fields() -> String {
@@ -414,7 +440,14 @@ impl Config {
         let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
 
         let default_batch_partition_fields = &"".to_string();
-        let batch_partition_fields = pipline.transform.as_ref().unwrap().batch_partition_fields.as_ref().unwrap_or(default_batch_partition_fields);
+        let batch_partition_fields = match pipline.transform.as_ref() {
+            Some(transform) => {
+                transform.batch_partition_fields.as_ref().unwrap_or(default_batch_partition_fields)
+            }
+            None => {
+                default_batch_partition_fields
+            }
+        };
 
         batch_partition_fields.to_string()
     }
@@ -425,7 +458,14 @@ impl Config {
         let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
 
         let default_namespace_fields = &"".to_string();
-        let namespace_fields = pipline.transform.as_ref().unwrap().namespace_fields.as_ref().unwrap_or(default_namespace_fields);
+        let namespace_fields = match pipline.transform.as_ref() {
+            Some(transform) => {
+                transform.namespace_fields.as_ref().unwrap_or(default_namespace_fields)
+            }
+            None => {
+                default_namespace_fields
+            }
+        };
 
         namespace_fields.to_string()
     }
@@ -437,7 +477,14 @@ impl Config {
 
         let default_flatten_events = &"no".to_string();
 
-        let flatten_events = pipline.transform.as_ref().unwrap().flatten_events.as_ref().unwrap_or(default_flatten_events);
+        let flatten_events = match pipline.transform.as_ref() {
+            Some(transform) => {
+                transform.flatten_events.as_ref().unwrap_or(default_flatten_events)
+            }
+            None => {
+                default_flatten_events
+            }
+        };
 
         Config::truth_value(flatten_events)
     }
@@ -449,7 +496,14 @@ impl Config {
 
         let default_record_field_path = &"".to_string();
 
-        let record_field_path = pipline.transform.as_ref().unwrap().record_field_path.as_ref().unwrap_or(default_record_field_path);
+        let record_field_path = match pipline.transform.as_ref() {
+            Some(transform) => {
+                transform.record_field_path.as_ref().unwrap_or(default_record_field_path)
+            }
+            None => {
+                default_record_field_path
+            }
+        };
 
         record_field_path.to_string()
     }
@@ -461,7 +515,14 @@ impl Config {
 
         let default_batch_time_fields = &"".to_string();
 
-        let batch_time_fields = pipline.transform.as_ref().unwrap().batch_time_fields.as_ref().unwrap_or(default_batch_time_fields);
+        let batch_time_fields = match pipline.transform.as_ref() {
+            Some(transform) => {
+                transform.batch_time_fields.as_ref().unwrap_or(default_batch_time_fields)
+            }
+            None => {
+                default_batch_time_fields
+            }
+        };
 
         batch_time_fields.to_string()
     }
@@ -473,7 +534,14 @@ impl Config {
 
         let default_batch_time_unit = &"".to_string();
 
-        let batch_time_unit = pipline.transform.as_ref().unwrap().batch_time_unit.as_ref().unwrap_or(default_batch_time_unit);
+        let batch_time_unit = match pipline.transform.as_ref() {
+            Some(transform) => {
+                transform.batch_time_unit.as_ref().unwrap_or(default_batch_time_unit)
+            }
+            None => {
+                default_batch_time_unit
+            }
+        };
 
         batch_time_unit.to_string()
     }
@@ -563,11 +631,19 @@ impl Config {
             "input" => {
                 if let Some(data_inputs) = config.data_inputs {
 
-                    let plugin_name = pipeline_config.input.as_ref().unwrap().split('.').collect::<Vec<&str>>()[1].to_string();
+                    let plugin_name = match pipeline_config.input.as_ref() {
+                        Some(input) => {
+                            input.split('.').collect::<Vec<&str>>()[1].to_string()
+                        }
+                        None => {
+                            "".to_string()
+                        }
+                    };
 
                     if let Some(config) = data_inputs.get(&plugin_name) {
                         match config {
                             PluginConfig::s3(s3_config) => Ok(PluginConfig::s3(s3_config.clone())),
+                            PluginConfig::file(file_config) => Ok(PluginConfig::file(file_config.clone())),
                             _ => Err("Invalid plugin type".to_string()),
                         }
                     } else {
@@ -580,7 +656,14 @@ impl Config {
             "output" => {
                 if let Some(data_outputs) = config.data_outputs {
 
-                    let plugin_name = pipeline_config.output.as_ref().unwrap().split('.').collect::<Vec<&str>>()[1].to_string();
+                    let plugin_name = match pipeline_config.output.as_ref() {
+                        Some(output) => {
+                            output.split('.').collect::<Vec<&str>>()[1].to_string()
+                        }
+                        None => {
+                            "".to_string()
+                        }
+                    };
 
                     if let Some(config) = data_outputs.get(&plugin_name) {
                         match config {
@@ -597,7 +680,14 @@ impl Config {
             "deadletter" => {
                 if let Some(data_deadletters) = config.data_deadletters {
 
-                    let plugin_name = pipeline_config.deadletter.as_ref().unwrap().split('.').collect::<Vec<&str>>()[1].to_string();
+                    let plugin_name = match pipeline_config.deadletter.as_ref() {
+                        Some(deadletter) => {
+                            deadletter.split('.').collect::<Vec<&str>>()[1].to_string()
+                        }
+                        None => {
+                            "".to_string()
+                        }
+                    };
 
                     if let Some(config) = data_deadletters.get(&plugin_name) {
                         match config {
@@ -614,7 +704,14 @@ impl Config {
             "schema" => {
                 if let Some(schema_outputs) = config.schema_outputs {
 
-                    let plugin_name = pipeline_config.input.as_ref().unwrap().split('.').collect::<Vec<&str>>()[1].to_string();
+                    let plugin_name = match pipeline_config.input.as_ref(){
+                        Some(input) => {
+                            input.split('.').collect::<Vec<&str>>()[1].to_string()
+                        }
+                        None => {
+                            "".to_string()
+                        }
+                    };
 
                     if let Some(config) = schema_outputs.get(&plugin_name) {
                         match config {
@@ -628,7 +725,7 @@ impl Config {
                     Err("Schema not found".to_string())
                 }
             }
-            _ => Err("Invalid plugin type".to_string()),
+            _ => Err(format!("Invalid plugin type: {}", plugin_type)),
         }
     }
 
