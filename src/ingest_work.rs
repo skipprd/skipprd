@@ -148,7 +148,6 @@ impl Drop for Ingest {
 
 impl Ingest {
     pub fn new() -> Ingest {
-        // get number of cpus with a minimum of 2
         let num_cpus = num_cpus::get().max(2);
         println!("Ingesting with {} threads", num_cpus);
         let (tx, rx) = channel();
@@ -217,26 +216,29 @@ impl Ingest {
                     let new_filename = format!(
                         "{}/done/{}-{}",
                         filepath.split("/").take(filepath.split("/").count() - 1).collect::<Vec<&str>>().join("/"),
-                        Helpers::random_str(12),
+                        Helpers::random_str(32),
                         &filename
                     );
 
                     match fs::rename(&filepath, &new_filename) {
                         Ok(_) => {
                             // println!("Rotated file {}", filepath);
+                            rotated_files.push(filepath.to_string());
                         }
                         Err(err) => {
                             println!("Failed to rotate buffer file {} to {}, Error {:?}", filepath, new_filename, err);
                         }
                     };
 
-                    rotated_files.push(filepath.to_string());
+
                 }
             }
         }
 
         for filename in rotated_files {
-            output_files.pop(&filename);
+            let popped = output_files.pop(&filename);
+            // println!("Rotated file {}: popped: {} with size: {} last update: {}", filename, popped.is_some(), popped.as_ref().unwrap().bytes.clone(), popped.unwrap().upated_at.duration_since(UNIX_EPOCH).unwrap().as_secs());
+
         }
 
         if force {
@@ -262,7 +264,7 @@ impl Ingest {
                             let new_filename = format!(
                                 "{}/done/{}-{}",
                                 dir,
-                                Helpers::random_str(12),
+                                Helpers::random_str(32),
                                 path.file_name().unwrap().to_str().unwrap()
                             );
                             let old_path = format!("{}", path.display().to_string());
@@ -294,6 +296,7 @@ impl Ingest {
     ) {
         // println!("Ingesting {} events", datas.len());
 
+        // If we're not running, exit after current threads finish.
         if !RUNNING.read().unwrap().load(Ordering::SeqCst) {
             self.wait_for_completion();
             exit(0);
@@ -331,15 +334,13 @@ impl Ingest {
 
     }
 
-    fn deadletter(record: Value, buffers: &mut Buffers) {
+    fn deadletter(record: &str, buffers: &mut Buffers) {
         let data_dir = Config::get_data_dir();
         let deadletter_dir = format!("{}/deadletter_buffer", data_dir);
 
         let output_file = format!("{}/{}", deadletter_dir.clone(), &DEADLETTER_FILE_NAME.as_str());
 
-        // println!("Skipping empty record: {} {} of {}", record, d, i);
-
-        buffers.write(&output_file, record.to_string().as_bytes());
+        buffers.write(&output_file, record.as_bytes());
         buffers.write(&output_file, "\n".as_bytes());
 
     }
@@ -367,10 +368,11 @@ impl Ingest {
         let mut buffers: Buffers = Buffers::new();
 
         let mut bytes: u64 = 0;
-        let mut i = 0;
+        let mut i: u64 = 0;
         let mut j = 0;
         let mut d = 0;
         let mut x = 0;
+        let mut batch_line: usize = 0;
 
         // @todo - check PluginConfig format is xml
         if Config::get_pipline_plugin_config("input").unwrap().format() == "xml" {
@@ -398,7 +400,7 @@ impl Ingest {
             } else if Config::get_pipline_plugin_config("input").unwrap().format() == "xml" {
                 records = SerdeXml::deserialize(ingest_batch.data.as_bytes());
             } else {
-                records = SerdeJson::deserialize(&ingest_batch.data);
+                records = SerdeJson::deserialize(&ingest_batch.data.clone());
             }
 
             if !entity_field_dot.is_empty() {
@@ -408,8 +410,11 @@ impl Ingest {
                 };
             }
 
+            batch_line = 0;
+
             for record in records {
 
+                batch_line += 1;
                 i += 1;
 
                 if record.is_null()
@@ -417,7 +422,19 @@ impl Ingest {
                     || (record.is_array() && record.as_array().unwrap().is_empty())
                 {
 
-                    Self::deadletter(record, &mut buffers);
+                    // let line batch_line in ingest_batch.data
+                    let line_str = match ingest_batch.data.lines().nth(batch_line - 1) {
+                        Some(line) => line,
+                        None => {
+                            // println!("Could not find null line {} in batch", batch_line);
+                            // println!("Batch lines: {}", ingest_batch.data.lines().count());
+                            // panic!("Could not find null line {} in batch", batch_line);
+                            ""
+                        }
+                    };
+
+
+                    Self::deadletter(line_str, &mut buffers);
 
                     d += 1;
 
@@ -505,7 +522,15 @@ impl Ingest {
                                 msg
 
                             } else { // or just deadletter message for later approval
-                                Self::deadletter(record, &mut buffers);
+                                let line_str = match ingest_batch.data.lines().nth(batch_line - 1) {
+                                    Some(line) => line,
+                                    None => {
+                                        // println!("Could not find line {} in batch", batch_line);
+                                        ""
+                                    }
+                                };
+
+                                Self::deadletter(line_str, &mut buffers);
 
                                 d += 1;
 
@@ -553,13 +578,27 @@ impl Ingest {
 
             if output_files.peek(filename).is_none() {
                 let f = match OpenOptions::new()
-                    .create(true)
-                    .write(true)
+                    .create(false)
                     .append(true)
                     .open(filename.clone()) {
-                        Ok(f) => f,
+                        Ok(f) => {
+                            println!("Opened file: {}", filename);
+                            f
+                        },
                         Err(err) => {
-                            panic!("Could not open file: {}, Error: {:?}", filename, err);
+                            // println!("Could not open file: {}, Error: {:?}", filename, err);
+                            // Create file
+                            println!("Creating new file: {}", filename);
+                            let f = match OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(filename.clone()) {
+                                    Ok(f) => f,
+                                    Err(err) => {
+                                        panic!("Could not open file: {}, Error: {:?}", filename, err);
+                                    }
+                                };
+                            f
                         }
                     };
 
@@ -595,18 +634,20 @@ impl Ingest {
 
                 // If the cache is full, remove and flush the least recently used item.
                 if output_files.len() == output_files.cap().get() {
-                    if let Some((filename, mut evicted)) = output_files.pop_lru() {
+                    if let Some((evicted_filename, mut evicted)) = output_files.pop_lru() {
                         evicted
                             .file
                             .flush()
-                            .expect(&format!("Could not flush file {}", filename));
+                            .expect(&format!("Could not flush file {}", evicted_filename));
+                        evicted.file.into_inner().unwrap().sync_all().unwrap(); // needed?
+
                     }
                 }
 
                 output_files.put(filename.clone(), new_file);
             }
 
-            if let Some(mut output_file) = output_files.get_mut(filename) {
+            if let Some(output_file) = output_files.get_mut(filename) {
                 output_file.file.write_all(&buffer.data).unwrap();
                 output_file.bytes += buffer.bytes;
                 output_file.upated_at = aprox_now;
