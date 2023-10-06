@@ -101,8 +101,8 @@ impl DataOutputAwsAthenaPlugin {
                 }
             }
 
-            let _bucket = &self.s3_bucket;
-            let key = &self.s3_prefix;
+            let _bucket = &self.config.s3_bucket;
+            let key = &self.config.s3_prefix;
 
             let namespace = BufferChunker::decode_file_namespace(&filename);
             // let _time_partition = BufferChunker::decode_file_time(&filename);
@@ -228,7 +228,7 @@ impl DataOutputAwsAthenaPlugin {
 
             DataOutputAwsAthenaPlugin::upload_object(
                 &self.s3_client,
-                &self.s3_bucket,
+                &self.config.s3_bucket,
                 &final_key,
                 &filename,
             )
