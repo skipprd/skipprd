@@ -425,9 +425,9 @@ impl Helpers {
         values.iter().map(|value| {
             let current_value = Helpers::get_nested_value_from_dot_notation(value, field_str);
             match current_value {
-                Some(Value::Array(_)) => current_value.clone(),
-                Some(Value::Object(_)) => current_value.clone(),
-                _ => None,
+                // Some(Value::Array(_)) => current_value.clone(),
+                // Some(Value::Object(_)) => current_value.clone(),
+                _ => current_value.clone(),
             }
         }).collect()
     }

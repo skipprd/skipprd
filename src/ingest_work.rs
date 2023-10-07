@@ -406,7 +406,7 @@ impl Ingest {
             if !entity_field_dot.is_empty() {
                 records = match Helpers::process_values(&records, &entity_field_dot) {
                     Some(records) => records,
-                    None => records
+                    None => Vec::new()
                 };
             }
 
