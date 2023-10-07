@@ -2,6 +2,7 @@ use crate::discover::Metadata;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::error::ArrowError;
 use std::collections::{HashMap, HashSet};
+use arrow::datatypes::TimeUnit::{Millisecond, Second};
 
 #[derive(Debug, Clone)]
 enum InferredType {
@@ -171,10 +172,13 @@ fn convert_skippr_to_arrow_field_types(
                 set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Utf8);
             }
             "timestamp" => {
-                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Int64);
+                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Timestamp(Millisecond, None));
+            }
+            "timestamp_milli" => {
+                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Timestamp(Millisecond, None));
             }
             "date" => {
-                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Int64);
+                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Timestamp(Millisecond, None));
             }
             "record" => {
                 field_types.insert(

@@ -22,8 +22,8 @@ static MAPPINGS: phf::Map<&'static str, &'static str> = phf_map! {
     "double" => "double",
     "NULL" => "null",
     "date" => "timestamp",
-    "timestamp" => "timestamp"
-    // 'timestamp_milli' => "timestamp"
+    "timestamp" => "timestamp",
+    "timestamp_milli" => "timestamp"
 };
 
 pub struct SkipprHive {}

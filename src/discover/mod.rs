@@ -874,6 +874,16 @@ impl AnalyseSchema {
         None
     }
 
+    pub(crate) fn coerce_to_milli_seconds(v: Value) -> Value {
+        if v.as_i64().unwrap() < 10000000000 {
+            let millis = v.as_i64().unwrap() * 1000;
+            // println!("field: {}, value: {}, v: {}", field, value, millis);
+            millis.into()
+        } else {
+            v
+        }
+    }
+
     // pub fn apply_evolution_factory(
     //     &self,
     //     field: &mut std::string::String,

@@ -8,6 +8,7 @@ use serde_json::{Map, Value};
 use std::borrow::BorrowMut;
 use std::collections::HashMap;
 use std::io::{BufReader, Read};
+use crate::cli::Mode::Discover;
 use crate::discover::evolution::Evolution;
 
 
@@ -539,13 +540,29 @@ fn match_scalar_value(
             }
         }
         "timestamp" | "timestamp_milli" | "int" | "integer" | "long" => match value.as_i64().map(Value::from) {
-            Some(v) => Ok(v),
+            Some(v) =>  if data_type == "timestamp_milli" || data_type == "timestamp" {
+                Ok(AnalyseSchema::coerce_to_milli_seconds(v))
+            } else {
+                Ok(v)
+            },
             None => match value.as_str().and_then(|v| v.parse::<i64>().ok()).map(Value::from) {
-                Some(v) => Ok(v),
+                Some(v) => if data_type == "timestamp_milli" || data_type == "timestamp" {
+                    Ok(AnalyseSchema::coerce_to_milli_seconds(v))
+                } else {
+                    Ok(v)
+                },
                 None => match value.as_f64().and_then(|v| v.to_string().parse::<i64>().ok()).map(Value::from) {
-                    Some(v) => Ok(v),
+                    Some(v) => if data_type == "timestamp_milli" || data_type == "timestamp" {
+                        Ok(AnalyseSchema::coerce_to_milli_seconds(v))
+                    } else {
+                        Ok(v)
+                    },
                     None => match value.as_bool().and_then(|v| v.to_string().parse::<i64>().ok()).map(Value::from) {
-                        Some(v) => Ok(v),
+                        Some(v) => if data_type == "timestamp_milli" || data_type == "timestamp" {
+                            Ok(AnalyseSchema::coerce_to_milli_seconds(v))
+                        } else {
+                            Ok(v)
+                        },
                         // None => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not an integer", value)))),
                         None => {
                             // Handle the value error applying the Evolution Strategy

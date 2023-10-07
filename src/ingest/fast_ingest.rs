@@ -6,7 +6,7 @@ use std::ops::Deref;
 use chrono::NaiveDateTime;
 use serde_json::Map;
 
-use crate::discover::{Metadata};
+use crate::discover::{AnalyseSchema, Metadata};
 use crate::discover::date_formats::DateFormats;
 use crate::discover::evolution::Evolution;
 
@@ -193,9 +193,17 @@ pub fn match_scalar_value_fast(
             }
         }
         "timestamp" | "timestamp_milli" | "int" | "integer" | "long" => match value.as_i64().map(Value::from) {
-            Some(v) => Ok(v),
+            Some(v) => if data_type == "timestamp_milli" || data_type == "timestamp" {
+                Ok(AnalyseSchema::coerce_to_milli_seconds(v))
+            } else {
+                Ok(v)
+            },
             None => match value.as_str().and_then(|v| v.parse::<i64>().ok()).map(Value::from) {
-                Some(v) => Ok(v),
+                Some(v) => if data_type == "timestamp_milli" || data_type == "timestamp" {
+                    Ok(AnalyseSchema::coerce_to_milli_seconds(v))
+                } else {
+                    Ok(v)
+                },
                 None => {
                     // handle boolean values
                     match value.as_bool().and_then(|v| {
