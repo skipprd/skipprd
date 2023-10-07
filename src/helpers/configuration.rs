@@ -142,7 +142,7 @@ impl From<PluginConfig> for DataSourceLocalFilePluginConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Pipeline {
-    pub workspace: String,
+    pub workspace: Option<String>,
     pub auto_approve: Option<String>,
     pub env: Option<String>,
     pub buffer_threshold_bytes: Option<i64>,
@@ -804,7 +804,10 @@ impl Config {
     }
 
     pub fn get_workspace_name() -> String {
-        Config::get_pipeline_config().workspace
+        match Config::get_pipeline_config().workspace {
+            Some(workspace) => workspace,
+            None => "default".to_string(),
+        }
     }
 
     pub fn get_full_namespace_name() -> String {
