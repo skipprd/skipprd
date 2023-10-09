@@ -180,6 +180,7 @@ async fn main() {
         }
         Mode::Query(options) => {
 
+            Config::build_config();
             // Track and report query runtime in seconds
             let now = Instant::now();
             query(&options.query).await;
@@ -259,8 +260,11 @@ async fn query(sql: &str) {
 
     let table_name = sql.to_lowercase().split("from").collect::<Vec<&str>>()[1].split(" ").collect::<Vec<&str>>()[1].trim().replace(";", "");
 
+    PIPELINE_NAME.write().unwrap().clear();
+    PIPELINE_NAME.write().unwrap().push_str(&table_name);
+    Config::init().await;
     let workspace = Config::get_workspace_name();
-    Config::setenv("PIPELINE_NAME", &table_name);
+    // Config::setenv("PIPELINE_NAME", &table_name);
     let full_table_name = format!("{}.{}", workspace, table_name);
 
     // @todo - check dir exists for provided table name, otherwise we end up creating erroneous dirs
