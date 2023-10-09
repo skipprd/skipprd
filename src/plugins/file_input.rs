@@ -16,15 +16,15 @@ use flate2::read::GzDecoder;
 use tar::Archive;
 use zip::ZipArchive;
 
-use crate::helpers::configuration::{Config};
+use crate::helpers::configuration::{Config, PluginConfig};
 
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::ingest_work::{Ingest, IngestBatch};
 
 use glob::{glob_with};
-use tokio::task;
 
 use futures::stream::StreamExt;
+use serde::Deserializer;
 use serde_derive::Deserialize;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -36,6 +36,16 @@ pub struct DataSourceLocalFilePluginConfig {
 
     path: String,
 }
+
+impl From<PluginConfig> for DataSourceLocalFilePluginConfig {
+    fn from(plugin_config: PluginConfig) -> Self {
+        match plugin_config {
+            PluginConfig::file(file_config) => file_config,
+            _ => panic!("Invalid plugin type"),
+        }
+    }
+}
+
 
 pub struct DataSourceLocalFilePlugin {
     ingest: Ingest,

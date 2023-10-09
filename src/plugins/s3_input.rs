@@ -1,4 +1,4 @@
-use crate::helpers::configuration::{Config};
+use crate::helpers::configuration::{Config, PluginConfig};
 
 use aws_sdk_s3::Client;
 
@@ -20,6 +20,7 @@ use std::{fs};
 
 use futures::future::join_all;
 use futures::{StreamExt};
+use serde::Deserializer;
 use serde_derive::Deserialize;
 
 
@@ -41,7 +42,14 @@ pub struct DataSourceS3PluginConfig {
     s3_prefix: String,
 }
 
-
+impl From<PluginConfig> for DataSourceS3PluginConfig {
+    fn from(plugin_config: PluginConfig) -> Self {
+        match plugin_config {
+            PluginConfig::s3(s3_config) => s3_config,
+            _ => panic!("Invalid plugin type"),
+        }
+    }
+}
 
 pub struct DataSourceS3Plugin {
     // config: HashMap<String, String>,

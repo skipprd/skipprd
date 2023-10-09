@@ -49,11 +49,11 @@ impl MetricsEnvConfig {
             schema_output_plugin_name: Config::get_pipeline_schema_plugin_name(),
             data_deadletter_plugin_name: Config::get_pipeline_deadletter_plugin_name(),
             data_source_batch_size_bytes: match Config::get_pipline_plugin_config("input") {
-                Ok(config) => config.batch_size_bytes(),
+                Ok(config) => config.batch_size_bytes().or(Some(0)).unwrap(),
                 Err(_) => 0
             },
             data_source_batch_size_seconds: match Config::get_pipline_plugin_config("input") {
-                Ok(config) => config.batch_size_seconds(),
+                Ok(config) => config.batch_size_seconds().or(Some(0)).unwrap(),
                 Err(_) => 0
             },
             buffer_threshold_bytes: Config::get_pipeline_buffer_threshold_bytes() as u64,

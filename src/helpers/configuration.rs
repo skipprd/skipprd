@@ -56,89 +56,46 @@ pub struct Transform {
     pub namespace_fields: Option<String>,
 }
 
-
 #[derive(Debug, Deserialize, Clone)]
 pub enum PluginConfig {
     s3(DataSourceS3PluginConfig),
     athena(DataOutputAwsAthenaPluginConfig),
     file(DataSourceLocalFilePluginConfig),
-    // ... any other plugin types
 }
 
 impl PluginConfig {
     pub fn format(&self) -> String {
         match self {
             PluginConfig::s3(s3_config) => s3_config.format.clone().or(Some("json".to_string())).as_ref().unwrap().clone(),
-            PluginConfig::athena(athena_config) => athena_config.format.clone().or(Some("json".to_string())).unwrap(),
+            PluginConfig::athena(athena_config) => athena_config.format.clone().or(Some("json".to_string())).as_ref().unwrap().clone(),
             PluginConfig::file(file_config) => file_config.format.clone().or(Some("json".to_string())).unwrap(),
         }
     }
 
-    pub fn plugin_name(&self) -> String {
+    pub fn plugin_name(&self) -> Option<String> {
         match self {
-            PluginConfig::s3(s3_config) => s3_config.plugin_name.clone().or(Some("".to_string())).as_ref().unwrap().clone(),
-            PluginConfig::athena(athena_config) => athena_config.plugin_name.clone().or(Some("".to_string())).unwrap(),
-            PluginConfig::file(file_config) => file_config.plugin_name.clone().or(Some("".to_string())).unwrap(),
+            PluginConfig::s3(s3_config) => s3_config.plugin_name.clone(),
+            PluginConfig::athena(athena_config) => athena_config.plugin_name.clone(),
+            PluginConfig::file(file_config) => file_config.plugin_name.clone(),
         }
     }
 
-    pub fn batch_size_bytes(&self) -> i64 {
+    pub fn batch_size_bytes(&self) -> Option<i64> {
         match self {
-            PluginConfig::s3(s3_config) => s3_config.batch_size_bytes.or(Some(1000000)).unwrap(),
-            PluginConfig::athena(athena_config) => athena_config.batch_size_bytes.or(Some(1000000)).unwrap(),
-            PluginConfig::file(file_config) => file_config.batch_size_bytes.or(Some(1000000)).unwrap(),
+            PluginConfig::s3(s3_config) => s3_config.batch_size_bytes.clone(),
+            PluginConfig::athena(athena_config) => athena_config.batch_size_bytes.clone(),
+            PluginConfig::file(file_config) => file_config.batch_size_bytes.clone(),
         }
     }
 
-    pub fn batch_size_seconds(&self) -> i64 {
+    pub fn batch_size_seconds(&self) -> Option<i64> {
         match self {
-            PluginConfig::s3(s3_config) => s3_config.batch_size_seconds.or(Some(60)).unwrap(),
-            PluginConfig::athena(athena_config) => athena_config.batch_size_seconds.or(Some(60)).unwrap(),
-            PluginConfig::file(file_config) => file_config.batch_size_seconds.or(Some(60)).unwrap(),
+            PluginConfig::s3(s3_config) => s3_config.batch_size_seconds.clone(),
+            PluginConfig::athena(athena_config) => athena_config.batch_size_seconds.clone(),
+            PluginConfig::file(file_config) => file_config.batch_size_seconds.clone(),
         }
     }
 }
-
-impl From<PluginConfig> for DataOutputAwsAthenaPluginConfig {
-    fn from(plugin_config: PluginConfig) -> Self {
-        match plugin_config {
-            PluginConfig::athena(athena_config) => athena_config,
-            _ => panic!("Invalid plugin type"),
-        }
-    }
-}
-
-impl From<PluginConfig> for DataSourceS3PluginConfig {
-    fn from(plugin_config: PluginConfig) -> Self {
-        match plugin_config {
-            PluginConfig::s3(s3_config) => s3_config,
-            _ => panic!("Invalid plugin type"),
-        }
-    }
-}
-
-impl From<PluginConfig> for DataSourceLocalFilePluginConfig {
-    fn from(plugin_config: PluginConfig) -> Self {
-        match plugin_config {
-            PluginConfig::file(file_config) => file_config,
-            _ => panic!("Invalid plugin type"),
-        }
-    }
-}
-
-
-
-// pub struct InputOutput {
-//     pub plugin: Plugins,
-// }
-
-// #[derive(Debug, Deserialize, Clone)]
-// pub struct Plugins {
-//     pub plugin_name: String,
-//     pub format: Option<String>,
-//     pub athena: Option<DataOutputAwsAthenaPluginConfig>,
-//     pub s3: Option<DataSourceS3PluginConfig>,
-// }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Pipeline {
@@ -281,7 +238,7 @@ impl Config {
                 Some(data_inputs) => {
                     match data_inputs.get(&input_plugin_name) {
                         Some(plugin_config) => {
-                            plugin_config.plugin_name().clone()
+                            plugin_config.plugin_name().clone().or(Some("".to_string())).unwrap()
                         },
                         None => {
                             "".to_string()
@@ -310,7 +267,7 @@ impl Config {
                 Some(data_outputs) => {
                     match data_outputs.get(&input_plugin_name) {
                         Some(plugin_config) => {
-                            plugin_config.plugin_name().clone()
+                            plugin_config.plugin_name().clone().or(Some("".to_string())).unwrap()
                         },
                         None => {
                             "".to_string()
@@ -339,7 +296,7 @@ impl Config {
                 Some(schema_outputs) => {
                     match schema_outputs.get(&input_plugin_name) {
                         Some(plugin_config) => {
-                            plugin_config.plugin_name().clone()
+                            plugin_config.plugin_name().clone().or(Some("".to_string())).unwrap()
                         },
                         None => {
                             "".to_string()
@@ -369,7 +326,7 @@ impl Config {
                 Some(data_deadletters) => {
                     match data_deadletters.get(&input_plugin_name) {
                         Some(plugin_config) => {
-                            plugin_config.plugin_name().clone()
+                            plugin_config.plugin_name().clone().or(Some("".to_string())).unwrap()
                         },
                         None => {
                             "".to_string()
@@ -641,11 +598,7 @@ impl Config {
                     };
 
                     if let Some(config) = data_inputs.get(&plugin_name) {
-                        match config {
-                            PluginConfig::s3(s3_config) => Ok(PluginConfig::s3(s3_config.clone())),
-                            PluginConfig::file(file_config) => Ok(PluginConfig::file(file_config.clone())),
-                            _ => Err("Invalid plugin type".to_string()),
-                        }
+                        Ok(config.clone())
                     } else {
                         Err("Input not found".to_string())
                     }
@@ -666,10 +619,7 @@ impl Config {
                     };
 
                     if let Some(config) = data_outputs.get(&plugin_name) {
-                        match config {
-                            PluginConfig::athena(athena_config) => Ok(PluginConfig::athena(athena_config.clone())),
-                            _ => Err("Invalid plugin type".to_string()),
-                        }
+                        Ok(config.clone())
                     } else {
                         Err("Output not found".to_string())
                     }
@@ -690,10 +640,7 @@ impl Config {
                     };
 
                     if let Some(config) = data_deadletters.get(&plugin_name) {
-                        match config {
-                            // PluginConfig::S3(s3_config) => Ok(PluginConfig::S3(s3_config.clone())),
-                            _ => Err("Invalid plugin type".to_string()),
-                        }
+                        Ok(config.clone())
                     } else {
                         Err("Deadletter not found".to_string())
                     }
@@ -714,10 +661,7 @@ impl Config {
                     };
 
                     if let Some(config) = schema_outputs.get(&plugin_name) {
-                        match config {
-                            // PluginConfig::Athena(athena_config) => Ok(PluginConfig::Athena(athena_config.clone())),
-                            _ => Err("Invalid plugin type".to_string()),
-                        }
+                        Ok(config.clone())
                     } else {
                         Err("Schema not found".to_string())
                     }

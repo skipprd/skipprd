@@ -1,8 +1,7 @@
 use crate::buffer::BufferChunker;
 use crate::converters::skippr_hive::SkipprHive;
 use crate::discover::Metadata;
-use crate::helpers::configuration::Config;
-use crate::helpers::logger::LogLevel;
+use crate::helpers::configuration::{Config, PluginConfig};
 use crate::helpers::Helpers;
 use crate::{discover, flatten_metadata, METADATA};
 use aws_sdk_athena::types::{
@@ -22,6 +21,7 @@ use std::fs;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
+use serde::Deserializer;
 use serde_derive::Deserialize;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -36,6 +36,16 @@ pub struct DataOutputAwsAthenaPluginConfig {
     // pub time_bucket: Option<String>,
     pub athena_workgroup_name: String,
     pub glue_database_name: String,
+
+}
+
+impl From<PluginConfig> for DataOutputAwsAthenaPluginConfig {
+    fn from(plugin_config: PluginConfig) -> Self {
+        match plugin_config {
+            PluginConfig::athena(athena_config) => athena_config,
+            _ => panic!("Invalid plugin type"),
+        }
+    }
 }
 
 pub struct DataOutputAwsAthenaPlugin {
