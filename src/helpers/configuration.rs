@@ -504,6 +504,12 @@ impl Config {
     }
 
     pub fn get_pipeline_chaos_mode() -> bool {
+
+        let mode = Config::getenv("SKIPPR_CHAOS_MODE", "");
+        if mode != "" {
+            return Config::truth_value(mode.as_str())
+        }
+
         let config = Config::get();
 
         let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();

@@ -23,6 +23,18 @@ env:
 #  GITHUB_REF: ${{ startsWith(github.ref, 'refs/tags/') && replace(github.ref, 'refs/tags/', '') || '1.1.1' }}
 
 jobs:
+  del_runs:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Delete workflow runs
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          retain_days: 30
+          keep_minimum_runs: 30
   # Check crate compiles
 #  cargo_check:
 #    name: cargo check
@@ -157,7 +169,7 @@ jobs:
       - linux_x86
     name: test build (linux x86)
     runs-on:
-      - ubuntu-latest-16-cores
+      - ubuntu-latest
     steps:
       - uses: actions/checkout@v3
 
@@ -215,7 +227,7 @@ jobs:
           fail_on_unmatched_files: true
 
   dockerize:
-#    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/')
     needs:
       - release
 #      - macos_arm64

@@ -746,8 +746,7 @@ async fn sync() {
 
     // let metrics_clone = metrics.clone();
 
-    let chaos = Config::get_pipeline_config().chaos_mode.or(Some("no".to_string())).unwrap();
-    if Config::truth_value(&chaos) {
+    if Config::get_pipeline_chaos_mode() {
         out_pnanner.add(
             move || {
                 if RUNNING.read().unwrap().load(Ordering::SeqCst) {
