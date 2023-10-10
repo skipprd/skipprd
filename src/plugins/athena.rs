@@ -574,7 +574,7 @@ impl AwsAthena {
         let bucket = config.s3_bucket;
         let granularity_target = Config::get_transform_batch_time_unit();
 
-        let path = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
+        let path = config.s3_prefix;
         let path = path.trim_matches('/');
         let path = std::path::Path::new(&bucket)
             .join(&path)
@@ -679,7 +679,7 @@ impl AwsAthena {
         let bucket = config.s3_bucket;
         let granularity_target = Config::get_transform_batch_time_unit();
 
-        let path = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
+        let path = config.s3_prefix;
         let path = path.trim_matches('/');
         let path = std::path::Path::new(&bucket)
             .join(&path)
