@@ -29,7 +29,6 @@ use serde_derive::Deserialize;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSourceLocalFilePluginConfig {
-    pub plugin_name: Option<String>,
     pub format: Option<String>,
     pub batch_size_seconds: Option<i64>,
     pub batch_size_bytes: Option<i64>,

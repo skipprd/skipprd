@@ -33,7 +33,6 @@ use crate::helpers::timed_rwlock::TimedRwLock;
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct DataSourceS3PluginConfig {
-    pub plugin_name: Option<String>,
     pub format: Option<String>,
     pub batch_size_seconds: Option<i64>,
     pub batch_size_bytes: Option<i64>,

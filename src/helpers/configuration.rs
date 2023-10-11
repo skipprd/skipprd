@@ -44,6 +44,7 @@ use crate::plugins::s3_input::DataSourceS3PluginConfig;
 #[derive(Debug, Deserialize, Clone)]
 pub struct Skippr {
     pub api_token: Option<String>,
+    pub workspace: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -74,9 +75,9 @@ impl PluginConfig {
 
     pub fn plugin_name(&self) -> Option<String> {
         match self {
-            PluginConfig::s3(s3_config) => s3_config.plugin_name.clone(),
-            PluginConfig::athena(athena_config) => athena_config.plugin_name.clone(),
-            PluginConfig::file(file_config) => file_config.plugin_name.clone(),
+            PluginConfig::s3(s3_config) => Some("s3".to_string()),
+            PluginConfig::athena(athena_config) => Some("athena".to_string()),
+            PluginConfig::file(file_config) => Some("file".to_string()),
         }
     }
 
@@ -99,7 +100,6 @@ impl PluginConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Pipeline {
-    pub workspace: Option<String>,
     pub auto_approve: Option<String>,
     pub env: Option<String>,
     pub buffer_threshold_bytes: Option<i64>,
@@ -130,7 +130,15 @@ impl Config {
 
     pub fn find_config_file() -> String {
 
-        let valid_locations = vec![
+        let config_file = Config::getenv("SKIPPR_CONFIG_FILE", "");
+
+        if config_file != "" {
+            if Path::new(&config_file).exists() {
+                return config_file.to_string()
+            }
+        }
+
+        let mut valid_locations = vec![
             "./skippr.yml",
             "./skippr.yaml",
             "./skippr.toml",
@@ -345,6 +353,11 @@ impl Config {
 
     pub fn get_skippr_api_token() -> String {
         let config = Config::get();
+
+        let token = Config::getenv("SKIPPR_API_TOKEN", "");
+        if token != "" {
+            return token
+        }
 
         config.skippr.api_token.as_ref().unwrap().to_string()
     }
@@ -754,18 +767,18 @@ impl Config {
     }
 
     pub fn get_workspace_name() -> String {
-        match Config::get_pipeline_config().workspace {
-            Some(workspace) => workspace,
-            None => "default".to_string(),
+        let config = Config::get();
+
+        let token = Config::getenv("SKIPPR_WORKSPACE", "");
+        if token != "" {
+            return token
         }
+
+        config.skippr.workspace.as_ref().unwrap().to_string()
     }
 
     pub fn get_full_namespace_name() -> String {
         // let mut helpers = Helpers { clean_field_cache: Default::default() };
-
-        // let input_plugin_name = Helpers::clean_field_name(Config::getenv("DATA_SOURCE_PLUGIN_NAME", "unknown"));
-        // let output_plugin_name = Helpers::clean_field_name(Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "unknown"));
-        // let default_pipeline_name = format!("{} to {}", input_plugin_name, output_plugin_name);
 
         let workspace = Self::get_workspace_name();
         let pipeline = Self::get_pipeline_name();
