@@ -241,7 +241,37 @@ impl Config {
                 pipeline
             }
             None => {
-                return Config::getenv("DATA_SOURCE_PLUGIN_NAME", "")
+                let plugin_name = Config::getenv("DATA_SOURCE_PLUGIN_NAME", "");
+                // @todo - add plugin_name to APP_CONFIG.write().unwrap().as_mut().unwrap().pipelines
+                match APP_CONFIG.write() {
+                    Ok(mut app_config) => {
+                        match app_config.as_mut() {
+                            Some(app_config) => {
+                                let pipeline_name = match PIPELINE_NAME.read() {
+                                    Ok(pipeline_name) => {
+                                        pipeline_name.clone()
+                                    }
+                                    Err(err) => {
+                                        println!("Error writing to PIPELINE_NAME: {:?}", err);
+                                        Config::getenv("PIPELINE_NAME", "")
+                                    }
+                                };
+                                match app_config.pipelines.get_mut(&pipeline_name) {
+                                    Some(pipeline) => {
+                                        pipeline.input = Some(plugin_name.clone());
+                                    }
+                                    None => {}
+                                }
+                            }
+                            None => {}
+                        }
+                    }
+                    Err(err) => {
+                        println!("Error writing to APP_CONFIG: {:?}", err);
+                    }
+                }
+                // APP_CONFIG.write().unwrap().as_mut().unwrap().pipelines.get_mut(PIPELINE_NAME.read().unwrap().as_str()).unwrap().input = Some(plugin_name.clone());
+                return plugin_name
             }
         };
 
@@ -278,7 +308,35 @@ impl Config {
                 pipeline
             }
             None => {
-                return Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "")
+                let plugin_name = Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "");
+                match APP_CONFIG.write() {
+                    Ok(mut app_config) => {
+                        match app_config.as_mut() {
+                            Some(app_config) => {
+                                let pipeline_name = match PIPELINE_NAME.read() {
+                                    Ok(pipeline_name) => {
+                                        pipeline_name.clone()
+                                    }
+                                    Err(err) => {
+                                        println!("Error writing to PIPELINE_NAME: {:?}", err);
+                                        Config::getenv("PIPELINE_NAME", "")
+                                    }
+                                };
+                                match app_config.pipelines.get_mut(&pipeline_name) {
+                                    Some(pipeline) => {
+                                        pipeline.input = Some(plugin_name.clone());
+                                    }
+                                    None => {}
+                                }
+                            }
+                            None => {}
+                        }
+                    }
+                    Err(err) => {
+                        println!("Error writing to APP_CONFIG: {:?}", err);
+                    }
+                }
+                return plugin_name
             }
         };
 
@@ -314,7 +372,35 @@ impl Config {
                 pipeline
             }
             None => {
-                return Config::getenv("DATA_SCHEMA_PLUGIN_NAME", "")
+                let plugin_name = Config::getenv("DATA_SCHEMA_PLUGIN_NAME", "");
+                match APP_CONFIG.write() {
+                    Ok(mut app_config) => {
+                        match app_config.as_mut() {
+                            Some(app_config) => {
+                                let pipeline_name = match PIPELINE_NAME.read() {
+                                    Ok(pipeline_name) => {
+                                        pipeline_name.clone()
+                                    }
+                                    Err(err) => {
+                                        println!("Error writing to PIPELINE_NAME: {:?}", err);
+                                        Config::getenv("PIPELINE_NAME", "")
+                                    }
+                                };
+                                match app_config.pipelines.get_mut(&pipeline_name) {
+                                    Some(pipeline) => {
+                                        pipeline.input = Some(plugin_name.clone());
+                                    }
+                                    None => {}
+                                }
+                            }
+                            None => {}
+                        }
+                    }
+                    Err(err) => {
+                        println!("Error writing to APP_CONFIG: {:?}", err);
+                    }
+                }
+                return plugin_name
             }
         };
 
@@ -351,7 +437,35 @@ impl Config {
                 pipeline
             }
             None => {
-                return Config::getenv("DATA_DEADLETTER_PLUGIN_NAME", "")
+                let plugin_name = Config::getenv("DATA_DEADLETTER_PLUGIN_NAME", "");
+                match APP_CONFIG.write() {
+                    Ok(mut app_config) => {
+                        match app_config.as_mut() {
+                            Some(app_config) => {
+                                let pipeline_name = match PIPELINE_NAME.read() {
+                                    Ok(pipeline_name) => {
+                                        pipeline_name.clone()
+                                    }
+                                    Err(err) => {
+                                        println!("Error writing to PIPELINE_NAME: {:?}", err);
+                                        Config::getenv("PIPELINE_NAME", "")
+                                    }
+                                };
+                                match app_config.pipelines.get_mut(&pipeline_name) {
+                                    Some(pipeline) => {
+                                        pipeline.input = Some(plugin_name.clone());
+                                    }
+                                    None => {}
+                                }
+                            }
+                            None => {}
+                        }
+                    }
+                    Err(err) => {
+                        println!("Error writing to APP_CONFIG: {:?}", err);
+                    }
+                }
+                return plugin_name
             }
         };
 
@@ -620,9 +734,17 @@ impl Config {
     pub fn get_auto_approve() -> bool {
         let config = Config::get();
 
-        let pipline = Config::get_pipeline_config();
+        let pipeline = Config::get_pipeline_config();
 
-        pipline.auto_approve == Some("yes".to_string())
+        match pipeline.auto_approve {
+            Some(auto_approve) => {
+                Config::truth_value(auto_approve.as_str())
+            }
+            None => {
+                true
+            }
+        }
+
     }
 
     pub fn get_pipeline_buffer_threshold_bytes() -> i64 {
@@ -644,20 +766,6 @@ impl Config {
         pipline.buffer_threshold_seconds.or(Some(60)).unwrap()
     }
 
-    // pub fn get_pipline_plugin_config(plugin_type: &str) -> Result<PluginConfig, String> {
-    //     let config = Config::get();
-    //
-    //     let pipline = Config::get_pipeline_config();
-    //
-    //     match plugin_type {
-    //         "input" => config.data_inputs.as_ref().unwrap().get(&pipline.input.as_ref().unwrap().to_string()).cloned().ok_or("Input not found".to_string()),
-    //         "output" => config.data_outputs.as_ref().unwrap().get(&pipline.output.as_ref().unwrap().to_string()).cloned().ok_or("Output not found".to_string()),
-    //         "deadletter" => config.data_deadletters.as_ref().unwrap().get(&pipline.deadletter.as_ref().unwrap().to_string()).cloned().ok_or("Deadletter not found".to_string()),
-    //         "schema" => config.schema_outputs.as_ref().unwrap().get(&pipline.schema.as_ref().unwrap().to_string()).cloned().ok_or("Schema not found".to_string()),
-    //         _ => Err("Invalid plugin type".to_string()),
-    //     }
-    // }
-
     pub fn get_pipline_plugin_config(plugin_type: &str) -> Result<PluginConfig, String> {
 
         let pipeline_name = PIPELINE_NAME.read().unwrap().as_str();
@@ -675,7 +783,7 @@ impl Config {
                             input.split('.').collect::<Vec<&str>>()[1].to_string()
                         }
                         None => {
-                            "".to_string()
+                            Config::getenv("DATA_SOURCE_PLUGIN_NAME", "")
                         }
                     };
 
@@ -696,7 +804,7 @@ impl Config {
                             output.split('.').collect::<Vec<&str>>()[1].to_string()
                         }
                         None => {
-                            Config::getenv("DATA_SOURCE_PLUGIN_NAME", "")
+                            Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "")
                         }
                     };
 
@@ -717,7 +825,7 @@ impl Config {
                             deadletter.split('.').collect::<Vec<&str>>()[1].to_string()
                         }
                         None => {
-                            Config::getenv("DATA_SOURCE_PLUGIN_NAME", "")
+                            Config::getenv("DATA_DEADLETTER_PLUGIN_NAME", "")
                         }
                     };
 
@@ -738,7 +846,7 @@ impl Config {
                             input.split('.').collect::<Vec<&str>>()[1].to_string()
                         }
                         None => {
-                            Config::getenv("DATA_SOURCE_PLUGIN_NAME", "")
+                            Config::getenv("DATA_SCHEMA_PLUGIN_NAME", "")
                         }
                     };
 

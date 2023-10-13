@@ -374,8 +374,13 @@ impl Ingest {
         let mut x = 0;
         let mut batch_line: usize = 0;
 
+        let format = match Config::get_pipline_plugin_config("input") {
+            Ok(plugin) => plugin.format(),
+            Err(_) => "json".to_string()
+        };
+
         // @todo - check PluginConfig format is xml
-        if Config::get_pipline_plugin_config("input").unwrap().format() == "xml" {
+        if format == "xml" {
             let batch = IngestBatch {
                 offset_key: datas[0].offset_key.clone(),
                 data: datas.iter().map(|v| v.data.as_str()).collect::<Vec<&str>>().join(""),
@@ -395,9 +400,9 @@ impl Ingest {
                 offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Closed, 0);
 
             let mut records: Vec<Value> = Vec::new();
-            if Config::get_pipline_plugin_config("input").unwrap().format() == "csv" {
+            if format == "csv" {
                 records = SerderCsv::deserialize(&ingest_batch.data);
-            } else if Config::get_pipline_plugin_config("input").unwrap().format() == "xml" {
+            } else if format == "xml" {
                 records = SerdeXml::deserialize(ingest_batch.data.as_bytes());
             } else {
                 records = SerdeJson::deserialize(&ingest_batch.data.clone());
@@ -487,6 +492,7 @@ impl Ingest {
 
                     let record_value = match msg {
                         Ok(msg) => {
+                            // println!("Fast path ingest: {}", msg);
                             // msg.to_string() + "\n"
                             // buffers.write(&output_file_name, buf_str.as_bytes());
                             msg
@@ -506,6 +512,8 @@ impl Ingest {
                                 &mut updated_schema_clone.lock().unwrap(),
                                 flatten,
                             );
+
+                            // println!("Slow path ingest: {}", msg);
 
                             // update metadata in runtime and ingest message
                             if Config::get_auto_approve() {
@@ -556,6 +564,7 @@ impl Ingest {
                     offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, i);
 
                 }
+
             }
 
             offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Closed, 1);

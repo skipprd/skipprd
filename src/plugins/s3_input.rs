@@ -50,6 +50,12 @@ impl From<PluginConfig> for DataSourceS3PluginConfig {
     }
 }
 
+impl Into<PluginConfig> for DataSourceS3PluginConfig {
+    fn into(self) -> PluginConfig {
+        PluginConfig::s3(self)
+    }
+}
+
 pub struct DataSourceS3Plugin {
     // config: HashMap<String, String>,
     // buffer: Sender<String>,
@@ -75,7 +81,16 @@ impl DataSourceS3Plugin {
 
         let s3_client = Client::new(&s3_config);
 
-        let config: DataSourceS3PluginConfig = Config::get_pipline_plugin_config("input").unwrap().into();
+        let config: DataSourceS3PluginConfig = match Config::get_pipline_plugin_config("input") {
+            Ok(config) => config.into(),
+            Err(_) => DataSourceS3PluginConfig {
+                format: None,
+                batch_size_seconds: None,
+                batch_size_bytes: None,
+                s3_bucket: Config::getenv("DATA_SOURCE_S3_BUCKET", ""),
+                s3_prefix: Config::getenv("DATA_SOURCE_S3_PREFIX", ""),
+            }
+        };
 
         DataSourceS3Plugin {
             s3_client,
