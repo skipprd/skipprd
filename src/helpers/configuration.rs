@@ -236,7 +236,15 @@ impl Config {
     pub fn get_pipeline_input_plugin_name() -> String {
         let config = Config::get();
 
-        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+        let pipline = match config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()) {
+            Some(pipeline) => {
+                pipeline
+            }
+            None => {
+                return Config::getenv("DATA_SOURCE_PLUGIN_NAME", "")
+            }
+        };
+
 
         if pipline.input.is_some() {
             // split dot string
@@ -265,7 +273,14 @@ impl Config {
     pub fn get_pipeline_output_plugin_name() -> String {
         let config = Config::get();
 
-        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+        let pipline = match config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()) {
+            Some(pipeline) => {
+                pipeline
+            }
+            None => {
+                return Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "")
+            }
+        };
 
         if pipline.output.is_some() {
             // split dot string
@@ -294,7 +309,14 @@ impl Config {
     pub fn get_pipeline_schema_plugin_name() -> String {
         let config = Config::get();
 
-        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+        let pipline = match config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()) {
+            Some(pipeline) => {
+                pipeline
+            }
+            None => {
+                return Config::getenv("DATA_SCHEMA_PLUGIN_NAME", "")
+            }
+        };
 
         if pipline.schema.is_some() {
             // split dot string
@@ -324,7 +346,14 @@ impl Config {
     pub fn get_pipeline_deadletter_plugin_name() -> String {
         let config = Config::get();
 
-        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+        let pipline = match config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()) {
+            Some(pipeline) => {
+                pipeline
+            }
+            None => {
+                return Config::getenv("DATA_DEADLETTER_PLUGIN_NAME", "")
+            }
+        };
 
         if pipline.deadletter.is_some() {
             // split dot string
@@ -377,15 +406,34 @@ impl Config {
     pub fn get_pipeline_config() -> Pipeline {
         let config = Config::get();
 
-        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+        let pipeline = match config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()) {
+            Some(pipeline) => {
+                pipeline
+            }
+            None => {
+                return Pipeline {
+                    auto_approve: None,
+                    env: None,
+                    buffer_threshold_bytes: None,
+                    buffer_threshold_seconds: None,
+                    chaos_mode: None,
+                    data_dir: None,
+                    transform: None,
+                    input: None,
+                    output: None,
+                    schema: None,
+                    deadletter: None,
+                }
+            }
+        };
 
-        pipline.clone()
+        pipeline.clone()
     }
 
     pub fn get_transform_config() -> Transform {
         let config = Config::get();
 
-        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+        let pipline = Config::get_pipeline_config();
 
         match pipline.transform.as_ref() {
             Some(transform) => {
@@ -407,7 +455,7 @@ impl Config {
     pub fn get_transform_batch_partition_fields() -> String {
         let config = Config::get();
 
-        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+        let pipline = Config::get_pipeline_config();
 
         let default_batch_partition_fields = &"".to_string();
         let batch_partition_fields = match pipline.transform.as_ref() {
@@ -425,7 +473,7 @@ impl Config {
     pub fn get_transform_namespace_fields() -> String {
         let config = Config::get();
 
-        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+        let pipline = Config::get_pipeline_config();
 
         let default_namespace_fields = &"".to_string();
         let namespace_fields = match pipline.transform.as_ref() {
@@ -443,7 +491,7 @@ impl Config {
     pub fn get_transform_flatten_events() -> bool {
         let config = Config::get();
 
-        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+        let pipline = Config::get_pipeline_config();
 
         let default_flatten_events = &"no".to_string();
 
@@ -462,7 +510,7 @@ impl Config {
     pub fn get_transform_record_field_path() -> String {
         let config = Config::get();
 
-        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+        let pipline = Config::get_pipeline_config();
 
         let default_record_field_path = &"".to_string();
 
@@ -481,7 +529,7 @@ impl Config {
     pub fn get_transform_batch_time_fields() -> String {
         let config = Config::get();
 
-        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+        let pipline = Config::get_pipeline_config();
 
         let default_batch_time_fields = &"".to_string();
 
@@ -500,7 +548,7 @@ impl Config {
     pub fn get_transform_batch_time_unit() -> String {
         let config = Config::get();
 
-        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+        let pipline = Config::get_pipeline_config();
 
         let default_batch_time_unit = &"".to_string();
 
@@ -525,7 +573,7 @@ impl Config {
 
         let config = Config::get();
 
-        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+        let pipline = Config::get_pipeline_config();
 
         let default_chaos_mode = &"no".to_string();
         let chaos_mode = pipline.chaos_mode.as_ref().unwrap_or(default_chaos_mode);
@@ -536,12 +584,19 @@ impl Config {
     pub fn get_pipeline_data_dir() -> String {
         let config = Config::get();
 
-        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+        let default_data_dir = "./data".to_string();
 
-        let default_data_dir = &"./data".to_string();
-        let data_dir = pipline.data_dir.as_ref().unwrap_or(default_data_dir);
+        let pipeline_dir = match config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()) {
+            Some(pipeline) => {
 
-        data_dir.to_string()
+                pipeline.data_dir.as_ref().unwrap_or(&default_data_dir).to_string()
+            }
+            None => {
+                default_data_dir
+            }
+        };
+
+        pipeline_dir
     }
 
     pub fn get_pipeline_env() -> String {
@@ -549,15 +604,23 @@ impl Config {
 
         let pipeline_name = PIPELINE_NAME.read().unwrap().clone();
 
-        let pipline = config.pipelines.get(pipeline_name.as_str()).unwrap();
+        let pipline_env = match config.pipelines.get(pipeline_name.as_str()) {
+            Some(pipeline) => {
+                pipeline.env.as_ref().unwrap_or(&"prod".to_string()).to_string()
+            }
+            None => {
+                "prod".to_string()
+            }
+        };
 
-        pipline.env.as_ref().unwrap_or(&"prod".to_string()).to_string()
+        pipline_env
+
     }
 
     pub fn get_auto_approve() -> bool {
         let config = Config::get();
 
-        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+        let pipline = Config::get_pipeline_config();
 
         pipline.auto_approve == Some("yes".to_string())
     }
@@ -565,7 +628,7 @@ impl Config {
     pub fn get_pipeline_buffer_threshold_bytes() -> i64 {
         let config = Config::get();
 
-        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+        let pipline = Config::get_pipeline_config();
 
         // @todo: default to 10485760
         pipline.buffer_threshold_bytes.or(Some(10485760)).unwrap()
@@ -575,7 +638,7 @@ impl Config {
     pub fn get_pipeline_buffer_threshold_seconds() -> i64 {
         let config = Config::get();
 
-        let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+        let pipline = Config::get_pipeline_config();
 
         // @todo default to 60
         pipline.buffer_threshold_seconds.or(Some(60)).unwrap()
@@ -584,7 +647,7 @@ impl Config {
     // pub fn get_pipline_plugin_config(plugin_type: &str) -> Result<PluginConfig, String> {
     //     let config = Config::get();
     //
-    //     let pipline = config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()).unwrap();
+    //     let pipline = Config::get_pipeline_config();
     //
     //     match plugin_type {
     //         "input" => config.data_inputs.as_ref().unwrap().get(&pipline.input.as_ref().unwrap().to_string()).cloned().ok_or("Input not found".to_string()),
@@ -633,7 +696,7 @@ impl Config {
                             output.split('.').collect::<Vec<&str>>()[1].to_string()
                         }
                         None => {
-                            "".to_string()
+                            Config::getenv("DATA_SOURCE_PLUGIN_NAME", "")
                         }
                     };
 
@@ -654,7 +717,7 @@ impl Config {
                             deadletter.split('.').collect::<Vec<&str>>()[1].to_string()
                         }
                         None => {
-                            "".to_string()
+                            Config::getenv("DATA_SOURCE_PLUGIN_NAME", "")
                         }
                     };
 
@@ -675,7 +738,7 @@ impl Config {
                             input.split('.').collect::<Vec<&str>>()[1].to_string()
                         }
                         None => {
-                            "".to_string()
+                            Config::getenv("DATA_SOURCE_PLUGIN_NAME", "")
                         }
                     };
 

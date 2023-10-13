@@ -151,7 +151,7 @@ async fn main() {
                 if !pipeline_name.is_empty() {
                     // println!("Syncing pipeline: {}", Config::getenv("PIPELINE_NAME").unwrap());
                     PIPELINE_NAME.write().unwrap().clear();
-                    PIPELINE_NAME.write().unwrap().push_str(&pipeline_name);
+                    PIPELINE_NAME.write().unwrap().push_str(&pipeline_name.clone());
                     Config::init().await;
                     sync().await;
                 } else {
