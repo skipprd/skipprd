@@ -465,7 +465,7 @@ async fn sync() {
     };
 
     {
-
+        NEW_METADATA.write().unwrap().clear();
         METADATA.write().unwrap().clone_from(&skippr_metadata);
     }
 
@@ -1078,10 +1078,10 @@ pub async fn sync_output_plugin(plugin_name: &str, buffer_name: String) {
             }
         }
         "" => {
-            println!("No Data Output plugin specified");
+            println!("No Data {} plugin specified", buffer_name);
         }
         _ => {
-            println!("Unknown Data Output plugin specified");
+            println!("Unknown Data {} plugin specified", buffer_name);
         }
     }
 }

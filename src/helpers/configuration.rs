@@ -359,7 +359,7 @@ impl Config {
             return token
         }
 
-        config.skippr.api_token.as_ref().unwrap().to_string()
+        config.skippr.api_token.as_ref().or(Some(&"".to_string())).unwrap().to_string()
     }
 
     pub fn get_pipelines() -> Vec<String> {
