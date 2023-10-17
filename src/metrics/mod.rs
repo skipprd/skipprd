@@ -136,7 +136,7 @@ impl Metrics {
         exit_code: Option<i8>,
     ) -> Result<(), Box<dyn std::error::Error>> {
 
-        let metrics = METRICS.read().unwrap();
+        let metrics = METRICS.read();
 
         let workspace = Config::get_workspace_name();
         let pipeline = Config::get_pipeline_name();
@@ -239,7 +239,7 @@ impl Metrics {
 
     pub(crate) async fn send_config() -> Result<(), Box<dyn std::error::Error>> {
 
-        let metrics = METRICS.read().unwrap();
+        let metrics = METRICS.read();
 
         let workspace = Config::get_workspace_name();
         let pipeline = Config::get_pipeline_name();

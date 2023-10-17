@@ -201,7 +201,7 @@ impl DataOutputAwsAthenaPlugin {
                 // for (namespace, _schema) in &metadata {
                 out_meta.insert(namespace.to_string(), Metadata::new().unwrap());
 
-                let metadata = METADATA.read().unwrap();
+                let metadata = METADATA.read();
 
                 let partition_metadata = if flatten {
                     flatten_metadata(

@@ -1,13 +1,11 @@
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, Mutex, PoisonError};
+use parking_lot::{RwLock, Mutex, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Instant, Duration};
-use std::collections::{HashMap};
+use std::collections::HashMap;
 use lazy_static::lazy_static;
 
 lazy_static! {
-    static ref PROFILE_PERFORMANCE: bool = false;
-    // This will hold the lock names that are currently being waited on and the time they started waiting.
+    static ref PROFILE_PERFORMANCE: bool = true;
     static ref WAITING_ON: Mutex<HashMap<String, Instant>> = Mutex::new(HashMap::new());
-    // This will hold the total wait times for each lock over the whole execution.
     static ref TOTAL_WAIT_TIMES: Mutex<HashMap<String, Duration>> = Mutex::new(HashMap::new());
 }
 
@@ -26,48 +24,40 @@ impl<T> TimedRwLock<T> {
         }
     }
 
-    pub fn read(&self) -> Result<RwLockReadGuard<'_, T>, PoisonError<RwLockReadGuard<'_, T>>> {
+    pub fn read(&self) -> RwLockReadGuard<'_, T> {
         if *PROFILE_PERFORMANCE {
-            {
-                let mut waiting_on = WAITING_ON.lock().unwrap();
-                waiting_on.insert(self.name.clone(), Instant::now());
-            }
+            let mut waiting_on = WAITING_ON.lock();
+            waiting_on.insert(self.name.clone(), Instant::now());
         }
 
         let result = self.lock.read();
 
         if *PROFILE_PERFORMANCE {
-            {
-                let mut waiting_on = WAITING_ON.lock().unwrap();
-                if let Some(start_time) = waiting_on.remove(&self.name) {
-                    let elapsed = start_time.elapsed();
-                    let mut total_wait_time = TOTAL_WAIT_TIMES.lock().unwrap();
-                    *total_wait_time.entry(self.name.clone()).or_insert(Duration::new(0, 0)) += elapsed;
-                }
+            let mut waiting_on = WAITING_ON.lock();
+            if let Some(start_time) = waiting_on.remove(&self.name) {
+                let elapsed = start_time.elapsed();
+                let mut total_wait_time = TOTAL_WAIT_TIMES.lock();
+                *total_wait_time.entry(self.name.clone()).or_insert(Duration::new(0, 0)) += elapsed;
             }
         }
 
         result
     }
 
-    pub fn write(&self) -> Result<RwLockWriteGuard<'_, T>, PoisonError<RwLockWriteGuard<'_, T>>> {
+    pub fn write(&self) -> RwLockWriteGuard<'_, T> {
         if *PROFILE_PERFORMANCE {
-            {
-                let mut waiting_on = WAITING_ON.lock().unwrap();
-                waiting_on.insert(self.name.clone(), Instant::now());
-            }
+            let mut waiting_on = WAITING_ON.lock();
+            waiting_on.insert(self.name.clone(), Instant::now());
         }
 
         let result = self.lock.write();
 
         if *PROFILE_PERFORMANCE {
-            {
-                let mut waiting_on = WAITING_ON.lock().unwrap();
-                if let Some(start_time) = waiting_on.remove(&self.name) {
-                    let elapsed = start_time.elapsed();
-                    let mut total_wait_time = TOTAL_WAIT_TIMES.lock().unwrap();
-                    *total_wait_time.entry(self.name.clone()).or_insert(Duration::new(0, 0)) += elapsed;
-                }
+            let mut waiting_on = WAITING_ON.lock();
+            if let Some(start_time) = waiting_on.remove(&self.name) {
+                let elapsed = start_time.elapsed();
+                let mut total_wait_time = TOTAL_WAIT_TIMES.lock();
+                *total_wait_time.entry(self.name.clone()).or_insert(Duration::new(0, 0)) += elapsed;
             }
         }
 
@@ -79,16 +69,17 @@ impl<T> TimedRwLock<T> {
     }
 
     pub fn currently_waiting() -> HashMap<String, Duration> {
-        let waiting_on = WAITING_ON.lock().unwrap();
+        let waiting_on = WAITING_ON.lock();
         waiting_on.iter().map(|(name, start_time)| (name.clone(), start_time.elapsed())).collect()
     }
 
     pub fn get_total_wait_times() -> HashMap<String, Duration> {
-        let totals = TOTAL_WAIT_TIMES.lock().unwrap().clone();
+        let mut totals = TOTAL_WAIT_TIMES.lock();
+        let cloned_totals = totals.clone();
 
         // clear the totals
-        TOTAL_WAIT_TIMES.lock().unwrap().clear();
+        totals.clear();
 
-        totals
+        cloned_totals
     }
 }

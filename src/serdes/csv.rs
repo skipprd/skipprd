@@ -24,11 +24,11 @@ impl SerderCsv {
 
         let delimiter_byte;
         {
-            let delim_guard = CHOSEN_DELIM.read().unwrap();
+            let delim_guard = CHOSEN_DELIM.read();
             if delim_guard.is_empty() {
                 drop(delim_guard);
                 let chosen_delim = Self::detect_delimiter(&record);
-                let mut delim_write_guard = CHOSEN_DELIM.write().unwrap();
+                let mut delim_write_guard = CHOSEN_DELIM.write();
                 *delim_write_guard = chosen_delim;
                 delimiter_byte = delim_write_guard.as_bytes()[0];
             } else {
@@ -55,13 +55,13 @@ impl SerderCsv {
             let mut is_header_row = false;
 
             let headers = {
-                let header_guard = CSV_HEADERS.read().unwrap();
+                let header_guard = CSV_HEADERS.read();
                 if header_guard.is_empty() {
                     drop(header_guard);
                     is_header_row = record.iter().all(|item| item.parse::<i64>().is_err());
                     if is_header_row {
                         let headers_vec: Vec<String> = record.iter().map(|s| s.to_string()).collect();
-                        let mut write_guard = CSV_HEADERS.write().unwrap();
+                        let mut write_guard = CSV_HEADERS.write();
                         write_guard.extend(headers_vec.clone());
                         headers_vec
                     } else {
@@ -124,10 +124,10 @@ mod tests_csv {
     use serial_test::serial;
 
     fn reset_globals() {
-        let mut delim_guard = CHOSEN_DELIM.write().unwrap();
+        let mut delim_guard = CHOSEN_DELIM.write();
         *delim_guard = "".to_string();
 
-        let mut headers_guard = CSV_HEADERS.write().unwrap();
+        let mut headers_guard = CSV_HEADERS.write();
         headers_guard.clear();
     }
 
@@ -139,7 +139,7 @@ mod tests_csv {
         let input = "name,age\nJohn,30\nDoe,25\n";
         let output = SerderCsv::deserialize(input);
 
-        assert_eq!(CHOSEN_DELIM.read().unwrap().to_string(), ",".to_string());
+        assert_eq!(CHOSEN_DELIM.read().to_string(), ",".to_string());
 
         let expected = vec![
             json!({"name": "John", "age": "30"}),
@@ -156,7 +156,7 @@ mod tests_csv {
         let input = "name;age\nJane;20";
         let output = SerderCsv::deserialize(input);
 
-        assert_eq!(CHOSEN_DELIM.read().unwrap().to_string(), ";".to_string());
+        assert_eq!(CHOSEN_DELIM.read().to_string(), ";".to_string());
 
         let expected = vec![json!({"name": "Jane", "age": "20"})];
         assert_eq!(output, expected);
@@ -171,7 +171,7 @@ mod tests_csv {
         let output = SerderCsv::deserialize(input);
         // Since there are no headers, fields are indexed numerically.
 
-        assert_eq!(CHOSEN_DELIM.read().unwrap().to_string(), ",".to_string());
+        assert_eq!(CHOSEN_DELIM.read().to_string(), ",".to_string());
 
         let expected = vec![
             json!({"0": "Alice", "1": "23"}),
@@ -189,7 +189,7 @@ mod tests_csv {
         let output = SerderCsv::deserialize(input);
         // The second record (Doe) should be ignored as it has fewer fields than expected.
 
-        assert_eq!(CHOSEN_DELIM.read().unwrap().to_string(), ",".to_string());
+        assert_eq!(CHOSEN_DELIM.read().to_string(), ",".to_string());
 
         let expected = vec![json!({"name": "John", "age": "30"})];
         assert_eq!(output, expected);

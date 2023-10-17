@@ -128,6 +128,20 @@ pub static PIPELINE_NAME: Lazy<Arc<TimedRwLock<String>>> = Lazy::new(|| Arc::new
 
 impl Config {
 
+    pub fn new() -> Config {
+        Config {
+            skippr: Skippr {
+                api_token: None,
+                workspace: None,
+            },
+            pipelines: HashMap::new(),
+            data_inputs: None,
+            data_outputs: None,
+            data_deadletters: None,
+            schema_outputs: None,
+        }
+    }
+
     pub fn find_config_file() -> String {
 
         let config_file = Config::getenv("SKIPPR_CONFIG_FILE", "");
@@ -197,8 +211,21 @@ impl Config {
         // println!("config: {:?}", config);
 
         {
-            let mut app_config = APP_CONFIG.write().unwrap();
-            *app_config = Some(config);
+            // let mut app_config = APP_CONFIG.write().unwrap();
+            // let mut app_config = match APP_CONFIG.write().as_mut() {
+            //     Some(app_config) => {
+            //         app_config
+            //     }
+            //     None => {
+            //         Config::new()
+            //     }
+            // };
+            //
+            // app_config = &mut config
+
+            // set APP_CONFIG to Some(&mut config)
+            let mut app_config = APP_CONFIG.write();
+            app_config.replace(config);
         }
 
         // panic!("test");
@@ -236,41 +263,24 @@ impl Config {
     pub fn get_pipeline_input_plugin_name() -> String {
         let config = Config::get();
 
-        let pipline = match config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()) {
+        let pipline = match config.pipelines.get(PIPELINE_NAME.read().as_str()) {
             Some(pipeline) => {
                 pipeline
             }
             None => {
                 let plugin_name = Config::getenv("DATA_SOURCE_PLUGIN_NAME", "");
                 // @todo - add plugin_name to APP_CONFIG.write().unwrap().as_mut().unwrap().pipelines
-                match APP_CONFIG.write() {
-                    Ok(mut app_config) => {
-                        match app_config.as_mut() {
-                            Some(app_config) => {
-                                let pipeline_name = match PIPELINE_NAME.read() {
-                                    Ok(pipeline_name) => {
-                                        pipeline_name.clone()
-                                    }
-                                    Err(err) => {
-                                        println!("Error writing to PIPELINE_NAME: {:?}", err);
-                                        Config::getenv("PIPELINE_NAME", "")
-                                    }
-                                };
-                                match app_config.pipelines.get_mut(&pipeline_name) {
-                                    Some(pipeline) => {
-                                        pipeline.input = Some(plugin_name.clone());
-                                    }
-                                    None => {}
-                                }
-                            }
-                            None => {}
-                        }
+                // let mut app_config = APP_CONFIG.write().unwrap();
+
+                let pipeline_name = Config::getenv("PIPELINE_NAME", PIPELINE_NAME.read().as_str());
+
+                match APP_CONFIG.write().as_mut().unwrap().pipelines.get_mut(&pipeline_name) {
+                    Some(pipeline) => {
+                        pipeline.input = Some(plugin_name.clone());
                     }
-                    Err(err) => {
-                        println!("Error writing to APP_CONFIG: {:?}", err);
-                    }
+                    None => {}
                 }
-                // APP_CONFIG.write().unwrap().as_mut().unwrap().pipelines.get_mut(PIPELINE_NAME.read().unwrap().as_str()).unwrap().input = Some(plugin_name.clone());
+
                 return plugin_name
             }
         };
@@ -303,38 +313,19 @@ impl Config {
     pub fn get_pipeline_output_plugin_name() -> String {
         let config = Config::get();
 
-        let pipline = match config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()) {
+        let pipline = match config.pipelines.get(PIPELINE_NAME.read().as_str()) {
             Some(pipeline) => {
                 pipeline
             }
             None => {
                 let plugin_name = Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "");
-                match APP_CONFIG.write() {
-                    Ok(mut app_config) => {
-                        match app_config.as_mut() {
-                            Some(app_config) => {
-                                let pipeline_name = match PIPELINE_NAME.read() {
-                                    Ok(pipeline_name) => {
-                                        pipeline_name.clone()
-                                    }
-                                    Err(err) => {
-                                        println!("Error writing to PIPELINE_NAME: {:?}", err);
-                                        Config::getenv("PIPELINE_NAME", "")
-                                    }
-                                };
-                                match app_config.pipelines.get_mut(&pipeline_name) {
-                                    Some(pipeline) => {
-                                        pipeline.input = Some(plugin_name.clone());
-                                    }
-                                    None => {}
-                                }
-                            }
-                            None => {}
-                        }
+                let pipeline_name = Config::getenv("PIPELINE_NAME", PIPELINE_NAME.read().as_str());
+
+                match APP_CONFIG.write().as_mut().unwrap().pipelines.get_mut(&pipeline_name) {
+                    Some(pipeline) => {
+                        pipeline.input = Some(plugin_name.clone());
                     }
-                    Err(err) => {
-                        println!("Error writing to APP_CONFIG: {:?}", err);
-                    }
+                    None => {}
                 }
                 return plugin_name
             }
@@ -367,38 +358,19 @@ impl Config {
     pub fn get_pipeline_schema_plugin_name() -> String {
         let config = Config::get();
 
-        let pipline = match config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()) {
+        let pipline = match config.pipelines.get(PIPELINE_NAME.read().as_str()) {
             Some(pipeline) => {
                 pipeline
             }
             None => {
                 let plugin_name = Config::getenv("DATA_SCHEMA_PLUGIN_NAME", "");
-                match APP_CONFIG.write() {
-                    Ok(mut app_config) => {
-                        match app_config.as_mut() {
-                            Some(app_config) => {
-                                let pipeline_name = match PIPELINE_NAME.read() {
-                                    Ok(pipeline_name) => {
-                                        pipeline_name.clone()
-                                    }
-                                    Err(err) => {
-                                        println!("Error writing to PIPELINE_NAME: {:?}", err);
-                                        Config::getenv("PIPELINE_NAME", "")
-                                    }
-                                };
-                                match app_config.pipelines.get_mut(&pipeline_name) {
-                                    Some(pipeline) => {
-                                        pipeline.input = Some(plugin_name.clone());
-                                    }
-                                    None => {}
-                                }
-                            }
-                            None => {}
-                        }
+                let pipeline_name = Config::getenv("PIPELINE_NAME", PIPELINE_NAME.read().as_str());
+
+                match APP_CONFIG.write().as_mut().unwrap().pipelines.get_mut(&pipeline_name) {
+                    Some(pipeline) => {
+                        pipeline.input = Some(plugin_name.clone());
                     }
-                    Err(err) => {
-                        println!("Error writing to APP_CONFIG: {:?}", err);
-                    }
+                    None => {}
                 }
                 return plugin_name
             }
@@ -432,38 +404,19 @@ impl Config {
     pub fn get_pipeline_deadletter_plugin_name() -> String {
         let config = Config::get();
 
-        let pipline = match config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()) {
+        let pipline = match config.pipelines.get(PIPELINE_NAME.read().as_str()) {
             Some(pipeline) => {
                 pipeline
             }
             None => {
                 let plugin_name = Config::getenv("DATA_DEADLETTER_PLUGIN_NAME", "");
-                match APP_CONFIG.write() {
-                    Ok(mut app_config) => {
-                        match app_config.as_mut() {
-                            Some(app_config) => {
-                                let pipeline_name = match PIPELINE_NAME.read() {
-                                    Ok(pipeline_name) => {
-                                        pipeline_name.clone()
-                                    }
-                                    Err(err) => {
-                                        println!("Error writing to PIPELINE_NAME: {:?}", err);
-                                        Config::getenv("PIPELINE_NAME", "")
-                                    }
-                                };
-                                match app_config.pipelines.get_mut(&pipeline_name) {
-                                    Some(pipeline) => {
-                                        pipeline.input = Some(plugin_name.clone());
-                                    }
-                                    None => {}
-                                }
-                            }
-                            None => {}
-                        }
+                let pipeline_name = Config::getenv("PIPELINE_NAME", PIPELINE_NAME.read().as_str());
+
+                match APP_CONFIG.write().as_mut().unwrap().pipelines.get_mut(&pipeline_name) {
+                    Some(pipeline) => {
+                        pipeline.input = Some(plugin_name.clone());
                     }
-                    Err(err) => {
-                        println!("Error writing to APP_CONFIG: {:?}", err);
-                    }
+                    None => {}
                 }
                 return plugin_name
             }
@@ -520,7 +473,7 @@ impl Config {
     pub fn get_pipeline_config() -> Pipeline {
         let config = Config::get();
 
-        let pipeline = match config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()) {
+        let pipeline = match config.pipelines.get(PIPELINE_NAME.read().as_str()) {
             Some(pipeline) => {
                 pipeline
             }
@@ -700,7 +653,7 @@ impl Config {
 
         let default_data_dir = "./data".to_string();
 
-        let pipeline_dir = match config.pipelines.get(PIPELINE_NAME.read().unwrap().as_str()) {
+        let pipeline_dir = match config.pipelines.get(PIPELINE_NAME.read().as_str()) {
             Some(pipeline) => {
 
                 pipeline.data_dir.as_ref().unwrap_or(&default_data_dir).to_string()
@@ -716,7 +669,7 @@ impl Config {
     pub fn get_pipeline_env() -> String {
         let config = Config::get();
 
-        let pipeline_name = PIPELINE_NAME.read().unwrap().clone();
+        let pipeline_name = PIPELINE_NAME.read().clone();
 
         let pipline_env = match config.pipelines.get(pipeline_name.as_str()) {
             Some(pipeline) => {
@@ -768,7 +721,7 @@ impl Config {
 
     pub fn get_pipline_plugin_config(plugin_type: &str) -> Result<PluginConfig, String> {
 
-        let pipeline_name = PIPELINE_NAME.read().unwrap().as_str();
+        let pipeline_name = PIPELINE_NAME.read().as_str();
 
         let pipeline_config = Config::get_pipeline_config();
 
@@ -865,7 +818,7 @@ impl Config {
 
     // Function to access the config anywhere in the code.
     pub fn get() -> Config {
-        APP_CONFIG.read().unwrap().as_ref().unwrap().clone()
+        APP_CONFIG.read().as_ref().unwrap().clone()
     }
 
     pub fn setenv(name: &str, value: &str) {
@@ -934,7 +887,7 @@ impl Config {
     }
 
     pub fn get_pipeline_name() -> String {
-        PIPELINE_NAME.read().unwrap().clone()
+        PIPELINE_NAME.read().clone()
     }
 
     pub fn get_workspace_name() -> String {

@@ -3972,6 +3972,7 @@ dependencies = [
  "nix",
  "num_cpus",
  "once_cell",
+ "parking_lot 0.12.1",
  "parquet 23.0.0",
  "periodic",
  "phf",

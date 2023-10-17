@@ -188,7 +188,8 @@ impl Ingest {
         println!("All ingest tasks finished");
     }
 
-    pub fn flush_buffers(force: bool, output_files: &mut RwLockWriteGuard<LruCache<String, OutputFile>>) {
+    // pub fn flush_buffers(force: bool, output_files: &mut RwLockWriteGuard<LruCache<String, OutputFile>>) {
+    pub fn flush_buffers(force: bool, output_files: &mut LruCache<String, OutputFile>) {
         let data_dir = Config::get_data_dir();
         // let output_dir = format!("{}/ingest_buffer", data_dir);
 
@@ -297,7 +298,7 @@ impl Ingest {
         // println!("Ingesting {} events", datas.len());
 
         // If we're not running, exit after current threads finish.
-        if !RUNNING.read().unwrap().load(Ordering::SeqCst) {
+        if !RUNNING.read().load(Ordering::SeqCst) {
             self.wait_for_completion();
             exit(0);
         } else {
@@ -480,13 +481,13 @@ impl Ingest {
                         skpr_time_bucket,
                     );
 
-                    if METADATA.read().unwrap().get(&skpr_namespace).is_none() {
-                        METADATA.write().unwrap().insert(skpr_namespace.clone(), Metadata::new().unwrap());
+                    if METADATA.read().get(&skpr_namespace).is_none() {
+                        METADATA.write().insert(skpr_namespace.clone(), Metadata::new().unwrap());
                     }
 
                     let msg = fast_path_ingest(
                         &record,
-                        &METADATA.read().unwrap().get(&skpr_namespace).unwrap().fields,
+                        &METADATA.read().get(&skpr_namespace).unwrap().fields,
                         flatten,
                     );
 
@@ -501,14 +502,14 @@ impl Ingest {
 
                             // let old_metadata = NEW_METADATA.read().unwrap().clone();
 
-                            if NEW_METADATA.read().unwrap().get(&skpr_namespace).is_none() {
-                                NEW_METADATA.write().unwrap().extend(METADATA.read().unwrap().clone());
+                            if NEW_METADATA.read().get(&skpr_namespace).is_none() {
+                                NEW_METADATA.write().extend(METADATA.read().clone());
                             }
 
                             // println!("Falling back to slow path due to: {}", err);
                             let msg = ingest(
                                 &record,
-                                &mut NEW_METADATA.write().unwrap().get_mut(&skpr_namespace).unwrap().fields,
+                                &mut NEW_METADATA.write().get_mut(&skpr_namespace).unwrap().fields,
                                 &mut updated_schema_clone.lock().unwrap(),
                                 flatten,
                             );
@@ -520,8 +521,8 @@ impl Ingest {
 
                                 if updated_schema_clone.lock().unwrap().as_str() == "yes" {
                                     {
-                                        METADATA.write().unwrap().clear();
-                                        METADATA.write().unwrap().extend(NEW_METADATA.read().unwrap().clone());
+                                        METADATA.write().clear();
+                                        METADATA.write().extend(NEW_METADATA.read().clone());
                                     }
                                 }
 
@@ -575,14 +576,15 @@ impl Ingest {
         // @todo - We should also be able to flush the buffers to disk in parallel.
         // @todo - Ideally this would not be a blocking operation.
         // @todo - We probably want to track file metadata in a persistent store, so we can recover from crashes. FS metadata is not reliably available.
-        let mut output_files = match OUTPUT_FILES_STATIC.write() {
-            Ok(output_files) => output_files,
-            Err(err) => {
-                panic!("Could not lock buffer files, Error: {:?}", err);
-            }
-        };
+        // let mut output_files = match OUTPUT_FILES_STATIC.write() {
+        //     Ok(output_files) => output_files,
+        //     Err(err) => {
+        //         panic!("Could not lock buffer files, Error: {:?}", err);
+        //     }
+        // };
+        let mut output_files = OUTPUT_FILES_STATIC.write();
 
-        // Flush all buffers to their respective files.
+            // Flush all buffers to their respective files.
         for (filename, buffer) in buffers.buffers.iter() {
 
             if output_files.peek(filename).is_none() {
@@ -678,11 +680,11 @@ impl Ingest {
                 .build()
                 .unwrap()
                 .block_on(async {
-                    Config::set_config(&METADATA.read().unwrap(), true).await;
+                    Config::set_config(&METADATA.read(), true).await;
                 });
         }
 
-        let mut counter_lock = METRICS.write().unwrap();
+        let mut counter_lock = METRICS.write();
         counter_lock.deadletters_total += d;
         counter_lock.ingeted_slow_total += x;
         counter_lock.messages_total += i;

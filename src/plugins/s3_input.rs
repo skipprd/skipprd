@@ -386,7 +386,7 @@ impl DataSourceS3Plugin {
                             let mut decompressed_data = String::new();
                             stream.read_to_string(&mut decompressed_data).unwrap();
 
-                            datas_clone.write().unwrap().push(IngestBatch {
+                            datas_clone.write().push(IngestBatch {
                                 offset_key: OffsetKey {
                                     namespace: bucket_name_clone.to_string(),
                                     partition: download.key,
@@ -396,7 +396,7 @@ impl DataSourceS3Plugin {
                         } else {
                             let str_data = String::from_utf8(data_vec).unwrap();
 
-                            datas_clone.write().unwrap().push(IngestBatch {
+                            datas_clone.write().push(IngestBatch {
                                 offset_key: OffsetKey {
                                     namespace: bucket_name_clone.to_string(),
                                     partition: download.key,
@@ -416,7 +416,7 @@ impl DataSourceS3Plugin {
         }
 
         // @todo - pass datas to ingest_file without cloning
-        let batch = datas.read().unwrap().clone();
+        let batch = datas.read().clone();
         self.ingest.ingest_file(batch, &offsets_clone);
     }
 

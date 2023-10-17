@@ -141,8 +141,8 @@ async fn main() {
 
             if options.pipeline.is_some() {
                 // println!("Syncing pipeline: {}", options.pipeline.unwrap().clone());
-                PIPELINE_NAME.write().unwrap().clear();
-                PIPELINE_NAME.write().unwrap().push_str(&options.pipeline.unwrap().clone());
+                PIPELINE_NAME.write().clear();
+                PIPELINE_NAME.write().push_str(&options.pipeline.unwrap().clone());
                 Config::init().await;
 
                 sync().await;
@@ -150,8 +150,8 @@ async fn main() {
                 let pipeline_name = Config::getenv("PIPELINE_NAME", "");
                 if !pipeline_name.is_empty() {
                     // println!("Syncing pipeline: {}", Config::getenv("PIPELINE_NAME").unwrap());
-                    PIPELINE_NAME.write().unwrap().clear();
-                    PIPELINE_NAME.write().unwrap().push_str(&pipeline_name.clone());
+                    PIPELINE_NAME.write().clear();
+                    PIPELINE_NAME.write().push_str(&pipeline_name.clone());
                     Config::init().await;
                     sync().await;
                 } else {
@@ -159,8 +159,8 @@ async fn main() {
                     let pipelines = Config::get_pipelines();
                     for pipeline in pipelines {
                         println!("Syncing pipeline: {}", pipeline);
-                        PIPELINE_NAME.write().unwrap().clear();
-                        PIPELINE_NAME.write().unwrap().push_str(&pipeline);
+                        PIPELINE_NAME.write().clear();
+                        PIPELINE_NAME.write().push_str(&pipeline);
                         Config::init().await;
                         sync().await;
                     }
@@ -260,8 +260,8 @@ async fn query(sql: &str) {
 
     let table_name = sql.to_lowercase().split("from").collect::<Vec<&str>>()[1].split(" ").collect::<Vec<&str>>()[1].trim().replace(";", "");
 
-    PIPELINE_NAME.write().unwrap().clear();
-    PIPELINE_NAME.write().unwrap().push_str(&table_name);
+    PIPELINE_NAME.write().clear();
+    PIPELINE_NAME.write().push_str(&table_name);
     Config::init().await;
     let workspace = Config::get_workspace_name();
     // Config::setenv("PIPELINE_NAME", &table_name);
@@ -430,7 +430,7 @@ async fn sync() {
             .log(LogLevel::Info, "Starting Skippr".to_string())
             .await;
 
-        let mut counter_lock = METRICS.write().unwrap();
+        let mut counter_lock = METRICS.write();
         counter_lock.status = MetricsStatus::Running;
     }
 
@@ -465,8 +465,8 @@ async fn sync() {
     };
 
     {
-        NEW_METADATA.write().unwrap().clear();
-        METADATA.write().unwrap().clone_from(&skippr_metadata);
+        NEW_METADATA.write().clear();
+        METADATA.write().clone_from(&skippr_metadata);
     }
 
     let now = Arc::new(Mutex::new(Instant::now()));
@@ -489,7 +489,7 @@ async fn sync() {
         let panic_info_clone = panic_str.clone();
 
         {
-            let mut counter_lock = METRICS.write().unwrap();
+            let mut counter_lock = METRICS.write();
             counter_lock.status = MetricsStatus::Error;
         }
 
@@ -509,7 +509,7 @@ async fn sync() {
             });
         }).join().unwrap();
 
-        if !RUNNING.read().unwrap().load(Ordering::SeqCst) {
+        if !RUNNING.read().load(Ordering::SeqCst) {
             println!("Received another panic - already gracefully shutting down");
         } else {
 
@@ -540,7 +540,7 @@ async fn sync() {
         for sig in signals.forever() {
 
             {
-                let mut counter_lock = METRICS.write().unwrap();
+                let mut counter_lock = METRICS.write();
                 counter_lock.status = MetricsStatus::Stopped;
             }
 
@@ -560,13 +560,13 @@ async fn sync() {
                 });
             }).join().unwrap();
 
-            if !RUNNING.read().unwrap().load(Ordering::SeqCst) {
+            if !RUNNING.read().load(Ordering::SeqCst) {
                 println!("Received another Ctrl+C signal - terminating immediately, this may result in data loss...");
                 std::process::exit(0);
             }
 
             {
-                RUNNING.write().unwrap().store(false, Ordering::SeqCst);
+                RUNNING.write().store(false, Ordering::SeqCst);
             }
 
             let offsets_clone = offsets_clone.clone();
@@ -584,31 +584,30 @@ async fn sync() {
                 while
                     OUTPUT_RUNNING
                         .read()
-                        .unwrap()
                         .load(Ordering::SeqCst) &&
                     !OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE
                         .read()
-                        .unwrap()
                         .load(Ordering::SeqCst)
                 {
                     sleep(Duration::from_secs(1));
                 }
 
-                let mut output_files = OUTPUT_FILES_STATIC.write().unwrap();
+                let mut output_files = OUTPUT_FILES_STATIC.write();
                 Ingest::flush_buffers(true, &mut output_files);
 
                 offsets_clone.flush();
                 println!("Flushed offsets");
 
-                let _metrics_lock = match METRICS.read() {
-                    Ok(m) => {
-                        println!("Messages Total: {}", m.messages_total);
-                    },
-                    Err(_e) => {
-                        println!("Could not lock metrics, skipping flush");
-                        return;
-                    }
-                };
+                // let _metrics_lock = match METRICS.read() {
+                //     Ok(m) => {
+                //         println!("Messages Total: {}", m.messages_total);
+                //     },
+                //     Err(_e) => {
+                //         println!("Could not lock metrics, skipping flush");
+                //         return;
+                //     }
+                // };
+                let _metrics_lock = METRICS.read();
 
                 let total_times: HashMap<String, Duration> = TimedRwLock::<()>::get_total_wait_times();
                 for (key, value) in total_times.iter() {
@@ -677,12 +676,13 @@ async fn sync() {
 
     planner.add(
         move || {
-            if RUNNING.read().unwrap().load(Ordering::SeqCst) {
+            if RUNNING.read().load(Ordering::SeqCst) {
 
-                let mut metrics_lock = match METRICS.read() {
-                    Ok(lock) => lock,
-                    Err(poisoned) => poisoned.into_inner(),
-                };
+                // let mut metrics_lock = match METRICS.read() {
+                //     Ok(lock) => lock,
+                //     Err(poisoned) => poisoned.into_inner(),
+                // };
+                let mut metrics_lock = METRICS.read();
 
                 let now_lock = now_clone.lock().unwrap();
 
@@ -749,7 +749,7 @@ async fn sync() {
     if Config::get_pipeline_chaos_mode() {
         out_pnanner.add(
             move || {
-                if RUNNING.read().unwrap().load(Ordering::SeqCst) {
+                if RUNNING.read().load(Ordering::SeqCst) {
 
                     println!("Chaos mode throwing a random exit. You can disable this test mode buy removing CHAOS_MODE flag or setting to 'no'");
 
@@ -766,7 +766,7 @@ async fn sync() {
     }
     out_pnanner.add(
         move || {
-            if RUNNING.read().unwrap().load(Ordering::SeqCst) {
+            if RUNNING.read().load(Ordering::SeqCst) {
                 tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
                     .build()
@@ -775,24 +775,23 @@ async fn sync() {
 
                         output_sync();
 
-                        while OUTPUT_RUNNING.read().unwrap().load(Ordering::SeqCst) {
+                        while OUTPUT_RUNNING.read().load(Ordering::SeqCst) {
                             // sleep(Duration::from_secs(1));
                             return;
                         }
 
                         if Config::get_pipeline_config().output.is_some() {
                             {
-                                OUTPUT_RUNNING.write().unwrap().store(true, Ordering::SeqCst);
+                                OUTPUT_RUNNING.write().store(true, Ordering::SeqCst);
                             }
                             {
-                                OUTPUT_RUNNING.write().unwrap().store(true, Ordering::SeqCst);
+                                OUTPUT_RUNNING.write().store(true, Ordering::SeqCst);
                             }
 
                             sync_output_plugin(Config::get_pipeline_output_plugin_name().as_str(), "output".to_string()).await;
 
                             OUTPUT_RUNNING
                                 .write()
-                                .unwrap()
                                 .store(false, Ordering::SeqCst);
                         }
                     });
@@ -847,7 +846,7 @@ async fn sync() {
             .log(LogLevel::Info, format!("Ingest completed, flushing remaining buffers to output plugin {}", Config::get_pipeline_config().output.or(Some("".to_string())).unwrap()))
             .await;
 
-        let mut counter_lock = METRICS.write().unwrap();
+        let mut counter_lock = METRICS.write();
         counter_lock.status = MetricsStatus::Finishing;
 
     }
@@ -855,10 +854,10 @@ async fn sync() {
 
     // RUNNING.write().unwrap().store(false, Ordering::SeqCst); // the prevents metrics from printing while shutting down, BUT also prevents output serialisatin
 
-    let mut output_files = OUTPUT_FILES_STATIC.write().unwrap();
+    let mut output_files = OUTPUT_FILES_STATIC.write();
     Ingest::flush_buffers(true, &mut output_files);
 
-    while OUTPUT_RUNNING.read().unwrap().load(Ordering::SeqCst) {
+    while OUTPUT_RUNNING.read().load(Ordering::SeqCst) {
         sleep(Duration::from_secs(1));
     }
 
@@ -872,7 +871,7 @@ async fn sync() {
         sync_output_plugin(&Config::get_pipeline_deadletter_plugin_name(), "deadletter".to_string()).await;
     }
 
-    let mut metrics_lock = METRICS.read().unwrap();
+    let mut metrics_lock = METRICS.read();
 
     let now_lock = now.lock().unwrap();
 
@@ -899,7 +898,7 @@ async fn sync() {
             .log(LogLevel::Info, "Complete, shutting down".to_string())
             .await;
 
-        let mut counter_lock = METRICS.write().unwrap();
+        let mut counter_lock = METRICS.write();
         counter_lock.status = MetricsStatus::Completed;
 
     }
@@ -918,10 +917,10 @@ fn output_sync() {
     // thread::spawn(move || {
     // println!("Arrow Schema: {:?}", arrowSchema);
 
-    if OUTPUT_RUNNING.read().unwrap().load(Ordering::SeqCst) {
+    if OUTPUT_RUNNING.read().load(Ordering::SeqCst) {
         return;
     } else {
-        OUTPUT_RUNNING.write().unwrap().store(true, Ordering::SeqCst);
+        OUTPUT_RUNNING.write().store(true, Ordering::SeqCst);
     }
 
     let flatten = Config::get_transform_flatten_events();
@@ -943,7 +942,7 @@ fn output_sync() {
     for entry in
         glob_with(&format!("{}/done/*", output_dir), options).expect("Failed to read glob pattern")
     {
-        if RUNNING.read().unwrap().load(Ordering::SeqCst) {
+        if RUNNING.read().load(Ordering::SeqCst) {
             match entry {
                 Ok(path) => {
                     // println!("Finalising output file {}", path.display());
@@ -956,7 +955,7 @@ fn output_sync() {
                         BufferChunker::decode_file_namespace(path.to_str().unwrap());
                     // let skpr_partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
 
-                    let metadata = METADATA.read().unwrap();
+                    let metadata = METADATA.read();
 
                     if metadata.get(&skpr_namespace).is_some() {
                         let mut output_metadata: HashMap<String, Metadata> = HashMap::new();
@@ -1016,13 +1015,11 @@ fn output_sync() {
 
     OUTPUT_RUNNING
         .write()
-        .unwrap()
         .store(false, Ordering::SeqCst);
 
-    if !RUNNING.read().unwrap().load(Ordering::SeqCst) {
+    if !RUNNING.read().load(Ordering::SeqCst) {
         OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE
             .write()
-            .unwrap()
             .store(true, Ordering::SeqCst);
     }
 

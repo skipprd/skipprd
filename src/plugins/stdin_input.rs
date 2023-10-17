@@ -114,7 +114,7 @@ impl DataSourceStdinPlugin {
                 }
                 Err(e) => match e {
                     mpsc::RecvTimeoutError::Timeout => {
-                        let mut output_files = OUTPUT_FILES_STATIC.write().unwrap();
+                        let mut output_files = OUTPUT_FILES_STATIC.write();
                         Ingest::flush_buffers(true, &mut output_files);
                     }
                     mpsc::RecvTimeoutError::Disconnected => {
