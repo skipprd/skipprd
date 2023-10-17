@@ -169,7 +169,8 @@ jobs:
       - linux_x86
     name: test build (linux x86)
     runs-on:
-      - ubuntu-latest
+      - ubuntu-latest-32-cores
+#      - ubuntu-latest
     steps:
       - uses: actions/checkout@v3
 
@@ -177,7 +178,8 @@ jobs:
         uses: actions/download-artifact@v3
 
       - name: Test linux x86 release
-        uses: ./.github/actions/e2e/chaos_mode
+#        uses: ./.github/actions/e2e/chaos_mode
+        uses: ./.github/actions/e2e/bike_hire_many
         with:
           architecture_name: linux_x86
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
