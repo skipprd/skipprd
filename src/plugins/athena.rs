@@ -27,8 +27,8 @@ use serde_derive::Deserialize;
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataOutputAwsAthenaPluginConfig {
     pub format: Option<String>,
-    pub batch_size_seconds: Option<i64>,
-    pub batch_size_bytes: Option<i64>,
+    // pub batch_size_seconds: Option<i64>,
+    // pub batch_size_bytes: Option<i64>,
 
     pub s3_bucket: String,
     pub s3_prefix: String,
@@ -71,7 +71,17 @@ impl DataOutputAwsAthenaPlugin {
         // let time_bucket = Config::getenv("TRANSFORM_BATCH_TIME_UNIT", "");
 
 
-        let athena_config: DataOutputAwsAthenaPluginConfig = Config::get_pipline_plugin_config("output").unwrap().into();
+        // let athena_config: DataOutputAwsAthenaPluginConfig = Config::get_pipline_plugin_config("output").unwrap().into();
+        let athena_config: DataOutputAwsAthenaPluginConfig = match Config::get_pipline_plugin_config("output") {
+            Ok(config) => config.into(),
+            Err(_) => DataOutputAwsAthenaPluginConfig {
+                format: None,
+                s3_bucket: Config::getenv("DATA_OUTPUT_S3_BUCKET", ""),
+                s3_prefix: Config::getenv("DATA_OUTPUT_S3_PREFIX", ""),
+                athena_workgroup_name: Config::getenv("DATA_OUTPUT_ATHENA_WORKGROUP_NAME", ""),
+                glue_database_name: Config::getenv("SCHEMA_OUTPUT_GLUE_DATABASE_NAME", ""),
+            }
+        };
 
         Self {
             s3_client,

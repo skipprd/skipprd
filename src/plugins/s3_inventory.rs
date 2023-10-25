@@ -1,4 +1,4 @@
-use crate::helpers::configuration::{Config};
+use crate::helpers::configuration::{Config, PluginConfig};
 
 use crate::serdes::json::SerdeJson;
 use aws_sdk_s3::Client;
@@ -33,14 +33,43 @@ use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::ingest_work::{Ingest, IngestBatch};
 use crate::{RUNNING};
 use std::sync::RwLock;
+use serde_derive::Deserialize;
 use tokio::sync::Semaphore;
+use crate::helpers::configuration::PluginConfig::s3_inventory;
+
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct DataSourceS3InventoryPluginConfig {
+    pub format: Option<String>,
+    pub batch_size_seconds: Option<i64>,
+    pub batch_size_bytes: Option<i64>,
+
+    pub s3_bucket: String,
+    pub s3_prefix: String,
+
+}
+
+impl From<PluginConfig> for DataSourceS3InventoryPluginConfig {
+    fn from(plugin_config: PluginConfig) -> Self {
+        match plugin_config {
+            PluginConfig::s3_inventory(s3_inventory_config) => s3_inventory_config,
+            _ => panic!("Invalid plugin type"),
+        }
+    }
+}
+
+impl Into<PluginConfig> for DataSourceS3InventoryPluginConfig {
+    fn into(self) -> PluginConfig {
+        PluginConfig::s3_inventory(self)
+    }
+}
 
 pub struct DataSourceS3InventoryPlugin {
     // config: HashMap<String, String>,
     // buffer: Sender<String>,
     s3_client: Client,
     ingest: Ingest,
-    source_bucket: String,
+    config: DataSourceS3InventoryPluginConfig,
     temp_dir: String,
 }
 
@@ -59,10 +88,21 @@ impl DataSourceS3InventoryPlugin {
 
         let s3_client = Client::new(&s3_config);
 
+        let config: DataSourceS3InventoryPluginConfig = match Config::get_pipline_plugin_config("input") {
+            Ok(config) => config.into(),
+            Err(_) => DataSourceS3InventoryPluginConfig {
+                format: None,
+                batch_size_seconds: Some(Config::getenv("DATA_SOURCE_BATCH_SIZE_SECONDS", "600").parse::<i64>().unwrap()),
+                batch_size_bytes: Some(Config::getenv("DATA_SOURCE_BATCH_SIZE_BYTES", "1024000").parse::<i64>().unwrap()),
+                s3_bucket: Config::getenv("DATA_SOURCE_S3_INVENTORY_BUCKET", ""),
+                s3_prefix: Config::getenv("DATA_SOURCE_S3_INVENTORY_PREFIX", ""),
+            }
+        };
+
         DataSourceS3InventoryPlugin {
             s3_client,
             ingest: Ingest::new(),
-            source_bucket: String::new(),
+            config,
             temp_dir: temp_dir.to_string(),
         }
     }
@@ -87,8 +127,8 @@ impl DataSourceS3InventoryPlugin {
         // let mut outputs: HashMap<String, Vec<String>> = HashMap::new();
         let mut outputs: Vec<String> = Vec::new();
 
-        let inventory_bucket = Config::getenv("DATA_SOURCE_S3_INVENTORY_BUCKET", "");
-        let inventory_prefix = Config::getenv("DATA_SOURCE_S3_INVENTORY_PREFIX", "");
+        let inventory_bucket = self.config.s3_bucket.clone();
+        let inventory_prefix = self.config.s3_prefix.clone();
 
         println!(
             "Syncing inventory from bucket: {} and prefix {}",
@@ -180,10 +220,12 @@ impl DataSourceS3InventoryPlugin {
 
                                     let _bucket = source_bucket.to_string();
 
-                                    let chunk_size =
-                                        Config::getenv("DATA_SOURCE_BATCH_SIZE_BYTES", "1024000")
-                                            .parse::<i64>()
-                                            .unwrap();
+                                    let chunk_size = self.config.batch_size_bytes.clone().unwrap_or(10000000);
+
+                                    // let chunk_size =
+                                    //     Config::getenv("DATA_SOURCE_BATCH_SIZE_BYTES", "1024000")
+                                    //         .parse::<i64>()
+                                    //         .unwrap();
 
                                     for file in manifest.first().unwrap()["files"].as_array() {
                                         let file_key =

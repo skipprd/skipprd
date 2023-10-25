@@ -85,8 +85,8 @@ impl DataSourceS3Plugin {
             Ok(config) => config.into(),
             Err(_) => DataSourceS3PluginConfig {
                 format: None,
-                batch_size_seconds: None,
-                batch_size_bytes: None,
+                batch_size_seconds: Some(Config::getenv("DATA_SOURCE_BATCH_SIZE_SECONDS", "600").parse::<i64>().unwrap()),
+                batch_size_bytes: Some(Config::getenv("DATA_SOURCE_BATCH_SIZE_BYTES", "1024000").parse::<i64>().unwrap()),
                 s3_bucket: Config::getenv("DATA_SOURCE_S3_BUCKET", ""),
                 s3_prefix: Config::getenv("DATA_SOURCE_S3_PREFIX", ""),
             }

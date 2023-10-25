@@ -39,6 +39,7 @@ use toml;
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::plugins::file_input::{DataSourceLocalFilePlugin, DataSourceLocalFilePluginConfig};
 use crate::plugins::s3_input::DataSourceS3PluginConfig;
+use crate::plugins::s3_inventory::{DataSourceS3InventoryPlugin, DataSourceS3InventoryPluginConfig};
 
 
 #[derive(Debug, Deserialize, Clone)]
@@ -60,6 +61,7 @@ pub struct Transform {
 #[derive(Debug, Deserialize, Clone)]
 pub enum PluginConfig {
     s3(DataSourceS3PluginConfig),
+    s3_inventory(DataSourceS3InventoryPluginConfig),
     athena(DataOutputAwsAthenaPluginConfig),
     file(DataSourceLocalFilePluginConfig),
 }
@@ -68,6 +70,7 @@ impl PluginConfig {
     pub fn format(&self) -> String {
         match self {
             PluginConfig::s3(s3_config) => s3_config.format.clone().or(Some("json".to_string())).as_ref().unwrap().clone(),
+            PluginConfig::s3_inventory(s3_inventory_config) => s3_inventory_config.format.clone().or(Some("json".to_string())).as_ref().unwrap().clone(),
             PluginConfig::athena(athena_config) => athena_config.format.clone().or(Some("json".to_string())).as_ref().unwrap().clone(),
             PluginConfig::file(file_config) => file_config.format.clone().or(Some("json".to_string())).unwrap(),
         }
@@ -76,6 +79,7 @@ impl PluginConfig {
     pub fn plugin_name(&self) -> Option<String> {
         match self {
             PluginConfig::s3(s3_config) => Some("s3".to_string()),
+            PluginConfig::s3_inventory(s3_inventory_config) => Some("s3_inventory".to_string()),
             PluginConfig::athena(athena_config) => Some("athena".to_string()),
             PluginConfig::file(file_config) => Some("file".to_string()),
         }
@@ -84,7 +88,8 @@ impl PluginConfig {
     pub fn batch_size_bytes(&self) -> Option<i64> {
         match self {
             PluginConfig::s3(s3_config) => s3_config.batch_size_bytes.clone(),
-            PluginConfig::athena(athena_config) => athena_config.batch_size_bytes.clone(),
+            PluginConfig::s3_inventory(s3_inventory_config) => s3_inventory_config.batch_size_bytes.clone(),
+            PluginConfig::athena(athena_config) => None,
             PluginConfig::file(file_config) => file_config.batch_size_bytes.clone(),
         }
     }
@@ -92,7 +97,8 @@ impl PluginConfig {
     pub fn batch_size_seconds(&self) -> Option<i64> {
         match self {
             PluginConfig::s3(s3_config) => s3_config.batch_size_seconds.clone(),
-            PluginConfig::athena(athena_config) => athena_config.batch_size_seconds.clone(),
+            PluginConfig::s3_inventory(s3_inventory_config) => s3_inventory_config.batch_size_seconds.clone(),
+            PluginConfig::athena(athena_config) => None,
             PluginConfig::file(file_config) => file_config.batch_size_seconds.clone(),
         }
     }
@@ -524,7 +530,7 @@ impl Config {
 
         let pipline = Config::get_pipeline_config();
 
-        let default_batch_partition_fields = &"".to_string();
+        let default_batch_partition_fields = &Config::getenv("TRANSFORM_BATCH_PARTITION_FIELDS", "");
         let batch_partition_fields = match pipline.transform.as_ref() {
             Some(transform) => {
                 transform.batch_partition_fields.as_ref().unwrap_or(default_batch_partition_fields)
@@ -542,7 +548,7 @@ impl Config {
 
         let pipline = Config::get_pipeline_config();
 
-        let default_namespace_fields = &"".to_string();
+        let default_namespace_fields = &Config::getenv("TRANSFORM_NAMESPACE_FIELDS", "");
         let namespace_fields = match pipline.transform.as_ref() {
             Some(transform) => {
                 transform.namespace_fields.as_ref().unwrap_or(default_namespace_fields)
@@ -560,7 +566,7 @@ impl Config {
 
         let pipline = Config::get_pipeline_config();
 
-        let default_flatten_events = &"no".to_string();
+        let default_flatten_events = &Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no");
 
         let flatten_events = match pipline.transform.as_ref() {
             Some(transform) => {
@@ -598,7 +604,7 @@ impl Config {
 
         let pipline = Config::get_pipeline_config();
 
-        let default_batch_time_fields = &"".to_string();
+        let default_batch_time_fields = &Config::getenv("TRANSFORM_BATCH_TIME_FIELDS", "");
 
         let batch_time_fields = match pipline.transform.as_ref() {
             Some(transform) => {
@@ -617,7 +623,7 @@ impl Config {
 
         let pipline = Config::get_pipeline_config();
 
-        let default_batch_time_unit = &"".to_string();
+        let default_batch_time_unit = &Config::getenv("TRANSFORM_BATCH_TIME_UNIT", "");
 
         let batch_time_unit = match pipline.transform.as_ref() {
             Some(transform) => {
@@ -651,7 +657,8 @@ impl Config {
     pub fn get_pipeline_data_dir() -> String {
         let config = Config::get();
 
-        let default_data_dir = "./data".to_string();
+        let default_data_dir = Config::getenv("DATA_DIR", "./data");
+        // let default_data_dir = "./data".to_string();
 
         let pipeline_dir = match config.pipelines.get(PIPELINE_NAME.read().as_str()) {
             Some(pipeline) => {
@@ -705,8 +712,9 @@ impl Config {
 
         let pipline = Config::get_pipeline_config();
 
-        // @todo: default to 10485760
-        pipline.buffer_threshold_bytes.or(Some(10485760)).unwrap()
+        let default = Config::getenv("BUFFER_THRESHOLD_BYTES", "10485760").parse::<i64>().unwrap();
+
+        pipline.buffer_threshold_bytes.or(Some(default)).unwrap()
 
     }
 
@@ -715,7 +723,8 @@ impl Config {
 
         let pipline = Config::get_pipeline_config();
 
-        // @todo default to 60
+        let default = Config::getenv("BUFFER_THRESHOLD_SECONDS", "60").parse::<i64>().unwrap();
+
         pipline.buffer_threshold_seconds.or(Some(60)).unwrap()
     }
 
@@ -893,7 +902,7 @@ impl Config {
     pub fn get_workspace_name() -> String {
         let config = Config::get();
 
-        let token = Config::getenv("SKIPPR_WORKSPACE", "");
+        let token = Config::getenv("WORKSPACE_NAME", "");
         if token != "" {
             return token
         }
