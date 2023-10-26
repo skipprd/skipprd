@@ -694,14 +694,16 @@ impl Config {
     pub fn get_auto_approve() -> bool {
         let config = Config::get();
 
-        let pipeline = Config::get_pipeline_config();
+        let mut pipeline = Config::get_pipeline_config();
 
         match pipeline.auto_approve {
             Some(auto_approve) => {
                 Config::truth_value(auto_approve.as_str())
             }
             None => {
-                true
+                let auto_approve = Config::truth_value(Config::getenv("AUTO_APPROVE", "true").as_str());
+                pipeline.auto_approve = Some(auto_approve.to_string());
+                auto_approve
             }
         }
 

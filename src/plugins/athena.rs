@@ -487,7 +487,8 @@ impl AwsAthena {
             .create_work_group()
             .name(&workgroup)
             .description(&workgroup)
-            .tags(Tag::builder().key("name").value(&workgroup).build())
+            .tags(Tag::builder().key("Name").value(&workgroup).build())
+            .tags(Tag::builder().key("Vendor").value("Skippr.io").build())
             .configuration(
                 WorkGroupConfiguration::builder()
                     .bytes_scanned_cutoff_per_query(300000000) // 300MB // min is 10000000
