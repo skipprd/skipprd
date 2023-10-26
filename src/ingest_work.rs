@@ -270,12 +270,6 @@ impl Ingest {
                             );
                             let old_path = format!("{}", path.display().to_string());
 
-                            println!(
-                                "Force flushing ingest buffer: {} to output: {}",
-                                path.display().to_string(),
-                                new_filename
-                            );
-
                             match fs::rename(&old_path, &new_filename) {
                                 Ok(_) => {}
                                 Err(err) => {
@@ -483,13 +477,22 @@ impl Ingest {
 
                     if METADATA.read().get(&skpr_namespace).is_none() {
                         METADATA.write().insert(skpr_namespace.clone(), Metadata::new().unwrap());
+                        // println!("New namespace: {}", skpr_namespace);
                     }
 
-                    let msg = fast_path_ingest(
-                        &record,
-                        &METADATA.read().get(&skpr_namespace).unwrap().fields,
-                        flatten,
-                    );
+                    let msg = match METADATA.read().get(&skpr_namespace) {
+                        Some(metadata) => {
+                            fast_path_ingest(
+                                &record,
+                                metadata.fields.as_ref(),
+                                flatten,
+                            )
+                        }
+                        None => {
+                            // println!("Failed to find metadata for namespace: {}", skpr_namespace);
+                            Err(format!("Failed to find metadata for namespace: {}", skpr_namespace).into())
+                        }
+                    };
 
                     let record_value = match msg {
                         Ok(msg) => {
@@ -594,7 +597,7 @@ impl Ingest {
                     .append(true)
                     .open(filename.clone()) {
                         Ok(f) => {
-                            println!("Opened file: {}", filename);
+                            // println!("Reopened buffer file: {}", filename);
                             f
                         },
                         Err(err) => {
