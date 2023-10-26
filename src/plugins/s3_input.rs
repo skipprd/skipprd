@@ -140,7 +140,7 @@ impl DataSourceS3Plugin {
         let mut i = 0;
         let mut chunk_size_current = 0;
 
-        let mut inventory_prefix = inventory_prefix.trim_matches('/').to_string();
+        let mut inventory_prefix = inventory_prefix.trim_start_matches('/').to_string();
 
         if inventory_prefix == "/".to_string() || inventory_prefix == "./".to_string() {
             inventory_prefix = "".to_string();
