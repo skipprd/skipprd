@@ -701,7 +701,7 @@ impl Config {
                 Config::truth_value(auto_approve.as_str())
             }
             None => {
-                let auto_approve = Config::truth_value(Config::getenv("AUTO_APPROVE", "true").as_str());
+                let auto_approve = Config::truth_value(Config::getenv("SCHEMA_AUTO_APPROVE", "true").as_str());
                 pipeline.auto_approve = Some(auto_approve.to_string());
                 auto_approve
             }
