@@ -62,7 +62,15 @@ impl DataSourceLocalFilePlugin {
             Err(_err) => {}
         }
 
-        let config: DataSourceLocalFilePluginConfig = Config::get_pipline_plugin_config("input").unwrap().into();
+        let config: DataSourceLocalFilePluginConfig = match Config::get_pipline_plugin_config("input") {
+            Ok(config) => config.into(),
+            Err(_) => DataSourceLocalFilePluginConfig {
+                format: None,
+                batch_size_seconds: Some(Config::getenv("DATA_SOURCE_BATCH_SIZE_SECONDS", "600").parse::<i64>().unwrap()),
+                batch_size_bytes: Some(Config::getenv("DATA_SOURCE_BATCH_SIZE_BYTES", "1024000").parse::<i64>().unwrap()),
+                path: Config::getenv("DATA_SOURCE_PATH", ""),
+            }
+        };
 
         DataSourceLocalFilePlugin {
             ingest: Ingest::new(),
