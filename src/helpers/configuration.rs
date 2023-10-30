@@ -212,7 +212,7 @@ impl Config {
         let config: Value = serde_json::from_str(&string_val).unwrap();
 
         // recusively merge config with any set ENV vars
-        let config = Config::merge_config_with_env(config);
+        // let config = Config::merge_config_with_env(config);
 
         let string_val = serde_json::to_string(&config).unwrap();
         // Deserialize the String back into Config
@@ -832,9 +832,16 @@ impl Config {
             "input" => {
                 if let Some(data_inputs) = config.data_inputs {
 
-                    let plugin_name = Config::get_pipeline_input_plugin_name();
+                    let input_name = match pipeline_config.input.as_ref() {
+                        Some(input) => {
+                            input.split('.').collect::<Vec<&str>>()[1].to_string()
+                        }
+                        None => {
+                            return Err("Input not found".to_string())
+                        }
+                    };
 
-                    if let Some(config) = data_inputs.get(&plugin_name) {
+                    if let Some(config) = data_inputs.get(&input_name) {
                         Ok(config.clone())
                     } else {
                         Err("Input not found".to_string())
@@ -846,9 +853,16 @@ impl Config {
             "output" => {
                 if let Some(data_outputs) = config.data_outputs {
 
-                    let plugin_name = Config::get_pipeline_output_plugin_name();
+                    let input_name = match pipeline_config.output.as_ref() {
+                        Some(input) => {
+                            input.split('.').collect::<Vec<&str>>()[1].to_string()
+                        }
+                        None => {
+                            return Err("Output not found".to_string())
+                        }
+                    };
 
-                    if let Some(config) = data_outputs.get(&plugin_name) {
+                    if let Some(config) = data_outputs.get(&input_name) {
                         Ok(config.clone())
                     } else {
                         Err("Output not found".to_string())
@@ -860,9 +874,16 @@ impl Config {
             "deadletter" => {
                 if let Some(data_deadletters) = config.data_deadletters {
 
-                    let plugin_name = Config::get_pipeline_deadletter_plugin_name();
+                    let input_name = match pipeline_config.deadletter.as_ref() {
+                        Some(input) => {
+                            input.split('.').collect::<Vec<&str>>()[1].to_string()
+                        }
+                        None => {
+                            return Err("Deadletter not found".to_string())
+                        }
+                    };
 
-                    if let Some(config) = data_deadletters.get(&plugin_name) {
+                    if let Some(config) = data_deadletters.get(&input_name) {
                         Ok(config.clone())
                     } else {
                         Err("Deadletter not found".to_string())
@@ -874,9 +895,16 @@ impl Config {
             "schema" => {
                 if let Some(schema_outputs) = config.schema_outputs {
 
-                    let plugin_name = Config::get_pipeline_schema_plugin_name();
+                    let input_name = match pipeline_config.schema.as_ref() {
+                        Some(input) => {
+                            input.split('.').collect::<Vec<&str>>()[1].to_string()
+                        }
+                        None => {
+                            return Err("Schema not found".to_string())
+                        }
+                    };
 
-                    if let Some(config) = schema_outputs.get(&plugin_name) {
+                    if let Some(config) = schema_outputs.get(&input_name) {
                         Ok(config.clone())
                     } else {
                         Err("Schema not found".to_string())

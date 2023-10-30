@@ -37,8 +37,8 @@ pub struct DataSourceS3PluginConfig {
     pub batch_size_seconds: Option<i64>,
     pub batch_size_bytes: Option<i64>,
 
-    s3_bucket: String,
-    s3_prefix: String,
+    pub s3_bucket: String,
+    pub s3_prefix: String,
 }
 
 impl From<PluginConfig> for DataSourceS3PluginConfig {
