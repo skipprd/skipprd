@@ -4,7 +4,7 @@ skippr:
 
 pipelines:
 
-  chaos_mode:
+  bike_hire_many:
     chaos_mode: no
     auto_approve: yes
     env: test
