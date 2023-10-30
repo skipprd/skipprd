@@ -1,19 +1,19 @@
-// use parking_lot::{RwLock, Mutex, RwLockReadGuard, RwLockWriteGuard};
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, Mutex};
-use std::time::{Instant, Duration};
 use std::collections::HashMap;
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::time::{Instant, Duration};
+use std::sync::atomic::{AtomicU64, Ordering};
+use dashmap::DashMap;
 use lazy_static::lazy_static;
 
 lazy_static! {
     static ref PROFILE_PERFORMANCE: bool = true;
-    static ref WAITING_ON: Mutex<HashMap<String, Instant>> = Mutex::new(HashMap::new());
-    static ref TOTAL_WAIT_TIMES: Mutex<HashMap<String, Duration>> = Mutex::new(HashMap::new());
+    static ref WAITING_ON: DashMap<String, Instant> = DashMap::new();
+    static ref TOTAL_WAIT_TIMES: DashMap<String, AtomicU64> = DashMap::new();
 }
 
 pub struct TimedRwLock<T> {
     name: String,
     lock: RwLock<T>,
-    wait_time: RwLock<Duration>,
 }
 
 impl<T> TimedRwLock<T> {
@@ -21,45 +21,47 @@ impl<T> TimedRwLock<T> {
         TimedRwLock {
             name,
             lock: RwLock::new(t),
-            wait_time: RwLock::new(Duration::new(0, 0)),
         }
     }
 
     pub fn read(&self) -> RwLockReadGuard<'_, T> {
-        if *PROFILE_PERFORMANCE {
-            let mut waiting_on = WAITING_ON.lock().unwrap();
-            waiting_on.insert(self.name.clone(), Instant::now());
-        }
+        let start_time = if *PROFILE_PERFORMANCE {
+            Some(Instant::now())
+        } else {
+            None
+        };
 
         let result = self.lock.read().unwrap();
 
-        if *PROFILE_PERFORMANCE {
-            let mut waiting_on = WAITING_ON.lock().unwrap();
-            if let Some(start_time) = waiting_on.remove(&self.name) {
-                let elapsed = start_time.elapsed();
-                let mut total_wait_time = TOTAL_WAIT_TIMES.lock().unwrap();
-                *total_wait_time.entry(self.name.clone()).or_insert(Duration::new(0, 0)) += elapsed;
-            }
+        if let Some(start_time) = start_time {
+            let elapsed = start_time.elapsed();
+            let nanos = elapsed.as_nanos() as u64;
+            TOTAL_WAIT_TIMES
+                .entry(self.name.clone())
+                .or_insert_with(|| AtomicU64::new(0))
+                .fetch_add(nanos, Ordering::Relaxed);
         }
 
         result
     }
 
     pub fn write(&self) -> RwLockWriteGuard<'_, T> {
-        if *PROFILE_PERFORMANCE {
-            let mut waiting_on = WAITING_ON.lock().unwrap();
-            waiting_on.insert(self.name.clone(), Instant::now());
-        }
+        let start_time = if *PROFILE_PERFORMANCE {
+            // println!("{} is waiting on a write lock", self.name);
+            Some(Instant::now())
+        } else {
+            None
+        };
 
         let result = self.lock.write().unwrap();
 
-        if *PROFILE_PERFORMANCE {
-            let mut waiting_on = WAITING_ON.lock().unwrap();
-            if let Some(start_time) = waiting_on.remove(&self.name) {
-                let elapsed = start_time.elapsed();
-                let mut total_wait_time = TOTAL_WAIT_TIMES.lock().unwrap();
-                *total_wait_time.entry(self.name.clone()).or_insert(Duration::new(0, 0)) += elapsed;
-            }
+        if let Some(start_time) = start_time {
+            let elapsed = start_time.elapsed();
+            let nanos = elapsed.as_nanos() as u64;
+            TOTAL_WAIT_TIMES
+                .entry(self.name.clone())
+                .or_insert_with(|| AtomicU64::new(0))
+                .fetch_add(nanos, Ordering::Relaxed);
         }
 
         result
@@ -69,18 +71,19 @@ impl<T> TimedRwLock<T> {
         &self.name
     }
 
-    pub fn currently_waiting() -> HashMap<String, Duration> {
-        let waiting_on = WAITING_ON.lock().unwrap();
-        waiting_on.iter().map(|(name, start_time)| (name.clone(), start_time.elapsed())).collect()
+    pub fn currently_waiting() -> Vec<(String, Duration)> {
+        WAITING_ON
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().elapsed()))
+            .collect()
     }
 
-    pub fn get_total_wait_times() -> HashMap<String, Duration> {
-        let mut totals = TOTAL_WAIT_TIMES.lock().unwrap();
-        let cloned_totals = totals.clone();
-
-        // clear the totals
-        totals.clear();
-
-        cloned_totals
+    pub fn get_total_wait_times() -> Vec<(String, Duration)> {
+        let totals = TOTAL_WAIT_TIMES
+            .iter()
+            .map(|entry| (entry.key().clone(), Duration::from_nanos(entry.value().load(Ordering::Relaxed))))
+            .collect();
+        TOTAL_WAIT_TIMES.clear();
+        totals
     }
 }

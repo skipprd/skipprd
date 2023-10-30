@@ -1,6 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::fmt::Debug;
+use std::fmt::{Debug, format};
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read};
@@ -13,6 +13,7 @@ use yaml_rust::YamlLoader;
 use nix::libc::exit;
 
 use std::time::{Duration, Instant};
+use dashmap::DashMap;
 use lazy_static::lazy_static;
 use once_cell::sync::Lazy;
 
@@ -41,6 +42,9 @@ use crate::plugins::file_input::{DataSourceLocalFilePlugin, DataSourceLocalFileP
 use crate::plugins::s3_input::DataSourceS3PluginConfig;
 use crate::plugins::s3_inventory::{DataSourceS3InventoryPlugin, DataSourceS3InventoryPluginConfig};
 
+lazy_static! {
+    static ref ENV_CACHE: TimedRwLock<DashMap<String, String>> = TimedRwLock::new("env_cache".to_string(), DashMap::new());
+}
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Skippr {
@@ -130,7 +134,7 @@ pub struct Config {
 }
 
 pub static APP_CONFIG: Lazy<Arc<TimedRwLock<Option<Config>>>> = Lazy::new(|| Arc::new(TimedRwLock::new("config".to_string(),None)));
-pub static PIPELINE_NAME: Lazy<Arc<TimedRwLock<String>>> = Lazy::new(|| Arc::new(TimedRwLock::new("config".to_string(),"default".to_string())));
+pub static PIPELINE_NAME: Lazy<Arc<TimedRwLock<String>>> = Lazy::new(|| Arc::new(TimedRwLock::new("pipeline_name".to_string(),"default".to_string())));
 
 impl Config {
 
@@ -267,201 +271,213 @@ impl Config {
     }
 
     pub fn get_pipeline_input_plugin_name() -> String {
-        let config = Config::get();
 
-        let pipline = match config.pipelines.get(PIPELINE_NAME.read().as_str()) {
-            Some(pipeline) => {
-                pipeline
-            }
-            None => {
-                let plugin_name = Config::getenv("DATA_SOURCE_PLUGIN_NAME", "");
-                // @todo - add plugin_name to APP_CONFIG.write().unwrap().as_mut().unwrap().pipelines
-                // let mut app_config = APP_CONFIG.write().unwrap();
+        if Config::get_envcache("DATA_SOURCE_PLUGIN_NAME") != "" {
+            return Config::get_envcache("DATA_SOURCE_PLUGIN_NAME")
+        } else {
+            let config = Config::get();
 
-                let pipeline_name = Config::getenv("PIPELINE_NAME", PIPELINE_NAME.read().as_str());
-
-                match APP_CONFIG.write().as_mut().unwrap().pipelines.get_mut(&pipeline_name) {
-                    Some(pipeline) => {
-                        pipeline.input = Some(plugin_name.clone());
-                    }
-                    None => {}
-                }
-
-                return plugin_name
-            }
-        };
-
-
-        if pipline.input.is_some() {
-            // split dot string
-            let input_plugin_name = pipline.input.as_ref().unwrap().split('.').collect::<Vec<&str>>()[1].to_string();
-
-            match config.data_inputs.as_ref() {
-                Some(data_inputs) => {
-                    match data_inputs.get(&input_plugin_name) {
-                        Some(plugin_config) => {
-                            plugin_config.plugin_name().clone().or(Some("".to_string())).unwrap()
-                        },
-                        None => {
-                            "".to_string()
-                        }
-                    }
+            let pipline = match config.pipelines.get(PIPELINE_NAME.read().as_str()) {
+                Some(pipeline) => {
+                    pipeline
                 }
                 None => {
-                    "".to_string()
+                    let plugin_name = Config::getenv("DATA_SOURCE_PLUGIN_NAME", "");
+
+                    Config::set_evncache("DATA_SOURCE_PLUGIN_NAME", &plugin_name.clone());
+
+                    return plugin_name;
                 }
+            };
+
+            if pipline.input.is_some() {
+                // split dot string
+                let input_plugin_name = pipline.input.as_ref().unwrap().split('.').collect::<Vec<&str>>()[1].to_string();
+
+                let res = match config.data_inputs.as_ref() {
+                    Some(data_inputs) => {
+                        match data_inputs.get(&input_plugin_name) {
+                            Some(plugin_config) => {
+                                plugin_config.plugin_name().clone().or(Some("".to_string())).unwrap()
+                            },
+                            None => {
+                                Config::getenv("DATA_SOURCE_PLUGIN_NAME", "")
+                            }
+                        }
+                    }
+                    None => {
+                        Config::getenv("DATA_SOURCE_PLUGIN_NAME", "")
+                    }
+                };
+
+                Config::set_evncache("DATA_SOURCE_PLUGIN_NAME", &res.clone());
+                res
+            } else {
+                let res = Config::getenv("DATA_SOURCE_PLUGIN_NAME", "");
+                Config::set_evncache("DATA_SOURCE_PLUGIN_NAME", &res.clone());
+                res
             }
-        } else {
-            "".to_string()
         }
     }
 
     pub fn get_pipeline_output_plugin_name() -> String {
-        let config = Config::get();
+        if Config::get_envcache("DATA_OUTPUT_PLUGIN_NAME") != "" {
+            return Config::get_envcache("DATA_OUTPUT_PLUGIN_NAME")
+        } else {
+            let config = Config::get();
 
-        let pipline = match config.pipelines.get(PIPELINE_NAME.read().as_str()) {
-            Some(pipeline) => {
-                pipeline
-            }
-            None => {
-                let plugin_name = Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "");
-                let pipeline_name = Config::getenv("PIPELINE_NAME", PIPELINE_NAME.read().as_str());
-
-                match APP_CONFIG.write().as_mut().unwrap().pipelines.get_mut(&pipeline_name) {
-                    Some(pipeline) => {
-                        pipeline.input = Some(plugin_name.clone());
-                    }
-                    None => {}
-                }
-                return plugin_name
-            }
-        };
-
-        if pipline.output.is_some() {
-            // split dot string
-            let input_plugin_name = pipline.output.as_ref().unwrap().split('.').collect::<Vec<&str>>()[1].to_string();
-
-            match config.data_outputs.as_ref() {
-                Some(data_outputs) => {
-                    match data_outputs.get(&input_plugin_name) {
-                        Some(plugin_config) => {
-                            plugin_config.plugin_name().clone().or(Some("".to_string())).unwrap()
-                        },
-                        None => {
-                            "".to_string()
-                        }
-                    }
+            let pipline = match config.pipelines.get(PIPELINE_NAME.read().as_str()) {
+                Some(pipeline) => {
+                    pipeline
                 }
                 None => {
-                    "".to_string()
+                    let plugin_name = Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "");
+                    Config::set_evncache("DATA_OUTPUT_PLUGIN_NAME", &plugin_name.clone());
+                    return plugin_name
                 }
+            };
+
+            if pipline.output.is_some() {
+                // split dot string
+                let input_plugin_name = pipline.output.as_ref().unwrap().split('.').collect::<Vec<&str>>()[1].to_string();
+
+                let res = match config.data_outputs.as_ref() {
+                    Some(data_outputs) => {
+                        match data_outputs.get(&input_plugin_name) {
+                            Some(plugin_config) => {
+                                plugin_config.plugin_name().clone().or(Some("".to_string())).unwrap()
+                            },
+                            None => {
+                                Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "")
+                            }
+                        }
+                    }
+                    None => {
+                        Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "")
+                    }
+                };
+
+                Config::set_evncache("DATA_OUTPUT_PLUGIN_NAME", &res.clone());
+                res
+
+            } else {
+                let res = Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "");
+                Config::set_evncache("DATA_OUTPUT_PLUGIN_NAME", &res.clone());
+                res
             }
-        } else {
-            "".to_string()
         }
     }
 
     pub fn get_pipeline_schema_plugin_name() -> String {
-        let config = Config::get();
+        if Config::get_envcache("DATA_SCHEMA_PLUGIN_NAME") != "" {
+            return Config::get_envcache("DATA_SCHEMA_PLUGIN_NAME")
+        } else {
+            let config = Config::get();
 
-        let pipline = match config.pipelines.get(PIPELINE_NAME.read().as_str()) {
-            Some(pipeline) => {
-                pipeline
-            }
-            None => {
-                let plugin_name = Config::getenv("DATA_SCHEMA_PLUGIN_NAME", "");
-                let pipeline_name = Config::getenv("PIPELINE_NAME", PIPELINE_NAME.read().as_str());
-
-                match APP_CONFIG.write().as_mut().unwrap().pipelines.get_mut(&pipeline_name) {
-                    Some(pipeline) => {
-                        pipeline.input = Some(plugin_name.clone());
-                    }
-                    None => {}
-                }
-                return plugin_name
-            }
-        };
-
-        if pipline.schema.is_some() {
-            // split dot string
-            let input_plugin_name = pipline.schema.as_ref().unwrap().split('.').collect::<Vec<&str>>()[1].to_string();
-
-            match config.schema_outputs.as_ref() {
-                Some(schema_outputs) => {
-                    match schema_outputs.get(&input_plugin_name) {
-                        Some(plugin_config) => {
-                            plugin_config.plugin_name().clone().or(Some("".to_string())).unwrap()
-                        },
-                        None => {
-                            "".to_string()
-                        }
-                    }
+            let pipline = match config.pipelines.get(PIPELINE_NAME.read().as_str()) {
+                Some(pipeline) => {
+                    pipeline
                 }
                 None => {
-                    "".to_string()
+                    let plugin_name = Config::getenv("DATA_SCHEMA_PLUGIN_NAME", "");
+                    Config::set_evncache("DATA_SCHEMA_PLUGIN_NAME", &plugin_name.clone());
+                    return plugin_name
                 }
-            }
-        } else {
-            "".to_string()
-        }
+            };
 
+            if pipline.schema.is_some() {
+                // split dot string
+                let input_plugin_name = pipline.schema.as_ref().unwrap().split('.').collect::<Vec<&str>>()[1].to_string();
+
+                let res = match config.schema_outputs.as_ref() {
+                    Some(schema_outputs) => {
+                        match schema_outputs.get(&input_plugin_name) {
+                            Some(plugin_config) => {
+                                plugin_config.plugin_name().clone().or(Some("".to_string())).unwrap()
+                            },
+                            None => {
+                                Config::getenv("DATA_SCHEMA_PLUGIN_NAME", "")
+                            }
+                        }
+                    }
+                    None => {
+                        Config::getenv("DATA_SCHEMA_PLUGIN_NAME", "")
+                    }
+                };
+
+                Config::set_evncache("DATA_SCHEMA_PLUGIN_NAME", &res.clone());
+                res
+
+            } else {
+                let res = Config::getenv("DATA_SCHEMA_PLUGIN_NAME", "");
+                Config::set_evncache("DATA_SCHEMA_PLUGIN_NAME", &res.clone());
+                res
+            }
+        }
     }
 
     pub fn get_pipeline_deadletter_plugin_name() -> String {
-        let config = Config::get();
+        if Config::get_envcache("DATA_DEADLETTER_PLUGIN_NAME") != "" {
+            return Config::get_envcache("DATA_DEADLETTER_PLUGIN_NAME")
+        } else {
+            let config = Config::get();
 
-        let pipline = match config.pipelines.get(PIPELINE_NAME.read().as_str()) {
-            Some(pipeline) => {
-                pipeline
-            }
-            None => {
-                let plugin_name = Config::getenv("DATA_DEADLETTER_PLUGIN_NAME", "");
-                let pipeline_name = Config::getenv("PIPELINE_NAME", PIPELINE_NAME.read().as_str());
-
-                match APP_CONFIG.write().as_mut().unwrap().pipelines.get_mut(&pipeline_name) {
-                    Some(pipeline) => {
-                        pipeline.input = Some(plugin_name.clone());
-                    }
-                    None => {}
-                }
-                return plugin_name
-            }
-        };
-
-        if pipline.deadletter.is_some() {
-            // split dot string
-            let input_plugin_name = pipline.deadletter.as_ref().unwrap().split('.').collect::<Vec<&str>>()[1].to_string();
-
-            match config.data_deadletters.as_ref() {
-                Some(data_deadletters) => {
-                    match data_deadletters.get(&input_plugin_name) {
-                        Some(plugin_config) => {
-                            plugin_config.plugin_name().clone().or(Some("".to_string())).unwrap()
-                        },
-                        None => {
-                            "".to_string()
-                        }
-                    }
+            let pipline = match config.pipelines.get(PIPELINE_NAME.read().as_str()) {
+                Some(pipeline) => {
+                    pipeline
                 }
                 None => {
-                    "".to_string()
+                    let plugin_name = Config::getenv("DATA_DEADLETTER_PLUGIN_NAME", "");
+                    Config::set_evncache("DATA_DEADLETTER_PLUGIN_NAME", &plugin_name.clone());
+                    return plugin_name
                 }
-            }
-        } else {
-            "".to_string()
-        }
+            };
 
+            if pipline.deadletter.is_some() {
+                // split dot string
+                let input_plugin_name = pipline.deadletter.as_ref().unwrap().split('.').collect::<Vec<&str>>()[1].to_string();
+
+                let res = match config.data_deadletters.as_ref() {
+                    Some(data_deadletters) => {
+                        match data_deadletters.get(&input_plugin_name) {
+                            Some(plugin_config) => {
+                                plugin_config.plugin_name().clone().or(Some("".to_string())).unwrap()
+                            },
+                            None => {
+                                Config::getenv("DATA_DEADLETTER_PLUGIN_NAME", "")
+                            }
+                        }
+                    }
+                    None => {
+                        Config::getenv("DATA_DEADLETTER_PLUGIN_NAME", "")
+                    }
+                };
+
+                Config::set_evncache("DATA_DEADLETTER_PLUGIN_NAME", &res.clone());
+                res
+
+            } else {
+                let res = Config::getenv("DATA_DEADLETTER_PLUGIN_NAME", "");
+                Config::set_evncache("DATA_DEADLETTER_PLUGIN_NAME", &res.clone());
+                res
+            }
+        }
     }
 
     pub fn get_skippr_api_token() -> String {
-        let config = Config::get();
+        if Config::get_envcache("SKIPPR_API_TOKEN") != "" {
+            return Config::get_envcache("SKIPPR_API_TOKEN")
+        } else {
+            let config = Config::get();
 
-        let token = Config::getenv("SKIPPR_API_TOKEN", "");
-        if token != "" {
-            return token
+            let token = Config::getenv("SKIPPR_API_TOKEN", "");
+            if token != "" {
+                Config::set_evncache("SKIPPR_API_TOKEN", &token.clone());
+                return token
+            }
+
+            config.skippr.api_token.as_ref().or(Some(&"".to_string())).unwrap().to_string()
         }
-
-        config.skippr.api_token.as_ref().or(Some(&"".to_string())).unwrap().to_string()
     }
 
     pub fn get_pipelines() -> Vec<String> {
@@ -526,208 +542,282 @@ impl Config {
     }
 
     pub fn get_transform_batch_partition_fields() -> String {
-        let config = Config::get();
+        if Config::get_envcache("TRANSFORM_BATCH_PARTITION_FIELDS") != "" {
+            return Config::get_envcache("TRANSFORM_BATCH_PARTITION_FIELDS")
+        } else {
+            let config = Config::get();
 
-        let pipline = Config::get_pipeline_config();
+            let pipline = Config::get_pipeline_config();
 
-        let default_batch_partition_fields = &Config::getenv("TRANSFORM_BATCH_PARTITION_FIELDS", "");
-        let batch_partition_fields = match pipline.transform.as_ref() {
-            Some(transform) => {
-                transform.batch_partition_fields.as_ref().unwrap_or(default_batch_partition_fields)
-            }
-            None => {
-                default_batch_partition_fields
-            }
-        };
+            let default_batch_partition_fields = &Config::getenv("TRANSFORM_BATCH_PARTITION_FIELDS", "");
+            let batch_partition_fields = match pipline.transform.as_ref() {
+                Some(transform) => {
+                    transform.batch_partition_fields.as_ref().unwrap_or(default_batch_partition_fields)
+                }
+                None => {
+                    default_batch_partition_fields
+                }
+            };
 
-        batch_partition_fields.to_string()
+            Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", &batch_partition_fields.clone());
+            batch_partition_fields.to_string()
+        }
     }
 
     pub fn get_transform_namespace_fields() -> String {
-        let config = Config::get();
+        if Config::get_envcache("TRANSFORM_NAMESPACE_FIELDS") != "" {
+            return Config::get_envcache("TRANSFORM_NAMESPACE_FIELDS")
+        } else {
+            let config = Config::get();
 
-        let pipline = Config::get_pipeline_config();
+            let pipline = Config::get_pipeline_config();
 
-        let default_namespace_fields = &Config::getenv("TRANSFORM_NAMESPACE_FIELDS", "");
-        let namespace_fields = match pipline.transform.as_ref() {
-            Some(transform) => {
-                transform.namespace_fields.as_ref().unwrap_or(default_namespace_fields)
-            }
-            None => {
-                default_namespace_fields
-            }
-        };
+            let default_namespace_fields = &Config::getenv("TRANSFORM_NAMESPACE_FIELDS", "");
+            let namespace_fields = match pipline.transform.as_ref() {
+                Some(transform) => {
+                    transform.namespace_fields.as_ref().unwrap_or(default_namespace_fields)
+                }
+                None => {
+                    default_namespace_fields
+                }
+            };
+            Config::set_evncache("TRANSFORM_NAMESPACE_FIELDS", &namespace_fields.clone());
 
-        namespace_fields.to_string()
+            namespace_fields.to_string()
+        }
     }
 
     pub fn get_transform_flatten_events() -> bool {
-        let config = Config::get();
+        if Config::get_envcache("TRANSFORM_FLATTEN_EVENTS") != "" {
+            return Config::truth_value(&Config::get_envcache("TRANSFORM_FLATTEN_EVENTS"))
+        } else {
+            let config = Config::get();
 
-        let pipline = Config::get_pipeline_config();
+            let pipline = Config::get_pipeline_config();
 
-        let default_flatten_events = &Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no");
+            let default_flatten_events = &Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no");
 
-        let flatten_events = match pipline.transform.as_ref() {
-            Some(transform) => {
-                transform.flatten_events.as_ref().unwrap_or(default_flatten_events)
-            }
-            None => {
-                default_flatten_events
-            }
-        };
+            let flatten_events = match pipline.transform.as_ref() {
+                Some(transform) => {
+                    transform.flatten_events.as_ref().unwrap_or(default_flatten_events)
+                }
+                None => {
+                    default_flatten_events
+                }
+            };
 
-        Config::truth_value(flatten_events)
+            Config::truth_value(flatten_events)
+        }
     }
 
     pub fn get_transform_record_field_path() -> String {
-        let config = Config::get();
+        if Config::get_envcache("TRANSFORM_RECORD_FIELD_PATH") != "" {
+            return Config::get_envcache("TRANSFORM_RECORD_FIELD_PATH")
+        } else {
+            let config = Config::get();
 
-        let pipline = Config::get_pipeline_config();
+            let pipline = Config::get_pipeline_config();
 
-        let default_record_field_path = &"".to_string();
+            let default_record_field_path = &"".to_string();
 
-        let record_field_path = match pipline.transform.as_ref() {
-            Some(transform) => {
-                transform.record_field_path.as_ref().unwrap_or(default_record_field_path)
-            }
-            None => {
-                default_record_field_path
-            }
-        };
+            let record_field_path = match pipline.transform.as_ref() {
+                Some(transform) => {
+                    transform.record_field_path.as_ref().unwrap_or(default_record_field_path)
+                }
+                None => {
+                    default_record_field_path
+                }
+            };
 
-        record_field_path.to_string()
+            Config::set_evncache("TRANSFORM_RECORD_FIELD_PATH", &record_field_path.clone());
+            record_field_path.to_string()
+        }
     }
 
     pub fn get_transform_batch_time_fields() -> String {
-        let config = Config::get();
+        if Config::get_envcache("TRANSFORM_BATCH_TIME_FIELDS") != "" {
+            return Config::get_envcache("TRANSFORM_BATCH_TIME_FIELDS")
+        } else {
+            let config = Config::get();
 
-        let pipline = Config::get_pipeline_config();
+            let pipline = Config::get_pipeline_config();
 
-        let default_batch_time_fields = &Config::getenv("TRANSFORM_BATCH_TIME_FIELDS", "");
+            let default_batch_time_fields = &Config::getenv("TRANSFORM_BATCH_TIME_FIELDS", "");
 
-        let batch_time_fields = match pipline.transform.as_ref() {
-            Some(transform) => {
-                transform.batch_time_fields.as_ref().unwrap_or(default_batch_time_fields)
-            }
-            None => {
-                default_batch_time_fields
-            }
-        };
-
-        batch_time_fields.to_string()
+            let batch_time_fields = match pipline.transform.as_ref() {
+                Some(transform) => {
+                    transform.batch_time_fields.as_ref().unwrap_or(default_batch_time_fields)
+                }
+                None => {
+                    default_batch_time_fields
+                }
+            };
+            Config::set_evncache("TRANSFORM_RECORD_FIELD_PATH", &batch_time_fields.clone());
+            batch_time_fields.to_string()
+        }
     }
 
     pub fn get_transform_batch_time_unit() -> String {
-        let config = Config::get();
+        if Config::get_envcache("TRANSFORM_BATCH_TIME_UNIT") != "" {
+            return Config::get_envcache("TRANSFORM_BATCH_TIME_UNIT")
+        } else {
+            let config = Config::get();
 
-        let pipline = Config::get_pipeline_config();
+            let pipline = Config::get_pipeline_config();
 
-        let default_batch_time_unit = &Config::getenv("TRANSFORM_BATCH_TIME_UNIT", "");
+            let default_batch_time_unit = &Config::getenv("TRANSFORM_BATCH_TIME_UNIT", "");
 
-        let batch_time_unit = match pipline.transform.as_ref() {
-            Some(transform) => {
-                transform.batch_time_unit.as_ref().unwrap_or(default_batch_time_unit)
-            }
-            None => {
-                default_batch_time_unit
-            }
-        };
+            let batch_time_unit = match pipline.transform.as_ref() {
+                Some(transform) => {
+                    transform.batch_time_unit.as_ref().unwrap_or(default_batch_time_unit)
+                }
+                None => {
+                    default_batch_time_unit
+                }
+            };
 
-        batch_time_unit.to_string()
+            Config::set_evncache("TRANSFORM_BATCH_TIME_UNIT", &batch_time_unit.clone());
+            batch_time_unit.to_string()
+        }
     }
 
     pub fn get_pipeline_chaos_mode() -> bool {
+        if Config::get_envcache("SKIPPR_CHAOS_MODE") != "" {
+            return Config::truth_value(&Config::get_envcache("SKIPPR_CHAOS_MODE"))
+        } else {
+            let config = Config::get();
 
-        let mode = Config::getenv("SKIPPR_CHAOS_MODE", "");
-        if mode != "" {
-            return Config::truth_value(mode.as_str())
+            let pipline = Config::get_pipeline_config();
+
+            let default_chaos_mode = Config::getenv("SKIPPR_CHAOS_MODE", "");
+            let chaos_mode = pipline.chaos_mode.as_ref().unwrap_or(&default_chaos_mode);
+
+            Config::truth_value(chaos_mode)
         }
-
-        let config = Config::get();
-
-        let pipline = Config::get_pipeline_config();
-
-        let default_chaos_mode = &"no".to_string();
-        let chaos_mode = pipline.chaos_mode.as_ref().unwrap_or(default_chaos_mode);
-
-        Config::truth_value(chaos_mode)
     }
 
     pub fn get_pipeline_data_dir() -> String {
-        let config = Config::get();
+        if Config::get_envcache("DATA_DIR") != "" {
+            return Config::get_envcache("DATA_DIR")
+        } else {
+            let config = Config::get();
 
-        let default_data_dir = Config::getenv("DATA_DIR", "./data");
-        // let default_data_dir = "./data".to_string();
+            let default_data_dir = Config::getenv("DATA_DIR", "./data");
+            // let default_data_dir = "./data".to_string();
 
-        let pipeline_dir = match config.pipelines.get(PIPELINE_NAME.read().as_str()) {
-            Some(pipeline) => {
+            let pipeline_dir = match config.pipelines.get(PIPELINE_NAME.read().as_str()) {
+                Some(pipeline) => {
 
-                pipeline.data_dir.as_ref().unwrap_or(&default_data_dir).to_string()
-            }
-            None => {
-                default_data_dir
-            }
-        };
+                    pipeline.data_dir.as_ref().unwrap_or(&default_data_dir).to_string()
+                }
+                None => {
+                    default_data_dir
+                }
+            };
 
-        pipeline_dir
+            Config::set_evncache("DATA_DIR", &pipeline_dir.clone());
+            pipeline_dir
+        }
     }
 
     pub fn get_pipeline_env() -> String {
-        let config = Config::get();
+        if Config::get_envcache("SKIPPR_ENV") != "" {
+            return Config::get_envcache("SKIPPR_ENV")
+        } else {
+            let config = Config::get();
 
-        let pipeline_name = PIPELINE_NAME.read().clone();
+            let default_env = Config::getenv("SKIPPR_ENV", "prod");
+            let pipeline_env = match config.pipelines.get(PIPELINE_NAME.read().as_str()) {
+                Some(pipeline) => {
+                    pipeline.env.as_ref().unwrap_or(&default_env).to_string()
+                }
+                None => {
+                    default_env
+                }
+            };
 
-        let pipline_env = match config.pipelines.get(pipeline_name.as_str()) {
-            Some(pipeline) => {
-                pipeline.env.as_ref().unwrap_or(&"prod".to_string()).to_string()
-            }
-            None => {
-                "prod".to_string()
-            }
-        };
-
-        pipline_env
-
+            Config::set_evncache("SKIPPR_ENV", &pipeline_env.clone());
+            pipeline_env
+        }
     }
 
     pub fn get_auto_approve() -> bool {
-        let config = Config::get();
+        if Config::get_envcache("SCHEMA_AUTO_APPROVE") != "" {
+            return Config::truth_value(&Config::get_envcache("SCHEMA_AUTO_APPROVE"))
+        } else {
+            let config = Config::get();
 
-        let mut pipeline = Config::get_pipeline_config();
+            let mut pipeline = Config::get_pipeline_config();
 
-        match pipeline.auto_approve {
-            Some(auto_approve) => {
-                Config::truth_value(auto_approve.as_str())
-            }
+            let default_auto_approve = Config::getenv("SCHEMA_AUTO_APPROVE", "true");
+            let auto_approve = pipeline.auto_approve.as_ref().unwrap_or(&default_auto_approve);
+
+            Config::truth_value(auto_approve)
+        }
+    }
+
+    pub fn get_envcache(name: &str) -> String {
+        match ENV_CACHE.read().get(name) {
+            Some(val) => val.clone(),
             None => {
-                let auto_approve = Config::truth_value(Config::getenv("SCHEMA_AUTO_APPROVE", "true").as_str());
-                pipeline.auto_approve = Some(auto_approve.to_string());
-                auto_approve
+                // println!("Missed cache: {}", name);
+                "".to_string()
             }
         }
+    }
 
+    pub fn set_evncache(name: &str, value: &str) {
+        let cache = ENV_CACHE.write();
+        cache.insert(name.to_string(), value.to_string());
     }
 
     pub fn get_pipeline_buffer_threshold_bytes() -> i64 {
-        let config = Config::get();
+        if Config::get_envcache("BUFFER_THRESHOLD_BYTES") != "" {
+            return Config::get_envcache("BUFFER_THRESHOLD_BYTES").parse::<i64>().unwrap()
+        } else {
+            let config = Config::get();
 
-        let pipline = Config::get_pipeline_config();
+            let pipline = Config::get_pipeline_config();
 
-        let default = Config::getenv("BUFFER_THRESHOLD_BYTES", "10485760").parse::<i64>().unwrap();
+            let default = Config::getenv("BUFFER_THRESHOLD_BYTES", "10485760").parse::<i64>().unwrap();
 
-        pipline.buffer_threshold_bytes.or(Some(default)).unwrap()
+            let buffer_threshold_bytes = match pipline.buffer_threshold_bytes.as_ref() {
+                Some(buffer_threshold_bytes) => {
+                    buffer_threshold_bytes
+                }
+                None => {
+                    &default
+                }
+            };
 
+            Config::set_evncache("BUFFER_THRESHOLD_BYTES", &buffer_threshold_bytes.to_string());
+            buffer_threshold_bytes.clone()
+        }
     }
 
     pub fn get_pipeline_buffer_threshold_seconds() -> i64 {
-        let config = Config::get();
+        if Config::get_envcache("BUFFER_THRESHOLD_SECONDS") != "" {
+            return Config::get_envcache("BUFFER_THRESHOLD_SECONDS").parse::<i64>().unwrap()
+        } else {
+            let config = Config::get();
 
-        let pipline = Config::get_pipeline_config();
+            let pipline = Config::get_pipeline_config();
 
-        let default = Config::getenv("BUFFER_THRESHOLD_SECONDS", "60").parse::<i64>().unwrap();
+            let default = Config::getenv("BUFFER_THRESHOLD_SECONDS", "60").parse::<i64>().unwrap();
 
-        pipline.buffer_threshold_seconds.or(Some(60)).unwrap()
+            let buffer_threshold_seconds = match pipline.buffer_threshold_seconds.as_ref() {
+                Some(buffer_threshold_seconds) => {
+                    buffer_threshold_seconds
+                }
+                None => {
+                    &default
+                }
+            };
+
+            Config::set_evncache("BUFFER_THRESHOLD_SECONDS", &buffer_threshold_seconds.to_string());
+            buffer_threshold_seconds.clone()
+        }
+
     }
 
     pub fn get_pipline_plugin_config(plugin_type: &str) -> Result<PluginConfig, String> {
@@ -742,14 +832,7 @@ impl Config {
             "input" => {
                 if let Some(data_inputs) = config.data_inputs {
 
-                    let plugin_name = match pipeline_config.input.as_ref() {
-                        Some(input) => {
-                            input.split('.').collect::<Vec<&str>>()[1].to_string()
-                        }
-                        None => {
-                            Config::getenv("DATA_SOURCE_PLUGIN_NAME", "")
-                        }
-                    };
+                    let plugin_name = Config::get_pipeline_input_plugin_name();
 
                     if let Some(config) = data_inputs.get(&plugin_name) {
                         Ok(config.clone())
@@ -763,14 +846,7 @@ impl Config {
             "output" => {
                 if let Some(data_outputs) = config.data_outputs {
 
-                    let plugin_name = match pipeline_config.output.as_ref() {
-                        Some(output) => {
-                            output.split('.').collect::<Vec<&str>>()[1].to_string()
-                        }
-                        None => {
-                            Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "")
-                        }
-                    };
+                    let plugin_name = Config::get_pipeline_output_plugin_name();
 
                     if let Some(config) = data_outputs.get(&plugin_name) {
                         Ok(config.clone())
@@ -784,14 +860,7 @@ impl Config {
             "deadletter" => {
                 if let Some(data_deadletters) = config.data_deadletters {
 
-                    let plugin_name = match pipeline_config.deadletter.as_ref() {
-                        Some(deadletter) => {
-                            deadletter.split('.').collect::<Vec<&str>>()[1].to_string()
-                        }
-                        None => {
-                            Config::getenv("DATA_DEADLETTER_PLUGIN_NAME", "")
-                        }
-                    };
+                    let plugin_name = Config::get_pipeline_deadletter_plugin_name();
 
                     if let Some(config) = data_deadletters.get(&plugin_name) {
                         Ok(config.clone())
@@ -805,14 +874,7 @@ impl Config {
             "schema" => {
                 if let Some(schema_outputs) = config.schema_outputs {
 
-                    let plugin_name = match pipeline_config.input.as_ref(){
-                        Some(input) => {
-                            input.split('.').collect::<Vec<&str>>()[1].to_string()
-                        }
-                        None => {
-                            Config::getenv("DATA_SCHEMA_PLUGIN_NAME", "")
-                        }
-                    };
+                    let plugin_name = Config::get_pipeline_schema_plugin_name();
 
                     if let Some(config) = schema_outputs.get(&plugin_name) {
                         Ok(config.clone())
@@ -834,16 +896,31 @@ impl Config {
 
     pub fn setenv(name: &str, value: &str) {
         std::env::set_var(name, value);
+        let mut cache = ENV_CACHE.write();
+        cache.insert(name.to_string(), value.to_string());
     }
 
     pub fn getenv(name: &str, default: &str) -> String {
-        match std::env::var(name.to_uppercase()) {
-            Ok(val) => match val {
-                v if v.is_empty() => default.to_string(),
-                _ => val,
-            },
-            Err(_e) => default.to_string(),
-        }
+        let res = {
+            let cache = ENV_CACHE.read();
+            cache.get(name).map(|val| val.clone())
+        };
+
+        let res = res.unwrap_or_else(|| {
+            match std::env::var(name.to_uppercase()) {
+                Ok(val) => match val {
+                    v if v.is_empty() => default.to_string(),
+                    _ => return val,
+                },
+                Err(_e) => default.to_string(),
+            }
+        });
+
+        // println!("Missed cache: {}", name);
+
+        // Set the cache after releasing the read lock.
+        Config::set_evncache(name, &res);
+        res
     }
 
     pub fn list_dir_contents<P: AsRef<Path>>(path: P) -> std::io::Result<()> {
@@ -902,14 +979,25 @@ impl Config {
     }
 
     pub fn get_workspace_name() -> String {
-        let config = Config::get();
+        if Config::get_envcache("WORKSPACE_NAME") != "" {
+            return Config::get_envcache("WORKSPACE_NAME")
+        } else {
+            let config = Config::get();
 
-        let token = Config::getenv("WORKSPACE_NAME", "");
-        if token != "" {
-            return token
+            let default_token = Config::getenv("WORKSPACE_NAME", "default");
+
+            let workspace_name = match config.skippr.workspace.as_ref() {
+                Some(workspace) => {
+                    workspace.to_string()
+                }
+                None => {
+                    default_token
+                }
+            };
+
+            Config::set_evncache("WORKSPACE_NAME", &workspace_name.clone());
+            workspace_name
         }
-
-        config.skippr.workspace.as_ref().unwrap().to_string()
     }
 
     pub fn get_full_namespace_name() -> String {
