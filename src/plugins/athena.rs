@@ -13,7 +13,7 @@ use aws_sdk_glue::types::{
 };
 use aws_sdk_glue::Client as GlueClient;
 use aws_sdk_s3::primitives::ByteStream;
-use aws_sdk_s3::{Client as S3Client, Error};
+use aws_sdk_s3::{Client as S3Client, Client, Error};
 use chrono::prelude::*;
 
 use std::collections::HashMap;
@@ -128,6 +128,8 @@ impl DataOutputAwsAthenaPlugin {
 
             let trimmed_key = &key.trim_matches('/').to_string();
 
+            let mut tags: HashMap<String, String> = HashMap::new();
+
             let mut full_key = "".to_string();
             if !namespace.is_empty() {
                 if !trimmed_key.is_empty() {
@@ -135,6 +137,8 @@ impl DataOutputAwsAthenaPlugin {
                 } else {
                     full_key = format!("{}", namespace);
                 }
+
+                tags.insert("namespace".to_string(), namespace.to_string());
             }
 
             // Partitioning
@@ -158,6 +162,7 @@ impl DataOutputAwsAthenaPlugin {
                     }
 
                     partition_values.push(value.to_string());
+                    tags.insert(item.to_string(), value.to_string());
                 }
 
                 // .collect().join("/")
@@ -250,6 +255,7 @@ impl DataOutputAwsAthenaPlugin {
                 &self.config.s3_bucket,
                 &final_key,
                 &filename,
+                tags,
             )
             .await
             .unwrap();
@@ -263,6 +269,7 @@ impl DataOutputAwsAthenaPlugin {
         bucket: &str,
         key: &str,
         filename: &str,
+        tag_hashmap: HashMap<String, String>
     ) -> Result<(), Error> {
         // let resp = client.list_buckets().send().await?;
 
@@ -274,15 +281,18 @@ impl DataOutputAwsAthenaPlugin {
 
         let body = ByteStream::from_path(Path::new(filename)).await;
 
+        let tags = tag_hashmap.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<String>>().join("&");
+
         match body {
             Ok(b) => {
-                // println!("Uploading file: {} to Bucket: {} and Prefix: {}", filename, bucket, key);
+                // println!("Uploading file: {} to Bucket: {} and Prefix: {} and Tags: {}", filename, bucket, key, tags);
 
                 match client
                     .put_object()
                     .bucket(bucket)
                     .key(key)
                     .body(b)
+                    .tagging(tags)
                     .send()
                     .await
                 {
