@@ -26,4 +26,4 @@ data_outputs:
       athena_workgroup_name: bikehire
       glue_database_name: bikehire
       s3_bucket: skippr-e2e-sample-data-output
-      s3_prefix: bikehire
+      s3_prefix: bikehire_many
