@@ -46,6 +46,8 @@ lazy_static! {
     static ref ENV_CACHE: TimedRwLock<DashMap<String, String>> = TimedRwLock::new("env_cache".to_string(), DashMap::new());
 }
 
+const DEFAULT_CONFIG: &'static str = "NULL_VALUE";
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct Skippr {
     pub api_token: Option<String>,
@@ -466,11 +468,14 @@ impl Config {
 
     pub fn get_skippr_api_token() -> String {
         if Config::get_envcache("SKIPPR_API_TOKEN") != "" {
+            if Config::get_envcache("SKIPPR_API_TOKEN") == DEFAULT_CONFIG {
+                return "".to_string();
+            }
             return Config::get_envcache("SKIPPR_API_TOKEN")
         } else {
             let config = Config::get();
 
-            let token = Config::getenv("SKIPPR_API_TOKEN", "");
+            let token = Config::getenv("SKIPPR_API_TOKEN", DEFAULT_CONFIG);
             if token != "" {
                 Config::set_evncache("SKIPPR_API_TOKEN", &token.clone());
                 return token
@@ -543,13 +548,15 @@ impl Config {
 
     pub fn get_transform_batch_partition_fields() -> String {
         if Config::get_envcache("TRANSFORM_BATCH_PARTITION_FIELDS") != "" {
+            if Config::get_envcache("TRANSFORM_BATCH_PARTITION_FIELDS") == DEFAULT_CONFIG {
+                return "".to_string();
+            }
             return Config::get_envcache("TRANSFORM_BATCH_PARTITION_FIELDS")
         } else {
-            let config = Config::get();
 
             let pipline = Config::get_pipeline_config();
 
-            let default_batch_partition_fields = &Config::getenv("TRANSFORM_BATCH_PARTITION_FIELDS", "");
+            let default_batch_partition_fields = &Config::getenv("TRANSFORM_BATCH_PARTITION_FIELDS", DEFAULT_CONFIG);
             let batch_partition_fields = match pipline.transform.as_ref() {
                 Some(transform) => {
                     transform.batch_partition_fields.as_ref().unwrap_or(default_batch_partition_fields)
@@ -566,13 +573,16 @@ impl Config {
 
     pub fn get_transform_namespace_fields() -> String {
         if Config::get_envcache("TRANSFORM_NAMESPACE_FIELDS") != "" {
+            if Config::get_envcache("TRANSFORM_NAMESPACE_FIELDS") == DEFAULT_CONFIG {
+                return "".to_string();
+            }
             return Config::get_envcache("TRANSFORM_NAMESPACE_FIELDS")
         } else {
             let config = Config::get();
 
             let pipline = Config::get_pipeline_config();
 
-            let default_namespace_fields = &Config::getenv("TRANSFORM_NAMESPACE_FIELDS", "");
+            let default_namespace_fields = &Config::getenv("TRANSFORM_NAMESPACE_FIELDS", DEFAULT_CONFIG);
             let namespace_fields = match pipline.transform.as_ref() {
                 Some(transform) => {
                     transform.namespace_fields.as_ref().unwrap_or(default_namespace_fields)
@@ -612,13 +622,16 @@ impl Config {
 
     pub fn get_transform_record_field_path() -> String {
         if Config::get_envcache("TRANSFORM_RECORD_FIELD_PATH") != "" {
+            if Config::get_envcache("TRANSFORM_RECORD_FIELD_PATH") == DEFAULT_CONFIG {
+                return "".to_string();
+            }
             return Config::get_envcache("TRANSFORM_RECORD_FIELD_PATH")
         } else {
             let config = Config::get();
 
             let pipline = Config::get_pipeline_config();
 
-            let default_record_field_path = &"".to_string();
+            let default_record_field_path = &Config::getenv("TRANSFORM_RECORD_FIELD_PATH", DEFAULT_CONFIG);
 
             let record_field_path = match pipline.transform.as_ref() {
                 Some(transform) => {
@@ -636,13 +649,16 @@ impl Config {
 
     pub fn get_transform_batch_time_fields() -> String {
         if Config::get_envcache("TRANSFORM_BATCH_TIME_FIELDS") != "" {
+            if Config::get_envcache("TRANSFORM_BATCH_TIME_FIELDS") == DEFAULT_CONFIG {
+                return "".to_string();
+            }
             return Config::get_envcache("TRANSFORM_BATCH_TIME_FIELDS")
         } else {
             let config = Config::get();
 
             let pipline = Config::get_pipeline_config();
 
-            let default_batch_time_fields = &Config::getenv("TRANSFORM_BATCH_TIME_FIELDS", "");
+            let default_batch_time_fields = &Config::getenv("TRANSFORM_BATCH_TIME_FIELDS", DEFAULT_CONFIG);
 
             let batch_time_fields = match pipline.transform.as_ref() {
                 Some(transform) => {
@@ -659,13 +675,16 @@ impl Config {
 
     pub fn get_transform_batch_time_unit() -> String {
         if Config::get_envcache("TRANSFORM_BATCH_TIME_UNIT") != "" {
+            if Config::get_envcache("TRANSFORM_BATCH_TIME_UNIT") == DEFAULT_CONFIG {
+                return "".to_string();
+            }
             return Config::get_envcache("TRANSFORM_BATCH_TIME_UNIT")
         } else {
             let config = Config::get();
 
             let pipline = Config::get_pipeline_config();
 
-            let default_batch_time_unit = &Config::getenv("TRANSFORM_BATCH_TIME_UNIT", "");
+            let default_batch_time_unit = &Config::getenv("TRANSFORM_BATCH_TIME_UNIT", DEFAULT_CONFIG);
 
             let batch_time_unit = match pipline.transform.as_ref() {
                 Some(transform) => {
@@ -689,7 +708,7 @@ impl Config {
 
             let pipline = Config::get_pipeline_config();
 
-            let default_chaos_mode = Config::getenv("SKIPPR_CHAOS_MODE", "");
+            let default_chaos_mode = Config::getenv("SKIPPR_CHAOS_MODE", "no");
             let chaos_mode = pipline.chaos_mode.as_ref().unwrap_or(&default_chaos_mode);
 
             Config::truth_value(chaos_mode)
@@ -927,6 +946,7 @@ impl Config {
         let mut cache = ENV_CACHE.write();
         cache.insert(name.to_string(), value.to_string());
     }
+
 
     pub fn getenv(name: &str, default: &str) -> String {
         let res = {
