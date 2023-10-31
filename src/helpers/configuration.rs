@@ -476,12 +476,10 @@ impl Config {
             let config = Config::get();
 
             let token = Config::getenv("SKIPPR_API_TOKEN", DEFAULT_CONFIG);
-            if token != "" {
-                Config::set_evncache("SKIPPR_API_TOKEN", &token.clone());
-                return token
-            }
 
-            config.skippr.api_token.as_ref().or(Some(&"".to_string())).unwrap().to_string()
+            let token = config.skippr.api_token.as_ref().or(Some(&token)).unwrap().to_string();
+            Config::set_evncache("SKIPPR_API_TOKEN", &token.clone());
+            token
         }
     }
 
@@ -668,7 +666,7 @@ impl Config {
                     default_batch_time_fields
                 }
             };
-            Config::set_evncache("TRANSFORM_RECORD_FIELD_PATH", &batch_time_fields.clone());
+            Config::set_evncache("TRANSFORM_BATCH_TIME_FIELDS", &batch_time_fields.clone());
             batch_time_fields.to_string()
         }
     }
@@ -1079,7 +1077,6 @@ impl Config {
             // println!("ERROR: No license found, please set the 'LICENSE' environment variable.");
             return Err(false);
         }
-
 
         if Config::get_transform_batch_time_unit() != ""
             && Config::get_transform_batch_time_fields() == ""
