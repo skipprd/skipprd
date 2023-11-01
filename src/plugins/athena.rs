@@ -307,6 +307,7 @@ impl DataOutputAwsAthenaPlugin {
                     }
                     Err(err) => {
                         println!("Failed to upload file: {}, will retry later.", filename);
+                        println!("{}", err.into_service_error());
 
                         // tokio::spawn(async move {
                         // LOGGER
@@ -339,8 +340,7 @@ impl DataOutputAwsAthenaPlugin {
                 // println!("data: {:?}", data.unwrap().into_bytes());
             }
             Err(_e) => {
-                println!("Failed to upload file: {}, will retry later.", filename);
-                // println!("{}", e);
+                println!("Failed to read file before uploading: {}, will retry later.", filename);
             }
         }
 
