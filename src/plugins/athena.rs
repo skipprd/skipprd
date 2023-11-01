@@ -152,17 +152,25 @@ impl DataOutputAwsAthenaPlugin {
                 let collection: Vec<&str> = parts.collect();
 
                 for item in &collection {
+                    let mut key = match item.split("=").next() {
+                        Some(key) => key,
+                        None => "",
+                    };
                     let mut value = match item.split("=").last() {
                         Some(value) => value,
                         None => "",
                     };
+
+                    if key == "" {
+                        key = "none";
+                    }
 
                     if value == "" {
                         value = "none";
                     }
 
                     partition_values.push(value.to_string());
-                    tags.insert(item.to_string(), value.to_string());
+                    tags.insert(key.to_string(), value.to_string());
                 }
 
                 // .collect().join("/")
