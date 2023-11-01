@@ -148,7 +148,8 @@ impl DataOutputS3Plugin {
                         };
                     }
                     Err(err) => {
-                        println!("Failed to upload file: {}, will retry later.", filename);
+                        println!("Failed to upload file: {} to bucket {}, will retry later.", filename, bucket);
+                        println!("{}", err);
 
                         // LOGGER
                         //     .write()
@@ -172,8 +173,9 @@ impl DataOutputS3Plugin {
                 // let data = resp.body.collect().await;
                 // println!("data: {:?}", data.unwrap().into_bytes());
             }
-            Err(_e) => {
-                println!("Failed to upload file: {}, will retry later.", filename);
+            Err(e) => {
+                println!("Failed to read file before uploading: {}, will retry later.", filename);
+                println!("{}", e);
                 // println!("{}", e);
             }
         }

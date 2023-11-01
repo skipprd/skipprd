@@ -974,6 +974,10 @@ fn output_sync() {
                         let skpr_partition =
                             BufferChunker::decode_file_partition(path.to_str().unwrap());
                         let source_time = BufferChunker::decode_file_time(path.to_str().unwrap());
+                        let mut skpr_time = None;
+                        if source_time >= 0 {
+                            skpr_time = Some(source_time);
+                        }
 
                         arrow_schema = convert_skippr_to_arrow(
                             output_metadata.get(&skpr_namespace).unwrap().fields.clone(),
@@ -987,7 +991,7 @@ fn output_sync() {
                             "output",
                             Some(&skpr_namespace),
                             Some(&skpr_partition),
-                            Some(source_time),
+                            skpr_time,
                         );
 
                         let finalised_file_path = &format!(

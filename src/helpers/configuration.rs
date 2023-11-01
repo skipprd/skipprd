@@ -936,7 +936,14 @@ impl Config {
 
     // Function to access the config anywhere in the code.
     pub fn get() -> Config {
-        APP_CONFIG.read().as_ref().unwrap().clone()
+        match APP_CONFIG.read().as_ref() {
+            Some(app_config) => {
+                app_config.clone()
+            }
+            None => {
+                Config::new()
+            }
+        }
     }
 
     pub fn setenv(name: &str, value: &str) {

@@ -565,7 +565,9 @@ mod parse_time_field_tests {
     #[test]
     fn test_parse_time_field_no_time_fields() {
         // Mocking the environment variable.
-        env::set_var("TRANSFORM_BATCH_TIME_FIELDS", "");
+        // env::set_var("TRANSFORM_BATCH_TIME_FIELDS", "");
+        Config::set_evncache("TRANSFORM_BATCH_TIME_FIELDS", "");
+        Config::setenv("TRANSFORM_BATCH_TIME_FIELDS", "");
 
         let message = json!({
             "key": "value"
@@ -577,7 +579,7 @@ mod parse_time_field_tests {
     #[test]
     fn test_parse_time_field_with_millisecond_timestamp() {
         // Mocking the environment variable.
-        env::set_var("TRANSFORM_BATCH_TIME_FIELDS", "time1");
+        Config::setenv("TRANSFORM_BATCH_TIME_FIELDS", "time1");
 
         let time = Utc::now().timestamp_millis();
         println!("{}", time);
@@ -589,7 +591,7 @@ mod parse_time_field_tests {
     #[test]
     fn test_parse_time_field_with_invalid_millisecond_timestamp() {
         // Mocking the environment variable.
-        env::set_var("TRANSFORM_BATCH_TIME_FIELDS", "time2");
+        Config::setenv("TRANSFORM_BATCH_TIME_FIELDS", "time2");
 
         let time: i64 = 999999999; // Invalid timestamp, less than 1000000000000
         let message = json!({ "time2": time });
@@ -600,7 +602,7 @@ mod parse_time_field_tests {
     #[test]
     fn test_parse_time_field_with_valid_second_timestamp() {
         // Mocking the environment variable.
-        env::set_var("TRANSFORM_BATCH_TIME_FIELDS", "time3");
+        Config::setenv("TRANSFORM_BATCH_TIME_FIELDS", "time3");
 
         let time: i64 = 1646901960;
         let message = json!({ "time3": time });
@@ -611,7 +613,7 @@ mod parse_time_field_tests {
     #[test]
     fn test_parse_time_field_with_datetime_string() {
         // Mocking the environment variable.
-        env::set_var("TRANSFORM_BATCH_TIME_FIELDS", "time4");
+        Config::setenv("TRANSFORM_BATCH_TIME_FIELDS", "time4");
 
         let dt = Utc::now();
         let time = dt.to_rfc3339();
@@ -623,7 +625,7 @@ mod parse_time_field_tests {
     #[test]
     fn test_parse_time_field_with_invalid_datetime_string() {
         // Mocking the environment variable.
-        env::set_var("TRANSFORM_BATCH_TIME_FIELDS", "time5");
+        Config::setenv("TRANSFORM_BATCH_TIME_FIELDS", "time5");
 
         let time = "invalid datetime string";
         let _message = json!({ "time5": time });
