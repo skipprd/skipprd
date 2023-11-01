@@ -122,12 +122,12 @@ impl DataSourceS3Plugin {
         // let mut outputs: HashMap<String, Vec<String>> = HashMap::new();
         let mut outputs: Vec<String> = Vec::new();
 
-        let inventory_bucket = self.config.s3_bucket.clone();
+        let s3_bucket = self.config.s3_bucket.clone();
         let inventory_prefix = self.config.s3_prefix.clone();
 
         println!(
             "Syncing from bucket: {} and prefix {}",
-            inventory_bucket.clone(),
+            s3_bucket.clone(),
             inventory_prefix
         );
 
@@ -140,17 +140,18 @@ impl DataSourceS3Plugin {
         let mut i = 0;
         let mut chunk_size_current = 0;
 
-        let mut inventory_prefix = inventory_prefix.trim_start_matches('/').to_string();
+        let mut s3_prefix = inventory_prefix.trim_start_matches('/').to_string();
 
-        if inventory_prefix == "/".to_string() || inventory_prefix == "./".to_string() {
-            inventory_prefix = "".to_string();
+        if s3_prefix == "/".to_string() || s3_prefix == "./".to_string() {
+            s3_prefix = "".to_string();
         }
 
         let mut list_obj_req = self
             .s3_client
+            // .list_objects()
             .list_objects_v2()
-            .bucket(inventory_bucket.clone())
-            .prefix(inventory_prefix.clone())
+            .bucket(s3_bucket.clone())
+            .prefix(s3_prefix.clone())
             .max_keys(10000);
 
 
@@ -186,7 +187,7 @@ impl DataSourceS3Plugin {
                             // let records_total = rdr.records().count();
 
                             let offset_key = OffsetKey {
-                                namespace: inventory_bucket.clone(),
+                                namespace: s3_bucket.clone(),
                                 partition: object_key.to_string(),
                             };
 
@@ -210,7 +211,7 @@ impl DataSourceS3Plugin {
                                     // println!("Proccessing {} Objects, totalling {} bytes (batch size config {} bytes)", i, chunk_size_current, chunk_size);
 
                                     self.download_and_ingest(
-                                        &inventory_bucket,
+                                        &s3_bucket,
                                         &outputs,
                                         &offsets_clone
                                     )
@@ -247,7 +248,7 @@ impl DataSourceS3Plugin {
 
                         if !outputs.is_empty() {
                             self.download_and_ingest(
-                                &inventory_bucket,
+                                &s3_bucket,
                                 &outputs,
                                 &offsets_clone,
                             )
