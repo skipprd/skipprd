@@ -145,7 +145,7 @@ async fn main() {
                 PIPELINE_NAME.write().push_str(&options.pipeline.unwrap().clone());
                 Config::init().await;
 
-                if Config::get_reset_offset() {
+                if Config::get_reset_offsets() {
 
                     let data_dir = Config::get_data_dir();
                     let pipeline_name = Config::get_pipeline_name();
@@ -163,7 +163,7 @@ async fn main() {
                     PIPELINE_NAME.write().clear();
                     PIPELINE_NAME.write().push_str(&pipeline_name.clone());
                     Config::init().await;
-                    if Config::get_reset_offset() {
+                    if Config::get_reset_offsets() {
 
                         let data_dir = Config::get_data_dir();
                         let pipeline_name = Config::get_pipeline_name();
@@ -184,7 +184,7 @@ async fn main() {
                         PIPELINE_NAME.write().push_str(&pipeline);
                         Config::init().await;
 
-                        if Config::get_reset_offset() {
+                        if Config::get_reset_offsets() {
 
                             let data_dir = Config::get_data_dir();
                             let pipeline_name = Config::get_pipeline_name();

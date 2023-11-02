@@ -191,8 +191,14 @@ impl Config {
 
         let file_path = Config::find_config_file();
 
-        let mut file = File::open(&file_path)
-            .expect("File not found");
+        let mut file = match File::open(&file_path) {
+            Ok(file) => file,
+            Err(error) => {
+                let mut app_config = APP_CONFIG.write();
+                app_config.replace(Config::new());
+                return;
+            }
+        };
 
         let mut contents = String::new();
         file.read_to_string(&mut contents)
@@ -773,7 +779,7 @@ impl Config {
         }
     }
 
-     pub fn get_reset_offset() -> bool {
+     pub fn get_reset_offsets() -> bool {
         if Config::get_envcache("RESET_OFFSETS") != "" {
             return Config::truth_value(&Config::get_envcache("RESET_OFFSETS"))
         } else {
