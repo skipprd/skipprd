@@ -342,7 +342,7 @@ impl Config {
                 None => {
                     let plugin_name = Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "");
                     Config::set_evncache("DATA_OUTPUT_PLUGIN_NAME", &plugin_name.clone());
-                    return plugin_name
+                    return plugin_name;
                 }
             };
 
@@ -390,7 +390,7 @@ impl Config {
                 None => {
                     let plugin_name = Config::getenv("DATA_SCHEMA_PLUGIN_NAME", "");
                     Config::set_evncache("DATA_SCHEMA_PLUGIN_NAME", &plugin_name.clone());
-                    return plugin_name
+                    return plugin_name;
                 }
             };
 
@@ -438,7 +438,7 @@ impl Config {
                 None => {
                     let plugin_name = Config::getenv("DATA_DEADLETTER_PLUGIN_NAME", "");
                     Config::set_evncache("DATA_DEADLETTER_PLUGIN_NAME", &plugin_name.clone());
-                    return plugin_name
+                    return plugin_name;
                 }
             };
 
