@@ -112,6 +112,7 @@ impl PluginConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Pipeline {
+    pub reset_offsets: Option<String>,
     pub auto_approve: Option<String>,
     pub env: Option<String>,
     pub buffer_threshold_bytes: Option<i64>,
@@ -504,6 +505,7 @@ impl Config {
             }
             None => {
                 return Pipeline {
+                    reset_offsets: None,
                     auto_approve: None,
                     env: None,
                     buffer_threshold_bytes: None,
@@ -762,12 +764,23 @@ impl Config {
         if Config::get_envcache("SCHEMA_AUTO_APPROVE") != "" {
             return Config::truth_value(&Config::get_envcache("SCHEMA_AUTO_APPROVE"))
         } else {
-            let config = Config::get();
-
             let mut pipeline = Config::get_pipeline_config();
 
             let default_auto_approve = Config::getenv("SCHEMA_AUTO_APPROVE", "true");
             let auto_approve = pipeline.auto_approve.as_ref().unwrap_or(&default_auto_approve);
+
+            Config::truth_value(auto_approve)
+        }
+    }
+
+     pub fn get_reset_offset() -> bool {
+        if Config::get_envcache("RESET_OFFSETS") != "" {
+            return Config::truth_value(&Config::get_envcache("RESET_OFFSETS"))
+        } else {
+            let mut pipeline = Config::get_pipeline_config();
+
+            let default_auto_approve = &Config::getenv("RESET_OFFSETS", "false");
+            let auto_approve = pipeline.reset_offsets.as_ref().unwrap_or(&default_auto_approve);
 
             Config::truth_value(auto_approve)
         }
@@ -786,6 +799,11 @@ impl Config {
     pub fn set_evncache(name: &str, value: &str) {
         let cache = ENV_CACHE.write();
         cache.insert(name.to_string(), value.to_string());
+    }
+
+    pub fn reset_envcache() {
+        let mut cache = ENV_CACHE.write();
+        cache.clear();
     }
 
     pub fn get_pipeline_buffer_threshold_bytes() -> i64 {
@@ -1288,7 +1306,6 @@ impl Config {
         license.unwrap().get_license().await.unwrap();
 
         Config::get_data_dir();
-
 
     }
 }

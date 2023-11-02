@@ -145,7 +145,17 @@ async fn main() {
                 PIPELINE_NAME.write().push_str(&options.pipeline.unwrap().clone());
                 Config::init().await;
 
-                sync().await;
+                if Config::get_reset_offset() {
+
+                    let data_dir = Config::get_data_dir();
+                    let pipeline_name = Config::get_pipeline_name();
+
+                    println!("Resetting offset and purging buffer files for pipeline: {}", pipeline_name);
+                    println!("To disable this behaviour and enable ingesting '{}' pipeline, remove 'reset_offset' from pipeline config or set to 'false'", pipeline_name);
+                    let _ = fs::remove_dir_all(&data_dir);
+                } else {
+                    sync().await;
+                }
             } else {
                 let pipeline_name = Config::getenv("PIPELINE_NAME", "");
                 if !pipeline_name.is_empty() {
@@ -153,16 +163,38 @@ async fn main() {
                     PIPELINE_NAME.write().clear();
                     PIPELINE_NAME.write().push_str(&pipeline_name.clone());
                     Config::init().await;
-                    sync().await;
+                    if Config::get_reset_offset() {
+
+                        let data_dir = Config::get_data_dir();
+                        let pipeline_name = Config::get_pipeline_name();
+
+                        println!("Resetting offset and purging buffer files for pipeline: {}", pipeline_name);
+                        println!("To disable this behaviour and enable ingesting '{}' pipeline, remove 'reset_offset' from pipeline config or set to 'false'", pipeline_name);
+                        let _ = fs::remove_dir_all(&data_dir);
+                    } else {
+                        sync().await;
+                    }
                 } else {
                     println!("No pipeline name provided, syncing all pipelines");
                     let pipelines = Config::get_pipelines();
                     for pipeline in pipelines {
                         println!("Syncing pipeline: {}", pipeline);
+                        Config::reset_envcache();
                         PIPELINE_NAME.write().clear();
                         PIPELINE_NAME.write().push_str(&pipeline);
                         Config::init().await;
-                        sync().await;
+
+                        if Config::get_reset_offset() {
+
+                            let data_dir = Config::get_data_dir();
+                            let pipeline_name = Config::get_pipeline_name();
+
+                            println!("Resetting offset and purging buffer files for pipeline: {}", pipeline_name);
+                            println!("To disable this behaviour and enable ingesting '{}' pipeline, remove 'reset_offset' from pipeline config or set to 'false'", pipeline_name);
+                            let _ = fs::remove_dir_all(&data_dir);
+                        } else {
+                            sync().await;
+                        }
                     }
                 }
                 // PIPELINE_NAME.write().unwrap().clear();

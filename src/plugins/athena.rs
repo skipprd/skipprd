@@ -315,8 +315,8 @@ impl DataOutputAwsAthenaPlugin {
                     }
                     Err(err) => {
                         println!("Failed to upload file: {} to bucket {}, will retry later.", filename, bucket);
-                        println!("{}", err);
                         println!("{:?}", err.raw_response());
+
 
                         // tokio::spawn(async move {
                         // LOGGER
