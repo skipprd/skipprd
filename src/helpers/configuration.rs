@@ -584,8 +584,6 @@ impl Config {
             }
             return Config::get_envcache("TRANSFORM_NAMESPACE_FIELDS")
         } else {
-            let config = Config::get();
-
             let pipline = Config::get_pipeline_config();
 
             let default_namespace_fields = &Config::getenv("TRANSFORM_NAMESPACE_FIELDS", DEFAULT_CONFIG);
@@ -605,14 +603,14 @@ impl Config {
 
     pub fn get_transform_flatten_events() -> bool {
         if Config::get_envcache("TRANSFORM_FLATTEN_EVENTS") != "" {
+            if Config::get_envcache("TRANSFORM_FLATTEN_EVENTS") == DEFAULT_CONFIG {
+                return false;
+            }
             return Config::truth_value(&Config::get_envcache("TRANSFORM_FLATTEN_EVENTS"))
         } else {
-            let config = Config::get();
-
             let pipline = Config::get_pipeline_config();
 
-            let default_flatten_events = &Config::getenv("TRANSFORM_FLATTEN_EVENTS", "no");
-
+            let default_flatten_events = &Config::getenv("TRANSFORM_FLATTEN_EVENTS", DEFAULT_CONFIG);
             let flatten_events = match pipline.transform.as_ref() {
                 Some(transform) => {
                     transform.flatten_events.as_ref().unwrap_or(default_flatten_events)
@@ -621,6 +619,7 @@ impl Config {
                     default_flatten_events
                 }
             };
+            Config::set_evncache("TRANSFORM_FLATTEN_EVENTS", &flatten_events.clone());
 
             Config::truth_value(flatten_events)
         }
