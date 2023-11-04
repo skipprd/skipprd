@@ -60,6 +60,20 @@ pub struct DataOutputAwsAthenaPlugin {
 const GRANULARITIES: [&str; 5] = ["year", "month", "day", "hour", "minute"];
 
 impl DataOutputAwsAthenaPlugin {
+
+    pub fn get_config() -> DataOutputAwsAthenaPluginConfig {
+        match Config::get_pipline_plugin_config("output") {
+            Ok(config) => config.into(),
+            Err(_) => DataOutputAwsAthenaPluginConfig {
+                format: None,
+                s3_bucket: Config::getenv("DATA_OUTPUT_S3_BUCKET", ""),
+                s3_prefix: Config::getenv("DATA_OUTPUT_S3_PREFIX", ""),
+                athena_workgroup_name: Config::getenv("DATA_OUTPUT_ATHENA_WORKGROUP_NAME", ""),
+                glue_database_name: Config::getenv("SCHEMA_OUTPUT_GLUE_DATABASE_NAME", ""),
+            }
+        }
+    }
+
     pub async fn new(buffer_name: String) -> DataOutputAwsAthenaPlugin {
         let aws_config = aws_config::from_env().load().await;
 
@@ -72,16 +86,7 @@ impl DataOutputAwsAthenaPlugin {
 
 
         // let athena_config: DataOutputAwsAthenaPluginConfig = Config::get_pipline_plugin_config("output").unwrap().into();
-        let athena_config: DataOutputAwsAthenaPluginConfig = match Config::get_pipline_plugin_config("output") {
-            Ok(config) => config.into(),
-            Err(_) => DataOutputAwsAthenaPluginConfig {
-                format: None,
-                s3_bucket: Config::getenv("DATA_OUTPUT_S3_BUCKET", ""),
-                s3_prefix: Config::getenv("DATA_OUTPUT_S3_PREFIX", ""),
-                athena_workgroup_name: Config::getenv("DATA_OUTPUT_ATHENA_WORKGROUP_NAME", ""),
-                glue_database_name: Config::getenv("SCHEMA_OUTPUT_GLUE_DATABASE_NAME", ""),
-            }
-        };
+        let athena_config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
 
         Self {
             s3_client,
@@ -407,7 +412,7 @@ impl AwsAthena {
     }
 
     pub async fn get_work_group() -> Result<bool, String> {
-        let config: DataOutputAwsAthenaPluginConfig = Config::get_pipline_plugin_config("output").unwrap().into();
+        let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
         let workgroup = config.athena_workgroup_name;
         let aws_config = aws_config::from_env().load().await;
 
@@ -437,7 +442,7 @@ impl AwsAthena {
     }
 
     pub async fn glue_get_database() -> Result<bool, String> {
-        let config: DataOutputAwsAthenaPluginConfig = Config::get_pipline_plugin_config("output").unwrap().into();
+        let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
 
         let database_name = config.glue_database_name;
 
@@ -458,7 +463,7 @@ impl AwsAthena {
     }
 
     pub async fn glue_get_table(namespace: &str) -> Result<bool, String> {
-        let config: DataOutputAwsAthenaPluginConfig = Config::get_pipline_plugin_config("output").unwrap().into();
+        let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
 
         let database_name = config.glue_database_name;
 
@@ -485,7 +490,7 @@ impl AwsAthena {
     }
 
     pub async fn create_workgroup(_namespace: &str) -> Result<bool, String> {
-        let config: DataOutputAwsAthenaPluginConfig = Config::get_pipline_plugin_config("output").unwrap().into();
+        let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
 
         let workgroup = config.athena_workgroup_name;
         let bucket = config.s3_bucket;
@@ -536,7 +541,7 @@ impl AwsAthena {
     }
 
     pub async fn glue_create_database(_namespace: &str) -> Result<bool, String> {
-        let config: DataOutputAwsAthenaPluginConfig = Config::get_pipline_plugin_config("output").unwrap().into();
+        let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
 
         let database = config.glue_database_name;
         let bucket = config.s3_bucket;
@@ -598,7 +603,7 @@ impl AwsAthena {
         namespace: &str,
         metadata: &discover::Metadata,
     ) -> Result<bool, String> {
-        let config: DataOutputAwsAthenaPluginConfig = Config::get_pipline_plugin_config("output").unwrap().into();
+        let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
 
         let database = config.glue_database_name;
         let bucket = config.s3_bucket;
@@ -703,7 +708,7 @@ impl AwsAthena {
         namespace: &str,
         metadata: &discover::Metadata,
     ) -> Result<bool, String> {
-        let config: DataOutputAwsAthenaPluginConfig = Config::get_pipline_plugin_config("output").unwrap().into();
+        let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
 
         let database = config.glue_database_name;
         let bucket = config.s3_bucket;
@@ -805,7 +810,7 @@ impl AwsAthena {
         partition_cache: &mut Vec<String>,
         metadata: &discover::Metadata,
     ) -> Result<bool, Error> {
-        let config: DataOutputAwsAthenaPluginConfig = Config::get_pipline_plugin_config("output").unwrap().into();
+        let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
 
         let database = config.glue_database_name;
         let bucket = config.s3_bucket;

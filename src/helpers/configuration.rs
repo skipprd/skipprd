@@ -863,8 +863,6 @@ impl Config {
 
     pub fn get_pipline_plugin_config(plugin_type: &str) -> Result<PluginConfig, String> {
 
-        let pipeline_name = PIPELINE_NAME.read().as_str();
-
         let pipeline_config = Config::get_pipeline_config();
 
         let config = Config::get();
