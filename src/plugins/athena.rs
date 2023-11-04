@@ -4,9 +4,7 @@ use crate::discover::Metadata;
 use crate::helpers::configuration::{Config, PluginConfig};
 use crate::helpers::Helpers;
 use crate::{discover, flatten_metadata, METADATA};
-use aws_sdk_athena::types::{
-    EncryptionConfiguration, EncryptionOption, ResultConfiguration, Tag, WorkGroupConfiguration,
-};
+use aws_sdk_athena::types::{EncryptionConfiguration, EncryptionOption, ResultConfiguration, ResultConfigurationUpdates, Tag, WorkGroupConfiguration, WorkGroupConfigurationUpdates};
 use aws_sdk_athena::Client as AthenaClient;
 use aws_sdk_glue::types::{
     Column, DatabaseInput, PartitionIndex, PartitionInput, SerDeInfo, StorageDescriptor, TableInput,
@@ -370,10 +368,19 @@ impl AwsAthena {
         match AwsAthena::get_work_group().await {
             Ok(true) => {}
             Ok(false) => {}
-            Err(_err) => match AwsAthena::create_workgroup(namespace).await {
-                Ok(_) => {}
+            Err(_err) => match AwsAthena::create_workgroup().await {
+                Ok(_) => {
+                    println!("Created Athena Workgroup");
+                }
                 Err(err) => {
-                    println!("ERROR creating Athena Workgroup: {}", err);
+                    match AwsAthena::update_workgroup().await {
+                        Ok(_) => {
+                            println!("Updated Athena Workgroup");
+                        }
+                        Err(err) => {
+                            println!("ERROR creating/updating Athena Workgroup: {}", err);
+                        }
+                    }
                 }
             },
         }
@@ -489,7 +496,7 @@ impl AwsAthena {
         }
     }
 
-    pub async fn create_workgroup(_namespace: &str) -> Result<bool, String> {
+    pub async fn create_workgroup() -> Result<bool, String> {
         let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
 
         let workgroup = config.athena_workgroup_name;
@@ -522,6 +529,54 @@ impl AwsAthena {
                     .requester_pays_enabled(false)
                     .result_configuration(
                         ResultConfiguration::builder()
+                            .encryption_configuration(
+                                EncryptionConfiguration::builder()
+                                    .encryption_option(EncryptionOption::SseS3)
+                                    .build(),
+                            )
+                            .output_location(format!("s3://{}", path))
+                            .build(),
+                    )
+                    .build(),
+            )
+            .send()
+            .await
+        {
+            Ok(_output) => Ok(true),
+            Err(err) => Err(err.into_service_error().to_string()),
+        }
+    }
+
+    pub async fn update_workgroup() -> Result<bool, String> {
+        let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
+
+        let workgroup = config.athena_workgroup_name;
+        let bucket = config.s3_bucket;
+        let path = config.s3_prefix;
+        let path = path.trim_matches('/');
+
+        let path = std::path::Path::new(&bucket)
+            .join(&path)
+            .join("query-results")
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let aws_config = aws_config::from_env().load().await;
+
+        let glue_client = AthenaClient::new(&aws_config);
+
+        match glue_client
+            .update_work_group()
+            .work_group(&workgroup)
+            .configuration_updates(
+                WorkGroupConfigurationUpdates::builder()
+                    .bytes_scanned_cutoff_per_query(300000000) // 300MB // min is 10000000
+                    .enforce_work_group_configuration(true)
+                    .publish_cloud_watch_metrics_enabled(false)
+                    .requester_pays_enabled(false)
+                    .result_configuration_updates(
+                        ResultConfigurationUpdates::builder()
                             .encryption_configuration(
                                 EncryptionConfiguration::builder()
                                     .encryption_option(EncryptionOption::SseS3)
