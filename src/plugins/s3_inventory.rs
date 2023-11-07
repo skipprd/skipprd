@@ -160,7 +160,7 @@ impl DataSourceS3InventoryPlugin {
             .await;
 
         match results {
-            Err(err) => println!("S3 Error: {}", err.to_string()),
+            Err(err) => println!("S3 Error: {:?}", err),
             Ok(..) => {
                 for result in results {
                     let objects = match result.contents() {

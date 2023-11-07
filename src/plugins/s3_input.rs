@@ -148,7 +148,6 @@ impl DataSourceS3Plugin {
 
         let mut list_obj_req = self
             .s3_client
-            // .list_objects()
             .list_objects_v2()
             .bucket(s3_bucket.clone())
             .prefix(s3_prefix.clone())
@@ -158,7 +157,9 @@ impl DataSourceS3Plugin {
         loop {
             match list_obj_req.clone().send().await {
 
-                Err(err) => println!("S3 Error: {}", err),
+                Err(err) => {
+                    println!("S3 Error: {:?}", err);
+                },
                 Ok(output) => {
                     let objects = match output.contents() {
                         Some(objects) => objects,
