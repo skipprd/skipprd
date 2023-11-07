@@ -542,16 +542,17 @@ impl AnalyseSchema {
             }
 
 
-            if type_count.contains_key("array")  {
-                data_type = "record".to_string();
-            } else if is_sequential {
-                // array of sequential int keys is an avro array
-                data_type = "array".to_string();
-            } else
-            // if type_count.len() > 1
+            // if type_count.contains_key("array")  {
+                // data_type = "record".to_string();
+            if type_count.len() > 1
             {
                 data_type = "record".to_string();
+            } else
+            if is_sequential {
+                // array of sequential int keys is an avro array
+                data_type = "array".to_string();
             }
+
             // NOTE:
             //  - maps sometimes become records, any previously loaded data will be invalid.
             //       which has to be handled by evolution. Resulting in the original map field (e.g. `foo`)
@@ -559,10 +560,10 @@ impl AnalyseSchema {
             //  - Also, maps seemed to make ingesting slower with nested data... but not when flattening data.
             //  - Also, I'm not sure how to query a map in datafusion. Athena is fine. I just don't have confidence the complexity was worth it.
             //  - At the time of writing, Maps are fully supported however and the intention is to maintain that support so users can opt-in to maps.
-            // else if !is_sequential {
+            else if !is_sequential {
                 // associative array is an avro map
-                // data_type = "map".to_string();
-            // }
+                data_type = "map".to_string();
+            }
             // Array of Arrays? Use a Record for the parent.
         }
 
@@ -1336,7 +1337,8 @@ mod tests {
                 "abc4": {"1": "a", "0": "b", "2": "c"},
                 "abc5": {"a": 123, "b": 456, "c": 789},
                 "abc6": ["abc", 123, null, 123.456],
-                "abc7": {"a": "abc", "b": 456, "c": 4.4}
+                "abc7": {"a": "abc", "b": 456, "c": 4.4},
+                "abc8": [{"a": "abc", "b": 456, "c": 4.4},{"a": "abc", "b": 456, "c": 4.4}]
         }"#;
 
         let json: Value = serde_json::from_str(field).unwrap();
@@ -1380,139 +1382,52 @@ mod tests {
 
         remove_file(Path::new(&format!("./{}", random_tmp_file_name))).unwrap();
 
-        println!("{:?}", metadata);
-        println!("{:?}", metadata.get("default").unwrap().fields);
-        println!(
-            "{:?}",
-            metadata.get("default").unwrap().fields.get("abc1").unwrap()
-        );
-        println!(
-            "{:?}",
-            metadata.get("default").unwrap().fields.get("abc2").unwrap()
-        );
+        // println!("{:?}", metadata);
+        // println!("{:?}", metadata.get("default").unwrap().fields);
+        // println!(
+        //     "{:?}",
+        //     metadata.get("default").unwrap().fields.get("abc1").unwrap()
+        // );
+        // println!(
+        //     "{:?}",
+        //     metadata.get("default").unwrap().fields.get("abc2").unwrap()
+        // );
         // println!("{:?}", new_meta.get("default").unwrap().fields.get("abc2").unwrap().determined_type);
         // println!("{:?}", new_meta.get("default").unwrap().fields.get("abc2").unwrap().determined_type_values);
 
-        assert_eq!(
-            metadata
-                .get("default")
-                .unwrap()
-                .fields
-                .get("abc1")
-                .unwrap()
-                .determined_type,
-            "array"
-        );
-        assert_eq!(
-            metadata
-                .get("default")
-                .unwrap()
-                .fields
-                .get("abc1")
-                .unwrap()
-                .determined_type_values,
-            "integer"
-        );
-        assert_eq!(
-            metadata
-                .get("default")
-                .unwrap()
-                .fields
-                .get("abc2")
-                .unwrap()
-                .determined_type,
-            "array"
-        );
-        assert_eq!(
-            metadata
-                .get("default")
-                .unwrap()
-                .fields
-                .get("abc2")
-                .unwrap()
-                .determined_type_values,
-            "string"
-        );
-        assert_eq!(
-            metadata
-                .get("default")
-                .unwrap()
-                .fields
-                .get("abc3")
-                .unwrap()
-                .determined_type,
-            "map"
-        );
-        assert_eq!(
-            metadata
-                .get("default")
-                .unwrap()
-                .fields
-                .get("abc3")
-                .unwrap()
-                .determined_type_values,
-            "string"
-        );
-        assert_eq!(
-            metadata
-                .get("default")
-                .unwrap()
-                .fields
-                .get("abc4")
-                .unwrap()
-                .determined_type,
-            "map"
-        );
-        assert_eq!(
-            metadata
-                .get("default")
-                .unwrap()
-                .fields
-                .get("abc4")
-                .unwrap()
-                .determined_type_values,
-            "string"
-        );
-        assert_eq!(
-            metadata
-                .get("default")
-                .unwrap()
-                .fields
-                .get("abc5")
-                .unwrap()
-                .determined_type,
-            "map"
-        );
-        assert_eq!(
-            metadata
-                .get("default")
-                .unwrap()
-                .fields
-                .get("abc5")
-                .unwrap()
-                .determined_type_values,
-            "integer"
-        );
-        assert_eq!(
-            metadata
-                .get("default")
-                .unwrap()
-                .fields
-                .get("abc6")
-                .unwrap()
-                .determined_type,
-            "record"
-        );
-        assert_eq!(
-            metadata
-                .get("default")
-                .unwrap()
-                .fields
-                .get("abc7")
-                .unwrap()
-                .determined_type,
-            "record"
-        );
+        assert_eq!(metadata.get("default").unwrap().fields.get("abc1").unwrap().determined_type, "array");
+        assert_eq!(metadata.get("default").unwrap().fields.get("abc1").unwrap().determined_type_values, "integer");
+        assert_eq!(metadata.get("default").unwrap().fields.get("abc2").unwrap().determined_type, "array");
+        assert_eq!(metadata.get("default").unwrap().fields.get("abc2").unwrap().determined_type_values, "string");
+        assert_eq!(metadata.get("default").unwrap().fields.get("abc3").unwrap().determined_type, "map");
+        assert_eq!( metadata .get("default") .unwrap() .fields .get("abc3") .unwrap().determined_type_values, "string" );
+        assert_eq!(metadata.get("default").unwrap().fields.get("abc4").unwrap().determined_type, "map");
+        assert_eq!(metadata.get("default").unwrap().fields.get("abc4").unwrap().determined_type_values, "string");
+        assert_eq!(metadata.get("default").unwrap().fields.get("abc5").unwrap().determined_type, "map");
+        assert_eq!(metadata.get("default").unwrap().fields.get("abc5").unwrap().determined_type_values, "integer");
+        assert_eq!(metadata.get("default").unwrap().fields.get("abc6").unwrap().determined_type, "record");
+        assert_eq!(metadata.get("default").unwrap().fields.get("abc7").unwrap().determined_type, "record");
+
+        assert_eq!(metadata.get("default").unwrap().fields.get("abc8").unwrap().determined_type, "array");
+        assert_eq!(metadata.get("default").unwrap().fields.get("abc8").unwrap().determined_type_values, "record");
+
+        // match metadata.get("default").unwrap().fields.get("abc8").unwrap().fields.get("1") {
+        //     Some(_) => {
+        //         match metadata.get("default").unwrap().fields.get("abc8").unwrap().fields.get("1").unwrap().fields.get("a") {
+        //             Some(_) => {
+        //                 match metadata.get("default").unwrap().fields.get("abc8").unwrap().fields.get("1").unwrap().fields.get("b").unwrap().determined_type.as_str() {
+        //                     "string" => {}
+        //                     _ => panic!("Field abc8.1.b not string"),
+        //                 }
+        //             }
+        //             None => panic!("Field abc8.1.a not found"),
+        //         }
+        //     }
+        //     None => panic!("Field abc8.1 not found. {:?}", metadata.get("default").unwrap().fields.get("abc8").unwrap()),
+        // }
+        // println!("{:?}", metadata.get("default").unwrap().fields.get("abc8").unwrap().fields.get("1").unwrap());
+        // assert_eq!(metadata.get("default").unwrap().fields.get("abc8").unwrap().fields.get("1").unwrap().fields.get("a").unwrap().determined_type, "string");
+        // assert_eq!(metadata.get("default").unwrap().fields.get("abc8").unwrap().fields.get("1").unwrap().fields.get("b").unwrap().determined_type, "integer");
 
     }
 
