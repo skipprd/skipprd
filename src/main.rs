@@ -220,15 +220,16 @@ async fn main() {
             println!("Query time: {} seconds", elapsed.as_secs());
         }
         Mode::Schema(options) => {
+            Config::build_config();
             // println!("Command schema");
-            Config::init().await;
-            schema(&options.schema).await;
+            // Config::init().await;
+            schema(&options.pipeline).await;
         }
 
     }
 }
 
-async fn schema(schema_name: &str) {
+async fn schema(pipeline: &str) {
     // register the table
     // let mut options = ConfigOptions::default();
     // options.catalog.information_schema = true;
@@ -240,10 +241,13 @@ async fn schema(schema_name: &str) {
 
     let ctx = SessionContext::with_config(session_config);
 
-    Config::setenv("PIPELINE_NAME", schema_name);
 
+    PIPELINE_NAME.write().clear();
+    PIPELINE_NAME.write().push_str(&pipeline);
+    Config::init().await;
     let workspace = Config::get_workspace_name();
-    let full_table_name = format!("{}.{}", workspace, schema_name);
+    // Config::setenv("PIPELINE_NAME", &table_name);
+    let full_table_name = format!("{}.{}", workspace, pipeline);
 
     // @todo - check dir exists for provided table name, otherwise we end up creating erroneous dirs
 
@@ -254,15 +258,15 @@ async fn schema(schema_name: &str) {
 
     println!("Querying data dir: {}", output_dir);
 
-    match ctx.register_parquet(&schema_name, &output_dir, ParquetReadOptions::default()).await {
+    match ctx.register_parquet(&pipeline, &output_dir, ParquetReadOptions::default()).await {
         Ok(_) => {}
         Err(e) => {
-            println!("Can't find data for table: {} in dir: {}", schema_name, output_dir);
+            println!("Can't find data for table: {} in dir: {}", pipeline, output_dir);
             process::exit(1);
         }
     }
 
-    let dfn = ctx.table(schema_name).await.unwrap();
+    let dfn = ctx.table(pipeline).await.unwrap();
 
     // print each field and type for schema:
     let schema = dfn.schema();

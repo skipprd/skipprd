@@ -34,5 +34,5 @@ pub struct QueryOptions {
 pub struct SchemaOptions {
     /// The schema to use
     #[arg(short, long)]
-    pub(crate) schema: String,
+    pub(crate) pipeline: String,
 }
