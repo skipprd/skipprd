@@ -625,7 +625,7 @@ async fn sync() {
                 }
 
                 let mut output_files = OUTPUT_FILES_STATIC.write();
-                Ingest::flush_buffers(true, &mut output_files);
+                Ingest::rotate_buffers(true, &mut output_files);
 
                 offsets_clone.flush();
                 println!("Flushed offsets");
@@ -887,7 +887,7 @@ async fn sync() {
     // RUNNING.write().unwrap().store(false, Ordering::SeqCst); // the prevents metrics from printing while shutting down, BUT also prevents output serialisatin
 
     let mut output_files = OUTPUT_FILES_STATIC.write();
-    Ingest::flush_buffers(true, &mut output_files);
+    Ingest::rotate_buffers(true, &mut output_files);
 
     while OUTPUT_RUNNING.read().load(Ordering::SeqCst) {
         sleep(Duration::from_secs(1));

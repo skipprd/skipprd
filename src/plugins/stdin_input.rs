@@ -115,7 +115,7 @@ impl DataSourceStdinPlugin {
                 Err(e) => match e {
                     mpsc::RecvTimeoutError::Timeout => {
                         let mut output_files = OUTPUT_FILES_STATIC.write();
-                        Ingest::flush_buffers(true, &mut output_files);
+                        Ingest::rotate_buffers(true, &mut output_files);
                     }
                     mpsc::RecvTimeoutError::Disconnected => {
                         eprintln!("Error receiving from buffer channel: {}", e);

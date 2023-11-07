@@ -30,7 +30,7 @@ use arrow::json::ReaderBuilder;
 use parquet::data_type::AsBytes;
 use crate::ingest::fast_ingest::fast_path_ingest;
 
-use avro_rs::{Writer, Schema};
+use avro_rs::{Schema};
 use helpers::timed_rwlock::TimedRwLock;
 use crate::serdes::csv::SerderCsv;
 use crate::serdes::xml::SerdeXml;
@@ -93,7 +93,8 @@ pub struct IngestBatch {
 pub struct OutputFile {
     pub(crate) bytes: u64,
     pub(crate) upated_at: SystemTime,
-    pub(crate) file: BufWriter<File>,
+    // non buffered writer
+    pub(crate) file: File,
     pub(crate) rotated: Option<bool>,
 }
 
@@ -189,22 +190,23 @@ impl Ingest {
     }
 
     // pub fn flush_buffers(force: bool, output_files: &mut RwLockWriteGuard<LruCache<String, OutputFile>>) {
-    pub fn flush_buffers(force: bool, output_files: &mut LruCache<String, OutputFile>) {
+    pub fn rotate_buffers(force: bool, output_files: &mut LruCache<String, OutputFile>) {
         let data_dir = Config::get_data_dir();
         // let output_dir = format!("{}/ingest_buffer", data_dir);
 
         let mut rotated_files: Vec<String> = Vec::new();
 
         for (filepath, output_file) in output_files.iter_mut() {
-            output_file
-                .file
-                .flush()
-                .expect(&format!("Could not flush file {}", filepath));
 
             if force
                 || Ingest::is_file_size_exceeded(&output_file)
                 || Ingest::is_file_time_exceeded(&output_file)
             {
+                output_file
+                    .file
+                    .flush()
+                    .expect(&format!("Could not flush file {}", filepath));
+
                 if output_file.bytes > 0 {
 
                     // don't flush empty files when forced
@@ -617,7 +619,7 @@ impl Ingest {
                         }
                     };
 
-                let writer = BufWriter::with_capacity(WRITE_BUF_SIZE, f);
+                // let writer = BufWriter::with_capacity(WRITE_BUF_SIZE, f);
 
                 // Be aware metadata will often not return a filesize on various filesystems. So we'll end up with larger buffer files than intended.
                 let new_file = match std::fs::metadata(&filename) {
@@ -635,14 +637,14 @@ impl Ingest {
                         OutputFile {
                             bytes: metadata.len(),
                             upated_at: time,
-                            file: writer,
+                            file: f,
                             rotated: None,
                         }
                     }
                     Err(_err) => OutputFile {
                         bytes: 0,
                         upated_at: aprox_now,
-                        file: writer,
+                        file: f,
                         rotated: None,
                     },
                 };
@@ -654,7 +656,8 @@ impl Ingest {
                             .file
                             .flush()
                             .expect(&format!("Could not flush file {}", evicted_filename));
-                        evicted.file.into_inner().unwrap().sync_all().unwrap(); // needed?
+                        // evicted.file.into_inner().unwrap().sync_all().unwrap(); // needed?
+
 
                     }
                 }
@@ -663,17 +666,29 @@ impl Ingest {
             }
 
             if let Some(output_file) = output_files.get_mut(filename) {
-                output_file.file.write_all(&buffer.data).unwrap();
-                output_file.bytes += buffer.bytes;
-                output_file.upated_at = aprox_now;
+                match output_file.file.write(&buffer.data) {
+                    Ok(_) => {
+                        output_file.bytes += buffer.bytes;
+                        output_file.upated_at = aprox_now;
+                        output_file
+                            .file
+                            .flush()
+                            .expect(&format!("Could not flush file {}", filename));
+
+                    }
+                    Err(err) => {
+                        println!("Could not write to file: {}, Error: {:?}", filename, err);
+                    }
+                }
             }
         }
-
-        Self::flush_buffers(false, &mut output_files);
 
         offset_db_clone.flush();
 
         buffers.clear_all();
+
+        Self::rotate_buffers(false, &mut output_files);
+
 
         if *updated_schema_clone.lock().unwrap() == "yes".to_string() {
             *updated_schema_clone.lock().unwrap() = "no".to_string();
