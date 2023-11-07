@@ -115,7 +115,7 @@ fn process_map_field(
     let mut new_value: Value = Value::Null;
     if value.is_object() {
         for (key, val) in value.as_object().ok_or("Value is not an object")? {
-            let meta_field = metadata.get(field).and_then(|f| f.fields.get(key)).ok_or(format!("Field '{}' not found in metadata or it's disabled", key))?;
+            let meta_field = metadata.get(field).and_then(|f| f.fields.get(key)).ok_or(format!("Map field '{}' not found in metadata or it's disabled", key))?;
             if meta_field.enabled {
                 let new_val = fast_set_value(
                     &meta_field.determined_type,
@@ -140,7 +140,7 @@ fn process_array_field(
     if value.is_array() {
         let values = value.as_array().ok_or("Value is not an array")?;
         for (idx, val) in values.iter().enumerate() {
-            let meta_field = metadata.get(field).ok_or(format!("Field '{}' not found in metadata or it's disabled", idx))?;
+            let meta_field = metadata.get(field).ok_or(format!("Array field '{}' not found in metadata or it's disabled", idx))?;
             if meta_field.enabled {
                 let new_val = fast_set_value(
                     &meta_field.determined_type_values,
