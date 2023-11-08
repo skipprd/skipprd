@@ -542,17 +542,16 @@ impl AnalyseSchema {
             }
 
 
-            // if type_count.contains_key("array")  {
-                // data_type = "record".to_string();
-            if type_count.len() > 1
-            {
+            if type_count.contains_key("array")  {
                 data_type = "record".to_string();
-            } else
-            if is_sequential {
+            } else if is_sequential {
                 // array of sequential int keys is an avro array
                 data_type = "array".to_string();
+            } else
+            // if type_count.len() > 1
+            {
+                data_type = "record".to_string();
             }
-
             // NOTE:
             //  - maps sometimes become records, any previously loaded data will be invalid.
             //       which has to be handled by evolution. Resulting in the original map field (e.g. `foo`)
@@ -560,10 +559,10 @@ impl AnalyseSchema {
             //  - Also, maps seemed to make ingesting slower with nested data... but not when flattening data.
             //  - Also, I'm not sure how to query a map in datafusion. Athena is fine. I just don't have confidence the complexity was worth it.
             //  - At the time of writing, Maps are fully supported however and the intention is to maintain that support so users can opt-in to maps.
-            else if !is_sequential {
+            // else if !is_sequential {
                 // associative array is an avro map
-                data_type = "map".to_string();
-            }
+                // data_type = "map".to_string();
+            // }
             // Array of Arrays? Use a Record for the parent.
         }
 
