@@ -113,6 +113,7 @@ impl PluginConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct Pipeline {
     pub reset_offsets: Option<String>,
+    pub reset_metadata: Option<String>,
     pub auto_approve: Option<String>,
     pub env: Option<String>,
     pub buffer_threshold_bytes: Option<i64>,
@@ -512,6 +513,7 @@ impl Config {
             None => {
                 return Pipeline {
                     reset_offsets: None,
+                    reset_metadata: None,
                     auto_approve: None,
                     env: None,
                     buffer_threshold_bytes: None,
@@ -707,6 +709,9 @@ impl Config {
 
     pub fn get_pipeline_chaos_mode() -> bool {
         if Config::get_envcache("SKIPPR_CHAOS_MODE") != "" {
+            if Config::get_envcache("SKIPPR_CHAOS_MODE") == DEFAULT_CONFIG {
+                return false;
+            }
             return Config::truth_value(&Config::get_envcache("SKIPPR_CHAOS_MODE"))
         } else {
             let config = Config::get();
@@ -788,6 +793,19 @@ impl Config {
             let auto_approve = pipeline.reset_offsets.as_ref().unwrap_or(&default_auto_approve);
 
             Config::truth_value(auto_approve)
+        }
+    }
+
+     pub fn get_reset_metadata() -> bool {
+        if Config::get_envcache("RESET_METADATA") != "" {
+            return Config::truth_value(&Config::get_envcache("RESET_METADATA"))
+        } else {
+            let mut pipeline = Config::get_pipeline_config();
+
+            let default = &Config::getenv("RESET_METADATA", "false");
+            let value = pipeline.reset_metadata.as_ref().unwrap_or(&default);
+
+            Config::truth_value(value)
         }
     }
 
@@ -1099,7 +1117,7 @@ impl Config {
         // return doc;
     }
 
-    pub async fn get_config() -> Result<HashMap<String, Metadata>, bool> {
+    pub async fn get_metadata() -> Result<HashMap<String, Metadata>, bool> {
 
         if !*HAS_LICENSE.read().unwrap() {
             // println!("ERROR: No license found, please set the 'LICENSE' environment variable.");
@@ -1173,7 +1191,54 @@ impl Config {
         metadata
     }
 
-    pub async fn set_config(metadata: &HashMap<String, Metadata>, evolved: bool) {
+    pub async fn delete_metadata() {
+        if !*HAS_LICENSE.read().unwrap() {
+            // println!("ERROR: No license found, please set the 'LICENSE' environment variable.");
+            return;
+        }
+
+        let workspace = Self::get_workspace_name();
+        let pipeline = Self::get_pipeline_name();
+
+        let env = Config::get_pipeline_env();
+        let uri = if env != "prod" {
+            format!("https://metadata.{}.api.skippr.io", env)
+        } else {
+            String::from("https://metadata.api.skippr.io")
+        };
+        let token = Config::get_skippr_api_token();
+
+        let mut headers = HeaderMap::new();
+        let auth_header = HeaderName::from_static("x-api-key");
+        headers.insert(auth_header, HeaderValue::from_str(&token).unwrap());
+
+        let client = Client::builder().default_headers(headers).build().unwrap();
+
+        let path = format!(
+            "workspace/{}/pipeline/{}",
+            workspace, pipeline
+        );
+
+        let response = client
+            .delete(&format!("{}/{}", uri, path))
+            .timeout(Duration::from_secs(32))
+            .send()
+            .await;
+
+        match response {
+            Ok(resp) => match resp.status() {
+                StatusCode::OK => {
+                    println!("Deleted pipeline metadata in Skippr SaaS");
+                }
+                err => println!("Metadata HTTP Error: {:?}", err.as_str()),
+            },
+            Err(err) => {
+                println!("Metadata HTTP Error: {:?}", err.to_string());
+            }
+        }
+    }
+
+    pub async fn set_metadata(metadata: &HashMap<String, Metadata>, evolved: bool) {
         if evolved {
 
             // let data_dir = Config::get_data_dir();
@@ -1209,6 +1274,7 @@ impl Config {
             } else {
                 String::from("https://metadata.api.skippr.io")
             };
+
             let token = Config::get_skippr_api_token();
 
             let mut headers = HeaderMap::new();

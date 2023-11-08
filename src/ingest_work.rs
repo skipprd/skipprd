@@ -699,7 +699,7 @@ impl Ingest {
                 .build()
                 .unwrap()
                 .block_on(async {
-                    Config::set_config(&METADATA.read(), true).await;
+                    Config::set_metadata(&METADATA.read(), true).await;
                 });
         }
 

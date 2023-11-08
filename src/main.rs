@@ -145,6 +145,12 @@ async fn main() {
                 PIPELINE_NAME.write().push_str(&options.pipeline.unwrap().clone());
                 Config::init().await;
 
+                if Config::get_reset_metadata() {
+                    println!("Resetting metadata for pipeline: {}", Config::get_pipeline_name());
+                    println!("To disable this behaviour and enable ingesting '{}' pipeline, remove 'reset_metadata' from pipeline config or set to 'false'", Config::get_pipeline_name());
+                    Config::delete_metadata().await;
+                }
+
                 if Config::get_reset_offsets() {
 
                     let data_dir = Config::get_data_dir();
@@ -163,6 +169,13 @@ async fn main() {
                     PIPELINE_NAME.write().clear();
                     PIPELINE_NAME.write().push_str(&pipeline_name.clone());
                     Config::init().await;
+
+                    if Config::get_reset_metadata() {
+                        println!("Resetting metadata for pipeline: {}", Config::get_pipeline_name());
+                        println!("To disable this behaviour and enable ingesting '{}' pipeline, remove 'reset_metadata' from pipeline config or set to 'false'", Config::get_pipeline_name());
+                        Config::delete_metadata().await;
+                    }
+
                     if Config::get_reset_offsets() {
 
                         let data_dir = Config::get_data_dir();
@@ -183,6 +196,12 @@ async fn main() {
                         PIPELINE_NAME.write().clear();
                         PIPELINE_NAME.write().push_str(&pipeline);
                         Config::init().await;
+
+                        if Config::get_reset_metadata() {
+                            println!("Resetting metadata for pipeline: {}", Config::get_pipeline_name());
+                            println!("To disable this behaviour and enable ingesting '{}' pipeline, remove 'reset_metadata' from pipeline config or set to 'false'", Config::get_pipeline_name());
+                            Config::delete_metadata().await;
+                        }
 
                         if Config::get_reset_offsets() {
 
@@ -442,7 +461,7 @@ async fn discover() {
 
     AnalyseSchema::determine_field_types(&mut skippr_metadata, None, None, flatten);
 
-    Config::set_config(&skippr_metadata, true).await;
+    Config::set_metadata(&skippr_metadata, true).await;
 
     // let file = OpenOptions::new()
     //     .create(true)
@@ -484,7 +503,7 @@ async fn sync() {
 
     let _data_dir = Config::get_data_dir();
 
-    let skippr_metadata = match Config::get_config().await {
+    let skippr_metadata = match Config::get_metadata().await {
         Ok(metadata) => {
             println!("Found Skippr metadata");
 
