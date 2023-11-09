@@ -180,6 +180,12 @@ impl BufferChunker {
                     Ok(path) => {
                         // println!("Finalising output file {}", path.display());
 
+                        // check file is not empty
+                        let metadata = fs::metadata(&path).unwrap();
+                        if metadata.len() == 0 {
+                            continue;
+                        }
+
                         // Always regenerate arrow schema incase updated skippr metadata, e.g. discovered a new field
                         let mut arrow_schema: Result<datatypes::Schema, ArrowError> = Ok(datatypes::Schema::empty());
                         let mut schema_ref = Arc::new(datatypes::Schema::empty());
@@ -493,6 +499,12 @@ impl BufferChunker {
             // if filename.contains(".lock") || filename.contains(".checkpoint") {
             //     continue;
             // }
+
+            // check file is not empty
+            let metadata = fs::metadata(&filename).unwrap();
+            if metadata.len() == 0 {
+                continue;
+            }
 
             match File::open(&filename) {
                 Err(ref e) if e.kind() == ErrorKind::NotFound => {
