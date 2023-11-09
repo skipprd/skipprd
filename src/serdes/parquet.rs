@@ -329,71 +329,71 @@ impl SerdeParquet {
 
         // Read the entire contents into a Vec<u8>
         let mut decompressed_data = Vec::new();
-        decoder.read_to_end(&mut decompressed_data).unwrap();
+        match decoder.read_to_end(&mut decompressed_data) {
+            Ok(_g) => {
+                // Now you have the decompressed data in a Vec<u8>, which does not implement `Seek`.
+                // To provide a seekable stream, you can use a `Cursor` which wraps the Vec<u8>.
+                let mut cursor = Cursor::new(decompressed_data);
 
 
-        // Now you have the decompressed data in a Vec<u8>, which does not implement `Seek`.
-        // To provide a seekable stream, you can use a `Cursor` which wraps the Vec<u8>.
-        let mut cursor = Cursor::new(decompressed_data);
+                // Now, since you have JSON data, parse it
+                // let reader = BufReader::new(decoder);
+                let json_reader = ReaderBuilder::new().with_schema(schema_ref).build(cursor).unwrap();
 
+                // Get the schema from the reader (this is assuming your JSON data conforms to the expected schema)
+                // schema_ref = json_reader.schema();
 
-        // Now, since you have JSON data, parse it
-        // let reader = BufReader::new(decoder);
-        let json_reader = ReaderBuilder::new().with_schema(schema_ref).build(cursor).unwrap();
+                // Create a Parquet writer with the Arrow schema
+                let mut writer = ArrowWriter::try_new(output, json_reader.schema(), Some(props.build())).unwrap();
 
-        // Get the schema from the reader (this is assuming your JSON data conforms to the expected schema)
-        // schema_ref = json_reader.schema();
-
-        // Create a Parquet writer with the Arrow schema
-        let mut writer = ArrowWriter::try_new(output, json_reader.schema(), Some(props.build())).unwrap();
-
-        for batch in json_reader {
-            match batch {
-                Ok(batch) => {
-                    // Write the record batch to the Parquet file
-                    writer.write(&batch).unwrap();
+                for batch in json_reader {
+                    match batch {
+                        Ok(batch) => {
+                            // Write the record batch to the Parquet file
+                            writer.write(&batch).unwrap();
+                        }
+                        Err(e) => {
+                            // Handle the error
+                            println!("Error reading batch: {}", e);
+                        }
+                    }
                 }
-                Err(e) => {
-                    // Handle the error
-                    println!("Error reading batch: {}", e);
+
+                // Finalize the file to ensure all data is flushed and the file is valid
+                writer.close().unwrap();
+            }
+            Err(_err) => {
+                // deprecated
+                let builder = ReaderBuilder::new().with_schema(schema_ref);
+
+                let reader = builder.build(input_file).unwrap();
+
+                schema_ref = reader.schema();
+
+                let mut writer =
+                    ArrowWriter::try_new(output, reader.schema(), Some(props.build())).unwrap();
+                let _error_count = 0;
+
+                for batch in reader {
+                    match batch {
+                        Ok(batch) => {
+
+                            match writer.write(&batch) {
+                                Ok(_g) => {}
+                                Err(_err) => {
+                                    println!("Error writing batch: {}", _err.to_string());
+                                }
+                            }
+                        }
+                        Err(_error) => {
+                            println!("Error reading batch: {} while serialising to parquet", _error.to_string());
+                        }
+                    }
                 }
+
+                writer.close().unwrap();
             }
         }
-
-        // Finalize the file to ensure all data is flushed and the file is valid
-        writer.close().unwrap();
-
-        ///////////////////
-
-
-        // let builder = ReaderBuilder::new().with_schema(schema_ref);
-        //
-        // let reader = builder.build(input_file).unwrap();
-        //
-        // schema_ref = reader.schema();
-        //
-        // let mut writer =
-        //     ArrowWriter::try_new(output, reader.schema(), Some(props.build())).unwrap();
-        // let _error_count = 0;
-        //
-        // for batch in reader {
-        //     match batch {
-        //         Ok(batch) => {
-        //
-        //             match writer.write(&batch) {
-        //                 Ok(_g) => {}
-        //                 Err(_err) => {
-        //                     println!("Error writing batch: {}", _err.to_string());
-        //                 }
-        //             }
-        //         }
-        //         Err(_error) => {
-        //             println!("Error reading batch: {} while serialising to parquet", _error.to_string());
-        //         }
-        //     }
-        // }
-        //
-        // writer.close().unwrap();
 
         output_file_path.to_string()
     }
