@@ -20,8 +20,8 @@ use std::fs::File;
 use std::io::BufReader;
 use std::ops::{Add, Deref};
 
-use std::sync::{Arc, Mutex, RwLock};
-use std::{env, thread};
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::fmt::Debug;
 
 use std::fs;
@@ -30,7 +30,7 @@ use std::fs;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::sleep;
-use std::time::{Instant};
+use std::time::Instant;
 
 use glob::glob_with;
 use glob::MatchOptions;
@@ -60,12 +60,8 @@ use clap::Parser;
 use signal_hook::iterator::Signals;
 
 use std::panic;
-use std::process::abort;
 use std::string::ToString;
-use arrow_schema::DataType;
 use datafusion::common::ExprSchema;
-use datafusion::config::ConfigOptions;
-use datafusion::physical_plan::Statistics;
 use futures::TryFutureExt;
 
 use once_cell::sync::Lazy;
@@ -76,17 +72,12 @@ mod ingest;
 
 mod serdes;
 
-use crate::serdes::parquet::SerdeParquet;
-
 mod plugins;
 
-use crate::discover::arrow_schema::convert_skippr_to_arrow;
 use crate::helpers::configuration::{Config, PIPELINE_NAME};
 
-use crate::buffer::BufferChunker;
-use crate::helpers::logger::{LogLevel, Logger};
+use crate::helpers::logger::{Logger, LogLevel};
 use crate::helpers::offsets::Offsets;
-use crate::helpers::Helpers;
 use crate::helpers::license::HAS_LICENSE;
 use crate::plugins::athena::DataOutputAwsAthenaPlugin;
 
@@ -102,7 +93,7 @@ use crate::plugins::stdin_input::DataSourceStdinPlugin;
 use crate::plugins::stdout_output::DataOutputStdoutPlugin;
 
 use datafusion::prelude::*;
-use nix::libc::{exit, signal};
+use crate::buffer::BufferChunker;
 use crate::helpers::timed_rwlock::TimedRwLock;
 // use crate::plugins::pcap_input::DataSourcePcapPlugin;
 
@@ -112,6 +103,10 @@ use crate::helpers::timed_rwlock::TimedRwLock;
 pub static RUNNING: Lazy<TimedRwLock<AtomicBool>> = Lazy::new(|| TimedRwLock::new("running".to_string(),AtomicBool::new(true)));
 pub static OUTPUT_RUNNING: Lazy<TimedRwLock<AtomicBool>> =
     Lazy::new(|| TimedRwLock::new("output_running".to_string(), AtomicBool::new(false)));
+
+pub static BUFFER_FINALISE_RUNNING: Lazy<TimedRwLock<AtomicBool>> =
+    Lazy::new(|| TimedRwLock::new("buffer_finalise_running".to_string(), AtomicBool::new(false)));
+
 pub static OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE: Lazy<TimedRwLock<AtomicBool>> =
     Lazy::new(|| TimedRwLock::new("output_graceful_shutdown_complete".to_string(), AtomicBool::new(false)));
 
@@ -647,8 +642,8 @@ async fn sync() {
                     sleep(Duration::from_secs(1));
                 }
 
-                let mut output_files = OUTPUT_FILES_STATIC.write();
-                Ingest::rotate_buffers(true, &mut output_files);
+                // let mut output_files = OUTPUT_FILES_STATIC.write();
+                // Ingest::rotate_buffers(true, &mut output_files);
 
                 offsets_clone.flush();
                 println!("Flushed offsets");
@@ -828,7 +823,7 @@ async fn sync() {
                     .unwrap()
                     .block_on(async {
 
-                        output_sync();
+                        // Ingest::finalise_buffers();
 
                         while OUTPUT_RUNNING.read().load(Ordering::SeqCst) {
                             // sleep(Duration::from_secs(1));
@@ -836,9 +831,6 @@ async fn sync() {
                         }
 
                         if Config::get_pipeline_config().output.is_some() {
-                            {
-                                OUTPUT_RUNNING.write().store(true, Ordering::SeqCst);
-                            }
                             {
                                 OUTPUT_RUNNING.write().store(true, Ordering::SeqCst);
                             }
@@ -910,13 +902,13 @@ async fn sync() {
     // RUNNING.write().unwrap().store(false, Ordering::SeqCst); // the prevents metrics from printing while shutting down, BUT also prevents output serialisatin
 
     let mut output_files = OUTPUT_FILES_STATIC.write();
-    Ingest::rotate_buffers(true, &mut output_files);
+    BufferChunker::rotate_buffers(true, &mut output_files);
+
+    // Ingest::finalise_buffers();
 
     while OUTPUT_RUNNING.read().load(Ordering::SeqCst) {
         sleep(Duration::from_secs(1));
     }
-
-    output_sync();
 
     if Config::get_pipeline_config().output.is_some() {
         sync_output_plugin(Config::get_pipeline_output_plugin_name().as_str(), "output".to_string()).await;
@@ -966,126 +958,6 @@ async fn sync() {
     LOGGER.write().await.flush().await.unwrap();
 
     println!("Complete. Shutting Down... bye");
-}
-
-fn output_sync() {
-    // thread::spawn(move || {
-    // println!("Arrow Schema: {:?}", arrowSchema);
-
-    if OUTPUT_RUNNING.read().load(Ordering::SeqCst) {
-        return;
-    } else {
-        OUTPUT_RUNNING.write().store(true, Ordering::SeqCst);
-    }
-
-    let flatten = Config::get_transform_flatten_events();
-
-    let data_dir = Config::get_data_dir();
-    let output_dir = &format!("{}/ingest_buffer", data_dir);
-    let finalised_dir = &format!("{}/output_buffer", data_dir);
-
-    let options = MatchOptions {
-        case_sensitive: false,
-        require_literal_separator: false,
-        require_literal_leading_dot: false,
-    };
-
-    // println!("Finalising output files");
-    // Config::list_dir_contents(output_dir).expect(&format!("Could not list output dir {}", output_dir));
-
-    // loop {
-    for entry in
-        glob_with(&format!("{}/done/*", output_dir), options).expect("Failed to read glob pattern")
-    {
-        if RUNNING.read().load(Ordering::SeqCst) {
-            match entry {
-                Ok(path) => {
-                    // println!("Finalising output file {}", path.display());
-
-                    // Always regenerate arrow schema incase updated skippr metadata, e.g. discovered a new field
-                    let mut arrow_schema: Result<Schema, ArrowError> = Ok(Schema::empty());
-                    let mut schema_ref = Arc::new(Schema::empty());
-
-                    let skpr_namespace =
-                        BufferChunker::decode_file_namespace(path.to_str().unwrap());
-                    // let skpr_partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
-
-                    let metadata = METADATA.read();
-
-                    if metadata.get(&skpr_namespace).is_some() {
-                        let mut output_metadata: HashMap<String, Metadata> = HashMap::new();
-                        if flatten {
-                            let mut meta: HashMap<String, Metadata> = HashMap::new();
-
-                            flatten_metadata(metadata.get(&skpr_namespace).unwrap(), &mut meta);
-
-                            let mut flat: Metadata = Metadata::new().unwrap();
-                            flat.fields = Box::new(meta);
-                            output_metadata.insert(skpr_namespace.clone(), flat);
-                        } else {
-                            output_metadata = metadata.clone();
-                        }
-
-                        let skpr_partition =
-                            BufferChunker::decode_file_partition(path.to_str().unwrap());
-                        let source_time = BufferChunker::decode_file_time(path.to_str().unwrap());
-                        let mut skpr_time = None;
-                        if source_time >= 0 {
-                            skpr_time = Some(source_time);
-                        }
-
-                        arrow_schema = convert_skippr_to_arrow(
-                            output_metadata.get(&skpr_namespace).unwrap().fields.clone(),
-                        );
-
-                        schema_ref = Arc::new(arrow_schema.unwrap());
-
-                        let tmp_file_path = SerdeParquet::serialize(path.clone(), schema_ref);
-
-                        let finalised_file_name = BufferChunker::encode_chunk_name(
-                            "output",
-                            Some(&skpr_namespace),
-                            Some(&skpr_partition),
-                            skpr_time,
-                        );
-
-                        let finalised_file_path = &format!(
-                            "{}/{}&part={}.parquet",
-                            finalised_dir,
-                            finalised_file_name,
-                            Helpers::random_str(32).as_str()
-                        );
-
-                        match fs::rename(tmp_file_path, finalised_file_path) {
-                            Ok(_) => {}
-                            Err(_) => {}
-                        };
-
-                        match std::fs::remove_file(path) {
-                            Ok(_t) => {}
-                            Err(err) => println!("{:?}", err),
-                        }
-                    }
-                }
-                Err(e) => println!("{:?}", e),
-            }
-        }
-    }
-
-    OUTPUT_RUNNING
-        .write()
-        .store(false, Ordering::SeqCst);
-
-    if !RUNNING.read().load(Ordering::SeqCst) {
-        OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE
-            .write()
-            .store(true, Ordering::SeqCst);
-    }
-
-
-    // sleep(Duration::from_secs(1));
-    // }
-    // });
 }
 
 pub fn flatten_metadata(metadata: &Metadata, flattened: &mut HashMap<String, Metadata>) {

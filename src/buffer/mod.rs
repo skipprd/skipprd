@@ -4,18 +4,268 @@ use url::form_urlencoded;
 use std::collections::HashMap;
 
 use std::fs::File;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 
-use std::str;
+use std::{fs, str};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::SystemTime;
+use arrow::datatypes;
+use arrow::error::ArrowError;
+use glob::{glob_with, MatchOptions};
+use lru::LruCache;
 
 use parquet::data_type::AsBytes;
+use crate::{BUFFER_FINALISE_RUNNING, METADATA, OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE, RUNNING};
+use crate::discover::arrow_schema::convert_skippr_to_arrow;
+use crate::discover::Metadata;
 
 use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
+use crate::ingest_work::OutputFile;
+use crate::metrics::MetricsStatus::Running;
+use crate::serdes::parquet::SerdeParquet;
 
 pub struct BufferChunker {}
 
 impl BufferChunker {
+
+    fn is_file_size_exceeded(file: &OutputFile) -> bool {
+        let buffer_size = Config::get_pipeline_buffer_threshold_bytes(); // 10MB default
+        file.bytes > buffer_size as u64
+    }
+
+    fn is_file_time_exceeded(file: &OutputFile) -> bool {
+        let ttl = Config::get_pipeline_buffer_threshold_seconds(); // 10MB default
+        SystemTime::now()
+            .duration_since(file.upated_at)
+            .unwrap()
+            .as_secs()
+            > ttl as u64
+    }
+
+    fn is_rotated(file: &OutputFile) -> bool {
+        file.rotated.is_some()
+    }
+
+    pub fn rotate_buffers(force: bool, output_files: &mut LruCache<String, OutputFile>) {
+        let data_dir = Config::get_data_dir();
+        // let output_dir = format!("{}/ingest_buffer", data_dir);
+
+        let mut rotated_files: Vec<String> = Vec::new();
+
+        for (filepath, output_file) in output_files.iter_mut() {
+
+            if force
+                || BufferChunker::is_file_size_exceeded(&output_file)
+                || BufferChunker::is_file_time_exceeded(&output_file)
+            {
+                output_file
+                    .file
+                    .flush()
+                    .expect(&format!("Could not flush file {}", filepath));
+
+                if output_file.bytes > 0 {
+
+                    // don't flush empty files when forced
+                    // output_file.bytes = 0;
+                    // output_file.upated_at = UNIX_EPOCH;
+                    // output_file.rotated = Some(true);
+
+                    let filename = filepath.split("/").last().unwrap();
+
+                    let new_filename = format!(
+                        "{}/done/{}-{}",
+                        filepath.split("/").take(filepath.split("/").count() - 1).collect::<Vec<&str>>().join("/"),
+                        Helpers::random_str(32),
+                        &filename
+                    );
+
+                    match fs::rename(&filepath, &new_filename) {
+                        Ok(_) => {
+                            // println!("Rotated file {}", filepath);
+                            rotated_files.push(filepath.to_string());
+                        }
+                        Err(err) => {
+                            println!("Failed to rotate buffer file {} to {}, Error {:?}", filepath, new_filename, err);
+                        }
+                    };
+
+
+                }
+            }
+        }
+
+        for filename in rotated_files {
+            let popped = output_files.pop(&filename);
+            // println!("Rotated file {}: popped: {} with size: {} last update: {}", filename, popped.is_some(), popped.as_ref().unwrap().bytes.clone(), popped.unwrap().upated_at.duration_since(UNIX_EPOCH).unwrap().as_secs());
+
+        }
+
+        if force {
+            let options = MatchOptions {
+                case_sensitive: false,
+                require_literal_separator: false,
+                require_literal_leading_dot: false,
+            };
+
+            for dir in [
+                format!("{}/ingest_buffer", data_dir),
+                format!("{}/deadletter_buffer", data_dir)] {
+
+                for entry in glob_with(&format!("{}/*", dir), options)
+                    .expect("Failed to read glob pattern")
+                {
+                    match entry {
+                        Ok(path) => {
+                            if path.is_dir() {
+                                break;
+                            }
+
+                            let new_filename = format!(
+                                "{}/done/{}-{}",
+                                dir,
+                                Helpers::random_str(32),
+                                path.file_name().unwrap().to_str().unwrap()
+                            );
+                            let old_path = format!("{}", path.display().to_string());
+
+                            match fs::rename(&old_path, &new_filename) {
+                                Ok(_) => {}
+                                Err(err) => {
+                                    println!("Error: {}", err)
+                                }
+                            };
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        BufferChunker::finalise_buffers();
+    }
+
+    pub fn finalise_buffers() {
+        // thread::spawn(move || {
+        // println!("Arrow Schema: {:?}", arrowSchema);
+
+        if BUFFER_FINALISE_RUNNING.read().load(Ordering::SeqCst) {
+            return;
+        } else {
+            BUFFER_FINALISE_RUNNING.write().store(true, Ordering::SeqCst);
+        }
+
+        let flatten = Config::get_transform_flatten_events();
+
+        let data_dir = Config::get_data_dir();
+        let output_dir = &format!("{}/ingest_buffer", data_dir);
+        let finalised_dir = &format!("{}/output_buffer", data_dir);
+
+        let options = MatchOptions {
+            case_sensitive: false,
+            require_literal_separator: false,
+            require_literal_leading_dot: false,
+        };
+
+        // println!("Finalising output files");
+        // Config::list_dir_contents(output_dir).expect(&format!("Could not list output dir {}", output_dir));
+
+        // loop {
+        for entry in
+        glob_with(&format!("{}/done/*", output_dir), options).expect("Failed to read glob pattern")
+        {
+            if RUNNING.read().load(Ordering::SeqCst) {
+                match entry {
+                    Ok(path) => {
+                        // println!("Finalising output file {}", path.display());
+
+                        // Always regenerate arrow schema incase updated skippr metadata, e.g. discovered a new field
+                        let mut arrow_schema: Result<datatypes::Schema, ArrowError> = Ok(datatypes::Schema::empty());
+                        let mut schema_ref = Arc::new(datatypes::Schema::empty());
+
+                        let skpr_namespace =
+                            BufferChunker::decode_file_namespace(path.to_str().unwrap());
+                        // let skpr_partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
+
+                        let metadata = METADATA.read();
+
+                        if metadata.get(&skpr_namespace).is_some() {
+                            let mut output_metadata: HashMap<String, Metadata> = HashMap::new();
+                            if flatten {
+                                let mut meta: HashMap<String, Metadata> = HashMap::new();
+
+                                crate::flatten_metadata(metadata.get(&skpr_namespace).unwrap(), &mut meta);
+
+                                let mut flat: Metadata = Metadata::new().unwrap();
+                                flat.fields = Box::new(meta);
+                                output_metadata.insert(skpr_namespace.clone(), flat);
+                            } else {
+                                output_metadata = metadata.clone();
+                            }
+
+                            let skpr_partition =
+                                BufferChunker::decode_file_partition(path.to_str().unwrap());
+                            let source_time = BufferChunker::decode_file_time(path.to_str().unwrap());
+                            let mut skpr_time = None;
+                            if source_time >= 0 {
+                                skpr_time = Some(source_time);
+                            }
+
+                            arrow_schema = convert_skippr_to_arrow(
+                                output_metadata.get(&skpr_namespace).unwrap().fields.clone(),
+                            );
+
+                            schema_ref = Arc::new(arrow_schema.unwrap());
+
+                            let tmp_file_path = SerdeParquet::serialize(path.clone(), schema_ref);
+
+                            let finalised_file_name = BufferChunker::encode_chunk_name(
+                                "output",
+                                Some(&skpr_namespace),
+                                Some(&skpr_partition),
+                                skpr_time,
+                            );
+
+                            let finalised_file_path = &format!(
+                                "{}/{}&part={}.parquet",
+                                finalised_dir,
+                                finalised_file_name,
+                                Helpers::random_str(32).as_str()
+                            );
+
+                            match fs::rename(tmp_file_path, finalised_file_path) {
+                                Ok(_) => {}
+                                Err(_) => {}
+                            };
+
+                            match std::fs::remove_file(path) {
+                                Ok(_t) => {}
+                                Err(err) => println!("{:?}", err),
+                            }
+                        }
+                    }
+                    Err(e) => println!("{:?}", e),
+                }
+            }
+        }
+
+        BUFFER_FINALISE_RUNNING
+            .write()
+            .store(false, Ordering::SeqCst);
+
+        if !RUNNING.read().load(Ordering::SeqCst) {
+            OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE
+                .write()
+                .store(true, Ordering::SeqCst);
+        }
+
+
+        // sleep(Duration::from_secs(1));
+        // }
+        // });
+    }
+
     pub fn check_flush_limit(_chunk_name: &str, _chunk: &HashMap<String, usize>) -> bool {
         let mut result = false;
 

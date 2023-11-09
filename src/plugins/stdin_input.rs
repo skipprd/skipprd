@@ -11,6 +11,7 @@ use std::thread;
 use std::time::Instant;
 // use async_trait::async_trait;
 use tokio::time::Duration;
+use crate::buffer::BufferChunker;
 // use crate::plugins::DataSourcePlugin;
 
 
@@ -115,7 +116,7 @@ impl DataSourceStdinPlugin {
                 Err(e) => match e {
                     mpsc::RecvTimeoutError::Timeout => {
                         let mut output_files = OUTPUT_FILES_STATIC.write();
-                        Ingest::rotate_buffers(true, &mut output_files);
+                        BufferChunker::rotate_buffers(true, &mut output_files);
                     }
                     mpsc::RecvTimeoutError::Disconnected => {
                         eprintln!("Error receiving from buffer channel: {}", e);

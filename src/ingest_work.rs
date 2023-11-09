@@ -1,11 +1,11 @@
 use crate::buffer::BufferChunker;
 use crate::discover::Metadata;
-use crate::helpers::configuration::{Config};
-use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
+use crate::helpers::configuration::Config;
+use crate::helpers::offsets::{OffsetKey, Offsets, OffsetTypes};
 use crate::helpers::Helpers;
 use crate::ingest::ingest::ingest;
 use crate::serdes::json::SerdeJson;
-use crate::{helpers, METADATA, METRICS, NEW_METADATA, RUNNING};
+use crate::{BUFFER_FINALISE_RUNNING, helpers, METADATA, METRICS, NEW_METADATA, OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE, OUTPUT_RUNNING, RUNNING};
 use glob::{glob_with, MatchOptions};
 use lru::LruCache;
 use once_cell::sync::Lazy;
@@ -13,26 +13,26 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
 use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::io::Write;
 use std::num::NonZeroUsize;
-use std::ops::Deref;
 use std::process::exit;
 use std::string::ToString;
-use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockWriteGuard};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use threadpool::ThreadPool;
 use std::sync::mpsc::channel;
 extern crate num_cpus;
 use std::sync::mpsc::Sender;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use arrow::json::ReaderBuilder;
-
 use parquet::data_type::AsBytes;
 use crate::ingest::fast_ingest::fast_path_ingest;
 
-use avro_rs::{Schema};
+use arrow::datatypes;
+use arrow::error::ArrowError;
 use helpers::timed_rwlock::TimedRwLock;
+use crate::discover::arrow_schema::convert_skippr_to_arrow;
 use crate::serdes::csv::SerderCsv;
+use crate::serdes::parquet::SerdeParquet;
 use crate::serdes::xml::SerdeXml;
 // use crate::converters::skippr_avro::convert_skippr_to_avro_field_types;
 
@@ -187,103 +187,6 @@ impl Ingest {
         }
 
         println!("All ingest tasks finished");
-    }
-
-    // pub fn flush_buffers(force: bool, output_files: &mut RwLockWriteGuard<LruCache<String, OutputFile>>) {
-    pub fn rotate_buffers(force: bool, output_files: &mut LruCache<String, OutputFile>) {
-        let data_dir = Config::get_data_dir();
-        // let output_dir = format!("{}/ingest_buffer", data_dir);
-
-        let mut rotated_files: Vec<String> = Vec::new();
-
-        for (filepath, output_file) in output_files.iter_mut() {
-
-            if force
-                || Ingest::is_file_size_exceeded(&output_file)
-                || Ingest::is_file_time_exceeded(&output_file)
-            {
-                output_file
-                    .file
-                    .flush()
-                    .expect(&format!("Could not flush file {}", filepath));
-
-                if output_file.bytes > 0 {
-
-                    // don't flush empty files when forced
-                    // output_file.bytes = 0;
-                    // output_file.upated_at = UNIX_EPOCH;
-                    // output_file.rotated = Some(true);
-
-                    let filename = filepath.split("/").last().unwrap();
-
-                    let new_filename = format!(
-                        "{}/done/{}-{}",
-                        filepath.split("/").take(filepath.split("/").count() - 1).collect::<Vec<&str>>().join("/"),
-                        Helpers::random_str(32),
-                        &filename
-                    );
-
-                    match fs::rename(&filepath, &new_filename) {
-                        Ok(_) => {
-                            // println!("Rotated file {}", filepath);
-                            rotated_files.push(filepath.to_string());
-                        }
-                        Err(err) => {
-                            println!("Failed to rotate buffer file {} to {}, Error {:?}", filepath, new_filename, err);
-                        }
-                    };
-
-
-                }
-            }
-        }
-
-        for filename in rotated_files {
-            let popped = output_files.pop(&filename);
-            // println!("Rotated file {}: popped: {} with size: {} last update: {}", filename, popped.is_some(), popped.as_ref().unwrap().bytes.clone(), popped.unwrap().upated_at.duration_since(UNIX_EPOCH).unwrap().as_secs());
-
-        }
-
-        if force {
-            let options = MatchOptions {
-                case_sensitive: false,
-                require_literal_separator: false,
-                require_literal_leading_dot: false,
-            };
-
-            for dir in [
-                format!("{}/ingest_buffer", data_dir),
-                format!("{}/deadletter_buffer", data_dir)] {
-
-                for entry in glob_with(&format!("{}/*", dir), options)
-                    .expect("Failed to read glob pattern")
-                {
-                    match entry {
-                        Ok(path) => {
-                            if path.is_dir() {
-                                break;
-                            }
-
-                            let new_filename = format!(
-                                "{}/done/{}-{}",
-                                dir,
-                                Helpers::random_str(32),
-                                path.file_name().unwrap().to_str().unwrap()
-                            );
-                            let old_path = format!("{}", path.display().to_string());
-
-                            match fs::rename(&old_path, &new_filename) {
-                                Ok(_) => {}
-                                Err(err) => {
-                                    println!("Error: {}", err)
-                                }
-                            };
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
     }
 
     pub fn ingest_file(
@@ -687,8 +590,7 @@ impl Ingest {
 
         buffers.clear_all();
 
-        Self::rotate_buffers(false, &mut output_files);
-
+        BufferChunker::rotate_buffers(false, &mut output_files);
 
         if *updated_schema_clone.lock().unwrap() == "yes".to_string() {
             *updated_schema_clone.lock().unwrap() = "no".to_string();
@@ -725,23 +627,7 @@ impl Ingest {
 
     }
 
-    fn is_file_size_exceeded(file: &OutputFile) -> bool {
-        let buffer_size = Config::get_pipeline_buffer_threshold_bytes(); // 10MB default
-        file.bytes > buffer_size as u64
-    }
 
-    fn is_file_time_exceeded(file: &OutputFile) -> bool {
-        let ttl = Config::get_pipeline_buffer_threshold_seconds(); // 10MB default
-        SystemTime::now()
-            .duration_since(file.upated_at)
-            .unwrap()
-            .as_secs()
-            > ttl as u64
-    }
-
-    fn is_rotated(file: &OutputFile) -> bool {
-        file.rotated.is_some()
-    }
 }
 
 
