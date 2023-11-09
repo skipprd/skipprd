@@ -500,12 +500,6 @@ impl BufferChunker {
             //     continue;
             // }
 
-            // check file is not empty
-            let metadata = fs::metadata(&filename).unwrap();
-            if metadata.len() == 0 {
-                continue;
-            }
-
             match File::open(&filename) {
                 Err(ref e) if e.kind() == ErrorKind::NotFound => {
                     // File was removed by a competing thread
@@ -517,6 +511,18 @@ impl BufferChunker {
                     continue;
                 }
                 Ok(_file) => {
+                    // check file is not empty
+                    let metadata = match fs::metadata(&filename) {
+                        Err(e) => {
+                            // println!("Error reading file {}: {}", filename.to_str().unwrap(), e);
+                            continue;
+                        }
+                        Ok(metadata) => metadata,
+                    };
+                    if metadata.len() == 0 {
+                        continue;
+                    }
+
                     // if self.lock(&file, false) {
                     return Some(filename.to_str().unwrap().to_string());
                     // }
