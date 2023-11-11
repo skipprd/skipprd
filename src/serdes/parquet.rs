@@ -258,7 +258,8 @@ impl SerdeParquet {
             return "".to_string();
         }
 
-        let input_file = source_file.unwrap();
+        // BufRead from source file
+        let input_file = std::io::BufReader::new(source_file.unwrap());
 
         // let mut input_file = File::open("/tmp/ddd/s3-uewnxrmskf").unwrap();
 
@@ -316,14 +317,17 @@ impl SerdeParquet {
             // .open("parquet")
             .unwrap();
 
-        let builder = ReaderBuilder::new().with_schema(schema_ref);
+        let builder = ReaderBuilder::new(schema_ref.clone());
+
 
         let reader = builder.build(input_file).unwrap();
         
-        schema_ref = reader.schema();
-        
+        // schema_ref = reader.
+
+        // panic!("Arrow schema: {:?}", schema_ref);
+
         let mut writer =
-            ArrowWriter::try_new(output, reader.schema(), Some(props.build())).unwrap();
+            ArrowWriter::try_new(output, schema_ref, Some(props.build())).unwrap();
         let _error_count = 0;
 
         for batch in reader {
@@ -334,48 +338,11 @@ impl SerdeParquet {
                         Ok(_g) => {}
                         Err(_err) => {
                             println!("Error writing batch: {}", _err.to_string());
-
-                            // let data_dir = Config::get_data_dir();
-                            // let deadletter_dir = format!("{}/deadletter_buffer", data_dir);
-                            // let output_file = format!("{}/{}", deadletter_dir.clone(), &DEADLETTER_FILE_NAME.as_str());
-                            //
-                            // let mut output = OpenOptions::new()
-                            //     .create(true)
-                            //     .write(true)
-                            //     .append(true)
-                            //     .open(output_file)
-                            //     .unwrap();
-                            //
-                            // match output.write_all(batch.to_string().as_bytes()) {
-                            //     Ok(_g) => {}
-                            //     Err(_err) => {
-                            //         println!("Error writing batch to deadletter: {}", _err.to_string());
-                            //     }
-                            // }
-
-                            // LOGGER
-                            //     .write()
-                            //     .await
-                            //     .log(LogLevel::Error, _err.to_string())
-                            //     .await;
                         }
                     }
                 }
                 Err(_error) => {
-                    // tokio::runtime::Builder::new_multi_thread()
-                    //     .enable_all()
-                    //     .build()
-                    //     .unwrap()
-                    //     .block_on(async {
-
-                            println!("Error reading batch: {} while serialising to parquet", _error.to_string());
-
-                            // LOGGER
-                            //     .write()
-                            //     .await
-                            //     .log(LogLevel::Error, _error.to_string())
-                            //     .await;
-                        // });
+                    println!("Error reading batch: {} while serialising to parquet", _error.to_string());
                 }
             }
         }

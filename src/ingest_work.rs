@@ -30,7 +30,6 @@ use crate::ingest::fast_ingest::fast_path_ingest;
 use arrow::datatypes;
 use arrow::error::ArrowError;
 use helpers::timed_rwlock::TimedRwLock;
-use crate::discover::arrow_schema::convert_skippr_to_arrow;
 use crate::serdes::csv::SerderCsv;
 use crate::serdes::parquet::SerdeParquet;
 use crate::serdes::xml::SerdeXml;
@@ -315,10 +314,33 @@ impl Ingest {
                 };
             }
 
-            batch_line = 0;
+            let mut unwrapped_records: Vec<Value> = Vec::new();
 
             for record in records {
+                match record.as_object() {
+                    Some(v) => unwrapped_records.push(record),
+                    None => {
+                        match record.as_array() {
+                            Some(v) => {
+                                for item in v {
+                                    // println!("Item: {}", item);
+                                    unwrapped_records.push(item.clone());
+                                }
+                            },
+                            None => {
+                                panic!("Could not unwrap record")
+                            }
+                        }
+                    }
+                };
 
+            }
+
+            batch_line = 0;
+
+            for record in unwrapped_records {
+
+                // println!("Record: {}", record);
                 batch_line += 1;
                 i += 1;
 
@@ -462,6 +484,17 @@ impl Ingest {
                     };
 
                     let output_file = format!("{}/{}", output_dir.clone(), &output_file_name);
+
+                    // let pretty_json = match serde_json::to_string_pretty(&record_value) {
+                    //     Ok(pretty_json) => pretty_json,
+                    //     Err(err) => {
+                    //         println!("Could not pretty print record: {}, Error: {:?}", record_value, err);
+                    //         "".to_string()
+                    //     }
+                    // };
+                    // panic!("Pretty json: {}", pretty_json);
+
+                    // Serialize your JSON value to a vector
 
                     let record_vec = serde_json::to_vec(&record_value).unwrap();
                     bytes += record_vec.len() as u64;

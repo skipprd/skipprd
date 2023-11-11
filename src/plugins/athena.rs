@@ -811,6 +811,8 @@ impl AwsAthena {
 
         let columns = SkipprHive::convert_skippr_to_hive(metadata).unwrap();
 
+        println!("Columns: {:?}", columns);
+
         let aws_config = aws_config::from_env().load().await;
 
         let glue_client = GlueClient::new(&aws_config);

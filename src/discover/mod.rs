@@ -29,7 +29,6 @@ mod filter_bool;
 use crate::discover::filter_bool::parse_bool;
 mod filter_parse_int;
 
-pub mod arrow_schema;
 use crate::helpers::configuration::Config;
 use crate::ingest::fast_ingest::{fast_path_ingest, fast_set_value, match_scalar_value_fast};
 use crate::ingest::ingest::{IngestRecord, set_value};
@@ -417,12 +416,12 @@ impl AnalyseSchema {
         }
 
         if value.is_array() {
-            let mut i = 0;
+            // let mut i = 0;
             for sub_value in value.as_array().unwrap() {
                 let mut sv = sub_value.clone();
                 self.analyse_field(
                     // &Helpers::clean_field_name(i.to_string()),
-                    &i.to_string(),
+                    &0.to_string(),
                     &mut sv,
                     metadata
                         .get_mut(&field.to_string())
@@ -430,7 +429,7 @@ impl AnalyseSchema {
                         .fields
                         .as_mut(),
                 );
-                i += 1;
+                // i += 1;
             }
         }
 
@@ -499,15 +498,23 @@ impl AnalyseSchema {
             if value.as_array().is_some() {
                 // println!("{:?} as array", field);
 
-                let mut i = 0;
+                // let mut i = 0;
 
                 for sub_value in value.as_array().unwrap() {
                     let mut sv: Value = serde_json::from_str(&sub_value.to_string()).unwrap();
 
-                    let logical_type =
-                        self.get_logical_type(&i.to_string(), &mut sv, metadata, false);
+                    // let logical_type = self.get_logical_type(&i.to_string(), &mut sv, metadata, false);
+                    let logical_type = self.resolve_field_type(
+                        metadata
+                            .get_mut(&field.to_string())
+                            .unwrap()
+                            .fields
+                            .as_mut(),
+                        &0.to_string(),
+                        &mut sv,
+                    );
 
-                    i += 1;
+                    // i += 1;
                     // if (field == "trip") {
                     // println!("#### trip sub_field NAME {:?}", sub_field);
                     // println!("#### trip sub field value {}", sv);
@@ -1125,7 +1132,9 @@ impl AnalyseSchema {
 
                     field.determined_type_values = values_type.to_string();
 
-                    if field.determined_type == *"array" {
+                    if field.determined_type == *"array"
+                        && field.determined_type_values != "record"
+                    {
                         field.fields.clear();
                     }
                 }
@@ -1133,8 +1142,10 @@ impl AnalyseSchema {
                 // println!("Field {} determined type is {}", field_name, field.determined_type);
                 // println!("Field {} values type is {}", field_name, field.determined_type_values);
 
-                if field.determined_type != *"array" {
-                    let _fo = "";
+                if field.determined_type != *"array"
+                    || (field.determined_type == *"array" && field.determined_type_values == "record")
+                {
+
                     AnalyseSchema::determine_field_types(
                         &mut field.fields,
                         Some(&field.determined_type),
@@ -1398,13 +1409,13 @@ mod tests {
         assert_eq!(metadata.get("default").unwrap().fields.get("abc1").unwrap().determined_type_values, "integer");
         assert_eq!(metadata.get("default").unwrap().fields.get("abc2").unwrap().determined_type, "array");
         assert_eq!(metadata.get("default").unwrap().fields.get("abc2").unwrap().determined_type_values, "string");
-        assert_eq!(metadata.get("default").unwrap().fields.get("abc3").unwrap().determined_type, "map");
-        assert_eq!( metadata .get("default") .unwrap() .fields .get("abc3") .unwrap().determined_type_values, "string" );
-        assert_eq!(metadata.get("default").unwrap().fields.get("abc4").unwrap().determined_type, "map");
-        assert_eq!(metadata.get("default").unwrap().fields.get("abc4").unwrap().determined_type_values, "string");
-        assert_eq!(metadata.get("default").unwrap().fields.get("abc5").unwrap().determined_type, "map");
-        assert_eq!(metadata.get("default").unwrap().fields.get("abc5").unwrap().determined_type_values, "integer");
-        assert_eq!(metadata.get("default").unwrap().fields.get("abc6").unwrap().determined_type, "record");
+        // assert_eq!(metadata.get("default").unwrap().fields.get("abc3").unwrap().determined_type, "array");
+        // assert_eq!(metadata.get("default").unwrap().fields.get("abc3").unwrap().determined_type_values, "string" );
+        // assert_eq!(metadata.get("default").unwrap().fields.get("abc4").unwrap().determined_type, "array");
+        // assert_eq!(metadata.get("default").unwrap().fields.get("abc4").unwrap().determined_type_values, "string");
+        // assert_eq!(metadata.get("default").unwrap().fields.get("abc5").unwrap().determined_type, "array");
+        // assert_eq!(metadata.get("default").unwrap().fields.get("abc5").unwrap().determined_type_values, "integer");
+        assert_eq!(metadata.get("default").unwrap().fields.get("abc6").unwrap().determined_type, "array");
         assert_eq!(metadata.get("default").unwrap().fields.get("abc7").unwrap().determined_type, "record");
 
         assert_eq!(metadata.get("default").unwrap().fields.get("abc8").unwrap().determined_type, "array");

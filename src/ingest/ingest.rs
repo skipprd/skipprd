@@ -22,9 +22,9 @@ pub struct IngestRecord {
     pub(crate) record: Value,
 }
 
-pub fn ingest_buf<R: Read>(reader: &mut BufReader<R>) -> ValueIter<R> {
-    ValueIter::new(reader, None)
-}
+// pub fn ingest_buf<R: Read>(reader: &mut BufReader<R>) -> ValueIter<R> {
+//     ValueIter::new(reader, None)
+// }
 
 // pub fn fast_path_ingest(unwrapped_message: &mut IngestRecord, metadata: &mut HashMap<String, Metadata>) -> HashMap<String, Message<Value>> {
 // pub fn fast_path_ingest(unwrapped_message: &mut IngestRecord, metadata: &mut HashMap<String, Metadata>) {
@@ -42,21 +42,9 @@ pub fn ingest(
     // let mut message: Vec<Value> = Vec::with_capacity(batch_size);
     let mut message: Value = Value::Null;
 
-    let records = match unwrapped_message.as_object() {
-        Some(v) => v,
-        None => {
-            match unwrapped_message.as_array() {
-                Some(v) => {
-                    return Value::Array(v.iter().map(|x| ingest(x, metadata, updated_schema, flatten)).collect());
-                },
-                None => {
-                    panic!("Message batch is not an object or array")
-                }
-            }
-        }
-    };
+    let mut i = 0;
 
-    for (field, value) in records {
+    for (field, value) in unwrapped_message.as_object().unwrap() {
         // let field = Helpers::clean_field_name(field.to_string());
 
         // println!("Ingesting field: {:?}", field);
@@ -277,7 +265,7 @@ pub fn set_value(
                         {
                             Some(_t) => (),
                             None => {
-                                // println!("({}.array) no metadata for {} => {} with value: {}", data_type, &field.to_string(), i.to_string(), sub_value);
+                                println!("({}.array) no metadata for {} => {} with value: {}", data_type, &field.to_string(), i.to_string(), sub_value);
                                 // discover_ingest(&field.to_string(), value, metadata, updatedSchema, flatten);
                                 discover_ingest(
                                     &i.to_string(),
@@ -433,7 +421,110 @@ pub fn set_value(
                 //     }
                 // }
             } else if data_type == "array" {
-                new_value = value.to_owned();
+
+                if metadata.get(field).unwrap().determined_type_values == "record" {
+
+                    let mut arr_new_value: Vec<Value> = Vec::new();
+
+                    for (i, sub_value) in value.as_array().unwrap().iter().enumerate() {
+
+                        match metadata
+                            .get(&field.to_string())
+                            .unwrap()
+                            .fields
+                            .get(&0.to_string())
+                        {
+                            Some(_t) => (),
+                            None => {
+                                // println!("({}.array) no metadata for {} => {} with value: {}", data_type, &field.to_string(), i.to_string(), sub_value);
+                                // discover_ingest(&field.to_string(), value, metadata, updatedSchema, flatten);
+                                discover_ingest(
+                                    &0.to_string(),
+                                    sub_value,
+                                    Some(field),
+                                    Some(data_type),
+                                    &mut metadata.get_mut(&field.to_string()).unwrap().fields,
+                                    updated_schema,
+                                );
+                            }
+                        }
+
+                        let foo = set_value(
+                            "record",
+                            &0.to_string(),
+                            sub_value,
+                            Some(field),
+                            Some("array"),
+                            &mut metadata.get_mut(field).unwrap().fields,
+                            updated_schema,
+                        );
+
+                        // println!("Array ingested field: {:?}", foo);
+
+                        arr_new_value.insert(i, foo);
+                    }
+
+                    // i += 1;
+
+                    // println!("Array ingested array: {:?}", arr_new_value);
+
+                    new_value = arr_new_value.into();
+
+                } else {
+
+                    let mut arr_new_value: Vec<Value> = Vec::new();
+
+                    match value.as_array() {
+                        Some(t) => {
+                            for (i, sub_value) in t.iter().enumerate() {
+                                match metadata
+                                    .get(&field.to_string())
+
+                                {
+                                    Some(_t) => (),
+                                    None => {
+                                        // println!("({}.array) no metadata for {} => {} with value: {}", data_type, &field.to_string(), i.to_string(), sub_value);
+                                        // discover_ingest(&field.to_string(), value, metadata, updatedSchema, flatten);
+                                        discover_ingest(
+                                            field,
+                                            sub_value,
+                                            parent_field,
+                                            parent_data_type,
+                                            &mut metadata.borrow_mut(),
+                                            updated_schema,
+                                        );
+
+                                        println!("({}.array) no metadata for {} => {} with value: {}", data_type, &field.to_string(), i.to_string(), sub_value);
+                                        println!("metadata {:?}", metadata)
+                                    }
+                                }
+
+                                // let sub_data_type = &metadata.get(&field.to_string()).unwrap().determined_type_values.as_str().clone();
+                                let foo = set_value(
+                                    &metadata
+                                        .get(&field.to_string())
+                                        .unwrap()
+                                        .determined_type_values
+                                        .clone(),
+                                    field,
+                                    sub_value,
+                                    parent_field,
+                                    parent_data_type,
+                                    &mut metadata.borrow_mut(),
+                                    updated_schema,
+                                );
+
+                                arr_new_value.insert(i, foo);
+                            }
+                            new_value = arr_new_value.into();
+                        }
+                        None => {
+                            new_value = Value::Null;
+                        }
+                    }
+
+                    new_value = value.to_owned();
+                }
             } else {
                 // println!("value is {}", value);
                 // println!("field is {}", field);
@@ -579,6 +670,7 @@ fn match_scalar_value(
                         },
                         // None => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not an integer", value)))),
                         None => {
+                            // println!("Field {} Value {} is not an integer", field, value);
                             // Handle the value error applying the Evolution Strategy
                             Evolution::evolve_field(&field.to_string(), value, parent_field, parent_data_type, metadata, updated_schema)
                         }

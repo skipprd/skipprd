@@ -17,7 +17,7 @@ use lru::LruCache;
 
 use parquet::data_type::AsBytes;
 use crate::{BUFFER_FINALISE_RUNNING, METADATA, OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE, RUNNING};
-use crate::discover::arrow_schema::convert_skippr_to_arrow;
+use crate::converters::skippr_arrow::convert_skippr_to_arrow;
 use crate::discover::Metadata;
 
 use crate::helpers::configuration::Config;

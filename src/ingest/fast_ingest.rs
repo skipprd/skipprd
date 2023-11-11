@@ -23,13 +23,48 @@ pub struct IngestRecord {
     pub(crate) record: Value,
 }
 
+pub fn create_default_nested_message(metadata: &HashMap<String, Metadata>) -> Value {
+    let mut message = Value::Object(Map::new());
+    for (field, meta_data) in metadata {
+        if meta_data.enabled {
+            if meta_data.fields.is_empty() {
+                message[meta_data.out_field_name.clone()] = Value::Null;
+            } else if meta_data.determined_type == "array" {
+                if meta_data.determined_type_values == "record" {
+                    // message[meta_data.out_field_name.clone()] = create_default_nested_message(&meta_data.fields);
+                    let fields = create_default_nested_message(&meta_data.fields);
+                    message[meta_data.out_field_name.clone()] = Value::Array(vec![]);
+                    if fields.as_array().is_some() {
+                        for field in fields.as_array().unwrap().iter() {
+                            message.as_array_mut().unwrap().push(field.clone());
+                        }
+                    }
+                } else {
+                    message[meta_data.out_field_name.clone()] = Value::Array(Vec::new());
+                }
+            } else if meta_data.determined_type == "map" {
+                message[meta_data.out_field_name.clone()] = Value::Object(Map::new());
+            } else {
+                let mut sub_fields = Map::new();
+                sub_fields.insert(field.to_string() , create_default_nested_message(&meta_data.fields));
+                message[meta_data.out_field_name.clone()] = Value::Object(sub_fields);
+            }
+        }
+    }
+    message
+}
 
 pub fn fast_path_ingest(
     unwrapped_message: &Value,
     metadata: &HashMap<String, Metadata>,
     flatten: bool,
 ) -> Result<Value, Box<dyn Error>> {
-    let mut message: Value = Value::Null;
+    // let mut message: Value = Value::Null;
+    // @todo - create a default message containing every field in metadata, including nested fields
+    let mut message = create_default_nested_message(metadata);
+
+    // panic!("message is: {:?}", message);
+
     for (field, value) in unwrapped_message.as_object().ok_or("Invalid JSON object")? {
         let meta_data = metadata.get(field).ok_or(format!("Field '{}' not found in metadata", field))?;
         let field_data_type = meta_data.determined_type.clone();
@@ -41,7 +76,11 @@ pub fn fast_path_ingest(
             None
         )?;
         if !resolved_value.is_null() {
-            message[meta_data.out_field_name.clone()] = resolved_value;
+            // if meta_data.out_field_name == "item_0" {
+            //     message[0] = resolved_value;
+            // } else {
+                message[meta_data.out_field_name.clone()] = resolved_value;
+            // }
         }
     }
     if flatten {
@@ -149,6 +188,9 @@ fn process_array_field(
                     &metadata.get(field).unwrap().fields,
                     None
                 )?;
+
+                // println!("new_val: {:?}", new_val);
+
                 array.push(new_val);
             }
         }
@@ -218,10 +260,10 @@ pub fn match_scalar_value_fast(
                             if apply_evolution {
                                 match Evolution::apply_evolution_factory(field, value, metadata) {
                                     Ok(v) => Ok(v),
-                                    Err(e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not an {}", value, data_type)))),
+                                    Err(e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Field {} value {} is not an {}", field, value, data_type)))),
                                 }
                             } else {
-                                Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not an {}", value, data_type))))
+                                Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Field {} value {} is not an {}", field, value, data_type))))
                             }
                         }
                     }

@@ -42,6 +42,10 @@ impl SkipprHive {
             match &*v.determined_type {
                 // Value::Array(array) => {
                 "record" => {
+                    if v.fields.is_empty() {
+                        continue;
+                    }
+
                     let stuct_cols = SkipprHive::convert_skippr_to_hive_field_types(v).unwrap();
 
                     let mut type_str =
@@ -50,6 +54,7 @@ impl SkipprHive {
                     let mut types: Vec<String> = vec![];
                     for col in stuct_cols.into_iter() {
                         types.push(format!("{}:{}", col.name().unwrap(), col.r#type().unwrap()));
+                        // types.push(format!("{}", col.r#type().unwrap()));
                     }
                     type_str = format!("{}{}>", type_str, types.join(","));
 
@@ -89,19 +94,39 @@ impl SkipprHive {
                             None => v.determined_type.to_string(),
                         };
 
-                        let value_type: String = match MAPPINGS.get(&v.determined_type_values) {
-                            Some(mapped_items) => mapped_items.to_string(),
-                            None => v.determined_type_values.to_string(),
-                        };
+                        if v.determined_type_values == "record" {
+                            let object_fields =
+                                SkipprHive::convert_skippr_to_hive_field_types(v).unwrap();
+                            let mut type_str = format!("{}<", field_type);
 
-                        let type_str = format!("{}<{}>", field_type, value_type);
+                            let mut types: Vec<String> = vec![];
+                            for col in object_fields.into_iter() {
+                                // types.push(format!("{}:{}", col.name().unwrap(), col.r#type().unwrap()));
+                                types.push(format!("{}", col.r#type().unwrap()));
+                            }
+                            type_str = format!("{}{}>", type_str, types.join(","));
 
-                        field_types.push(
-                            Column::builder()
-                                .name(&v.out_field_name.to_string())
-                                .r#type(type_str)
-                                .build(),
-                        )
+                            field_types.push(
+                                Column::builder()
+                                    .name(v.out_field_name.to_string())
+                                    .r#type(type_str)
+                                    .build(),
+                            )
+                        } else {
+                            let value_type: String = match MAPPINGS.get(&v.determined_type_values) {
+                                Some(mapped_value) => mapped_value.to_string(),
+                                None => v.determined_type_values.to_string(),
+                            };
+
+                            let type_str = format!("{}<{}>", field_type, value_type);
+
+                            field_types.push(
+                                Column::builder()
+                                    .name(v.out_field_name.to_string())
+                                    .r#type(type_str)
+                                    .build(),
+                            )
+                        }
                     }
                 }
                 _ => {
