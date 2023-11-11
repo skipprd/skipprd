@@ -42,7 +42,21 @@ pub fn ingest(
     // let mut message: Vec<Value> = Vec::with_capacity(batch_size);
     let mut message: Value = Value::Null;
 
-    for (field, value) in unwrapped_message.as_object().unwrap() {
+    let records = match unwrapped_message.as_object() {
+        Some(v) => v,
+        None => {
+            match unwrapped_message.as_array() {
+                Some(v) => {
+                    return Value::Array(v.iter().map(|x| ingest(x, metadata, updated_schema, flatten)).collect());
+                },
+                None => {
+                    panic!("Message batch is not an object or array")
+                }
+            }
+        }
+    };
+
+    for (field, value) in records {
         // let field = Helpers::clean_field_name(field.to_string());
 
         // println!("Ingesting field: {:?}", field);
