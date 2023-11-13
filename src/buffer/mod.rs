@@ -496,6 +496,9 @@ impl BufferChunker {
         // filenames.sort_by(|a, b| fs::metadata(a).unwrap().modified().cmp(&fs::metadata(b).unwrap().modified()));
 
         for filename in filenames {
+
+            println!("filename: {:?}", filename);
+
             if filename.to_str().unwrap().contains(".temp") {
                 continue;
             }
