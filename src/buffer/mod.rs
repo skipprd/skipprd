@@ -496,9 +496,9 @@ impl BufferChunker {
         // filenames.sort_by(|a, b| fs::metadata(a).unwrap().modified().cmp(&fs::metadata(b).unwrap().modified()));
 
         for filename in filenames {
-            // if filename.contains(".lock") || filename.contains(".checkpoint") {
-            //     continue;
-            // }
+            if filename.to_str().unwrap().contains(".temp") {
+                continue;
+            }
 
             match File::open(&filename) {
                 Err(ref e) if e.kind() == ErrorKind::NotFound => {
