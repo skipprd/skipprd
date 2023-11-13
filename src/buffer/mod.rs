@@ -512,16 +512,16 @@ impl BufferChunker {
                 }
                 Ok(_file) => {
                     // check file is not empty
-                    let metadata = match fs::metadata(&filename) {
-                        Err(e) => {
-                            // println!("Error reading file {}: {}", filename.to_str().unwrap(), e);
-                            continue;
-                        }
-                        Ok(metadata) => metadata,
-                    };
-                    if metadata.len() == 0 {
-                        continue;
-                    }
+                    // let metadata = match fs::metadata(&filename) {
+                    //     Err(e) => {
+                    //         // println!("Error reading file {}: {}", filename.to_str().unwrap(), e);
+                    //         continue;
+                    //     }
+                    //     Ok(metadata) => metadata,
+                    // };
+                    // if metadata.len() == 0 {
+                    //     continue;
+                    // }
 
                     // if self.lock(&file, false) {
                     return Some(filename.to_str().unwrap().to_string());
