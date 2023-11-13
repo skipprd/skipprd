@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Write;
 
 use std::path::PathBuf;
 
@@ -316,84 +316,71 @@ impl SerdeParquet {
             // .open("parquet")
             .unwrap();
 
-        /////////////////////
+        let builder = ReaderBuilder::new().with_schema(schema_ref);
 
-        use flate2::read::GzDecoder;
-        use std::fs::File;
-        use std::io::{BufReader, Cursor};
-        use arrow::json::ReaderBuilder;
+        let reader = builder.build(input_file).unwrap();
+        
+        schema_ref = reader.schema();
+        
+        let mut writer =
+            ArrowWriter::try_new(output, reader.schema(), Some(props.build())).unwrap();
+        let _error_count = 0;
 
-        // Open the compressed file
-        let input = File::open(path).unwrap();
-        let mut decoder = GzDecoder::new(BufReader::new(input));
+        for batch in reader {
+            match batch {
+                Ok(batch) => {
 
-        // Read the entire contents into a Vec<u8>
-        let mut decompressed_data = Vec::new();
-        match decoder.read_to_end(&mut decompressed_data) {
-            Ok(_g) => {
-                // Now you have the decompressed data in a Vec<u8>, which does not implement `Seek`.
-                // To provide a seekable stream, you can use a `Cursor` which wraps the Vec<u8>.
-                let mut cursor = Cursor::new(decompressed_data);
+                    match writer.write(&batch) {
+                        Ok(_g) => {}
+                        Err(_err) => {
+                            println!("Error writing batch: {}", _err.to_string());
 
+                            // let data_dir = Config::get_data_dir();
+                            // let deadletter_dir = format!("{}/deadletter_buffer", data_dir);
+                            // let output_file = format!("{}/{}", deadletter_dir.clone(), &DEADLETTER_FILE_NAME.as_str());
+                            //
+                            // let mut output = OpenOptions::new()
+                            //     .create(true)
+                            //     .write(true)
+                            //     .append(true)
+                            //     .open(output_file)
+                            //     .unwrap();
+                            //
+                            // match output.write_all(batch.to_string().as_bytes()) {
+                            //     Ok(_g) => {}
+                            //     Err(_err) => {
+                            //         println!("Error writing batch to deadletter: {}", _err.to_string());
+                            //     }
+                            // }
 
-                // Now, since you have JSON data, parse it
-                // let reader = BufReader::new(decoder);
-                let json_reader = ReaderBuilder::new().with_schema(schema_ref).build(cursor).unwrap();
-
-                // Get the schema from the reader (this is assuming your JSON data conforms to the expected schema)
-                // schema_ref = json_reader.schema();
-
-                // Create a Parquet writer with the Arrow schema
-                let mut writer = ArrowWriter::try_new(output, json_reader.schema(), Some(props.build())).unwrap();
-
-                for batch in json_reader {
-                    match batch {
-                        Ok(batch) => {
-                            // Write the record batch to the Parquet file
-                            writer.write(&batch).unwrap();
-                        }
-                        Err(e) => {
-                            // Handle the error
-                            println!("Error reading batch: {}", e);
+                            // LOGGER
+                            //     .write()
+                            //     .await
+                            //     .log(LogLevel::Error, _err.to_string())
+                            //     .await;
                         }
                     }
                 }
+                Err(_error) => {
+                    // tokio::runtime::Builder::new_multi_thread()
+                    //     .enable_all()
+                    //     .build()
+                    //     .unwrap()
+                    //     .block_on(async {
 
-                // Finalize the file to ensure all data is flushed and the file is valid
-                writer.close().unwrap();
-            }
-            Err(_err) => {
-                // deprecated
-                let builder = ReaderBuilder::new().with_schema(schema_ref);
-
-                let reader = builder.build(input_file).unwrap();
-
-                schema_ref = reader.schema();
-
-                let mut writer =
-                    ArrowWriter::try_new(output, reader.schema(), Some(props.build())).unwrap();
-                let _error_count = 0;
-
-                for batch in reader {
-                    match batch {
-                        Ok(batch) => {
-
-                            match writer.write(&batch) {
-                                Ok(_g) => {}
-                                Err(_err) => {
-                                    println!("Error writing batch: {}", _err.to_string());
-                                }
-                            }
-                        }
-                        Err(_error) => {
                             println!("Error reading batch: {} while serialising to parquet", _error.to_string());
-                        }
-                    }
-                }
 
-                writer.close().unwrap();
+                            // LOGGER
+                            //     .write()
+                            //     .await
+                            //     .log(LogLevel::Error, _error.to_string())
+                            //     .await;
+                        // });
+                }
             }
         }
+
+        writer.close().unwrap();
 
         output_file_path.to_string()
     }

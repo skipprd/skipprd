@@ -29,8 +29,6 @@ use crate::ingest::fast_ingest::fast_path_ingest;
 
 use arrow::datatypes;
 use arrow::error::ArrowError;
-use flate2::Compression;
-use flate2::write::GzEncoder;
 use helpers::timed_rwlock::TimedRwLock;
 use crate::discover::arrow_schema::convert_skippr_to_arrow;
 use crate::serdes::csv::SerderCsv;
@@ -296,9 +294,7 @@ impl Ingest {
             None => "".to_string()
         };
 
-
         for ingest_batch in datas {
-
 
             let has_offsets =
                 offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Closed, 0);
@@ -467,14 +463,9 @@ impl Ingest {
 
                     let output_file = format!("{}/{}", output_dir.clone(), &output_file_name);
 
-
-
-                    // Serialize your JSON value to a vector
                     let record_vec = serde_json::to_vec(&record_value).unwrap();
-
                     bytes += record_vec.len() as u64;
                     buffers.write(&output_file, &record_vec);
-                    // buffers.write(&output_file, &compressed_data);
                     buffers.write(&output_file, "\n".as_bytes());
 
                     // i += 1;
@@ -578,20 +569,7 @@ impl Ingest {
             }
 
             if let Some(output_file) = output_files.get_mut(filename) {
-
-                // Assuming buffers.write takes a &mut Vec<u8>, which is your in-memory buffer
-                let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-
-                // Compress the serialized JSON
-                encoder.write_all(&buffer.data).unwrap();
-                // encoder.write_all(b"\n").unwrap();
-
-                // Finalize the compression and obtain the compressed data
-                let compressed_data = encoder.finish().unwrap();
-
-
-                match output_file.file.write(&compressed_data) {
-                // match output_file.file.write(&buffer.data) {
+                match output_file.file.write(&buffer.data) {
                     Ok(_) => {
                         output_file.bytes += buffer.bytes;
                         output_file.upated_at = aprox_now;
