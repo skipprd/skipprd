@@ -515,7 +515,7 @@ async fn sync() {
     };
 
     {
-        NEW_METADATA.write().clear();
+        // NEW_METADATA.write().clear();
         METADATA.write().clone_from(&skippr_metadata);
     }
 
