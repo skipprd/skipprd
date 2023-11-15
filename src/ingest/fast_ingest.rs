@@ -11,7 +11,7 @@ use crate::discover::date_formats::DateFormats;
 use crate::discover::evolution::Evolution;
 
 use crate::helpers::Helpers;
-use crate::ingest::ingest::set_date;
+use crate::ingest::ingest::{ResolvedFieldValue, set_date};
 
 #[derive(Default)]
 pub struct IngestRecord {
@@ -75,11 +75,11 @@ pub fn fast_path_ingest(
             metadata,
             None
         )?;
-        if !resolved_value.is_null() {
+        if !resolved_value.value.is_null() {
             // if meta_data.out_field_name == "item_0" {
             //     message[0] = resolved_value;
             // } else {
-                message[meta_data.out_field_name.clone()] = resolved_value;
+                message[resolved_value.field] = resolved_value.value;
             // }
         }
     }
@@ -100,12 +100,18 @@ pub fn fast_set_value(
     value: &Value,
     metadata: &HashMap<String, Metadata>,
     apply_evolution: Option<bool>,
-) -> Result<Value, Box<dyn Error>> {
+) -> Result<ResolvedFieldValue, Box<dyn Error>> {
     if value.is_null() {
-        return Ok(Value::Null);
+        return Ok(ResolvedFieldValue {
+            field: field.to_string(),
+            value: Value::Null,
+        });
     }
     if value.is_string() && value.as_str().unwrap_or_default().is_empty() {
-        return Ok(Value::Null);
+        return Ok(ResolvedFieldValue {
+            field: field.to_string(),
+            value: Value::Null,
+        });
     }
     if data_type.is_empty() {
         return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, "No data type specified")));
@@ -126,7 +132,7 @@ fn process_record_field(
     field: &str,
     value: &Value,
     metadata: &HashMap<String, Metadata>,
-) -> Result<Value, Box<dyn Error>> {
+) -> Result<ResolvedFieldValue, Box<dyn Error>> {
     let mut m = Map::new();
     if value.is_object() {
         for (sub_field, sub_value) in value.as_object().ok_or("Value is not an object")? {
@@ -139,18 +145,18 @@ fn process_record_field(
                     &metadata.get(field).unwrap().fields,
                     None
                 )?;
-                m.insert(meta_field.out_field_name.clone(), newval);
+                m.insert(newval.field, newval.value);
             }
         }
     }
-    Ok(Value::Object(m))
+    Ok(ResolvedFieldValue::new(field.to_string(),Value::Object(m)))
 }
 
 fn process_map_field(
     field: &str,
     value: &Value,
     metadata: &HashMap<String, Metadata>,
-) -> Result<Value, Box<dyn Error>> {
+) -> Result<ResolvedFieldValue, Box<dyn Error>> {
     let mut new_value: Value = Value::Null;
     if value.is_object() {
         for (key, val) in value.as_object().ok_or("Value is not an object")? {
@@ -163,18 +169,18 @@ fn process_map_field(
                     &metadata.get(field).unwrap().fields,
                     None
                 )?;
-                new_value[meta_field.out_field_name.clone()] = new_val;
+                new_value[new_val.field] = new_val.value;
             }
         }
     }
-    Ok(new_value)
+    Ok(ResolvedFieldValue::new(field.to_string(), new_value))
 }
 
 fn process_array_field(
     field: &str,
     value: &Value,
     metadata: &HashMap<String, Metadata>,
-) -> Result<Value, Box<dyn Error>> {
+) -> Result<ResolvedFieldValue, Box<dyn Error>> {
     let mut array: Vec<Value> = Vec::new();
     if value.is_array() {
         let values = value.as_array().ok_or("Value is not an array")?;
@@ -191,11 +197,11 @@ fn process_array_field(
 
                 // println!("new_val: {:?}", new_val);
 
-                array.push(new_val);
+                array.push(new_val.value);
             }
         }
     }
-    Ok(Value::Array(array))
+    Ok(ResolvedFieldValue::new(field.to_string(), Value::Array(array)))
 }
 
 
@@ -205,21 +211,36 @@ pub fn match_scalar_value_fast(
     value: &Value,
     metadata: &HashMap<String, Metadata>,
     apply_evolution: bool,
-) -> Result<Value, Box<dyn Error>> {
+) -> Result<ResolvedFieldValue, Box<dyn Error>> {
 
     if value.is_null() {
-        return Ok(Value::Null);
+        return Ok(ResolvedFieldValue {
+            field: Metadata::get_field_out_field_name(metadata, field),
+            value: Value::Null,
+        });
     }
 
     match data_type {
         "string" => match value.as_str().map(Value::from) {
-            Some(v) => Ok(v),
+            Some(v) => Ok(ResolvedFieldValue {
+                field: Metadata::get_field_out_field_name(metadata, field),
+                value: v,
+            }),
             None => match value.as_i64().map(|v| v.to_string()).map(Value::from) {
-                Some(v) => Ok(v),
+                Some(v) => Ok(ResolvedFieldValue {
+                    field: Metadata::get_field_out_field_name(metadata, field),
+                    value: v,
+                }),
                 None => match value.as_f64().map(|v| v.to_string()).map(Value::from) {
-                    Some(v) => Ok(v),
+                    Some(v) => Ok(ResolvedFieldValue {
+                        field: Metadata::get_field_out_field_name(metadata, field),
+                        value: v,
+                    }),
                     None => match value.as_bool().map(|v| v.to_string()).map(Value::from) {
-                        Some(v) => Ok(v),
+                        Some(v) => Ok(ResolvedFieldValue {
+                            field: Metadata::get_field_out_field_name(metadata, field),
+                            value: v,
+                        }),
                         None => {
                             if apply_evolution {
                                 match Evolution::apply_evolution_factory(field, value, metadata) {
@@ -236,15 +257,27 @@ pub fn match_scalar_value_fast(
         }
         "timestamp" | "timestamp_milli" | "int" | "integer" | "long" => match value.as_i64().map(Value::from) {
             Some(v) => if data_type == "timestamp_milli" || data_type == "timestamp" {
-                Ok(AnalyseSchema::coerce_to_milli_seconds(v))
+                Ok(ResolvedFieldValue {
+                    field: Metadata::get_field_out_field_name(metadata, field),
+                    value: AnalyseSchema::coerce_to_milli_seconds(v),
+                })
             } else {
-                Ok(v)
+                Ok(ResolvedFieldValue {
+                    field: Metadata::get_field_out_field_name(metadata, field),
+                    value: v,
+                })
             },
             None => match value.as_str().and_then(|v| v.parse::<i64>().ok()).map(Value::from) {
                 Some(v) => if data_type == "timestamp_milli" || data_type == "timestamp" {
-                    Ok(AnalyseSchema::coerce_to_milli_seconds(v))
+                    Ok(ResolvedFieldValue {
+                        field: Metadata::get_field_out_field_name(metadata, field),
+                        value: AnalyseSchema::coerce_to_milli_seconds(v),
+                    })
                 } else {
-                    Ok(v)
+                    Ok(ResolvedFieldValue {
+                        field: Metadata::get_field_out_field_name(metadata, field),
+                        value: v,
+                    })
                 },
                 None => {
                     // handle boolean values
@@ -255,7 +288,10 @@ pub fn match_scalar_value_fast(
                             Some(0)
                         }
                     }).map(Value::from) {
-                        Some(v) => Ok(v),
+                        Some(v) => Ok(ResolvedFieldValue {
+                            field: Metadata::get_field_out_field_name(metadata, field),
+                            value: v,
+                        }),
                         None => {
                             if apply_evolution {
                                 match Evolution::apply_evolution_factory(field, value, metadata) {
@@ -271,9 +307,15 @@ pub fn match_scalar_value_fast(
             }
         }
         "double" => match value.as_f64().map(Value::from) {
-            Some(v) => Ok(v),
+            Some(v) => Ok(ResolvedFieldValue {
+                field: Metadata::get_field_out_field_name(metadata, field),
+                value: v,
+            }),
             None => match value.as_str().and_then(|v| v.parse::<f64>().ok()).map(Value::from) {
-                Some(v) => Ok(v),
+                Some(v) => Ok(ResolvedFieldValue {
+                    field: Metadata::get_field_out_field_name(metadata, field),
+                    value: v,
+                }),
                 None => {
                     if apply_evolution {
                         match Evolution::apply_evolution_factory(field, value, metadata) {
@@ -288,9 +330,15 @@ pub fn match_scalar_value_fast(
             // Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData,  format!("Value {} is not a double", value)))),
         }
         "boolean" => match value.as_bool().map(Value::from) {
-            Some(v) => Ok(v),
+            Some(v) => Ok(ResolvedFieldValue {
+                field: Metadata::get_field_out_field_name(metadata, field),
+                value: v,
+            }),
             None => match value.as_str().and_then(|v| v.parse::<bool>().ok()).map(Value::from) {
-                Some(v) => Ok(v),
+                Some(v) => Ok(ResolvedFieldValue {
+                    field: Metadata::get_field_out_field_name(metadata, field),
+                    value: v,
+                }),
                 None => {
                     match value.as_i64().and_then(|v| {
                         if v == 0 || v == 1 {
@@ -299,7 +347,10 @@ pub fn match_scalar_value_fast(
                             None
                         }
                     }) {
-                        Some(v) => Ok(v),
+                        Some(v) => Ok(ResolvedFieldValue {
+                            field: Metadata::get_field_out_field_name(metadata, field),
+                            value: v,
+                        }),
                         None => {
                             if apply_evolution {
                                 match Evolution::apply_evolution_factory(field, value, metadata) {
@@ -319,7 +370,7 @@ pub fn match_scalar_value_fast(
 
 }
 
-pub fn fast_set_date(field: &str, value: &Value, metadata: &HashMap<String, Metadata>) -> Result<Value, Box<dyn Error>> {
+pub fn fast_set_date(field: &str, value: &Value, metadata: &HashMap<String, Metadata>) -> Result<ResolvedFieldValue, Box<dyn Error>> {
     // Hive Timestamp doesn't support string dates
     match value.as_str() {
         Some(val) => {
@@ -341,7 +392,10 @@ pub fn fast_set_date(field: &str, value: &Value, metadata: &HashMap<String, Meta
                 Ok(f) => match NaiveDateTime::parse_from_str(val, f.as_str()) {
                     Ok(date) => {
                         let millis = date.timestamp() * 1000;
-                        Ok(millis.into())
+                        Ok(ResolvedFieldValue {
+                            field: Metadata::get_field_out_field_name(metadata, field),
+                            value: millis.into(),
+                        })
                     }
                     Err(_) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid date format"))),
                 },
@@ -379,7 +433,7 @@ mod tests_match_scalar_value_fast {
         Value::from(b)
     }
 
-    fn get_or_panic(result: Result<Value, Box<dyn Error>>) -> Value {
+    fn get_or_panic(result: Result<ResolvedFieldValue, Box<dyn Error>>) -> ResolvedFieldValue {
         result.expect("Unexpected error")
     }
 
@@ -390,19 +444,19 @@ mod tests_match_scalar_value_fast {
         metadata.insert("field".to_string(), Metadata::new().unwrap());
 
         assert_eq!(
-            get_or_panic(match_scalar_value_fast("field", "string", &str_to_val("hello"), &metadata, true)),
+            get_or_panic(match_scalar_value_fast("field", "string", &str_to_val("hello"), &metadata, true)).value,
             str_to_val("hello")
         );
         assert_eq!(
-            get_or_panic(match_scalar_value_fast("field", "string", &i64_to_val(123), &metadata, true)),
+            get_or_panic(match_scalar_value_fast("field", "string", &i64_to_val(123), &metadata, true)).value,
             str_to_val("123")
         );
         assert_eq!(
-            get_or_panic(match_scalar_value_fast("field", "string", &f64_to_val(123.4), &metadata, true)),
+            get_or_panic(match_scalar_value_fast("field", "string", &f64_to_val(123.4), &metadata, true)).value,
             str_to_val("123.4")
         );
         assert_eq!(
-            get_or_panic(match_scalar_value_fast("field", "string", &bool_to_val(true), &metadata, true)),
+            get_or_panic(match_scalar_value_fast("field", "string", &bool_to_val(true), &metadata, true)).value,
             str_to_val("true")
         );
     }
@@ -414,11 +468,11 @@ mod tests_match_scalar_value_fast {
         metadata.insert("field".to_string(), Metadata::new().unwrap());
 
         assert_eq!(
-            get_or_panic(match_scalar_value_fast("field", "int", &i64_to_val(123), &metadata, true)),
+            get_or_panic(match_scalar_value_fast("field", "int", &i64_to_val(123), &metadata, true)).value,
             i64_to_val(123)
         );
         assert_eq!(
-            get_or_panic(match_scalar_value_fast("field", "int", &str_to_val("123"), &metadata, true)),
+            get_or_panic(match_scalar_value_fast("field", "int", &str_to_val("123"), &metadata, true)).value,
             i64_to_val(123)
         );
     }
@@ -430,11 +484,11 @@ mod tests_match_scalar_value_fast {
         metadata.insert("field".to_string(), Metadata::new().unwrap());
 
         assert_eq!(
-            get_or_panic(match_scalar_value_fast("field", "double", &f64_to_val(123.4), &metadata, true)),
+            get_or_panic(match_scalar_value_fast("field", "double", &f64_to_val(123.4), &metadata, true)).value,
             f64_to_val(123.4)
         );
         assert_eq!(
-            get_or_panic(match_scalar_value_fast("field", "double", &str_to_val("123.4"), &metadata, true)),
+            get_or_panic(match_scalar_value_fast("field", "double", &str_to_val("123.4"), &metadata, true)).value,
             f64_to_val(123.4)
         );
     }
@@ -446,19 +500,19 @@ mod tests_match_scalar_value_fast {
         metadata.insert("field".to_string(), Metadata::new().unwrap());
 
         assert_eq!(
-            get_or_panic(match_scalar_value_fast("field", "boolean", &bool_to_val(true), &metadata, true)),
+            get_or_panic(match_scalar_value_fast("field", "boolean", &bool_to_val(true), &metadata, true)).value,
             bool_to_val(true)
         );
         assert_eq!(
-            get_or_panic(match_scalar_value_fast("field", "boolean", &str_to_val("true"), &metadata, true)),
+            get_or_panic(match_scalar_value_fast("field", "boolean", &str_to_val("true"), &metadata, true)).value,
             bool_to_val(true)
         );
         assert_eq!(
-            get_or_panic(match_scalar_value_fast("field", "boolean", &i64_to_val(1), &metadata, true)),
+            get_or_panic(match_scalar_value_fast("field", "boolean", &i64_to_val(1), &metadata, true)).value,
             bool_to_val(true)
         );
         assert_eq!(
-            get_or_panic(match_scalar_value_fast("field", "boolean", &i64_to_val(0), &metadata, true)),
+            get_or_panic(match_scalar_value_fast("field", "boolean", &i64_to_val(0), &metadata, true)).value,
             bool_to_val(false)
         );
         // assert_eq!(
@@ -495,7 +549,7 @@ mod tests_process_array_field {
 
         let result = process_array_field(field, &value, &metadata)?;
 
-        assert_eq!(result, json!([1, 2, 3]));
+        assert_eq!(result.value, json!([1, 2, 3]));
         Ok(())
     }
 
@@ -510,7 +564,7 @@ mod tests_process_array_field {
 
         let result = process_array_field(field, &value, &metadata)?;
 
-        assert_eq!(result, json!([1.2, 2.3, 3.4]));
+        assert_eq!(result.value, json!([1.2, 2.3, 3.4]));
         Ok(())
     }
 
@@ -525,7 +579,7 @@ mod tests_process_array_field {
 
         let result = process_array_field(field, &value, &metadata)?;
 
-        assert_eq!(result, json!([true, false, true]));
+        assert_eq!(result.value, json!([true, false, true]));
         Ok(())
     }
 
@@ -540,7 +594,7 @@ mod tests_process_array_field {
 
         let result = process_array_field(field, &value, &metadata)?;
 
-        assert_eq!(result, json!([true, false, true]));
+        assert_eq!(result.value, json!([true, false, true]));
         Ok(())
     }
 
@@ -555,7 +609,7 @@ mod tests_process_array_field {
 
         let result = process_array_field(field, &value, &metadata)?;
 
-        assert_eq!(result, json!([null, null, null]));
+        assert_eq!(result.value, json!([null, null, null]));
         Ok(())
     }
 
@@ -570,7 +624,7 @@ mod tests_process_array_field {
 
         let result = process_array_field(field, &value, &metadata)?;
 
-        assert_eq!(result, json!(["one", "two", "three"]));
+        assert_eq!(result.value, json!(["one", "two", "three"]));
         Ok(())
     }
 

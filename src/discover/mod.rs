@@ -119,6 +119,21 @@ impl Metadata {
             determined_type_values: "".to_string(),
         })
     }
+
+    pub fn get_field_out_field_name(meatdata: &HashMap<String, Metadata>, field: &str) -> String {
+        let mut out_field_name = field.to_string();
+
+        match meatdata.get(field) {
+            Some(metadata) => {
+                if !metadata.out_field_name.is_empty() {
+                    out_field_name = metadata.out_field_name.clone();
+                }
+            }
+            None => {}
+        }
+
+        out_field_name
+    }
 }
 
 pub struct AnalyseSchema {

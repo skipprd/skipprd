@@ -6,7 +6,7 @@ use crate::ingest::fast_ingest::fast_set_value;
 use std::str::FromStr;
 use std::borrow::BorrowMut;
 use serde_derive::{Deserialize, Serialize};
-use crate::ingest::ingest::discover_ingest;
+use crate::ingest::ingest::{discover_ingest, ResolvedFieldValue};
 
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -64,7 +64,7 @@ impl Evolution {
         parent_data_type: Option<&str>,
         metadata: &mut HashMap<String, Metadata>,
         mut updated_schema: &mut String,
-    ) -> Result<Value, Box<dyn std::error::Error>> {
+    ) -> Result<ResolvedFieldValue, Box<dyn std::error::Error>> {
 
         // println!("Handling value error for field: '{}'", field);
 
@@ -132,12 +132,12 @@ impl Evolution {
         field: &str,
         value: &Value,
         metadata: &HashMap<String, Metadata>,
-    ) -> Result<Value, Box<dyn std::error::Error>> {
+    ) -> Result<ResolvedFieldValue, Box<dyn std::error::Error>> {
 
         // println!("Applying evolution factory for field: '{}'", field);
 
         // get the cached last successful evolution for this field and try it first
-        let mut found_value: Option<Result<Value, Box<dyn std::error::Error>>> = None;
+        let mut found_value: Option<Result<ResolvedFieldValue, Box<dyn std::error::Error>>> = None;
         LAST_SUCCESSFUL_EVOLUTION.with(|last_evolution_refcell| {
             let last_evolution_guard = last_evolution_refcell.borrow();
             if let Some(evolution_key) = last_evolution_guard.get(field) {
@@ -148,7 +148,7 @@ impl Evolution {
                             Ok(v) => {
                                 // set value if the evolution succeeds
                                 // println!("Cached evolution succeeded for field: '{}' with evolution: '{}'", field, evolution_key);
-                                found_value = Some(Ok(v));
+                                found_value = Some(Ok(ResolvedFieldValue::new(evolution.new_field.clone(), v.value)));
                             },
                             Err(_) => { }
                         }
@@ -157,15 +157,15 @@ impl Evolution {
             }
         });
 
-        if let Some(value) = found_value {
-            return value;
+        if let Some(resolved_value) = found_value {
+            return resolved_value;
         }
 
         // iterate through the evolutions and try the existing ones
         match metadata.get(field) {
             Some(field_metadata) => {
                 for (evolution_key, evolution) in field_metadata.evolution.iter() {
-                    // println!("Trying evolution: '{}' for field: '{}'", evolution_key, field);
+                    println!("Trying evolution: '{}' for field: '{}'", evolution_key, field);
                     // match match_scalar_value_fast(&evolution.new_field, evolution_key, value, metadata, false) {
                     match fast_set_value(evolution_key, &evolution.new_field, value, metadata, Some(false)) {
                         Ok(v) => {
@@ -174,11 +174,11 @@ impl Evolution {
                                 let mut last_evolution_guard = last_evolution_refcell.borrow_mut();
                                 last_evolution_guard.insert(field.to_string(), evolution_key.clone());
                             });
-                            // println!("Evolution succeeded for field: '{}' with evolution: '{}'", field, evolution_key);
-                            return Ok(v);
+                            println!("Evolution succeeded for field: '{}' to evolution: '{}' => '{}'", field, &evolution.new_field, evolution_key);
+                            return Ok(ResolvedFieldValue::new(evolution.new_field.clone(), v.value));
                         },
                         Err(_err) => {
-                            // println!("Evolution failed for field: '{}' with evolution: '{}', Error: {}", field, evolution_key, _err)
+                            println!("Evolution failed for field: '{}' to evolution: '{}' => '{}', Error: {}", field, &evolution.new_field, evolution_key, _err)
                         }
                     }
                 }
@@ -187,7 +187,7 @@ impl Evolution {
                 Err(Box::new(ArrowError::ParseError("Unable to parse value".to_string())))
             },
             None => {
-                // println!("No metadata for field: '{}'", field);
+                println!("No metadata for evolution field: '{}'", field);
                 Err(Box::new(ArrowError::ParseError("Unable to parse value".to_string())))
             }
         }
