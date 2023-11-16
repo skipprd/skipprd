@@ -191,11 +191,17 @@ fn process_array_field(
     if value.is_array() {
         let values = value.as_array().ok_or("Value is not an array")?;
         for (idx, val) in values.iter().enumerate() {
+
+            let mut sub_field = idx.to_string();
+            if metadata.get(field).unwrap().determined_type_values == "record" {
+                sub_field = 0.to_string().clone();
+            }
+
             let meta_field = metadata.get(field).ok_or(format!("Array field '{}' not found in metadata or it's disabled", idx))?;
             if meta_field.enabled {
                 let new_val = match fast_set_value(
                     &meta_field.determined_type_values,
-                    &idx.to_string(),
+                    &sub_field,
                     val,
                     &metadata.get(field).unwrap().fields,
                     None
