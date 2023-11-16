@@ -286,7 +286,7 @@ pub fn set_value(
                         {
                             Some(_t) => (),
                             None => {
-                                println!("({}.array) no metadata for {} => {} with value: {}", data_type, &field.to_string(), i.to_string(), sub_value);
+                                // println!("({}.array) no metadata for {} => {} with value: {}", data_type, &field.to_string(), i.to_string(), sub_value);
                                 // discover_ingest(&field.to_string(), value, metadata, updatedSchema, flatten);
                                 discover_ingest(
                                     &i.to_string(),
