@@ -441,15 +441,15 @@ impl Ingest {
 
                             // let old_metadata = NEW_METADATA.read().unwrap().clone();
 
-                            // if NEW_METADATA.read().get(&skpr_namespace).is_none() {
+                            if NEW_METADATA.read().get(&skpr_namespace).is_none() {
                                 // NEW_METADATA.write().insert(skpr_namespace.clone(), Metadata::new().unwrap());
-                                // NEW_METADATA.write().extend(METADATA.read().clone());
-                            // }
+                                NEW_METADATA.write().extend(METADATA.read().clone());
+                            }
 
                             // println!("Falling back to slow path due to: {}", err);
                             let msg = match ingest(
                                 &record,
-                                &mut METADATA.write().get_mut(&skpr_namespace).unwrap().fields,
+                                &mut NEW_METADATA.write().get_mut(&skpr_namespace).unwrap().fields,
                                 &mut updated_schema_clone.lock().unwrap(),
                                 flatten,
                             ) {
@@ -480,12 +480,12 @@ impl Ingest {
                             // update metadata in runtime and ingest message
                             if Config::get_auto_approve() {
 
-                                // if updated_schema_clone.lock().unwrap().as_str() == "yes" {
-                                //     {
-                                //         METADATA.write().clear();
-                                //         METADATA.write().extend(NEW_METADATA.read().clone());
-                                //     }
-                                // }
+                                if updated_schema_clone.lock().unwrap().as_str() == "yes" {
+                                    {
+                                        METADATA.write().clear();
+                                        METADATA.write().extend(NEW_METADATA.read().clone());
+                                    }
+                                }
 
                                 x += 1;
 
