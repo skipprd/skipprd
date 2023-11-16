@@ -57,6 +57,48 @@ impl EvolutionType {
 
 impl Evolution {
 
+    pub fn evolve_array_field(
+        field: &String,
+        value: &Value,
+        parent_field: Option<&str>,
+        parent_data_type: Option<&str>,
+        metadata: &mut HashMap<String, Metadata>,
+    ) {
+
+        // Create new, evolved field. Will ensure field is included in schemas
+        let temp_feild_name = &format!("{}_{}", field, "unknown");
+
+        let mut update_schmea_mock = "no".to_string();
+
+        discover_ingest(
+            temp_feild_name,
+            value,
+            parent_field,
+            parent_data_type,
+            metadata,
+            &mut update_schmea_mock
+        );
+
+        let discoverd_data_type = metadata.get(temp_feild_name).unwrap().determined_type_values.clone();
+
+        let new_feild_name = &format!("{}_array_{}", field, discoverd_data_type);
+
+        //rename metadata[temp_feild_name] to new_feild_name
+        let new = metadata.remove(temp_feild_name).unwrap();
+        metadata.insert(new_feild_name.clone(), new);
+
+        // println!("New data type for array field: '{}' is: '{}'", new_feild_name, discoverd_data_type);
+
+        // Update existing field with the evolution to the new field
+        let evo = Evolution {
+            type_string: "array".to_string(),
+            new_field: new_feild_name.clone(),
+            sovled: true,
+        };
+
+        metadata.get_mut(field).unwrap().evolution.insert("array".to_string(), evo.clone());
+    }
+
     pub fn evolve_field(
         field: &String,
         value: &Value,
@@ -69,18 +111,52 @@ impl Evolution {
         // println!("Handling value error for field: '{}'", field);
 
         let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
-        let discoverd_data_type = foo.resolve_field_type(metadata.clone().borrow_mut(), &field.to_string(), value.clone().borrow_mut());
+        let mut discoverd_data_type = foo.resolve_field_type(metadata.clone().borrow_mut(), &field.to_string(), value.clone().borrow_mut());
 
 
         // println!("Evolving new data type: '{}' for field '{}' with value '{}' with current data type of '{}'", discoverd_data_type, field, value, metadata.get(field).unwrap().determined_type);
 
         if discoverd_data_type != "" {
 
-            match metadata.get(field).unwrap().evolution.get(&discoverd_data_type) {
+            let new_feild_name = &format!("{}_{}", field, discoverd_data_type);
+
+
+            match metadata.get(field).unwrap().evolution.get(new_feild_name) {
                 Some(evolution) => {
-                    // println!("Already have an evolution for field: '{}' to type: '{}'", field, discoverd_data_type);
+                    if discoverd_data_type == "array" {
+                        // println!("Have an evolution for field: '{}' to type: '{}' but it is an array, so ignoring", field, discoverd_data_type);
+
+                        *updated_schema = "yes".to_string();
+
+                        Evolution::evolve_array_field(
+                            field,
+                            value,
+                            parent_field,
+                            parent_data_type,
+                            metadata,
+                        );
+
+                    } else {
+                        // println!("Already have an evolution for field: '{}' to type: '{}'", field, discoverd_data_type);
+                        // println!("Evolution: {:?}", evolution);
+                    }
                 },
                 None => {
+                    if discoverd_data_type == "array" {
+
+                        // println!("Creating new evolution for array field: '{}' to type: '{}'", field, discoverd_data_type);
+
+                        *updated_schema = "yes".to_string();
+
+                        Evolution::evolve_array_field(
+                            field,
+                            value,
+                            parent_field,
+                            parent_data_type,
+                            metadata,
+                        );
+                        return Ok(ResolvedFieldValue::new(new_feild_name.clone(), value.clone()));
+                    }
 
                     println!("Creating new evolution for field: '{}' to type: '{}'", field, discoverd_data_type);
 
@@ -107,14 +183,17 @@ impl Evolution {
                         sovled: true,
                     };
 
-                    metadata.get_mut(field).unwrap().evolution.insert(discoverd_data_type.clone(), evo.clone());
+                    metadata.get_mut(field).unwrap().evolution.insert(new_feild_name.to_string(), evo.clone());
 
                 }
             };
 
             match Evolution::apply_evolution_factory(field, value, metadata) {
                 Ok(v) => Ok(v),
-                Err(e) => Err(e),
+                Err(e) => {
+                    // println!("#### Error applying evolution factory: {}", e);
+                    Err(e)
+                },
             }
 
         } else {
@@ -165,16 +244,16 @@ impl Evolution {
         match metadata.get(field) {
             Some(field_metadata) => {
                 for (evolution_key, evolution) in field_metadata.evolution.iter() {
-                    println!("Trying evolution: '{}' for field: '{}'", evolution_key, field);
+                    // println!("Trying evolution: '{}' for field: '{}'", evolution_key, field);
                     // match match_scalar_value_fast(&evolution.new_field, evolution_key, value, metadata, false) {
-                    match fast_set_value(evolution_key, &evolution.new_field, value, metadata, Some(false)) {
+                    match fast_set_value(&evolution.type_string, &evolution.new_field, value, metadata, Some(false)) {
                         Ok(v) => {
                             // cache the last evolution that worked
                             LAST_SUCCESSFUL_EVOLUTION.with(|last_evolution_refcell| {
                                 let mut last_evolution_guard = last_evolution_refcell.borrow_mut();
                                 last_evolution_guard.insert(field.to_string(), evolution_key.clone());
                             });
-                            println!("Evolution succeeded for field: '{}' to evolution: '{}' => '{}'", field, &evolution.new_field, evolution_key);
+                            // println!("Evolution succeeded for field: '{}' to evolution: '{}' => '{}'", field, &evolution.new_field, evolution_key);
                             return Ok(ResolvedFieldValue::new(evolution.new_field.clone(), v.value));
                         },
                         Err(_err) => {
@@ -182,13 +261,14 @@ impl Evolution {
                         }
                     }
                 }
+
                 // throw Err() if no evolutions are Ok()
                 // println!("No evolutions succeeded for field: '{}'", field);
                 Err(Box::new(ArrowError::ParseError("Unable to parse value".to_string())))
             },
             None => {
-                println!("No metadata for evolution field: '{}'", field);
-                Err(Box::new(ArrowError::ParseError("Unable to parse value".to_string())))
+                // println!("No metadata for evolution field: '{}'", field);
+                return Err(Box::new(ArrowError::ParseError("### No metadata for evolution field".to_string())));
             }
         }
     }

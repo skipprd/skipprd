@@ -2,7 +2,7 @@ use arrow::error::ArrowError;
 use std::any::Any;
 use std::borrow::BorrowMut;
 use std::collections::{BTreeMap, HashMap};
-use std::fs::File;
+use std::fs::{File, metadata};
 use std::io::Read;
 use std::ops::Deref;
 use std::str::FromStr;
@@ -513,13 +513,14 @@ impl AnalyseSchema {
             if value.as_array().is_some() {
                 // println!("{:?} as array", field);
 
-                // let mut i = 0;
+                let mut i = 0;
 
                 for sub_value in value.as_array().unwrap() {
                     let mut sv: Value = serde_json::from_str(&sub_value.to_string()).unwrap();
 
-                    // let logical_type = self.get_logical_type(&i.to_string(), &mut sv, metadata, false);
-                    let logical_type = self.resolve_field_type(
+                    let mut logical_type= "".to_string();
+
+                    logical_type = self.resolve_field_type(
                         metadata
                             .get_mut(&field.to_string())
                             .unwrap()
@@ -529,7 +530,11 @@ impl AnalyseSchema {
                         &mut sv,
                     );
 
-                    // i += 1;
+                    // if logical_type != "record" {
+                    //     logical_type = self.get_logical_type(&i.to_string(), &mut sv, metadata, false);
+                    // }
+
+                    i += 1;
                     // if (field == "trip") {
                     // println!("#### trip sub_field NAME {:?}", sub_field);
                     // println!("#### trip sub field value {}", sv);
@@ -554,6 +559,7 @@ impl AnalyseSchema {
 
 
             let demoted_types = vec!["boolean".to_string(), "date".to_string(), "timestamp".to_string(), "timestamp_milli".to_string()];
+
 
             if type_count.len() > 1 {
                 for (type_1, count) in type_count.clone() {
@@ -851,7 +857,9 @@ impl AnalyseSchema {
                         let date = Utc.from_utc_datetime(&dt);
 
                         // let date = Utc.timestamp_opt(seconds, 0).unwrap();
-                        let min_date = Utc.ymd(1970, 1, 1).and_hms(0, 0, 0);
+                        // let min_date = Utc.ymd(1970, 1, 1).and_hms(0, 0, 0);
+                        // if it happened before the dot com crash... is it a timestamp, did it even happen?
+                        let min_date = Utc.ymd(2001, 1, 1).and_hms(0, 0, 0);
                         let max_date = Utc.ymd(2040, 1, 1).and_hms(0, 0, 0);
                         if date >= min_date && date <= max_date {
                             return true;
@@ -946,31 +954,31 @@ impl AnalyseSchema {
 
     pub fn set_discovered_occurrence(
         &self,
-        array: &mut HashMap<String, Metadata>,
+        metadata: &mut HashMap<String, Metadata>,
         field: &String,
         data_type: &String,
         value: &mut String,
     ) {
-        if array
+        if metadata
             .get(field)
             .unwrap()
             .types
             .get(&data_type.to_string())
             .is_none()
         {
-            array
+            metadata
                 .get_mut(field)
                 .unwrap()
                 .types
                 .insert(data_type.to_string(), 1);
-            array.get_mut(field).unwrap().evolution.insert(
-                data_type.to_string(),
-                Evolution {
-                    type_string: "".to_string(),
-                    new_field: "".to_string(),
-                    sovled: false,
-                },
-            );
+            // array.get_mut(field).unwrap().evolution.insert(
+            //     data_type.to_string(),
+            //     Evolution {
+            //         type_string: "".to_string(),
+            //         new_field: "".to_string(),
+            //         sovled: false,
+            //     },
+            // );
 
             // @todo
             // if !Config::analysing
@@ -981,25 +989,29 @@ impl AnalyseSchema {
             //     array.get_mut(field).unwrap().determined_type = data_type.to_string();
             // }
         } else {
-            let newCount: u32 = array.get_mut(field).unwrap().types.get(data_type).unwrap() + 1;
-            array
+            let newCount: u32 = metadata.get_mut(field).unwrap().types.get(data_type).unwrap() + 1;
+            metadata
                 .get_mut(field)
                 .unwrap()
                 .types
                 .insert(data_type.to_string(), newCount);
         }
 
-        if data_type == "integer" {
-            let valid_timestamp = self.is_valid_timestamp(value);
-            if valid_timestamp {
-                self.set_discovered_occurrence(array, field, &"timestamp".to_string(), value);
+        // I found in practice theres too many false possitives for array values types of timestamp
+        // @todo - probably better handeled in determine_field_types, not sure why it isn't already working
+        // if metadata.get(field).unwrap().parent_type != "array" {
+            if data_type == "integer" {
+                let valid_timestamp = self.is_valid_timestamp(value);
+                if valid_timestamp {
+                    self.set_discovered_occurrence(metadata, field, &"timestamp".to_string(), value);
+                }
+            } else if data_type == "long" {
+                let valid_timestamp = self.is_valid_timestamp(value);
+                if valid_timestamp {
+                    self.set_discovered_occurrence(metadata, field, &"timestamp_milli".to_string(), value);
+                }
             }
-        } else if data_type == "long" {
-            let valid_timestamp = self.is_valid_timestamp(value);
-            if valid_timestamp {
-                self.set_discovered_occurrence(array, field, &"timestamp_milli".to_string(), value);
-            }
-        }
+        // }
     }
 
     pub fn determine_field_types(
@@ -1215,6 +1227,52 @@ impl AnalyseSchema {
     }
 }
 
+
+#[cfg(test)]
+mod valid_timestamps_tests {
+    use super::*;
+    use chrono::Utc;
+
+    #[test]
+    fn test_valid_timestamps() {
+        let my_struct = AnalyseSchema { i: 0 };
+        assert!(my_struct.is_valid_timestamp(&mut "0".to_string())); // Start of UNIX epoch
+        assert!(my_struct.is_valid_timestamp(&mut "1577836800".to_string())); // Jan 1, 2020
+        // Add more valid cases here
+    }
+
+    #[test]
+    fn test_invalid_timestamps() {
+        let my_struct = AnalyseSchema { i: 0 };
+        assert!(!my_struct.is_valid_timestamp(&mut "-1".to_string())); // Before UNIX epoch
+        assert!(!my_struct.is_valid_timestamp(&mut "2208988800".to_string())); // After 2040
+        // Add more invalid cases here
+    }
+
+    #[test]
+    fn test_edge_cases() {
+        let my_struct = AnalyseSchema { i: 0 };
+        // Start and end of the allowed range
+        assert!(my_struct.is_valid_timestamp(&mut "0".to_string())); // Start of 1970
+        assert!(my_struct.is_valid_timestamp(&mut "2208988799".to_string())); // Just before 2040
+    }
+
+    #[test]
+    fn test_non_numeric_and_malformed_inputs() {
+        let my_struct = AnalyseSchema { i: 0 };
+        assert!(!my_struct.is_valid_timestamp(&mut "abc".to_string()));
+        assert!(!my_struct.is_valid_timestamp(&mut "1970-01-01".to_string())); // Non-numeric
+        // Add more non-numeric or malformed cases here
+    }
+
+    #[test]
+    fn test_overflow_underflow_cases() {
+        let my_struct = AnalyseSchema { i: 0 };
+        assert!(!my_struct.is_valid_timestamp(&mut "99999999999999999999".to_string())); // Overflow
+        assert!(!my_struct.is_valid_timestamp(&mut "-99999999999999999999".to_string())); // Underflow
+        // Add more extreme cases here
+    }
+}
 
 
 #[cfg(test)]

@@ -904,8 +904,6 @@ async fn sync() {
     let mut output_files = OUTPUT_FILES_STATIC.write();
     BufferChunker::rotate_buffers(true, &mut output_files);
 
-    // BufferChunker::finalise_buffers();
-
     while OUTPUT_RUNNING.read().load(Ordering::SeqCst) {
         sleep(Duration::from_secs(1));
     }

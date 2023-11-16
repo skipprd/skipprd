@@ -328,7 +328,16 @@ impl Ingest {
                                 }
                             },
                             None => {
-                                panic!("Could not unwrap record")
+                                // deadletter
+                                let line_str = match ingest_batch.data.lines().nth(batch_line - 1) {
+                                    Some(line) => line,
+                                    None => ""
+                                };
+
+                                Self::deadletter(line_str, &mut buffers);
+
+                                d += 1;
+
                             }
                         }
                     }
@@ -438,12 +447,33 @@ impl Ingest {
                             // }
 
                             // println!("Falling back to slow path due to: {}", err);
-                            let msg = ingest(
+                            let msg = match ingest(
                                 &record,
                                 &mut METADATA.write().get_mut(&skpr_namespace).unwrap().fields,
                                 &mut updated_schema_clone.lock().unwrap(),
                                 flatten,
-                            );
+                            ) {
+                                Ok(msg) => msg,
+                                Err(err) => {
+                                    // println!("Deadlettring - Could not ingest record: {}, Error: {:?}", record, err);
+
+                                    // deadletter record
+                                    let line_str = match ingest_batch.data.lines().nth(batch_line - 1) {
+                                        Some(line) => line,
+                                        None => {
+                                            // println!("Could not find line {} in batch", batch_line);
+                                            ""
+                                        }
+                                    };
+
+                                    Self::deadletter(line_str, &mut buffers);
+
+                                    d += 1;
+
+                                    continue
+                                }
+                            };
+
 
                             // println!("Slow path ingest: {}", msg);
 

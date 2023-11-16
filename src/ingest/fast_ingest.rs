@@ -68,13 +68,19 @@ pub fn fast_path_ingest(
     for (field, value) in unwrapped_message.as_object().ok_or("Invalid JSON object")? {
         let meta_data = metadata.get(field).ok_or(format!("Field '{}' not found in metadata", field))?;
         let field_data_type = meta_data.determined_type.clone();
-        let resolved_value = fast_set_value(
-            &field_data_type,
-            field,
-            value,
-            metadata,
-            None
-        )?;
+        let resolved_value = match fast_set_value(
+                &field_data_type,
+                field,
+                value,
+                metadata,
+                None
+            ) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Err(e);
+                }
+            };
+
         if !resolved_value.value.is_null() {
             // if meta_data.out_field_name == "item_0" {
             //     message[0] = resolved_value;
@@ -294,9 +300,13 @@ pub fn match_scalar_value_fast(
                         }),
                         None => {
                             if apply_evolution {
+                                // println!("### Applying Evolution: {}", field);
                                 match Evolution::apply_evolution_factory(field, value, metadata) {
                                     Ok(v) => Ok(v),
-                                    Err(e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Field {} value {} is not an {}", field, value, data_type)))),
+                                    Err(e) => {
+                                        // println!("### Fast evolutino Error: {}", e);
+                                        Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Field {} value {} is not an {}", field, value, data_type))))
+                                    },
                                 }
                             } else {
                                 Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Field {} value {} is not an {}", field, value, data_type))))
