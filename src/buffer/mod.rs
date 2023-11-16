@@ -497,8 +497,6 @@ impl BufferChunker {
 
         for filename in filenames {
 
-            println!("filename: {:?}", filename);
-
             if filename.to_str().unwrap().contains(".temp") {
                 continue;
             }
