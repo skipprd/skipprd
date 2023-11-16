@@ -560,6 +560,20 @@ impl Ingest {
         for (filename, buffer) in buffers.buffers.iter() {
 
             if output_files.peek(filename).is_none() {
+
+                // If the cache is full, remove and flush the least recently used item.
+                if output_files.len() == output_files.cap().get() {
+                    if let Some((evicted_filename, mut evicted)) = output_files.pop_lru() {
+                        evicted
+                            .file
+                            .flush()
+                            .expect(&format!("Could not flush file {}", evicted_filename));
+                        // evicted.file.into_inner().unwrap().sync_all().unwrap(); // needed?
+
+
+                    }
+                }
+
                 let f = match OpenOptions::new()
                     .create(false)
                     .append(true)
@@ -615,18 +629,7 @@ impl Ingest {
                     },
                 };
 
-                // If the cache is full, remove and flush the least recently used item.
-                if output_files.len() == output_files.cap().get() {
-                    if let Some((evicted_filename, mut evicted)) = output_files.pop_lru() {
-                        evicted
-                            .file
-                            .flush()
-                            .expect(&format!("Could not flush file {}", evicted_filename));
-                        // evicted.file.into_inner().unwrap().sync_all().unwrap(); // needed?
 
-
-                    }
-                }
 
                 output_files.put(filename.clone(), new_file);
             }
