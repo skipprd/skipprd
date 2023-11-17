@@ -501,12 +501,12 @@ impl AnalyseSchema {
                     // parent field resolve type as `record`.
                     // When in fact we'd want to discover schema as [int, int, int] and
                     // parent field resolve as `array`.
-                    if type_count.len() == 2
-                        && type_count.contains_key("integer")
-                        && type_count.contains_key("boolean")
-                    {
-                        type_count.remove("boolean");
-                    }
+                    // if type_count.len() == 2
+                    //     && type_count.contains_key("integer")
+                    //     && type_count.contains_key("boolean")
+                    // {
+                    //     type_count.remove("boolean");
+                    // }
                 }
             }
 
@@ -548,12 +548,12 @@ impl AnalyseSchema {
                     // parent field resolve type as `record`.
                     // When in fact we'd want to discover schema as [int, int, int] and
                     // parent field resolve as `array`.
-                    if type_count.len() == 2
-                        && type_count.contains_key("integer")
-                        && type_count.contains_key("boolean")
-                    {
-                        type_count.remove("boolean");
-                    }
+                    // if type_count.len() == 2
+                    //     && type_count.contains_key("integer")
+                    //     && type_count.contains_key("boolean")
+                    // {
+                    //     type_count.remove("boolean");
+                    // }
                 }
             }
 
@@ -1068,14 +1068,14 @@ impl AnalyseSchema {
 
                                 // hacky, support inference on they fly when we only infer on one record.
                                 // much more likely to be an integer than a boolean
-                                if field.types.len() == 1
-                                    && field.types.contains_key("boolean")
-                                    && field.types.get("boolean").unwrap() == &1
-                                {
-                                    highest_type = "integer".to_string();
-                                    highest_count = *data_type_count;
-                                    break;
-                                }
+                                // if field.types.len() == 1
+                                //     && field.types.contains_key("boolean")
+                                //     && field.types.get("boolean").unwrap() == &1
+                                // {
+                                //     highest_type = "integer".to_string();
+                                //     highest_count = *data_type_count;
+                                //     break;
+                                // }
 
                                 if field.types.len() == 1
                                     || (field.types.len() > 1
@@ -1123,14 +1123,14 @@ impl AnalyseSchema {
 
                             // hacky, support inference on they fly when we only infer on one record.
                             // much more likely to be an integer than a boolean
-                            if sub_value.types.len() == 1
-                                && sub_value.types.contains_key("boolean")
-                                && sub_value.types.get("boolean").unwrap() == &1
-
-                            {
-                                type_count.insert("integer".to_string(), *data_type_count);
-                                break;
-                            }
+                            // if sub_value.types.len() == 1
+                            //     && sub_value.types.contains_key("boolean")
+                            //     && sub_value.types.get("boolean").unwrap() == &1
+                            //
+                            // {
+                            //     type_count.insert("integer".to_string(), *data_type_count);
+                            //     break;
+                            // }
 
                             if type_count.len() <= 1
                                 || (type_count.len() > 1
@@ -1227,6 +1227,68 @@ impl AnalyseSchema {
     }
 }
 
+
+#[cfg(test)]
+mod get_type_bool_tests {
+
+    use crate::discover::get_type;
+
+    #[test]
+    fn test_get_type_int() {
+        let expected_type = "boolean".to_string();
+
+        let subject = 123;
+        assert_ne!(get_type(&mut subject.to_string()), expected_type);
+    }
+
+    #[test]
+    fn test_get_type_true_int() {
+        let expected_type = "boolean".to_string();
+
+        let subject = 1;
+        assert_ne!(get_type(&mut subject.to_string()), expected_type);
+    }
+
+    #[test]
+    fn test_get_type_false_int() {
+        let expected_type = "boolean".to_string();
+
+        let subject = 0;
+        assert_ne!(get_type(&mut subject.to_string()), expected_type);
+    }
+
+    #[test]
+    fn test_get_type_true_bool() {
+        let expected_type = "boolean".to_string();
+
+        let subject = true;
+        assert_eq!(get_type(&mut subject.to_string()), expected_type);
+    }
+
+    #[test]
+    fn test_get_type_false_bool() {
+        let expected_type = "boolean".to_string();
+
+        let subject = false;
+        assert_eq!(get_type(&mut subject.to_string()), expected_type);
+    }
+
+    #[test]
+    fn test_get_type_true_str() {
+        let expected_type = "boolean".to_string();
+
+        let subject = "true";
+        assert_eq!(get_type(&mut subject.to_string()), expected_type);
+    }
+
+    #[test]
+    fn test_get_type_false_str() {
+        let expected_type = "boolean".to_string();
+
+        let subject = "false";
+        assert_eq!(get_type(&mut subject.to_string()), expected_type);
+    }
+}
 
 #[cfg(test)]
 mod valid_timestamps_tests {

@@ -1,64 +1,4 @@
-#[cfg(test)]
-mod tests {
 
-    use crate::discover::get_type;
-
-    #[test]
-    fn test_get_type_int() {
-        let expected_type = "boolean".to_string();
-
-        let subject = 123;
-        assert_ne!(get_type(&mut subject.to_string()), expected_type);
-    }
-
-    #[test]
-    fn test_get_type_true_int() {
-        let expected_type = "boolean".to_string();
-
-        let subject = 1;
-        assert_eq!(get_type(&mut subject.to_string()), expected_type);
-    }
-
-    #[test]
-    fn test_get_type_false_int() {
-        let expected_type = "boolean".to_string();
-
-        let subject = 0;
-        assert_eq!(get_type(&mut subject.to_string()), expected_type);
-    }
-
-    #[test]
-    fn test_get_type_true_bool() {
-        let expected_type = "boolean".to_string();
-
-        let subject = true;
-        assert_eq!(get_type(&mut subject.to_string()), expected_type);
-    }
-
-    #[test]
-    fn test_get_type_false_bool() {
-        let expected_type = "boolean".to_string();
-
-        let subject = false;
-        assert_eq!(get_type(&mut subject.to_string()), expected_type);
-    }
-
-    #[test]
-    fn test_get_type_true_str() {
-        let expected_type = "boolean".to_string();
-
-        let subject = "true";
-        assert_eq!(get_type(&mut subject.to_string()), expected_type);
-    }
-
-    #[test]
-    fn test_get_type_false_str() {
-        let expected_type = "boolean".to_string();
-
-        let subject = "false";
-        assert_eq!(get_type(&mut subject.to_string()), expected_type);
-    }
-}
 
 pub fn parse_bool(value: &mut String) -> Result<bool, i32> {
     let len = value.chars().count();
@@ -76,9 +16,9 @@ pub fn parse_bool(value: &mut String) -> Result<bool, i32> {
         }
         1 => {
             if str == "1" {
-                ret = 1;
+                ret = -1;
             } else if *str == "0" {
-                ret = 0;
+                ret = -1;
             } else {
                 ret = -1;
             }
@@ -102,14 +42,14 @@ pub fn parse_bool(value: &mut String) -> Result<bool, i32> {
             }
         }
         4 => {
-            if str.to_lowercase() == "true" {
+            if str.to_lowercase().as_str() == "true" {
                 ret = 1;
             } else {
                 ret = -1;
             }
         }
         5 => {
-            if str.to_lowercase() == "false" {
+            if str.to_lowercase().as_str() == "false" {
                 ret = 0;
             } else {
                 ret = -1;
@@ -128,5 +68,47 @@ pub fn parse_bool(value: &mut String) -> Result<bool, i32> {
 }
 
 fn cast_to_bool(num: i32) -> bool {
-    num.to_string().parse::<bool>().is_ok()
+    num != 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cast_to_bool(i: i32) -> bool {
+        i != 0
+    }
+
+    #[test]
+    fn test_valid_true_values() {
+        assert_eq!(parse_bool(&mut "true".to_string()), Ok(true));
+        assert_eq!(parse_bool(&mut "on".to_string()), Ok(true));
+        assert_eq!(parse_bool(&mut "yes".to_string()), Ok(true));
+        // Add more cases for valid true values
+    }
+
+    #[test]
+    fn test_valid_false_values() {
+        assert_eq!(parse_bool(&mut "false".to_string()), Ok(false));
+        assert_eq!(parse_bool(&mut "off".to_string()), Ok(false));
+        assert_eq!(parse_bool(&mut "no".to_string()), Ok(false));
+        assert_eq!(parse_bool(&mut "".to_string()), Ok(false));
+        // Add more cases for valid false values
+    }
+
+    #[test]
+    fn test_invalid_values() {
+        assert_eq!(parse_bool(&mut "1".to_string()), Err(-1));
+        assert_eq!(parse_bool(&mut "0".to_string()), Err(-1));
+        assert_eq!(parse_bool(&mut "2".to_string()), Err(-1));
+        assert_eq!(parse_bool(&mut "not a boolean".to_string()), Err(-1));
+        // Add more cases for invalid values
+    }
+
+    #[test]
+    fn test_case_insensitivity() {
+        assert_eq!(parse_bool(&mut "TrUe".to_string()), Ok(true));
+        assert_eq!(parse_bool(&mut "FaLsE".to_string()), Ok(false));
+        // Add more cases for case insensitivity
+    }
 }
