@@ -359,6 +359,10 @@ impl SerdeParquet {
             }
         }
 
+        if last_error == "" {
+            println!("Error reading batch: {} while serialising to parquet", last_error);
+        }
+
         output_file_path.to_string()
     }
 

@@ -249,6 +249,8 @@ impl BufferChunker {
                                 Ok(_t) => {}
                                 Err(err) => println!("{:?}", err),
                             }
+
+                            println!("Finalised output file {}", finalised_file_path);
                         }
                     }
                     Err(e) => println!("{:?}", e),
