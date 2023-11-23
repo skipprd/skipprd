@@ -413,7 +413,7 @@ impl Ingest {
 
                     if METADATA.read().get(&skpr_namespace).is_none() {
                         METADATA.write().insert(skpr_namespace.clone(), Metadata::new().unwrap());
-                        // println!("New namespace: {}", skpr_namespace);
+                        println!("New namespace: {}", skpr_namespace);
                     }
 
                     let msg = match METADATA.read().get(&skpr_namespace) {
