@@ -326,9 +326,12 @@ impl SerdeParquet {
 
         // panic!("Arrow schema: {:?}", schema_ref);
 
+        let mut last_error = "".to_string();
+
         let mut writer =
             ArrowWriter::try_new(output, schema_ref, Some(props.build())).unwrap();
         let _error_count = 0;
+
 
         for batch in reader {
             match batch {
@@ -342,7 +345,8 @@ impl SerdeParquet {
                     }
                 }
                 Err(_error) => {
-                    println!("Error reading batch: {} while serialising to parquet", _error.to_string());
+                    // println!("Error reading batch: {} while serialising to parquet", _error.to_string());
+                    last_error = _error.to_string();
                 }
             }
         }
@@ -350,6 +354,7 @@ impl SerdeParquet {
         match writer.close() {
             Ok(_g) => {}
             Err(_err) => {
+                println!("Error reading batch: {} while serialising to parquet", last_error);
                 println!("Error Parquet closing writer: {}", _err.to_string());
             }
         }
