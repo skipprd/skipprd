@@ -558,16 +558,16 @@ impl AnalyseSchema {
             }
 
 
-            let demoted_types = vec!["boolean".to_string(), "date".to_string(), "timestamp".to_string(), "timestamp_milli".to_string()];
+            // let demoted_types = vec!["boolean".to_string(), "date".to_string(), "timestamp".to_string(), "timestamp_milli".to_string()];
 
 
-            if type_count.len() > 1 {
-                for (type_1, count) in type_count.clone() {
-                    if demoted_types.contains(&type_1) {
-                        type_count.remove(&type_1);
-                    }
-                }
-            }
+            // if type_count.len() > 1 {
+            //     for (type_1, count) in type_count.clone() {
+            //         if demoted_types.contains(&type_1) {
+            //             type_count.remove(&type_1);
+            //         }
+            //     }
+            // }
 
 
             if type_count.contains_key("array")  {
@@ -1020,7 +1020,7 @@ impl AnalyseSchema {
         parent_field: Option<&str>,
         flatten: bool,
     ) {
-        let demoted_types = vec!["boolean", "date", "timestamp", "timestamp_milli"];
+        // let demoted_types = vec!["boolean", "date", "timestamp", "timestamp_milli"];
 
         for (field_name, field) in metadata.iter_mut() {
             // Useful for field evolution logic for maps, which only support one sub-field type
@@ -1077,13 +1077,13 @@ impl AnalyseSchema {
                                 //     break;
                                 // }
 
-                                if field.types.len() == 1
-                                    || (field.types.len() > 1
-                                        && !demoted_types.contains(&data_type.as_str()))
-                                {
+                                // if field.types.len() == 1
+                                //     || (field.types.len() > 1
+                                //         && !demoted_types.contains(&data_type.as_str()))
+                                // {
                                     highest_type = data_type.to_string();
                                     highest_count = *data_type_count;
-                                }
+                                // }
                             }
                         }
 
@@ -1132,16 +1132,16 @@ impl AnalyseSchema {
                             //     break;
                             // }
 
-                            if type_count.len() <= 1
-                                || (type_count.len() > 1
-                                    && !demoted_types.contains(&data_type.as_str()))
-                            {
+                            // if type_count.len() <= 1
+                            //     || (type_count.len() > 1
+                            //         && !demoted_types.contains(&data_type.as_str()))
+                            // {
                                 if type_count.get(data_type).is_none() {
                                     type_count.insert(data_type.to_string(), *data_type_count);
                                 } else {
                                     *type_count.get_mut(data_type).unwrap() += data_type_count;
                                 }
-                            }
+                            // }
                         }
                     }
 
