@@ -5,7 +5,7 @@ use crate::helpers::offsets::{OffsetKey, Offsets, OffsetTypes};
 use crate::helpers::Helpers;
 use crate::ingest::ingest::ingest;
 use crate::serdes::json::SerdeJson;
-use crate::{BUFFER_FINALISE_RUNNING, helpers, METADATA, METRICS, NEW_METADATA, OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE, OUTPUT_RUNNING, RUNNING};
+use crate::{BUFFER_FINALISE_RUNNING, helpers, METADATA, METRICS, OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE, OUTPUT_RUNNING, RUNNING};
 use glob::{glob_with, MatchOptions};
 use lru::LruCache;
 use once_cell::sync::Lazy;
@@ -441,15 +441,15 @@ impl Ingest {
 
                             // let old_metadata = NEW_METADATA.read().unwrap().clone();
 
-                            if NEW_METADATA.read().get(&skpr_namespace).is_none() {
-                                // NEW_METADATA.write().insert(skpr_namespace.clone(), Metadata::new().unwrap());
-                                NEW_METADATA.write().extend(METADATA.read().clone());
-                            }
+                            // if NEW_METADATA.read().get(&skpr_namespace).is_none() {
+                            //     NEW_METADATA.write().insert(skpr_namespace.clone(), Metadata::new().unwrap());
+                            // }
 
                             // println!("Falling back to slow path due to: {}", err);
                             let msg = match ingest(
                                 &record,
-                                &mut NEW_METADATA.write().get_mut(&skpr_namespace).unwrap().fields,
+                                // &mut NEW_METADATA.write().get_mut(&skpr_namespace).unwrap().fields,
+                                &mut METADATA.write().get_mut(&skpr_namespace).unwrap().fields,
                                 &mut updated_schema_clone.lock().unwrap(),
                                 flatten,
                             ) {
@@ -482,8 +482,8 @@ impl Ingest {
 
                                 if updated_schema_clone.lock().unwrap().as_str() == "yes" {
                                     {
-                                        METADATA.write().clear();
-                                        METADATA.write().extend(NEW_METADATA.read().clone());
+                                        // METADATA.write().clear();
+                                        // METADATA.write().extend(NEW_METADATA.read().clone());
                                     }
                                 }
 
