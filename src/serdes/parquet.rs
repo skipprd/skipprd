@@ -347,7 +347,12 @@ impl SerdeParquet {
             }
         }
 
-        writer.close().unwrap();
+        match writer.close() {
+            Ok(_g) => {}
+            Err(_err) => {
+                println!("Error Parquet closing writer: {}", _err.to_string());
+            }
+        }
 
         output_file_path.to_string()
     }

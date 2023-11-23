@@ -229,7 +229,7 @@ impl DataSourceS3Plugin {
                         }
 
                         if skipped_objects > 0 {
-                            println!("Skipped {} objects... already processed", skipped_objects);
+                            // println!("Skipped {} objects... already processed", skipped_objects);
                             skipped_objects = 0;
                         }
                     }

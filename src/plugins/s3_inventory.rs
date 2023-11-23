@@ -393,10 +393,10 @@ impl DataSourceS3InventoryPlugin {
                         }
 
                         if skipped_manifests > 0 {
-                            println!(
-                                "Skipped {} inventory manifests... already processed",
-                                skipped_manifests
-                            );
+                            // println!(
+                            //     "Skipped {} inventory manifests... already processed",
+                            //     skipped_manifests
+                            // );
                             skipped_manifests = 0;
                         }
 
