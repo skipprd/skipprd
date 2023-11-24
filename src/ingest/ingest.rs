@@ -739,7 +739,27 @@ fn match_scalar_value(
                 }
             }
         }
-        "timestamp" | "timestamp_milli" | "int" | "integer" | "long" => match value.as_i64().map(Value::from) {
+        "int" | "integer"  => match value.as_i64().map(|v| v as i32).map(Value::from) {
+            Some(v) => Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), v)),
+            None => match value.as_str().and_then(|v| v.parse::<i32>().ok()).map(Value::from) {
+                Some(v) => Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), v)),
+                None => match value.as_f64().and_then(|v| v.to_string().parse::<i32>().ok()).map(Value::from) {
+                    Some(v) => Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), v)),
+                    None => match value.as_bool().and_then(|v| v.to_string().parse::<i32>().ok()).map(Value::from) {
+                        Some(v) => Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), v)),
+                        // None => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not an integer", value)))),
+                        None => {
+                            if !allow_evolve {
+                                return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Field: {} => {} value: {} is not an integer", parent_field.unwrap_or("root"), field, value))));
+                            }
+                            // Handle the value error applying the Evolution Strategy
+                            Evolution::evolve_field(&field.to_string(), value, parent_field, parent_data_type, metadata, updated_schema)
+                        }
+                    }
+                }
+            }
+        }
+        "timestamp" | "timestamp_milli" | "long" => match value.as_i64().map(Value::from) {
             Some(v) =>  if data_type == "timestamp_milli" || data_type == "timestamp" {
                 Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), AnalyseSchema::coerce_to_milli_seconds(v)))
             } else {

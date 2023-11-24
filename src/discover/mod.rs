@@ -298,7 +298,6 @@ impl AnalyseSchema {
         let mut i = 0;
 
         for v in records {
-
             skpr_namespace = Helpers::parse_namespace_field(
                 &v,
                 pipeline_name.clone(),
@@ -518,7 +517,7 @@ impl AnalyseSchema {
                 for sub_value in value.as_array().unwrap() {
                     let mut sv: Value = serde_json::from_str(&sub_value.to_string()).unwrap();
 
-                    let mut logical_type= "".to_string();
+                    let mut logical_type = "".to_string();
 
                     logical_type = self.resolve_field_type(
                         metadata
@@ -570,7 +569,7 @@ impl AnalyseSchema {
             // }
 
 
-            if type_count.contains_key("array")  {
+            if type_count.contains_key("array") {
                 data_type = "record".to_string();
             } else if is_sequential {
                 // array of sequential int keys is an avro array
@@ -588,8 +587,8 @@ impl AnalyseSchema {
             //  - Also, I'm not sure how to query a map in datafusion. Athena is fine. I just don't have confidence the complexity was worth it.
             //  - At the time of writing, Maps are fully supported however and the intention is to maintain that support so users can opt-in to maps.
             // else if !is_sequential {
-                // associative array is an avro map
-                // data_type = "map".to_string();
+            // associative array is an avro map
+            // data_type = "map".to_string();
             // }
             // Array of Arrays? Use a Record for the parent.
         }
@@ -620,8 +619,14 @@ impl AnalyseSchema {
 
                 if data_type == *"integer" {
                     valid_timestamp = self.is_valid_timestamp(value);
+                    if valid_timestamp {
+                        data_type = "timestamp".to_string();
+                    }
                 } else if data_type == *"long" {
                     valid_timestamp = self.is_valid_timestamp(value);
+                    if valid_timestamp {
+                        data_type = "timestamp_milli".to_string();
+                    }
                 }
 
                 if valid_timestamp {
@@ -647,13 +652,13 @@ impl AnalyseSchema {
                 .as_mut()
                 .is_none()
                 || metadata
-                    .get_mut(field)
-                    .unwrap()
-                    .date_candidate
-                    .as_mut()
-                    .unwrap()
-                    .check_count
-                    < DATE_FIELD_VALIDATION_MIN_SAMPLE
+                .get_mut(field)
+                .unwrap()
+                .date_candidate
+                .as_mut()
+                .unwrap()
+                .check_count
+                < DATE_FIELD_VALIDATION_MIN_SAMPLE
             {
                 // println!("Checking if {} is date type", field);
 
@@ -679,7 +684,7 @@ impl AnalyseSchema {
             }
         }
 
-        // @todo
+        // @todo - we don't support int bool anymore
         if data_type == *"integer" || data_type == *"string" {
             match parse_bool(value) {
                 Err(_i32) => {
@@ -707,11 +712,12 @@ impl AnalyseSchema {
     pub fn check_string_or_int(&self, value: &mut String) -> String {
         let mut data_type = get_type(value);
 
-        if value.parse::<i32>().is_ok() && (&mut value.parse::<i32>().unwrap().to_string() == value)
-        {
-            if self.is32bitSignedInt(value) {
+       // check is_32_bit_signed_int or is_64_bit_signed_int
+
+        if data_type == *"string" {
+            if self.is_32_bit_signed_int(value) {
                 data_type = "integer".to_string();
-            } else if self.is64bitSignedInt(value) {
+            } else if self.is_64_bit_signed_int(value) {
                 data_type = "long".to_string();
             }
         }
@@ -758,13 +764,13 @@ impl AnalyseSchema {
             .as_mut()
             .is_some()
             && metadata
-                .get_mut(field)
-                .unwrap()
-                .date_candidate
-                .as_mut()
-                .unwrap()
-                .valid_count
-                == 0
+            .get_mut(field)
+            .unwrap()
+            .date_candidate
+            .as_mut()
+            .unwrap()
+            .valid_count
+            == 0
         {
             metadata
                 .get_mut(field)
@@ -820,32 +826,43 @@ impl AnalyseSchema {
         }
     }
 
-    fn is32bitSignedInt(&self, value: &mut String) -> bool {
+    fn is_32_bit_signed_int(&self, value: &mut String) -> bool {
         // let value = value as i32;
-        const min: i32 = -2147483647;
+        const min: i32 = -2147483648;
         const max: i32 = 2147483647;
 
         let mut result = false;
-        if value.parse::<i32>().unwrap() > min {
-            result = true
-        }
+        let val = match value.parse::<i32>() {
+            Ok(val) => val,
+            Err(_) => {
+                return false;
+            },
+        };
 
-        if result && value.parse::<i32>().unwrap() < max {
-            result = true
+        if val >= min && val <= max {
+            result = true;
         }
 
         result
     }
 
-    fn is64bitSignedInt(&self, value: &mut String) -> bool {
-        let value = value.parse::<i64>().unwrap();
-        let options = [-9223372036854775807, 9223372036854775807];
+    fn is_64_bit_signed_int(&self, value: &mut String) -> bool {
+        let value = match value.parse::<i64>() {
+            Ok(val) => val,
+            Err(_) => {
+                return false;
+            },
+        };
+
+        const min: i64 = -9223372036854775808;
+        const max: i64 = 9223372036854775807;
+
         let mut result = false;
-        for i in options.iter() {
-            if value == *i {
-                result = true;
-            }
+
+        if value >= min && value <= max {
+            result = true;
         }
+
         result
     }
 
@@ -1224,6 +1241,106 @@ impl AnalyseSchema {
                 })
                 .or_insert(value);
         }
+    }
+}
+
+#[cfg(test)]
+mod check_string_or_int_tests {
+    use super::*;
+
+
+    #[test]
+    fn test_32_bit_signed_int() {
+        let dummy = AnalyseSchema { i: 0 };
+        let mut value = "2147483647".to_string(); // max i32
+        assert_eq!(dummy.check_string_or_int(&mut value), "integer");
+
+        let mut value = "-2147483648".to_string(); // min i32
+        assert_eq!(dummy.check_string_or_int(&mut value), "integer");
+    }
+
+    #[test]
+    fn test_64_bit_signed_int() {
+        let dummy = AnalyseSchema { i: 0 };
+        let mut value = "9223372036854775807".to_string(); // max i64
+        assert_eq!(dummy.check_string_or_int(&mut value), "long");
+
+        let mut value = "-9223372036854775808".to_string(); // min i64
+        assert_eq!(dummy.check_string_or_int(&mut value), "long");
+    }
+
+    #[test]
+    fn test_non_integer() {
+        let dummy = AnalyseSchema { i: 0 };
+        let mut value = "Hello".to_string();
+        assert_eq!(dummy.check_string_or_int(&mut value), "string"); // Assuming get_type returns "string"
+
+    }
+}
+
+#[cfg(test)]
+mod is_32_int_tests {
+    use super::*;
+
+    #[test]
+    fn test_within_range() {
+        let dummy = AnalyseSchema { i: 0 };
+        let mut value = "2147483647".to_string(); // max i32
+        assert!(dummy.is_32_bit_signed_int(&mut value));
+
+        let mut value = "-2147483648".to_string(); // min i32
+        assert!(dummy.is_32_bit_signed_int(&mut value));
+    }
+
+    #[test]
+    fn test_out_of_range() {
+        let dummy = AnalyseSchema { i: 0 };
+        let mut value = "2147483648".to_string(); // just above max i32
+        assert!(!dummy.is_32_bit_signed_int(&mut value));
+
+        let mut value = "-2147483649".to_string(); // just below min i32
+        assert!(!dummy.is_32_bit_signed_int(&mut value));
+    }
+
+    #[test]
+    fn test_invalid_input() {
+        let dummy = AnalyseSchema { i: 0 };
+        let mut value = "not a number".to_string();
+        assert!(!dummy.is_32_bit_signed_int(&mut value));
+    }
+}
+
+#[cfg(test)]
+mod is_64_int_tests {
+    use super::*;
+
+    //-9223372036854775808, 9223372036854775807
+
+    #[test]
+    fn test_within_range() {
+        let dummy = AnalyseSchema { i: 0 };
+        let mut value = "9223372036854775807".to_string(); // max i64
+        assert!(dummy.is_64_bit_signed_int(&mut value));
+
+        let mut value = "-9223372036854775808".to_string(); // min i64
+        assert!(dummy.is_64_bit_signed_int(&mut value));
+    }
+
+    #[test]
+    fn test_out_of_range() {
+        let dummy = AnalyseSchema { i: 0 };
+        let mut value = "9223372036854775808".to_string(); // just above max i64
+        assert!(!dummy.is_64_bit_signed_int(&mut value));
+
+        let mut value = "-9223372036854775809".to_string(); // just below min i64
+        assert!(!dummy.is_64_bit_signed_int(&mut value));
+    }
+
+    #[test]
+    fn test_invalid_input() {
+        let dummy = AnalyseSchema { i: 0 };
+        let mut value = "not a number".to_string();
+        assert!(!dummy.is_64_bit_signed_int(&mut value));
     }
 }
 

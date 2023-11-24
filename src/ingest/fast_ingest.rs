@@ -274,30 +274,85 @@ pub fn match_scalar_value_fast(
                 }
             }
         }
-        "timestamp" | "timestamp_milli" | "int" | "integer" | "long" => match value.as_i64().map(Value::from) {
-            Some(v) => if data_type == "timestamp_milli" || data_type == "timestamp" {
-                Ok(ResolvedFieldValue {
-                    field: Metadata::get_field_out_field_name(metadata, field),
-                    value: AnalyseSchema::coerce_to_milli_seconds(v),
-                })
-            } else {
-                Ok(ResolvedFieldValue {
+        "long" => match value.as_i64().map(Value::from) {
+            Some(v) => Ok(ResolvedFieldValue {
+                field: Metadata::get_field_out_field_name(metadata, field),
+                value: v,
+            }),
+            None => match value.as_str().and_then(|v| v.parse::<i64>().ok()).map(Value::from) {
+                Some(v) => Ok(ResolvedFieldValue {
                     field: Metadata::get_field_out_field_name(metadata, field),
                     value: v,
-                })
-            },
+                }),
+                None => {
+                    if apply_evolution {
+                        match Evolution::apply_evolution_factory(field, value, metadata) {
+                            Ok(v) => Ok(v),
+                            Err(e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type)))),
+                        }
+                    } else {
+                        Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type))))
+                    }
+                }
+            }
+        }
+        // ensure 32bit int
+        "int" | "integer" => match value.as_i64().map(|v| v as i32).map(Value::from) {
+            Some(v) => Ok(ResolvedFieldValue {
+                field: Metadata::get_field_out_field_name(metadata, field),
+                value: v,
+            }),
+            None => match value.as_str().and_then(|v| v.parse::<i32>().ok()).map(Value::from) {
+                Some(v) => Ok(ResolvedFieldValue {
+                    field: Metadata::get_field_out_field_name(metadata, field),
+                    value: v,
+                }),
+                None => {
+                    if apply_evolution {
+                        match Evolution::apply_evolution_factory(field, value, metadata) {
+                            Ok(v) => Ok(v),
+                            Err(e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type)))),
+                        }
+                    } else {
+                        Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type))))
+                    }
+                }
+            }
+
+        }
+        "timestamp" => match value.as_i64().map(Value::from) {
+            Some(v) => Ok(ResolvedFieldValue {
+                field: Metadata::get_field_out_field_name(metadata, field),
+                value: v,
+            }),
+            None => match value.as_str().and_then(|v| v.parse::<i32>().ok()).map(Value::from) {
+                Some(v) => Ok(ResolvedFieldValue {
+                    field: Metadata::get_field_out_field_name(metadata, field),
+                    value: v,
+                }),
+                None => {
+                    if apply_evolution {
+                        match Evolution::apply_evolution_factory(field, value, metadata) {
+                            Ok(v) => Ok(v),
+                            Err(e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type)))),
+                        }
+                    } else {
+                        Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type))))
+                    }
+                }
+            }
+        }
+        "timestamp_milli"  => match value.as_i64().map(Value::from) {
+            Some(v) => Ok(ResolvedFieldValue {
+                    field: Metadata::get_field_out_field_name(metadata, field),
+                    value: AnalyseSchema::coerce_to_milli_seconds(v),
+                }),
             None => match value.as_str().and_then(|v| v.parse::<i64>().ok()).map(Value::from) {
-                Some(v) => if data_type == "timestamp_milli" || data_type == "timestamp" {
+                Some(v) =>
                     Ok(ResolvedFieldValue {
                         field: Metadata::get_field_out_field_name(metadata, field),
                         value: AnalyseSchema::coerce_to_milli_seconds(v),
-                    })
-                } else {
-                    Ok(ResolvedFieldValue {
-                        field: Metadata::get_field_out_field_name(metadata, field),
-                        value: v,
-                    })
-                },
+                    }),
                 None => {
                     // handle boolean values
                     match value.as_bool().and_then(|v| {
