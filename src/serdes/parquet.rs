@@ -345,6 +345,7 @@ impl SerdeParquet {
                     }
                 }
                 Err(_error) => {
+                    panic!("Error reading batch: {} while serialising to parquet", _error.to_string());
                     // println!("Error reading batch: {} while serialising to parquet", _error.to_string());
                     last_error = _error.to_string();
                 }
