@@ -328,8 +328,14 @@ impl Ingest {
                                 }
                             },
                             None => {
+                                let line_no = if batch_line == 0 || batch_line > ingest_batch.data.lines().count() {
+                                    1
+                                } else {
+                                    batch_line - 1
+                                };
+
                                 // deadletter
-                                let line_str = match ingest_batch.data.lines().nth(batch_line - 1) {
+                                let line_str = match ingest_batch.data.lines().nth(line_no) {
                                     Some(line) => line,
                                     None => ""
                                 };
