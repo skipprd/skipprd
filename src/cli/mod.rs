@@ -9,7 +9,7 @@ pub struct Cli {
 
 #[derive(Parser)]
 pub enum Mode {
-    Discover,
+    Discover(DisocverOptions),
     Sync(SyncOptions),
     Query(QueryOptions),
     Schema(SchemaOptions),
@@ -18,6 +18,13 @@ pub enum Mode {
 
 #[derive(Parser)]
 pub struct SyncOptions {
+    /// The pipeline to use
+    #[arg(short, long)]
+    pub(crate) pipeline: Option<String>,
+}
+
+#[derive(Parser)]
+pub struct DisocverOptions {
     /// The pipeline to use
     #[arg(short, long)]
     pub(crate) pipeline: Option<String>,

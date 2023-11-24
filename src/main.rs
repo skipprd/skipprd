@@ -219,10 +219,17 @@ async fn main() {
 
 
         }
-        Mode::Discover => {
-            // println!("Command discover");
-            Config::init().await;
-            discover().await;
+        Mode::Discover(options) => {
+            if options.pipeline.is_some() {
+                // println!("Syncing pipeline: {}", options.pipeline.unwrap().clone());
+                PIPELINE_NAME.write().clear();
+                PIPELINE_NAME.write().push_str(&options.pipeline.unwrap().clone());
+                Config::init().await;
+
+                discover().await;
+            } else {
+                println!("No pipeline name provided, you must provide a pipeline name to discover schemas");
+            }
         }
         Mode::Query(options) => {
 
