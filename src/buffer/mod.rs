@@ -9,7 +9,7 @@ use std::io::{ErrorKind, Write};
 use std::{fs, str};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 use arrow::datatypes;
 use arrow::error::ArrowError;
 use glob::{glob_with, MatchOptions};
@@ -102,7 +102,7 @@ impl BufferChunker {
 
         }
 
-        if force {
+        // if force {
             let options = MatchOptions {
                 case_sensitive: false,
                 require_literal_separator: false,
@@ -122,25 +122,58 @@ impl BufferChunker {
                                 break;
                             }
 
-                            let new_filename = format!(
-                                "{}/done/{}-{}",
-                                dir,
-                                Helpers::random_str(32),
-                                path.file_name().unwrap().to_str().unwrap()
-                            );
-                            let old_path = format!("{}", path.display().to_string());
+                            let output_file = match std::fs::metadata(&path) {
+                                Ok(metadata) => {
+                                    let secs_since_epoch = metadata
+                                        .modified()
+                                        .unwrap()
+                                        .duration_since(UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_secs();
+                                    let time = UNIX_EPOCH + std::time::Duration::from_secs(secs_since_epoch);
 
-                            match fs::rename(&old_path, &new_filename) {
-                                Ok(_) => {}
-                                Err(err) => {
-                                    println!("Error: {}", err)
+                                    // println!("Checking buffer file: {}, size: {}, updated_at: {}", path.to_str().unwrap(), metadata.len(), time.duration_since(UNIX_EPOCH).unwrap().as_secs());
+
+                                    OutputFile {
+                                        bytes: metadata.len(),
+                                        upated_at: time,
+                                        file: File::open(&path).unwrap(),
+                                        rotated: None,
+                                    }
                                 }
+                                Err(_err) => OutputFile {
+                                    bytes: 0,
+                                    upated_at: SystemTime::now(),
+                                    file: File::open(&path).unwrap(),
+                                    rotated: None,
+                                },
                             };
+
+
+                            if force
+                                || BufferChunker::is_file_size_exceeded(&output_file)
+                                || BufferChunker::is_file_time_exceeded(&output_file)
+                            {
+                                let new_filename = format!(
+                                    "{}/done/{}-{}",
+                                    dir,
+                                    Helpers::random_str(32),
+                                    path.file_name().unwrap().to_str().unwrap()
+                                );
+                                let old_path = format!("{}", path.display().to_string());
+
+                                match fs::rename(&old_path, &new_filename) {
+                                    Ok(_) => {}
+                                    Err(err) => {
+                                        println!("Error: {}", err)
+                                    }
+                                };
+                            }
                         }
                         _ => {}
                     }
                 }
-            }
+            // }
         }
 
         BufferChunker::finalise_buffers();
