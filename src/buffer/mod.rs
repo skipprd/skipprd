@@ -132,7 +132,7 @@ impl BufferChunker {
                                         .as_secs();
                                     let time = UNIX_EPOCH + std::time::Duration::from_secs(secs_since_epoch);
 
-                                    // println!("Checking buffer file: {}, size: {}, updated_at: {}", path.to_str().unwrap(), metadata.len(), time.duration_since(UNIX_EPOCH).unwrap().as_secs());
+                                    println!("Checking buffer file: {}, size: {}, updated_at: {}", path.to_str().unwrap(), metadata.len(), time.duration_since(UNIX_EPOCH).unwrap().as_secs());
 
                                     OutputFile {
                                         bytes: metadata.len(),
