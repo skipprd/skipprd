@@ -229,9 +229,9 @@ impl DataSourceS3Plugin {
                         }
 
                         if skipped_objects > 0 {
-                            if skipped_objects >= 100000 {
+                            // if skipped_objects >= 100000 {
                                 println!("Skipped {} objects... already processed", skipped_objects);
-                            }
+                            // }
                             skipped_objects = 0;
                         }
                     }
