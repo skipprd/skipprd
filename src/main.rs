@@ -830,12 +830,14 @@ async fn sync() {
                     .unwrap()
                     .block_on(async {
 
+                        BufferChunker::rotate_buffers(false);
+
                         while OUTPUT_RUNNING.read().load(Ordering::SeqCst) {
                             // sleep(Duration::from_secs(1));
                             return;
                         }
 
-                        BufferChunker::rotate_buffers(false);
+
                         // BufferChunker::finalise_buffers(false);
 
                         if Config::get_pipeline_config().output.is_some() {
@@ -844,11 +846,11 @@ async fn sync() {
                             }
 
                             sync_output_plugin(Config::get_pipeline_output_plugin_name().as_str(), "output".to_string()).await;
-
-                            OUTPUT_RUNNING
-                                .write()
-                                .store(false, Ordering::SeqCst);
                         }
+
+                        OUTPUT_RUNNING
+                            .write()
+                            .store(false, Ordering::SeqCst);
                     });
             }
         },
