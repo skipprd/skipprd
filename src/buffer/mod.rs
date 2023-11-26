@@ -209,9 +209,9 @@ impl BufferChunker {
 
                 let path = PathBuf::from(&new_filename);
 
-                if !force {
-                    BufferChunker::finalise_buffers(false, new_file, &new_filename)
-                } else {
+                // if !force {
+                //     BufferChunker::finalise_buffers(false, new_file, &new_filename)
+                // } else {
                     // let finalize_file = OutputFile {
                     //     bytes: new_file.bytes,
                     //     updated_at: SystemTime::now(),
@@ -221,15 +221,15 @@ impl BufferChunker {
                     // files_to_finalize.insert(new_filename.clone(), finalize_file);
 
 
-                    false
-                }
+                    // false
+                // }
 
 
             };
 
-            if should_remove {
-                file_pointers.remove(&new_filename);
-            }
+            // if should_remove {
+            //     file_pointers.remove(&new_filename);
+            // }
 
         }
 
