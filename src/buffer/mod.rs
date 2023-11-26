@@ -18,6 +18,7 @@ use glob::{glob_with, MatchOptions};
 use lru::LruCache;
 
 use parquet::data_type::AsBytes;
+use parquet::file::reader::Length;
 use crate::{BUFFER_FINALISE_RUNNING, METADATA, OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE, RUNNING};
 use crate::converters::skippr_arrow::convert_skippr_to_arrow;
 use crate::discover::Metadata;
@@ -80,9 +81,9 @@ impl BufferChunker {
             .collect::<Vec<_>>());
 
         for path in paths {
-            if path.is_dir() {
-                break;
-            }
+            // if path.is_dir() {
+            //     break;
+            // }
 
             let skpr_namespace =
                 BufferChunker::decode_file_namespace(path.to_str().unwrap());
@@ -244,24 +245,19 @@ impl BufferChunker {
 
                 let filename = path.to_str().unwrap().to_string();
 
-                let file_metadata = match fs::metadata(&filename) {
-                    Ok(metadata) => metadata,
-                    Err(err) => {
-                        println!("Error: {}, File: {}", err, filename);
-                        continue;
-                    }
-                };
-
                 let file: OutputFile = match fs::OpenOptions::new()
                     .create(true)
                     .append(true)
                     .open(&filename)
                 {
                     Ok(file) => OutputFile {
-                        bytes: file_metadata.len(),
-                        updated_at: match file_metadata.modified() {
-                            Ok(time) => time,
-                            Err(err) => SystemTime::now(),
+                        bytes: file.len(),
+                        updated_at: match file.metadata() {
+                            Ok(metadata) => metadata.modified().unwrap(),
+                            Err(err) => {
+                                println!("Error getting buffer file metadata modified time: {}, File: {}", err, filename);
+                                continue;
+                            }
                         },
                         file,
                         rotated: None,
@@ -283,9 +279,9 @@ impl BufferChunker {
             .collect::<Vec<_>>();
 
         for path in paths {
-            if path.is_dir() {
-                break;
-            }
+            // if path.is_dir() {
+            //     break;
+            // }
 
             match fs::remove_file(&path) {
                 Ok(_t) => {}
