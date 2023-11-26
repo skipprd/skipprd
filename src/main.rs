@@ -509,8 +509,6 @@ async fn sync() {
         Ok(metadata) => {
             println!("Found Skippr metadata");
 
-            Config::sync_schema(&metadata).await;
-
             metadata
         }
         Err(_e) => {
@@ -525,6 +523,8 @@ async fn sync() {
         // NEW_METADATA.write().clear();
         METADATA.write().clone_from(&skippr_metadata);
     }
+
+    Config::sync_schema(&skippr_metadata).await;
 
     let now = Arc::new(Mutex::new(Instant::now()));
 

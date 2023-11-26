@@ -231,8 +231,20 @@ impl DataOutputAwsAthenaPlugin {
 
                 let partition_metadata = if flatten {
                     flatten_metadata(
-                        metadata.get(&namespace).unwrap(),
-                        &mut out_meta.get_mut(&namespace).unwrap().fields,
+                        match metadata.get(&namespace) {
+                            Some(meta) => meta,
+                            None => {
+                                println!("Failed to find metadata for namespace: {}", namespace);
+                                continue;
+                            }
+                        },
+                        match out_meta.get_mut(&namespace) {
+                            Some(meta) => meta.fields.as_mut(),
+                            None => {
+                                println!("Failed to find metadata for namespace: {}", namespace);
+                                continue;
+                            }
+                        }
                     );
                     out_meta.get(&namespace)
                 } else {
