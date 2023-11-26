@@ -81,7 +81,7 @@ impl BufferChunker {
             .collect::<Vec<_>>());
 
         // limit path to 1000 files
-        // paths.truncate(1000);
+        paths.truncate(1000);
 
         for path in paths {
             // if path.is_dir() {
