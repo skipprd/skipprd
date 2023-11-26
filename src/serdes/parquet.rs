@@ -246,10 +246,9 @@ impl SerdeParquet {
                 Some(file)
             },
             Err(err) => {
-                println!(
-                    "Error opening file for serialisation, already processed? {}",
-                    err
-                );
+                // println!("Error opening file for serialisation, already processed? {}", err);
+                println!("File: {}", path.to_str().unwrap());
+                panic!("Error opening file for serialisation, already processed? {}", err);
                 None
             }
         };

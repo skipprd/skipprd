@@ -84,7 +84,7 @@ use crate::plugins::athena::DataOutputAwsAthenaPlugin;
 use crate::plugins::s3_input::DataSourceS3Plugin;
 use crate::plugins::s3_inventory::DataSourceS3InventoryPlugin;
 
-use crate::ingest_work::{Ingest, OUTPUT_FILES_STATIC};
+use crate::ingest_work::{Ingest};
 use crate::metrics::{Metrics, MetricsStatus};
 use crate::plugins::file_input::DataSourceLocalFilePlugin;
 use crate::plugins::file_output::DataOutputFilePlugin;
@@ -626,7 +626,7 @@ async fn sync() {
                 RUNNING.write().store(false, Ordering::SeqCst);
             }
 
-            let offsets_clone = offsets_clone.clone();
+            // let offsets_clone = offsets_clone.clone();
             // let logger_clone = Arc::clone(&logger_clone);
 
             thread::spawn(move || {
@@ -652,8 +652,8 @@ async fn sync() {
                 // let mut output_files = OUTPUT_FILES_STATIC.write();
                 // Ingest::rotate_buffers(true, &mut output_files);
 
-                offsets_clone.flush();
-                println!("Flushed offsets");
+                // offsets_clone.flush();
+                // println!("Flushed offsets");
 
                 // let _metrics_lock = match METRICS.read() {
                 //     Ok(m) => {
@@ -830,12 +830,13 @@ async fn sync() {
                     .unwrap()
                     .block_on(async {
 
-                        // Ingest::finalise_buffers();
-
                         while OUTPUT_RUNNING.read().load(Ordering::SeqCst) {
                             // sleep(Duration::from_secs(1));
                             return;
                         }
+
+                        BufferChunker::rotate_buffers(false);
+                        // BufferChunker::finalise_buffers(false);
 
                         if Config::get_pipeline_config().output.is_some() {
                             {
@@ -851,7 +852,7 @@ async fn sync() {
                     });
             }
         },
-        periodic::Every::new(Duration::from_secs(60)),
+        periodic::Every::new(Duration::from_secs(5)),
     );
     out_pnanner.start();
 
@@ -908,12 +909,16 @@ async fn sync() {
 
     // RUNNING.write().unwrap().store(false, Ordering::SeqCst); // the prevents metrics from printing while shutting down, BUT also prevents output serialisatin
 
-    let mut output_files = OUTPUT_FILES_STATIC.write();
-    BufferChunker::rotate_buffers(true, &mut output_files);
-
     while OUTPUT_RUNNING.read().load(Ordering::SeqCst) {
         sleep(Duration::from_secs(1));
     }
+
+    while BUFFER_FINALISE_RUNNING.read().load(Ordering::SeqCst) {
+        sleep(Duration::from_secs(1));
+    }
+
+    BufferChunker::rotate_buffers(true);
+    // BufferChunker::finalise_buffers(true);
 
     if Config::get_pipeline_config().output.is_some() {
         sync_output_plugin(Config::get_pipeline_output_plugin_name().as_str(), "output".to_string()).await;
@@ -1127,4 +1132,70 @@ mod tests {
             metadata_child.count
         );
     }
+
+    // @todo - support flattening of arrays of structs?
+    // #[test]
+    // fn test_flatten_array_of_structsmetadata() {
+    //     let mut fields: Box<HashMap<String, Metadata>> = Box::new(HashMap::new());
+    //
+    //     let metadata_child = Metadata {
+    //         count: 1,
+    //         types: HashMap::new(),
+    //         parent_type: "record".to_string(),
+    //         fields: Box::new(HashMap::new()),
+    //         date_candidate: None,
+    //         evolution: Box::new(HashMap::new()),
+    //         enabled: true,
+    //         out_field_name: "parent_record_child".to_string(),
+    //         determined_type: "string".to_string(),
+    //         determined_type_values: "".to_string(),
+    //     };
+    //
+    //     fields.insert("child".to_string(), metadata_child.clone());
+    //
+    //     let mut record_fields: Box<HashMap<String, Metadata>> = Box::new(HashMap::new());
+    //
+    //     let metadata_record = Metadata {
+    //         count: 1,
+    //         types: HashMap::new(),
+    //         parent_type: "array".to_string(),
+    //         fields: fields,
+    //         date_candidate: None,
+    //         evolution: Box::new(HashMap::new()),
+    //         enabled: true,
+    //         out_field_name: "record".to_string(),
+    //         determined_type: "record".to_string(),
+    //         determined_type_values: "".to_string(),
+    //     };
+    //
+    //     record_fields.insert("record".to_string(), metadata_record.clone());
+    //
+    //     let metadata = Metadata {
+    //         count: 1,
+    //         types: HashMap::new(),
+    //         parent_type: "".to_string(),
+    //         fields: record_fields,
+    //         date_candidate: None,
+    //         evolution: Box::new(HashMap::new()),
+    //         enabled: true,
+    //         out_field_name: "parent".to_string(),
+    //         determined_type: "array".to_string(),
+    //         determined_type_values: "".to_string(),
+    //     };
+    //
+    //
+    //     let mut flattened: HashMap<String, Metadata> = HashMap::new();
+    //
+    //     flatten_metadata(&metadata, &mut flattened);
+    //
+    //     println!("{:?}", flattened);
+    //
+    //     assert_eq!(flattened.len(), 1);
+    //     assert!(flattened.contains_key("parent_record_child"));
+    //     assert_eq!(
+    //         flattened.get("parent_record_child").unwrap().count,
+    //         metadata_child.count
+    //     );
+    // }
+
 }

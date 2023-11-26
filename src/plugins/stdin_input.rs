@@ -2,7 +2,7 @@
 use crate::helpers::configuration::{Config};
 use crate::helpers::offsets::{OffsetKey, Offsets};
 use crate::helpers::Helpers;
-use crate::ingest_work::{Ingest, IngestBatch, OUTPUT_FILES_STATIC};
+use crate::ingest_work::{Ingest, IngestBatch};
 
 use std::io::{self, BufRead, BufReader};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -115,8 +115,7 @@ impl DataSourceStdinPlugin {
                 }
                 Err(e) => match e {
                     mpsc::RecvTimeoutError::Timeout => {
-                        let mut output_files = OUTPUT_FILES_STATIC.write();
-                        BufferChunker::rotate_buffers(true, &mut output_files);
+                        BufferChunker::rotate_buffers(true);
                     }
                     mpsc::RecvTimeoutError::Disconnected => {
                         eprintln!("Error receiving from buffer channel: {}", e);

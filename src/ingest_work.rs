@@ -91,7 +91,7 @@ pub struct IngestBatch {
 // Can't rely on file.metadata() as we don't know we're dealing with a unix FS. e.g. EFS
 pub struct OutputFile {
     pub(crate) bytes: u64,
-    pub(crate) upated_at: SystemTime,
+    pub(crate) updated_at: SystemTime,
     // non buffered writer
     pub(crate) file: File,
     pub(crate) rotated: Option<bool>,
@@ -108,10 +108,6 @@ pub const WRITE_BUF_SIZE: usize = if cfg!(target_os = "espidf") {
 thread_local! {
     pub static PARSE_NAMESPACE_CACHE: Lazy<RwLock<HashMap<String, String>>> = Lazy::new(|| RwLock::new(HashMap::new()));
 }
-
-pub static OUTPUT_FILES_STATIC: Lazy<TimedRwLock<LruCache<String, OutputFile>>> =
-    Lazy::new(|| TimedRwLock::new("output_files_static".to_string(), LruCache::new(NonZeroUsize::new(100).expect(""))));
-
 pub static DEADLETTER_FILE_NAME: Lazy<String> = Lazy::new(|| BufferChunker::encode_chunk_name(
     "deadletters",
     Some(Config::get_pipeline_name().as_str()),
@@ -224,7 +220,7 @@ impl Ingest {
 
                 self.thread_pool.execute(move || {
                     // println!("Processing batch of {} events on core {}", datas_clone.len(), core_count);
-                    Ingest::process_batch(&mut datas_clone, &offset_db_clone);
+                    Ingest::process_batch(&mut datas_clone, &offset_db_clone, core_count);
                     tx.send(()).unwrap();
                 });
 
@@ -246,7 +242,8 @@ impl Ingest {
 
     fn process_batch(
         datas: &mut Vec<IngestBatch>,
-        offset_db_clone: &Arc<Offsets>
+        offset_db_clone: &Arc<Offsets>,
+        core_count: usize,
     ) {
 
         // let mut avro_schemas = AVRO_SCHEMA.lock().unwrap();
@@ -519,7 +516,7 @@ impl Ingest {
                         }
                     };
 
-                    let output_file = format!("{}/{}", output_dir.clone(), &output_file_name);
+                    let output_file = format!("{}/{}.part", output_dir.clone(), &output_file_name);
 
                     // let pretty_json = match serde_json::to_string_pretty(&record_value) {
                     //     Ok(pretty_json) => pretty_json,
@@ -554,115 +551,53 @@ impl Ingest {
         // @todo - We should also be able to flush the buffers to disk in parallel.
         // @todo - Ideally this would not be a blocking operation.
         // @todo - We probably want to track file metadata in a persistent store, so we can recover from crashes. FS metadata is not reliably available.
-        // let mut output_files = match OUTPUT_FILES_STATIC.write() {
-        //     Ok(output_files) => output_files,
-        //     Err(err) => {
-        //         panic!("Could not lock buffer files, Error: {:?}", err);
-        //     }
-        // };
-        let mut output_files = OUTPUT_FILES_STATIC.write();
+
 
             // Flush all buffers to their respective files.
         for (filename, buffer) in buffers.buffers.iter() {
 
-            if output_files.peek(filename).is_none() {
+            let new_file = format!("{}-{}-{}", filename.clone(), Helpers::random_password(12), core_count);
 
-                // If the cache is full, remove and flush the least recently used item.
-                if output_files.len() == output_files.cap().get() {
-                    if let Some((evicted_filename, mut evicted)) = output_files.pop_lru() {
-                        evicted
-                            .file
-                            .flush()
-                            .expect(&format!("Could not flush file {}", evicted_filename));
-                        // evicted.file.into_inner().unwrap().sync_all().unwrap(); // needed?
-
-
+            // println!("Creating new file: {}", filename);
+            let mut f = match OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(new_file) {
+                    Ok(f) => f,
+                    Err(err) => {
+                        panic!("Could not open file: {}, Error: {:?}", filename, err);
                     }
-                }
-
-                let f = match OpenOptions::new()
-                    .create(false)
-                    .append(true)
-                    .open(filename.clone()) {
-                        Ok(f) => {
-                            // println!("Reopened buffer file: {}", filename);
-                            f
-                        },
-                        Err(err) => {
-                            // println!("Could not open file: {}, Error: {:?}", filename, err);
-                            // Create file
-                            // println!("Creating new file: {}", filename);
-                            let f = match OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open(filename.clone()) {
-                                    Ok(f) => f,
-                                    Err(err) => {
-                                        panic!("Could not open file: {}, Error: {:?}", filename, err);
-                                    }
-                                };
-                            f
-                        }
-                    };
-
-                // let writer = BufWriter::with_capacity(WRITE_BUF_SIZE, f);
-
-                // Be aware metadata will often not return a filesize on various filesystems. So we'll end up with larger buffer files than intended.
-                let new_file = match std::fs::metadata(&filename) {
-                    Ok(metadata) => {
-                        let secs_since_epoch = metadata
-                            .modified()
-                            .unwrap()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs();
-                        let time = UNIX_EPOCH + Duration::from_secs(secs_since_epoch);
-
-                        // println!("File: {} already exists, size: {}, updated_at: {}", filename, metadata.len(), time.duration_since(UNIX_EPOCH).unwrap().as_secs());
-
-                        OutputFile {
-                            bytes: metadata.len(),
-                            upated_at: time,
-                            file: f,
-                            rotated: None,
-                        }
-                    }
-                    Err(_err) => OutputFile {
-                        bytes: 0,
-                        upated_at: aprox_now,
-                        file: f,
-                        rotated: None,
-                    },
                 };
 
 
-
-                output_files.put(filename.clone(), new_file);
-            }
-
-            if let Some(output_file) = output_files.get_mut(filename) {
-                match output_file.file.write(&buffer.data) {
+                match f.write(&buffer.data) {
                     Ok(_) => {
-                        output_file.bytes += buffer.bytes;
-                        output_file.upated_at = aprox_now;
-                        output_file
-                            .file
-                            .flush()
-                            .expect(&format!("Could not flush file {}", filename));
-
+                        match f.flush(){
+                            Ok(_) => {
+                                // println!("Flushed file: {}", filename);
+                            },
+                            Err(err) => {
+                                println!("Could not flush file: {}, Error: {:?}", filename, err);
+                            }
+                        }
+                        match f.sync_all() {
+                            Ok(_) => {
+                                // println!("Synced file: {}", filename);
+                            },
+                            Err(err) => {
+                                println!("Could not sync file: {}, Error: {:?}", filename, err);
+                            }
+                        }
                     }
                     Err(err) => {
                         println!("Could not write to file: {}, Error: {:?}", filename, err);
                     }
                 }
-            }
         }
 
         offset_db_clone.flush();
 
         buffers.clear_all();
-
-        BufferChunker::rotate_buffers(false, &mut output_files);
 
         if *updated_schema_clone.lock().unwrap() == "yes".to_string() {
             *updated_schema_clone.lock().unwrap() = "no".to_string();
