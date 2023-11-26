@@ -300,15 +300,6 @@ impl BufferChunker {
 
     pub fn finalise_buffers(force: bool, output_file: &OutputFile, filename: &String) -> bool {
 
-        // check filename exists on disk, very often not syned to disk yet
-        if !Path::new(filename).exists() {
-            // println!("File {} does not exist", filename);
-            // panic!("File {} does not exist", filename);
-            // sleep(std::time::Duration::from_millis(5000));
-            // panic!("File {} does not exist", filename);
-            return false;
-        }
-
         let flatten = Config::get_transform_flatten_events();
 
         let data_dir = Config::get_data_dir();
@@ -325,6 +316,17 @@ impl BufferChunker {
             || BufferChunker::is_file_size_exceeded(&output_file)
             || BufferChunker::is_file_time_exceeded(&output_file)
         {
+
+            // check filename exists on disk, very often not syned to disk yet
+            // only check fs when necessary, i.e. when file is due to be rotated
+            if !Path::new(filename).exists() {
+                // println!("File {} does not exist", filename);
+                // panic!("File {} does not exist", filename);
+                // sleep(std::time::Duration::from_millis(5000));
+                // panic!("File {} does not exist", filename);
+                return false;
+            }
+
             // println!("Finalising output file {}", filename);
 
             if output_file.bytes == 0 {
