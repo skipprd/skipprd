@@ -80,6 +80,9 @@ impl BufferChunker {
             .filter_map(Result::ok)
             .collect::<Vec<_>>());
 
+        // limit path to 1000 files
+        // paths.truncate(1000);
+
         for path in paths {
             // if path.is_dir() {
             //     break;
@@ -130,8 +133,14 @@ impl BufferChunker {
                         };
 
                         let output_file = OutputFile {
-                            bytes: 0,
-                            updated_at: SystemTime::now(),
+                            bytes: file.len(),
+                            updated_at: match file.metadata() {
+                                Ok(metadata) => match metadata.modified() {
+                                    Ok(time) => time,
+                                    Err(err) => SystemTime::now(),
+                                }
+                                Err(err) => SystemTime::now(),
+                            },
                             file,
                             rotated: None,
                         };
@@ -253,11 +262,11 @@ impl BufferChunker {
                     Ok(file) => OutputFile {
                         bytes: file.len(),
                         updated_at: match file.metadata() {
-                            Ok(metadata) => metadata.modified().unwrap(),
-                            Err(err) => {
-                                println!("Error getting buffer file metadata modified time: {}, File: {}", err, filename);
-                                continue;
-                            }
+                            Ok(metadata) => match metadata.modified() {
+                                Ok(time) => time,
+                                Err(err) => SystemTime::now(),
+                            },
+                            Err(err) => SystemTime::now(),
                         },
                         file,
                         rotated: None,
