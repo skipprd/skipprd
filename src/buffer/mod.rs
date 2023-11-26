@@ -250,34 +250,17 @@ impl BufferChunker {
                     .append(true)
                     .open(&filename)
                 {
-                    Ok(file) => {
-
-                        let metadata = match fs::metadata(&filename) {
-                            Ok(metadata) => metadata,
+                    Ok(file) => OutputFile {
+                        bytes: file.len(),
+                        updated_at: match file.metadata() {
+                            Ok(metadata) => metadata.modified().unwrap(),
                             Err(err) => {
-                                println!("Error getting buffer file metadata: {}, File: {}", err, filename);
+                                println!("Error getting buffer file metadata modified time: {}, File: {}", err, filename);
                                 continue;
                             }
-                        };
-
-                        OutputFile {
-                            bytes: match metadata.len() {
-                                0 => {
-                                    println!("Skipping empty file {}", filename);
-                                    continue;
-                                }
-                                bytes => bytes,
-                            },
-                            updated_at: match metadata.modified() {
-                                Ok(time) => time,
-                                Err(err) => {
-                                    println!("Error getting buffer file modified time: {}, File: {}", err, filename);
-                                    continue;
-                                }
-                            },
-                            file,
-                            rotated: None,
-                        }
+                        },
+                        file,
+                        rotated: None,
                     },
                     Err(err) => {
                         println!("Error: {}, File: {}", err, filename);
@@ -339,7 +322,9 @@ impl BufferChunker {
                 // panic!("File {} does not exist", filename);
                 return false;
             }
-            
+
+            // println!("Finalising output file {}", filename);
+
             if output_file.bytes == 0 {
                 println!("Skipping empty file {}", filename);
                 // continue;
