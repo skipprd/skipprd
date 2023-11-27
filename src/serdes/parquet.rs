@@ -286,6 +286,7 @@ impl SerdeParquet {
         let skpr_namespace = BufferChunker::decode_file_namespace(path.to_str().unwrap());
         let skpr_partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
         let source_time = BufferChunker::decode_file_time(path.to_str().unwrap());
+        let shard = BufferChunker::decode_file_shard(path.to_str().unwrap());
 
         // let skpr_namespace = Helpers::parse_namespace_field(&record, source_namespace, &mut PARSE_NAMESPACE_CACHE);
 
@@ -294,7 +295,7 @@ impl SerdeParquet {
             Some(&skpr_namespace),
             Some(&skpr_partition),
             Some(source_time),
-            None
+            Some(&shard),
         );
 
         let output_dir = &format!("{}/output_buffer", data_dir);

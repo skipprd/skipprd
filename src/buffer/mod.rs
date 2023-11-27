@@ -797,6 +797,10 @@ impl BufferChunker {
         BufferChunker::get_file_part(filename, "namespace")
     }
 
+    pub fn decode_file_shard(filename: &str) -> String {
+        BufferChunker::get_file_part(filename, "shard")
+    }
+
     pub fn next_file(buffer_name: &str) -> Option<String> {
         let data_dir = Config::get_data_dir();
         let pattern = format!("{}/{}_buffer/buffer={}*", data_dir, buffer_name, buffer_name);
