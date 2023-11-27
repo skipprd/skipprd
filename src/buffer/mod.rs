@@ -2,20 +2,28 @@ use chrono::{DateTime, Datelike, NaiveDateTime, TimeZone, Timelike, Utc};
 use url::form_urlencoded;
 
 use std::collections::HashMap;
+use std::fmt::format;
+use std::fs::File;
 
-use std::fs::{File, OpenOptions};
+// use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
+// use std::{fs, str};
 
-use std::{fs, str};
+use tokio::fs;
+use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
+
 use std::path::{Path, PathBuf};
+use std::string::ToString;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::thread::sleep;
 use std::time::{SystemTime, UNIX_EPOCH};
 use arrow::datatypes;
 use arrow::error::ArrowError;
+use dashmap::DashMap;
 use glob::{glob_with, MatchOptions};
 use lru::LruCache;
+use nix::libc;
 
 use parquet::data_type::AsBytes;
 use parquet::file::reader::Length;
@@ -25,11 +33,17 @@ use crate::discover::Metadata;
 
 use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
+use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::ingest_work::OutputFile;
 use crate::metrics::MetricsStatus::Running;
 use crate::serdes::parquet::SerdeParquet;
+use once_cell::sync::Lazy;
 
 pub struct BufferChunker {}
+
+pub static BUFFER_INDEX: Lazy<Arc<TimedRwLock<DashMap<String, DashMap<String, OutputFile>>>>> = Lazy::new(|| {
+    Arc::new(TimedRwLock::new("buffer_index".to_string(), DashMap::new()))
+});
 
 impl BufferChunker {
     fn is_file_size_exceeded(file: &OutputFile) -> bool {
@@ -50,8 +64,162 @@ impl BufferChunker {
         file.rotated.is_some()
     }
 
-    pub fn rotate_buffers(force: bool) {
+    // unsafe function
+    // unsafe fn get_unlimit() -> i32 {
+    //     let open_file_limit = match unsafe { libc::sysconf(libc::_SC_OPEN_MAX) } {
+    //         -1 => 1000,
+    //         limit => limit as usize,
+    //     };
+    //     open_file_limit as i32
+    // }
 
+    pub async fn build_buffer_index() -> Result<(), Box<dyn std::error::Error>> {
+
+        println!("Building buffer indexs");
+
+        let data_dir = Config::get_data_dir(); // Assuming Config::get_data_dir() is defined
+        let mut patterns = HashMap::new();
+        // patterns.insert("ingest_buffer_part", format!("{}/ingest_buffer/*.part*", data_dir));
+        // patterns.insert("deadletter_buffer_part", format!("{}/deadletter_buffer/*.part*", data_dir));
+        patterns.insert("ingest_buffer_merged", format!("{}/ingest_buffer/*.merged", data_dir));
+        patterns.insert("deadletter_buffer_merged", format!("{}/deadletter_buffer/*.merged", data_dir));
+
+        let options = MatchOptions {
+            case_sensitive: false,
+            require_literal_separator: false,
+            require_literal_leading_dot: false,
+        };
+
+        // get OS open file limit
+        let open_file_limit = 4096; // @todo - unsafe { BufferChunker::get_unlimit() };
+
+        let mut i  = 0;
+
+        for pattern in patterns.iter() {
+            {
+                let mut index = BUFFER_INDEX.write();
+
+                let file_dashmap = match index.get_mut(&pattern.0.to_string()) {
+                    Some(file_dashmap) => file_dashmap,
+                    None => {
+                        let file_dashmap = DashMap::new();
+                        index.insert(pattern.0.to_string(), file_dashmap);
+                        index.get_mut(&pattern.0.to_string()).unwrap()
+                    }
+                };
+            }
+
+
+            for path in glob_with(pattern.1.as_str(), options).expect("Failed to read glob pattern") {
+                match path {
+                    Ok(path) => {
+                        if let Ok(metadata) = fs::metadata(&path).await {
+
+                            i+=1;
+
+                            let mut file = fs::File::open(&path).await?;
+
+                            let limit_readed = if i < open_file_limit {
+                                false
+                            } else {
+                                true
+                            };
+
+                            let output_file = match limit_readed {
+                                false => {
+                                    OutputFile {
+                                        bytes: metadata.len(),
+                                        updated_at: metadata.modified().unwrap_or(SystemTime::now()),
+                                        file: Some(file),
+                                        rotated: None,
+                                        path: path.clone(),
+                                    }
+                                }
+                                true => {
+                                    let output_file = OutputFile {
+                                        bytes: metadata.len(),
+                                        updated_at: metadata.modified().unwrap_or(SystemTime::now()),
+                                        file: None,
+                                        rotated: None,
+                                        path: path.clone(),
+                                    };
+
+                                    drop(file); // don't exhaust file descriptors
+
+                                    output_file
+                                }
+                            };
+
+                            let mut index = BUFFER_INDEX.write();
+
+                            let file_dashmap= match index.get_mut(&pattern.0.to_string()) {
+                                Some(file_dashmap) => file_dashmap,
+                                None => {
+                                    let file_dashmap = DashMap::new();
+                                    index.insert(pattern.0.to_string(), file_dashmap);
+                                    index.get_mut(&pattern.0.to_string()).unwrap()
+                                }
+                            };
+
+                            // let file_dashmap = DashMap::new();
+                            file_dashmap.insert(path.to_str().unwrap().to_string(), output_file);
+
+                            // index.insert(pattern.0.to_string(), file_dashmap);
+
+                        }
+                    },
+                    Err(e) => println!("Glob error: {}", e),
+                }
+            }
+
+            match BUFFER_INDEX.read().get( &pattern.0.to_string()) {
+                Some(index) => {
+                    println!("Indexed {} files in {}", index.len(), pattern.0);
+                },
+                None => {
+                    println!("Indexed 0 files in {}", pattern.0);
+                }
+            }
+            // println!("Indexed {} files in {}", BUFFER_INDEX.read().get( &pattern.0.to_string()).unwrap().len(), pattern.0);
+        }
+
+        Ok(())
+    }
+
+    pub async fn create_and_insert_new_file(new_filename: String) {
+
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&new_filename)
+            .await.unwrap();
+
+        let output_file = OutputFile {
+            bytes: file.metadata().await.unwrap().len(),
+            updated_at: match file.metadata().await {
+                Ok(metadata) => match metadata.modified() {
+                    Ok(time) => time,
+                    Err(err) => SystemTime::now(),
+                },
+                Err(err) => SystemTime::now(),
+            },
+            file: Some(file),
+            rotated: None,
+            path: PathBuf::from(&new_filename),
+        };
+
+        {
+            let index_guard = BUFFER_INDEX.write();
+            let index = index_guard.get_mut("ingest_buffer_merged").unwrap();
+
+            index.insert(new_filename.clone(), output_file);
+        }
+        // index.get_mut(&new_filename).unwrap().value_mut()
+
+    }
+
+
+    pub async fn rotate_buffers(force: bool) {
         if BUFFER_FINALISE_RUNNING.read().load(Ordering::SeqCst) {
             return;
         } else {
@@ -66,192 +234,220 @@ impl BufferChunker {
             require_literal_leading_dot: false,
         };
 
-        let mut file_pointers: HashMap<String, OutputFile> = HashMap::new();
-
-        let mut files_to_finalize: HashMap<String, OutputFile> = HashMap::new();
-
-        let mut paths = glob_with(&format!("{}/ingest_buffer/*.part*", data_dir), options)
-            .expect("Failed to read glob pattern")
-            .filter_map(Result::ok)
-            .collect::<Vec<_>>();
-
-        paths.extend(glob_with(&format!("{}/deadletter_buffer/*.part*", data_dir), options)
-            .expect("Failed to read glob pattern")
-            .filter_map(Result::ok)
-            .collect::<Vec<_>>());
-
-        // limit path to 1000 files
-        paths.truncate(1000);
-
-        for path in paths {
-
-            let skpr_namespace =
-                BufferChunker::decode_file_namespace(path.to_str().unwrap());
-            let skpr_partition =
-                BufferChunker::decode_file_partition(path.to_str().unwrap());
-            let source_time = BufferChunker::decode_file_time(path.to_str().unwrap());
-            let mut skpr_time = None;
-            if source_time >= 0 {
-                skpr_time = Some(source_time);
-            }
-
-            let finalised_file_name = BufferChunker::encode_chunk_name(
-                "output",
-                Some(&skpr_namespace),
-                Some(&skpr_partition),
-                skpr_time,
-            );
-
-            let dir = path.parent().unwrap().to_str().unwrap();
-
-            let new_filename = format!(
-                "{}/{}.merged",
-                dir,
-                finalised_file_name
-            );
-            let old_path = format!("{}", path.display().to_string());
-
-            // println!("Merging file {} to {}", old_path, new_filename);
-
-            let should_remove = {
-                let mut new_file = match file_pointers.get_mut(&new_filename) {
-                    Some(output_file) => output_file,
-                    None => {
-                        let file = match fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(&new_filename)
-                        {
-                            Ok(file) => file,
-                            Err(err) => {
-                                println!("Error: {}, File: {}", err, new_filename);
-                                continue;
-                            }
-                        };
-
-                        let output_file = OutputFile {
-                            bytes: file.len(),
-                            updated_at: match file.metadata() {
-                                Ok(metadata) => match metadata.modified() {
-                                    Ok(time) => time,
-                                    Err(err) => SystemTime::now(),
-                                }
-                                Err(err) => SystemTime::now(),
-                            },
-                            file,
-                            rotated: None,
-                        };
-
-                        file_pointers.insert(new_filename.clone(), output_file);
-                        file_pointers.get_mut(&new_filename).unwrap()
-                    }
-                };
-
-                let mut old_file = match File::open(&old_path) {
-                    Ok(file) => file,
-                    Err(err) => {
-                        println!("Error: {}, File: {}", err, old_path);
-                        continue;
-                    }
-                };
-                let mut buffer = Vec::new();
-
-                match old_file.read_to_end(&mut buffer) {
-                    Ok(_) => {}
-                    Err(err) => {
-                        println!("Error: {}, File: {}", err, old_path);
-                        continue;
-                    }
-                };
-                match new_file.file.write_all(&buffer) {
-                    Ok(_) => {}
-                    Err(err) => {
-                        println!("Error in file {}: {}", new_filename, err)
-                    }
-                }
-                match new_file.file.flush() {
-                    Ok(_) => {}
-                    Err(err) => {
-                        println!("Error in file {}: {}", new_filename, err)
-                    }
-                }
-                match new_file.file.sync_all() {
-                    Ok(_) => {}
-                    Err(err) => {
-                        println!("Error in file {}: {}", new_filename, err)
-                    }
-                }
-
-                new_file.bytes += buffer.len() as u64;
-                new_file.updated_at = SystemTime::now();
-
-                // tombstone file, can't delete it as OS may not delete immediately and we may write to it again
-                let tombstone_file_name = old_path.rsplitn(2, "/").next().unwrap();
-                let tombstone_file_path = format!("{}/done/{}", dir, tombstone_file_name);
-
-                match fs::rename(old_path.as_str(), &tombstone_file_path) {
-                    Ok(_) => {}
-                    Err(_) => {}
-                };
-
-                // println!("Tomstoned file {}", &tombstone_file_path);
-
-                let path = PathBuf::from(&new_filename);
-
-            };
-        }
+        // let file_paths = {
+        //     let index_guard = BUFFER_INDEX.read();
+        //     let index = index_guard.get("ingest_buffer_part").unwrap();
+        //     index.iter().map(|entry| entry.key().clone()).collect::<Vec<_>>()
+        // };
 
 
-        // Delete all tombstone files in done dir
+        // for file_path in file_paths {
+        //
+        //     let skpr_namespace =
+        //         BufferChunker::decode_file_namespace(&file_path);
+        //     let skpr_partition =
+        //         BufferChunker::decode_file_partition(&file_path);
+        //     let source_time = BufferChunker::decode_file_time(&file_path);
+        //     let mut skpr_time = None;
+        //     if source_time >= 0 {
+        //         skpr_time = Some(source_time);
+        //     }
+        //
+        //     let finalised_file_name = BufferChunker::encode_chunk_name(
+        //         "output",
+        //         Some(&skpr_namespace),
+        //         Some(&skpr_partition),
+        //         skpr_time,
+        //     );
+        //
+        //     // get directory of the file
+        //     let dir = Path::new(&file_path).parent().unwrap().to_str().unwrap();
+        //
+        //     let new_filename = format!(
+        //         "{}/{}.merged",
+        //         dir,
+        //         finalised_file_name
+        //     );
+        //
+        //     let old_path = format!("{}", file_path);
+        //
+        //     let new_file_exists = {
+        //         let mut index_guard = BUFFER_INDEX.write();
+        //         let index = index_guard.get_mut("ingest_buffer_merged").unwrap();
+        //         index.contains_key(&new_filename)
+        //     };
+        //
+        //     if !new_file_exists {
+        //         // println!("Creating merge file {}", new_filename);
+        //
+        //         BufferChunker::create_and_insert_new_file(new_filename.clone()).await;
+        //         continue;
+        //     }
+        //
+        //     // println!("Merging file {} to {}", old_path, new_filename);
+        //
+        //     let mut old_file = match fs::File::open(&old_path).await {
+        //         Ok(file) => file,
+        //         Err(err) => {
+        //             println!("Error: {}, File: {}", err, old_path);
+        //             continue;
+        //         }
+        //     };
+        //
+        //     let mut buffer = vec![0; 4096]; // Chunk size can be adjusted
+        //
+        //     let mut index_guard = BUFFER_INDEX.write();
+        //     let index = index_guard.get_mut("ingest_buffer_merged").unwrap();
+        //     let mut new_file_ref = index.get_mut(&new_filename).unwrap();
+        //
+        //     let mut new_file = new_file_ref.value_mut();
+        //
+        //     // check file descriptor is open
+        //     if new_file.file.is_none() || new_file.file.as_mut().unwrap().metadata().await.is_err() {
+        //         println!("File descriptor changed, re-creating {}", new_filename);
+        //
+        //         let file = fs::OpenOptions::new()
+        //             .create(true)
+        //             .append(true)
+        //             .open(&new_filename)
+        //             .await.unwrap();
+        //
+        //         new_file.file = Some(file);
+        //     }
+        //
+        //     // println!("writing to file {}", new_filename);
+        //
+        //     let mut total_bytes = 0;
+        //
+        //     loop {
+        //         let bytes_read = old_file.read(&mut buffer).await.expect("Failed to read file");
+        //         if bytes_read == 0 {
+        //             break;
+        //         }
+        //
+        //         new_file.file.as_mut().unwrap().write(&buffer[..bytes_read]).await.expect(format!("Failed to write file: {}", new_filename).as_str());
+        //         new_file.bytes += bytes_read as u64;
+        //
+        //         total_bytes += bytes_read;
+        //
+        //         // modus 1000000
+        //         if total_bytes % 1000000 == 0 {
+        //             println!("written {} bytes", total_bytes);
+        //         }
+        //     }
+        //
+        //     // println!("flushing file {}", new_filename);
+        //
+        //     match new_file.file.as_mut().unwrap().flush().await {
+        //         Ok(_) => {}
+        //         Err(err) => {
+        //             println!("Error in file {}: {}", new_filename, err)
+        //         }
+        //     }
+        //     match new_file.file.as_mut().unwrap().sync_all().await {
+        //         Ok(_) => {}
+        //         Err(err) => {
+        //             println!("Error in file {}: {}", new_filename, err)
+        //         }
+        //     }
+        //
+        //     new_file.updated_at = SystemTime::now();
+        //
+        //     println!("flushed file {}", new_filename);
+        //
+        //     // tombstone file, can't delete it as OS may not delete immediately and we may write to it again
+        //     let tombstone_file_name = old_path.rsplitn(2, "/").next().unwrap();
+        //     let tombstone_file_path = format!("{}/done/{}", file_path, tombstone_file_name);
+        //
+        //     match fs::rename(old_path.as_str(), &tombstone_file_path).await {
+        //         Ok(_) => {}
+        //         Err(_) => {}
+        //     };
+        //
+        //     println!("Tomstoned file {}", &tombstone_file_path);
+        //
+        //     // update index
+        //
+        //     // if called when holding any sort of reference into the map.
+        //     // while index_guard.get_mut("ingest_buffer_merged").is_none() {
+        //     //     println!("Waiting for index to be released");
+        //     //     sleep(std::time::Duration::from_millis(100));
+        //     // }
+        //     // let old_index_guard = BUFFER_INDEX.write();
+        //     // let old_index = old_index_guard.get("ingest_buffer_part").unwrap();
+        //     // old_index.remove(&old_path);
+        //     // //
+        //     // println!("Updated index for file {}", old_path);
+        //
+        //
+        //     let path = PathBuf::from(&new_filename);
+        // }
+
+        // print number of files in ingest_buffer_merged index
+        // let index_guard = BUFFER_INDEX.read();
+        // let index = match index_guard.get("ingest_buffer_merged") {
+        //     Some(index) => index,
+        //     None => {
+        //         println!("No files in ingest_buffer_merged");
+        //         return;
+        //     }
+        // };
+
+        // println!("\nIndexed {} files in ingest_buffer_merged\n", index.len());
+
         let options = MatchOptions {
             case_sensitive: false,
             require_literal_separator: false,
             require_literal_leading_dot: false,
         };
 
-            let paths = glob_with(&format!("{}/ingest_buffer/*.merged", data_dir), options)
-                .expect("Failed to read glob pattern")
-                .filter_map(Result::ok)
-                .collect::<Vec<_>>();
+        // let mut index_guard = BUFFER_INDEX.write();
+        // let index = index_guard.get_mut("ingest_buffer_merged").unwrap();
+        //
+        // for file in index.iter() {
 
-            for path in paths {
-
-                let filename = path.to_str().unwrap().to_string();
-
-                let file: OutputFile = match fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&filename)
-                {
-                    Ok(file) => OutputFile {
-                        bytes: file.len(),
-                        updated_at: match file.metadata() {
-                            Ok(metadata) => match metadata.modified() {
-                                Ok(time) => time,
-                                Err(err) => SystemTime::now(),
-                            },
-                            Err(err) => SystemTime::now(),
-                        },
-                        file,
-                        rotated: None,
-                    },
-                    Err(err) => {
-                        println!("Error: {}, File: {}", err, filename);
-                        continue;
-                    }
-                };
-
-                BufferChunker::finalise_buffers(force, &file, &filename);
-            }
-
-        let paths = glob_with(&format!("{}/ingest_buffer/done/*", data_dir), options)
+        let paths = glob_with(&format!("{}/ingest_buffer/*.merged", data_dir), options)
             .expect("Failed to read glob pattern")
             .filter_map(Result::ok)
             .collect::<Vec<_>>();
 
         for path in paths {
 
-            match fs::remove_file(&path) {
+            let new_filename = path.to_str().unwrap().to_string();
+
+            let file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&new_filename)
+                .await.unwrap();
+
+            let output_file = OutputFile {
+                bytes: file.metadata().await.unwrap().len(),
+                updated_at: match file.metadata().await {
+                    Ok(metadata) => match metadata.modified() {
+                        Ok(time) => time,
+                        Err(err) => SystemTime::now(),
+                    },
+                    Err(err) => SystemTime::now(),
+                },
+                file: Some(file),
+                rotated: None,
+                path: PathBuf::from(&new_filename),
+            };
+
+            BufferChunker::finalise_buffers(force, &output_file, &path.to_str().unwrap().to_string()).await;
+
+
+        }
+
+        // Delete all tombstone files in done dir
+        let paths = glob_with(&format!("{}/ingest_buffer/done/*", data_dir), options)
+            .expect("Failed to read glob pattern")
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+
+        for path in paths {
+            match fs::remove_file(&path).await {
                 Ok(_t) => {}
                 Err(err) => println!("{:?}", err),
             }
@@ -262,7 +458,7 @@ impl BufferChunker {
             .store(false, Ordering::SeqCst);
     }
 
-    pub fn finalise_buffers(force: bool, output_file: &OutputFile, filename: &String) -> bool {
+    pub async fn finalise_buffers(force: bool, output_file: &OutputFile, filename: &String) -> bool {
 
         let flatten = Config::get_transform_flatten_events();
 
@@ -350,7 +546,7 @@ impl BufferChunker {
                     Helpers::random_str(32).as_str()
                 );
 
-                match fs::rename(tmp_file_path, finalised_file_path) {
+                match fs::rename(tmp_file_path, finalised_file_path).await {
                     Ok(_) => {}
                     Err(_) => {}
                 };
@@ -360,7 +556,7 @@ impl BufferChunker {
                 let tombstone_file_name = file_name_without_dir.replace(".merged", ".tombstone");
                 let tombstone_file_path = format!("{}/done/{}", output_dir, tombstone_file_name);
 
-                match fs::rename(filename.as_str(), &tombstone_file_path) {
+                match fs::rename(filename.as_str(), &tombstone_file_path).await {
                     Ok(_) => {}
                     Err(_) => {}
                 };

@@ -1,4 +1,4 @@
-use crate::buffer::BufferChunker;
+use crate::buffer::{BUFFER_INDEX, BufferChunker};
 use crate::discover::Metadata;
 use crate::helpers::configuration::Config;
 use crate::helpers::offsets::{OffsetKey, Offsets, OffsetTypes};
@@ -15,6 +15,7 @@ use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::num::NonZeroUsize;
+use std::path::PathBuf;
 use std::process::exit;
 use std::string::ToString;
 use std::sync::{Arc, Mutex, RwLock};
@@ -24,11 +25,14 @@ use std::sync::mpsc::channel;
 extern crate num_cpus;
 use std::sync::mpsc::Sender;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread::sleep;
 use parquet::data_type::AsBytes;
 use crate::ingest::fast_ingest::fast_path_ingest;
 
 use arrow::datatypes;
 use arrow::error::ArrowError;
+use dashmap::DashMap;
+use tokio::io::AsyncWriteExt;
 use helpers::timed_rwlock::TimedRwLock;
 use crate::serdes::csv::SerderCsv;
 use crate::serdes::parquet::SerdeParquet;
@@ -90,10 +94,11 @@ pub struct IngestBatch {
 
 // Can't rely on file.metadata() as we don't know we're dealing with a unix FS. e.g. EFS
 pub struct OutputFile {
+    pub(crate) path: PathBuf,
     pub(crate) bytes: u64,
     pub(crate) updated_at: SystemTime,
     // non buffered writer
-    pub(crate) file: File,
+    pub(crate) file: Option<tokio::fs::File>,
     pub(crate) rotated: Option<bool>,
 }
 
@@ -516,7 +521,7 @@ impl Ingest {
                         }
                     };
 
-                    let output_file = format!("{}/{}.part", output_dir.clone(), &output_file_name);
+                    let output_file = format!("{}/{}.merged", output_dir.clone(), &output_file_name);
 
                     // let pretty_json = match serde_json::to_string_pretty(&record_value) {
                     //     Ok(pretty_json) => pretty_json,
@@ -553,47 +558,104 @@ impl Ingest {
         // @todo - We probably want to track file metadata in a persistent store, so we can recover from crashes. FS metadata is not reliably available.
 
 
-            // Flush all buffers to their respective files.
-        for (filename, buffer) in buffers.buffers.iter() {
 
-            let new_file = format!("{}-{}-{}", filename.clone(), Helpers::random_password(12), core_count);
+            // update metadata at control pane, this may or may not be automatically approved
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
 
-            // println!("Creating new file: {}", filename);
-            let mut f = match OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(new_file) {
-                    Ok(f) => f,
-                    Err(err) => {
-                        panic!("Could not open file: {}, Error: {:?}", filename, err);
-                    }
-                };
+                    // Flush all buffers to their respective files.
+                    for (new_filename, buffered_records) in buffers.buffers.iter() {
 
+                        let mut buffer = vec![0; 4096]; // Chunk size can be adjusted
 
-                match f.write(&buffer.data) {
-                    Ok(_) => {
-                        match f.flush(){
-                            Ok(_) => {
-                                // println!("Flushed file: {}", filename);
-                            },
+                        let has_file: bool = {
+                            let index_guard = BUFFER_INDEX.read();
+                            let index = match index_guard.get("ingest_buffer_merged") {
+                                Some(index) => index,
+                                None => {
+                                    println!("Failed to find index ingest_buffer_merged");
+                                    return;
+                                }
+                            };
+                            let result = match index.get_mut(new_filename) {
+                                Some(new_file_ref) => {
+                                    true
+                                },
+                                None => {
+                                     false
+                                }
+                            };
+
+                            result
+                        };
+
+                        if !has_file {
+                            BufferChunker::create_and_insert_new_file(new_filename.to_string()).await;
+                        }
+
+                        let mut index_guard = BUFFER_INDEX.read();
+                        let index = index_guard.get_mut("ingest_buffer_merged").unwrap();
+                        let mut new_file_ref = index.get_mut(new_filename).expect("Failed to find file");
+
+                        let mut new_file = new_file_ref.value_mut();
+
+                        // check file descriptor is open
+                        if new_file.file.is_none() || new_file.file.as_mut().unwrap().metadata().await.is_err() {
+                            println!("File descriptor changed, re-creating {}", new_filename);
+
+                            let file = tokio::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(&new_filename)
+                                .await.unwrap();
+
+                            new_file.file = Some(file);
+                        }
+
+                        // println!("writing to file {}", new_filename);
+
+                        let mut total_bytes = 0;
+
+                        // loop {
+                            buffer = buffered_records.data.clone();
+                            // if bytes_read == 0 {
+                            //     break;
+                            // }
+
+                            new_file.file.as_mut().unwrap().write_all(&buffer).await.expect(format!("Failed to write file: {}", new_filename).as_str());
+
+                            new_file.bytes += buffered_records.bytes;
+
+                        //     total_bytes += bytes_read;
+                        //
+                        //     // modus 1000000
+                        //     if total_bytes % 1000000 == 0 {
+                        //         println!("written {} bytes", total_bytes);
+                        //     }
+                        // }
+
+                        // println!("flushing file {}", new_filename);
+
+                        match new_file.file.as_mut().unwrap().flush().await {
+                            Ok(_) => {}
                             Err(err) => {
-                                println!("Could not flush file: {}, Error: {:?}", filename, err);
+                                println!("Error in file {}: {}", new_filename, err)
                             }
                         }
-                        match f.sync_all() {
-                            Ok(_) => {
-                                // println!("Synced file: {}", filename);
-                            },
+                        match new_file.file.as_mut().unwrap().sync_all().await {
+                            Ok(_) => {}
                             Err(err) => {
-                                println!("Could not sync file: {}, Error: {:?}", filename, err);
+                                println!("Error in file {}: {}", new_filename, err)
                             }
                         }
+
+                        new_file.updated_at = SystemTime::now();
+
                     }
-                    Err(err) => {
-                        println!("Could not write to file: {}, Error: {:?}", filename, err);
-                    }
-                }
-        }
+                });
 
         offset_db_clone.flush();
 
@@ -609,6 +671,7 @@ impl Ingest {
                 .unwrap()
                 .block_on(async {
                     Config::set_metadata(&METADATA.read(), true).await;
+                    // BufferChunker::rotate_buffers(false).await;
                 });
         }
 
