@@ -84,9 +84,6 @@ impl BufferChunker {
         paths.truncate(1000);
 
         for path in paths {
-            // if path.is_dir() {
-            //     break;
-            // }
 
             let skpr_namespace =
                 BufferChunker::decode_file_namespace(path.to_str().unwrap());
@@ -188,16 +185,8 @@ impl BufferChunker {
                 new_file.bytes += buffer.len() as u64;
                 new_file.updated_at = SystemTime::now();
 
-
-                // match fs::remove_file(&old_path) {
-                //     Ok(_t) => {}
-                //     Err(err) => println!("{:?}", err),
-                // }
-
                 // tombstone file, can't delete it as OS may not delete immediately and we may write to it again
-                // replace .merged to .tombstone and move to .{output_dir}/done
                 let tombstone_file_name = old_path.rsplitn(2, "/").next().unwrap();
-                // let tombstone_file_name = file_name_without_dir.replace(".merged", ".tombstone");
                 let tombstone_file_path = format!("{}/done/{}", dir, tombstone_file_name);
 
                 match fs::rename(old_path.as_str(), &tombstone_file_path) {
@@ -209,28 +198,7 @@ impl BufferChunker {
 
                 let path = PathBuf::from(&new_filename);
 
-                // if !force {
-                //     BufferChunker::finalise_buffers(false, new_file, &new_filename)
-                // } else {
-                    // let finalize_file = OutputFile {
-                    //     bytes: new_file.bytes,
-                    //     updated_at: SystemTime::now(),
-                    //     file: new_file.file.try_clone().unwrap(),
-                    //     rotated: None,
-                    // };
-                    // files_to_finalize.insert(new_filename.clone(), finalize_file);
-
-
-                    // false
-                // }
-
-
             };
-
-            // if should_remove {
-            //     file_pointers.remove(&new_filename);
-            // }
-
         }
 
 
@@ -240,10 +208,6 @@ impl BufferChunker {
             require_literal_separator: false,
             require_literal_leading_dot: false,
         };
-
-        // Finalize all files at the end if force is true
-        // if force {
-        //     let mut finalise_files_to_remove = vec![];
 
             let paths = glob_with(&format!("{}/ingest_buffer/*.merged", data_dir), options)
                 .expect("Failed to read glob pattern")
@@ -280,17 +244,12 @@ impl BufferChunker {
                 BufferChunker::finalise_buffers(force, &file, &filename);
             }
 
-
-
         let paths = glob_with(&format!("{}/ingest_buffer/done/*", data_dir), options)
             .expect("Failed to read glob pattern")
             .filter_map(Result::ok)
             .collect::<Vec<_>>();
 
         for path in paths {
-            // if path.is_dir() {
-            //     break;
-            // }
 
             match fs::remove_file(&path) {
                 Ok(_t) => {}
@@ -325,10 +284,6 @@ impl BufferChunker {
             // check filename exists on disk, very often not syned to disk yet
             // only check fs when necessary, i.e. when file is due to be rotated
             if !Path::new(filename).exists() {
-                // println!("File {} does not exist", filename);
-                // panic!("File {} does not exist", filename);
-                // sleep(std::time::Duration::from_millis(5000));
-                // panic!("File {} does not exist", filename);
                 return false;
             }
 
@@ -346,7 +301,6 @@ impl BufferChunker {
 
             let skpr_namespace =
                 BufferChunker::decode_file_namespace(filename.as_str());
-            // let skpr_partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
 
             let metadata = METADATA.read();
 
@@ -401,14 +355,7 @@ impl BufferChunker {
                     Err(_) => {}
                 };
 
-                // match std::fs::remove_file(filename.as_str()) {
-                //     Ok(_t) => {}
-                //     Err(err) => println!("{:?}", err),
-                // }
-
-                // @todo - tombstone file, can't delete it as OS may not delete immediately and we may write to it again
-
-                // get filename without dir
+                // tombstone file, can't delete it as OS may not delete immediately and we may write to it again
                 let file_name_without_dir = filename.rsplitn(2, "/").next().unwrap();
                 let tombstone_file_name = file_name_without_dir.replace(".merged", ".tombstone");
                 let tombstone_file_path = format!("{}/done/{}", output_dir, tombstone_file_name);
@@ -420,16 +367,11 @@ impl BufferChunker {
 
                 // println!("Tomstoned file {}", &tombstone_file_path);
 
-                println!("Finalised output file {}", finalised_file_path);
+                // println!("Finalised output file {}", finalised_file_path);
 
                 return true;
             }
         }
-        //             }
-        //             Err(e) => println!("{:?}", e),
-        //         }
-        //     }
-        // }
 
         false
     }
