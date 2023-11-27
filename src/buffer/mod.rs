@@ -402,12 +402,12 @@ impl BufferChunker {
                 require_literal_leading_dot: false,
             };
 
-            let paths = glob_with(&format!("{}/ingest_buffer/*.merged*", data_dir), options)
+            for path in glob_with(&format!("{}/ingest_buffer/*.merged", data_dir), options)
                 .expect("Failed to read glob pattern")
                 .filter_map(Result::ok)
-                .collect::<Vec<_>>();
+                .collect::<Vec<_>>()
+            {
 
-            for path in paths {
                 let new_filename = path.to_str().unwrap().to_string();
 
                 let file = fs::OpenOptions::new()
