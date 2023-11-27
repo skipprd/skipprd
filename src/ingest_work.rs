@@ -654,6 +654,8 @@ impl Ingest {
 
                         new_file.updated_at = SystemTime::now();
 
+                        BufferChunker::finalise_buffers(false, &new_file, &new_filename).await;
+
                     }
                 });
 
