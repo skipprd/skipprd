@@ -26,7 +26,9 @@ pub static DEADLETTER_FILE_NAME: Lazy<String> = Lazy::new(|| BufferChunker::enco
     "deadletters",
     Some(Config::get_pipeline_name().as_str()),
     Some("parquet-error"),
-    None));
+    None,
+None
+));
 
 // #[derive(clap::ValueEnum, Clone)]
 // #[allow(non_camel_case_types, clippy::upper_case_acronyms)]
@@ -292,6 +294,7 @@ impl SerdeParquet {
             Some(&skpr_namespace),
             Some(&skpr_partition),
             Some(source_time),
+            None
         );
 
         let output_dir = &format!("{}/output_buffer", data_dir);

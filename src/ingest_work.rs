@@ -117,7 +117,9 @@ pub static DEADLETTER_FILE_NAME: Lazy<String> = Lazy::new(|| BufferChunker::enco
     "deadletters",
     Some(Config::get_pipeline_name().as_str()),
     None,
-    None));
+    None,
+    None
+));
 
 // static AVRO_SCHEMA: Lazy<Mutex<HashMap<String, Schema>>> = Lazy::new(|| {
 //
@@ -417,6 +419,7 @@ impl Ingest {
                         Some(&skpr_namespace),
                         Some(&skpr_partition),
                         skpr_time_bucket,
+                        Some(&core_count.to_string())
                     );
 
                     if METADATA.read().get(&skpr_namespace).is_none() {
@@ -521,7 +524,7 @@ impl Ingest {
                         }
                     };
 
-                    let output_file = format!("{}/{}.merged-{}", output_dir.clone(), &output_file_name, core_count);
+                    let output_file = format!("{}/{}.merged", output_dir.clone(), &output_file_name);
 
                     // let pretty_json = match serde_json::to_string_pretty(&record_value) {
                     //     Ok(pretty_json) => pretty_json,
