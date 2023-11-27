@@ -395,43 +395,44 @@ impl BufferChunker {
 
         // println!("\nIndexed {} files in ingest_buffer_merged\n", index.len());
 
-        // let options = MatchOptions {
-        //     case_sensitive: false,
-        //     require_literal_separator: false,
-        //     require_literal_leading_dot: false,
-        // };
+        if force {
+            let options = MatchOptions {
+                case_sensitive: false,
+                require_literal_separator: false,
+                require_literal_leading_dot: false,
+            };
 
-        // let paths = glob_with(&format!("{}/ingest_buffer/*.merged*", data_dir), options)
-        //     .expect("Failed to read glob pattern")
-        //     .filter_map(Result::ok)
-        //     .collect::<Vec<_>>();
-        //
-        // for path in paths {
-        //
-        //     let new_filename = path.to_str().unwrap().to_string();
-        //
-        //     let file = fs::OpenOptions::new()
-        //         .create(true)
-        //         .append(true)
-        //         .open(&new_filename)
-        //         .await.unwrap();
-        //
-        //     let output_file = OutputFile {
-        //         bytes: file.metadata().await.unwrap().len(),
-        //         updated_at: match file.metadata().await {
-        //             Ok(metadata) => match metadata.modified() {
-        //                 Ok(time) => time,
-        //                 Err(err) => SystemTime::now(),
-        //             },
-        //             Err(err) => SystemTime::now(),
-        //         },
-        //         file: Some(file),
-        //         rotated: None,
-        //         path: PathBuf::from(&new_filename),
-        //     };
-        //
-        //     BufferChunker::finalise_buffers(force, &output_file, &path.to_str().unwrap().to_string()).await;
-        // }
+            let paths = glob_with(&format!("{}/ingest_buffer/*.merged*", data_dir), options)
+                .expect("Failed to read glob pattern")
+                .filter_map(Result::ok)
+                .collect::<Vec<_>>();
+
+            for path in paths {
+                let new_filename = path.to_str().unwrap().to_string();
+
+                let file = fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&new_filename)
+                    .await.unwrap();
+
+                let output_file = OutputFile {
+                    bytes: file.metadata().await.unwrap().len(),
+                    updated_at: match file.metadata().await {
+                        Ok(metadata) => match metadata.modified() {
+                            Ok(time) => time,
+                            Err(err) => SystemTime::now(),
+                        },
+                        Err(err) => SystemTime::now(),
+                    },
+                    file: Some(file),
+                    rotated: None,
+                    path: PathBuf::from(&new_filename),
+                };
+
+                BufferChunker::finalise_buffers(force, &output_file, &path.to_str().unwrap().to_string()).await;
+            }
+        }
 
         // Delete all tombstone files in done dir
         let paths = glob_with(&format!("{}/ingest_buffer/done/*", data_dir), options)
