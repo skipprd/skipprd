@@ -521,7 +521,7 @@ impl Ingest {
                         }
                     };
 
-                    let output_file = format!("{}/{}.merged", output_dir.clone(), &output_file_name);
+                    let output_file = format!("{}/{}.merged-{}", output_dir.clone(), &output_file_name, core_count);
 
                     // let pretty_json = match serde_json::to_string_pretty(&record_value) {
                     //     Ok(pretty_json) => pretty_json,
