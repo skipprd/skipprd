@@ -510,6 +510,7 @@ impl BufferChunker {
 
                 let skpr_partition =
                     BufferChunker::decode_file_partition(filename.as_str());
+                let shard = BufferChunker::decode_file_part(filename.as_str(), "shard");
                 let source_time = BufferChunker::decode_file_time(filename.as_str());
                 let mut skpr_time = None;
                 if source_time >= 0 {
@@ -531,7 +532,7 @@ impl BufferChunker {
                     Some(&skpr_namespace),
                     Some(&skpr_partition),
                     skpr_time,
-                    None
+                    Some(&shard),
                 );
 
                 let finalised_file_path = &format!(
