@@ -245,22 +245,21 @@ impl SerdeParquet {
 
         let source_file = match File::open(path.clone()) {
             Ok(file) => {
-                Some(file)
+                file
             },
             Err(err) => {
                 // println!("Error opening file for serialisation, already processed? {}", err);
                 println!("File: {}", path.to_str().unwrap());
                 panic!("Error opening file for serialisation, already processed? {}", err);
-                None
             }
         };
 
-        if source_file.is_none() {
-            return "".to_string();
-        }
+        // if source_file.is_none() {
+        //     return "".to_string();
+        // }
 
         // BufRead from source file
-        let input_file = std::io::BufReader::new(source_file.unwrap());
+        let input_file = std::io::BufReader::new(source_file);
 
         // let mut input_file = File::open("/tmp/ddd/s3-uewnxrmskf").unwrap();
 
@@ -312,18 +311,32 @@ impl SerdeParquet {
             Helpers::random_str(12).as_str()
         );
 
-        let output = OpenOptions::new()
+        let output = match OpenOptions::new()
             .create(true)
             .write(true)
             .append(true)
             .open(output_file_path)
             // .open("parquet")
-            .unwrap();
+        {
+            Ok(file) => {
+                file
+            },
+            Err(err) => {
+                panic!("Error opening output file for serialisation, already processed? {}", err);
+            }
+        };
 
         let builder = ReaderBuilder::new(schema_ref.clone());
 
 
-        let reader = builder.build(input_file).unwrap();
+        let reader = match builder.build(input_file) {
+            Ok(reader) => {
+                reader
+            },
+            Err(err) => {
+                panic!("Error building parquet reader: {}", err);
+            }
+        };
         
         // schema_ref = reader.
 
@@ -332,7 +345,15 @@ impl SerdeParquet {
         let mut last_error = "".to_string();
 
         let mut writer =
-            ArrowWriter::try_new(output, schema_ref, Some(props.build())).unwrap();
+            match ArrowWriter::try_new(output, schema_ref, Some(props.build())) {
+                Ok(writer) => {
+                    writer
+                },
+                Err(err) => {
+                    panic!("Error building parquet writer: {}", err);
+                }
+            };
+
         let _error_count = 0;
 
 

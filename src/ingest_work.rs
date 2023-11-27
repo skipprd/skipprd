@@ -606,14 +606,19 @@ impl Ingest {
                         let mut new_file = new_file_ref.value_mut();
 
                         // check file descriptor is open
-                        if new_file.file.is_none() || new_file.file.as_mut().unwrap().metadata().await.is_err() {
+                        if new_file.file.is_none() || new_file.file.as_mut().is_none() || new_file.file.as_mut().unwrap().metadata().await.is_err() {
                             println!("File descriptor changed, re-creating {}", new_filename);
 
-                            let file = tokio::fs::OpenOptions::new()
+                            let file = match tokio::fs::OpenOptions::new()
                                 .create(true)
                                 .append(true)
                                 .open(&new_filename)
-                                .await.unwrap();
+                                .await {
+                                Ok(file) => file,
+                                Err(err) => {
+                                    panic!("Failed to open indexed buffer file {}: {}", new_filename, err);
+                                }
+                            };
 
                             new_file.file = Some(file);
                         }
@@ -628,7 +633,19 @@ impl Ingest {
                             //     break;
                             // }
 
-                            new_file.file.as_mut().unwrap().write_all(&buffer).await.expect(format!("Failed to write file: {}", new_filename).as_str());
+                            match new_file.file.as_mut() {
+                                Some(file) => {
+                                    match file.write_all(&buffer).await {
+                                        Ok(_) => {}
+                                        Err(err) => {
+                                            println!("Error writing to buffer file {}: {}", new_filename, err)
+                                        }
+                                    }
+                                },
+                                None => {
+                                   panic!("Failed to find file descriptor when writing to buffer file {}", new_filename);
+                                }
+                            }
 
                             new_file.bytes += buffered_records.bytes;
 
@@ -642,16 +659,18 @@ impl Ingest {
 
                         // println!("flushing file {}", new_filename);
 
-                        match new_file.file.as_mut().unwrap().flush().await {
+                        match new_file.file.as_mut().expect(&format!("Failed to find file descriptor when flushing buffer file"))
+                            .flush().await {
                             Ok(_) => {}
                             Err(err) => {
-                                println!("Error in file {}: {}", new_filename, err)
+                                println!("Error flushing buffer file {}: {}", new_filename, err)
                             }
                         }
-                        match new_file.file.as_mut().unwrap().sync_all().await {
+                        match new_file.file.as_mut().expect(&format!("Failed to find file descriptor when syncing buffer file metadata"))
+                            .sync_all().await {
                             Ok(_) => {}
                             Err(err) => {
-                                println!("Error in file {}: {}", new_filename, err)
+                                println!("Error syncing buffer file metadata {}: {}", new_filename, err)
                             }
                         }
 
