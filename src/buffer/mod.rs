@@ -7,6 +7,7 @@ use std::fs::File;
 
 // use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
+use std::io::ErrorKind::NotFound;
 // use std::{fs, str};
 
 use tokio::fs;
@@ -188,14 +189,22 @@ impl BufferChunker {
 
     pub async fn create_and_insert_new_file(new_filename: String) {
 
-        let file = fs::OpenOptions::new()
+        let file = match fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&new_filename)
-            .await.unwrap();
+            .await {
+            Ok(file) => file,
+            Err(err) => {
+               panic!("Error creating buffer file index: {}, File: {}", err, new_filename);
+            }
+        };
 
         let output_file = OutputFile {
-            bytes: file.metadata().await.unwrap().len(),
+            bytes: match file.metadata().await {
+                Ok(metadata) => metadata.len(),
+                Err(err) => 0,
+            },
             updated_at: match file.metadata().await {
                 Ok(metadata) => match metadata.modified() {
                     Ok(time) => time,
@@ -410,14 +419,23 @@ impl BufferChunker {
 
                 let new_filename = path.to_str().unwrap().to_string();
 
-                let file = fs::OpenOptions::new()
+                let file = match fs::OpenOptions::new()
                     .create(true)
                     .append(true)
                     .open(&new_filename)
-                    .await.unwrap();
+                    .await {
+                    Ok(file) => file,
+                    Err(err) => {
+                        println!("Error while opening buffer file: {}, File: {}", err, new_filename);
+                        continue;
+                    }
+                };
 
                 let output_file = OutputFile {
-                    bytes: file.metadata().await.unwrap().len(),
+                    bytes: match file.metadata().await {
+                        Ok(metadata) => metadata.len(),
+                        Err(err) => 0,
+                    },
                     updated_at: match file.metadata().await {
                         Ok(metadata) => match metadata.modified() {
                             Ok(time) => time,
@@ -806,10 +824,15 @@ impl BufferChunker {
         let data_dir = Config::get_data_dir();
         let pattern = format!("{}/{}_buffer/buffer={}*", data_dir, buffer_name, buffer_name);
 
-        let filenames = glob::glob(&pattern)
-            .unwrap()
-            .filter_map(Result::ok)
-            .collect::<Vec<_>>();
+        let filenames = match glob::glob(&pattern) {
+            Ok(filenames) => filenames
+                .filter_map(Result::ok)
+                .collect::<Vec<_>>(),
+            Err(e) => {
+                println!("Error globbing for next buffer file, Error: {}", e);
+                return None;
+            }
+        };
 
         // filenames.sort_by(|a, b| fs::metadata(a).unwrap().modified().cmp(&fs::metadata(b).unwrap().modified()));
 

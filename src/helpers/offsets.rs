@@ -164,13 +164,19 @@ impl Offsets {
     pub fn flush(&self) -> Option<usize> {
         match self.tree.flush() {
             Ok(val) => Some(val),
-            Err(_) => None,
+            Err(err) => {
+                println!("Failed flushing offsets, Error: {:?}", err);
+                None
+            },
         }
     }
     pub fn set(&self, key: &OffsetKey, offset_type: OffsetTypes, offset: u64) -> Option<IVec> {
         match self.upsert(key, offset_type, offset) {
             Ok(val) => val,
-            Err(_) => None,
+            Err(err) => {
+                println!("Failed setting offset, Error: {:?}", err);
+                None
+            },
         }
     }
 
@@ -220,7 +226,10 @@ impl Offsets {
         let bytes: &[u8] = key.as_bytes();
         match self.tree.get(bytes) {
             Ok(val) => val,
-            Err(_) => None,
+            Err(err) => {
+                println!("Failed getting offset, Error: {:?}", err);
+                None
+            },
         }
     }
 
@@ -230,7 +239,10 @@ impl Offsets {
         let bytes: &[u8] = key.as_bytes();
         match self.tree.get(bytes) {
             Ok(val) => val,
-            Err(_) => None,
+            Err(err) => {
+                println!("Failed getting latest offset, Error: {:?}", err);
+                None
+            },
         }
     }
 
@@ -240,7 +252,10 @@ impl Offsets {
         let bytes: &[u8] = key.as_bytes();
         match self.tree.remove(bytes) {
             Ok(val) => val,
-            Err(_) => None,
+            Err(err) => {
+                println!("Failed removing offset, Error: {:?}", err);
+                None
+            },
         }
     }
 
