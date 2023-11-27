@@ -406,7 +406,7 @@ impl BufferChunker {
         //
         // for file in index.iter() {
 
-        let paths = glob_with(&format!("{}/ingest_buffer/*.merged", data_dir), options)
+        let paths = glob_with(&format!("{}/ingest_buffer/*.merged*", data_dir), options)
             .expect("Failed to read glob pattern")
             .filter_map(Result::ok)
             .collect::<Vec<_>>();
