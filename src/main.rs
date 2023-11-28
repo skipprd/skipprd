@@ -832,7 +832,7 @@ async fn sync() {
                     .unwrap()
                     .block_on(async {
 
-                        BufferChunker::rotate_buffers(false).await;
+                        BufferChunker::rotate_buffers(false);
 
                         while OUTPUT_RUNNING.read().load(Ordering::SeqCst) {
                             // sleep(Duration::from_secs(1));
@@ -921,9 +921,7 @@ async fn sync() {
         sleep(Duration::from_secs(1));
     }
 
-    BufferChunker::rotate_buffers(true).await;
-    BufferChunker::rotate_buffers(true).await;
-    // BufferChunker::finalise_buffers(true);
+    BufferChunker::rotate_buffers(true);
 
     if Config::get_pipeline_config().output.is_some() {
         sync_output_plugin(Config::get_pipeline_output_plugin_name().as_str(), "output".to_string()).await;

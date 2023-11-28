@@ -235,7 +235,7 @@ impl BufferChunker {
     }
 
 
-    pub async fn rotate_buffers(force: bool) {
+    pub fn rotate_buffers(force: bool) {
         if BUFFER_FINALISE_RUNNING.read().load(Ordering::SeqCst) {
             return;
         } else {
@@ -418,7 +418,7 @@ impl BufferChunker {
                 require_literal_leading_dot: false,
             };
 
-            for path in glob_with(&format!("{}/ingest_buffer/*.merged", data_dir), options)
+            for path in glob_with(&format!("{}/ingest_buffer/*.merged*", data_dir), options)
                 .expect("Failed to read glob pattern")
                 .filter_map(Result::ok)
                 .collect::<Vec<_>>()
@@ -465,7 +465,7 @@ impl BufferChunker {
             .collect::<Vec<_>>();
 
         for path in paths {
-            match fs::remove_file(&path).await {
+            match std::fs::remove_file(&path) {
                 Ok(_t) => {}
                 Err(err) => println!("{:?}", err),
             }
