@@ -505,7 +505,7 @@ async fn sync() {
 
     let _data_dir = Config::get_data_dir();
 
-    BufferChunker::build_buffer_index().await.expect("Failed to build buffer index");
+    BufferChunker::build_buffer_index().expect("Failed to build buffer index");
 
     let skippr_metadata = match Config::get_metadata().await {
         Ok(metadata) => {
@@ -840,7 +840,7 @@ async fn sync() {
                         }
 
 
-                        // BufferChunker::finalise_buffers(false);
+                        BufferChunker::rotate_buffers(false);
 
                         if Config::get_pipeline_config().output.is_some() {
                             {

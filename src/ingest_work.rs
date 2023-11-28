@@ -227,7 +227,7 @@ impl Ingest {
 
                 self.thread_pool.execute(move || {
                     // println!("Processing batch of {} events on core {}", datas_clone.len(), core_count);
-                    Ingest::process_batch(&mut datas_clone, &offset_db_clone,);
+                    Ingest::process_batch(&mut datas_clone, &offset_db_clone);
                     tx.send(()).unwrap();
                 });
 
@@ -418,7 +418,7 @@ impl Ingest {
                         Some(&skpr_namespace),
                         Some(&skpr_partition),
                         skpr_time_bucket,
-                        None
+                        None,
                     );
 
                     if METADATA.read().get(&skpr_namespace).is_none() {
@@ -588,7 +588,8 @@ impl Ingest {
                                     true
                                 },
                                 None => {
-                                     false
+                                    // BufferChunker::create_and_insert_new_file(new_filename.to_string());
+                                    false
                                 }
                             };
 
@@ -599,9 +600,9 @@ impl Ingest {
                             BufferChunker::create_and_insert_new_file(new_filename.to_string());
                         }
 
-                        let mut index_guard = BUFFER_INDEX.read();
+                        let index_guard = BUFFER_INDEX.read();
                         let index = index_guard.get_mut("ingest_buffer_merged").unwrap();
-                        let mut new_file_ref = index.get_mut(new_filename).expect("Failed to find file");
+                        let mut new_file_ref = index.get_mut(new_filename).expect(format!("Failed to find file: {}", new_filename).as_str());
 
                         let new_file = new_file_ref.value_mut();
 
@@ -674,7 +675,25 @@ impl Ingest {
 
                         new_file.updated_at = SystemTime::now();
 
-                        BufferChunker::finalise_buffers(false, &new_file, &new_filename);
+                        let finalised = BufferChunker::finalise_buffers(false, &new_file, &new_filename);
+
+                        if finalised {
+                            // println!("Removing file pointer for {}", new_filename);
+                            // remvoe file pointer and delete from index
+                            new_file.file = TimedRwLock::new("index_buf_file".to_string(), None);
+                            new_file.bytes = 0;
+                            new_file.updated_at = SystemTime::now();
+
+                            // println!("Dropping index guard");
+                            drop(new_file_ref);
+
+
+                            // can't remove index as other threads may be using it
+                            // have to settle for resetting the file pointer above and accepting the memory leak of the index growing with orphaned files
+                            // println!("Removing file from index {}", new_filename);
+                            // index.remove(new_filename);
+
+                        }
 
                     }
                 // });

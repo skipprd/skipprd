@@ -74,7 +74,7 @@ impl BufferChunker {
     //     open_file_limit as i32
     // }
 
-    pub async fn build_buffer_index() -> Result<(), Box<dyn std::error::Error>> {
+    pub fn build_buffer_index() -> Result<(), Box<dyn std::error::Error>> {
 
         println!("Building buffer indexs");
 
@@ -114,16 +114,16 @@ impl BufferChunker {
             for path in glob_with(pattern.1.as_str(), options).expect("Failed to read glob pattern") {
                 match path {
                     Ok(path) => {
-                        if let Ok(metadata) = fs::metadata(&path).await {
+                        if let Ok(metadata) = std::fs::metadata(&path) {
 
                             i+=1;
 
                             let filename = format!("./{}", path.to_str().unwrap().to_string());
 
-                            let limit_readed = if i < open_file_limit {
-                                false
-                            } else {
+                            let limit_readed = if i >= open_file_limit {
                                 true
+                            } else {
+                                false
                             };
 
                             let output_file = match limit_readed {
@@ -194,6 +194,8 @@ impl BufferChunker {
 
     pub fn create_and_insert_new_file(new_filename: String) {
 
+        let index_guard = BUFFER_INDEX.write();
+        let index = index_guard.get_mut("ingest_buffer_merged").unwrap();
 
         // println!("Creating merge file {}", new_filename);
 
@@ -224,12 +226,11 @@ impl BufferChunker {
             path: PathBuf::from(&new_filename),
         };
 
-        {
-            let index_guard = BUFFER_INDEX.write();
-            let index = index_guard.get_mut("ingest_buffer_merged").unwrap();
+        // {
+
 
             index.insert(new_filename.clone(), output_file);
-        }
+        // }
         // index.get_mut(&new_filename).unwrap().value_mut()
 
     }
@@ -504,7 +505,7 @@ impl BufferChunker {
             // println!("Finalising output file {}", filename);
 
             // aquire lock on file to prevent writing while we finalise
-            let lock = output_file.file.write();
+            // let lock = output_file.file.write();
 
             if output_file.bytes == 0 {
                 println!("Skipping empty file {}", filename);
@@ -574,6 +575,15 @@ impl BufferChunker {
                     Err(_) => {}
                 };
 
+                // drop(lock);
+
+                // close file pointer and remove from index
+                // let mut index_guard = BUFFER_INDEX.write();
+                // let index = index_guard.get_mut("ingest_buffer_merged").unwrap();
+                // index.remove(filename);
+
+
+
                 // tombstone file, can't delete it as OS may not delete immediately and we may write to it again
                 let file_name_without_dir = filename.rsplitn(2, "/").next().unwrap();
                 let tombstone_file_name = file_name_without_dir.replace(".merged", ".tombstone");
@@ -588,8 +598,11 @@ impl BufferChunker {
 
                 // println!("Finalised output file {}", finalised_file_path);
 
+
+
                 return true;
             }
+
         }
 
         false

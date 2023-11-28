@@ -714,12 +714,12 @@ impl Config {
             }
             return Config::truth_value(&Config::get_envcache("SKIPPR_CHAOS_MODE"))
         } else {
-            let config = Config::get();
-
             let pipline = Config::get_pipeline_config();
 
             let default_chaos_mode = Config::getenv("SKIPPR_CHAOS_MODE", "no");
             let chaos_mode = pipline.chaos_mode.as_ref().unwrap_or(&default_chaos_mode);
+
+            Config::set_evncache("SKIPPR_CHAOS_MODE", &chaos_mode.clone());
 
             Config::truth_value(chaos_mode)
         }

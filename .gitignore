@@ -19,3 +19,4 @@ skippr_data_tmp/
 /legacy/test-data/
 /flamegraph*
 test-data/ieu_trip
+/test-data/
