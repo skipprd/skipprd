@@ -98,7 +98,7 @@ pub struct OutputFile {
     pub(crate) bytes: u64,
     pub(crate) updated_at: SystemTime,
     // non buffered writer
-    pub(crate) file: Option<tokio::fs::File>,
+    pub(crate) file: Option<std::fs::File>,
     pub(crate) rotated: Option<bool>,
 }
 
@@ -563,11 +563,11 @@ impl Ingest {
 
 
             // update metadata at control pane, this may or may not be automatically approved
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(async {
+            // tokio::runtime::Builder::new_multi_thread()
+            //     .enable_all()
+            //     .build()
+            //     .unwrap()
+            //     .block_on(async {
 
                     // Flush all buffers to their respective files.
                     for (new_filename, buffered_records) in buffers.buffers.iter() {
@@ -585,6 +585,7 @@ impl Ingest {
                             };
                             let result = match index.get_mut(new_filename) {
                                 Some(new_file_ref) => {
+                                    // println!("Found file in index {}", new_filename);
                                     true
                                 },
                                 None => {
@@ -596,24 +597,30 @@ impl Ingest {
                         };
 
                         if !has_file {
-                            BufferChunker::create_and_insert_new_file(new_filename.to_string()).await;
+                            BufferChunker::create_and_insert_new_file(new_filename.to_string());
                         }
 
                         let mut index_guard = BUFFER_INDEX.read();
                         let index = index_guard.get_mut("ingest_buffer_merged").unwrap();
                         let mut new_file_ref = index.get_mut(new_filename).expect("Failed to find file");
 
-                        let mut new_file = new_file_ref.value_mut();
+                        let new_file = new_file_ref.value_mut();
 
+
+                        let mock_buffer = vec![0; 0];
                         // check file descriptor is open
-                        if new_file.file.is_none() || new_file.file.as_mut().is_none() || new_file.file.as_mut().unwrap().metadata().await.is_err() {
-                            println!("File descriptor changed, re-creating {}", new_filename);
+                        if new_file.file.is_none()
+                            || new_file.file.as_mut().is_none()
+                            // || new_file.file.as_mut().unwrap().metadata().is_err()
+                            || new_file.file.as_mut().unwrap().write(&mock_buffer).is_err()
+                            // || new_file.file.as_mut().unwrap().flush().is_err()
+                        {
+                            // println!("File descriptor changed, re-creating {}", new_filename);
 
-                            let file = match tokio::fs::OpenOptions::new()
+                            let file = match std::fs::OpenOptions::new()
                                 .create(true)
                                 .append(true)
-                                .open(&new_filename)
-                                .await {
+                                .open(&new_filename) {
                                 Ok(file) => file,
                                 Err(err) => {
                                     panic!("Failed to open indexed buffer file {}: {}", new_filename, err);
@@ -623,20 +630,17 @@ impl Ingest {
                             new_file.file = Some(file);
                         }
 
-                        // println!("writing to file {}", new_filename);
 
                         let mut total_bytes = 0;
 
-                        // loop {
                             buffer = buffered_records.data.clone();
-                            // if bytes_read == 0 {
-                            //     break;
-                            // }
 
                             match new_file.file.as_mut() {
                                 Some(file) => {
-                                    match file.write_all(&buffer).await {
-                                        Ok(_) => {}
+                                    match file.write_all(&buffer) {
+                                        Ok(_) => {
+                                            // println!("Wrote {} bytes to buffer file {}", buffer.len(), new_filename);
+                                        }
                                         Err(err) => {
                                             println!("Error writing to buffer file {}: {}", new_filename, err)
                                         }
@@ -649,26 +653,21 @@ impl Ingest {
 
                             new_file.bytes += buffered_records.bytes;
 
-                        //     total_bytes += bytes_read;
-                        //
-                        //     // modus 1000000
-                        //     if total_bytes % 1000000 == 0 {
-                        //         println!("written {} bytes", total_bytes);
-                        //     }
-                        // }
-
-                        // println!("flushing file {}", new_filename);
 
                         match new_file.file.as_mut().expect(&format!("Failed to find file descriptor when flushing buffer file"))
-                            .flush().await {
-                            Ok(_) => {}
+                            .flush() {
+                            Ok(_) => {
+                                // println!("Flushed buffer file {}", new_filename);
+                            }
                             Err(err) => {
                                 println!("Error flushing buffer file {}: {}", new_filename, err)
                             }
                         }
                         match new_file.file.as_mut().expect(&format!("Failed to find file descriptor when syncing buffer file metadata"))
-                            .sync_all().await {
-                            Ok(_) => {}
+                            .sync_all() {
+                            Ok(_) => {
+                                // println!("Synced buffer file metadata {}", new_filename);
+                            }
                             Err(err) => {
                                 println!("Error syncing buffer file metadata {}: {}", new_filename, err)
                             }
@@ -676,10 +675,10 @@ impl Ingest {
 
                         new_file.updated_at = SystemTime::now();
 
-                        BufferChunker::finalise_buffers(false, &new_file, &new_filename).await;
+                        BufferChunker::finalise_buffers(false, &new_file, &new_filename);
 
                     }
-                });
+                // });
 
         offset_db_clone.flush();
 

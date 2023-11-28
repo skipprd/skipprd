@@ -118,7 +118,7 @@ impl BufferChunker {
 
                             i+=1;
 
-                            let mut file = fs::File::open(&path).await?;
+                            let filename = format!("./{}", path.to_str().unwrap().to_string());
 
                             let limit_readed = if i < open_file_limit {
                                 false
@@ -128,12 +128,15 @@ impl BufferChunker {
 
                             let output_file = match limit_readed {
                                 false => {
+
+                                    let file = std::fs::File::open(&filename)?;
+
                                     OutputFile {
                                         bytes: metadata.len(),
                                         updated_at: metadata.modified().unwrap_or(SystemTime::now()),
                                         file: Some(file),
                                         rotated: None,
-                                        path: path.clone(),
+                                        path: PathBuf::from(&filename),
                                     }
                                 }
                                 true => {
@@ -142,10 +145,10 @@ impl BufferChunker {
                                         updated_at: metadata.modified().unwrap_or(SystemTime::now()),
                                         file: None,
                                         rotated: None,
-                                        path: path.clone(),
+                                        path: PathBuf::from(&filename),
                                     };
 
-                                    drop(file); // don't exhaust file descriptors
+                                    // drop(file); // don't exhaust file descriptors
 
                                     output_file
                                 }
@@ -162,8 +165,10 @@ impl BufferChunker {
                                 }
                             };
 
+                            // println!("Indexing file {}", filename);
+
                             // let file_dashmap = DashMap::new();
-                            file_dashmap.insert(format!("./{}", path.to_str().unwrap().to_string()), output_file);
+                            file_dashmap.insert(filename, output_file);
 
                             // index.insert(pattern.0.to_string(), file_dashmap);
 
@@ -187,13 +192,15 @@ impl BufferChunker {
         Ok(())
     }
 
-    pub async fn create_and_insert_new_file(new_filename: String) {
+    pub fn create_and_insert_new_file(new_filename: String) {
 
-        let file = match fs::OpenOptions::new()
+
+        // println!("Creating merge file {}", new_filename);
+
+        let file = match std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&new_filename)
-            .await {
+            .open(&new_filename) {
             Ok(file) => file,
             Err(err) => {
                panic!("Error creating buffer file index: {}, File: {}", err, new_filename);
@@ -201,11 +208,11 @@ impl BufferChunker {
         };
 
         let output_file = OutputFile {
-            bytes: match file.metadata().await {
+            bytes: match file.metadata() {
                 Ok(metadata) => metadata.len(),
                 Err(err) => 0,
             },
-            updated_at: match file.metadata().await {
+            updated_at: match file.metadata() {
                 Ok(metadata) => match metadata.modified() {
                     Ok(time) => time,
                     Err(err) => SystemTime::now(),
@@ -419,11 +426,10 @@ impl BufferChunker {
 
                 let new_filename = path.to_str().unwrap().to_string();
 
-                let file = match fs::OpenOptions::new()
+                let file = match std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(&new_filename)
-                    .await {
+                    .open(&new_filename) {
                     Ok(file) => file,
                     Err(err) => {
                         println!("Error while opening buffer file: {}, File: {}", err, new_filename);
@@ -432,11 +438,11 @@ impl BufferChunker {
                 };
 
                 let output_file = OutputFile {
-                    bytes: match file.metadata().await {
+                    bytes: match file.metadata() {
                         Ok(metadata) => metadata.len(),
                         Err(err) => 0,
                     },
-                    updated_at: match file.metadata().await {
+                    updated_at: match file.metadata() {
                         Ok(metadata) => match metadata.modified() {
                             Ok(time) => time,
                             Err(err) => SystemTime::now(),
@@ -448,7 +454,7 @@ impl BufferChunker {
                     path: PathBuf::from(&new_filename),
                 };
 
-                BufferChunker::finalise_buffers(force, &output_file, &path.to_str().unwrap().to_string()).await;
+                BufferChunker::finalise_buffers(force, &output_file, &path.to_str().unwrap().to_string());
             }
         }
 
@@ -470,7 +476,7 @@ impl BufferChunker {
             .store(false, Ordering::SeqCst);
     }
 
-    pub async fn finalise_buffers(force: bool, output_file: &OutputFile, filename: &String) -> bool {
+    pub fn finalise_buffers(force: bool, output_file: &OutputFile, filename: &String) -> bool {
 
         let flatten = Config::get_transform_flatten_events();
 
@@ -560,7 +566,7 @@ impl BufferChunker {
                     Helpers::random_str(32).as_str()
                 );
 
-                match fs::rename(tmp_file_path, finalised_file_path).await {
+                match std::fs::rename(tmp_file_path, finalised_file_path) {
                     Ok(_) => {}
                     Err(_) => {}
                 };
@@ -570,7 +576,7 @@ impl BufferChunker {
                 let tombstone_file_name = file_name_without_dir.replace(".merged", ".tombstone");
                 let tombstone_file_path = format!("{}/done/{}", output_dir, tombstone_file_name);
 
-                match fs::rename(filename.as_str(), &tombstone_file_path).await {
+                match std::fs::rename(filename.as_str(), &tombstone_file_path) {
                     Ok(_) => {}
                     Err(_) => {}
                 };
