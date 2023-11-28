@@ -308,13 +308,42 @@ pub fn match_scalar_value_fast(
                     value: v,
                 }),
                 None => {
-                    if apply_evolution {
-                        match Evolution::apply_evolution_factory(field, value, metadata) {
-                            Ok(v) => Ok(v),
-                            Err(e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type)))),
+                    match value.as_bool().and_then(|v| {
+                        if v {
+                            Some(1)
+                        } else {
+                            Some(0)
                         }
-                    } else {
-                        Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type))))
+                    }).map(|v| v as i32).map(Value::from) {
+                        Some(v) => Ok(ResolvedFieldValue {
+                            field: Metadata::get_field_out_field_name(metadata, field),
+                            value: v,
+                        }),
+                        None => {
+                            // handle string bool as int "true" => 1 and "false" => 0
+                            match value.as_str().and_then(|v| {
+                                if v == "false" || v == "true" {
+                                    Some((v == "true").then(|| 1).unwrap_or(0))
+                                } else {
+                                    None
+                                }
+                            }) {
+                                Some(v) => Ok(ResolvedFieldValue {
+                                    field: Metadata::get_field_out_field_name(metadata, field),
+                                    value: Value::from(v),
+                                }),
+                                None => {
+                                    if apply_evolution {
+                                        match Evolution::apply_evolution_factory(field, value, metadata) {
+                                            Ok(v) => Ok(v),
+                                            Err(e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type)))),
+                                        }
+                                    } else {
+                                        Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type))))
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -407,13 +436,28 @@ pub fn match_scalar_value_fast(
                             value: v,
                         }),
                         None => {
-                            if apply_evolution {
-                                match Evolution::apply_evolution_factory(field, value, metadata) {
-                                    Ok(v) => Ok(v),
-                                    Err(e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type)))),
+                            // handle bool as string
+                            match value.as_str().and_then(|v| {
+                                if v == "0" || v == "1" {
+                                    Some((v == "1").to_string().parse::<bool>().ok()).map(Value::from)
+                                } else {
+                                    None
                                 }
-                            } else {
-                                Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type))))
+                            }) {
+                                Some(v) => Ok(ResolvedFieldValue {
+                                    field: Metadata::get_field_out_field_name(metadata, field),
+                                    value: v,
+                                }),
+                                None => {
+                                    if apply_evolution {
+                                        match Evolution::apply_evolution_factory(field, value, metadata) {
+                                            Ok(v) => Ok(v),
+                                            Err(e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type)))),
+                                        }
+                                    } else {
+                                        Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type))))
+                                    }
+                                }
                             }
                         }
                     }
@@ -530,6 +574,48 @@ mod tests_match_scalar_value_fast {
             get_or_panic(match_scalar_value_fast("field", "int", &str_to_val("123"), &metadata, true)).value,
             i64_to_val(123)
         );
+
+        assert_eq!(
+            get_or_panic(match_scalar_value_fast("field", "int", &bool_to_val(true), &metadata, true)).value,
+            i64_to_val(1)
+        );
+        assert_eq!(
+            get_or_panic(match_scalar_value_fast("field", "int", &bool_to_val(false), &metadata, true)).value,
+            i64_to_val(0)
+        );
+
+        assert_eq!(
+            get_or_panic(match_scalar_value_fast("field", "int", &str_to_val("true"), &metadata, true)).value,
+            i64_to_val(1)
+        );
+        assert_eq!(
+            get_or_panic(match_scalar_value_fast("field", "int", &str_to_val("false"), &metadata, true)).value,
+            i64_to_val(0)
+        );
+        assert_eq!(
+            match_scalar_value_fast("field", "int", &str_to_val("True"), &metadata, true).is_err(),
+            true
+        );
+        assert_eq!(
+            match_scalar_value_fast("field", "int", &str_to_val("False"), &metadata, true).is_err(),
+            true
+        );
+        assert_eq!(
+            get_or_panic(match_scalar_value_fast("field", "int", &i64_to_val(1), &metadata, true)).value,
+            i64_to_val(1)
+        );
+        assert_eq!(
+            get_or_panic(match_scalar_value_fast("field", "int", &str_to_val("1"), &metadata, true)).value,
+            i64_to_val(1)
+        );
+        assert_eq!(
+            get_or_panic(match_scalar_value_fast("field", "int", &i64_to_val(0), &metadata, true)).value,
+            i64_to_val(0)
+        );
+        assert_eq!(
+            get_or_panic(match_scalar_value_fast("field", "int", &str_to_val("0"), &metadata, true)).value,
+            i64_to_val(0)
+        );
     }
 
     #[test]
@@ -559,8 +645,32 @@ mod tests_match_scalar_value_fast {
             bool_to_val(true)
         );
         assert_eq!(
+            get_or_panic(match_scalar_value_fast("field", "boolean", &bool_to_val(false), &metadata, true)).value,
+            bool_to_val(false)
+        );
+        assert_eq!(
             get_or_panic(match_scalar_value_fast("field", "boolean", &str_to_val("true"), &metadata, true)).value,
             bool_to_val(true)
+        );
+        assert_eq!(
+            get_or_panic(match_scalar_value_fast("field", "boolean", &str_to_val("false"), &metadata, true)).value,
+            bool_to_val(false)
+        );
+        assert_eq!(
+            match_scalar_value_fast("field", "boolean", &str_to_val("True"), &metadata, true).is_err(),
+            true
+        );
+        assert_eq!(
+            match_scalar_value_fast("field", "boolean", &str_to_val("False"), &metadata, true).is_err(),
+            true
+        );
+        assert_eq!(
+            match_scalar_value_fast("field", "boolean", &str_to_val("Yes"), &metadata, true).is_err(),
+            true
+        );
+        assert_eq!(
+            match_scalar_value_fast("field", "boolean", &str_to_val("No"), &metadata, true).is_err(),
+            true
         );
         assert_eq!(
             get_or_panic(match_scalar_value_fast("field", "boolean", &i64_to_val(1), &metadata, true)).value,
@@ -568,6 +678,14 @@ mod tests_match_scalar_value_fast {
         );
         assert_eq!(
             get_or_panic(match_scalar_value_fast("field", "boolean", &i64_to_val(0), &metadata, true)).value,
+            bool_to_val(false)
+        );
+        assert_eq!(
+            get_or_panic(match_scalar_value_fast("field", "boolean", &str_to_val("1"), &metadata, true)).value,
+            bool_to_val(true)
+        );
+        assert_eq!(
+            get_or_panic(match_scalar_value_fast("field", "boolean", &str_to_val("0"), &metadata, true)).value,
             bool_to_val(false)
         );
         // assert_eq!(

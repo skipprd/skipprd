@@ -1405,6 +1405,39 @@ mod get_type_bool_tests {
         let subject = "false";
         assert_eq!(get_type(&mut subject.to_string()), expected_type);
     }
+
+    #[test]
+    fn test_get_type_true_upper_str() {
+        let expected_type = "string".to_string();
+
+        let subject = "True";
+        assert_eq!(get_type(&mut subject.to_string()), expected_type);
+    }
+
+    #[test]
+    fn test_get_type_false_upper_str() {
+        let expected_type = "string".to_string();
+
+        let subject = "False";
+        assert_eq!(get_type(&mut subject.to_string()), expected_type);
+    }
+
+    #[test]
+    fn test_get_type_yes_str() {
+        let expected_type = "string".to_string();
+
+        let subject = "yes";
+        assert_eq!(get_type(&mut subject.to_string()), expected_type);
+    }
+
+    #[test]
+    fn test_get_type_no_str() {
+        let expected_type = "string".to_string();
+
+        let subject = "no";
+        assert_eq!(get_type(&mut subject.to_string()), expected_type);
+    }
+
 }
 
 #[cfg(test)]
