@@ -418,7 +418,7 @@ impl BufferChunker {
                 require_literal_leading_dot: false,
             };
 
-            for path in glob_with(&format!("{}/ingest_buffer/*.merged*", data_dir), options)
+            for path in glob_with(&format!("{}/ingest_buffer/*.merged", data_dir), options)
                 .expect("Failed to read glob pattern")
                 .filter_map(Result::ok)
                 .collect::<Vec<_>>()
@@ -502,6 +502,9 @@ impl BufferChunker {
             }
 
             // println!("Finalising output file {}", filename);
+
+            // aquire lock on file to prevent writing while we finalise
+            let lock = output_file.file.write();
 
             if output_file.bytes == 0 {
                 println!("Skipping empty file {}", filename);
