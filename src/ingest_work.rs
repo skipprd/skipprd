@@ -98,7 +98,7 @@ pub struct OutputFile {
     pub(crate) bytes: u64,
     pub(crate) updated_at: SystemTime,
     // non buffered writer
-    pub(crate) file: Option<std::fs::File>,
+    pub(crate) file: TimedRwLock<Option<std::fs::File>>,
     pub(crate) rotated: Option<bool>,
 }
 
@@ -608,10 +608,10 @@ impl Ingest {
 
                         let mock_buffer = vec![0; 0];
                         // check file descriptor is open
-                        if new_file.file.is_none()
-                            || new_file.file.as_mut().is_none()
+                        if new_file.file.write().is_none()
+                            || new_file.file.write().as_mut().is_none()
                             // || new_file.file.as_mut().unwrap().metadata().is_err()
-                            || new_file.file.as_mut().unwrap().write(&mock_buffer).is_err()
+                            || new_file.file.write().as_mut().unwrap().write(&mock_buffer).is_err()
                             // || new_file.file.as_mut().unwrap().flush().is_err()
                         {
                             // println!("File descriptor changed, re-creating {}", new_filename);
@@ -626,7 +626,7 @@ impl Ingest {
                                 }
                             };
 
-                            new_file.file = Some(file);
+                            new_file.file = TimedRwLock::new("index_buf_file".to_string(), Some(file));
                         }
 
 
@@ -634,7 +634,7 @@ impl Ingest {
 
                             buffer = buffered_records.data.clone();
 
-                            match new_file.file.as_mut() {
+                            match new_file.file.write().as_mut() {
                                 Some(file) => {
                                     match file.write_all(&buffer) {
                                         Ok(_) => {
@@ -653,7 +653,7 @@ impl Ingest {
                             new_file.bytes += buffered_records.bytes;
 
 
-                        match new_file.file.as_mut().expect(&format!("Failed to find file descriptor when flushing buffer file"))
+                        match new_file.file.write().as_mut().expect(&format!("Failed to find file descriptor when flushing buffer file"))
                             .flush() {
                             Ok(_) => {
                                 // println!("Flushed buffer file {}", new_filename);
@@ -662,7 +662,7 @@ impl Ingest {
                                 println!("Error flushing buffer file {}: {}", new_filename, err)
                             }
                         }
-                        match new_file.file.as_mut().expect(&format!("Failed to find file descriptor when syncing buffer file metadata"))
+                        match new_file.file.write().as_mut().expect(&format!("Failed to find file descriptor when syncing buffer file metadata"))
                             .sync_all() {
                             Ok(_) => {
                                 // println!("Synced buffer file metadata {}", new_filename);

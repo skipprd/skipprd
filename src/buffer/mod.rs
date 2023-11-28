@@ -134,7 +134,7 @@ impl BufferChunker {
                                     OutputFile {
                                         bytes: metadata.len(),
                                         updated_at: metadata.modified().unwrap_or(SystemTime::now()),
-                                        file: Some(file),
+                                        file: TimedRwLock::new("index_buf_file".to_string(), Some(file)),
                                         rotated: None,
                                         path: PathBuf::from(&filename),
                                     }
@@ -143,7 +143,7 @@ impl BufferChunker {
                                     let output_file = OutputFile {
                                         bytes: metadata.len(),
                                         updated_at: metadata.modified().unwrap_or(SystemTime::now()),
-                                        file: None,
+                                        file: TimedRwLock::new("index_buf_file".to_string(), None),
                                         rotated: None,
                                         path: PathBuf::from(&filename),
                                     };
@@ -219,7 +219,7 @@ impl BufferChunker {
                 },
                 Err(err) => SystemTime::now(),
             },
-            file: Some(file),
+            file: TimedRwLock::new("index_buf_file".to_string(), Some(file)),
             rotated: None,
             path: PathBuf::from(&new_filename),
         };
@@ -449,7 +449,7 @@ impl BufferChunker {
                         },
                         Err(err) => SystemTime::now(),
                     },
-                    file: Some(file),
+                    file: TimedRwLock::new("index_buf_file".to_string(), Some(file)),
                     rotated: None,
                     path: PathBuf::from(&new_filename),
                 };
