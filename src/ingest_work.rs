@@ -223,11 +223,11 @@ impl Ingest {
 
                 let mut datas_clone = datas.clone();
 
-                let core_count = self.thread_pool.active_count();
+                // let core_count = self.thread_pool.active_count();
 
                 self.thread_pool.execute(move || {
                     // println!("Processing batch of {} events on core {}", datas_clone.len(), core_count);
-                    Ingest::process_batch(&mut datas_clone, &offset_db_clone, core_count);
+                    Ingest::process_batch(&mut datas_clone, &offset_db_clone,);
                     tx.send(()).unwrap();
                 });
 
@@ -250,7 +250,6 @@ impl Ingest {
     fn process_batch(
         datas: &mut Vec<IngestBatch>,
         offset_db_clone: &Arc<Offsets>,
-        core_count: usize,
     ) {
 
         // let mut avro_schemas = AVRO_SCHEMA.lock().unwrap();
@@ -419,7 +418,7 @@ impl Ingest {
                         Some(&skpr_namespace),
                         Some(&skpr_partition),
                         skpr_time_bucket,
-                        Some(&core_count.to_string())
+                        None
                     );
 
                     if METADATA.read().get(&skpr_namespace).is_none() {
