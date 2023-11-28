@@ -323,7 +323,10 @@ impl DataSourceLocalFilePlugin {
                                     let reader = BufReader::new(file);
 
                                     for line in reader.lines() {
-                                        let line = line.unwrap();
+                                        let line = match line {
+                                            Ok(line) => line,
+                                            Err(_) => continue,
+                                        };
                                         let line_len = line.len() as i64;
                                         if batch_bytes + line_len > chunk_size && !current_batch.is_empty() {
                                             tx.unbounded_send(current_batch.clone()).unwrap();
