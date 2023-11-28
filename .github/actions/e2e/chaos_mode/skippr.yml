@@ -5,7 +5,6 @@ skippr:
 pipelines:
 
   chaos_mode:
-    chaos_mode: yes
     auto_approve: yes
     env: test
     buffer_threshold_bytes: 20000000
