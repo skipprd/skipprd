@@ -675,6 +675,8 @@ impl Ingest {
 
                         new_file.updated_at = SystemTime::now();
 
+                        // @todo - might want to just rotate buffers here and leave a separate process to finalise them
+                        // that would create a backlog of files to finalise, but would preventing blocking ingest
                         let finalised = BufferChunker::finalise_buffers(false, &new_file, &new_filename);
 
                         if finalised {

@@ -73,13 +73,13 @@ pipelines:
     buffer_threshold_bytes: 20000000
     buffer_threshold_seconds: 600
     transform:
-      batch_time_fields: event_date
-      batch_time_unit: day
+#      batch_time_fields: event_date
+#      batch_time_unit: day
 #      namespace_fields: message_type
 #      batch_partition_fields: event_type,hardware.model,hardware.manufacturer
 #      batch_partition_fields: event_type
-    input: data_inputs.s3_bike_hire
-#    output: data_outputs.test_datalake
+    input: data_inputs.local_bike_hire
+    output: data_outputs.test_datalake
 
   ieu_trip:
 #    reset_offsets: yes
@@ -147,8 +147,8 @@ pipelines:
       batch_time_unit: day
       flatten_events: yes
       namespace_fields: detail-type
-    input: data_inputs.cube_events
-#    output: data_outputs.ds_datalake
+    input: data_inputs.local_cube_events
+    output: data_outputs.test_datalake
 
   drvn:
 #    reset_offsets: yes
@@ -164,9 +164,14 @@ pipelines:
 data_inputs:
   cube_events:
     s3:
-      batch_size_bytes: 2048000
+      batch_size_bytes: 5048000
       s3_bucket: production-datastorage-stack-cubeevents9ad2ae37-ots21z45kn3g
-      s3_prefix: /2021/
+      s3_prefix: /2022/
+  local_cube_events:
+    file:
+      batch_size_bytes: 4048000
+      format: json
+      path: /Users/huders2000/Documents/sites/skippr/skipprd/test-data/cube_events/01
   cloud_trail:
     s3:
       batch_size_bytes: 1000
@@ -201,6 +206,11 @@ data_inputs:
       batch_size_bytes: 48000
       s3_bucket: skippr-e2e-sample-data
       s3_prefix: bike-hire/
+  local_bike_hire:
+    file:
+      batch_size_bytes: 4048000
+      format: json
+      path: /Users/huders2000/Documents/sites/skippr/skipprd/test-data/bike-hire/
   local_cache:
     file:
       batch_size_bytes: 4048000
