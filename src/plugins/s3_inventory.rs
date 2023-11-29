@@ -227,7 +227,7 @@ impl DataSourceS3InventoryPlugin {
                                     //         .parse::<i64>()
                                     //         .unwrap();
 
-                                    for file in manifest.first().unwrap()["files"].as_array() {
+                                    while let Some(file) = manifest.first().unwrap()["files"].as_array() {
                                         let file_key =
                                             file.first().unwrap()["key"].as_str().unwrap();
 
