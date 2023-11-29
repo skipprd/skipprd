@@ -2,8 +2,8 @@ use crate::discover::Metadata;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::error::ArrowError;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use arrow::datatypes::TimeUnit::{Millisecond, Second};
+
+use arrow::datatypes::TimeUnit::{Millisecond};
 // use arrow::datatypes::Fields;
 
 #[derive(Debug, Clone)]

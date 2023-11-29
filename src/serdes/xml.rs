@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
-use serde_xml_rs::{from_str};
+
 use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Cursor, Lines, Read, Result, Write};
+use std::io::{BufRead, BufReader, BufWriter, Lines, Read, Result, Write};
 use std::path::Path;
-use serde_transcode::transcode;
+
 use serde_value::Value;
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -198,7 +198,7 @@ fn test_xml_serde() {
     // fn test_basic_valid_xml() {
         let record: String = r#"<note><to>Tove</to><from>Jani</from><heading>Reminder</heading><body>Don't forget me this weekend!</body></note>"#.to_string();
         println!("{:?}", record);
-        let msg = SerdeXml::deserialize(record.as_bytes());
+        let _msg = SerdeXml::deserialize(record.as_bytes());
         // println!("{:?}", msg);
         // assert_eq!(msg.first().unwrap()., "Tove");
         // assert_eq!(msg["body".to_string()], &Value::String("jj".to_string()));
@@ -227,7 +227,7 @@ fn test_xml_repeate_fields_serde() {
    </item>
 </items>"#.to_string();
         println!("{:?}", record);
-        let msg = SerdeXml::deserialize(record.as_bytes());
+        let _msg = SerdeXml::deserialize(record.as_bytes());
         // println!("{:?}", msg);
         // assert_eq!(msg.first().unwrap()., "Tove");
         // assert_eq!(msg["body".to_string()], &Value::String("jj".to_string()));

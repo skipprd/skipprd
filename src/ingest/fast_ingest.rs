@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 use std::error::Error;
-use std::ops::Deref;
+
 use chrono::NaiveDateTime;
 use serde_json::Map;
 
@@ -11,7 +11,7 @@ use crate::discover::date_formats::DateFormats;
 use crate::discover::evolution::Evolution;
 
 use crate::helpers::Helpers;
-use crate::ingest::ingest::{ResolvedFieldValue, set_date};
+use crate::ingest::ingest::{ResolvedFieldValue};
 
 #[derive(Default)]
 pub struct IngestRecord {
@@ -199,7 +199,7 @@ fn process_array_field(
 
             let meta_field = metadata.get(field).ok_or(format!("Array field '{}' not found in metadata or it's disabled", idx))?;
             if meta_field.enabled {
-                let new_val = match fast_set_value(
+                let _new_val = match fast_set_value(
                     &meta_field.determined_type_values,
                     &sub_field,
                     val,
@@ -207,7 +207,7 @@ fn process_array_field(
                     None
                 ) {
                     Ok(v) => array.push(v.value),
-                    Err(e) => {
+                    Err(_e) => {
                         // @todo - bubble up error and add array evolution support.
                         // Very slow ingest otherwise so just setting null and dropping values
                         array.push(Value::Null);
@@ -264,7 +264,7 @@ pub fn match_scalar_value_fast(
                             if apply_evolution {
                                 match Evolution::apply_evolution_factory(field, value, metadata) {
                                     Ok(v) => Ok(v),
-                                    Err(e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type)))),
+                                    Err(_e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type)))),
                                 }
                             } else {
                                 Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type))))
@@ -288,7 +288,7 @@ pub fn match_scalar_value_fast(
                     if apply_evolution {
                         match Evolution::apply_evolution_factory(field, value, metadata) {
                             Ok(v) => Ok(v),
-                            Err(e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type)))),
+                            Err(_e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type)))),
                         }
                     } else {
                         Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type))))
@@ -336,7 +336,7 @@ pub fn match_scalar_value_fast(
                                     if apply_evolution {
                                         match Evolution::apply_evolution_factory(field, value, metadata) {
                                             Ok(v) => Ok(v),
-                                            Err(e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type)))),
+                                            Err(_e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type)))),
                                         }
                                     } else {
                                         Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type))))
@@ -377,7 +377,7 @@ pub fn match_scalar_value_fast(
                                 // println!("### Applying Evolution: {}", field);
                                 match Evolution::apply_evolution_factory(field, value, metadata) {
                                     Ok(v) => Ok(v),
-                                    Err(e) => {
+                                    Err(_e) => {
                                         // println!("### Fast evolutino Error: {}", e);
                                         Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Field {} value {} is not an {}", field, value, data_type))))
                                     },
@@ -404,7 +404,7 @@ pub fn match_scalar_value_fast(
                     if apply_evolution {
                         match Evolution::apply_evolution_factory(field, value, metadata) {
                             Ok(v) => Ok(v),
-                            Err(e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type)))),
+                            Err(_e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type)))),
                         }
                     } else {
                         Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type))))
@@ -452,7 +452,7 @@ pub fn match_scalar_value_fast(
                                     if apply_evolution {
                                         match Evolution::apply_evolution_factory(field, value, metadata) {
                                             Ok(v) => Ok(v),
-                                            Err(e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type)))),
+                                            Err(_e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type)))),
                                         }
                                     } else {
                                         Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type))))
@@ -512,7 +512,7 @@ pub fn fast_set_date(field: &str, value: &Value, metadata: &HashMap<String, Meta
 
 #[cfg(test)]
 mod tests_match_scalar_value_fast {
-    use std::fs::metadata;
+    
     use super::*;
     use serde_json::Value;
 

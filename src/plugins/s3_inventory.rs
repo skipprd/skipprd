@@ -12,13 +12,13 @@ use std::fs::File;
 
 use std::io::{BufRead, BufReader, Cursor, Read, Write};
 
-use std::future::Future;
+
 use std::sync::{Arc};
 
 use aws_sdk_s3::operation::get_object::{GetObjectError, GetObjectOutput};
 
 
-use std::sync::atomic::Ordering;
+
 
 use std::time::Duration;
 use std::{fs, thread};
@@ -31,11 +31,11 @@ use futures::StreamExt;
 
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::ingest_work::{Ingest, IngestBatch};
-use crate::{RUNNING};
+
 use std::sync::RwLock;
 use serde_derive::Deserialize;
 use tokio::sync::Semaphore;
-use crate::helpers::configuration::PluginConfig::s3_inventory;
+
 
 
 #[derive(Debug, Deserialize, Clone)]
@@ -270,19 +270,44 @@ impl DataSourceS3InventoryPlugin {
                                                     .into_bytes()
                                                     .to_vec();
 
-                                                let mut tmpfile = File::create(
+                                                let mut tmpfile = match File::create(
                                                     self.temp_dir.to_string()
                                                         + "/s3-inventory-temp.csv.gz",
-                                                )
-                                                .unwrap();
+                                                ) {
+                                                    Ok(file) => file,
+                                                    Err(err) => {
+                                                        println!(
+                                                            "Error creating file: {}",
+                                                            err.to_string()
+                                                        );
+                                                        continue;
+                                                    }
+                                                };
 
-                                                tmpfile.write_all(&tmp_file_content);
+                                                match tmpfile.write_all(&tmp_file_content) {
+                                                    Ok(_file) => {}
+                                                    Err(err) => {
+                                                        println!(
+                                                            "Error writing file: {}",
+                                                            err.to_string()
+                                                        );
+                                                        continue;
+                                                    }
+                                                }
 
-                                                let file = File::open(
+                                                let file = match File::open(
                                                     self.temp_dir.to_string()
                                                         + "/s3-inventory-temp.csv.gz",
-                                                )
-                                                .unwrap();
+                                                ) {
+                                                    Ok(file) => file,
+                                                    Err(err) => {
+                                                        println!(
+                                                            "Error opening file: {}",
+                                                            err.to_string()
+                                                        );
+                                                        continue;
+                                                    }
+                                                };
                                                 let file = BufReader::new(file);
                                                 let mut file = GzDecoder::new(file);
                                                 let mut bytes = Vec::new();

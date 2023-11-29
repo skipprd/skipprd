@@ -5,37 +5,37 @@ use crate::helpers::offsets::{OffsetKey, Offsets, OffsetTypes};
 use crate::helpers::Helpers;
 use crate::ingest::ingest::ingest;
 use crate::serdes::json::SerdeJson;
-use crate::{BUFFER_FINALISE_RUNNING, helpers, METADATA, METRICS, OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE, OUTPUT_RUNNING, RUNNING};
-use glob::{glob_with, MatchOptions};
-use lru::LruCache;
+use crate::{helpers, METADATA, METRICS, RUNNING};
+
+
 use once_cell::sync::Lazy;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::fs;
-use std::fs::{File, OpenOptions};
+
+
 use std::io::Write;
-use std::num::NonZeroUsize;
+
 use std::path::PathBuf;
 use std::process::exit;
 use std::string::ToString;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime};
 use threadpool::ThreadPool;
 use std::sync::mpsc::channel;
 extern crate num_cpus;
 use std::sync::mpsc::Sender;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::thread::sleep;
+
 use parquet::data_type::AsBytes;
 use crate::ingest::fast_ingest::fast_path_ingest;
 
-use arrow::datatypes;
-use arrow::error::ArrowError;
-use dashmap::DashMap;
+
+
+
 use tokio::io::AsyncWriteExt;
 use helpers::timed_rwlock::TimedRwLock;
 use crate::serdes::csv::SerderCsv;
-use crate::serdes::parquet::SerdeParquet;
+
 use crate::serdes::xml::SerdeXml;
 // use crate::converters::skippr_avro::convert_skippr_to_avro_field_types;
 
@@ -178,7 +178,7 @@ impl Ingest {
 
         while self.active_count.load(Ordering::SeqCst) > 0 {
 
-            if (current_active_count != self.active_count.load(Ordering::SeqCst)) {
+            if current_active_count != self.active_count.load(Ordering::SeqCst) {
                 println!("Waiting for {} ingest tasks to finish", self.active_count.load(Ordering::SeqCst));
                 current_active_count = self.active_count.load(Ordering::SeqCst);
             }
@@ -258,9 +258,9 @@ impl Ingest {
 
         let data_dir = Config::get_data_dir();
         let output_dir = format!("{}/ingest_buffer", data_dir);
-        let deadletter_dir = format!("{}/deadletter_buffer", data_dir);
+        let _deadletter_dir = format!("{}/deadletter_buffer", data_dir);
 
-        let aprox_now = SystemTime::now();
+        let _aprox_now = SystemTime::now();
 
         let updated_schema: Arc<Mutex<String>> = Arc::new(Mutex::new("no".to_string()));
 
@@ -321,7 +321,7 @@ impl Ingest {
 
             for record in records {
                 match record.as_object() {
-                    Some(v) => unwrapped_records.push(record),
+                    Some(_v) => unwrapped_records.push(record),
                     None => {
                         match record.as_array() {
                             Some(v) => {
@@ -447,7 +447,7 @@ impl Ingest {
                             // buffers.write(&output_file_name, buf_str.as_bytes());
                             msg
                         },
-                        Err(err) => {
+                        Err(_err) => {
 
                             // let old_metadata = NEW_METADATA.read().unwrap().clone();
 
@@ -464,7 +464,7 @@ impl Ingest {
                                 flatten,
                             ) {
                                 Ok(msg) => msg,
-                                Err(err) => {
+                                Err(_err) => {
                                     // println!("Deadlettring - Could not ingest record: {}, Error: {:?}", record, err);
 
                                     // deadletter record
@@ -583,7 +583,7 @@ impl Ingest {
                                 }
                             };
                             let result = match index.get_mut(new_filename) {
-                                Some(new_file_ref) => {
+                                Some(_new_file_ref) => {
                                     // println!("Found file in index {}", new_filename);
                                     true
                                 },
@@ -631,7 +631,7 @@ impl Ingest {
                         }
 
 
-                        let mut total_bytes = 0;
+                        let _total_bytes = 0;
 
                             buffer = buffered_records.data.clone();
 

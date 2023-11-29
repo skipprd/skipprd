@@ -1,24 +1,24 @@
-use std::cell::{Cell, RefCell};
+
 use std::collections::HashMap;
-use std::fmt::{Debug, format};
+use std::fmt::{Debug};
 use std::fs;
-use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Read};
-use std::ops::Deref;
+use std::fs::{File};
+use std::io::{Read};
+
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+
+use std::sync::{Arc};
 use yaml_rust::YamlLoader;
 
 use nix::libc::exit;
 
-use std::time::{Duration, Instant};
+use std::time::{Duration};
 use dashmap::DashMap;
 use lazy_static::lazy_static;
 use once_cell::sync::Lazy;
 
 // use aws_config::profile::profile_file::ProfileFileKind::Config;
-use serde_derive::{Deserialize, Serialize};
+use serde_derive::{Deserialize};
 
 use serde_json::{json, Value};
 
@@ -29,18 +29,18 @@ use reqwest::header::{HeaderMap, HeaderName};
 use reqwest::{Client, StatusCode};
 
 use crate::discover::Metadata;
-use crate::{flatten_metadata, METRICS, RUNNING};
-use crate::helpers::Helpers;
+use crate::{flatten_metadata};
 
-use crate::helpers::license::{HAS_LICENSE, LicenseChecker, TENANT_ID};
+
+use crate::helpers::license::{HAS_LICENSE, LicenseChecker};
 
 use crate::plugins::athena::{AwsAthena, DataOutputAwsAthenaPluginConfig};
 
 use toml;
 use crate::helpers::timed_rwlock::TimedRwLock;
-use crate::plugins::file_input::{DataSourceLocalFilePlugin, DataSourceLocalFilePluginConfig};
+use crate::plugins::file_input::{DataSourceLocalFilePluginConfig};
 use crate::plugins::s3_input::DataSourceS3PluginConfig;
-use crate::plugins::s3_inventory::{DataSourceS3InventoryPlugin, DataSourceS3InventoryPluginConfig};
+use crate::plugins::s3_inventory::{DataSourceS3InventoryPluginConfig};
 
 lazy_static! {
     static ref ENV_CACHE: TimedRwLock<DashMap<String, String>> = TimedRwLock::new("env_cache".to_string(), DashMap::new());
@@ -84,10 +84,10 @@ impl PluginConfig {
 
     pub fn plugin_name(&self) -> Option<String> {
         match self {
-            PluginConfig::s3(s3_config) => Some("s3".to_string()),
-            PluginConfig::s3_inventory(s3_inventory_config) => Some("s3_inventory".to_string()),
-            PluginConfig::athena(athena_config) => Some("athena".to_string()),
-            PluginConfig::file(file_config) => Some("file".to_string()),
+            PluginConfig::s3(_s3_config) => Some("s3".to_string()),
+            PluginConfig::s3_inventory(_s3_inventory_config) => Some("s3_inventory".to_string()),
+            PluginConfig::athena(_athena_config) => Some("athena".to_string()),
+            PluginConfig::file(_file_config) => Some("file".to_string()),
         }
     }
 
@@ -95,7 +95,7 @@ impl PluginConfig {
         match self {
             PluginConfig::s3(s3_config) => s3_config.batch_size_bytes.clone(),
             PluginConfig::s3_inventory(s3_inventory_config) => s3_inventory_config.batch_size_bytes.clone(),
-            PluginConfig::athena(athena_config) => None,
+            PluginConfig::athena(_athena_config) => None,
             PluginConfig::file(file_config) => file_config.batch_size_bytes.clone(),
         }
     }
@@ -104,7 +104,7 @@ impl PluginConfig {
         match self {
             PluginConfig::s3(s3_config) => s3_config.batch_size_seconds.clone(),
             PluginConfig::s3_inventory(s3_inventory_config) => s3_inventory_config.batch_size_seconds.clone(),
-            PluginConfig::athena(athena_config) => None,
+            PluginConfig::athena(_athena_config) => None,
             PluginConfig::file(file_config) => file_config.batch_size_seconds.clone(),
         }
     }
@@ -166,7 +166,7 @@ impl Config {
             }
         }
 
-        let mut valid_locations = vec![
+        let valid_locations = vec![
             "./skippr.yml",
             "./skippr.yaml",
             "./skippr.toml",
@@ -194,7 +194,7 @@ impl Config {
 
         let mut file = match File::open(&file_path) {
             Ok(file) => file,
-            Err(error) => {
+            Err(_error) => {
                 let mut app_config = APP_CONFIG.write();
                 app_config.replace(Config::new());
                 return;
@@ -226,7 +226,7 @@ impl Config {
 
         let string_val = serde_json::to_string(&config).unwrap();
         // Deserialize the String back into Config
-        let mut config: Config = serde_json::from_str(&string_val).unwrap();
+        let config: Config = serde_json::from_str(&string_val).unwrap();
 
         // println!("config: {:?}", config);
 
@@ -533,7 +533,7 @@ impl Config {
     }
 
     pub fn get_transform_config() -> Transform {
-        let config = Config::get();
+        let _config = Config::get();
 
         let pipline = Config::get_pipeline_config();
 
@@ -634,7 +634,7 @@ impl Config {
             }
             return Config::get_envcache("TRANSFORM_RECORD_FIELD_PATH")
         } else {
-            let config = Config::get();
+            let _config = Config::get();
 
             let pipline = Config::get_pipeline_config();
 
@@ -661,7 +661,7 @@ impl Config {
             }
             return Config::get_envcache("TRANSFORM_BATCH_TIME_FIELDS")
         } else {
-            let config = Config::get();
+            let _config = Config::get();
 
             let pipline = Config::get_pipeline_config();
 
@@ -687,7 +687,7 @@ impl Config {
             }
             return Config::get_envcache("TRANSFORM_BATCH_TIME_UNIT")
         } else {
-            let config = Config::get();
+            let _config = Config::get();
 
             let pipline = Config::get_pipeline_config();
 
@@ -774,7 +774,7 @@ impl Config {
         if Config::get_envcache("SCHEMA_AUTO_APPROVE") != "" {
             return Config::truth_value(&Config::get_envcache("SCHEMA_AUTO_APPROVE"))
         } else {
-            let mut pipeline = Config::get_pipeline_config();
+            let pipeline = Config::get_pipeline_config();
 
             let default_auto_approve = Config::getenv("SCHEMA_AUTO_APPROVE", "true");
             let auto_approve = pipeline.auto_approve.as_ref().unwrap_or(&default_auto_approve);
@@ -787,7 +787,7 @@ impl Config {
         if Config::get_envcache("RESET_OFFSETS") != "" {
             return Config::truth_value(&Config::get_envcache("RESET_OFFSETS"))
         } else {
-            let mut pipeline = Config::get_pipeline_config();
+            let pipeline = Config::get_pipeline_config();
 
             let default_auto_approve = &Config::getenv("RESET_OFFSETS", "false");
             let auto_approve = pipeline.reset_offsets.as_ref().unwrap_or(&default_auto_approve);
@@ -800,7 +800,7 @@ impl Config {
         if Config::get_envcache("RESET_METADATA") != "" {
             return Config::truth_value(&Config::get_envcache("RESET_METADATA"))
         } else {
-            let mut pipeline = Config::get_pipeline_config();
+            let pipeline = Config::get_pipeline_config();
 
             let default = &Config::getenv("RESET_METADATA", "false");
             let value = pipeline.reset_metadata.as_ref().unwrap_or(&default);
@@ -825,7 +825,7 @@ impl Config {
     }
 
     pub fn reset_envcache() {
-        let mut cache = ENV_CACHE.write();
+        let cache = ENV_CACHE.write();
         cache.clear();
     }
 
@@ -833,7 +833,7 @@ impl Config {
         if Config::get_envcache("BUFFER_THRESHOLD_BYTES") != "" {
             return Config::get_envcache("BUFFER_THRESHOLD_BYTES").parse::<i64>().unwrap()
         } else {
-            let config = Config::get();
+            let _config = Config::get();
 
             let pipline = Config::get_pipeline_config();
 
@@ -857,7 +857,7 @@ impl Config {
         if Config::get_envcache("BUFFER_THRESHOLD_SECONDS") != "" {
             return Config::get_envcache("BUFFER_THRESHOLD_SECONDS").parse::<i64>().unwrap()
         } else {
-            let config = Config::get();
+            let _config = Config::get();
 
             let pipline = Config::get_pipeline_config();
 
@@ -987,7 +987,7 @@ impl Config {
 
     pub fn setenv(name: &str, value: &str) {
         std::env::set_var(name, value);
-        let mut cache = ENV_CACHE.write();
+        let cache = ENV_CACHE.write();
         cache.insert(name.to_string(), value.to_string());
     }
 
@@ -1130,7 +1130,7 @@ impl Config {
             println!("ERROR: Config: 'TRANSFORM_BATCH_TIME_FIELDS' must be since you've set: 'TRANSFORM_BATCH_TIME_UNIT'.");
         }
 
-        let data_dir = Config::get_data_dir();
+        let _data_dir = Config::get_data_dir();
 
 
         let workspace = Self::get_workspace_name();

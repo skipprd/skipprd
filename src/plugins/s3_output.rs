@@ -1,15 +1,15 @@
 use crate::buffer::BufferChunker;
-use crate::converters::skippr_hive::SkipprHive;
-use crate::discover::Metadata;
+
+
 use crate::helpers::configuration::Config;
-use crate::helpers::logger::LogLevel;
+
 use crate::helpers::Helpers;
-use crate::{discover, flatten_metadata, METADATA};
+
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::{Client as S3Client, Error};
 use chrono::prelude::*;
 
-use std::collections::HashMap;
+
 use std::fs;
 use std::fs::File;
 use std::io::{BufReader, Read};
@@ -45,7 +45,7 @@ impl DataOutputS3Plugin {
     }
 
     pub async fn sync(&self) {
-        let mut partition_cache: Vec<String> = vec![];
+        let _partition_cache: Vec<String> = vec![];
 
         while let Some(filename) = BufferChunker::next_file(&self.buffer_name) {
             let mut file = BufReader::new(File::open(&filename).unwrap());

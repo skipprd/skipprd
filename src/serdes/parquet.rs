@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use crate::buffer::BufferChunker;
 use crate::helpers::configuration::Config;
-use crate::helpers::logger::LogLevel;
+
 // use crate::LOGGER;
 
 use parquet::basic::{Compression, Encoding};
@@ -164,7 +164,7 @@ impl SerdeParquet {
     //
     // }
 
-    pub fn serialize(path: PathBuf, mut schema_ref: Arc<Schema>) -> String {
+    pub fn serialize(path: PathBuf, schema_ref: Arc<Schema>) -> String {
         // pub fn serialize(path: PathBuf, mut schema_ref: Schema) -> Schema {
 
         // println!("Arrow schema: {:?}", schema_ref);
@@ -342,7 +342,7 @@ impl SerdeParquet {
 
         // panic!("Arrow schema: {:?}", schema_ref);
 
-        let mut last_error = "".to_string();
+        let last_error = "".to_string();
 
         let mut writer =
             match ArrowWriter::try_new(output, schema_ref, Some(props.build())) {

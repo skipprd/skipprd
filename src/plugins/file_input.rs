@@ -5,11 +5,11 @@ use std::io::prelude::*;
 use std::{fs};
 use std::io::BufReader;
 use std::path::Path;
-use std::process::exit;
+
 
 use std::sync::{Arc};
-use std::thread::sleep;
-use std::time::Duration;
+
+
 
 
 use flate2::read::GzDecoder;
@@ -24,7 +24,7 @@ use crate::ingest_work::{Ingest, IngestBatch};
 use glob::{glob_with};
 
 use futures::stream::StreamExt;
-use serde::Deserializer;
+
 use serde_derive::Deserialize;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -152,14 +152,14 @@ impl DataSourceLocalFilePlugin {
                         let has_offsets = offsets_clone.validate(&offset_key, OffsetTypes::Closed, 1);
 
                         if Some(true) != has_offsets {
-                            let mut file = match File::open(&path) {
+                            let file = match File::open(&path) {
                                 Err(why) => {
                                     println!("couldn't open {}: {}", path.display(), why);
                                     continue;
                                 },
                                 Ok(file) => file,
                             };
-                            let mut file_content = String::new();
+                            let _file_content = String::new();
                             let file_ext = match path.extension() {
                                 Some(ext) => match ext.to_str() {
                                     Some(ext) => ext,
@@ -170,7 +170,7 @@ impl DataSourceLocalFilePlugin {
 
                             match file_ext {
                                 "gz" => {
-                                    let mut decoder = GzDecoder::new(file);
+                                    let decoder = GzDecoder::new(file);
                                     let reader = BufReader::new(decoder);
 
                                     for line in reader.lines() {
@@ -201,7 +201,7 @@ impl DataSourceLocalFilePlugin {
                                 "tar" => {
                                     let mut archive = Archive::new(file);
                                     for entry in archive.entries().unwrap() {
-                                        let mut file_entry = entry.unwrap();
+                                        let file_entry = entry.unwrap();
                                         let reader = BufReader::new(file_entry);
 
                                         for line in reader.lines() {
@@ -234,7 +234,7 @@ impl DataSourceLocalFilePlugin {
                                     let decoder = GzDecoder::new(file);
                                     let mut archive = Archive::new(decoder);
                                     for entry in archive.entries().unwrap() {
-                                        let mut file_entry = entry.unwrap();
+                                        let file_entry = entry.unwrap();
                                         let reader = BufReader::new(file_entry);
 
                                         for line in reader.lines() {
@@ -269,7 +269,7 @@ impl DataSourceLocalFilePlugin {
                                     let mut ingest_data = format!("");
 
                                     for i in 0..archive.len() {
-                                        let mut file = archive.by_index(i).unwrap();
+                                        let file = archive.by_index(i).unwrap();
                                         let reader = BufReader::new(file);
 
                                         for line in reader.lines() {
@@ -282,7 +282,7 @@ impl DataSourceLocalFilePlugin {
                                             // tx.unbounded_send(current_batch.clone()).unwrap();
                                             // sleep(Duration::from_millis(10000));
                                             // exit(0);
-                                            let line_len = line.len() as i64;
+                                            let _line_len = line.len() as i64;
 
                                             ingest_data = format!("{}{}{}", ingest_data, line, "\n");
                                             // ingest_data = format!("{}{}", ingest_data, line);

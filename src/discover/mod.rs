@@ -1,17 +1,17 @@
-use arrow::error::ArrowError;
+
 use std::any::Any;
-use std::borrow::BorrowMut;
+
 use std::collections::{BTreeMap, HashMap};
-use std::fs::{File, metadata};
+use std::fs::{File};
 use std::io::Read;
-use std::ops::Deref;
-use std::str::FromStr;
-use std::sync::Mutex;
-use std::thread::sleep;
-use std::time::Duration;
+
+
+
+
+
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
-use lazy_static::lazy_static;
+
 use serde_derive::{Deserialize, Serialize};
 
 use serde_json::Value;
@@ -30,12 +30,12 @@ use crate::discover::filter_bool::parse_bool;
 mod filter_parse_int;
 
 use crate::helpers::configuration::Config;
-use crate::ingest::fast_ingest::{fast_path_ingest, fast_set_value, match_scalar_value_fast};
-use crate::ingest::ingest::{IngestRecord, set_value};
-use crate::ingest_work::Ingest;
+
+use crate::ingest::ingest::{IngestRecord};
+
 use crate::serdes::json::SerdeJson;
 
-use once_cell::sync::Lazy;
+
 use crate::discover::evolution::Evolution;
 
 
@@ -1443,7 +1443,7 @@ mod get_type_bool_tests {
 #[cfg(test)]
 mod valid_timestamps_tests {
     use super::*;
-    use chrono::Utc;
+    
 
     #[test]
     fn test_valid_timestamps() {
@@ -1607,7 +1607,7 @@ mod tests {
     use std::fs::{File, OpenOptions, remove_file};
     use std::io::{Seek, Write};
 
-    use crate::discover::{AnalyseSchema, Metadata};
+    use crate::discover::{AnalyseSchema};
     use crate::helpers::configuration::Config;
     use parquet::data_type::AsBytes;
     use rand::Rng;

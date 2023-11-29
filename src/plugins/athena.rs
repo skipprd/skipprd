@@ -11,7 +11,7 @@ use aws_sdk_glue::types::{
 };
 use aws_sdk_glue::Client as GlueClient;
 use aws_sdk_s3::primitives::ByteStream;
-use aws_sdk_s3::{Client as S3Client, Client, Error};
+use aws_sdk_s3::{Client as S3Client, Error};
 use chrono::prelude::*;
 
 use std::collections::HashMap;
@@ -19,7 +19,7 @@ use std::fs;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
-use serde::Deserializer;
+
 use serde_derive::Deserialize;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -384,7 +384,7 @@ impl AwsAthena {
                 Ok(_) => {
                     println!("Created Athena Workgroup");
                 }
-                Err(err) => {
+                Err(_err) => {
                     match AwsAthena::update_workgroup().await {
                         Ok(_) => {
                             println!("Updated Athena Workgroup");

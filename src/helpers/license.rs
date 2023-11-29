@@ -7,8 +7,8 @@ use reqwest::{header::HeaderName, Client, Url};
 use serde_derive::{Deserialize, Serialize};
 
 use std::error::Error;
-use std::process::exit;
-use std::sync::{Mutex, RwLock};
+
+use std::sync::{RwLock};
 
 pub static TENANT_ID: Lazy<RwLock<String>> = Lazy::new(|| RwLock::new("".to_string()));
 pub static HAS_LICENSE: Lazy<RwLock<bool>> = Lazy::new(|| RwLock::new(false));
@@ -79,7 +79,7 @@ impl LicenseChecker {
                 .map_or(false, |l| &self.api_key == &l.api_key);
 
             let mut has_license = match HAS_LICENSE.write() {
-                Ok(mut val) => {
+                Ok(val) => {
                     val
                 },
                 Err(err) => {

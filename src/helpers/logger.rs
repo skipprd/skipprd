@@ -2,7 +2,7 @@ use std::collections::btree_map::BTreeMap;
 use crate::helpers::configuration::Config;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::json;
-use std::collections::HashMap;
+
 use std::hash::{Hash, Hasher};
 
 use crate::helpers::license::{HAS_LICENSE, TENANT_ID};
@@ -118,7 +118,7 @@ impl Logger {
         let tenant_id = TENANT_ID.read().unwrap().clone();
 
         let data = json!({
-            "logs": logs.iter().map(|(time, log)| {
+            "logs": logs.iter().map(|(_time, log)| {
                 json!({
                     "level": log.level.to_string(),
                     "message": log.message,

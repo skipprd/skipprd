@@ -1,12 +1,12 @@
 use std::fmt::Debug;
 use std::ops::Sub;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Instant, SystemTime};
+use std::time::{SystemTime};
 use chrono::DateTime;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_derive::{Deserialize, Serialize};
 use serde_json::json;
-use tar::Header;
+
 use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
 use crate::helpers::license::{HAS_LICENSE, TENANT_ID};

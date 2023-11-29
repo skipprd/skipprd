@@ -2,33 +2,33 @@ use chrono::{DateTime, Datelike, NaiveDateTime, TimeZone, Timelike, Utc};
 use url::form_urlencoded;
 
 use std::collections::HashMap;
-use std::fmt::format;
+
 use std::fs::File;
 
 // use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
-use std::io::ErrorKind::NotFound;
+
 // use std::{fs, str};
 
-use tokio::fs;
-use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use std::path::{Path, PathBuf};
 use std::string::ToString;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::thread::sleep;
-use std::time::{SystemTime, UNIX_EPOCH};
+
+use std::time::{SystemTime};
 use arrow::datatypes;
 use arrow::error::ArrowError;
 use dashmap::DashMap;
 use glob::{glob_with, MatchOptions};
-use lru::LruCache;
-use nix::libc;
+
+
 
 use parquet::data_type::AsBytes;
 use parquet::file::reader::Length;
-use crate::{BUFFER_FINALISE_RUNNING, METADATA, OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE, RUNNING};
+use crate::{BUFFER_FINALISE_RUNNING, METADATA};
 use crate::converters::skippr_arrow::convert_skippr_to_arrow;
 use crate::discover::Metadata;
 
@@ -36,7 +36,7 @@ use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::ingest_work::OutputFile;
-use crate::metrics::MetricsStatus::Running;
+
 use crate::serdes::parquet::SerdeParquet;
 use once_cell::sync::Lazy;
 
@@ -98,9 +98,9 @@ impl BufferChunker {
 
         for pattern in patterns.iter() {
             {
-                let mut index = BUFFER_INDEX.write();
+                let index = BUFFER_INDEX.write();
 
-                let file_dashmap = match index.get_mut(&pattern.0.to_string()) {
+                let _file_dashmap = match index.get_mut(&pattern.0.to_string()) {
                     Some(file_dashmap) => file_dashmap,
                     None => {
                         let file_dashmap = DashMap::new();
@@ -154,7 +154,7 @@ impl BufferChunker {
                                 }
                             };
 
-                            let mut index = BUFFER_INDEX.write();
+                            let index = BUFFER_INDEX.write();
 
                             let file_dashmap= match index.get_mut(&pattern.0.to_string()) {
                                 Some(file_dashmap) => file_dashmap,
@@ -212,14 +212,14 @@ impl BufferChunker {
         let output_file = OutputFile {
             bytes: match file.metadata() {
                 Ok(metadata) => metadata.len(),
-                Err(err) => 0,
+                Err(_err) => 0,
             },
             updated_at: match file.metadata() {
                 Ok(metadata) => match metadata.modified() {
                     Ok(time) => time,
-                    Err(err) => SystemTime::now(),
+                    Err(_err) => SystemTime::now(),
                 },
-                Err(err) => SystemTime::now(),
+                Err(_err) => SystemTime::now(),
             },
             file: TimedRwLock::new("index_buf_file".to_string(), Some(file)),
             rotated: None,
@@ -441,14 +441,14 @@ impl BufferChunker {
                 let output_file = OutputFile {
                     bytes: match file.metadata() {
                         Ok(metadata) => metadata.len(),
-                        Err(err) => 0,
+                        Err(_err) => 0,
                     },
                     updated_at: match file.metadata() {
                         Ok(metadata) => match metadata.modified() {
                             Ok(time) => time,
-                            Err(err) => SystemTime::now(),
+                            Err(_err) => SystemTime::now(),
                         },
-                        Err(err) => SystemTime::now(),
+                        Err(_err) => SystemTime::now(),
                     },
                     file: TimedRwLock::new("index_buf_file".to_string(), Some(file)),
                     rotated: None,
@@ -485,7 +485,7 @@ impl BufferChunker {
         let output_dir = &format!("{}/ingest_buffer", data_dir);
         let finalised_dir = &format!("{}/output_buffer", data_dir);
 
-        let options = MatchOptions {
+        let _options = MatchOptions {
             case_sensitive: false,
             require_literal_separator: false,
             require_literal_leading_dot: false,
@@ -715,7 +715,7 @@ impl BufferChunker {
             None => "".to_string(),
         };
 
-        let mut chunks = vec![
+        let chunks = vec![
             ("buffer".to_string(), buffer_name.to_string()),
             ("namespace".to_string(), namespace.unwrap_or("").to_string()),
             ("partition".to_string(), partition.unwrap_or("").to_string()),
@@ -1095,7 +1095,7 @@ mod event_time_bucket_tests {
 
 #[cfg(test)]
 mod encode_chunk_name_tests {
-    use datafusion::common::tree_node::Transformed::No;
+    
     use crate::buffer::BufferChunker;
 
     #[test]

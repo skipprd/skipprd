@@ -8,7 +8,7 @@ use flate2::read::GzDecoder;
 
 use std::io::{Cursor, Read};
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc};
 
 use aws_sdk_s3::operation::get_object::{GetObjectError, GetObjectOutput};
 
@@ -20,7 +20,7 @@ use std::{fs};
 
 use futures::future::join_all;
 use futures::{StreamExt};
-use serde::Deserializer;
+
 use serde_derive::Deserialize;
 
 

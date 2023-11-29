@@ -105,13 +105,13 @@ impl Evolution {
         parent_field: Option<&str>,
         parent_data_type: Option<&str>,
         metadata: &mut HashMap<String, Metadata>,
-        mut updated_schema: &mut String,
+        updated_schema: &mut String,
     ) -> Result<ResolvedFieldValue, Box<dyn std::error::Error>> {
 
         // println!("Handling value error for field: '{}'", field);
 
-        let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
-        let mut discoverd_data_type = foo.resolve_field_type(metadata.clone().borrow_mut(), &field.to_string(), value.clone().borrow_mut());
+        let foo: AnalyseSchema = AnalyseSchema { i: 0 };
+        let discoverd_data_type = foo.resolve_field_type(metadata.clone().borrow_mut(), &field.to_string(), value.clone().borrow_mut());
 
 
         // println!("Evolving new data type: '{}' for field '{}' with value '{}' with current data type of '{}'", discoverd_data_type, field, value, metadata.get(field).unwrap().determined_type);
@@ -122,7 +122,7 @@ impl Evolution {
 
 
             match metadata.get(field).unwrap().evolution.get(new_feild_name) {
-                Some(evolution) => {
+                Some(_evolution) => {
                     if discoverd_data_type == "array" {
                         // println!("Have an evolution for field: '{}' to type: '{}' but it is an array, so ignoring", field, discoverd_data_type);
 

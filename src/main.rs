@@ -18,11 +18,11 @@ use std::collections::HashMap;
 use std::fs::File;
 
 use std::io::BufReader;
-use std::ops::{Add, Deref};
+use std::ops::{Add};
 
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::fmt::Debug;
+
 
 use std::fs;
 
@@ -62,7 +62,7 @@ use signal_hook::iterator::Signals;
 use std::panic;
 use std::string::ToString;
 use datafusion::common::ExprSchema;
-use futures::TryFutureExt;
+
 
 use once_cell::sync::Lazy;
 use signal_hook::consts::{SIGABRT, SIGINT, SIGQUIT, SIGTERM};
@@ -84,7 +84,7 @@ use crate::plugins::athena::DataOutputAwsAthenaPlugin;
 use crate::plugins::s3_input::DataSourceS3Plugin;
 use crate::plugins::s3_inventory::DataSourceS3InventoryPlugin;
 
-use crate::ingest_work::{Ingest};
+
 use crate::metrics::{Metrics, MetricsStatus};
 use crate::plugins::file_input::DataSourceLocalFilePlugin;
 use crate::plugins::file_output::DataOutputFilePlugin;
@@ -268,7 +268,7 @@ async fn schema(pipeline: &str) {
     Config::init().await;
     let workspace = Config::get_workspace_name();
     // Config::setenv("PIPELINE_NAME", &table_name);
-    let full_table_name = format!("{}.{}", workspace, pipeline);
+    let _full_table_name = format!("{}.{}", workspace, pipeline);
 
     // @todo - check dir exists for provided table name, otherwise we end up creating erroneous dirs
 
@@ -281,7 +281,7 @@ async fn schema(pipeline: &str) {
 
     match ctx.register_parquet(&pipeline, &output_dir, ParquetReadOptions::default()).await {
         Ok(_) => {}
-        Err(e) => {
+        Err(_e) => {
             println!("Can't find data for table: {} in dir: {}", pipeline, output_dir);
             process::exit(1);
         }
@@ -322,7 +322,7 @@ async fn query(sql: &str) {
     Config::init().await;
     let workspace = Config::get_workspace_name();
     // Config::setenv("PIPELINE_NAME", &table_name);
-    let full_table_name = format!("{}.{}", workspace, table_name);
+    let _full_table_name = format!("{}.{}", workspace, table_name);
 
     // @todo - check dir exists for provided table name, otherwise we end up creating erroneous dirs
 
@@ -531,7 +531,7 @@ async fn sync() {
     let now = Arc::new(Mutex::new(Instant::now()));
 
     let offsets = Arc::new(Offsets::init().unwrap());
-    let offsets_clone = offsets.clone();
+    let _offsets_clone = offsets.clone();
     // let logger_clone = Arc::clone(&logger);
 
     /**
@@ -741,7 +741,7 @@ async fn sync() {
                 //     Ok(lock) => lock,
                 //     Err(poisoned) => poisoned.into_inner(),
                 // };
-                let mut metrics_lock = METRICS.read();
+                let metrics_lock = METRICS.read();
 
                 let now_lock = now_clone.lock().unwrap();
 
@@ -931,7 +931,7 @@ async fn sync() {
         sync_output_plugin(&Config::get_pipeline_deadletter_plugin_name(), "deadletter".to_string()).await;
     }
 
-    let mut metrics_lock = METRICS.read();
+    let metrics_lock = METRICS.read();
 
     let now_lock = now.lock().unwrap();
 
@@ -986,20 +986,20 @@ pub fn flatten_metadata(metadata: &Metadata, flattened: &mut HashMap<String, Met
 pub async fn sync_output_plugin(plugin_name: &str, buffer_name: String) {
     match plugin_name {
         "stdout" => {
-            let mut output = DataOutputStdoutPlugin::new(buffer_name).await;
+            let output = DataOutputStdoutPlugin::new(buffer_name).await;
             output
                 .sync()
                 .await;
         }
         "file" => {
-            let mut output = DataOutputFilePlugin::new(buffer_name).await;
+            let output = DataOutputFilePlugin::new(buffer_name).await;
             output
                 .sync()
                 .await;
         }
         "s3" => {
             if *HAS_LICENSE.read().unwrap() {
-                let mut output = DataOutputS3Plugin::new(buffer_name).await;
+                let output = DataOutputS3Plugin::new(buffer_name).await;
                 output
                     .sync()
                     .await;
@@ -1010,7 +1010,7 @@ pub async fn sync_output_plugin(plugin_name: &str, buffer_name: String) {
         }
         "athena" => {
             if *HAS_LICENSE.read().unwrap() {
-                let mut output = DataOutputAwsAthenaPlugin::new(buffer_name).await;
+                let output = DataOutputAwsAthenaPlugin::new(buffer_name).await;
                 output
                     .sync()
                     .await;

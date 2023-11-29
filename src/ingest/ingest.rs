@@ -6,8 +6,8 @@ use chrono::NaiveDateTime;
 use serde_json::{Map, Value};
 use std::borrow::BorrowMut;
 use std::collections::HashMap;
-use std::io::{BufReader, Read};
-use datafusion::arrow::compute::using_chrono_tz_and_utc_naive_date_time;
+
+
 use crate::discover::evolution::Evolution;
 
 
@@ -52,7 +52,7 @@ pub fn ingest(
     // let mut message: Vec<Value> = Vec::with_capacity(batch_size);
     let mut message: Value = Value::Null;
 
-    let mut i = 0;
+    let _i = 0;
 
     for (field, value) in unwrapped_message.as_object().unwrap() {
         // let field = Helpers::clean_field_name(field.to_string());
@@ -83,7 +83,7 @@ pub fn ingest(
             true
         ) {
             Ok(v) => v,
-            Err(e) => {
+            Err(_e) => {
                 // apply evolution strategy
                 match Evolution::evolve_field(&field.to_string(), value, None, None, metadata, updated_schema) {
                     Ok(v) => v,
@@ -593,7 +593,7 @@ pub fn set_value(
 
                                     let res = match foo {
                                         Ok(v) => v,
-                                        Err(e) => {
+                                        Err(_e) => {
                                             // println!("Error: {}", e);
                                             values_valid = false;
                                             ResolvedFieldValue::new(field.to_string(), Value::Null)
@@ -715,7 +715,7 @@ fn match_scalar_value(
     parent_field: Option<&str>,
     parent_data_type: Option<&str>,
     metadata: &mut HashMap<String, Metadata>,
-    mut updated_schema: &mut String,
+    updated_schema: &mut String,
     allow_evolve: bool
 ) -> Result<ResolvedFieldValue, Box<dyn std::error::Error>> {
     match data_type {
@@ -860,7 +860,7 @@ pub fn discover_ingest(
 ) -> String {
     let foo: AnalyseSchema = AnalyseSchema { i: 0 };
 
-    let mut discoverd_data_type = "string".to_string().clone();
+    let discoverd_data_type = "string".to_string().clone();
 
     // For null values, we need to create a new field and default to string
     // This is to avoid constantly trying to discover the field and slowing ingestion
@@ -925,7 +925,7 @@ pub fn set_date(
     parent_field: Option<&str>,
     parent_data_type: Option<&str>,
     metadata: &mut HashMap<String, Metadata>,
-    mut updated_schema: &mut String
+    updated_schema: &mut String
 ) -> Result<ResolvedFieldValue, Box<dyn std::error::Error>> {
     // Hive Timestamp doesn't support string dates
     match value.clone().as_str() {
@@ -967,20 +967,20 @@ mod tests {
     use chrono::NaiveDateTime;
     
     use std::collections::HashMap;
-    use datafusion::common::tree_node::Transformed::No;
+    
 
     fn generate_metadata(field: &str, format_name: &str) -> HashMap<String, Metadata> {
         let date_candidate = DateCandidate {
             check_count: 1,
             valid_count: 1,
-            field: String::from(field.clone()),
+            field: String::from(field),
             format: String::from(format_name),
         };
 
         let mut meta = HashMap::new();
 
         meta.insert(
-            String::from(field.clone()),
+            String::from(field),
             Metadata {
                 count: 1,
                 types: HashMap::new(),
