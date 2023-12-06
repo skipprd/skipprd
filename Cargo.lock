@@ -2787,12 +2787,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8bb03732005da905c88227371639bf1ad885cc712789c011c31c5fb3ab3ccf02"
 
 [[package]]
-name = "io"
-version = "0.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85c839d30624bc6b3dced6a4652823d1967fb7939d4848ad002d509b1fc916b2"
-
-[[package]]
 name = "ipnet"
 version = "2.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4336,7 +4330,6 @@ dependencies = [
  "hex",
  "icu",
  "indexmap 1.9.3",
- "io",
  "lazy_static",
  "lru",
  "md5",
