@@ -71,6 +71,10 @@ impl LicenseChecker {
             TENANT_ID
                 .write()
                 .unwrap()
+                .clear();
+            TENANT_ID
+                .write()
+                .unwrap()
                 .push_str(&self.license.as_ref().unwrap().tenant);
 
             self.license_is_valid = self
