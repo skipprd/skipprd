@@ -369,9 +369,27 @@ impl SerdeParquet {
                     }
                 }
                 Err(_error) => {
-                    panic!("Error reading batch: {} while serialising to parquet", _error.to_string());
-                    // println!("Error reading batch: {} while serialising to parquet", _error.to_string());
-                    last_error = _error.to_string();
+                    println!("Error reading batch: {} while serialising to parquet", _error.to_string());
+
+                    // move file to deadletter
+                    let deadletter_dir = &format!("{}/deadletter_buffer", data_dir);
+
+                    let deadletter_file_path = &format!(
+                        "{}/{}-parquet-error.temp",
+                        deadletter_dir,
+                        Helpers::random_str(12).as_str()
+                    );
+
+                    match fs::rename(path.clone(), deadletter_file_path) {
+                        Ok(_g) => {
+                            println!("Moved file to deadletter: {}", deadletter_file_path)
+                        }
+                        Err(_err) => {
+                            println!("Error moving file to deadletter: {}", _err.to_string());
+                        }
+                    }
+
+                    // last_error = _error.to_string();
                 }
             }
         }
