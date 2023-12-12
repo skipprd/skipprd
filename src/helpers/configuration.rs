@@ -1164,11 +1164,15 @@ impl Config {
         let metadata: Result<HashMap<String, Metadata>, bool> = match response {
             Ok(resp) => match resp.status() {
                 StatusCode::OK => {
-                    let metadata = resp.json::<HashMap<String, Metadata>>().await.unwrap();
+                    let metadata = match resp.json::<HashMap<String, Metadata>>().await {
+                        Ok(metadata) => metadata,
+                        Err(err) => {
+                            panic!("Metadata HTTP Error: {:?}", err);
+                        }
+                    };
                     Ok(metadata)
                 }
                 StatusCode::NOT_FOUND => {
-                    // println!("Metadata HTTP Error: {:?}", err);
                     Err(false)
                 }
                 err => unsafe {
@@ -1182,9 +1186,9 @@ impl Config {
                     exit(1);
                 },
             },
-            Err(_err) => {
-                // println!("Metadata HTTP Error: {:?}", err);
-                Err(false)
+            Err(err) => {
+                println!("Metadata HTTP Error, shutting down to prevent metadata consistency issues: {:?}", err);
+                panic!("Metadata HTTP Error: {:?}", err);
             }
         };
 
