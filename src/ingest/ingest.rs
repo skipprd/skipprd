@@ -941,18 +941,18 @@ pub fn set_date(
                 Ok(f) => match Helpers::parse_date_from_string(val, f.as_str()) {
                     Ok(date) => {
                         let millis = date.timestamp() * 1000;
-                        Ok(ResolvedFieldValue::new(field.to_string(), millis.into()))
+                        Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), millis.into()))
                     }
-                    Err(_) => Ok(ResolvedFieldValue::new(field.to_string(), Value::Null)),
+                    Err(_) => Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), Value::Null)),
                 },
                 Err(err) => {
                     println!("Error date: {}", err);
-                    Ok(ResolvedFieldValue::new(field.to_string(), Value::Null))
+                    Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), Value::Null))
                 }
             }
         }
         None => {
-            // println!("Could not format date to int using format");
+            // println!("Could not format date {} to int using format {} for field {}", value, metadata.get(field).unwrap().date_candidate.as_ref().unwrap().format, field);
             // Handle the value error applying the Evolution Strategy
             Evolution::evolve_field(&field.to_string(), value, parent_field, parent_data_type, metadata, updated_schema)
             // Value::Null
