@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 use std::error::Error;
 
-use chrono::NaiveDateTime;
+use chrono::{DateTime, NaiveDateTime};
 use serde_json::Map;
 
 use crate::discover::{AnalyseSchema, Metadata};
@@ -488,7 +488,7 @@ pub fn fast_set_date(field: &str, value: &Value, metadata: &HashMap<String, Meta
             let fmt = &date_meta.format;
 
             match DateFormats::from_str(fmt) {
-                Ok(f) => match NaiveDateTime::parse_from_str(val, f.as_str()) {
+                Ok(f) => match Helpers::parse_date_from_string(val, f.as_str()) {
                     Ok(date) => {
                         let millis = date.timestamp() * 1000;
                         Ok(ResolvedFieldValue {
@@ -496,7 +496,9 @@ pub fn fast_set_date(field: &str, value: &Value, metadata: &HashMap<String, Meta
                             value: millis.into(),
                         })
                     }
-                    Err(_) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid date format"))),
+                    Err(_) => {
+                        Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Could not parse date {} with format {} for field {}", val, fmt, field))))
+                    }
                 },
                 Err(err) => {
                     println!("Error date: {}", err);
@@ -507,6 +509,130 @@ pub fn fast_set_date(field: &str, value: &Value, metadata: &HashMap<String, Meta
         None => {
             Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Could not format date, expected value {} to parse as a string", value))))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests_fast_set_date {
+    use super::*;
+    use crate::discover::DateCandidate;
+    use chrono::{FixedOffset, NaiveDateTime, Utc};
+
+    use std::collections::HashMap;
+
+
+    fn generate_metadata(field: &str, format_name: &str) -> HashMap<String, Metadata> {
+        let date_candidate = DateCandidate {
+            check_count: 1,
+            valid_count: 1,
+            field: String::from(field),
+            format: String::from(format_name),
+        };
+
+        let mut meta = HashMap::new();
+
+        meta.insert(
+            String::from(field),
+            Metadata {
+                count: 1,
+                types: HashMap::new(),
+                parent_type: String::from("parent"),
+                fields: Box::new(HashMap::new()),
+                date_candidate: Some(date_candidate),
+                evolution: Box::new(HashMap::new()),
+                enabled: true,
+                out_field_name: String::from(field),
+                determined_type: String::from("date"),
+                determined_type_values: "".to_string(),
+            },
+        );
+
+        meta
+    }
+
+    #[test]
+    fn test_fast_set_date_with_valid_date() {
+        let foo: AnalyseSchema = AnalyseSchema { i: 0 };
+
+        let field = "test_field";
+
+        let date_str = "2023-05-21 12:34:56";
+        let format_name = foo.is_valid_date(date_str).unwrap();
+        let format = DateFormats::from_str(format_name).unwrap().as_str();
+
+        let mut meta = generate_metadata(field, format_name);
+
+        let value = Value::String(String::from(date_str));
+
+        let mut updated_schema = "no".to_string();
+
+        let result = fast_set_date(field, &value, &mut meta);
+
+        let expected_date = Helpers::parse_date_from_string(date_str, format).unwrap();
+        let expected_millis =
+            Value::Number(serde_json::Number::from(expected_date.timestamp() * 1000));
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().value, expected_millis);
+    }
+
+    #[test]
+    fn test_fast_set_date_with_valid_iso_date() {
+        let foo: AnalyseSchema = AnalyseSchema { i: 0 };
+
+        let field = "test_field";
+
+        // let date_str = "2023-05-23T07:09:03.000Z";
+        // let date_str = "2023-07-11T12:56:44.000Z";
+        // let date_str = "2023-07-11T14:56:44+02:00";
+        let date_str = "2023-07-11T14:56:44";
+        let format_name = foo.is_valid_date(date_str).unwrap();
+        let format = DateFormats::from_str(format_name).unwrap().as_str();
+
+        let mut meta = generate_metadata(field, format_name);
+
+        let value = Value::String(String::from(date_str));
+
+        let mut updated_schema = "no".to_string();
+
+        let result = fast_set_date(field, &value, &mut meta);
+
+        let expected_date = Helpers::parse_date_from_string(date_str, format).unwrap();
+
+        let expected_millis =
+            Value::Number(serde_json::Number::from(expected_date.timestamp() * 1000));
+
+        println!("Expected date {} as {}", date_str, expected_millis);
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().value, expected_millis);
+
+    }
+
+    #[test]
+    fn test_fast_set_date_with_valid_iso_timezone_date() {
+        let foo: AnalyseSchema = AnalyseSchema { i: 0 };
+
+        let field = "test_field";
+
+        let date_str = "2023-12-11T15:49:31+01:00";
+        let format_name = foo.is_valid_date(date_str).unwrap();
+        let format = DateFormats::from_str(format_name).unwrap().as_str();
+
+        let mut meta = generate_metadata(field, format_name);
+
+        let value = Value::String(String::from(date_str));
+
+        let mut updated_schema = "no".to_string();
+
+        let result = fast_set_date(field, &value, &mut meta);
+
+        let expected_date = Helpers::parse_date_from_string(date_str, format).unwrap();
+        let expected_millis =
+            Value::Number(serde_json::Number::from(expected_date.timestamp() * 1000));
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().value, expected_millis);
     }
 }
 

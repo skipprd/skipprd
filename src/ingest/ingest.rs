@@ -2,7 +2,7 @@ use crate::discover::date_formats::DateFormats;
 use crate::discover::{AnalyseSchema, Metadata};
 use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
-use chrono::NaiveDateTime;
+use chrono::{DateTime, NaiveDateTime};
 use serde_json::{Map, Value};
 use std::borrow::BorrowMut;
 use std::collections::HashMap;
@@ -938,7 +938,7 @@ pub fn set_date(
                 .unwrap()
                 .format;
             match DateFormats::from_str(fmt) {
-                Ok(f) => match NaiveDateTime::parse_from_str(val, f.as_str()) {
+                Ok(f) => match Helpers::parse_date_from_string(val, f.as_str()) {
                     Ok(date) => {
                         let millis = date.timestamp() * 1000;
                         Ok(ResolvedFieldValue::new(field.to_string(), millis.into()))
@@ -961,10 +961,10 @@ pub fn set_date(
 }
 
 #[cfg(test)]
-mod tests {
+mod tests_set_date {
     use super::*;
     use crate::discover::DateCandidate;
-    use chrono::NaiveDateTime;
+    use chrono::{FixedOffset, NaiveDateTime};
     
     use std::collections::HashMap;
     
@@ -1008,7 +1008,7 @@ mod tests {
         let format_name = foo.is_valid_date(date_str).unwrap();
         let format = DateFormats::from_str(format_name).unwrap().as_str();
 
-        let mut meta = generate_metadata(field, format);
+        let mut meta = generate_metadata(field, format_name);
 
         let value = Value::String(String::from(date_str));
 
@@ -1016,7 +1016,8 @@ mod tests {
 
         let result = set_date(field, &value, None, None, &mut meta, &mut updated_schema);
 
-        let expected_date = NaiveDateTime::parse_from_str(date_str, format).unwrap();
+        let expected_date = Helpers::parse_date_from_string(date_str, format).unwrap();
+
         let expected_millis =
             Value::Number(serde_json::Number::from(expected_date.timestamp() * 1000));
 
@@ -1034,7 +1035,7 @@ mod tests {
         let format_name = foo.is_valid_date(date_str).unwrap();
         let format = DateFormats::from_str(format_name).unwrap().as_str();
 
-        let mut meta = generate_metadata(field, format);
+        let mut meta = generate_metadata(field, format_name);
 
         let value = Value::String(String::from(date_str));
 
@@ -1042,7 +1043,36 @@ mod tests {
 
         let result = set_date(field, &value, None, None, &mut meta, &mut updated_schema);
 
-        let expected_date = NaiveDateTime::parse_from_str(date_str, format).unwrap();
+        let expected_date = Helpers::parse_date_from_string(date_str, format).unwrap();
+
+        let mills = expected_date.timestamp() * 1000;
+        let expected_millis: Value = mills.into();
+            // Value::Number(serde_json::Number::from(expected_date.timestamp() * 1000));
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().value, expected_millis);
+    }
+
+    #[test]
+    fn test_set_date_with_valid_iso_timezone_date() {
+        let foo: AnalyseSchema = AnalyseSchema { i: 0 };
+
+        let field = "test_field";
+
+        let date_str = "2023-12-11T15:49:31+01:00";
+        let format_name = foo.is_valid_date(date_str).unwrap();
+        let format = DateFormats::from_str(format_name).unwrap().as_str();
+
+        let mut meta = generate_metadata(field, format_name);
+
+        let value = Value::String(String::from(date_str));
+
+        let mut updated_schema = "no".to_string();
+
+        let result = set_date(field, &value, None, None, &mut meta, &mut updated_schema);
+
+        let expected_date =  Helpers::parse_date_from_string(date_str, format).unwrap();
+
         let expected_millis =
             Value::Number(serde_json::Number::from(expected_date.timestamp() * 1000));
 
@@ -1052,7 +1082,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod test_discover_on_ingest {
+mod test_smoke_tests {
     use serial_test::serial;
     use std::collections::HashMap;
     use std::fs::{remove_file, File, OpenOptions};
@@ -1073,7 +1103,7 @@ mod test_discover_on_ingest {
 
     #[test]
     #[serial]
-    fn test_set_date_valid() {
+    fn test_discover_and_ingest() {
         let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
 
         let field = r#"
@@ -1200,6 +1230,6 @@ mod test_discover_on_ingest {
 
         assert_eq!(&map, &trip_map);
 
-        remove_file(Path::new(&format!("./{}", random_tmp_file_name)));
+        remove_file(Path::new(&format!("./{}", random_tmp_file_name))).unwrap();
     }
 }

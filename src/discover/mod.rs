@@ -892,22 +892,12 @@ impl AnalyseSchema {
 
     pub(crate) fn is_valid_date(&self, value: &str) -> Option<&str> {
         for format in DateFormats::iterator() {
-            let found_format = match DateTime::parse_from_str(value, format.as_str()) {
+            let found_format = match Helpers::parse_date_from_string(value, format.as_str()) {
                 Ok(_) => {
-                    // println!("Value {} is format {}", value, format.as_str());
                     return Some(format.name());
                 }
                 Err(_) => {
-                    match NaiveDate::parse_from_str(value, format.as_str()) {
-                        Ok(_) => {
-                            // println!("Value {} is naive format {}", value, format.as_str());
-                            return Some(format.name());
-                        }
-                        Err(_) => {
-                            // println!("Value {} is not a date of format {}: {}, trying naive", value.as_str(), format.name(), format.as_str());
-                            None
-                        }
-                    }
+                    None
                 }
             };
 
@@ -1493,6 +1483,7 @@ mod is_valid_date_tests {
     use crate::discover::AnalyseSchema;
     use chrono::{DateTime, NaiveDate, NaiveDateTime};
     use serde_json::Value;
+    use crate::helpers::Helpers;
 
     #[test]
     fn test_valid_date_formats() {
@@ -1509,7 +1500,7 @@ mod is_valid_date_tests {
 
         let fmt = DateFormats::from_str("Iso8601").unwrap();
         assert_eq!("%Y-%m-%dT%H:%M:%S.%fZ", fmt.as_str());
-        NaiveDateTime::parse_from_str(date_str, fmt.as_str()).unwrap();
+        Helpers::parse_date_from_string(date_str, fmt.as_str()).unwrap();
 
         let date_str = "2022-01-07T08:28:07Z";
         assert_eq!(Some("Iso8601_2"), foo.is_valid_date(date_str));
@@ -1560,7 +1551,7 @@ mod is_valid_date_tests {
     fn test_valid_date() {
         let foo: AnalyseSchema = AnalyseSchema { i: 0 };
         let date_str = "2022-02-22";
-        let _nd = NaiveDate::parse_from_str(date_str, "%Y-%m-%d").unwrap();
+        let _nd = Helpers::parse_date_from_string(date_str, "%Y-%m-%d").unwrap();
         assert_eq!(Some("DateOnly"), foo.is_valid_date(date_str));
     }
 }
@@ -1570,7 +1561,8 @@ mod discover_date_formats_tests {
     use crate::discover::date_formats::DateFormats;
     use crate::discover::AnalyseSchema;
     use chrono::NaiveDateTime;
-    
+    use crate::helpers::Helpers;
+
 
     #[test]
     fn test_valid_date_formats() {
@@ -1581,7 +1573,7 @@ mod discover_date_formats_tests {
 
         let fmt = DateFormats::from_str("Iso8601").unwrap();
         assert_eq!("%Y-%m-%dT%H:%M:%S.%fZ", fmt.as_str());
-        NaiveDateTime::parse_from_str(date_str, fmt.as_str()).unwrap();
+        Helpers::parse_date_from_string(date_str, fmt.as_str()).unwrap();
 
         let date_str = "2022-01-07T08:28:07Z";
         assert_eq!(Some("Iso8601_2"), foo.is_valid_date(date_str));
