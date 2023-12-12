@@ -1,4 +1,4 @@
-use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone, Utc};
 use memory_stats::memory_stats;
 use regex::Regex;
 use std::collections::HashMap;
@@ -354,13 +354,14 @@ impl Helpers {
                                     // println!("2");
                                     for format in DateFormats::iterator() {
                                         // println!("3: {} ? {}", val, format.as_str());
-                                        time_field_value = match NaiveDateTime::parse_from_str(
+                                        time_field_value = match Helpers::parse_date_from_string(
                                             val,
                                             format.as_str(),
                                         ) {
                                             Ok(dt) => {
                                                 // println!("3.1: FOUND {}", format.as_str());
-                                                Some(DateTime::<Utc>::from_utc(dt, Utc).timestamp())
+                                                // Some(DateTime::<Utc>::from_utc(dt, Utc).timestamp())
+                                                Some(dt.timestamp())
                                             }
                                             Err(_err) => {
                                                 // println!("{:?}", _err);
@@ -391,6 +392,24 @@ impl Helpers {
 
         // println!("time_field_value: {:?}", time_field_value);
         time_field_value
+    }
+
+    pub fn parse_date_from_string(date_str: &str, format: &str) -> Result<DateTime<Utc>, String> {
+
+        return match DateTime::parse_from_str(date_str, format) {
+            Ok(date) => {
+                Ok(DateTime::<Utc>::from(date))
+            },
+            Err(_) => {
+                match NaiveDateTime::parse_from_str(date_str, format) {
+                    Ok(date) => Ok(DateTime::<Utc>::from_naive_utc_and_offset(date, Utc)),
+                    Err(_) => {
+                        Err(format!("Could not parse date {} with format {}", date_str, format))
+                    }
+                }
+            }
+        };
+
     }
 
     pub fn get_nested_value_from_dot_notation(
