@@ -213,35 +213,35 @@ fn convert_skippr_to_arrow_field_types(
                     &mut field_types,
                     &v.out_field_name,
                     DataType::Boolean,
-                );
+                ).expect("Error setting object scalar field type");
             }
             "NULL" => {
-                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Null);
+                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Null).expect("Error setting object scalar NULL type");
             }
             "integer" => {
-                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Int32);
+                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Int32).expect("Error setting object scalar field integer type");
             }
             "long" => {
-                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Int64);
+                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Int64).expect("Error setting object scalar field long type")
             }
             "double" => {
                 set_object_scalar_field_type(
                     &mut field_types,
                     &v.out_field_name,
                     DataType::Float64,
-                );
+                ).expect("Error setting object scalar field double type")
             }
             "string" => {
-                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Utf8);
+                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Utf8).expect("Error setting object scalar field string type")
             }
             "timestamp" => {
-                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Timestamp(Millisecond, None));
+                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Timestamp(Millisecond, None)).expect("Error setting object scalar field timestamp type")
             }
             "timestamp_milli" => {
-                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Timestamp(Millisecond, None));
+                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Timestamp(Millisecond, None)).expect("Error setting object scalar field timestamp_milli type")
             }
             "date" => {
-                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Timestamp(Millisecond, None));
+                set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Timestamp(Millisecond, None)).expect("Error setting object scalar field date type")
             }
             "" => {}
             _Any => {
