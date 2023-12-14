@@ -100,75 +100,71 @@ impl SerdeJson {
                     };
                 });
 
-                if error_lines.is_empty() {
-                    return message;
-                }
+                if !error_lines.is_empty() {
+                    let lines = error_lines
+                        .into_iter()
+                        .map(|line| {
+                            let mut cleaned_line = line
+                                .replace('\\', "");
+                            // .replace("u'", "\'"); // single quote will be cleaned below
+                            // .replace('\'', "\"");
 
-                let lines = error_lines
-                    .into_iter()
-                    .map(|line| {
-                        let mut cleaned_line = line
-                            .replace('\\', "");
-                        // .replace("u'", "\'"); // single quote will be cleaned below
-                        // .replace('\'', "\"");
-
-                        let re = Regex::new(r#"u'([^']*)'"#).unwrap();
-                        cleaned_line = re.replace_all(&cleaned_line, "\"$1\"").to_string();
+                            let re = Regex::new(r#"u'([^']*)'"#).unwrap();
+                            cleaned_line = re.replace_all(&cleaned_line, "\"$1\"").to_string();
 
 
-                        // @todo -support values containing single quotes e.g. "b'H'", also fix single quoted field and values {'status': '200'} -> {"status": "200"}
+                            // @todo -support values containing single quotes e.g. "b'H'", also fix single quoted field and values {'status': '200'} -> {"status": "200"}
 
-                        let valid_chars: String = cleaned_line
-                            .chars()
-                            .filter(|c| !c.is_ascii_control())
-                            .collect();
+                            let valid_chars: String = cleaned_line
+                                .chars()
+                                .filter(|c| !c.is_ascii_control())
+                                .collect();
 
-                        if valid_chars.starts_with("efbbbf") {
-                            cleaned_line = valid_chars.replace("efbbbf", "");
-                        }
-
-                        if let Some(json_start) = cleaned_line.find(|c| c == '[' || c == '{') {
-                            cleaned_line.drain(..json_start);
-                        }
-
-                        cleaned_line
-                    })
-                    .collect::<Vec<_>>();
-
-
-
-
-                let mut deserialized_lines: Vec<Value> = lines
-                    .iter()
-                    .map(|line| serde_json::from_str(line).unwrap_or_default())
-                    .collect();
-
-                if deserialized_lines.is_empty()
-                    || deserialized_lines.first().unwrap() == &Value::Null
-                {
-                    deserialized_lines.clear();
-
-                    for line in lines {
-                        let records: Vec<&str> = line.split("}{").collect();
-
-                        for (i, record) in records.iter().enumerate() {
-                            let mut record = record.to_string();
-
-                            if i != 0 {
-                                record.insert(0, '{');
+                            if valid_chars.starts_with("efbbbf") {
+                                cleaned_line = valid_chars.replace("efbbbf", "");
                             }
 
-                            if i != records.len() - 1 {
-                                record.push('}');
+                            if let Some(json_start) = cleaned_line.find(|c| c == '[' || c == '{') {
+                                cleaned_line.drain(..json_start);
                             }
 
-                            deserialized_lines
-                                .push(serde_json::from_str(&record).unwrap_or_default());
+                            cleaned_line
+                        })
+                        .collect::<Vec<_>>();
+
+
+                    let mut deserialized_lines: Vec<Value> = lines
+                        .iter()
+                        .map(|line| serde_json::from_str(line).unwrap_or_default())
+                        .collect();
+
+                    if deserialized_lines.is_empty()
+                        || deserialized_lines.first().unwrap() == &Value::Null
+                    {
+                        deserialized_lines.clear();
+
+                        for line in lines {
+                            let records: Vec<&str> = line.split("}{").collect();
+
+                            for (i, record) in records.iter().enumerate() {
+                                let mut record = record.to_string();
+
+                                if i != 0 {
+                                    record.insert(0, '{');
+                                }
+
+                                if i != records.len() - 1 {
+                                    record.push('}');
+                                }
+
+                                deserialized_lines
+                                    .push(serde_json::from_str(&record).unwrap_or_default());
+                            }
                         }
                     }
-                }
 
-                message.extend(deserialized_lines);
+                    message.extend(deserialized_lines);
+                }
             }
         }
 
