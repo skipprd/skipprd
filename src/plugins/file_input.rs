@@ -140,9 +140,16 @@ impl DataSourceLocalFilePlugin {
                 require_literal_leading_dot: false,
             };
 
-            for entry in glob_with(&file_path_pattern, options).expect("Failed to read glob pattern") {
+            let globed = glob_with(&file_path_pattern, options).expect("Failed to read glob pattern");
+
+            for entry in globed {
                 match entry {
                     Ok(path) => {
+
+                        // ignore dirs
+                        if path.is_dir() {
+                            continue;
+                        }
 
                         let offset_key = OffsetKey {
                             namespace: source_dir.clone(),
@@ -360,13 +367,15 @@ impl DataSourceLocalFilePlugin {
                     },
                     Err(e) => println!("{:?}", e),
                 }
-            }
+            };
 
             if !current_batch.is_empty() {
+                println!("Sending last batch {:?}", current_batch);
                 tx.unbounded_send(current_batch.clone()).unwrap();
                 current_batch.clear();
                 batch_bytes = 0;
             }
+
         });
 
         rx
