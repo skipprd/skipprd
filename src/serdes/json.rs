@@ -68,8 +68,8 @@ impl SerdeJson {
     // The output is wrapped in a Result to allow matching on errors
     // Returns an Iterator to the Reader of the lines of the file.
     pub fn read_lines<P>(filename: P) -> Result<Lines<BufReader<File>>>
-    where
-        P: AsRef<Path>,
+        where
+            P: AsRef<Path>,
     {
         let file = File::open(filename)?;
         Ok(BufReader::new(file).lines())
@@ -85,14 +85,32 @@ impl SerdeJson {
             Ok(line) => {
                 message.push(line);
             }
-            Err(_) => {
-                let lines = string
-                    .lines()
+            Err(err) => {
+
+                let mut error_lines: Vec<String> = Vec::new();
+
+                string.lines().into_iter().for_each(|line| {
+                    match serde_json::from_str::<Value>(line) {
+                        Ok(decoded_line) => {
+                            message.push(decoded_line);
+                        }
+                        Err(err) => {
+                            error_lines.push(line.to_string());
+                        }
+                    };
+                });
+
+                if error_lines.is_empty() {
+                    return message;
+                }
+
+                let lines = error_lines
+                    .into_iter()
                     .map(|line| {
                         let mut cleaned_line = line
                             .replace('\\', "");
-                            // .replace("u'", "\'"); // single quote will be cleaned below
-                            // .replace('\'', "\"");
+                        // .replace("u'", "\'"); // single quote will be cleaned below
+                        // .replace('\'', "\"");
 
                         let re = Regex::new(r#"u'([^']*)'"#).unwrap();
                         cleaned_line = re.replace_all(&cleaned_line, "\"$1\"").to_string();
@@ -116,6 +134,9 @@ impl SerdeJson {
                         cleaned_line
                     })
                     .collect::<Vec<_>>();
+
+
+
 
                 let mut deserialized_lines: Vec<Value> = lines
                     .iter()
