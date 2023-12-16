@@ -95,8 +95,31 @@ jobs:
       - name: Run script
         run: node _files/purge-dynamodb.js
 
+  smoke_test:
+    needs:
+      - cleanup
+      - purge_dynamodb
+    name: Smoke Tests
+    runs-on:
+      - ubuntu-latest-32-cores
+    #      - ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+#      - name: Download Artifacts
+#        uses: actions/download-artifact@v3
+
+      - name: Test linux x86 release
+        uses: ./.github/actions/e2e/smoke_test
+        with:
+          architecture_name: linux_x86
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+#          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
+
+
   macos_arm64:
-#    needs: linux_x86_test
+    needs: smoke_test
     name: cargo build (mac arm64)
     runs-on:
       - macOS
@@ -149,7 +172,7 @@ jobs:
 #          architecture_name: macos_x86
 
   linux_x86:
-#    needs: macos_arm64_test
+    needs: smoke_test
     name: cargo build (linux x86)
     runs-on:
       - ubuntu-latest-32-cores
@@ -210,7 +233,7 @@ jobs:
 
 
   release:
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test')
     needs:
       - linux_x86_test
       - macos_arm64
@@ -250,7 +273,7 @@ jobs:
           fail_on_unmatched_files: true
 
   dockerize:
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test')
     needs:
       - release
 #      - macos_arm64
