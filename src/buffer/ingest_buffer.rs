@@ -1,9 +1,7 @@
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::{fs, io, thread};
+use std::{fs, io,};
 use std::io::{BufRead, Cursor, Read, Write};
-use std::ops::Deref;
-use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -11,13 +9,13 @@ use arrow::array::RecordBatch;
 use arrow::json::ReaderBuilder;
 use arrow_schema::{ArrowError, SchemaRef};
 use dashmap::DashMap;
+use glob::{glob_with, MatchOptions};
+use std::sync::atomic::Ordering;
 use once_cell::sync::Lazy;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
-use parquet::data_type::AsBytes;
 use parquet::file::properties::WriterProperties;
-use crate::ARROW_SCHEMA;
+use crate::{ARROW_SCHEMA, BUFFER_FINALISE_RUNNING};
 use crate::buffer::BufferChunker;
 use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
@@ -29,9 +27,10 @@ pub static BUFFER_INDEX: Lazy<Arc<TimedRwLock<HashMap<String, Buffers>>>> = Lazy
 
 pub struct Buffer {
     name: &'static str,
-    data: Cursor<Vec<u8>>,
-    record_batch: Vec<Arc<RecordBatch>>,
+    // data: Cursor<Vec<u8>>,
+    // record_batch: Vec<Arc<RecordBatch>>,
     bytes: u64,
+    updated_at: SystemTime,
     wal_file: Option<WalFile>,
 }
 
@@ -39,16 +38,17 @@ impl Buffer {
     pub fn new(name: &str) -> Self {
         Buffer {
             name: Box::leak(name.to_string().into_boxed_str()),
-            data: Cursor::new(Vec::new()),
-            record_batch: Vec::new(),
+            // data: Cursor::new(Vec::new()),
+            // record_batch: Vec::new(),
             bytes: 0,
+            updated_at: SystemTime::now(),
             wal_file: WalFile::new(name).ok(),
         }
     }
 
     pub fn write(&mut self, json_value: &[u8]) {
 
-        self.data.write_all(json_value).unwrap();
+        // self.data.write_all(json_value).unwrap();
 
         // write to wal, creating or appending file
         if let Some(wal_file) = &mut self.wal_file {
@@ -58,6 +58,8 @@ impl Buffer {
             wal_file.write_to_wal(json_value);
             self.wal_file = Some(wal_file);
         }
+
+        self.bytes += json_value.len() as u64;
 
     }
 
@@ -88,10 +90,7 @@ impl Buffer {
     }
 
 
-    fn json_to_arrow(json_value: &[u8],
-                     namespace: &str
-                     // , arrow_schema: &Arc<arrow::datatypes::Schema>
-    ) -> Result<RecordBatch, arrow::error::ArrowError> {
+    fn json_to_arrow(json_value: &[u8], namespace: &str) -> Result<RecordBatch, arrow::error::ArrowError> {
 
         let arrow_schema_guard = ARROW_SCHEMA.read();
         let arrow_schema = arrow_schema_guard.get(namespace).unwrap();
@@ -126,19 +125,17 @@ impl Buffer {
         RecordBatch::try_new(batch1.schema(), columns).unwrap() // Handle this error appropriately
     }
 
-    fn calculate_bytes(&self, batch: &Vec<Arc<RecordBatch>>) -> u64 {
-        // Calculate the bytes used by the RecordBatch
-        batch.iter().map(|batch| batch.get_array_memory_size() as u64).sum()
-
-        // batch.columns().iter().map(|column| column.get_array_memory_size() as u64).sum()
-    }
+    // fn calculate_bytes(&mut self) {
+    //     self.bytes = self.record_batch.iter().map(|batch| batch.get_array_memory_size() as u64).sum();
+    // }
 
     pub fn clear(&mut self) {
-        // self.data = Vec::new();
+        self.wal_file = None;
         self.bytes = 0;
+        self.updated_at = SystemTime::now();
     }
 
-    pub async fn flush(&mut self) {
+    pub fn flush(&mut self) {
 
         /*
          * Flush WAL file
@@ -158,90 +155,87 @@ impl Buffer {
         /*
          * Write data buffer to arrow record batches
          */
-        self.data.set_position(0);
-        let reader = io::BufReader::new(self.data.get_ref().as_slice());
+        // self.data.set_position(0);
+        // let reader = io::BufReader::new(self.data.get_ref().as_slice());
+        //
+        // let name = self.name.clone();
+        // let namespace = BufferChunker::decode_file_namespace(name);
+        //
+        // let arrow_schema_guard = ARROW_SCHEMA.read();
+        // let arrow_schema = arrow_schema_guard.get(&namespace).unwrap();
+        //
+        // let record_batches = Self::read_from_json(reader, Arc::clone(arrow_schema)).unwrap();
+        // for batch in record_batches {
+        //     self.record_batch.push(Arc::from(batch.unwrap()));
+        // }
+        //
+        // self.updated_at = SystemTime::now();
+        // self.calculate_bytes();
+        // // println!("Record batch bytes: {}, Rows {}", self.bytes, self.record_batch.iter().map(|batch| batch.num_rows()).sum::<usize>());
+        //
+        // self.data.get_mut().clear();
+        // self.data.set_position(0);
 
-        let name = self.name.clone();
-        let namespace = BufferChunker::decode_file_namespace(name);
+        self.updated_at = SystemTime::now();
 
-        let arrow_schema_guard = ARROW_SCHEMA.read();
-        let arrow_schema = arrow_schema_guard.get(&namespace).unwrap();
+        self.check_wal_rotate();
 
-        let record_batches = Self::read_from_json(reader, Arc::clone(arrow_schema)).unwrap();
-        for batch in record_batches {
-            self.record_batch.push(Arc::from(batch.unwrap()));
+    }
+
+    pub fn recover_from_wal(&mut self) -> io::Result<()> {
+        if let Some(wal_file) = &self.wal_file {
+            self.bytes = wal_file.bytes;
+            self.updated_at = wal_file.path.metadata()?.modified()?;
+            // let data = wal_file.recover_data()?;
+            // self.data.get_mut().extend(data);
+            // self.data.set_position(0);
         }
-
-        // self.bytes = self.calculate_bytes(&self.record_batch);
-        // println!("Record batch bytes: {}, Rows {}, Columns {}", self.bytes, self.record_batch.as_ref().unwrap().num_rows(), self.record_batch.as_ref().unwrap().num_columns());
-
-        self.data.get_mut().clear();
-        self.data.set_position(0);
-
+        Ok(())
     }
 
-    fn is_file_size_exceeded(file: &WalFile) -> bool {
+    fn is_file_size_exceeded(&self) -> bool {
         let buffer_size = Config::get_pipeline_buffer_threshold_bytes();
-        file.bytes > buffer_size as u64
+        self.bytes > buffer_size
     }
 
-    fn is_file_time_exceeded(file: &WalFile) -> bool {
+    fn is_file_time_exceeded(&self) -> bool {
         let ttl = Config::get_pipeline_buffer_threshold_seconds();
         SystemTime::now()
-            .duration_since(file.updated_at)
+            .duration_since(self.updated_at)
             .unwrap()
             .as_secs()
             > ttl as u64
     }
 
-    pub fn check_file_rotation(&mut self) {
-        if let Some(wal_file) = &mut self.wal_file {
-            if Self::is_file_size_exceeded(wal_file) || Self::is_file_time_exceeded(wal_file) {
-                // println!("Rotating WAL file: {}", wal_file.path.to_str().unwrap());
-                self.rotate();
-            }
+    pub fn check_wal_rotate(&mut self) {
+        if self.is_file_size_exceeded() || self.is_file_time_exceeded() {
+            println!("Rotating WAL file: {}", self.name);
+            self.wal_rotate();
         }
     }
 
-    pub fn rotate(&mut self) {
-
-        let namespace = BufferChunker::decode_file_namespace(self.name);
-
-        let arrow_schema_guard = ARROW_SCHEMA.read();
-        let arrow_schema = arrow_schema_guard.get(&namespace).unwrap().clone();
-
-        let file_path = format!("{}/{}/{}-{}.parquet", Config::get_data_dir(), "output_buffer", self.name, Helpers::random_str(32));
-        let file = File::create(file_path).unwrap();
-
-        let props = WriterProperties::builder()
-            .set_dictionary_enabled(false)
-            .set_encoding(parquet::basic::Encoding::PLAIN)
-            .set_compression(Compression::SNAPPY)
-            .build();
-
-        let mut writer = ArrowWriter::try_new(file, arrow_schema, Some(props)).unwrap();
-
-        self.record_batch.iter().for_each(|batch| {
-            match writer.write(batch) {
-                Ok(_g) => {}
-                Err(_err) => {
-                    panic!("Error writing to parquet file: {}", _err.to_string());
-                }
+    pub fn wal_rotate(&mut self) {
+        let wal_file = match self.wal_file.take() {
+            Some(file) => file,
+            None => {
+                // It was flushed by another thead between this thread write() and flush()
+                // println!("No WAL file found for buffer: {}", self.name);
+                return;
             }
-        });
+        };
 
-        writer.close().unwrap();
+        let current_path =  wal_file.path.to_str().unwrap();
+        let closed_path = current_path.replace(".wal", ".merged");
+        fs::rename(current_path, closed_path).unwrap();
 
-        // clear record batch
-        self.record_batch.clear();
+        self.clear();
 
-        // tombstone by renaming, replacing .wal to .tombstone and moving to ./done dir
-        let wal_file = self.wal_file.take().unwrap();
-        let tombstone_path = format!("{}/done/{}.tombstone", wal_file.path.parent().unwrap().to_str().unwrap(), wal_file.path.file_stem().unwrap().to_str().unwrap());
-        fs::rename(wal_file.path, tombstone_path).unwrap();
+        let mut wal_file = WalFile::new(self.name).unwrap();
+        wal_file.write_to_wal(&[]); // create empty file
+        self.wal_file = Some(wal_file);
+
 
     }
-
 
 }
 
@@ -266,53 +260,91 @@ impl Buffers {
         unimplemented!("clear_all() is not yet implemented");
     }
 
-}
+    pub fn finalise() {
+        if BUFFER_FINALISE_RUNNING.read().load(Ordering::SeqCst) {
+            return;
+        } else {
+            BUFFER_FINALISE_RUNNING.write().store(true, Ordering::SeqCst);
+        }
 
-pub struct SyncWriteFile {
-    file: File,
-}
+        let data_dir = Config::get_data_dir();
 
-impl SyncWriteFile {
-    pub fn new(file: File) -> std::io::Result<Self> {
-        Ok(SyncWriteFile { file })
+        let options = MatchOptions {
+            case_sensitive: false,
+            require_literal_separator: false,
+            require_literal_leading_dot: false,
+        };
+
+        for path in glob_with(&format!("{}/ingest_buffer/*.merged", data_dir), options)
+            .expect("Failed to read glob pattern")
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>()
+        {
+            let filename = path.to_str().unwrap();
+            Self::output_finalise(filename);
+        }
+
+        BUFFER_FINALISE_RUNNING
+            .write()
+            .store(false, Ordering::SeqCst);
     }
-}
 
-impl Write for SyncWriteFile {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.file.write(buf)
-    }
+    pub fn output_finalise(filename: &str) {
 
-    fn flush(&mut self) -> std::io::Result<()> {
-        // println!("fsync during flush()");
+        println!("Finalising output file: {}", filename);
 
-        match self.file.sync_all() {
-            Ok(_g) => {}
-            Err(_err) => {
-                println!("Error syncing file: {}", _err.to_string());
+        let data_dir = Config::get_data_dir();
+
+        let namespace = BufferChunker::decode_file_namespace(filename);
+
+        let arrow_schema_guard = ARROW_SCHEMA.read();
+        let arrow_schema = arrow_schema_guard.get(&namespace).unwrap().clone();
+
+        let file_chunk_name = BufferChunker::decode_chunk_string_from_filename(filename);
+        let temp_file_path = format!("{}/{}/{}-{}.temp", data_dir, "output_buffer", file_chunk_name, Helpers::random_str(32));
+        let write_file = OpenOptions::new().write(true).create(true).open(&temp_file_path).unwrap();
+
+        let props = WriterProperties::builder()
+            .set_dictionary_enabled(false)
+            .set_encoding(parquet::basic::Encoding::PLAIN)
+            .set_compression(Compression::SNAPPY)
+            .build();
+
+
+        let reader = io::BufReader::new(File::open(&filename).unwrap());
+
+        let record_batches = Buffer::read_from_json(reader, Arc::clone(&arrow_schema)).unwrap();
+
+        let mut writer = ArrowWriter::try_new(write_file, arrow_schema, Some(props)).unwrap();
+
+        for batch in record_batches {
+            let batch = batch.unwrap();
+            match writer.write(&batch) {
+                Ok(_g) => {}
+                Err(_err) => {
+                    panic!("Error writing to parquet file: {}", _err.to_string());
+                }
             }
         }
 
-        let fd = self.file.as_raw_fd();
-        unsafe {
-            libc::fsync(fd);
-        };
+        writer.close().unwrap();
 
+        let parquet_path = temp_file_path.replace(".temp", ".parquet");
+        fs::rename(&temp_file_path, parquet_path).unwrap();
 
-        Ok(())
+        // tombstone by renaming, replacing .wal to .tombstone and moving to ./done dir
+        let tombstone_path = format!("{}/ingest_buffer/done/{}.tombstone", data_dir, Helpers::random_str(32));
+        fs::rename(filename, tombstone_path).unwrap();
+
     }
 
-    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
-        self.file.write_all(buf)
-    }
 }
 
 pub struct WalFile {
     pub(crate) path: PathBuf,
     pub(crate) bytes: u64,
-    pub(crate) updated_at: SystemTime,
     // non buffered writer
-    pub(crate) file: TimedRwLock<Option<SyncWriteFile>>,
+    pub(crate) file: TimedRwLock<Option<File>>,
     pub(crate) rotated: Option<bool>,
 }
 
@@ -322,12 +354,10 @@ impl WalFile {
         println!("Creating WAL file: {}", path_str);
         let path= PathBuf::from(&path_str);
         let file = OpenOptions::new().append(true).create(true).open(&path)?;
-        let sync_file = SyncWriteFile::new(file)?;
         Ok(WalFile {
             path,
             bytes: 0,
-            updated_at: SystemTime::now(),
-            file: TimedRwLock::new(path_str, Some(sync_file)),
+            file: TimedRwLock::new(path_str, Some(file)),
             rotated: None,
         })
     }
@@ -352,10 +382,18 @@ impl WalFile {
         if let Some(sync_file) = &mut self.file.write().as_mut() {
             sync_file.write_all(data)?;
             self.bytes += data.len() as u64;
-            self.updated_at = SystemTime::now(); // bit slow, perhaps use rust-coarsetime
             // sync_file.flush()?;
         }
         Ok(())
+    }
+
+    pub fn recover_data(&self) -> io::Result<Vec<u8>> {
+        let mut data = Vec::new();
+        if let Some(sync_file) = &mut self.file.write().as_mut() {
+            sync_file.read_to_end(&mut data)?;
+        }
+
+        Ok(data)
     }
 
     pub fn flush(&mut self) -> io::Result<()> {

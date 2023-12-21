@@ -20,7 +20,7 @@ pub const SLED_NAME: &str = "db";
 // does not have alignment requirements.
 // sled does not guarantee any particular
 // value alignment as of now.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 #[repr(C)]
 pub struct OffsetKey {
     pub(crate) namespace: String,

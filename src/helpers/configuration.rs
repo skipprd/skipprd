@@ -29,7 +29,7 @@ use reqwest::header::{HeaderMap, HeaderName};
 use reqwest::{Client, StatusCode};
 
 use crate::discover::Metadata;
-use crate::{flatten_metadata};
+use crate::{flatten_metadata, METADATA};
 
 
 use crate::helpers::license::{HAS_LICENSE, LicenseChecker};
@@ -38,6 +38,7 @@ use crate::plugins::athena::{AwsAthena, DataOutputAwsAthenaPluginConfig};
 
 use toml;
 use crate::helpers::timed_rwlock::TimedRwLock;
+use crate::ingest::fast_ingest::{create_default_nested_message, DEFAULT_NESTED_MESSAGE};
 use crate::ingest_work::Ingest;
 use crate::plugins::file_input::{DataSourceLocalFilePluginConfig};
 use crate::plugins::s3_input::DataSourceS3PluginConfig;
@@ -117,8 +118,8 @@ pub struct Pipeline {
     pub reset_metadata: Option<String>,
     pub auto_approve: Option<String>,
     pub env: Option<String>,
-    pub buffer_threshold_bytes: Option<i64>,
-    pub buffer_threshold_seconds: Option<i64>,
+    pub buffer_threshold_bytes: Option<u64>,
+    pub buffer_threshold_seconds: Option<u64>,
     pub chaos_mode: Option<String>,
     pub data_dir: Option<String>,
     pub transform: Option<Transform>,
@@ -830,15 +831,15 @@ impl Config {
         cache.clear();
     }
 
-    pub fn get_pipeline_buffer_threshold_bytes() -> i64 {
+    pub fn get_pipeline_buffer_threshold_bytes() -> u64 {
         if Config::get_envcache("BUFFER_THRESHOLD_BYTES") != "" {
-            return Config::get_envcache("BUFFER_THRESHOLD_BYTES").parse::<i64>().unwrap()
+            return Config::get_envcache("BUFFER_THRESHOLD_BYTES").parse::<u64>().unwrap()
         } else {
             let _config = Config::get();
 
             let pipline = Config::get_pipeline_config();
 
-            let default = Config::getenv("BUFFER_THRESHOLD_BYTES", "10485760").parse::<i64>().unwrap();
+            let default = Config::getenv("BUFFER_THRESHOLD_BYTES", "10485760").parse::<u64>().unwrap();
 
             let buffer_threshold_bytes = match pipline.buffer_threshold_bytes.as_ref() {
                 Some(buffer_threshold_bytes) => {
@@ -854,15 +855,15 @@ impl Config {
         }
     }
 
-    pub fn get_pipeline_buffer_threshold_seconds() -> i64 {
+    pub fn get_pipeline_buffer_threshold_seconds() -> u64 {
         if Config::get_envcache("BUFFER_THRESHOLD_SECONDS") != "" {
-            return Config::get_envcache("BUFFER_THRESHOLD_SECONDS").parse::<i64>().unwrap()
+            return Config::get_envcache("BUFFER_THRESHOLD_SECONDS").parse::<u64>().unwrap()
         } else {
             let _config = Config::get();
 
             let pipline = Config::get_pipeline_config();
 
-            let default = Config::getenv("BUFFER_THRESHOLD_SECONDS", "60").parse::<i64>().unwrap();
+            let default = Config::getenv("BUFFER_THRESHOLD_SECONDS", "60").parse::<u64>().unwrap();
 
             let buffer_threshold_seconds = match pipline.buffer_threshold_seconds.as_ref() {
                 Some(buffer_threshold_seconds) => {
@@ -1349,6 +1350,10 @@ impl Config {
 
                 for (namespace, schema) in metadata.into_iter() {
                     println!("Updating Hive '{}' schema", namespace);
+
+                    let default_message = create_default_nested_message(&schema.fields);
+                    let mut lock = DEFAULT_NESTED_MESSAGE.write();
+                    lock.insert(namespace.clone(), default_message);
 
                     Ingest::prepare_arrow_schema(&namespace, flatten).unwrap();
 
