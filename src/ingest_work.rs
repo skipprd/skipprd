@@ -35,7 +35,7 @@ use dashmap::DashMap;
 use nix::libc;
 
 use parquet::data_type::AsBytes;
-use crate::ingest::fast_ingest::fast_path_ingest;
+use crate::ingest::fast_ingest::{create_default_nested_message, DEFAULT_NESTED_MESSAGE, fast_path_ingest};
 
 
 
@@ -260,6 +260,8 @@ impl Ingest {
             None => "".to_string()
         };
 
+        let mut batch_offset_lines: HashMap<OffsetKey, u64> = HashMap::new();
+
         for ingest_batch in datas {
 
             let has_offsets =
@@ -395,6 +397,7 @@ impl Ingest {
                             fast_path_ingest(
                                 &record,
                                 metadata.fields.as_ref(),
+                                &skpr_namespace,
                                 flatten,
                             )
                         }
@@ -461,6 +464,11 @@ impl Ingest {
 
                                         let skpr_namespace = BufferChunker::decode_file_namespace(&output_file_name);
 
+                                        let metadata = METADATA.read();
+                                        let default_message = create_default_nested_message(&metadata.get(&skpr_namespace).unwrap().fields);
+                                        let mut lock = DEFAULT_NESTED_MESSAGE.write();
+                                        lock.insert(skpr_namespace.clone(), default_message);
+
                                         Ingest::prepare_arrow_schema(&skpr_namespace, flatten).unwrap();
                                     }
                                 }
@@ -515,7 +523,8 @@ impl Ingest {
                     // i += 1;
                     j += 1;
 
-                    offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, i);
+                    // offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, i);
+                    batch_offset_lines.insert(ingest_batch.offset_key.clone(), i);
 
                 }
 
@@ -524,12 +533,16 @@ impl Ingest {
             offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
         }
 
+        batch_offset_lines.iter().for_each(|(offset_key, i)| {
+            offset_db_clone.insert(offset_key, OffsetTypes::Line, *i);
+        });
+
         offset_db_clone.flush();
 
         let keys: Vec<String> = buffers.buffers.iter().map(|entry| entry.key().clone()).collect();
 
-        // Iterate over keys and get mutable access to each Buffer
         for key in keys {
+            // flush each buffer, locking the dashmap in the process
             if let Some(mut buffer) = buffers.buffers.get_mut(&key) {
                 buffer.flush();
             }

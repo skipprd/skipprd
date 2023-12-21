@@ -2,8 +2,10 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 use std::error::Error;
+use std::sync::Arc;
 
 use chrono::{DateTime, NaiveDateTime};
+use once_cell::sync::Lazy;
 use serde_json::Map;
 
 use crate::discover::{AnalyseSchema, Metadata};
@@ -11,6 +13,7 @@ use crate::discover::date_formats::DateFormats;
 use crate::discover::evolution::Evolution;
 
 use crate::helpers::Helpers;
+use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::ingest::ingest::{ResolvedFieldValue};
 
 #[derive(Default)]
@@ -22,6 +25,10 @@ pub struct IngestRecord {
     pub(crate) skpr_partition: String,
     pub(crate) record: Value,
 }
+
+pub static DEFAULT_NESTED_MESSAGE: Lazy<Arc<TimedRwLock<HashMap<String, Value>>>> = Lazy::new(|| {
+    Arc::new(TimedRwLock::new("default_message".to_string(), HashMap::new()))
+});
 
 pub fn create_default_nested_message(metadata: &HashMap<String, Metadata>) -> Value {
     let mut message = Value::Object(Map::new());
@@ -57,11 +64,14 @@ pub fn create_default_nested_message(metadata: &HashMap<String, Metadata>) -> Va
 pub fn fast_path_ingest(
     unwrapped_message: &Value,
     metadata: &HashMap<String, Metadata>,
+    namespace: &str,
     flatten: bool,
 ) -> Result<Value, Box<dyn Error>> {
     // let mut message: Value = Value::Null;
     // @todo - create a default message containing every field in metadata, including nested fields
-    let mut message = create_default_nested_message(metadata);
+    // let mut message = create_default_nested_message(metadata);
+
+    let mut message = DEFAULT_NESTED_MESSAGE.read().get(namespace).unwrap().clone();
 
     // panic!("message is: {:?}", message);
 

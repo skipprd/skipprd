@@ -50,23 +50,23 @@ pub struct BufferChunker {}
 // });
 
 impl BufferChunker {
-    fn is_file_size_exceeded(file: &WalFile) -> bool {
-        let buffer_size = Config::get_pipeline_buffer_threshold_bytes(); // 10MB default
-        file.bytes > buffer_size as u64
-    }
+    // fn is_file_size_exceeded(file: &WalFile) -> bool {
+    //     let buffer_size = Config::get_pipeline_buffer_threshold_bytes(); // 10MB default
+    //     file.bytes > buffer_size as u64
+    // }
+    //
+    // fn is_file_time_exceeded(file: &WalFile) -> bool {
+    //     let ttl = Config::get_pipeline_buffer_threshold_seconds(); // 10MB default
+    //     SystemTime::now()
+    //         .duration_since(file.updated_at)
+    //         .unwrap()
+    //         .as_secs()
+    //         > ttl as u64
+    // }
 
-    fn is_file_time_exceeded(file: &WalFile) -> bool {
-        let ttl = Config::get_pipeline_buffer_threshold_seconds(); // 10MB default
-        SystemTime::now()
-            .duration_since(file.updated_at)
-            .unwrap()
-            .as_secs()
-            > ttl as u64
-    }
-
-    fn is_rotated(file: &WalFile) -> bool {
-        file.rotated.is_some()
-    }
+    // fn is_rotated(file: &WalFile) -> bool {
+    //     file.rotated.is_some()
+    // }
 
     // unsafe function
     // unsafe fn get_unlimit() -> i32 {
@@ -699,6 +699,32 @@ impl BufferChunker {
         } else {
             0
         }
+    }
+
+    pub fn decode_chunk_string_from_filename(filename: &str) -> String {
+
+        // Parse the query string into key-value pairs
+        let pairs = url::form_urlencoded::parse(filename.as_bytes());
+
+        // match pairs into:
+        // let chunks = vec![
+        //     ("buffer".to_string(), buffer_name.to_string()),
+        //     ("namespace".to_string(), namespace.unwrap_or("").to_string()),
+        //     ("partition".to_string(), partition.unwrap_or("").to_string()),
+        //     ("time".to_string(), time_string),
+        //     ("shard".to_string(), shard_string),
+        // ];
+        let mut chunks = HashMap::new();
+
+        pairs.into_iter().for_each(|(key, value)| {
+            chunks.insert(key, value);
+        });
+
+        let chunk_name = form_urlencoded::Serializer::new(String::new())
+            .extend_pairs(chunks)
+            .finish();
+
+        chunk_name
     }
 
     pub fn encode_chunk_name(

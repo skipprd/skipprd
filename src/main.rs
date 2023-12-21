@@ -93,6 +93,7 @@ use crate::plugins::stdin_input::DataSourceStdinPlugin;
 use crate::plugins::stdout_output::DataOutputStdoutPlugin;
 
 use datafusion::prelude::*;
+use crate::buffer::ingest_buffer::Buffers;
 // use crate::buffer::BufferChunker;
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::ingest_work::Ingest;
@@ -843,6 +844,7 @@ async fn sync() {
                             return;
                         }
 
+                        Buffers::finalise();
 
                         // BufferChunker::rotate_buffers(false);
 
@@ -927,6 +929,7 @@ async fn sync() {
     }
 
     // BufferChunker::rotate_buffers(true);
+    Buffers::finalise();
 
     if Config::get_pipeline_config().output.is_some() {
         sync_output_plugin(Config::get_pipeline_output_plugin_name().as_str(), "output".to_string()).await;
