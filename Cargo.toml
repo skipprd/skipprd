@@ -64,6 +64,7 @@ shellexpand = "3.1.0"
 toml = "0.8.1"
 parking_lot = "0.12.1"
 dashmap = "5.5.3"
+libc = "0.2.151"
 
 [dev-dependencies]
 serial_test = "1.0.0"

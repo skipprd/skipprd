@@ -93,8 +93,9 @@ use crate::plugins::stdin_input::DataSourceStdinPlugin;
 use crate::plugins::stdout_output::DataOutputStdoutPlugin;
 
 use datafusion::prelude::*;
-use crate::buffer::BufferChunker;
+// use crate::buffer::BufferChunker;
 use crate::helpers::timed_rwlock::TimedRwLock;
+use crate::ingest_work::Ingest;
 // use crate::plugins::pcap_input::DataSourcePcapPlugin;
 
 // pub static DISPLAY_METRICS: Lazy<TimedRwLock<AtomicBool>> =
@@ -114,6 +115,9 @@ pub static LOGGER: Lazy<Arc<tokio::sync::RwLock<Logger>>> = Lazy::new(|| Logger:
 pub static METRICS: Lazy<Arc<TimedRwLock<Metrics>>> = Lazy::new(|| Arc::new(TimedRwLock::new("metrics".to_string(),Metrics::new())));
 pub static METADATA: Lazy<Arc<TimedRwLock<HashMap<String, Metadata>>>> = Lazy::new(|| Arc::new(TimedRwLock::new("metadata".to_string(), HashMap::new())));
 // pub static NEW_METADATA: Lazy<Arc<TimedRwLock<HashMap<String, Metadata>>>> = Lazy::new(|| Arc::new(TimedRwLock::new("new_metadata".to_string(), HashMap::new())));
+
+//Arc<Schema>
+pub static  ARROW_SCHEMA: Lazy<Arc<TimedRwLock<HashMap<String, Arc<Schema>>>>> = Lazy::new(|| Arc::new(TimedRwLock::new("arrow_schema".to_string(), HashMap::new())));
 
 #[tokio::main]
 async fn main() {
@@ -505,7 +509,7 @@ async fn sync() {
 
     let _data_dir = Config::get_data_dir();
 
-    BufferChunker::build_buffer_index().expect("Failed to build buffer index");
+    // BufferChunker::build_buffer_index().expect("Failed to build buffer index");
 
     let skippr_metadata = match Config::get_metadata().await {
         Ok(metadata) => {
@@ -832,7 +836,7 @@ async fn sync() {
                     .unwrap()
                     .block_on(async {
 
-                        BufferChunker::rotate_buffers(false);
+                        // BufferChunker::rotate_buffers(false);
 
                         while OUTPUT_RUNNING.read().load(Ordering::SeqCst) {
                             // sleep(Duration::from_secs(1));
@@ -840,7 +844,7 @@ async fn sync() {
                         }
 
 
-                        BufferChunker::rotate_buffers(false);
+                        // BufferChunker::rotate_buffers(false);
 
                         if Config::get_pipeline_config().output.is_some() {
                             {
@@ -922,7 +926,7 @@ async fn sync() {
         sleep(Duration::from_secs(1));
     }
 
-    BufferChunker::rotate_buffers(true);
+    // BufferChunker::rotate_buffers(true);
 
     if Config::get_pipeline_config().output.is_some() {
         sync_output_plugin(Config::get_pipeline_output_plugin_name().as_str(), "output".to_string()).await;
