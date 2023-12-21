@@ -209,7 +209,7 @@ impl Buffer {
 
     pub fn check_wal_rotate(&mut self) {
         if self.is_file_size_exceeded() || self.is_file_time_exceeded() {
-            println!("Rotating WAL file: {}", self.name);
+            // println!("Rotating WAL file: {}", self.name);
             self.wal_rotate();
         }
     }
@@ -351,7 +351,7 @@ pub struct WalFile {
 impl WalFile {
     pub fn new(name: &str) -> io::Result<Self> {
         let path_str = Self::generate_wal_file_path(name);
-        println!("Creating WAL file: {}", path_str);
+        // println!("Creating WAL file: {}", path_str);
         let path= PathBuf::from(&path_str);
         let file = OpenOptions::new().append(true).create(true).open(&path)?;
         Ok(WalFile {
