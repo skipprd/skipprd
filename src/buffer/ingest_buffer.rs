@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::{fs, io,};
 use std::io::{BufRead, Cursor, Read, Write};
+use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -31,7 +32,7 @@ pub struct Buffer {
     // record_batch: Vec<Arc<RecordBatch>>,
     bytes: u64,
     updated_at: SystemTime,
-    wal_file: Option<WalFile>,
+    wal_file: Option<TimedRwLock<WalFile>>,
 }
 
 impl Buffer {
@@ -42,7 +43,7 @@ impl Buffer {
             // record_batch: Vec::new(),
             bytes: 0,
             updated_at: SystemTime::now(),
-            wal_file: WalFile::new(name).ok(),
+            wal_file: Some(TimedRwLock::new(name.to_string(), WalFile::new(name).unwrap()))
         }
     }
 
@@ -50,14 +51,20 @@ impl Buffer {
 
         // self.data.write_all(json_value).unwrap();
 
-        // write to wal, creating or appending file
-        if let Some(wal_file) = &mut self.wal_file {
-            wal_file.write_to_wal(json_value);
-        } else {
-            let mut wal_file = WalFile::new(self.name).unwrap();
-            wal_file.write_to_wal(json_value);
-            self.wal_file = Some(wal_file);
+        if self.wal_file.is_none() {
+            self.wal_file = Some(TimedRwLock::new(self.name.to_string(), WalFile::new(self.name).unwrap()));
         }
+
+        let mut wal_file = match self.wal_file.take() {
+            Some(file) => file,
+            None => {
+                // It was flushed by another thead between this thread write() and flush()
+                // println!("No WAL file found for buffer: {}", self.name);
+                return;
+            }
+        };
+
+        wal_file.write().write_to_wal(json_value);
 
         self.bytes += json_value.len() as u64;
 
@@ -149,7 +156,7 @@ impl Buffer {
             }
         };
 
-        wal_file.flush().unwrap();
+        wal_file.write().flush().unwrap();
         self.wal_file = Some(wal_file);
 
         /*
@@ -184,8 +191,8 @@ impl Buffer {
 
     pub fn recover_from_wal(&mut self) -> io::Result<()> {
         if let Some(wal_file) = &self.wal_file {
-            self.bytes = wal_file.bytes;
-            self.updated_at = wal_file.path.metadata()?.modified()?;
+            self.bytes = wal_file.read().bytes;
+            self.updated_at = wal_file.read().path.metadata()?.modified()?;
             // let data = wal_file.recover_data()?;
             // self.data.get_mut().extend(data);
             // self.data.set_position(0);
@@ -215,7 +222,7 @@ impl Buffer {
     }
 
     pub fn wal_rotate(&mut self) {
-        let wal_file = match self.wal_file.take() {
+        match self.wal_file.take() {
             Some(file) => file,
             None => {
                 // It was flushed by another thead between this thread write() and flush()
@@ -224,17 +231,26 @@ impl Buffer {
             }
         };
 
-        let current_path =  wal_file.path.to_str().unwrap();
+        let wal_file = match &self.wal_file {
+            Some(file) => file,
+            None => {
+                // It was flushed by another thead between this thread write() and flush()
+                // println!("No WAL file found for buffer: {}", self.name);
+                return;
+            }
+        };
+
+        let current_path = wal_file.read().path.to_str().unwrap().to_string();
         let closed_path = current_path.replace(".wal", "");
         let closed_path = format!("{}-{}.merged", closed_path, Helpers::random_str(32));
-            fs::rename(current_path, closed_path).unwrap();
+
+        fs::rename(current_path, closed_path).unwrap();
 
         self.clear();
 
-        let mut wal_file = WalFile::new(self.name).unwrap();
-        wal_file.write_to_wal(&[]); // create empty file
+        // let wal_file = WalFile::new(self.name).unwrap();
+        let wal_file = TimedRwLock::new(self.name.to_string(), WalFile::new(self.name).unwrap());
         self.wal_file = Some(wal_file);
-
 
     }
 
@@ -259,6 +275,41 @@ impl Buffers {
 
     pub fn clear_all(self) {
         unimplemented!("clear_all() is not yet implemented");
+    }
+
+    pub fn force_rotate() {
+
+        BUFFER_FINALISE_RUNNING.write().store(true, Ordering::SeqCst);
+
+        let data_dir = Config::get_data_dir();
+
+        let options = MatchOptions {
+            case_sensitive: false,
+            require_literal_separator: false,
+            require_literal_leading_dot: false,
+        };
+
+        let patterns = vec![
+            format!("{}/ingest_buffer/*.wal", data_dir),
+            format!("{}/ingest_buffer/*.merged", data_dir),
+        ];
+
+        let paths = patterns.iter().flat_map(|pattern| {
+            glob_with(pattern, options)
+                .expect("Failed to read glob pattern")
+                .filter_map(Result::ok)
+                .collect::<Vec<_>>()
+        }).collect::<Vec<_>>();
+
+        for path in paths {
+            let filename = path.to_str().unwrap();
+            Self::output_finalise(filename);
+        }
+
+        BUFFER_FINALISE_RUNNING
+            .write()
+            .store(false, Ordering::SeqCst);
+
     }
 
     pub fn finalise() {
@@ -313,7 +364,7 @@ impl Buffers {
             Some(&skpr_namespace),
             Some(&skpr_partition),
             Some(source_time),
-            Some(&shard),
+            None,
         );
 
         let temp_file_path = format!("{}/{}/{}-{}.temp", data_dir, "output_buffer", output_file_name, Helpers::random_str(32));
@@ -413,7 +464,12 @@ impl WalFile {
 
     pub fn flush(&mut self) -> io::Result<()> {
         if let Some(sync_file) = &mut self.file.write().as_mut() {
-            sync_file.flush()?;
+            // sync_file.flush()?;
+
+            unsafe {
+                libc::fsync(sync_file.as_raw_fd());
+            }
+
         }
         Ok(())
     }
