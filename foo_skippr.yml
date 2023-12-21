@@ -70,7 +70,7 @@ pipelines:
     chaos_mode: no
     auto_approve: yes
     env: dev
-    buffer_threshold_bytes: 20000000
+    buffer_threshold_bytes: 100000000
     buffer_threshold_seconds: 600
     transform:
 #      batch_time_fields: event_date

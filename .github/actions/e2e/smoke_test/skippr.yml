@@ -7,7 +7,7 @@ pipelines:
   smoke_test:
     auto_approve: yes
     env: test
-    buffer_threshold_bytes: 20000000
+    buffer_threshold_bytes: 200000000
     buffer_threshold_seconds: 600
     input: data_inputs.s3_bike_hire
     output: data_outputs.test_datalake
@@ -15,7 +15,7 @@ pipelines:
 data_inputs:
   s3_bike_hire:
     s3:
-      batch_size_bytes: 2048000
+      batch_size_bytes: 10000000
       s3_bucket: skippr-e2e-sample-data
       s3_prefix: bike-hire/
 
