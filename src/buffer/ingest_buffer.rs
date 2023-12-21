@@ -225,8 +225,9 @@ impl Buffer {
         };
 
         let current_path =  wal_file.path.to_str().unwrap();
-        let closed_path = current_path.replace(".wal", ".merged");
-        fs::rename(current_path, closed_path).unwrap();
+        let closed_path = current_path.replace(".wal", "");
+        let closed_path = format!("{}-{}.merged", closed_path, Helpers::random_str(32));
+            fs::rename(current_path, closed_path).unwrap();
 
         self.clear();
 
