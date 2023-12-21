@@ -533,13 +533,15 @@ impl Ingest {
             offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
         }
 
-        batch_offset_lines.iter().for_each(|(offset_key, i)| {
-            offset_db_clone.insert(offset_key, OffsetTypes::Line, *i);
-        });
+        // batch_offset_lines.iter().for_each(|(offset_key, i)| {
+        //     offset_db_clone.insert(offset_key, OffsetTypes::Line, *i);
+        // });
 
         offset_db_clone.flush();
 
         let keys: Vec<String> = buffers.buffers.iter().map(|entry| entry.key().clone()).collect();
+        // let keys = buffers.buffers.keys().map(|key| key.clone()).collect::<Vec<String>>();
+
 
         for key in keys {
             // flush each buffer, locking the dashmap in the process
