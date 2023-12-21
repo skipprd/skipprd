@@ -275,10 +275,12 @@ impl Buffers {
             require_literal_leading_dot: false,
         };
 
-        for path in glob_with(&format!("{}/ingest_buffer/*.merged", data_dir), options)
+        let paths = glob_with(&format!("{}/ingest_buffer/*.merged", data_dir), options)
             .expect("Failed to read glob pattern")
             .filter_map(Result::ok)
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+
+        for path in paths
         {
             let filename = path.to_str().unwrap();
             Self::output_finalise(filename);
@@ -300,8 +302,20 @@ impl Buffers {
         let arrow_schema_guard = ARROW_SCHEMA.read();
         let arrow_schema = arrow_schema_guard.get(&namespace).unwrap().clone();
 
-        let file_chunk_name = BufferChunker::decode_chunk_string_from_filename(filename);
-        let temp_file_path = format!("{}/{}/{}-{}.temp", data_dir, "output_buffer", file_chunk_name, Helpers::random_str(32));
+        let skpr_namespace = BufferChunker::decode_file_namespace(filename);
+        let skpr_partition = BufferChunker::decode_file_partition(filename);
+        let source_time = BufferChunker::decode_file_time(filename);
+        let shard = BufferChunker::decode_file_shard(filename);
+
+        let output_file_name = BufferChunker::encode_chunk_name(
+            "output",
+            Some(&skpr_namespace),
+            Some(&skpr_partition),
+            Some(source_time),
+            Some(&shard),
+        );
+
+        let temp_file_path = format!("{}/{}/{}-{}.temp", data_dir, "output_buffer", output_file_name, Helpers::random_str(32));
         let write_file = OpenOptions::new().write(true).create(true).open(&temp_file_path).unwrap();
 
         let props = WriterProperties::builder()
