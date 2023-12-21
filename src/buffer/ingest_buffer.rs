@@ -55,11 +55,11 @@ impl Buffer {
             self.wal_file = Some(TimedRwLock::new(self.name.to_string(), WalFile::new(self.name).unwrap()));
         }
 
-        let mut wal_file = match self.wal_file.take() {
+        let wal_file = match &self.wal_file {
             Some(file) => file,
             None => {
                 // It was flushed by another thead between this thread write() and flush()
-                // println!("No WAL file found for buffer: {}", self.name);
+                println!("No WAL file found for buffer: {}", self.name);
                 return;
             }
         };
@@ -147,17 +147,16 @@ impl Buffer {
         /*
          * Flush WAL file
          */
-        let mut wal_file = match self.wal_file.take() {
+        let wal_file = match &self.wal_file {
             Some(file) => file,
             None => {
                 // It was flushed by another thead between this thread write() and flush()
-                // println!("No WAL file found for buffer: {}", self.name);
+                println!("No WAL file found for buffer: {}", self.name);
                 return;
             }
         };
 
         wal_file.write().flush().unwrap();
-        self.wal_file = Some(wal_file);
 
         /*
          * Write data buffer to arrow record batches
@@ -222,20 +221,12 @@ impl Buffer {
     }
 
     pub fn wal_rotate(&mut self) {
-        match self.wal_file.take() {
-            Some(file) => file,
-            None => {
-                // It was flushed by another thead between this thread write() and flush()
-                // println!("No WAL file found for buffer: {}", self.name);
-                return;
-            }
-        };
 
         let wal_file = match &self.wal_file {
             Some(file) => file,
             None => {
                 // It was flushed by another thead between this thread write() and flush()
-                // println!("No WAL file found for buffer: {}", self.name);
+                println!("No WAL file found for buffer: {}", self.name);
                 return;
             }
         };
