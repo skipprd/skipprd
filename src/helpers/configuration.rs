@@ -1342,21 +1342,22 @@ impl Config {
     }
 
     pub async fn sync_schema(metadata: &HashMap<String, Metadata>) {
-        if Config::get_pipeline_output_plugin_name() != ""
-            && Config::get_pipeline_output_plugin_name() == "athena"
-        {
-            if *HAS_LICENSE.read().unwrap() {
-                let flatten = Config::get_transform_flatten_events();
 
-                for (namespace, schema) in metadata.into_iter() {
-                    println!("Updating Hive '{}' schema", namespace);
+        if *HAS_LICENSE.read().unwrap() {
+            let flatten = Config::get_transform_flatten_events();
 
-                    let default_message = create_default_nested_message(&schema.fields);
-                    let mut lock = DEFAULT_NESTED_MESSAGE.write();
-                    lock.insert(namespace.clone(), default_message);
+            for (namespace, schema) in metadata.into_iter() {
+                println!("Updating Hive '{}' schema", namespace);
 
-                    Ingest::prepare_arrow_schema(&namespace, flatten).unwrap();
+                let default_message = create_default_nested_message(&schema.fields);
+                let mut lock = DEFAULT_NESTED_MESSAGE.write();
+                lock.insert(namespace.clone(), default_message);
 
+                Ingest::prepare_arrow_schema(&namespace, flatten).unwrap();
+
+                if Config::get_pipeline_output_plugin_name() != ""
+                    && Config::get_pipeline_output_plugin_name() == "athena"
+                {
                     if flatten {
                         let mut out_meta: HashMap<String, Metadata> = HashMap::new();
                         flatten_metadata(metadata.get(namespace).unwrap(), &mut out_meta);
@@ -1375,10 +1376,11 @@ impl Config {
                         AwsAthena::create_or_update_schema(&namespace, &schema).await;
                     }
                 }
-            } else {
-                println!("No license found for AWS Glue schema plugin. Visit https://skippr.io to get a license.");
             }
+        } else {
+            println!("No license found for AWS Glue schema plugin. Visit https://skippr.io to get a license.");
         }
+
     }
 
     pub async fn init() {
