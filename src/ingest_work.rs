@@ -1,19 +1,22 @@
-use crate::buffer::{BUFFER_INDEX, BufferChunker};
+use crate::buffer::{BufferChunker};
 use crate::discover::Metadata;
 use crate::helpers::configuration::Config;
 use crate::helpers::offsets::{OffsetKey, Offsets, OffsetTypes};
 use crate::helpers::Helpers;
 use crate::ingest::ingest::ingest;
 use crate::serdes::json::SerdeJson;
-use crate::{helpers, METADATA, METRICS, RUNNING};
+use crate::{ARROW_SCHEMA, helpers, METADATA, METRICS, RUNNING};
 
 
 use once_cell::sync::Lazy;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
+use std::io;
 
 
 use std::io::Write;
+use std::os::fd::AsRawFd;
 
 use std::path::PathBuf;
 use std::process::exit;
@@ -25,6 +28,11 @@ use std::sync::mpsc::channel;
 extern crate num_cpus;
 use std::sync::mpsc::Sender;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering::AcqRel;
+use arrow::json::ReaderBuilder;
+use arrow::record_batch::RecordBatch;
+use dashmap::DashMap;
+use nix::libc;
 
 use parquet::data_type::AsBytes;
 use crate::ingest::fast_ingest::fast_path_ingest;
@@ -34,72 +42,22 @@ use crate::ingest::fast_ingest::fast_path_ingest;
 
 use tokio::io::AsyncWriteExt;
 use helpers::timed_rwlock::TimedRwLock;
+use crate::buffer::ingest_buffer::{Buffer, Buffers, WalFile};
 use crate::serdes::csv::SerderCsv;
 
 use crate::serdes::xml::SerdeXml;
 // use crate::converters::skippr_avro::convert_skippr_to_avro_field_types;
 
-pub struct Buffer {
-    data: Vec<u8>,
-    bytes: u64,
-}
+use arrow::datatypes::Schema;
+use arrow::error::ArrowError;
+use arrow::datatypes;
+use crate::converters::skippr_arrow::convert_skippr_to_arrow;
 
-impl Buffer {
-    pub fn new() -> Self {
-        Buffer {
-            data: Vec::new(),
-            bytes: 0,
-        }
-    }
-
-    pub fn write(&mut self, data: &[u8]) {
-        self.data.extend_from_slice(data);
-        self.bytes += data.len() as u64;
-    }
-}
-
-pub struct Buffers {
-    pub(crate) buffers: HashMap<String, Buffer>,
-}
-
-impl Buffers {
-    pub fn new() -> Self {
-        Buffers {
-            buffers: HashMap::new(),
-        }
-    }
-
-    pub fn write(&mut self, key: &str, data: &[u8]) {
-        let buffer = self.buffers.entry(key.to_string()).or_insert(Buffer::new());
-        buffer.write(data);
-    }
-
-    pub fn clear(&mut self, key: &str) {
-        if let Some(buffer) = self.buffers.get_mut(key) {
-            buffer.data.clear();
-            buffer.bytes = 0;
-        }
-    }
-
-    pub fn clear_all(&mut self) {
-        self.buffers = HashMap::new();
-    }
-}
 
 #[derive(Clone, Debug)]
 pub struct IngestBatch {
     pub(crate) offset_key: OffsetKey,
     pub(crate) data: String,
-}
-
-// Can't rely on file.metadata() as we don't know we're dealing with a unix FS. e.g. EFS
-pub struct OutputFile {
-    pub(crate) path: PathBuf,
-    pub(crate) bytes: u64,
-    pub(crate) updated_at: SystemTime,
-    // non buffered writer
-    pub(crate) file: TimedRwLock<Option<std::fs::File>>,
-    pub(crate) rotated: Option<bool>,
 }
 
 // Bare metal platforms usually have very small amounts of RAM
@@ -138,7 +96,7 @@ pub struct Ingest {
     num_cpus: usize,
     tx: Sender<()>,
     active_count: Arc<AtomicUsize>,
-
+    buffers: Arc<Buffers>
 }
 
 impl Drop for Ingest {
@@ -164,11 +122,14 @@ impl Ingest {
             }
         });
 
+        let buffers = Arc::new(Buffers::new());
+
         Ingest {
             num_cpus,
             thread_pool,
             tx,
             active_count,
+            buffers
         }
     }
 
@@ -225,9 +186,11 @@ impl Ingest {
 
                 // let core_count = self.thread_pool.active_count();
 
+            let buffers_clone =  Arc::clone(&self.buffers);
+
                 self.thread_pool.execute(move || {
                     // println!("Processing batch of {} events on core {}", datas_clone.len(), core_count);
-                    Ingest::process_batch(&mut datas_clone, &offset_db_clone);
+                    Ingest::process_batch(&mut datas_clone, &offset_db_clone, buffers_clone);
                     tx.send(()).unwrap();
                 });
 
@@ -236,20 +199,21 @@ impl Ingest {
 
     }
 
-    fn deadletter(record: &str, buffers: &mut Buffers) {
+    fn deadletter(record: &str, buffers: &Arc<Buffers>) {
         let data_dir = Config::get_data_dir();
         let deadletter_dir = format!("{}/deadletter_buffer", data_dir);
 
         let output_file = format!("{}/{}", deadletter_dir.clone(), &DEADLETTER_FILE_NAME.as_str());
 
-        buffers.write(&output_file, record.as_bytes());
-        buffers.write(&output_file, "\n".as_bytes());
+        // buffers.write(&output_file, record.as_bytes());
+        // buffers.write(&output_file, "\n".as_bytes());
 
     }
 
     fn process_batch(
         datas: &mut Vec<IngestBatch>,
         offset_db_clone: &Arc<Offsets>,
+        buffers: Arc<Buffers>
     ) {
 
         // let mut avro_schemas = AVRO_SCHEMA.lock().unwrap();
@@ -267,7 +231,7 @@ impl Ingest {
         let updated_schema_clone = updated_schema;
         // let offset_db_clone = offset_db.clone();
 
-        let mut buffers: Buffers = Buffers::new();
+        // let mut buffers: Buffers = BUFFER_INDEX.read().get(&output_dir).unwrap().clone();
 
         let mut bytes: u64 = 0;
         let mut i: u64 = 0;
@@ -343,7 +307,7 @@ impl Ingest {
                                     None => ""
                                 };
 
-                                Self::deadletter(line_str, &mut buffers);
+                                Self::deadletter(line_str, &buffers);
 
                                 d += 1;
 
@@ -379,7 +343,7 @@ impl Ingest {
                     };
 
 
-                    Self::deadletter(line_str, &mut buffers);
+                    Self::deadletter(line_str, &buffers);
 
                     d += 1;
 
@@ -476,7 +440,7 @@ impl Ingest {
                                         }
                                     };
 
-                                    Self::deadletter(line_str, &mut buffers);
+                                    Self::deadletter(line_str, &buffers);
 
                                     d += 1;
 
@@ -494,6 +458,10 @@ impl Ingest {
                                     {
                                         // METADATA.write().clear();
                                         // METADATA.write().extend(NEW_METADATA.read().clone());
+
+                                        let skpr_namespace = BufferChunker::decode_file_namespace(&output_file_name);
+
+                                        Ingest::prepare_arrow_schema(&skpr_namespace, flatten).unwrap();
                                     }
                                 }
 
@@ -510,7 +478,7 @@ impl Ingest {
                                     }
                                 };
 
-                                Self::deadletter(line_str, &mut buffers);
+                                Self::deadletter(line_str, &buffers);
 
                                 d += 1;
 
@@ -536,10 +504,13 @@ impl Ingest {
 
                     // Serialize your JSON value to a vector
 
-                    let record_vec = serde_json::to_vec(&record_value).unwrap();
+                    let record_vec = serde_json::to_string(&record_value).unwrap();
                     bytes += record_vec.len() as u64;
-                    buffers.write(&output_file, &record_vec);
-                    buffers.write(&output_file, "\n".as_bytes());
+
+                    let output_file_name_str = output_file_name.to_string();
+                    let mut buffer = buffers.buffers.entry(output_file_name).or_insert_with(|| Buffer::new(&output_file_name_str));
+
+                    buffer.write(record_vec.as_bytes());
 
                     // i += 1;
                     j += 1;
@@ -553,156 +524,16 @@ impl Ingest {
             offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
         }
 
-
-        // @todo - I'd rather not lock the whole hashmap here, instead we should lock the individual files.
-        // @todo - We should also be able to flush the buffers to disk in parallel.
-        // @todo - Ideally this would not be a blocking operation.
-        // @todo - We probably want to track file metadata in a persistent store, so we can recover from crashes. FS metadata is not reliably available.
-
-
-
-            // update metadata at control pane, this may or may not be automatically approved
-            // tokio::runtime::Builder::new_multi_thread()
-            //     .enable_all()
-            //     .build()
-            //     .unwrap()
-            //     .block_on(async {
-
-                    // Flush all buffers to their respective files.
-                    for (new_filename, buffered_records) in buffers.buffers.iter() {
-
-                        let mut buffer = vec![0; 4096]; // Chunk size can be adjusted
-
-                        let has_file: bool = {
-                            let index_guard = BUFFER_INDEX.read();
-                            let index = match index_guard.get("ingest_buffer_merged") {
-                                Some(index) => index,
-                                None => {
-                                    println!("Failed to find index ingest_buffer_merged");
-                                    return;
-                                }
-                            };
-                            let result = match index.get_mut(new_filename) {
-                                Some(_new_file_ref) => {
-                                    // println!("Found file in index {}", new_filename);
-                                    true
-                                },
-                                None => {
-                                    // BufferChunker::create_and_insert_new_file(new_filename.to_string());
-                                    false
-                                }
-                            };
-
-                            result
-                        };
-
-                        if !has_file {
-                            BufferChunker::create_and_insert_new_file(new_filename.to_string());
-                        }
-
-                        let index_guard = BUFFER_INDEX.read();
-                        let index = index_guard.get_mut("ingest_buffer_merged").unwrap();
-                        let mut new_file_ref = index.get_mut(new_filename).expect(format!("Failed to find file: {}", new_filename).as_str());
-
-                        let new_file = new_file_ref.value_mut();
-
-
-                        let mock_buffer = vec![0; 0];
-                        // check file descriptor is open
-                        if new_file.file.write().is_none()
-                            || new_file.file.write().as_mut().is_none()
-                            // || new_file.file.as_mut().unwrap().metadata().is_err()
-                            || new_file.file.write().as_mut().unwrap().write(&mock_buffer).is_err()
-                            // || new_file.file.as_mut().unwrap().flush().is_err()
-                        {
-                            // println!("File descriptor changed, re-creating {}", new_filename);
-
-                            let file = match std::fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open(&new_filename) {
-                                Ok(file) => file,
-                                Err(err) => {
-                                    panic!("Failed to open indexed buffer file {}: {}", new_filename, err);
-                                }
-                            };
-
-                            new_file.file = TimedRwLock::new("index_buf_file".to_string(), Some(file));
-                        }
-
-
-                        let _total_bytes = 0;
-
-                            buffer = buffered_records.data.clone();
-
-                            match new_file.file.write().as_mut() {
-                                Some(file) => {
-                                    match file.write_all(&buffer) {
-                                        Ok(_) => {
-                                            // println!("Wrote {} bytes to buffer file {}", buffer.len(), new_filename);
-                                        }
-                                        Err(err) => {
-                                            println!("Error writing to buffer file {}: {}", new_filename, err)
-                                        }
-                                    }
-                                },
-                                None => {
-                                   panic!("Failed to find file descriptor when writing to buffer file {}", new_filename);
-                                }
-                            }
-
-                            new_file.bytes += buffered_records.bytes;
-
-
-                        match new_file.file.write().as_mut().expect(&format!("Failed to find file descriptor when flushing buffer file"))
-                            .flush() {
-                            Ok(_) => {
-                                // println!("Flushed buffer file {}", new_filename);
-                            }
-                            Err(err) => {
-                                println!("Error flushing buffer file {}: {}", new_filename, err)
-                            }
-                        }
-                        match new_file.file.write().as_mut().expect(&format!("Failed to find file descriptor when syncing buffer file metadata"))
-                            .sync_all() {
-                            Ok(_) => {
-                                // println!("Synced buffer file metadata {}", new_filename);
-                            }
-                            Err(err) => {
-                                println!("Error syncing buffer file metadata {}: {}", new_filename, err)
-                            }
-                        }
-
-                        new_file.updated_at = SystemTime::now();
-
-                        // @todo - might want to just rotate buffers here and leave a separate process to finalise them
-                        // that would create a backlog of files to finalise, but would preventing blocking ingest
-                        let finalised = BufferChunker::finalise_buffers(false, &new_file, &new_filename);
-
-                        if finalised {
-                            // println!("Removing file pointer for {}", new_filename);
-                            // remvoe file pointer and delete from index
-                            new_file.file = TimedRwLock::new("index_buf_file".to_string(), None);
-                            new_file.bytes = 0;
-                            new_file.updated_at = SystemTime::now();
-
-                            // println!("Dropping index guard");
-                            drop(new_file_ref);
-
-
-                            // can't remove index as other threads may be using it
-                            // have to settle for resetting the file pointer above and accepting the memory leak of the index growing with orphaned files
-                            // println!("Removing file from index {}", new_filename);
-                            // index.remove(new_filename);
-
-                        }
-
-                    }
-                // });
-
         offset_db_clone.flush();
 
-        buffers.clear_all();
+        let keys: Vec<String> = buffers.buffers.iter().map(|entry| entry.key().clone()).collect();
+
+        // Iterate over keys and get mutable access to each Buffer
+        for key in keys {
+            if let Some(mut buffer) = buffers.buffers.get_mut(&key) {
+                buffer.flush();
+            }
+        }
 
         if *updated_schema_clone.lock().unwrap() == "yes".to_string() {
             *updated_schema_clone.lock().unwrap() = "no".to_string();
@@ -714,7 +545,6 @@ impl Ingest {
                 .unwrap()
                 .block_on(async {
                     Config::set_metadata(&METADATA.read(), true).await;
-                    // BufferChunker::rotate_buffers(false).await;
                 });
         }
 
@@ -725,19 +555,55 @@ impl Ingest {
         counter_lock.bytes_current += bytes;
         counter_lock.bytes_total += bytes;
 
-        // println!("Batch Msg Ingested: {}", j);
-        // println!("Batch Msg Fixed: {}", x);
-        // println!("Batch Deadletters: {}", d);
-        // // Summarize the bytes, rounding to the nearest MB/GB/TB as appropriate.
-        // let rounded_bytes = match bytes {
-        //     0..=999_999 => format!("{}B", bytes),
-        //     1_000_000..=999_999_999 => format!("{:.1}MB", bytes as f64 / 1_000_000.0),
-        //     1_000_000_000..=999_999_999_999 => format!("{:.1}GB", bytes as f64 / 1_000_000_000.0),
-        //     _ => format!("{:.1}TB", bytes as f64 / 1_000_000_000_000.0),
-        // };
-        // println!("Batch Bytes: {}", rounded_bytes);
+    }
 
+    pub(crate) fn prepare_arrow_schema(skpr_namespace: &str, flatten: bool) -> Result<Arc<Schema>, ArrowError> {
 
+        println!("Preparing schema for namespace: {}", skpr_namespace);
+
+        let mut arrow_schema: Result<datatypes::Schema, ArrowError> = Ok(datatypes::Schema::empty());
+        let mut schema_ref = Arc::new(datatypes::Schema::empty());
+
+        let metadata = METADATA.read();
+
+        if metadata.get(skpr_namespace).is_none() {
+            return Err(ArrowError::SchemaError(format!("Failed to find metadata for namespace: {}", skpr_namespace)));
+            // panic!("Failed to find metadata for namespace: {}", skpr_namespace);
+        }
+
+        let mut output_metadata: HashMap<String, Metadata> = HashMap::new();
+        if flatten {
+            let mut meta: HashMap<String, Metadata> = HashMap::new();
+
+            crate::flatten_metadata(metadata.get(skpr_namespace).unwrap(), &mut meta);
+
+            let mut flat: Metadata = Metadata::new().unwrap();
+            flat.fields = Box::new(meta);
+            output_metadata.insert(skpr_namespace.to_string(), flat);
+        } else {
+            output_metadata = metadata.clone();
+        }
+
+        // println!("Preparing schema for namespace: {}", skpr_namespace);
+        // println!("Schema: {:?}", output_metadata);
+
+        // let skpr_partition = BufferChunker::decode_file_partition(filename);
+        // let shard = BufferChunker::decode_file_shard(filename);
+        // let source_time = BufferChunker::decode_file_time(filename);
+        // let mut skpr_time = None;
+        // if source_time >= 0 {
+        //     skpr_time = Some(source_time);
+        // }
+
+        arrow_schema = convert_skippr_to_arrow(
+            output_metadata.get(skpr_namespace).unwrap().fields.clone(),
+        );
+
+        schema_ref = Arc::new(arrow_schema.unwrap());
+
+        ARROW_SCHEMA.write().insert(skpr_namespace.to_string(), schema_ref.clone());
+
+        Ok(schema_ref)
     }
 
 

@@ -115,7 +115,7 @@ impl DataSourceStdinPlugin {
                 }
                 Err(e) => match e {
                     mpsc::RecvTimeoutError::Timeout => {
-                        BufferChunker::rotate_buffers(true);
+                        // BufferChunker::rotate_buffers(true);
                     }
                     mpsc::RecvTimeoutError::Disconnected => {
                         eprintln!("Error receiving from buffer channel: {}", e);

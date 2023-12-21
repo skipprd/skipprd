@@ -38,6 +38,7 @@ use crate::plugins::athena::{AwsAthena, DataOutputAwsAthenaPluginConfig};
 
 use toml;
 use crate::helpers::timed_rwlock::TimedRwLock;
+use crate::ingest_work::Ingest;
 use crate::plugins::file_input::{DataSourceLocalFilePluginConfig};
 use crate::plugins::s3_input::DataSourceS3PluginConfig;
 use crate::plugins::s3_inventory::{DataSourceS3InventoryPluginConfig};
@@ -1348,6 +1349,8 @@ impl Config {
 
                 for (namespace, schema) in metadata.into_iter() {
                     println!("Updating Hive '{}' schema", namespace);
+
+                    Ingest::prepare_arrow_schema(&namespace, flatten).unwrap();
 
                     if flatten {
                         let mut out_meta: HashMap<String, Metadata> = HashMap::new();
