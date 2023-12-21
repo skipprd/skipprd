@@ -928,7 +928,7 @@ async fn sync() {
         sleep(Duration::from_secs(1));
     }
 
-    // BufferChunker::rotate_buffers(true);
+    Buffers::force_rotate();
     Buffers::finalise();
 
     if Config::get_pipeline_config().output.is_some() {
