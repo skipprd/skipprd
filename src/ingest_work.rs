@@ -238,7 +238,7 @@ impl Ingest {
         let mut j = 0;
         let mut d = 0;
         let mut x = 0;
-        let mut batch_line: usize = 0;
+        let mut batch_line: u64 = 0;
 
         let format = match Config::get_pipline_plugin_config("input") {
             Ok(plugin) => plugin.format(),
@@ -267,6 +267,7 @@ impl Ingest {
 
             let has_offsets =
                 offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Closed, 0);
+            let current_line_offset = offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Line, 0);
 
             let mut records: Vec<Value> = Vec::new();
             if format == "csv" {
@@ -284,6 +285,17 @@ impl Ingest {
                 };
             }
 
+            if has_offsets.is_some() {
+
+               let offset = offset_db_clone.get_line(&ingest_batch.offset_key);
+                if offset.is_some() {
+
+                    batch_line = u64::from(offset.unwrap());
+                } else {
+                    batch_line = 0;
+                }
+            }
+
             let mut unwrapped_records: Vec<Value> = Vec::new();
 
             for record in records {
@@ -298,14 +310,14 @@ impl Ingest {
                                 }
                             },
                             None => {
-                                let line_no = if batch_line == 0 || batch_line > ingest_batch.data.lines().count() {
+                                let line_no = if batch_line == 0 || batch_line > ingest_batch.data.lines().count() as u64 {
                                     1
                                 } else {
                                     batch_line - 1
                                 };
 
                                 // deadletter
-                                let line_str = match ingest_batch.data.lines().nth(line_no) {
+                                let line_str = match ingest_batch.data.lines().nth(line_no as usize) {
                                     Some(line) => line,
                                     None => ""
                                 };
@@ -321,22 +333,11 @@ impl Ingest {
 
             }
 
-            if has_offsets.is_some() {
-
-               let offset = offset_db_clone.get_line(&ingest_batch.offset_key);
-                if offset.is_some() {
-
-                    batch_line = u64::from(offset.unwrap()) as usize;
-                } else {
-                    batch_line = 0;
-                }
-            }
 
             for record in unwrapped_records {
 
                 // println!("Record: {}", record);
                 batch_line += 1;
-
 
                 if record.is_null()
                     || (record.is_object() && record.as_object().unwrap().is_empty())
@@ -344,7 +345,7 @@ impl Ingest {
                 {
 
                     // let line batch_line in ingest_batch.data
-                    let line_str = match ingest_batch.data.lines().nth(batch_line - 1) {
+                    let line_str = match ingest_batch.data.lines().nth(batch_line as usize - 1) {
                         Some(line) => line,
                         None => {
                             // println!("Could not find null line {} in batch", batch_line);
@@ -363,8 +364,8 @@ impl Ingest {
                 }
 
                 if has_offsets.is_none()
-                    || Some(false)
-                        != offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Line, batch_line as u64)
+                    || current_line_offset.is_none()
+                    || Some(true) == offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Line, batch_line)
                 {
 
                     i += 1;
@@ -448,7 +449,7 @@ impl Ingest {
                                     // println!("Deadlettring - Could not ingest record: {}, Error: {:?}", record, err);
 
                                     // deadletter record
-                                    let line_str = match ingest_batch.data.lines().nth(batch_line - 1) {
+                                    let line_str = match ingest_batch.data.lines().nth(batch_line as usize - 1) {
                                         Some(line) => line,
                                         None => {
                                             // println!("Could not find line {} in batch", batch_line);
@@ -491,7 +492,7 @@ impl Ingest {
                                 msg
 
                             } else { // or just deadletter message for later approval
-                                let line_str = match ingest_batch.data.lines().nth(batch_line - 1) {
+                                let line_str = match ingest_batch.data.lines().nth(batch_line as usize - 1) {
                                     Some(line) => line,
                                     None => {
                                         // println!("Could not find line {} in batch", batch_line);
@@ -538,24 +539,26 @@ impl Ingest {
                     j += 1;
 
                     // offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, batch_line as u64);
-                    batch_offset_lines.insert(ingest_batch.offset_key.clone(), batch_line as u64);
+                    batch_offset_lines.insert(ingest_batch.offset_key.clone(), batch_line);
 
                 } else {
                     println!("Skipping line {} in batch", batch_line);
                 }
+
             }
+
+            println!("Batch lines: {}", batch_line);
 
             // offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
             batch_offset_files.insert(ingest_batch.offset_key.clone(), 1);
         }
 
         let keys: Vec<String> = buffers.buffers.iter().map(|entry| entry.key().clone()).collect();
-        // let keys = buffers.buffers.keys().map(|key| key.clone()).collect::<Vec<String>>();
-
 
         for key in keys {
             // flush each buffer, locking the dashmap in the process
-            if let Some(mut buffer) = buffers.buffers.get_mut(&key) {
+            if let Some(buffer) = buffers.buffers.get(&key) {
+                println!("Ingest flushing buffer: {}", key);
                 buffer.write().flush();
             }
         }

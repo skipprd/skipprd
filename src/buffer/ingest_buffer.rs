@@ -14,7 +14,7 @@ use std::sync::atomic::Ordering;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
-use crate::{ARROW_SCHEMA, BUFFER_FINALISE_RUNNING};
+use crate::{ARROW_SCHEMA, BUFFER_FINALISE_RUNNING, RUNNING};
 use crate::buffer::BufferChunker;
 use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
@@ -24,10 +24,19 @@ pub struct Buffer {
     name: &'static str,
     buf: Vec<u8>,
     // record_batch: Vec<Arc<RecordBatch>>,
+    // inner_count: u64,
+    // count: u64,
     bytes: u64,
     updated_at: SystemTime,
     wal_file: WalFile,
 }
+
+// impl Drop for Buffer {
+//     fn drop(&mut self) {
+//         println!("Flushing buffer: {}", self.name);
+//         self.flush();
+//     }
+// }
 
 impl Buffer {
     pub fn new(name: &str) -> Self {
@@ -35,6 +44,8 @@ impl Buffer {
             name: Box::leak(name.to_string().into_boxed_str()),
             buf: Vec::new(),
             // record_batch: Vec::new(),
+            // inner_count: 0,
+            // count: 0,
             bytes: 0,
             updated_at: SystemTime::now(),
             wal_file: WalFile::new(name).unwrap()
@@ -45,75 +56,13 @@ impl Buffer {
 
         self.buf.extend_from_slice(json_value);
 
+        // self.inner_count += 1;
+
+        // self.wal_file.write_to_wal(json_value).unwrap();
+
         self.bytes += json_value.len() as u64;
 
     }
-
-    fn read_from_json<R: BufRead>(
-        mut reader: R,
-        schema: SchemaRef,
-    ) -> Result<impl Iterator<Item = Result<RecordBatch, ArrowError>>, ArrowError> {
-        let mut decoder = ReaderBuilder::new(schema).build_decoder()?;
-        let mut next = move || {
-            loop {
-                // Decoder is agnostic that buf doesn't contain whole records
-                let buf = reader.fill_buf()?;
-                if buf.is_empty() {
-                    break; // Input exhausted
-                }
-                let read = buf.len();
-                let decoded = decoder.decode(buf)?;
-
-                // Consume the number of bytes read
-                reader.consume(decoded);
-                if decoded != read {
-                    break; // Read batch size
-                }
-            }
-            decoder.flush()
-        };
-        Ok(std::iter::from_fn(move || next().transpose()))
-    }
-
-
-    fn json_to_arrow(json_value: &[u8], namespace: &str) -> Result<RecordBatch, arrow::error::ArrowError> {
-
-        let arrow_schema_guard = ARROW_SCHEMA.read();
-        let arrow_schema = arrow_schema_guard.get(namespace).unwrap();
-
-        let mut decoder = ReaderBuilder::new(Arc::clone(arrow_schema)).build_decoder().unwrap();
-        // decoder.serialize(json_value).unwrap();
-        let decoded = decoder.decode(json_value)?;
-        let batch = decoder.flush().unwrap().unwrap();
-        Ok(batch)
-    }
-
-    fn append_record_batches(&self, batch1: &RecordBatch, batch2: &RecordBatch) -> RecordBatch {
-        let mut columns = Vec::new();
-
-        if batch1.schema() != batch2.schema() {
-            panic!("Schemas of record batches do not match"); // Handle this error appropriately
-        }
-
-        for i in 0..batch1.num_columns() {
-            let column1 = batch1.column(i);
-            let column2 = batch2.column(i);
-
-            // Concatenate the arrays
-            let combined_column = match arrow::compute::concat(&[column1.as_ref(), column2.as_ref()]) {
-                Ok(array) => array,
-                Err(error) => panic!("Error concatenating arrays: {}", error),
-            };
-
-            columns.push(combined_column);
-        }
-
-        RecordBatch::try_new(batch1.schema(), columns).unwrap() // Handle this error appropriately
-    }
-
-    // fn calculate_bytes(&mut self) {
-    //     self.bytes = self.record_batch.iter().map(|batch| batch.get_array_memory_size() as u64).sum();
-    // }
 
     pub fn clear(&mut self) {
         self.wal_file = WalFile::new(self.name).unwrap();
@@ -132,6 +81,11 @@ impl Buffer {
         //     }
         // };
 
+        // println!("Count group: {}", self.inner_count);
+        // self.count += self.inner_count;
+        // self.inner_count = 0;
+        // println!("Count total: {}", self.count);
+
         self.wal_file.write_to_wal(&self.buf).unwrap();
 
         /*
@@ -147,6 +101,7 @@ impl Buffer {
         // };
 
         self.wal_file.flush().unwrap();
+
 
         /*
          * Write data buffer to arrow record batches
@@ -224,6 +179,72 @@ impl Buffer {
 
     }
 
+    fn read_from_json<R: BufRead>(
+        mut reader: R,
+        schema: SchemaRef,
+    ) -> Result<impl Iterator<Item = Result<RecordBatch, ArrowError>>, ArrowError> {
+        let mut decoder = ReaderBuilder::new(schema).build_decoder()?;
+        let mut next = move || {
+            loop {
+                // Decoder is agnostic that buf doesn't contain whole records
+                let buf = reader.fill_buf()?;
+                if buf.is_empty() {
+                    break; // Input exhausted
+                }
+                let read = buf.len();
+                let decoded = decoder.decode(buf)?;
+
+                // Consume the number of bytes read
+                reader.consume(decoded);
+                if decoded != read {
+                    break; // Read batch size
+                }
+            }
+            decoder.flush()
+        };
+        Ok(std::iter::from_fn(move || next().transpose()))
+    }
+
+
+    fn json_to_arrow(json_value: &[u8], namespace: &str) -> Result<RecordBatch, arrow::error::ArrowError> {
+
+        let arrow_schema_guard = ARROW_SCHEMA.read();
+        let arrow_schema = arrow_schema_guard.get(namespace).unwrap();
+
+        let mut decoder = ReaderBuilder::new(Arc::clone(arrow_schema)).build_decoder().unwrap();
+        // decoder.serialize(json_value).unwrap();
+        let decoded = decoder.decode(json_value)?;
+        let batch = decoder.flush().unwrap().unwrap();
+        Ok(batch)
+    }
+
+    fn append_record_batches(&self, batch1: &RecordBatch, batch2: &RecordBatch) -> RecordBatch {
+        let mut columns = Vec::new();
+
+        if batch1.schema() != batch2.schema() {
+            panic!("Schemas of record batches do not match"); // Handle this error appropriately
+        }
+
+        for i in 0..batch1.num_columns() {
+            let column1 = batch1.column(i);
+            let column2 = batch2.column(i);
+
+            // Concatenate the arrays
+            let combined_column = match arrow::compute::concat(&[column1.as_ref(), column2.as_ref()]) {
+                Ok(array) => array,
+                Err(error) => panic!("Error concatenating arrays: {}", error),
+            };
+
+            columns.push(combined_column);
+        }
+
+        RecordBatch::try_new(batch1.schema(), columns).unwrap() // Handle this error appropriately
+    }
+
+    // fn calculate_bytes(&mut self) {
+    //     self.bytes = self.record_batch.iter().map(|batch| batch.get_array_memory_size() as u64).sum();
+    // }
+
 }
 
 pub struct Buffers {
@@ -245,6 +266,35 @@ impl Buffers {
 
     pub fn clear_all(self) {
         unimplemented!("clear_all() is not yet implemented");
+    }
+
+    pub fn force_flush() {
+        let data_dir = Config::get_data_dir();
+
+        let options = MatchOptions {
+            case_sensitive: false,
+            require_literal_separator: false,
+            require_literal_leading_dot: false,
+        };
+
+        let patterns = vec![
+            format!("{}/ingest_buffer/*.wal", data_dir),
+            format!("{}/ingest_buffer/*.merged", data_dir),
+        ];
+
+        let paths = patterns.iter().flat_map(|pattern| {
+            glob_with(pattern, options)
+                .expect("Failed to read glob pattern")
+                .filter_map(Result::ok)
+                .collect::<Vec<_>>()
+        }).collect::<Vec<_>>();
+
+        for path in paths {
+            let filename = path.to_str().unwrap();
+            let file = File::open(filename).unwrap();
+            let mut file = SyncWriteFile::new(file).unwrap();
+            file.flush().unwrap();
+        }
     }
 
     pub fn force_rotate() {
@@ -276,6 +326,11 @@ impl Buffers {
         }).collect::<Vec<_>>();
 
         for path in paths {
+
+            if !RUNNING.read().load(Ordering::SeqCst) {
+                break;
+            }
+
             let filename = path.to_str().unwrap();
             Self::output_finalise(filename);
         }
@@ -308,6 +363,10 @@ impl Buffers {
 
         for path in paths
         {
+            if !RUNNING.read().load(Ordering::SeqCst) {
+                break;
+            }
+
             let filename = path.to_str().unwrap();
             Self::output_finalise(filename);
         }
