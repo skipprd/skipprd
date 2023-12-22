@@ -427,6 +427,7 @@ impl Ingest {
                                 &record,
                                 // &mut NEW_METADATA.write().get_mut(&skpr_namespace).unwrap().fields,
                                 &mut METADATA.write().get_mut(&skpr_namespace).unwrap().fields,
+                                &skpr_namespace,
                                 &mut updated_schema_clone.lock().unwrap(),
                                 flatten,
                             ) {

@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 
 use crate::discover::evolution::Evolution;
+use crate::ingest::fast_ingest::DEFAULT_NESTED_MESSAGE;
 
 
 pub struct ResolvedFieldValue {
@@ -41,6 +42,7 @@ pub struct IngestRecord {
 pub fn ingest(
     unwrapped_message: &Value,
     metadata: &mut HashMap<String, Metadata>,
+    namespace: &str,
     updated_schema: &mut String,
     flatten: bool,
 ) -> Result<Value, Box<dyn std::error::Error>> {
@@ -50,7 +52,13 @@ pub fn ingest(
     // let mut message = SerderParquet::default_message(metadata);
 
     // let mut message: Vec<Value> = Vec::with_capacity(batch_size);
-    let mut message: Value = Value::Null;
+    // let mut message: Value = Value::Null;
+    let mut message = match DEFAULT_NESTED_MESSAGE.read().get(namespace) {
+        Some(m) => m.clone(),
+        None => {
+            Value::Null
+        }
+    };
 
     let _i = 0;
 
@@ -1198,6 +1206,7 @@ mod test_smoke_tests {
         let ingest_value = ingest(
             records.first().unwrap(),
             &mut metadata.get_mut("default").unwrap().fields,
+            "foo",
             &mut updated_schema,
             false,
         );
