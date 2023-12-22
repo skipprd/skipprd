@@ -58,7 +58,31 @@ pub fn create_default_nested_message(metadata: &HashMap<String, Metadata>) -> Va
             }
         }
     }
+
+    sort_fields(&mut message);
+
     message
+}
+
+pub fn sort_fields(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            let mut sorted_map = map.clone().into_iter().collect::<Vec<(String, Value)>>();
+            sorted_map.sort_by_key(|k| k.0.clone());
+            *map = sorted_map.into_iter().collect::<Map<String, Value>>();
+
+            // Sort nested fields
+            for (_, v) in map.iter_mut() {
+                sort_fields(v);
+            }
+        },
+        Value::Array(vec) => {
+            for v in vec.iter_mut() {
+                sort_fields(v);
+            }
+        },
+        _ => {} // Other types do not need sorting
+    }
 }
 
 pub fn fast_path_ingest(
