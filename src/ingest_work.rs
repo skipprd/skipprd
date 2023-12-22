@@ -261,6 +261,7 @@ impl Ingest {
         };
 
         let mut batch_offset_lines: HashMap<OffsetKey, u64> = HashMap::new();
+        let mut batch_offset_files: HashMap<OffsetKey, u64> = HashMap::new();
 
         for ingest_batch in datas {
 
@@ -320,13 +321,22 @@ impl Ingest {
 
             }
 
-            batch_line = 0;
+            if has_offsets.is_some() {
+
+               let offset = offset_db_clone.get_line(&ingest_batch.offset_key);
+                if offset.is_some() {
+
+                    batch_line = u64::from(offset.unwrap()) as usize;
+                } else {
+                    batch_line = 0;
+                }
+            }
 
             for record in unwrapped_records {
 
                 // println!("Record: {}", record);
                 batch_line += 1;
-                i += 1;
+
 
                 if record.is_null()
                     || (record.is_object() && record.as_object().unwrap().is_empty())
@@ -354,8 +364,10 @@ impl Ingest {
 
                 if has_offsets.is_none()
                     || Some(false)
-                        != offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Line, i)
+                        != offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Line, batch_line as u64)
                 {
+
+                    i += 1;
 
                     let mut namesapce_cache =  PARSE_NAMESPACE_CACHE.with(|cache| cache.read().unwrap().clone());
                     let skpr_namespace = Helpers::parse_namespace_field(
@@ -516,29 +528,26 @@ impl Ingest {
                     let record_vec = serde_json::to_string(&record_value).unwrap();
                     bytes += record_vec.len() as u64;
 
-                    let output_file_name_str = output_file_name.to_string();
-                    let mut buffer = buffers.buffers.entry(output_file_name).or_insert_with(|| Buffer::new(&output_file_name_str));
+                    // let output_file_name_str = output_file_name.to_string();
+                    let buffer = buffers.buffers.entry(output_file_name.clone()).or_insert_with(|| {
+                        TimedRwLock::new(output_file_name.clone(), Buffer::new(&output_file_name))
+                    });
 
-                    buffer.write(record_vec.as_bytes());
+                    buffer.write().write(&record_vec.as_bytes());
 
-                    // i += 1;
                     j += 1;
 
-                    // offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, i);
-                    batch_offset_lines.insert(ingest_batch.offset_key.clone(), i);
+                    // offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, batch_line as u64);
+                    batch_offset_lines.insert(ingest_batch.offset_key.clone(), batch_line as u64);
 
+                } else {
+                    println!("Skipping line {} in batch", batch_line);
                 }
-
             }
 
-            offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
+            // offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
+            batch_offset_files.insert(ingest_batch.offset_key.clone(), 1);
         }
-
-        // batch_offset_lines.iter().for_each(|(offset_key, i)| {
-        //     offset_db_clone.insert(offset_key, OffsetTypes::Line, *i);
-        // });
-
-        offset_db_clone.flush();
 
         let keys: Vec<String> = buffers.buffers.iter().map(|entry| entry.key().clone()).collect();
         // let keys = buffers.buffers.keys().map(|key| key.clone()).collect::<Vec<String>>();
@@ -547,9 +556,19 @@ impl Ingest {
         for key in keys {
             // flush each buffer, locking the dashmap in the process
             if let Some(mut buffer) = buffers.buffers.get_mut(&key) {
-                buffer.flush();
+                buffer.write().flush();
             }
         }
+
+        batch_offset_lines.iter().for_each(|(offset_key, i)| {
+            offset_db_clone.insert(offset_key, OffsetTypes::Line, *i);
+        });
+
+        batch_offset_files.iter().for_each(|(offset_key, i)| {
+            offset_db_clone.insert(offset_key, OffsetTypes::Closed, *i);
+        });
+
+        offset_db_clone.flush();
 
         if *updated_schema_clone.lock().unwrap() == "yes".to_string() {
             *updated_schema_clone.lock().unwrap() = "no".to_string();
