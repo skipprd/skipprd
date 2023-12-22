@@ -691,7 +691,7 @@ async fn sync() {
 
                 // println!("Looking for temp files in {}", &format!("{}/output_buffer/*parquet.temp", data_dir));
 
-                for entry in glob_with(&format!("{}/output_buffer/*parquet.temp", data_dir), options)
+                for entry in glob_with(&format!("{}/output_buffer/*.temp", data_dir), options)
                     .expect("Failed to read glob 'finalised' pattern")
                 {
                     match entry {
