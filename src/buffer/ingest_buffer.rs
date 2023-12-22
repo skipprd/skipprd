@@ -58,9 +58,11 @@ impl Buffer {
 
         // self.inner_count += 1;
 
-        // self.wal_file.write_to_wal(json_value).unwrap();
+        self.wal_file.write_to_wal(json_value).unwrap();
 
         self.bytes += json_value.len() as u64;
+
+        // self.flush();
 
     }
 
@@ -86,7 +88,7 @@ impl Buffer {
         // self.inner_count = 0;
         // println!("Count total: {}", self.count);
 
-        self.wal_file.write_to_wal(&self.buf).unwrap();
+        // self.wal_file.write_to_wal(&self.buf).unwrap();
 
         /*
          * Flush WAL file

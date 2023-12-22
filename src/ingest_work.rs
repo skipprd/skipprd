@@ -184,13 +184,13 @@ impl Ingest {
 
             let mut datas_clone = datas.clone();
 
-            // let core_count = self.thread_pool.active_count();
+            let core_id = self.thread_pool.active_count();
 
             let buffers_clone = Arc::clone(&self.buffers);
 
             self.thread_pool.execute(move || {
                 // println!("Processing batch of {} events on core {}", datas_clone.len(), core_count);
-                Ingest::process_batch(&mut datas_clone, &offset_db_clone, buffers_clone);
+                Ingest::process_batch(&mut datas_clone, &offset_db_clone, buffers_clone, &core_id.to_string());
                 tx.send(()).unwrap();
             });
 
@@ -213,7 +213,8 @@ impl Ingest {
     fn process_batch(
         datas: &mut Vec<IngestBatch>,
         offset_db_clone: &Arc<Offsets>,
-        buffers: Arc<Buffers>
+        buffers: Arc<Buffers>,
+        core_id: &str,
     ) {
 
         // let mut avro_schemas = AVRO_SCHEMA.lock().unwrap();
@@ -285,16 +286,7 @@ impl Ingest {
                 };
             }
 
-            if has_offsets.is_some() {
-
-               let offset = offset_db_clone.get_line(&ingest_batch.offset_key);
-                if offset.is_some() {
-
-                    batch_line = u64::from(offset.unwrap());
-                } else {
-                    batch_line = 0;
-                }
-            }
+            batch_line = 0;
 
             let mut unwrapped_records: Vec<Value> = Vec::new();
 
@@ -397,7 +389,7 @@ impl Ingest {
                         Some(&skpr_namespace),
                         Some(&skpr_partition),
                         skpr_time_bucket,
-                        None,
+                        Some(core_id),
                     );
 
                     if METADATA.read().get(&skpr_namespace).is_none() {
@@ -538,20 +530,27 @@ impl Ingest {
 
                     j += 1;
 
-                    // offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, batch_line as u64);
-                    batch_offset_lines.insert(ingest_batch.offset_key.clone(), batch_line);
+                    offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, batch_line);
+                    // batch_offset_lines.insert(ingest_batch.offset_key.clone(), batch_line);
 
-                } else {
-                    println!("Skipping line {} in batch", batch_line);
                 }
+                // else {
+                //     println!("Skipping line {} in batch", batch_line);
+                // }
 
             }
 
-            println!("Batch lines: {}", batch_line);
-
-            // offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
-            batch_offset_files.insert(ingest_batch.offset_key.clone(), 1);
+            offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
+            // batch_offset_files.insert(ingest_batch.offset_key.clone(), 1);
         }
+
+        // batch_offset_lines.iter().for_each(|(offset_key, i)| {
+        //     offset_db_clone.insert(offset_key, OffsetTypes::Line, *i);
+        // });
+        //
+        // batch_offset_files.iter().for_each(|(offset_key, i)| {
+        //     offset_db_clone.insert(offset_key, OffsetTypes::Closed, *i);
+        // });
 
         let keys: Vec<String> = buffers.buffers.iter().map(|entry| entry.key().clone()).collect();
 
@@ -562,14 +561,6 @@ impl Ingest {
                 buffer.write().flush();
             }
         }
-
-        batch_offset_lines.iter().for_each(|(offset_key, i)| {
-            offset_db_clone.insert(offset_key, OffsetTypes::Line, *i);
-        });
-
-        batch_offset_files.iter().for_each(|(offset_key, i)| {
-            offset_db_clone.insert(offset_key, OffsetTypes::Closed, *i);
-        });
 
         offset_db_clone.flush();
 
