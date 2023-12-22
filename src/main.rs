@@ -1,4 +1,5 @@
 mod arr;
+use std::time::Duration;
 
 use arrow::datatypes::Schema;
 use arrow::error::ArrowError;
@@ -663,6 +664,8 @@ async fn sync() {
                     sleep(Duration::from_secs(1));
                 }
 
+                // Buffers::force_flush();
+
                 // offsets_clone.flush();
                 // println!("Flushed offsets");
 
@@ -675,12 +678,18 @@ async fn sync() {
                 //         return;
                 //     }
                 // };
-                let _metrics_lock = METRICS.read();
+                let metrics_lock = METRICS.read();
 
-                let total_times: Vec<(String, Duration)> = TimedRwLock::<()>::get_total_wait_times();
-                for (key, value) in total_times.iter() {
-                    println!("{}: {}ms", key, value.as_millis());
-                }
+                println!("Messages Fixed: {}", metrics_lock.ingeted_slow_total);
+                println!("Messages Total: {}", metrics_lock.messages_total);
+                println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
+                // println!("Bytes per Min: {}", metrics_lock.bytes_current);
+                println!("Bytes: {}", metrics_lock.bytes_total);
+
+                // let total_times: Vec<(String, Duration)> = TimedRwLock::<()>::get_total_wait_times();
+                // for (key, value) in total_times.iter() {
+                //     println!("{}: {}ms", key, value.as_millis());
+                // }
 
 
                 ////////////// Cleanup part written parquet files START ////////
@@ -734,7 +743,6 @@ async fn sync() {
         }
     });
 
-    use std::time::Duration;
 
     let mut planner = periodic::Planner::new();
 
@@ -1065,16 +1073,8 @@ pub async fn sync_input_plugin(offsets_clone: Arc<Offsets>) {
                 .await;
         }
         "s3" => {
-            // if *HAS_LICENSE.read().unwrap() {
-                let mut input = DataSourceS3Plugin::new().await;
-                input.sync(
-                    offsets_clone,
-                )
-                    .await;
-            // } else {
-            //     println!("No license found for S3 input plugin. Visit https://skippr.io to get a license.");
-            // }
-
+            let mut input = DataSourceS3Plugin::new().await;
+            input.sync(offsets_clone).await;
         }
         "s3_inventory" => {
             if *HAS_LICENSE.read().unwrap() {
