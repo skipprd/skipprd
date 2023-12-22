@@ -659,6 +659,10 @@ async fn sync() {
                 // let mut output_files = OUTPUT_FILES_STATIC.write();
                 // Ingest::rotate_buffers(true, &mut output_files);
 
+                while BUFFER_FINALISE_RUNNING.read().load(Ordering::SeqCst) {
+                    sleep(Duration::from_secs(1));
+                }
+
                 // offsets_clone.flush();
                 // println!("Flushed offsets");
 
