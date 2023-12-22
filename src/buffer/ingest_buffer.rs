@@ -397,11 +397,64 @@ impl Buffers {
 
 }
 
+pub struct SyncWriteFile {
+    file: File,
+}
+
+impl SyncWriteFile {
+    pub fn new(file: File) -> std::io::Result<Self> {
+        Ok(SyncWriteFile { file })
+    }
+}
+
+impl Drop for SyncWriteFile {
+    fn drop(&mut self) {
+        let fd = self.file.as_raw_fd();
+        unsafe {
+            libc::fsync(fd);
+        };
+    }
+}
+
+// implement read_to_end for SyncWriteFile
+impl Read for SyncWriteFile {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.file.read(buf)
+    }
+}
+
+impl Write for SyncWriteFile {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.file.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+
+        // match self.file.sync_all() {
+        //     Ok(_g) => {}
+        //     Err(_err) => {
+        //         println!("Error syncing file: {}", _err.to_string());
+        //     }
+        // }
+
+        let fd = self.file.as_raw_fd();
+        unsafe {
+            libc::fsync(fd);
+        };
+
+        Ok(())
+    }
+
+    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        self.file.write_all(buf)
+    }
+}
+
 pub struct WalFile {
     pub(crate) path: PathBuf,
     pub(crate) bytes: u64,
     // non buffered writer
-    pub(crate) file: TimedRwLock<Option<File>>,
+    pub(crate) file: TimedRwLock<Option<SyncWriteFile>>,
     pub(crate) rotated: Option<bool>,
 }
 
@@ -411,6 +464,7 @@ impl WalFile {
         // println!("Creating WAL file: {}", path_str);
         let path= PathBuf::from(&path_str);
         let file = OpenOptions::new().append(true).create(true).open(&path)?;
+        let file = SyncWriteFile::new(file)?;
         Ok(WalFile {
             path,
             bytes: 0,
@@ -455,11 +509,11 @@ impl WalFile {
 
     pub fn flush(&mut self) -> io::Result<()> {
         if let Some(sync_file) = &mut self.file.write().as_mut() {
-            // sync_file.flush()?;
+            sync_file.flush()?;
 
-            unsafe {
-                libc::fsync(sync_file.as_raw_fd());
-            }
+            // unsafe {
+            //     libc::fsync(sync_file.file.as_raw_fd());
+            // }
 
         }
         Ok(())
