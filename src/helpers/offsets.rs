@@ -224,12 +224,34 @@ impl Offsets {
         let key = self.build_key(key);
         // let bytes: &[u8] = unsafe { self.any_as_u8_slice(&key) };
         let bytes: &[u8] = key.as_bytes();
+        self.tree.get(bytes).unwrap_or_else(|err| {
+            // println!("Failed getting offset, Error: {:?}", err);
+            None
+        })
+    }
+
+    pub fn get_line(&self, key: &OffsetKey) -> Option<U64<LittleEndian>> {
+        let key = self.build_key(key);
+        // let bytes: &[u8] = unsafe { self.any_as_u8_slice(&key) };
+        let bytes: &[u8] = key.as_bytes();
         match self.tree.get(bytes) {
-            Ok(val) => val,
+            Ok(val) => {
+                let mut backing_bytes = sled::IVec::from(val.unwrap());
+
+                // this verifies that our value is the correct length
+                // and alignment (in this case we don't need it to be
+                // aligned, because we use the `U64` type from zerocopy)
+                let layout: LayoutVerified<&mut [u8], OffsetValue> =
+                    LayoutVerified::new_unaligned(&mut *backing_bytes)
+                        .expect("bytes do not fit schema");
+
+                let value: &mut OffsetValue = layout.into_mut();
+                Some(value.line)
+            }
             Err(err) => {
                 println!("Failed getting offset, Error: {:?}", err);
                 None
-            },
+            }
         }
     }
 
