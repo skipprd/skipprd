@@ -175,29 +175,35 @@ impl DataSourceLocalFilePlugin {
                                 None => "",
                             };
 
+                            let mut ingest_data = String::new();
+
                             match file_ext {
                                 "gz" => {
                                     let decoder = GzDecoder::new(file);
                                     let reader = BufReader::new(decoder);
 
+
+
                                     for line in reader.lines() {
                                         let line = line.unwrap();
-                                        let line_len = line.len() as i64;
+                                        // let line_len = line.len() as i64;
 
-                                        if batch_bytes + line_len > chunk_size && !current_batch.is_empty() {
-                                            tx.unbounded_send(current_batch.clone()).unwrap();
-                                            current_batch.clear();
-                                            batch_bytes = 0;
-                                        }
-
-                                        let ingest_data = format!("{}{}", if batch_bytes == 0 { "" } else { "\n" }, line);
+                                        let ingest_line = format!("{}{}", if batch_bytes == 0 { "" } else { "\n" }, line);
+                                        ingest_data.extend(ingest_line.chars());
                                         batch_bytes += ingest_data.len() as i64;
-
-                                        current_batch.push(IngestBatch {
-                                            offset_key: offset_key.clone(),
-                                            data: ingest_data,
-                                        });
                                     }
+
+                                    if batch_bytes >= chunk_size && !current_batch.is_empty() {
+                                        tx.unbounded_send(current_batch.clone()).unwrap();
+                                        current_batch.clear();
+                                        batch_bytes = 0;
+                                        ingest_data = String::new();
+                                    }
+
+                                    current_batch.push(IngestBatch {
+                                        offset_key: offset_key.clone(),
+                                        data: ingest_data,
+                                    });
 
                                     if !current_batch.is_empty() {
                                         tx.unbounded_send(current_batch.clone()).unwrap();
