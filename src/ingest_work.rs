@@ -165,34 +165,34 @@ impl Ingest {
             exit(0);
         } else {
 
-        // Wait for an available thread if there's no capacity
-        while self.active_count.load(Ordering::SeqCst) >= self.num_cpus {
-            // println!("Waiting for {} tasks to finish", self.active_count.load(Ordering::SeqCst));
+            // Wait for an available thread if there's no capacity
+            while self.active_count.load(Ordering::SeqCst) >= self.num_cpus {
+                // println!("Waiting for {} tasks to finish", self.active_count.load(Ordering::SeqCst));
 
-            // Here you can do other work while waiting for threads to finish,
-            // or just sleep for a while if there's nothing else to do.
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
+                // Here you can do other work while waiting for threads to finish,
+                // or just sleep for a while if there's nothing else to do.
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
 
-        // Spawn a new thread for this 'datas' if there's capacity
-        // while self.active_count.load(Ordering::SeqCst) <= self.num_cpus {
+            // Spawn a new thread for this 'datas' if there's capacity
+            // while self.active_count.load(Ordering::SeqCst) <= self.num_cpus {
             // if self.thread_pool.queued_count() < self.num_cpus {
-                let tx = self.tx.clone();
-                let offset_db_clone = offset_db.clone();
+            let tx = self.tx.clone();
+            let offset_db_clone = offset_db.clone();
 
-                self.active_count.fetch_add(1, Ordering::SeqCst);
+            self.active_count.fetch_add(1, Ordering::SeqCst);
 
-                let mut datas_clone = datas.clone();
+            let mut datas_clone = datas.clone();
 
-                // let core_count = self.thread_pool.active_count();
+            // let core_count = self.thread_pool.active_count();
 
-            let buffers_clone =  Arc::clone(&self.buffers);
+            let buffers_clone = Arc::clone(&self.buffers);
 
-                self.thread_pool.execute(move || {
-                    // println!("Processing batch of {} events on core {}", datas_clone.len(), core_count);
-                    Ingest::process_batch(&mut datas_clone, &offset_db_clone, buffers_clone);
-                    tx.send(()).unwrap();
-                });
+            self.thread_pool.execute(move || {
+                // println!("Processing batch of {} events on core {}", datas_clone.len(), core_count);
+                Ingest::process_batch(&mut datas_clone, &offset_db_clone, buffers_clone);
+                tx.send(()).unwrap();
+            });
 
             // }
         }
