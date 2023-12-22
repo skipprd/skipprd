@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::{fs, io,};
 use std::io::{BufRead, Read, Write};
@@ -12,7 +11,6 @@ use arrow_schema::{ArrowError, SchemaRef};
 use dashmap::DashMap;
 use glob::{glob_with, MatchOptions};
 use std::sync::atomic::Ordering;
-use once_cell::sync::Lazy;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
@@ -21,10 +19,6 @@ use crate::buffer::BufferChunker;
 use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
 use crate::helpers::timed_rwlock::TimedRwLock;
-
-pub static BUFFER_INDEX: Lazy<Arc<TimedRwLock<HashMap<String, Buffers>>>> = Lazy::new(|| {
-    Arc::new(TimedRwLock::new("buffer_index".to_string(), HashMap::new()))
-});
 
 pub struct Buffer {
     name: &'static str,

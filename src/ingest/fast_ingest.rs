@@ -56,6 +56,7 @@ pub fn create_default_nested_message(metadata: &HashMap<String, Metadata>) -> Va
                 sub_fields.insert(field.to_string() , create_default_nested_message(&meta_data.fields));
                 message[meta_data.out_field_name.clone()] = Value::Object(sub_fields);
             }
+            sort_fields(&mut message);
         }
     }
 
