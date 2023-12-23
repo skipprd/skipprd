@@ -542,6 +542,9 @@ impl Ingest {
 
             offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
             // batch_offset_files.insert(ingest_batch.offset_key.clone(), 1);
+
+            offset_db_clone.flush();
+
         }
 
         // batch_offset_lines.iter().for_each(|(offset_key, i)| {
@@ -561,7 +564,7 @@ impl Ingest {
         //     }
         // }
 
-        offset_db_clone.flush();
+        // offset_db_clone.flush();
 
         if *updated_schema_clone.lock().unwrap() == "yes".to_string() {
             *updated_schema_clone.lock().unwrap() = "no".to_string();
