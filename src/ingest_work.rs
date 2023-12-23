@@ -263,6 +263,7 @@ impl Ingest {
 
         let mut batch_offset_lines: HashMap<OffsetKey, u64> = HashMap::new();
         let mut batch_offset_files: HashMap<OffsetKey, u64> = HashMap::new();
+        let mut buffer_batchs: HashMap<String, String> = HashMap::new();
 
         for ingest_batch in datas {
 
@@ -527,11 +528,12 @@ impl Ingest {
                     });
 
                     buffer.write().write(&record_vec.as_bytes());
+                    buffer_batchs.insert(output_file_name.clone(), "foo".to_string());
 
                     j += 1;
 
-                    offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, batch_line);
-                    // batch_offset_lines.insert(ingest_batch.offset_key.clone(), batch_line);
+                    // offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, batch_line);
+                    batch_offset_lines.insert(ingest_batch.offset_key.clone(), batch_line);
 
                 }
                 // else {
@@ -540,31 +542,29 @@ impl Ingest {
 
             }
 
-            offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
-            // batch_offset_files.insert(ingest_batch.offset_key.clone(), 1);
-
-            offset_db_clone.flush();
+            // offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
+            batch_offset_files.insert(ingest_batch.offset_key.clone(), 1);
 
         }
 
-        // batch_offset_lines.iter().for_each(|(offset_key, i)| {
-        //     offset_db_clone.insert(offset_key, OffsetTypes::Line, *i);
-        // });
-        //
-        // batch_offset_files.iter().for_each(|(offset_key, i)| {
-        //     offset_db_clone.insert(offset_key, OffsetTypes::Closed, *i);
-        // });
+        batch_offset_lines.iter().for_each(|(offset_key, i)| {
+            offset_db_clone.insert(offset_key, OffsetTypes::Line, *i);
+        });
 
+        batch_offset_files.iter().for_each(|(offset_key, i)| {
+            offset_db_clone.insert(offset_key, OffsetTypes::Closed, *i);
+        });
+        
         // let keys: Vec<String> = buffers.buffers.iter().map(|entry| entry.key().clone()).collect();
-        //
-        // for key in keys {
-        //     // flush each buffer, locking the dashmap in the process
-        //     if let Some(buffer) = buffers.buffers.get(&key) {
-        //         buffer.write().flush();
-        //     }
-        // }
+        let keys = buffer_batchs.iter().map(|entry| entry.0.clone()).collect::<Vec<String>>();
+        for key in keys {
+            // flush each buffer, locking the dashmap in the process
+            if let Some(buffer) = buffers.buffers.get(&key) {
+                buffer.write().flush();
+            }
+        }
 
-        // offset_db_clone.flush();
+        offset_db_clone.flush();
 
         if *updated_schema_clone.lock().unwrap() == "yes".to_string() {
             *updated_schema_clone.lock().unwrap() = "no".to_string();
