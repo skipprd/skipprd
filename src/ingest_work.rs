@@ -552,15 +552,14 @@ impl Ingest {
         //     offset_db_clone.insert(offset_key, OffsetTypes::Closed, *i);
         // });
 
-        let keys: Vec<String> = buffers.buffers.iter().map(|entry| entry.key().clone()).collect();
-
-        for key in keys {
-            // flush each buffer, locking the dashmap in the process
-            if let Some(buffer) = buffers.buffers.get(&key) {
-                println!("Ingest flushing buffer: {}", key);
-                buffer.write().flush();
-            }
-        }
+        // let keys: Vec<String> = buffers.buffers.iter().map(|entry| entry.key().clone()).collect();
+        //
+        // for key in keys {
+        //     // flush each buffer, locking the dashmap in the process
+        //     if let Some(buffer) = buffers.buffers.get(&key) {
+        //         buffer.write().flush();
+        //     }
+        // }
 
         offset_db_clone.flush();
 

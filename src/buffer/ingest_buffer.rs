@@ -64,6 +64,10 @@ impl Buffer {
 
         // self.flush();
 
+        self.updated_at = SystemTime::now();
+
+        self.check_wal_rotate();
+
     }
 
     pub fn clear(&mut self) {
