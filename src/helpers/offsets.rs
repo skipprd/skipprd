@@ -4,6 +4,7 @@ use Result;
 
 use crate::helpers::configuration::Config;
 use serde::__private::de::IdentifierDeserializer;
+use serde_derive::Serialize;
 use sled::{IVec};
 use {
     byteorder::{BigEndian, LittleEndian},
@@ -41,14 +42,14 @@ pub enum OffsetTypes {
 #[derive(FromBytes, AsBytes, Unaligned, Debug)]
 #[repr(C)]
 pub struct OffsetValue {
-    filesize: U64<LittleEndian>,
-    line: U64<LittleEndian>,
-    closed: U64<LittleEndian>, // we store bool here
+    pub(crate) filesize: U64<LittleEndian>,
+    pub(crate) line: U64<LittleEndian>,
+    pub(crate) closed: U64<LittleEndian>, // we store bool here
 }
 
 pub struct Offset {
-    value: OffsetValue,
-    key: OffsetKey,
+    pub(crate) value: OffsetValue,
+    pub(crate) key: OffsetKey,
 }
 
 pub struct Offsets {

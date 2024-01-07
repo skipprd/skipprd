@@ -10,7 +10,7 @@ use serde_json::Value;
 use crate::helpers::timed_rwlock::TimedRwLock;
 
 pub static CSV_HEADERS: Lazy<TimedRwLock<Vec<String>>> = Lazy::new(|| TimedRwLock::new("csv_headers".to_string(), Vec::new()));
-pub static CHOSEN_DELIM: Lazy<TimedRwLock<String>> = Lazy::new(|| TimedRwLock::new("chosen_delim".to_string(), ",".to_string()));
+pub static CHOSEN_DELIM: Lazy<TimedRwLock<String>> = Lazy::new(|| TimedRwLock::new("chosen_delim".to_string(), "".to_string()));
 
 pub struct SerderCsv;
 
@@ -85,6 +85,8 @@ impl SerderCsv {
                 }
                 messages.push(Value::Object(obj));
             }
+
+            // println!("CSV record: {:?}, Headers {:?}, delimiter: {}", record, headers, String::from_utf8(vec![delimiter_byte]).unwrap());
         }
 
         messages
@@ -92,14 +94,14 @@ impl SerderCsv {
 
     fn detect_delimiter(record: &str) -> String {
         let delimiters = vec![";", ",", "\t", "|"];
-        let mut chosen_delim = ",".to_string();  // Default to comma.
+        let mut chosen_delim = ";".to_string();  // Default to comma.
         let mut max_fields = 0;
 
         for delim in &delimiters {
             let lines: Vec<&str> = record.split('\n').collect();
             let first_line_fields = lines[0].split(*delim).count();
 
-            println!("Delimiter: {} ({} fields)", delim, first_line_fields);
+            // println!("Delimiter: {} ({} fields)", delim, first_line_fields);
 
             if
             // lines.iter().all(|line| line.split(*delim).count() == first_line_fields) &&
@@ -109,7 +111,7 @@ impl SerderCsv {
             }
         }
 
-        println!("Delimiter: {} ({} fields)", chosen_delim, max_fields);
+        // println!("Delimiter: {} ({} fields)", chosen_delim, max_fields);
 
 
         chosen_delim

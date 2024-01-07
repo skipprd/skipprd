@@ -856,8 +856,6 @@ async fn sync() {
                             return;
                         }
 
-                        Buffers::finalise();
-
                         // BufferChunker::rotate_buffers(false);
 
                         if Config::get_pipeline_config().output.is_some() {
@@ -938,9 +936,6 @@ async fn sync() {
     while BUFFER_FINALISE_RUNNING.read().load(Ordering::SeqCst) {
         sleep(Duration::from_secs(1));
     }
-
-    Buffers::force_rotate();
-    Buffers::finalise();
 
     if Config::get_pipeline_config().output.is_some() {
         sync_output_plugin(Config::get_pipeline_output_plugin_name().as_str(), "output".to_string()).await;
