@@ -872,23 +872,24 @@ async fn sync() {
     let ingest_dir = &format!("{}/ingest_buffer", data_dir);
     let deadletter_dir = &format!("{}/deadletter_buffer", data_dir);
     let output_dir = &format!("{}/output_buffer", data_dir);
-    match fs::create_dir(deadletter_dir) {
+
+    match fs::create_dir_all(deadletter_dir) {
         Ok(_g) => {}
         Err(_err) => {}
     }
-    match fs::create_dir(format!("{}/done", deadletter_dir)) {
+    match fs::create_dir_all(format!("{}/done", deadletter_dir)) {
         Ok(_g) => {}
         Err(_err) => {}
     }
-    match fs::create_dir(ingest_dir) {
+    match fs::create_dir_all(ingest_dir) {
         Ok(_g) => {}
         Err(_err) => {}
     }
-    match fs::create_dir(format!("{}/done", ingest_dir)) {
+    match fs::create_dir_all(format!("{}/done", ingest_dir)) {
         Ok(_g) => {}
         Err(_err) => {}
     }
-    match fs::create_dir(output_dir) {
+    match fs::create_dir_all(output_dir) {
         Ok(_g) => {}
         Err(_err) => {}
     }

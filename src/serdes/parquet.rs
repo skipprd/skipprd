@@ -377,7 +377,7 @@ impl SerdeParquet {
                     let deadletter_file_path = &format!(
                         "{}/{}-parquet-error.temp",
                         deadletter_dir,
-                        Helpers::random_str(12).as_str()
+                        Helpers::random_str(32).as_str()
                     );
 
                     match fs::rename(path.clone(), deadletter_file_path) {
@@ -385,7 +385,7 @@ impl SerdeParquet {
                             println!("Moved file to deadletter: {}", deadletter_file_path)
                         }
                         Err(_err) => {
-                            println!("Error moving file to deadletter: {}", _err.to_string());
+                            panic!("Error moving file to deadletter: {}", _err.to_string());
                         }
                     }
 
