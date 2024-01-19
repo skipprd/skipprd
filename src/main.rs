@@ -94,7 +94,7 @@ use crate::plugins::stdin_input::DataSourceStdinPlugin;
 use crate::plugins::stdout_output::DataOutputStdoutPlugin;
 
 use datafusion::prelude::*;
-use crate::buffer::ingest_buffer::Buffers;
+use crate::buffer::ingest_buffer::{Buffers, WAL_INDEX};
 // use crate::buffer::BufferChunker;
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::ingest_work::Ingest;
@@ -509,9 +509,39 @@ async fn sync() {
         }
     }
 
-    let _data_dir = Config::get_data_dir();
+    let data_dir = Config::get_data_dir();
+    let ingest_dir = &format!("{}/ingest_buffer", data_dir);
+    let deadletter_dir = &format!("{}/deadletter_buffer", data_dir);
+    let output_dir = &format!("{}/output_buffer", data_dir);
+    match fs::create_dir(deadletter_dir) {
+        Ok(_g) => {}
+        Err(_err) => {}
+    }
+    match fs::create_dir(format!("{}/done", deadletter_dir)) {
+        Ok(_g) => {}
+        Err(_err) => {}
+    }
+    match fs::create_dir(ingest_dir) {
+        Ok(_g) => {}
+        Err(_err) => {}
+    }
+    match fs::create_dir(format!("{}/done", ingest_dir)) {
+        Ok(_g) => {}
+        Err(_err) => {}
+    }
+    match fs::create_dir(output_dir) {
+        Ok(_g) => {}
+        Err(_err) => {}
+    }
 
-    // BufferChunker::build_buffer_index().expect("Failed to build buffer index");
+    let offsets = Arc::new(Offsets::init().unwrap());
+
+    let offset_buffer_clone = offsets.clone();
+
+    {
+        let mut wal_index = WAL_INDEX.write();
+        wal_index.recover(offset_buffer_clone).expect("Failed to recover WAL index");
+    }
 
     let skippr_metadata = match Config::get_metadata().await {
         Ok(metadata) => {
@@ -536,7 +566,6 @@ async fn sync() {
 
     let now = Arc::new(Mutex::new(Instant::now()));
 
-    let offsets = Arc::new(Offsets::init().unwrap());
     let _offsets_clone = offsets.clone();
     // let logger_clone = Arc::clone(&logger);
 
@@ -877,37 +906,14 @@ async fn sync() {
     out_pnanner.start();
 
     // @todo - share across s3 ingests
-    let _parse_namespace_cache: HashMap<String, String> = HashMap::new();
-    let _output_files: HashMap<String, File> = HashMap::new();
-    let _options = MatchOptions {
-        case_sensitive: false,
-        require_literal_separator: false,
-        require_literal_leading_dot: false,
-    };
-    let data_dir = Config::get_data_dir();
-    let ingest_dir = &format!("{}/ingest_buffer", data_dir);
-    let deadletter_dir = &format!("{}/deadletter_buffer", data_dir);
-    let output_dir = &format!("{}/output_buffer", data_dir);
-    match fs::create_dir(deadletter_dir) {
-        Ok(_g) => {}
-        Err(_err) => {}
-    }
-    match fs::create_dir(format!("{}/done", deadletter_dir)) {
-        Ok(_g) => {}
-        Err(_err) => {}
-    }
-    match fs::create_dir(ingest_dir) {
-        Ok(_g) => {}
-        Err(_err) => {}
-    }
-    match fs::create_dir(format!("{}/done", ingest_dir)) {
-        Ok(_g) => {}
-        Err(_err) => {}
-    }
-    match fs::create_dir(output_dir) {
-        Ok(_g) => {}
-        Err(_err) => {}
-    }
+    // let _parse_namespace_cache: HashMap<String, String> = HashMap::new();
+    // let _output_files: HashMap<String, File> = HashMap::new();
+    // let _options = MatchOptions {
+    //     case_sensitive: false,
+    //     require_literal_separator: false,
+    //     require_literal_leading_dot: false,
+    // };
+
 
     let offsets_clone = offsets.clone();
 

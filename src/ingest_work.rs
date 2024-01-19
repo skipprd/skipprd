@@ -221,15 +221,6 @@ impl Ingest {
 
         // let mut avro_schemas = AVRO_SCHEMA.lock().unwrap();
 
-        let mut buf: IngestBufferBatch = IngestBufferBatch {
-            offset: OffsetKeySerialize {
-                position: 0,
-                namespace: "".to_string(),
-                partition: "".to_string(),
-            },
-            records: Vec::new(),
-        };
-
         let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.or(Some("no".to_string())).unwrap());
 
         let data_dir = Config::get_data_dir();
@@ -277,6 +268,15 @@ impl Ingest {
         let mut buffer_batchs: HashMap<String, String> = HashMap::new();
 
         for ingest_batch in datas {
+
+            let mut buf: IngestBufferBatch = IngestBufferBatch {
+                offset: OffsetKeySerialize {
+                    position: 0,
+                    namespace: ingest_batch.offset_key.namespace.clone(),
+                    partition: ingest_batch.offset_key.partition.clone(),
+                },
+                records: Vec::new(),
+            };
 
             let has_offsets =
                 offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Closed, 0);
@@ -513,47 +513,8 @@ impl Ingest {
 
                                 continue;
                             }
-
-
-                            // Value::Null
-
                         }
                     };
-
-                    // let output_file = format!("{}/{}.merged", output_dir.clone(), &output_file_name);
-
-                    // let pretty_json = match serde_json::to_string_pretty(&record_value) {
-                    //     Ok(pretty_json) => pretty_json,
-                    //     Err(err) => {
-                    //         println!("Could not pretty print record: {}, Error: {:?}", record_value, err);
-                    //         "".to_string()
-                    //     }
-                    // };
-                    // panic!("Pretty json: {}", pretty_json);
-
-                    // Serialize your JSON value to a vector
-
-                    // let record_vec = serde_json::to_string(&record_value).unwrap();
-                    // bytes += record_vec.len() as u64;
-
-                    // let output_file_name_str = output_file_name.to_string();
-                    // let buffer = buffers.buffers.entry(output_file_name.clone()).or_insert_with(|| {
-                    //     TimedRwLock::new(output_file_name_str, Buffer::new(&output_file_name.clone()))
-                    // });
-
-                    let offset_key_serialized = OffsetKeySerialize {
-                        position: batch_line,
-                        namespace: ingest_batch.offset_key.namespace.clone(),
-                        partition: ingest_batch.offset_key.partition.clone(),
-                    };
-                    //
-                    // let ingest_buffer_batch: IngestBufferBatch = IngestBufferBatch {
-                    //     namespace: skpr_namespace,
-                    //     offset: offset_key_serialized.clone(),
-                    //     record: record_value,
-                    // };
-
-                    // buffer.write().write(ingest_buffer_batch);
 
                     let ingest_record = IngestRecord {
                         namespace: skpr_namespace,
@@ -562,16 +523,8 @@ impl Ingest {
                         record: record_value,
                     };
 
-                    // buf.entry(na).or_insert_with(|| {
-                    //     IngestBufferBatch {
-                    //         offset: offset_key_serialized.clone(),
-                    //         records: Vec::new(),
-                    //     }
-                    // });
-                    buf.offset = offset_key_serialized;
+                    buf.offset.position = batch_line;
                     buf.records.push(ingest_record);
-
-                    // buffer_batchs.insert(output_file_name.clone(), "foo".to_string());
 
                     j += 1;
 
@@ -584,6 +537,8 @@ impl Ingest {
                 // }
 
             }
+
+            buffers.write().write(buf);
 
             // offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
             batch_offset_files.insert(ingest_batch.offset_key.clone(), 1);
@@ -602,7 +557,7 @@ impl Ingest {
         // }
 
         // @todo - write() Buffers
-        buffers.write().write(buf);
+
         buffers.write().flush().unwrap();
 
 
