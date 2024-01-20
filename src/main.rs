@@ -932,6 +932,7 @@ async fn sync() {
 
     }
 
+    Buffers::force_compact_all_partitions();
 
     // RUNNING.write().unwrap().store(false, Ordering::SeqCst); // the prevents metrics from printing while shutting down, BUT also prevents output serialisatin
 
