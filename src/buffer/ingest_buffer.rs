@@ -158,7 +158,7 @@ impl Buffers {
 
             // let mut ingest_batch = WalRecordBatches::new(offset, record_batches);
 
-            wal_file_partition.bytes = wal_file.write_to_stream(&record_batches)? as u64;
+            wal_file_partition.bytes += wal_file.write_to_stream(&record_batches)? as u64;
 
             // println!("Wrote records to WAL file: {}", wal_file.path.to_str().unwrap());
 
@@ -175,6 +175,16 @@ impl Buffers {
 
         Ok(())
     }
+
+    pub fn force_compact_all_partitions() {
+        let mut wal_index = WAL_INDEX.write(); // Acquire read lock on WAL_INDEX
+
+        for (_key, wal_partition) in wal_index.index.iter_mut() {
+            // let mut wal_partition = wal_partition.clone();
+            wal_partition.compact_to_parquet();
+        }
+    }
+
 }
 
 #[derive(Default, Debug)]
@@ -298,11 +308,7 @@ impl WalFilePartition {
     }
 
     fn compact_to_parquet(&mut self) {
-
-        // println!("Finalising output file: {}", filename);
-
         let data_dir = Config::get_data_dir();
-
         let output_file_name = BufferChunker::encode_chunk_name(
             "output",
             Some(&self.namespace),
@@ -319,7 +325,6 @@ impl WalFilePartition {
             .unwrap();
 
         let write_file = SyncWriteFile::new(write_file).unwrap();
-
         let props = WriterProperties::builder()
             .set_dictionary_enabled(false)
             .set_encoding(parquet::basic::Encoding::PLAIN)
@@ -327,52 +332,41 @@ impl WalFilePartition {
             .build();
 
         let schema = ARROW_SCHEMA.read().get(&self.namespace).unwrap().clone();
-
         let mut writer = ArrowWriter::try_new(write_file, schema, Some(props)).unwrap();
 
         for wal_file in self.files.iter_mut() {
 
-            // let filename = format!("{}/ingest_buffer/{}.wal", data_dir, wal_file.path.file_name().unwrap().to_str().unwrap());
+            if wal_file.bytes == 0 {
+                continue;
+            }
 
-            // let mut reader = io::BufReader::new(File::open(&filename).unwrap());
-
-            // create record batches from arrow IPC WAL file
-            let record_batch_ingest_batch = wal_file.read_from_stream().unwrap();
+            let record_batches = wal_file.read_from_stream().unwrap();
 
             /**
-            * Support optional SQL query to transform data before writing to parquet
-            */
+             * Support optional SQL query to transform data before writing to parquet
+             */
             // let mut batches = Vec::new();
             //
             // let sql = None; // "SELECT * FROM my_table";
             //
             // if sql.is_some() {
-            //     batches = Self::apply_sql_on_ipc_stream(record_batch_ingest_batch.record_batches, sql.unwrap()).await.unwrap();
+            //     batches = Self::apply_sql_on_ipc_stream(batches, sql.unwrap()).await.unwrap();
             // } else {
-            //     batches = record_batch_ingest_batch.record_batches;
+            //     batches = batches;
             // }
 
-            for batch in record_batch_ingest_batch.iter() {
-                match writer.write(&batch) {
-                    Ok(_g) => {}
-                    Err(_err) => {
-                        panic!("Error writing to parquet file: {}", _err.to_string());
-                    }
-                }
+            for batch in record_batches {
+                writer.write(&batch).expect("Error writing to parquet file");
             }
 
-            // tombstone by naming .tombstone and moving to ./done dir
+            // Rename the processed WAL file to a tombstone file
             let tombstone_path = format!("{}/ingest_buffer/done/{}.tombstone", data_dir, Helpers::random_str(32));
             fs::rename(&wal_file.path, tombstone_path).unwrap();
-
         }
 
         writer.close().unwrap();
-
-
         let parquet_path = temp_file_path.replace(".temp", ".parquet");
         fs::rename(&temp_file_path, parquet_path).unwrap();
-
     }
 
     async fn apply_sql_on_ipc_stream(record_batches: Vec<arrow::array::RecordBatch>, sql: &str) -> Result<Vec<arrow::array::RecordBatch>, Box<dyn std::error::Error>> {
@@ -483,6 +477,8 @@ impl WalFile {
 
         reader.seek(io::SeekFrom::Start(0)).unwrap();
 
+        println!("Reading offset from WAL file: {}", self.path.to_str().unwrap());
+
         let mut offset_size = [0u8; 8];
         reader.read_exact(&mut offset_size).expect("Failed to read offset size from WAL");
 
@@ -515,7 +511,8 @@ impl WalFile {
         writer.seek(io::SeekFrom::Start(0))?;
 
         let bin_offset = bincode::serialize(&self.offset).unwrap();
-        let offset_size = bin_offset.len() as u64;
+
+        let offset_size: u64 = bin_offset.len() as u64;
 
         writer.write_all(&offset_size.to_le_bytes())?;
         writer.write_all(&bin_offset)?;
@@ -533,6 +530,8 @@ impl WalFile {
         }
 
         stream_writer.finish()?;
+
+        self.bytes += size as u64;
 
         Ok(size)
     }
