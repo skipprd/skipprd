@@ -168,7 +168,11 @@ impl Buffers {
             wal_file_partition.updated_at = SystemTime::now();
             wal_file_partition.files.push(wal_file);
 
-            wal_file_partition.check_wal_rotate();
+            let rotated = wal_file_partition.check_wal_rotate();
+
+            if rotated {
+                index_lock.remove(&(namespace.clone(), partition.clone(), time.clone()));
+            }
 
         }
 
@@ -309,11 +313,15 @@ impl WalFilePartition {
             > ttl as u64
     }
 
-    pub fn check_wal_rotate(&mut self) {
+    pub fn check_wal_rotate(&mut self) -> bool {
         if self.is_file_size_exceeded() || self.is_file_time_exceeded() {
             println!("Rotating WAL file: {} Bytes: {}, Files {}", self.namespace, self.bytes, self.files.len());
             self.compact_to_parquet();
+
+            return true
         }
+
+        false
     }
 
     fn compact_to_parquet(&mut self) {
@@ -391,7 +399,8 @@ impl WalFilePartition {
             writer.close().unwrap();
         }
 
-        self.files.clear();
+        // self.files.clear();
+        self.updated_at = SystemTime::now();
 
         let parquet_path = temp_file_path.replace(".temp", ".parquet");
         fs::rename(&temp_file_path, parquet_path).unwrap();
@@ -419,6 +428,7 @@ impl WalFilePartition {
         let results = df.collect().await?;
 
         Ok(results)
+
     }
 }
 
