@@ -332,24 +332,22 @@ impl WalFilePartition {
             None,
         );
 
-        let temp_file_path = format!("{}/{}/{}-{}.temp", data_dir, "output_buffer", output_file_name, Helpers::random_str(32));
+        // let write_file = OpenOptions::new()
+        //     .create(true)
+        //     .write(true)
+        //     .open(&temp_file_path)
+        //     .unwrap();
 
-        let write_file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(&temp_file_path)
-            .unwrap();
+        // let props = WriterProperties::builder()
+        //     .set_dictionary_enabled(false)
+        //     .set_encoding(parquet::basic::Encoding::PLAIN)
+        //     .set_compression(Compression::SNAPPY)
+        //     .build();
 
-        let props = WriterProperties::builder()
-            .set_dictionary_enabled(false)
-            .set_encoding(parquet::basic::Encoding::PLAIN)
-            .set_compression(Compression::SNAPPY)
-            .build();
-
-        let schema = ARROW_SCHEMA.read().get(&self.namespace).unwrap().clone();
+        // let schema = ARROW_SCHEMA.read().get(&self.namespace).unwrap().clone();
         // let wal_file = self.files.last_mut().unwrap();
         // let schema = wal_file.read_schema_from_stream().expect("Failed to read schema from WAL file");
-        let mut writer = ArrowWriter::try_new(write_file, schema, Some(props)).unwrap();
+        // let mut writer = ArrowWriter::try_new(write_file, schema, Some(props)).unwrap();
 
         for wal_file in self.files.iter_mut() {
 
@@ -357,7 +355,7 @@ impl WalFilePartition {
                 continue;
             }
 
-            // let temp_file_path = format!("{}/{}/{}-{}.temp", data_dir, "output_buffer", output_file_name, Helpers::random_str(32));
+            let temp_file_path = format!("{}/{}/{}-{}.temp", data_dir, "output_buffer", output_file_name, Helpers::random_str(32));
 
             let record_batches = wal_file.read_from_stream().unwrap();
 
@@ -374,20 +372,20 @@ impl WalFilePartition {
             //     batches = batches;
             // }
 
-            // let write_file = OpenOptions::new()
-            //     .create(true)
-            //     .write(true)
-            //     .open(&temp_file_path)
-            //     .unwrap();
-            //
-            // let props = WriterProperties::builder()
-            //     .set_dictionary_enabled(false)
-            //     .set_encoding(parquet::basic::Encoding::PLAIN)
-            //     .set_compression(Compression::SNAPPY)
-            //     .build();
+            let write_file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .open(&temp_file_path)
+                .unwrap();
 
-            // let schema = wal_file.read_schema_from_stream().expect("Failed to read schema from WAL file");
-            // let mut writer = ArrowWriter::try_new(write_file, schema, Some(props)).unwrap();
+            let props = WriterProperties::builder()
+                .set_dictionary_enabled(false)
+                .set_encoding(parquet::basic::Encoding::PLAIN)
+                .set_compression(Compression::SNAPPY)
+                .build();
+
+            let schema = wal_file.read_schema_from_stream().expect("Failed to read schema from WAL file");
+            let mut writer = ArrowWriter::try_new(write_file, schema, Some(props)).unwrap();
 
             for batch in record_batches {
                 writer.write(&batch).expect("Error writing to parquet file");
@@ -397,18 +395,12 @@ impl WalFilePartition {
             let tombstone_path = format!("{}/ingest_buffer/done/{}.tombstone", data_dir, Helpers::random_str(32));
             fs::rename(&wal_file.path, tombstone_path).unwrap();
 
-            // writer.close().unwrap();
-            //
-            // let parquet_path = temp_file_path.replace(".temp", ".parquet");
-            // fs::rename(&temp_file_path, parquet_path).unwrap();
+            writer.close().unwrap();
+
+            let parquet_path = temp_file_path.replace(".temp", ".parquet");
+            fs::rename(&temp_file_path, parquet_path).unwrap();
 
         }
-
-        writer.close().unwrap();
-
-        let parquet_path = temp_file_path.replace(".temp", ".parquet");
-        fs::rename(&temp_file_path, parquet_path).unwrap();
-
 
         // self.files.clear();
         // self.updated_at = SystemTime::now();
