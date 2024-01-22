@@ -163,7 +163,7 @@ impl Buffers {
             // wal_file_partition.bytes += wal_file.bytes;
             // println!("Wrote records to WAL file: {}", wal_file.path.to_str().unwrap());
 
-            wal_file.file.flush()?;
+            wal_file.flush()?;
 
             wal_file_partition.updated_at = SystemTime::now();
             wal_file_partition.files.push(wal_file);
