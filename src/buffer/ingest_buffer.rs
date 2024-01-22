@@ -125,7 +125,8 @@ impl Buffers {
 
             let mut wal_file = WalFile::new(namespace, partition, *time, offset).unwrap();
 
-            let wal_file_partition = index.index.entry((namespace.clone(), partition.clone(), *time)).or_insert_with(
+            let mut index_lock = index.index.write();
+            let wal_file_partition = index_lock.entry((namespace.clone(), partition.clone(), *time)).or_insert_with(
                 || WalFilePartition {
                     files: Vec::new(),
                     namespace: namespace.clone(),
@@ -178,7 +179,7 @@ impl Buffers {
     pub fn force_compact_all_partitions() {
         let mut wal_index = WAL_INDEX.write(); // Acquire read lock on WAL_INDEX
 
-        for (_key, wal_partition) in wal_index.index.iter_mut() {
+        for (_key, wal_partition) in wal_index.index.write().iter_mut() {
             // let mut wal_partition = wal_partition.clone();
             wal_partition.compact_to_parquet();
         }
@@ -186,16 +187,16 @@ impl Buffers {
 
 }
 
-#[derive(Default, Debug)]
+// #[derive(Default, Debug)]
 pub struct WalIndex {
     // Maps namespace, partition, and time to WAL file information
-    index: HashMap<(String, String, i64), WalFilePartition>,
+    index: TimedRwLock<HashMap<(String, String, i64), WalFilePartition>>,
 }
 
 impl WalIndex {
     fn new() -> Self {
         WalIndex {
-            index: HashMap::new(),
+            index: TimedRwLock::new("wal_index".to_string(), HashMap::new()),
         }
     }
 
@@ -232,7 +233,8 @@ impl WalIndex {
 
             let partition_key = (wal_file.namespace.clone(), wal_file.partition.clone(), wal_file.time.clone());
 
-            let wal_file_partition = self.index.entry(partition_key).or_insert_with(|| WalFilePartition {
+            let mut index_lock = self.index.write();
+            let wal_file_partition = index_lock.entry(partition_key).or_insert_with(|| WalFilePartition {
                 files: Vec::new(),
                 namespace: wal_file.namespace.clone(),
                 partition: wal_file.partition.clone(),
@@ -324,22 +326,22 @@ impl WalFilePartition {
         );
 
         let temp_file_path = format!("{}/{}/{}-{}.temp", data_dir, "output_buffer", output_file_name, Helpers::random_str(32));
-        let write_file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(&temp_file_path)
-            .unwrap();
+        // let write_file = OpenOptions::new()
+        //     .create(true)
+        //     .write(true)
+        //     .open(&temp_file_path)
+        //     .unwrap();
 
-        let props = WriterProperties::builder()
-            .set_dictionary_enabled(false)
-            .set_encoding(parquet::basic::Encoding::PLAIN)
-            .set_compression(Compression::SNAPPY)
-            .build();
+        // let props = WriterProperties::builder()
+        //     .set_dictionary_enabled(false)
+        //     .set_encoding(parquet::basic::Encoding::PLAIN)
+        //     .set_compression(Compression::SNAPPY)
+        //     .build();
 
-        let schema = ARROW_SCHEMA.read().get(&self.namespace).unwrap().clone();
+        // let schema = ARROW_SCHEMA.read().get(&self.namespace).unwrap().clone();
         // let wal_file = self.files.last_mut().unwrap();
         // let schema = wal_file.read_schema_from_stream().expect("Failed to read schema from WAL file");
-        let mut writer = ArrowWriter::try_new(write_file, schema, Some(props)).unwrap();
+        // let mut writer = ArrowWriter::try_new(write_file, schema, Some(props)).unwrap();
 
         for wal_file in self.files.iter_mut() {
 
@@ -362,6 +364,21 @@ impl WalFilePartition {
             //     batches = batches;
             // }
 
+            let write_file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .open(&temp_file_path)
+                .unwrap();
+
+            let props = WriterProperties::builder()
+                .set_dictionary_enabled(false)
+                .set_encoding(parquet::basic::Encoding::PLAIN)
+                .set_compression(Compression::SNAPPY)
+                .build();
+
+            let schema = wal_file.read_schema_from_stream().expect("Failed to read schema from WAL file");
+            let mut writer = ArrowWriter::try_new(write_file, schema, Some(props)).unwrap();
+
             for batch in record_batches {
                 writer.write(&batch).expect("Error writing to parquet file");
             }
@@ -369,9 +386,12 @@ impl WalFilePartition {
             // Rename the processed WAL file to a tombstone file
             let tombstone_path = format!("{}/ingest_buffer/done/{}.tombstone", data_dir, Helpers::random_str(32));
             fs::rename(&wal_file.path, tombstone_path).unwrap();
+
+            writer.close().unwrap();
         }
 
-        writer.close().unwrap();
+        self.files.clear();
+
         let parquet_path = temp_file_path.replace(".temp", ".parquet");
         fs::rename(&temp_file_path, parquet_path).unwrap();
     }
