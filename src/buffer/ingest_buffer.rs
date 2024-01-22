@@ -158,8 +158,9 @@ impl Buffers {
 
             // let mut ingest_batch = WalRecordBatches::new(offset, record_batches);
 
-            wal_file_partition.bytes += wal_file.write_to_stream(&record_batches)? as u64;
+            wal_file_partition.bytes += wal_file.write_to_stream(&record_batches)?;
 
+            // wal_file_partition.bytes += wal_file.bytes;
             // println!("Wrote records to WAL file: {}", wal_file.path.to_str().unwrap());
 
             wal_file.file.flush()?;
@@ -177,7 +178,7 @@ impl Buffers {
     }
 
     pub fn force_compact_all_partitions() {
-        let mut wal_index = WAL_INDEX.write(); // Acquire read lock on WAL_INDEX
+        let wal_index = WAL_INDEX.write(); // Acquire read lock on WAL_INDEX
 
         for (_key, wal_partition) in wal_index.index.write().iter_mut() {
             // let mut wal_partition = wal_partition.clone();
@@ -543,7 +544,7 @@ impl WalFile {
         Ok(record_batches)
     }
 
-    pub fn write_to_stream(&mut self, record_batches: &[RecordBatch]) -> Result<usize, ArrowError> {
+    pub fn write_to_stream(&mut self, record_batches: &[RecordBatch]) -> Result<u64, ArrowError> {
         // let writer = self.file.as_mut().ok_or(ArrowError::IoError("Can't write to WAL file".to_string(), io::Error::new(io::ErrorKind::NotFound, "File not found")))?;
         let mut writer = io::BufWriter::new(&self.file);
 
@@ -558,21 +559,21 @@ impl WalFile {
 
         writer.seek(io::SeekFrom::End(0))?;
 
-        let mut size: usize = 0;
+        // let mut size: usize = 0;
         let codec = Some(CompressionType::LZ4_FRAME);
         let options = IpcWriteOptions::default().try_with_compression(codec)?;
 
         let mut stream_writer = StreamWriter::try_new_with_options(writer, &record_batches[0].schema(), options)?;
         for batch in record_batches {
-            size += batch.get_array_memory_size() / 10; // @todo - approximate 10x compression ratio
+            // size += batch.get_array_memory_size() / 10; // @todo - approximate 10x compression ratio
             stream_writer.write(batch).expect("Failed to write record batch to stream writer");
         }
 
         stream_writer.finish()?;
 
-        self.bytes += size as u64;
+        self.bytes += self.file.metadata().unwrap().len();
 
-        Ok(size)
+        Ok(self.bytes)
     }
 
     fn generate_wal_file_path(namespace: &str, partition: &str, time: Option<i64>) -> String {
