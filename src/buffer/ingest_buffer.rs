@@ -125,8 +125,7 @@ impl Buffers {
 
             let mut wal_file = WalFile::new(namespace, partition, *time, offset).unwrap();
 
-            let mut index_lock = index.index.write();
-            let wal_file_partition = index_lock.entry((namespace.clone(), partition.clone(), time.clone())).or_insert_with(
+            let wal_file_partition = index.index.entry((namespace.clone(), partition.clone(), time.clone())).or_insert_with(
                 || WalFilePartition {
                     files: Vec::new(),
                     namespace: namespace.clone(),
@@ -171,7 +170,7 @@ impl Buffers {
             let rotated = wal_file_partition.check_wal_rotate();
 
             if rotated {
-                index_lock.remove(&(namespace.clone(), partition.clone(), time.clone()));
+                index.index.remove(&(namespace.clone(), partition.clone(), time.clone()));
             }
 
         }
@@ -182,9 +181,9 @@ impl Buffers {
     }
 
     pub fn force_compact_all_partitions() {
-        let wal_index = WAL_INDEX.write(); // Acquire read lock on WAL_INDEX
+        let mut wal_index = WAL_INDEX.write(); // Acquire read lock on WAL_INDEX
 
-        for (_key, wal_partition) in wal_index.index.write().iter_mut() {
+        for (_key, wal_partition) in wal_index.index.iter_mut() {
             // let mut wal_partition = wal_partition.clone();
             wal_partition.compact_to_parquet();
         }
@@ -195,13 +194,13 @@ impl Buffers {
 // #[derive(Default, Debug)]
 pub struct WalIndex {
     // Maps namespace, partition, and time to WAL file information
-    index: TimedRwLock<HashMap<(String, String, Option<i64>), WalFilePartition>>,
+    index: HashMap<(String, String, Option<i64>), WalFilePartition>,
 }
 
 impl WalIndex {
     fn new() -> Self {
         WalIndex {
-            index: TimedRwLock::new("wal_index".to_string(), HashMap::new()),
+            index: HashMap::new(),
         }
     }
 
@@ -238,8 +237,7 @@ impl WalIndex {
 
             let partition_key = (wal_file.namespace.clone(), wal_file.partition.clone(), wal_file.time.clone());
 
-            let mut index_lock = self.index.write();
-            let wal_file_partition = index_lock.entry(partition_key).or_insert_with(|| WalFilePartition {
+            let wal_file_partition = self.index.entry(partition_key).or_insert_with(|| WalFilePartition {
                 files: Vec::new(),
                 namespace: wal_file.namespace.clone(),
                 partition: wal_file.partition.clone(),
