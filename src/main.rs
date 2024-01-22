@@ -866,7 +866,7 @@ async fn sync() {
                 }
 
                 // exit(0);
-            }, periodic::Every::new(Duration::from_secs(rand::thread_rng().gen_range(15..60))),
+            }, periodic::Every::new(Duration::from_secs(rand::thread_rng().gen_range(60..90))),
         );
     }
     out_pnanner.add(
