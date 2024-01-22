@@ -332,7 +332,6 @@ impl WalFilePartition {
             None,
         );
 
-        let temp_file_path = format!("{}/{}/{}-{}.temp", data_dir, "output_buffer", output_file_name, Helpers::random_str(32));
         // let write_file = OpenOptions::new()
         //     .create(true)
         //     .write(true)
@@ -355,6 +354,8 @@ impl WalFilePartition {
             if wal_file.bytes == 0 {
                 continue;
             }
+
+            let temp_file_path = format!("{}/{}/{}-{}.temp", data_dir, "output_buffer", output_file_name, Helpers::random_str(32));
 
             let record_batches = wal_file.read_from_stream().unwrap();
 
@@ -395,13 +396,16 @@ impl WalFilePartition {
             fs::rename(&wal_file.path, tombstone_path).unwrap();
 
             writer.close().unwrap();
+
+            let parquet_path = temp_file_path.replace(".temp", ".parquet");
+            fs::rename(&temp_file_path, parquet_path).unwrap();
+
         }
 
         // self.files.clear();
-        self.updated_at = SystemTime::now();
+        // self.updated_at = SystemTime::now();
 
-        let parquet_path = temp_file_path.replace(".temp", ".parquet");
-        fs::rename(&temp_file_path, parquet_path).unwrap();
+
     }
 
     async fn apply_sql_on_ipc_stream(record_batches: Vec<arrow::array::RecordBatch>, sql: &str) -> Result<Vec<arrow::array::RecordBatch>, Box<dyn std::error::Error>> {
