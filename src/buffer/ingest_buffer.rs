@@ -95,12 +95,12 @@ impl Buffers {
 
     pub fn flush(&mut self) -> Result<(), ArrowError> {
 
-        let mut buffers: HashMap<(String, String, i64), Vec<IngestBufferBatch>> = HashMap::new();
+        let mut buffers: HashMap<(String, String, Option<i64>), Vec<IngestBufferBatch>> = HashMap::new();
 
         // Merge record batches into a partitions by namespace, partition, and time
         for ingest_buffer_batch in self.buf.iter_mut() {
             for record in ingest_buffer_batch.records.iter_mut() {
-                let key = (record.namespace.clone(), record.partition.clone(), record.time.unwrap_or(0));
+                let key = (record.namespace.clone(), record.partition.clone(), record.time);
 
                 let buf = buffers.entry(key).or_insert_with(|| Vec::new());
 
@@ -126,12 +126,12 @@ impl Buffers {
             let mut wal_file = WalFile::new(namespace, partition, *time, offset).unwrap();
 
             let mut index_lock = index.index.write();
-            let wal_file_partition = index_lock.entry((namespace.clone(), partition.clone(), *time)).or_insert_with(
+            let wal_file_partition = index_lock.entry((namespace.clone(), partition.clone(), time.clone())).or_insert_with(
                 || WalFilePartition {
                     files: Vec::new(),
                     namespace: namespace.clone(),
                     partition: partition.clone(),
-                    time: *time,
+                    time: time.clone(),
                     updated_at: SystemTime::now(),
                     bytes: 0,
                 }
@@ -190,7 +190,7 @@ impl Buffers {
 // #[derive(Default, Debug)]
 pub struct WalIndex {
     // Maps namespace, partition, and time to WAL file information
-    index: TimedRwLock<HashMap<(String, String, i64), WalFilePartition>>,
+    index: TimedRwLock<HashMap<(String, String, Option<i64>), WalFilePartition>>,
 }
 
 impl WalIndex {
@@ -283,7 +283,7 @@ struct WalFilePartition {
     files: Vec<WalFile>,
     pub(crate) namespace: String,
     pub(crate) partition: String,
-    pub(crate) time: i64,
+    pub(crate) time: Option<i64>,
     updated_at: SystemTime,
     bytes: u64,
 }
@@ -321,7 +321,7 @@ impl WalFilePartition {
             "output",
             Some(&self.namespace),
             Some(&self.partition),
-            Some(self.time),
+            self.time,
             None,
         );
 
@@ -426,7 +426,7 @@ pub struct WalFile {
     pub(crate) path: PathBuf,
     pub(crate) namespace: String,
     pub(crate) partition: String,
-    pub(crate) time: i64,
+    pub(crate) time: Option<i64>,
     pub(crate) bytes: u64,
     pub(crate) file: File,
     pub(crate) updated_at: SystemTime,
@@ -434,7 +434,7 @@ pub struct WalFile {
 }
 
 impl WalFile {
-    pub fn new(namespace: &str, partition: &str, time: i64, offset: OffsetKeySerialize) -> io::Result<Self> {
+    pub fn new(namespace: &str, partition: &str, time: Option<i64>, offset: OffsetKeySerialize) -> io::Result<Self> {
 
         let path_str = Self::generate_wal_file_path(namespace, partition, time);
         // println!("Creating WAL file: {}", path_str);
@@ -461,6 +461,7 @@ impl WalFile {
         let namespace = BufferChunker::decode_file_namespace(path.to_str().unwrap());
         let partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
         let time = BufferChunker::decode_file_time(path.to_str().unwrap());
+        let time = if time > 0 { None } else { Some(time) };
 
         let updated_at = match file.metadata() {
             Ok(metadata) => metadata.modified().unwrap_or_else(|_err| SystemTime::now()),
@@ -574,7 +575,7 @@ impl WalFile {
         Ok(size)
     }
 
-    fn generate_wal_file_path(namespace: &str, partition: &str, time: i64) -> String {
+    fn generate_wal_file_path(namespace: &str, partition: &str, time: Option<i64>) -> String {
         let data_dir = Config::get_data_dir();
         let output_dir = &format!("{}/ingest_buffer", data_dir);
 
@@ -582,7 +583,7 @@ impl WalFile {
             "ingest",
             Some(namespace),
             Some(partition),
-            Some(time),
+            time,
             None,
         );
 
