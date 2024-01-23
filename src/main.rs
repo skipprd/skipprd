@@ -566,7 +566,6 @@ async fn sync() {
 
     let now = Arc::new(Mutex::new(Instant::now()));
 
-    let _offsets_clone = offsets.clone();
     // let logger_clone = Arc::clone(&logger);
 
     /**
@@ -630,6 +629,8 @@ async fn sync() {
 
     // let logger_clone = Arc::clone(&logger);
 
+    let offsets_clone = offsets.clone();
+
     thread::spawn(move || {
         for sig in signals.forever() {
 
@@ -656,6 +657,7 @@ async fn sync() {
 
             if !RUNNING.read().load(Ordering::SeqCst) {
                 println!("Received another Ctrl+C signal - terminating immediately, this may result in data loss...");
+                offsets_clone.flush();
                 std::process::exit(0);
             }
 
@@ -663,7 +665,7 @@ async fn sync() {
                 RUNNING.write().store(false, Ordering::SeqCst);
             }
 
-            // let offsets_clone = offsets_clone.clone();
+            let offsets_clone = offsets_clone.clone();
             // let logger_clone = Arc::clone(&logger_clone);
 
             thread::spawn(move || {
@@ -695,7 +697,7 @@ async fn sync() {
 
                 // Buffers::force_flush();
 
-                // offsets_clone.flush();
+                offsets_clone.flush();
                 // println!("Flushed offsets");
 
                 // let _metrics_lock = match METRICS.read() {
