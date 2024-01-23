@@ -853,6 +853,8 @@ async fn sync() {
 
     // let metrics_clone = metrics.clone();
 
+    let offsets_clone = offsets.clone();
+
     if Config::get_pipeline_chaos_mode() {
         out_pnanner.add(
             move || {
@@ -889,7 +891,8 @@ async fn sync() {
                         }
 
                         // BufferChunker::rotate_buffers(false);
-                        Buffers::compact_all_partitions(false);
+
+                        Buffers::compact_all_partitions(false, offsets_clone.clone());
 
                         if Config::get_pipeline_config().output.is_some() {
                             {
@@ -936,7 +939,8 @@ async fn sync() {
 
     }
 
-    Buffers::compact_all_partitions(true);
+    let offsets_clone = offsets.clone();
+    Buffers::compact_all_partitions(true, offsets_clone);
 
     // RUNNING.write().unwrap().store(false, Ordering::SeqCst); // the prevents metrics from printing while shutting down, BUT also prevents output serialisatin
 
