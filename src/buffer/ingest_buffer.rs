@@ -180,12 +180,26 @@ impl Buffers {
         Ok(())
     }
 
-    pub fn compact_all_partitions(force: bool) {
+    pub fn compact_all_partitions(force: bool, offsets_db: Arc<Offsets>) {
         let mut wal_index = WAL_INDEX.write();
 
         let mut compacted_index_partitions = Vec::new();
 
         for (_key, wal_partition) in wal_index.index.iter_mut() {
+
+            // ensure offsets committed
+            for wal_file in wal_partition.files.iter_mut() {
+                let offset_key = OffsetKey {
+                    namespace: wal_file.offset.namespace.clone(),
+                    partition: wal_file.offset.partition.clone(),
+                };
+
+                offsets_db.insert(&offset_key, OffsetTypes::Line, wal_file.offset.position);
+
+            }
+
+            offsets_db.flush();
+
 
             if force {
                 wal_partition.compact_to_parquet();
