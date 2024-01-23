@@ -858,11 +858,12 @@ async fn sync() {
 
                     println!("Chaos mode throwing a random exit. You can disable this test mode buy removing CHAOS_MODE flag or setting to 'no'");
 
-                    let pid = process::id() as i32; // or replace with the PID of the target process
-
-                    unsafe {
-                        kill(Pid::from_raw(pid), Signal::SIGTERM).unwrap();
-                    }
+                    // let pid = process::id() as i32; // or replace with the PID of the target process
+                    //
+                    // unsafe {
+                    //     kill(Pid::from_raw(pid), Signal::SIGKILL).unwrap();
+                    // }
+                    std::process::exit(0);
                 }
 
                 // exit(0);
