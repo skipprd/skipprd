@@ -167,11 +167,11 @@ impl Buffers {
             wal_file_partition.updated_at = SystemTime::now();
             wal_file_partition.files.push(wal_file);
 
-            let rotated = wal_file_partition.check_wal_rotate();
-
-            if rotated {
-                index.index.remove(&(namespace.clone(), partition.clone(), time.clone()));
-            }
+            // let rotated = wal_file_partition.check_wal_rotate();
+            //
+            // if rotated {
+            //     index.index.remove(&(namespace.clone(), partition.clone(), time.clone()));
+            // }
 
         }
 
@@ -180,12 +180,26 @@ impl Buffers {
         Ok(())
     }
 
-    pub fn force_compact_all_partitions() {
-        let mut wal_index = WAL_INDEX.write(); // Acquire read lock on WAL_INDEX
+    pub fn compact_all_partitions(force: bool) {
+        let mut wal_index = WAL_INDEX.write();
+
+        let mut compacted_index_partitions = Vec::new();
 
         for (_key, wal_partition) in wal_index.index.iter_mut() {
-            // let mut wal_partition = wal_partition.clone();
-            wal_partition.compact_to_parquet();
+
+            if force {
+                wal_partition.compact_to_parquet();
+            } else {
+                let rotated = wal_partition.check_wal_rotate();
+
+                if rotated {
+                   compacted_index_partitions.push((wal_partition.namespace.clone(), wal_partition.partition.clone(), wal_partition.time.clone()));
+                }
+            }
+        }
+
+        for (namespace, partition, time) in compacted_index_partitions {
+            wal_index.index.remove(&(namespace, partition, time));
         }
     }
 
