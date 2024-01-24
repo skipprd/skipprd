@@ -862,6 +862,9 @@ async fn sync() {
 
                     println!("Chaos mode throwing a random exit. You can disable this test mode buy removing CHAOS_MODE flag or setting to 'no'");
 
+                    let metrics_lock = METRICS.read();
+                    println!("Messages Total: {}", metrics_lock.messages_total);
+
                     // let pid = process::id() as i32; // or replace with the PID of the target process
                     //
                     // unsafe {

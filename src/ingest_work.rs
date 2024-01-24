@@ -529,7 +529,7 @@ impl Ingest {
                     j += 1;
 
                     // offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, batch_line);
-                    batch_offset_lines.insert(ingest_batch.offset_key.clone(), batch_line);
+
 
                 }
                 // else {
@@ -538,7 +538,10 @@ impl Ingest {
 
             }
 
+
             buffers.write().write(buf);
+
+            batch_offset_lines.insert(ingest_batch.offset_key.clone(), batch_line);
 
             // offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
             batch_offset_files.insert(ingest_batch.offset_key.clone(), 1);
