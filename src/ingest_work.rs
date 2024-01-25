@@ -534,8 +534,8 @@ impl Ingest {
                         IngestBufferBatch {
                             offset: OffsetKeySerialize {
                                 position: 0,
-                                source_namespace: skpr_namespace.clone(),
-                                source_partition: skpr_partition.clone(),
+                                source_namespace: ingest_batch.offset_key.namespace.clone(),
+                                source_partition: ingest_batch.offset_key.partition.clone(),
                             },
                             namespace: skpr_namespace.clone(),
                             partition: skpr_partition.clone(),
