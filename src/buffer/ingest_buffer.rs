@@ -50,8 +50,8 @@ lazy_static! {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OffsetKeySerialize {
-    pub(crate) namespace: String,
-    pub(crate) partition: String,
+    pub(crate) source_namespace: String,
+    pub(crate) source_partition: String,
     pub(crate) position: u64,
 }
 
@@ -65,53 +65,35 @@ pub struct IngestRecord {
 
 pub struct IngestBufferBatch {
     pub(crate) offset: OffsetKeySerialize,
+    pub(crate) namespace: String,
+    pub(crate) partition: String,
+    pub(crate) time: Option<i64>,
     pub(crate) records: Vec<IngestRecord>,
 }
 
 pub struct Buffers {
-    buf: Vec<IngestBufferBatch>,
+    buf: HashMap<(String, String, Option<i64>), IngestBufferBatch>,
     index: WalIndex
 }
 
 impl Buffers {
+
     pub fn new() -> Self {
         Buffers {
-            buf: vec![IngestBufferBatch {
-                offset: OffsetKeySerialize {
-                    namespace: "".to_string(),
-                    partition: "".to_string(),
-                    position: 0,
-                },
-                records: Vec::new(),
-            }],
+            buf: HashMap::new(),
             index: WalIndex::new(),
         }
     }
 
-    pub fn write(&mut self, ingest_buffer_batch: IngestBufferBatch) {
-        self.buf.push(ingest_buffer_batch);
+
+    pub fn write(&mut self, ingest_buffer_batch: HashMap<(String, String, Option<i64>), IngestBufferBatch>) {
+        for batch in ingest_buffer_batch {
+            self.buf.insert(batch.0, batch.1);
+        }
 
     }
 
     pub fn flush(&mut self) -> Result<(), ArrowError> {
-
-        let mut buffers: HashMap<(String, String, Option<i64>), Vec<IngestBufferBatch>> = HashMap::new();
-
-        // Merge record batches into a partitions by namespace, partition, and time
-        for ingest_buffer_batch in self.buf.iter_mut() {
-            for record in ingest_buffer_batch.records.iter_mut() {
-                let key = (record.namespace.clone(), record.partition.clone(), record.time);
-
-                let buf = buffers.entry(key).or_insert_with(|| Vec::new());
-
-                buf.push(IngestBufferBatch {
-                    offset: ingest_buffer_batch.offset.clone(),
-                    records: vec![record.clone()],
-                });
-            }
-        }
-
-        self.buf.clear();
 
         let arrow_schema_guard = ARROW_SCHEMA.read();
 
@@ -119,38 +101,42 @@ impl Buffers {
 
         let mut rows = 0;
 
-        for ((namespace, partition, time), ingest_buffer_batches) in buffers.iter_mut() {
+        for ((namespace, partition, time), ingest_buffer_batch) in self.buf.iter_mut() {
 
-            let offset = ingest_buffer_batches.last().unwrap().offset.clone();
+            let mut wal_file = WalFile::new(
+                namespace,
+                partition,
+                *time,
+                ingest_buffer_batch.offset.clone(),
+            ).unwrap();
 
-            let mut wal_file = WalFile::new(namespace, partition, *time, offset).unwrap();
-
-            let wal_file_partition = index.index.entry((namespace.clone(), partition.clone(), time.clone())).or_insert_with(
+            let wal_file_partition = index.index.entry((
+                ingest_buffer_batch.namespace.clone(),
+                ingest_buffer_batch.partition.clone(),
+                ingest_buffer_batch.time.clone()
+           )).or_insert_with(
                 || WalFilePartition {
                     files: Vec::new(),
-                    namespace: namespace.clone(),
-                    partition: partition.clone(),
-                    time: time.clone(),
+                    namespace: ingest_buffer_batch.namespace.clone(),
+                    partition: ingest_buffer_batch.partition.clone(),
+                    time: ingest_buffer_batch.time.clone(),
                     updated_at: SystemTime::now(),
                     bytes: 0,
                 }
             );
 
-            let arrow_schema = arrow_schema_guard.get(namespace).unwrap().clone();
+            let arrow_schema = arrow_schema_guard.get(&ingest_buffer_batch.namespace).unwrap().clone();
 
             let mut decoder = ReaderBuilder::new(arrow_schema).build_decoder().unwrap();
 
             let mut record_batches = Vec::new();
 
             // @todo - faster to build a vec and pass to decoder?
-            for ingest_buffer_batch in ingest_buffer_batches.iter_mut() {
 
-                rows += ingest_buffer_batch.records.len();
+            rows += ingest_buffer_batch.records.len();
 
-                let json_values = ingest_buffer_batch.records.iter().map(|record| &record.record).collect::<Vec<&Value>>();
-                decoder.serialize(&json_values).unwrap();
-
-            }
+            let json_values = ingest_buffer_batch.records.iter().map(|record| &record.record).collect::<Vec<&Value>>();
+            decoder.serialize(&json_values).unwrap();
 
             record_batches.push(decoder.flush().unwrap().unwrap());
 
@@ -175,6 +161,8 @@ impl Buffers {
 
         }
 
+        self.buf.clear();
+
         // println!("Wrote {} rows to WAL", rows);
 
         Ok(())
@@ -188,17 +176,17 @@ impl Buffers {
         for (_key, wal_partition) in wal_index.index.iter_mut() {
 
             // ensure offsets committed
-            for wal_file in wal_partition.files.iter_mut() {
-                let offset_key = OffsetKey {
-                    namespace: wal_file.offset.namespace.clone(),
-                    partition: wal_file.offset.partition.clone(),
-                };
-
-                offsets_db.insert(&offset_key, OffsetTypes::Line, wal_file.offset.position);
-
-            }
-
-            offsets_db.flush();
+            // for wal_file in wal_partition.files.iter_mut() {
+            //     let offset_key = OffsetKey {
+            //         namespace: wal_file.offset.source_namespace.clone(),
+            //         partition: wal_file.offset.source_partition.clone(),
+            //     };
+            //
+            //     offsets_db.insert(&offset_key, OffsetTypes::Line, wal_file.offset.position);
+            //
+            // }
+            //
+            // offsets_db.flush();
 
 
             if force {
@@ -212,9 +200,9 @@ impl Buffers {
             }
         }
 
-        for (namespace, partition, time) in compacted_index_partitions {
-            wal_index.index.remove(&(namespace, partition, time));
-        }
+        // for (namespace, partition, time) in compacted_index_partitions {
+        //     wal_index.index.remove(&(namespace, partition, time));
+        // }
     }
 
 }
@@ -288,8 +276,8 @@ impl WalIndex {
             // ensure offsets committed
             for wal_file in wal_partition.files.iter_mut() {
                 let offset_key = OffsetKey {
-                    namespace: wal_file.offset.namespace.clone(),
-                    partition: wal_file.offset.partition.clone(),
+                    namespace: wal_file.offset.source_namespace.clone(),
+                    partition: wal_file.offset.source_partition.clone(),
                 };
 
                 offsets_db.insert(&offset_key, OffsetTypes::Line, wal_file.offset.position);
