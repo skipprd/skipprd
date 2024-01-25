@@ -575,7 +575,7 @@ impl Ingest {
         });
 
         batch_offset_files.iter().for_each(|(offset_key, i)| {
-            offset_db_clone.insert(offset_key, OffsetTypes::Closed, *i);
+            offset_db_clone.insert(offset_key, OffsetTypes::Closed, 1);
         });
 
         offset_db_clone.flush();
