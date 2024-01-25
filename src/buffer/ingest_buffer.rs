@@ -277,11 +277,11 @@ impl WalIndex {
             count += 1;
         }
 
+        println!("Syncing offsets to DB");
+
         for wal_partition in self.index.values_mut() {
             wal_partition.files.sort_by(|a, b| a.file.metadata().unwrap().created().unwrap().cmp(&b.file.metadata().unwrap().created().unwrap()));
         }
-
-        println!("Syncing offset to DB");
 
         for (_key, wal_partition) in self.index.iter_mut() {
 
