@@ -372,7 +372,8 @@ impl Ingest {
 
                 if has_offsets.is_none()
                     || current_line_offset.is_none()
-                    || Some(true) == offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Line, batch_line)
+                    // || Some(true) == offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Line, batch_line)
+                    || Some(true) == has_offsets
                 {
 
                     i += 1;
