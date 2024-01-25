@@ -293,6 +293,7 @@ impl WalIndex {
                 };
 
                 offsets_db.insert(&offset_key, OffsetTypes::Line, wal_file.offset.position);
+                offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
             }
         }
 
