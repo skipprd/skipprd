@@ -256,13 +256,6 @@ impl WalIndex {
 
             let wal_file = WalFile::from_path(&file_path)?;
 
-            let offset_key: OffsetKey = OffsetKey {
-                namespace: wal_file.offset.namespace.clone(),
-                partition: wal_file.offset.partition.clone(),
-            };
-
-            offsets_db.insert(&offset_key, OffsetTypes::Line, wal_file.offset.position);
-
             let partition_key = (wal_file.namespace.clone(), wal_file.partition.clone(), wal_file.time.clone());
 
             let wal_file_partition = self.index.entry(partition_key).or_insert_with(|| WalFilePartition {
@@ -284,7 +277,24 @@ impl WalIndex {
             count += 1;
         }
 
+        for wal_partition in self.index.values_mut() {
+            wal_partition.files.sort_by(|a, b| a.file.metadata().unwrap().created().unwrap().cmp(&b.file.metadata().unwrap().created().unwrap()));
+        }
+
         println!("Syncing offset to DB");
+
+        for (_key, wal_partition) in self.index.iter_mut() {
+
+            // ensure offsets committed
+            for wal_file in wal_partition.files.iter_mut() {
+                let offset_key = OffsetKey {
+                    namespace: wal_file.offset.namespace.clone(),
+                    partition: wal_file.offset.partition.clone(),
+                };
+
+                offsets_db.insert(&offset_key, OffsetTypes::Line, wal_file.offset.position);
+            }
+        }
 
         offsets_db.flush();
 
