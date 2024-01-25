@@ -267,16 +267,18 @@ impl Ingest {
         let mut batch_offset_files: HashMap<OffsetKey, u64> = HashMap::new();
         let mut buffer_batchs: HashMap<String, String> = HashMap::new();
 
+        let mut buf: HashMap<(String, String, Option<i64>), IngestBufferBatch> = HashMap::new();
+
         for ingest_batch in datas {
 
-            let mut buf: IngestBufferBatch = IngestBufferBatch {
-                offset: OffsetKeySerialize {
-                    position: 0,
-                    namespace: ingest_batch.offset_key.namespace.clone(),
-                    partition: ingest_batch.offset_key.partition.clone(),
-                },
-                records: Vec::new(),
-            };
+            // let mut buf: IngestBufferBatch = IngestBufferBatch {
+            //     offset: OffsetKeySerialize {
+            //         position: 0,
+            //         source_namespace: ingest_batch.offset_key.namespace.clone(),
+            //         source_partition: ingest_batch.offset_key.partition.clone(),
+            //     },
+            //     records: Vec::new(),
+            // };
 
             let has_offsets =
                 offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Closed, 0);
@@ -518,14 +520,32 @@ impl Ingest {
                     };
 
                     let ingest_record = IngestRecord {
-                        namespace: skpr_namespace,
-                        partition: skpr_partition,
-                        time: skpr_time,
+                        namespace: skpr_namespace.clone(),
+                        partition: skpr_partition.clone(),
+                        time: skpr_time_bucket.clone(),
                         record: record_value,
                     };
 
-                    buf.offset.position = batch_line;
-                    buf.records.push(ingest_record);
+                    let buf_entry = buf.entry((
+                        skpr_namespace.clone(),
+                        skpr_partition.clone(),
+                        skpr_time_bucket.clone(),
+                    )).or_insert_with(|| {
+                        IngestBufferBatch {
+                            offset: OffsetKeySerialize {
+                                position: 0,
+                                source_namespace: skpr_namespace.clone(),
+                                source_partition: skpr_partition.clone(),
+                            },
+                            namespace: skpr_namespace.clone(),
+                            partition: skpr_partition.clone(),
+                            time: skpr_time_bucket,
+                            records: Vec::new(),
+                        }
+                    });
+
+                    buf_entry.offset.position = batch_line;
+                    buf_entry.records.push(ingest_record);
 
                     j += 1;
 
@@ -540,7 +560,6 @@ impl Ingest {
             }
 
 
-            buffers.write().write(buf);
 
             batch_offset_lines.insert(ingest_batch.offset_key.clone(), batch_line);
 
@@ -561,6 +580,7 @@ impl Ingest {
         // }
 
         // @todo - write() Buffers
+        buffers.write().write(buf);
 
         buffers.write().flush().unwrap();
 
