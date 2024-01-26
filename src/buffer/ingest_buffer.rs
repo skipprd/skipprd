@@ -200,9 +200,9 @@ impl Buffers {
             }
         }
 
-        // for (namespace, partition, time) in compacted_index_partitions {
-        //     wal_index.index.remove(&(namespace, partition, time));
-        // }
+        for (namespace, partition, time) in compacted_index_partitions {
+            wal_index.index.remove(&(namespace, partition, time));
+        }
     }
 
 }
@@ -267,9 +267,9 @@ impl WalIndex {
 
         println!("Syncing offsets to DB");
 
-        for wal_partition in self.index.values_mut() {
-            wal_partition.files.sort_by(|a, b| a.file.metadata().unwrap().created().unwrap().cmp(&b.file.metadata().unwrap().created().unwrap()));
-        }
+        // for wal_partition in self.index.values_mut() {
+        //     wal_partition.files.sort_by(|a, b| a.file.metadata().unwrap().created().unwrap().cmp(&b.file.metadata().unwrap().created().unwrap()));
+        // }
 
         for (_key, wal_partition) in self.index.iter_mut() {
 
