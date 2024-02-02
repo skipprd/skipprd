@@ -7,6 +7,7 @@ use arrow::error::ArrowError;
 // mod thread_pool;
 // use thread_pool::ThreadPool;
 mod ingest_work;
+mod sql_parser;
 
 extern crate nix;
 
@@ -98,7 +99,10 @@ use crate::buffer::ingest_buffer::{Buffers, WAL_INDEX};
 // use crate::buffer::BufferChunker;
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::ingest_work::Ingest;
+use crate::sql_parser::{SParser, Statement};
 // use crate::plugins::pcap_input::DataSourcePcapPlugin;
+
+
 
 // pub static DISPLAY_METRICS: Lazy<TimedRwLock<AtomicBool>> =
 //     Lazy::new(|| TimedRwLock::new("display_metrics".to_string(), AtomicBool::new(false)));
@@ -321,7 +325,17 @@ async fn query(sql: &str) {
 
     let ctx = SessionContext::with_config(session_config);
 
-    let table_name = sql.to_lowercase().split("from").collect::<Vec<&str>>()[1].split(" ").collect::<Vec<&str>>()[1].trim().replace(";", "");
+    let mut table_name = "".to_string();
+
+    // if sql.to_lowercase().split("from").collect::<Vec<&str>>().len() > 1 {
+    //     println!("Invalid query, must be in the format: SELECT * FROM <table_name>");
+    //     // process::exit(1);
+    //
+    //     table_name = sql.to_lowercase().split("from").collect::<Vec<&str>>()[1].split(" ").collect::<Vec<&str>>()[1].trim().replace(";", "");
+    //
+    // } else {
+        table_name = "bike_hire".to_string();
+    // }
 
     PIPELINE_NAME.write().clear();
     PIPELINE_NAME.write().push_str(&table_name);
@@ -347,26 +361,65 @@ async fn query(sql: &str) {
         }
     }
 
-    let df = match ctx.sql(sql).await {
-        Ok(df) => df,
-        Err(e) => {
-            println!("Error: {}", e);
-            process::exit(1);
-        }
-    };
+    let mut parser = SParser::new(sql).unwrap();
 
-    match df.show().await {
-        Ok(res) => {
-            res
-        }
+    match parser.parse_statement() {
+        Ok(Statement::Statement(stmt)) => {
+           println!("Bon! Statement parsed.");
+        },
+        Ok(Statement::SchemaLoad(stmt)) => {
+            // print contents of source file
+            let source = stmt.source;
+            let dest = stmt.table;
+            let contents = std::fs::read_to_string(&source).expect("Something went wrong reading the file");
+            println!("Updating with schema {}: \n{}", source, contents);
+            let sql = &format!("SELECT * FROM {} LIMIT 1", dest);
+            let df = match ctx.sql(sql).await {
+                Ok(df) => df,
+                Err(e) => {
+                    println!("Error: {}", e);
+                    process::exit(1);
+                }
+            };
+
+            match df.show().await {
+                Ok(res) => {
+                    res
+                }
+                Err(e) => {
+                    println!("Error: {}", e);
+                    process::exit(1);
+                }
+            }
+            println!("Bon! Schema loaded.");
+        },
+        Ok(Statement::SchemaDump(stmt)) => {
+            println!("Bon! Schema dumped.");
+        },
         Err(e) => {
-            println!("Error: {}", e);
-            process::exit(1);
+            println!("Not Bon: {}", e);
+            let df = match ctx.sql(sql).await {
+                Ok(df) => df,
+                Err(e) => {
+                    println!("Error: {}", e);
+                    process::exit(1);
+                }
+            };
+
+            match df.show().await {
+                Ok(res) => {
+                    res
+                }
+                Err(e) => {
+                    println!("Error: {}", e);
+                    process::exit(1);
+                }
+            }
+        },
+        _ => {
+            println!("Unknown not Bon");
         }
     }
-
-
-
 }
 
 async fn discover() {
