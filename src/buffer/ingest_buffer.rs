@@ -103,7 +103,7 @@ impl Buffers {
 
         for ((namespace, partition, time), ingest_buffer_batch) in self.buf.iter_mut() {
 
-            println!("Writing {} rows to WAL {} {} {}", ingest_buffer_batch.records.len(), namespace, partition, time.unwrap_or(0));
+            // println!("Writing {} rows to WAL {} {} {}", ingest_buffer_batch.records.len(), namespace, partition, time.unwrap_or(0));
 
             let mut wal_file = WalFile::new(
                 namespace,
@@ -112,7 +112,7 @@ impl Buffers {
                 ingest_buffer_batch.offset.clone(),
             ).unwrap();
 
-            println!("WAL File {} offset: {:?}", wal_file.path.to_str().unwrap(), ingest_buffer_batch.offset);
+            // println!("WAL File {} offset: {:?}", wal_file.path.to_str().unwrap(), ingest_buffer_batch.offset);
 
             let wal_file_partition = index.index.entry((
                 ingest_buffer_batch.namespace.clone(),

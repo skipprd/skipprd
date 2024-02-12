@@ -134,6 +134,90 @@ impl Metadata {
 
         out_field_name
     }
+
+    // Get nested metadata from field notation
+    // Supports both flat and dot notation, e.g. `foo.bar` and `foo_bar`
+    pub fn get_nested_metadata_from_field_notation<'a>(
+        metadata: &'a mut Metadata,
+        field_str: &str,
+    ) -> Option<&'a mut Metadata> {
+
+        if field_str.contains('.') {
+            let mut fields: Vec<&str> = field_str.split('.').collect();
+            return Metadata::get_nested_metadata_from_dot_notation(metadata, &mut fields);
+        }
+
+        Metadata::get_nested_metadata_from_flat_notation(metadata, field_str)
+    }
+
+    fn get_nested_metadata_from_flat_notation<'a>(metadata: &'a mut Metadata, field_str: &str) -> Option<&'a mut Metadata> {
+        if metadata.out_field_name == field_str {
+            return Some(metadata);
+        }
+
+        for nested_metadata in metadata.fields.values_mut() {
+            if let Some(found_metadata) = Metadata::get_nested_metadata_from_flat_notation(nested_metadata, field_str) {
+                return Some(found_metadata);
+            }
+        }
+
+        None
+    }
+
+    fn get_nested_metadata_from_dot_notation<'a>(metadata: &'a mut Metadata, fields: &mut Vec<&str>) -> Option<&'a mut Metadata> {
+
+        let mut current_metadata = metadata;
+        // remove and return first element from fields
+        let field = fields.remove(0);
+
+        if let Some(next_metadata) = current_metadata.fields.get_mut(field) {
+            if fields.len() == 0 {
+                return Some(next_metadata);
+            }
+            current_metadata = match Metadata::get_nested_metadata_from_dot_notation(next_metadata, fields) {
+                Some(found_metadata) => found_metadata,
+                None => return None,
+            }
+        } else {
+            return None;
+        }
+
+        Some(current_metadata)
+    }
+
+    pub fn remove_nested_metadata_from_dot_notation<'a>(metadata: &'a mut Metadata, field_str: &str) -> Option<&'a mut Metadata> {
+
+        let mut fields: Vec<&str> = Vec::new();
+
+        if field_str.contains('.') {
+            fields = field_str.split('.').collect();
+        } else {
+            fields.push(field_str);
+        }
+
+        let current_metadata = metadata;
+
+        let field = fields.remove(0);
+
+        if current_metadata.fields.get_mut(field).is_some() {
+            if fields.len() == 0 {
+                let mut last = current_metadata.fields.remove(field);
+                return None;
+            } else {
+                let next_metadata = current_metadata.fields.get_mut(field).unwrap();
+                Metadata::remove_nested_metadata_from_dot_notation(next_metadata, fields.join(".").as_str())
+            }
+            // current_metadata = match Metadata::remove_nested_metadata_from_dot_notation(next_metadata, fields.join(".").as_str()) {
+                // Some(found_metadata) => return found_metadata,
+                // None => return None,
+            // }
+        } else {
+            return None;
+        }
+
+
+    }
+
 }
 
 pub struct AnalyseSchema {
@@ -143,6 +227,62 @@ pub struct AnalyseSchema {
     // pub data_type_masks: HashMap<String, String>,
     // pub data_type_drops: HashMap<String, String>,
     // pub data_type_casts: HashMap<String, Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SkipprTypes {
+    String,
+    Integer,
+    Long,
+    Double,
+    Boolean,
+    Date,
+    Timestamp,
+    TimestampMilli,
+    Array,
+    Map,
+    Record,
+    Null,
+}
+
+// to string
+impl SkipprTypes {
+    pub(crate) fn to_string(&self) -> String {
+        match self {
+            SkipprTypes::String => "string".to_string(),
+            SkipprTypes::Integer => "integer".to_string(),
+            SkipprTypes::Long => "long".to_string(),
+            SkipprTypes::Double => "double".to_string(),
+            SkipprTypes::Boolean => "boolean".to_string(),
+            SkipprTypes::Date => "date".to_string(),
+            SkipprTypes::Timestamp => "timestamp".to_string(),
+            SkipprTypes::TimestampMilli => "timestamp_milli".to_string(),
+            SkipprTypes::Array => "array".to_string(),
+            SkipprTypes::Map => "map".to_string(),
+            SkipprTypes::Record => "record".to_string(),
+            SkipprTypes::Null => "null".to_string(),
+        }
+    }
+
+    pub(crate) fn from_string(s: &str) -> Option<SkipprTypes> {
+        match s.to_lowercase().as_str() {
+            "string" => Some(SkipprTypes::String),
+            "integer" => Some(SkipprTypes::Integer),
+            "int" => Some(SkipprTypes::Integer),
+            "long" => Some(SkipprTypes::Long),
+            "double" => Some(SkipprTypes::Double),
+            "boolean" => Some(SkipprTypes::Boolean),
+            "date" => Some(SkipprTypes::Date),
+            "timestamp" => Some(SkipprTypes::Timestamp),
+            "timestamp_milli" => Some(SkipprTypes::TimestampMilli),
+            "array" => Some(SkipprTypes::Array),
+            "map" => Some(SkipprTypes::Map),
+            "record" => Some(SkipprTypes::Record),
+            "struct" => Some(SkipprTypes::Record),
+            "null" => Some(SkipprTypes::Null),
+            _ => None,
+        }
+    }
 }
 
 const DATE_FIELD_VALIDATION_MIN_SAMPLE: i32 = 100;

@@ -451,6 +451,23 @@ impl Helpers {
         }).collect()
     }
 
+    pub fn get_nested_metadata_with_flat_name<'a>(metadata: &'a mut Metadata, field_str: &str) -> Option<&'a mut Metadata> {
+        // Check if the current metadata's out_field_name matches the field_str
+        if metadata.out_field_name == field_str {
+            return Some(metadata);
+        }
+
+        // Recursively search in nested fields
+        for (_, nested_metadata) in metadata.fields.iter_mut() {
+            if let Some(found_metadata) = Helpers::get_nested_metadata_with_flat_name(nested_metadata, field_str) {
+                return Some(found_metadata);
+            }
+        }
+
+        // If no matching Metadata is found in this branch, return None
+        None
+    }
+
 }
 
 #[cfg(test)]
