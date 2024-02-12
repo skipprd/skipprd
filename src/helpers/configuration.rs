@@ -14,6 +14,7 @@ use nix::libc::exit;
 
 use std::time::{Duration};
 use dashmap::DashMap;
+use ini::configparser::ini::Ini;
 use lazy_static::lazy_static;
 use once_cell::sync::Lazy;
 
@@ -190,6 +191,50 @@ impl Config {
 
     }
 
+    fn parse_skippr_profile() {
+
+        // get SKIPPR_PROFILE env var
+        let profile_name = Config::getenv("SKIPPR_PROFILE", "default");
+
+        // Parse credentials file
+        let credentials_file_path = format!("{}/.skippr/credentials", std::env::var("HOME").unwrap());
+        let credentials_file_contents = fs::read_to_string(&credentials_file_path).unwrap_or_else(|_| {
+            panic!("Credentials file not found at {}", credentials_file_path);
+        });
+
+        let mut ini = Ini::new();
+        ini.read(credentials_file_contents).unwrap_or_else(|_| {
+            panic!("Error parsing credentials file");
+        });
+
+        // check if profile exists
+        if ini.sections().contains(&profile_name) == true
+            || profile_name == "default" {
+
+            let workspace = ini.get(&profile_name, "workspace").expect(&format!("'workspace' not found for profile '{}' in credentials file {}", profile_name, credentials_file_path));
+            let api_token = ini.get(&profile_name, "api_token").expect(&format!("'api_token' not found for profile '{}' in credentials file {}", profile_name, credentials_file_path));
+
+            // Update app config
+            let mut app_config = APP_CONFIG.write().clone();
+            match app_config {
+                Some(mut conf) => {
+                    conf.skippr.workspace = Some(workspace);
+                    conf.skippr.api_token = Some(api_token);
+                }
+                None => {
+                    let mut conf = Config::new();
+                    conf.skippr.workspace = Some(workspace);
+                    conf.skippr.api_token = Some(api_token);
+                    app_config.replace(conf);
+                }
+            }
+
+        } else {
+            panic!("Profile '{}' not found in credentials file {}", profile_name, credentials_file_path);
+        }
+
+    }
+
     pub fn build_config() {
 
         let file_path = Config::find_config_file();
@@ -249,6 +294,8 @@ impl Config {
             let mut app_config = APP_CONFIG.write();
             app_config.replace(config);
         }
+
+        Config::parse_skippr_profile();
 
         // panic!("test");
 

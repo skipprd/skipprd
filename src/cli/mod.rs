@@ -34,7 +34,7 @@ pub struct DisocverOptions {
 pub struct QueryOptions {
     /// The SQL query to run
     #[arg(short, long)]
-    pub(crate) query: String,
+    pub(crate) sql: String,
 }
 
 #[derive(Parser)]

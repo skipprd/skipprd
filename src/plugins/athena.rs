@@ -376,7 +376,7 @@ impl DataOutputAwsAthenaPlugin {
 pub struct AwsAthena {}
 
 impl AwsAthena {
-    pub async fn create_or_update_schema(namespace: &str, schema: &discover::Metadata) {
+    pub async fn create_or_update_schema(namespace: &str, schema: &Metadata) {
         match AwsAthena::get_work_group().await {
             Ok(true) => {}
             Ok(false) => {}
@@ -668,7 +668,7 @@ impl AwsAthena {
 
     pub async fn glue_create_table(
         namespace: &str,
-        metadata: &discover::Metadata,
+        metadata: &Metadata,
     ) -> Result<bool, String> {
         let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
 
@@ -773,7 +773,7 @@ impl AwsAthena {
 
     pub async fn glue_update_table(
         namespace: &str,
-        metadata: &discover::Metadata,
+        metadata: &Metadata,
     ) -> Result<bool, String> {
         let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
 
@@ -875,7 +875,7 @@ impl AwsAthena {
         partition_values: Vec<String>,
         key: &str,
         partition_cache: &mut Vec<String>,
-        metadata: &discover::Metadata,
+        metadata: &Metadata,
     ) -> Result<bool, Error> {
         let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
 
