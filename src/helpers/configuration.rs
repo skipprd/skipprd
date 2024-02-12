@@ -198,9 +198,11 @@ impl Config {
 
         // Parse credentials file
         let credentials_file_path = format!("{}/.skippr/credentials", std::env::var("HOME").unwrap());
-        let credentials_file_contents = fs::read_to_string(&credentials_file_path).unwrap_or_else(|_| {
-            panic!("Credentials file not found at {}", credentials_file_path);
-        });
+        let credentials_file_contents = fs::read_to_string(&credentials_file_path).unwrap_or(String::new());
+
+        if credentials_file_contents.is_empty() {
+            return;
+        }
 
         let mut ini = Ini::new();
         ini.read(credentials_file_contents).unwrap_or_else(|_| {
