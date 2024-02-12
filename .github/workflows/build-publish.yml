@@ -157,19 +157,20 @@ jobs:
 #          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 #          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
 
-#  macos_x86:
-#    name: cargo build (mac x86)
-#    runs-on:
-#      - macOS
-#      - self-hosted
-#      - X64 #MacBook-Pro-4
-#    steps:
-#      - uses: actions/checkout@v3
-#      - name: Build macOS x86 release
-#        uses: ./.github/actions/rust-build-release
-#        with:
-#          rust-version: stable
-#          architecture_name: macos_x86
+  macos_x86:
+    name: cargo build (mac x86)
+    needs: smoke_test
+    runs-on:
+      - macOS
+      - self-hosted
+      - X64 #MacBook-Pro-4
+    steps:
+      - uses: actions/checkout@v3
+      - name: Build macOS x86 release
+        uses: ./.github/actions/rust-build-release
+        with:
+          rust-version: stable
+          architecture_name: macos_x86
 
   linux_x86:
     needs: smoke_test
@@ -237,7 +238,7 @@ jobs:
     needs:
       - linux_x86_test
       - macos_arm64
-#      - macos_x86
+      - macos_x86
 #      - macos_arm64_test
     runs-on: ubuntu-latest
     steps:
@@ -252,7 +253,7 @@ jobs:
           ls -la .
           tar -czvf skippr-macos_arm64.tar.gz skippr-macos_arm64/
           tar -czvf skippr-linux_x86.tar.gz skippr-linux_x86/
-#          tar -czvf skippr-macos_x86.tar.gz skippr-macos_x86/
+          tar -czvf skippr-macos_x86.tar.gz skippr-macos_x86/
       - name: Release builds to GitHub
         uses: softprops/action-gh-release@v1
         with:
@@ -260,7 +261,7 @@ jobs:
             install.sh
             ./skippr-macos_arm64.tar.gz
             ./skippr-linux_x86.tar.gz
-#            ./skippr-macos_x86.tar.gz
+            ./skippr-macos_x86.tar.gz
           tag_name: ${{ github.ref_name }}
           body: ${{ github.event.head_commit.message }}
           body_path: CHANGELOG.txt
