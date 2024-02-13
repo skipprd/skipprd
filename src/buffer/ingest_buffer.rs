@@ -494,7 +494,14 @@ impl WalFilePartition {
         let ctx = SessionContext::with_config(session_config);
 
         // for dir in dirs {
-            ctx.register_parquet("my_table", temp_parquet_path, ParquetReadOptions::default()).await?;
+            ctx.register_parquet("my_table", temp_parquet_path, ParquetReadOptions {
+                schema: Some(schema_ref.as_ref()),
+                file_extension: "parquet",
+                table_partition_cols: vec![],
+                parquet_pruning: None,
+                skip_metadata: Some(true),
+                file_sort_order: vec![],
+            }).await?;
         // }
 
         // let df = ctx
