@@ -180,20 +180,6 @@ impl Buffers {
 
         for (_key, wal_partition) in wal_index.index.iter_mut() {
 
-            // ensure offsets committed
-            // for wal_file in wal_partition.files.iter_mut() {
-            //     let offset_key = OffsetKey {
-            //         namespace: wal_file.offset.source_namespace.clone(),
-            //         partition: wal_file.offset.source_partition.clone(),
-            //     };
-            //
-            //     offsets_db.insert(&offset_key, OffsetTypes::Line, wal_file.offset.position);
-            //
-            // }
-            //
-            // offsets_db.flush();
-
-
             if force {
                 wal_partition.compact_to_parquet().await;
                 compacted_index_partitions.push((wal_partition.namespace.clone(), wal_partition.partition.clone(), wal_partition.time.clone()));
@@ -408,6 +394,12 @@ impl WalFilePartition {
                 continue;
             }
 
+            // check for empty file
+            if wal_file.file.metadata().unwrap().len() == 0 {
+                println!("Ignoring empty WAL file: {}", wal_file.path.to_str().unwrap());
+                continue;
+            }
+
             let temp_file_path = format!("{}/{}-{}.temp", temp_parquet_path, output_file_name, Helpers::random_str(32));
 
             let record_batches = wal_file.read_from_stream().expect("Failed to read from WAL file");
@@ -478,7 +470,13 @@ impl WalFilePartition {
         // Rename the processed WAL file to a tombstone file
         for wal_file in self.files.iter_mut() {
             let tombstone_path = format!("{}/ingest_buffer/done/{}.tombstone", data_dir, Helpers::random_str(32));
-            fs::rename(&wal_file.path, tombstone_path).unwrap();
+
+            if fs::metadata(&tombstone_path).is_ok() {
+                fs::rename(&wal_file.path, tombstone_path).expect("Failed to tombstone WAL file");
+            } else {
+                println!("Failed to tombstone WAL file: {}, it doesn't exist", wal_file.path.to_str().unwrap());
+            }
+
         }
 
         let wal_partition_dir = WalFile::get_wal_partition_dir(&self.namespace, &self.partition, self.time);
