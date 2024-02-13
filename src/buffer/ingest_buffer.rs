@@ -390,7 +390,13 @@ impl WalFilePartition {
 
             let temp_file_path = format!("{}/{}/{}-{}.temp", data_dir, "output_buffer", output_file_name, Helpers::random_str(32));
 
-            let record_batches = wal_file.read_from_stream().unwrap();
+            let record_batches = match wal_file.read_from_stream() {
+                Ok(record_batches) => record_batches,
+                Err(e) => {
+                    println!("Error reading from WAL file: {:?}", e);
+                    continue;
+                }
+            };
 
             /**
              * Support optional SQL query to transform data before writing to parquet
@@ -576,12 +582,12 @@ impl WalFile {
 
         Self::seek_offset(&mut reader)?;
 
-        // let reader = self.file.as_mut().ok_or(ArrowError::IoError("Can't write to WAL file".to_string(), io::Error::new(io::ErrorKind::NotFound, "File not found")))?;
-
-        let mut stream_reader = StreamReader::try_new(reader, None).expect("Failed to create WAL stream reader");
+        let stream_reader = StreamReader::try_new(reader, None)
+            .map_err(|e| ArrowError::from_external_error(Box::new(e)))?;
 
         let mut record_batches = Vec::new();
-        while let Some(batch) = stream_reader.next() {
+
+        for batch in stream_reader {
             let batch = batch.expect("Failed to read record batch from WAL stream reader");
             record_batches.push(batch);
         }
