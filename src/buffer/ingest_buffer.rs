@@ -13,15 +13,16 @@ use arrow_schema::{ArrowError, SchemaRef};
 use dashmap::DashMap;
 use glob::{glob_with, MatchOptions};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use arrow::ipc::CompressionType;
+use arrow::ipc::{CompressionType, Schema};
 use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
 use bincode;
 use serde_cbor;
 use byteorder::LittleEndian;
 use datafusion::datasource::MemTable;
+use datafusion::execution::options::ArrowReadOptions;
 use datafusion::parquet::data_type::AsBytes;
-use datafusion::prelude::{SessionConfig, SessionContext};
+use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
 use icu::properties::sets::print;
 use lazy_static::lazy_static;
 use libc::exit;
@@ -172,7 +173,7 @@ impl Buffers {
         Ok(())
     }
 
-    pub fn compact_all_partitions(force: bool, offsets_db: Arc<Offsets>) {
+    pub async fn compact_all_partitions(force: bool) {
         let mut wal_index = WAL_INDEX.write();
 
         let mut compacted_index_partitions = Vec::new();
@@ -194,11 +195,11 @@ impl Buffers {
 
 
             if force {
-                wal_partition.compact_to_parquet();
+                wal_partition.compact_to_parquet().await;
                 compacted_index_partitions.push((wal_partition.namespace.clone(), wal_partition.partition.clone(), wal_partition.time.clone()));
 
             } else {
-                let rotated = wal_partition.check_wal_rotate();
+                let rotated = wal_partition.check_wal_rotate().await;
 
                 if rotated {
                    compacted_index_partitions.push((wal_partition.namespace.clone(), wal_partition.partition.clone(), wal_partition.time.clone()));
@@ -207,7 +208,11 @@ impl Buffers {
         }
 
         for (namespace, partition, time) in compacted_index_partitions {
-            wal_index.index.remove(&(namespace, partition, time));
+            wal_index.index.remove(&(namespace.clone(), partition.clone(), time.clone()));
+
+            // remove partition dir
+            let wal_partition_dir = WalFile::get_wal_partition_dir(&namespace, &partition, time);
+            fs::remove_dir_all(wal_partition_dir).unwrap();
         }
     }
 
@@ -302,9 +307,17 @@ impl WalIndex {
         let data_dir = Config::get_data_dir();
         let wal_dir = PathBuf::from(format!("{}/ingest_buffer", data_dir));
         let mut wal_files = Vec::new();
-        for entry in fs::read_dir(wal_dir)? {
-            let entry = entry?;
-            let path = entry.path();
+        // for entry in fs::read_dir(wal_dir)? {
+        // recursive glob directory
+        let options = MatchOptions {
+            case_sensitive: false,
+            require_literal_separator: false,
+            require_literal_leading_dot: false,
+        };
+
+        for entry in glob_with(&format!("{}/**/*.wal", wal_dir.to_str().unwrap()), options).expect("Failed to read WAL files") {
+
+            let path = entry.expect("Failed to read WAL file");
             if path.is_file() && path.extension().and_then(OsStr::to_str) == Some("wal") {
                 wal_files.push(path);
             }
@@ -344,10 +357,10 @@ impl WalFilePartition {
             > ttl as u64
     }
 
-    pub fn check_wal_rotate(&mut self) -> bool {
+    pub async fn check_wal_rotate(&mut self) -> bool {
         if self.is_file_size_exceeded() || self.is_file_time_exceeded() {
-            println!("Rotating WAL file: {} Bytes: {}, Files {}", self.namespace, self.bytes, self.files.len());
-            self.compact_to_parquet();
+            println!("Rotating WAL: {} Bytes: {}, Segment Files {}", self.namespace, self.bytes, self.files.len());
+            self.compact_to_parquet().await;
 
             return true
         }
@@ -355,7 +368,7 @@ impl WalFilePartition {
         false
     }
 
-    fn compact_to_parquet(&mut self) {
+    async fn compact_to_parquet(&mut self) {
         let data_dir = Config::get_data_dir();
         let output_file_name = BufferChunker::encode_chunk_name(
             "output",
@@ -365,22 +378,29 @@ impl WalFilePartition {
             None,
         );
 
-        // let write_file = OpenOptions::new()
-        //     .create(true)
-        //     .write(true)
-        //     .open(&temp_file_path)
-        //     .unwrap();
 
-        // let props = WriterProperties::builder()
-        //     .set_dictionary_enabled(false)
-        //     .set_encoding(parquet::basic::Encoding::PLAIN)
-        //     .set_compression(Compression::SNAPPY)
-        //     .build();
 
         // let schema = ARROW_SCHEMA.read().get(&self.namespace).unwrap().clone();
         // let wal_file = self.files.last_mut().unwrap();
         // let schema = wal_file.read_schema_from_stream().expect("Failed to read schema from WAL file");
         // let mut writer = ArrowWriter::try_new(write_file, schema, Some(props)).unwrap();
+
+        // let schema = wal_file.read_schema_from_stream().expect("Failed to read schema from WAL file");
+        let schema = ARROW_SCHEMA.read().get(&self.namespace).unwrap().clone();
+
+        let namespace = match self.namespace.as_str() {
+           "" => "none",
+            _ => self.namespace.as_str()
+        };
+        let partition = match self.partition.as_str() {
+            "" => "none",
+            _ => self.partition.as_str()
+        };
+        let time = self.time.unwrap_or(0);
+        let sub_dir = format!("{}-{}-{}", namespace, partition, time);
+        let temp_parquet_path = format!("{}/{}", data_dir, sub_dir);
+        fs::create_dir_all(&temp_parquet_path).unwrap();
+
 
         for wal_file in self.files.iter_mut() {
 
@@ -388,28 +408,9 @@ impl WalFilePartition {
                 continue;
             }
 
-            let temp_file_path = format!("{}/{}/{}-{}.temp", data_dir, "output_buffer", output_file_name, Helpers::random_str(32));
+            let temp_file_path = format!("{}/{}-{}.temp", temp_parquet_path, output_file_name, Helpers::random_str(32));
 
-            let record_batches = match wal_file.read_from_stream() {
-                Ok(record_batches) => record_batches,
-                Err(e) => {
-                    println!("Error reading from WAL file: {:?}", e);
-                    continue;
-                }
-            };
-
-            /**
-             * Support optional SQL query to transform data before writing to parquet
-             */
-            // let mut batches = Vec::new();
-            //
-            // let sql = None; // "SELECT * FROM my_table";
-            //
-            // if sql.is_some() {
-            //     batches = Self::apply_sql_on_ipc_stream(batches, sql.unwrap()).await.unwrap();
-            // } else {
-            //     batches = batches;
-            // }
+            let record_batches = wal_file.read_from_stream().expect("Failed to read from WAL file");
 
             let write_file = OpenOptions::new()
                 .create(true)
@@ -423,6 +424,7 @@ impl WalFilePartition {
                 .set_compression(Compression::SNAPPY)
                 .build();
 
+
             let schema = wal_file.read_schema_from_stream().expect("Failed to read schema from WAL file");
             let mut writer = ArrowWriter::try_new(write_file, schema, Some(props)).unwrap();
 
@@ -430,24 +432,61 @@ impl WalFilePartition {
                 writer.write(&batch).expect("Error writing to parquet file");
             }
 
-            // Rename the processed WAL file to a tombstone file
-            let tombstone_path = format!("{}/ingest_buffer/done/{}.tombstone", data_dir, Helpers::random_str(32));
-            fs::rename(&wal_file.path, tombstone_path).unwrap();
-
             writer.close().unwrap();
 
-            let parquet_path = temp_file_path.replace(".temp", ".parquet");
-            fs::rename(&temp_file_path, parquet_path).unwrap();
+            let temp_parquet_file = temp_file_path.replace(".temp", ".parquet");
+            fs::rename(&temp_file_path, temp_parquet_file).unwrap();
 
         }
 
-        // self.files.clear();
-        // self.updated_at = SystemTime::now();
 
+        let parquet_output = format!("{}/{}/{}-{}.parquet", data_dir, "output_buffer", output_file_name, Helpers::random_str(32));
+
+
+        /**
+         * Support optional SQL query to transform data before writing to parquet
+         */
+        let sql = Some("SELECT * FROM my_table");
+
+        let record_batches = Self::apply_sql_on_ipc_stream(&temp_parquet_path, sql.unwrap(), schema).await.unwrap();
+
+        let write_file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&parquet_output)
+            .unwrap();
+
+        let props = WriterProperties::builder()
+            .set_dictionary_enabled(false)
+            .set_encoding(parquet::basic::Encoding::PLAIN)
+            .set_compression(Compression::SNAPPY)
+            .build();
+
+        let schema = ARROW_SCHEMA.read().get(&self.namespace).unwrap().clone();
+
+        let mut writer = ArrowWriter::try_new(write_file, schema.clone(), Some(props)).unwrap();
+
+        for batch in record_batches {
+            writer.write(&batch).expect("Error writing to parquet file");
+        }
+
+        writer.close().unwrap();
+
+        fs::remove_dir_all(temp_parquet_path).unwrap();
+
+
+        // Rename the processed WAL file to a tombstone file
+        for wal_file in self.files.iter_mut() {
+            let tombstone_path = format!("{}/ingest_buffer/done/{}.tombstone", data_dir, Helpers::random_str(32));
+            fs::rename(&wal_file.path, tombstone_path).unwrap();
+        }
+
+        let wal_partition_dir = WalFile::get_wal_partition_dir(&self.namespace, &self.partition, self.time);
+        fs::remove_dir_all(wal_partition_dir).unwrap();
 
     }
 
-    async fn apply_sql_on_ipc_stream(record_batches: Vec<arrow::array::RecordBatch>, sql: &str) -> Result<Vec<arrow::array::RecordBatch>, Box<dyn std::error::Error>> {
+    async fn apply_sql_on_ipc_stream(temp_parquet_path: &str, sql: &str, schema_ref: SchemaRef) -> Result<Vec<arrow::array::RecordBatch>, Box<dyn std::error::Error>> {
 
         let mut session_config = SessionConfig::new();
         session_config = session_config.set("datafusion.catalog.information_schema", "true".into());
@@ -456,13 +495,40 @@ impl WalFilePartition {
 
         let ctx = SessionContext::with_config(session_config);
 
+        // for dir in dirs {
+            ctx.register_arrow("my_table", temp_parquet_path, ArrowReadOptions::default()).await?;
+        // }
+
+        // let df = ctx
+        //     .read_parquet(
+        //         temp_parquet_path,
+        //         ParquetReadOptions::default(),
+        //     )
+        //     .await?;
+        //
+        // let results = df.collect().await?;
+
         // Create a new DataFusion context
         // let mut ctx = ExecutionContext::new();
 
         // Read batches and register them as a table in the context
-        let schema_ref = record_batches[0].schema();
+        // let schema_ref = record_batches[0].schema();
 
-        ctx.register_table("my_table", Arc::new(MemTable::try_new(schema_ref, vec![record_batches])?))?;
+        // let schema_ref = ARROW_SCHEMA.read().get("my_table").unwrap().clone();
+
+        // ctx.register_table("my_table", Arc::new(MemTable::try_new(schema_ref, record_batches)?))?;
+
+        // let mut results = Vec::new();
+        //
+        // let df = ctx.read_a
+        //
+        //
+        // for batch in record_batches {
+        //     for b in batch {
+        //        let df = ctx.read_batch(b.clone()).unwrap();
+        //         results.extend(df.collect().await.unwrap());
+        //     }
+        // }
 
         // Execute the SQL query
         let df = ctx.sql(sql).await?;
@@ -489,7 +555,6 @@ impl WalFile {
     pub fn new(namespace: &str, partition: &str, time: Option<i64>, offset: OffsetKeySerialize) -> io::Result<Self> {
 
         let path_str = Self::generate_wal_file_path(namespace, partition, time);
-        // println!("Creating WAL file: {}", path_str);
         let path= PathBuf::from(&path_str);
         let file = OpenOptions::new().write(true).read(true).create(true).open(&path)?;
 
@@ -627,9 +692,32 @@ impl WalFile {
         Ok(self.bytes)
     }
 
-    fn generate_wal_file_path(namespace: &str, partition: &str, time: Option<i64>) -> String {
+    fn get_wal_partition_dir(namespace: &str, partition: &str, time: Option<i64>) -> String {
         let data_dir = Config::get_data_dir();
         let output_dir = &format!("{}/ingest_buffer", data_dir);
+
+        let namespace = match namespace {
+            "" => "none",
+            _ => namespace
+        };
+
+        let partition = match partition {
+            "" => "none",
+            _ => partition
+        };
+
+        let time = time.unwrap_or_else(|| 0);
+
+        let wal_partition_dir = format!("{}/{}/{}/{}", output_dir, namespace, partition, time);
+
+        fs::create_dir_all(&wal_partition_dir).expect("Failed to create WAL partition directories");
+
+        wal_partition_dir
+
+
+    }
+
+    fn generate_wal_file_path(namespace: &str, partition: &str, time: Option<i64>) -> String {
 
         let wal_file_name = BufferChunker::encode_chunk_name(
             "ingest",
@@ -639,9 +727,11 @@ impl WalFile {
             None,
         );
 
-        let wal_file_name = format!("{}-{}", wal_file_name, Helpers::random_str(32));
+        let wal_partition_dir = WalFile::get_wal_partition_dir(namespace, partition, time);
 
-        format!("{}/{}.wal", output_dir, wal_file_name)
+        let wal_file_name = format!("{}/{}-{}", wal_partition_dir, wal_file_name, Helpers::random_str(32));
+
+        format!("{}.wal", wal_file_name)
     }
 
 }
