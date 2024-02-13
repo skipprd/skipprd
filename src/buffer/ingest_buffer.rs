@@ -494,7 +494,7 @@ impl WalFilePartition {
         let ctx = SessionContext::with_config(session_config);
 
         // for dir in dirs {
-            ctx.register_arrow("my_table", temp_parquet_path, ArrowReadOptions::default()).await?;
+            ctx.register_parquet("my_table", temp_parquet_path, ParquetReadOptions::default()).await?;
         // }
 
         // let df = ctx
