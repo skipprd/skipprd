@@ -53,7 +53,7 @@ use crate::helpers::timed_rwlock::TimedRwLock;
 pub static TOTAL_ROWS: Lazy<TimedRwLock<AtomicU64>> =
     Lazy::new(|| TimedRwLock::new("record_batch_total".to_string(), AtomicU64::new(0)));
 
-pub static WAL_INDEX: Lazy<TimedRwLock<WalIndex>> = Lazy::new(|| TimedRwLock::new("wal_index".to_string(), WalIndex::new()));
+pub static WAL_PARTITION_INDEX: Lazy<TimedRwLock<WalPartitionIndex>> = Lazy::new(|| TimedRwLock::new("wal_index".to_string(), WalPartitionIndex::new()));
 
 // lazy_static! {
 //     pub static ref WAL_INDEX: TimedRwLock<WalIndex> = TimedRwLock::new("wal_index".to_string(), WalIndex::new());
@@ -103,7 +103,7 @@ impl Buffers {
 
     }
 
-    pub fn flush(&mut self) -> Result<(), ArrowError> {
+    pub async fn flush(&mut self) -> Result<(), ArrowError> {
 
         let arrow_schema_guard = ARROW_SCHEMA.read();
 
@@ -113,9 +113,14 @@ impl Buffers {
 
         // println!("Flushing {} WAL files", self.buf.len());
 
+        let mut partitions: HashMap<(String, String, Option<i64>, String), Vec<WalFile>> = HashMap::new();
+
         for ((namespace, partition, time, shard), ingest_buffer_batch) in self.buf.iter_mut() {
 
             // println!("Writing {} rows to WAL {} {} {} {}", ingest_buffer_batch.records.len(), namespace, partition, time.unwrap_or(0), shard);
+
+            let partition_entry = partitions.entry((namespace.clone(), partition.clone(), time.clone(), shard.clone())).or_insert_with(|| Vec::new());
+
 
             let mut wal_file = WalFile::new(
                 namespace,
@@ -125,24 +130,25 @@ impl Buffers {
                 ingest_buffer_batch.offset.clone(),
             ).unwrap();
 
+
             // println!("WAL File {} offset: {:?}", wal_file.path.to_str().unwrap(), ingest_buffer_batch.offset);
 
-           //  let wal_file_partition = index.index.entry((
-           //      ingest_buffer_batch.namespace.clone(),
-           //      ingest_buffer_batch.partition.clone(),
-           //      ingest_buffer_batch.time.clone(),
-           //      ingest_buffer_batch.shard.clone(),
-           // )).or_insert_with(
-           //      || WalFilePartition {
-           //          files: Vec::new(),
-           //          namespace: ingest_buffer_batch.namespace.clone(),
-           //          partition: ingest_buffer_batch.partition.clone(),
-           //          time: ingest_buffer_batch.time.clone(),
-           //          shard: ingest_buffer_batch.shard.clone(),
-           //          updated_at: SystemTime::now(),
-           //          bytes: 0,
-           //      }
-           //  );
+            //  let wal_file_partition = index.index.entry((
+            //      ingest_buffer_batch.namespace.clone(),
+            //      ingest_buffer_batch.partition.clone(),
+            //      ingest_buffer_batch.time.clone(),
+            //      ingest_buffer_batch.shard.clone(),
+            // )).or_insert_with(
+            //      || WalFilePartition {
+            //          files: Vec::new(),
+            //          namespace: ingest_buffer_batch.namespace.clone(),
+            //          partition: ingest_buffer_batch.partition.clone(),
+            //          time: ingest_buffer_batch.time.clone(),
+            //          shard: ingest_buffer_batch.shard.clone(),
+            //          updated_at: SystemTime::now(),
+            //          bytes: 0,
+            //      }
+            //  );
 
             let arrow_schema = arrow_schema_guard.get(&ingest_buffer_batch.namespace).unwrap().clone();
 
@@ -172,6 +178,9 @@ impl Buffers {
 
             wal_file.close()?;
 
+            partition_entry.push(wal_file);
+
+
             // wal_file_partition.updated_at = SystemTime::now();
             // wal_file_partition.files.push(wal_file);
 
@@ -185,13 +194,45 @@ impl Buffers {
 
         self.buf.clear();
 
+        let mut index = WAL_PARTITION_INDEX.write();
+
+        for ((namespace, partition, time, shard), wal_files) in partitions.iter_mut() {
+            let mut wal_partition = index.index.entry((namespace.clone(), partition.clone(), time.clone(), shard.clone()))
+                .or_insert_with(|| WalPartition {
+                files: Vec::new(),
+                namespace: namespace.clone(),
+                partition: partition.clone(),
+                time: time.clone(),
+                shard: shard.clone(),
+                updated_at: SystemTime::now(),
+                bytes: 0,
+            });
+
+            wal_partition.files.append(wal_files);
+        }
+
+
+        let mut compacted_index_partitions = Vec::new();
+
+        for ((namespace, partition, time, shard), wal_partition) in index.index.iter_mut() {
+            let rotated = wal_partition.check_wal_rotate().await;
+
+            if rotated {
+                compacted_index_partitions.push((wal_partition.namespace.clone(), wal_partition.partition.clone(), wal_partition.time.clone(), wal_partition.shard.clone()));
+            }
+        }
+
+        for (namespace, partition, time, shard) in compacted_index_partitions {
+            index.index.remove(&(namespace.clone(), partition.clone(), time.clone(), shard));
+        }
+
         // println!("Wrote {} rows to WAL", rows);
 
         Ok(())
     }
 
     pub async fn compact_all_partitions(force: bool, offsets_db: Arc<Offsets>) {
-        let mut wal_index = WAL_INDEX.write();
+        let mut wal_index = WAL_PARTITION_INDEX.write();
 
         wal_index.index.clear(); // avoid duplicates
         // @todo - implement better, persistent  indexing
@@ -229,14 +270,14 @@ impl Buffers {
 }
 
 // #[derive(Default, Debug)]
-pub struct WalIndex {
+pub struct WalPartitionIndex {
     // Maps namespace, partition, and time to WAL file information
-    index: HashMap<(String, String, Option<i64>, String), WalFilePartition>,
+    index: HashMap<(String, String, Option<i64>, String), WalPartition>,
 }
 
-impl WalIndex {
+impl WalPartitionIndex {
     fn new() -> Self {
-        WalIndex {
+        WalPartitionIndex {
             index: HashMap::new(),
         }
     }
@@ -267,7 +308,7 @@ impl WalIndex {
 
             let partition_key = (wal_file.namespace.clone(), wal_file.partition.clone(), wal_file.time.clone(), wal_file.shard.clone());
 
-            let wal_file_partition = self.index.entry(partition_key).or_insert_with(|| WalFilePartition {
+            let wal_file_partition = self.index.entry(partition_key).or_insert_with(|| WalPartition {
                 files: Vec::new(),
                 namespace: wal_file.namespace.clone(),
                 partition: wal_file.partition.clone(),
@@ -339,7 +380,7 @@ impl WalIndex {
 }
 
 #[derive(Debug)]
-struct WalFilePartition {
+struct WalPartition {
     files: Vec<WalFile>,
     pub(crate) namespace: String,
     pub(crate) partition: String,
@@ -349,7 +390,7 @@ struct WalFilePartition {
     bytes: u64,
 }
 
-impl WalFilePartition {
+impl WalPartition {
     pub fn recover_from_wal(&mut self) -> io::Result<()> {
 
         Ok(())
@@ -391,38 +432,39 @@ impl WalFilePartition {
         );
 
 
-        let schema = ARROW_SCHEMA.read().get(&self.namespace).unwrap().clone();
+        // let schema = ARROW_SCHEMA.read().get(&self.namespace).unwrap().clone();
 
         let temp_file_path = format!("{}/{}-{}.temp", data_dir, output_file_name, Helpers::random_str(32));
 
-        let mut record_batches = Vec::new();
+        // let mut record_batches = Vec::new();
 
-        let mut compacted_files = Vec::new();
+        // let mut compacted_files = Vec::new();
 
-        for wal_file in self.files.iter_mut() {
-            if wal_file.bytes == 0 {
-                println!("Ignoring empty bytes WAL file: {}", wal_file.path.to_str().unwrap());
-                continue;
-            }
-
-            // check for empty file
-            if wal_file.file.metadata().unwrap().len() == 0 {
-                println!("Ignoring empty WAL file: {}", wal_file.path.to_str().unwrap());
-                continue;
-            } else {
-                println!("Reading WAL file: {}, of bytes: {}", wal_file.path.to_str().unwrap(), wal_file.file.metadata().unwrap().len());
-
-                let mut total_rows = TOTAL_ROWS.read().load(Ordering::Relaxed);
-                total_rows += 1;
-                TOTAL_ROWS.read().store(total_rows, Ordering::Relaxed);
-
-            }
-
-            compacted_files.push(wal_file.path.clone());
-
-            record_batches.extend(wal_file.read_from_stream().expect(format!("Failed to read from WAL file: {} of bytes: {}", wal_file.path.to_str().unwrap(), wal_file.file.metadata().unwrap().len()).as_str()));
-
-        }
+        // @todo - I think this file empty check is redundant now we're building the index as we write
+        // for wal_file in self.files.iter_mut() {
+        //     if wal_file.bytes == 0 {
+        //         println!("Ignoring empty bytes WAL file: {}", wal_file.path.to_str().unwrap());
+        //         continue;
+        //     }
+        //
+        //     // check for empty file
+        //     if wal_file.file.metadata().unwrap().len() == 0 {
+        //         println!("Ignoring empty WAL file: {}", wal_file.path.to_str().unwrap());
+        //         continue;
+        //     } else {
+        //         println!("Reading WAL file: {}, of bytes: {}", wal_file.path.to_str().unwrap(), wal_file.file.metadata().unwrap().len());
+        //
+        //         let mut total_rows = TOTAL_ROWS.read().load(Ordering::Relaxed);
+        //         total_rows += 1;
+        //         TOTAL_ROWS.read().store(total_rows, Ordering::Relaxed);
+        //
+        //     }
+        //
+        //     compacted_files.push(wal_file.path.clone());
+        //
+        //     record_batches.extend(wal_file.read_from_stream().expect(format!("Failed to read from WAL file: {} of bytes: {}", wal_file.path.to_str().unwrap(), wal_file.file.metadata().unwrap().len()).as_str()));
+        //
+        // }
 
         let write_file = OpenOptions::new()
             .create(true)
@@ -436,22 +478,31 @@ impl WalFilePartition {
             .set_compression(Compression::SNAPPY)
             .build();
 
-        let mut writer = ArrowWriter::try_new(write_file, schema.clone(), Some(props)).unwrap();
+        let schema = self.files.last_mut().unwrap().read_schema_from_stream().expect("Failed to read schema from WAL file");
 
-        for batch in record_batches {
+        let mut writer = ArrowWriter::try_new(write_file, schema, Some(props)).unwrap();
+        // let mut writer = ArrowWriter::try_new(write_file, schema.clone(), Some(props)).unwrap();
 
-            // use json as an intermediate format to align record batches schema fields order
-            // @todo - clearly we want something more efficient
-            let json = record_batches_to_json_rows(vec![&batch].as_slice()).unwrap();
-            let mut decoder = ReaderBuilder::new(schema.clone()).build_decoder().unwrap();
+        for wal_file in self.files.iter_mut() {
 
-            decoder.serialize(&json).unwrap();
+            for batch in wal_file.read_from_stream().expect(format!("Failed to read from WAL file: {} of bytes: {}", wal_file.path.to_str().unwrap(), wal_file.file.metadata().unwrap().len()).as_str()) {
+                // use json as an intermediate format to align record batches schema fields order
+                // @todo - clearly we want something more efficient
+                // let json = record_batches_to_json_rows(vec![&batch].as_slice()).unwrap();
+                // let mut decoder = ReaderBuilder::new(schema.clone()).build_decoder().unwrap();
+                //
+                // decoder.serialize(&json).unwrap();
+                //
+                // let aligned_batch = decoder.flush().unwrap().unwrap();
+                //
+                // println!("Writing {} rows to parquet", aligned_batch.num_rows());
+                //
+                // writer.write(&aligned_batch).expect("Error writing to parquet file");
 
-            let aligned_batch = decoder.flush().unwrap().unwrap();
+                println!("Writing {} rows to parquet", batch.num_rows());
 
-            println!("Writing {} rows to parquet", aligned_batch.num_rows());
-
-            writer.write(&aligned_batch).expect("Error writing to parquet file");
+                writer.write(&batch).expect("Error writing to parquet file");
+            }
 
         }
 
@@ -462,16 +513,16 @@ impl WalFilePartition {
         fs::rename(&temp_file_path, parquet_output).unwrap();
 
         // Rename the processed WAL file to a tombstone file
-        for wal_file_path in compacted_files {
+        for wal_file in self.files.iter() {
             let tombstone_path = format!("{}/ingest_buffer/done/{}.tombstone", data_dir, Helpers::random_str(32));
 
             // if fs::metadata(&wal_file_path).is_ok() {
-                match fs::rename(&wal_file_path, tombstone_path) {
+                match fs::rename(&wal_file.path, tombstone_path) {
                     Ok(_) => {
-                        println!("Tombstoned WAL file: {}", wal_file_path.to_str().unwrap());
+                        println!("Tombstoned WAL file: {}", wal_file.path.to_str().unwrap());
                     },
                     Err(e) => {
-                        println!("Failed to tombstone WAL file: {}, Error: {}", wal_file_path.to_str().unwrap(), e);
+                        println!("Failed to tombstone WAL file: {}, Error: {}", wal_file.path.to_str().unwrap(), e);
                     }
 
                 }

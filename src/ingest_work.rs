@@ -198,11 +198,20 @@ impl Ingest {
 
             let run_id = self.run_id.clone();
 
+
             self.thread_pool.execute(move || {
                 // println!("Processing batch of {} events on core {}", datas_clone.len(), core_count);
-                Ingest::process_batch(&mut datas_clone, &offset_db_clone, buffers_clone, &core_id.to_string(), run_id);
-                tx.send(()).unwrap();
+                // Ingest::process_batch(&mut datas_clone, &offset_db_clone, buffers_clone, &core_id.to_string(), run_id).await;
+                // tx.send(()).unwrap();
+
+                // Use a new Tokio runtime or an appropriate async runtime
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async {
+                    Ingest::process_batch(&mut datas_clone, &offset_db_clone, buffers_clone, &core_id.to_string(), run_id).await;
+                    tx.send(()).unwrap(); // Assuming this is a synchronous channel
+                });
             });
+
 
             // }
         }
@@ -220,7 +229,7 @@ impl Ingest {
 
     }
 
-    fn process_batch(
+    async fn process_batch(
         datas: &mut Vec<IngestBatch>,
         offset_db_clone: &Arc<Offsets>,
         buffers: Arc<TimedRwLock<Buffers>>,
@@ -596,7 +605,7 @@ impl Ingest {
         // @todo - write() Buffers
         buffers.write(buf);
 
-        buffers.flush().unwrap();
+        buffers.flush().await.unwrap();
 
 
         // for buffer in buffers.buffers.iter() {
@@ -618,13 +627,15 @@ impl Ingest {
             *updated_schema_clone.lock().unwrap() = "no".to_string();
 
             // update metadata at control pane, this may or may not be automatically approved
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(async {
-                    Config::set_metadata(&METADATA.read(), true).await;
-                });
+            // tokio::runtime::Builder::new_multi_thread()
+            //     .enable_all()
+            //     .build()
+            //     .unwrap()
+            //     .block_on(async {
+            //         Config::set_metadata(&METADATA.read(), true).await;
+            //     });
+
+            Config::set_metadata(&METADATA.read(), true).await;
         }
 
         let mut counter_lock = METRICS.write();

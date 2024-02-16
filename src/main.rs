@@ -98,7 +98,7 @@ use crate::plugins::stdout_output::DataOutputStdoutPlugin;
 use datafusion::prelude::*;
 use sqlparser::test_utils::alter_table_op_with_name;
 use tokio::fs::metadata;
-use crate::buffer::ingest_buffer::{Buffers, TOTAL_ROWS, WAL_INDEX};
+use crate::buffer::ingest_buffer::{Buffers, TOTAL_ROWS, WAL_PARTITION_INDEX};
 use crate::helpers::Helpers;
 // use crate::buffer::BufferChunker;
 use crate::helpers::timed_rwlock::TimedRwLock;
@@ -766,7 +766,7 @@ async fn sync() {
     }
 
     {
-        let mut wal_index = WAL_INDEX.write();
+        let mut wal_index = WAL_PARTITION_INDEX.write();
         wal_index.recover(offset_buffer_clone).expect("Failed to recover WAL index");
     }
 
@@ -1109,7 +1109,7 @@ async fn sync() {
                             OUTPUT_RUNNING.write().store(true, Ordering::SeqCst);
                         }
 
-                        Buffers::compact_all_partitions(false, offsets_clone).await;
+                        // Buffers::compact_all_partitions(false, offsets_clone).await;
 
                         if Config::get_pipeline_config().output.is_some() {
 
@@ -1202,7 +1202,7 @@ async fn sync() {
     }
 
     let mut total_rows = TOTAL_ROWS.read().load(Ordering::Relaxed);
-    println!("Total WAL files read: {}", total_rows);
+    println!("\nTotal Rows written: {}\n", total_rows);
 
     {
         LOGGER.write()
