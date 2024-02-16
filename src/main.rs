@@ -1122,7 +1122,7 @@ async fn sync() {
                     });
             }
         },
-        periodic::Every::new(Duration::from_secs(5)),
+        periodic::Every::new(Duration::from_secs(10)),
     );
     out_pnanner.start();
 
