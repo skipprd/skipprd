@@ -383,7 +383,7 @@ impl WalFilePartition {
         );
 
 
-        // let schema = ARROW_SCHEMA.read().get(&self.namespace).unwrap().clone();
+        let schema = ARROW_SCHEMA.read().get(&self.namespace).unwrap().clone();
 
         let temp_file_path = format!("{}/{}-{}.temp", data_dir, output_file_name, Helpers::random_str(32));
 
@@ -425,8 +425,8 @@ impl WalFilePartition {
 
         // let batch = arrow::compute::concat_batches(&schema, &record_batches).unwrap();
 
-        let batch_schema = record_batches[0].schema();
-        let batch = Self::concat_batches(&batch_schema, &record_batches).unwrap();
+        // let batch_schema = record_batches[0].schema();
+        // let batch = Self::concat_batches(&batch_schema, &record_batches).unwrap();
 
         // let empty_schema = arrow_schema::Schema::empty();
         // let empty_schema = Arc::new(empty_schema);
@@ -444,9 +444,11 @@ impl WalFilePartition {
             .set_compression(Compression::SNAPPY)
             .build();
 
-        let mut writer = ArrowWriter::try_new(write_file, batch_schema.clone(), Some(props)).unwrap();
+        let mut writer = ArrowWriter::try_new(write_file, schema, Some(props)).unwrap();
 
-        writer.write(&batch).expect("Error writing to parquet file");
+        for batch in record_batches {
+            writer.write(&batch).expect("Error writing to parquet file");
+        }
 
         writer.close().unwrap();
 
