@@ -18,6 +18,7 @@ use arrow::compute::concat;
 use arrow::ipc::{CompressionType};
 use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
+use arrow::json::reader::Decoder;
 use arrow::json::writer::record_batches_to_json_rows;
 use arrow::record_batch::RecordBatchOptions;
 use bincode;
@@ -420,25 +421,8 @@ impl WalFilePartition {
             compacted_files.push(wal_file.path.clone());
 
             record_batches.extend(wal_file.read_from_stream().expect(format!("Failed to read from WAL file: {} of bytes: {}", wal_file.path.to_str().unwrap(), wal_file.file.metadata().unwrap().len()).as_str()));
-            // for record_batch in read_batches {
-            //     record_batches.push(record_batch);
-            // }
 
         }
-
-        // println!("Schema: {:?}", schema);
-
-        // order record batches arrays by schema order
-        // Self::recusive_sort(schema.clone(), &mut record_batches);
-
-        // let batch = arrow::compute::concat_batches(&schema, &record_batches).unwrap();
-
-        // let batch_schema = record_batches[0].schema();
-        // let batch = Self::concat_batches(&batch_schema, &record_batches).unwrap();
-
-        // let empty_schema = arrow_schema::Schema::empty();
-        // let empty_schema = Arc::new(empty_schema);
-        // let batch = arrow::compute::concat_batches(&empty_schema, &record_batches).unwrap();
 
         let write_file = OpenOptions::new()
             .create(true)
@@ -455,8 +439,12 @@ impl WalFilePartition {
         let mut writer = ArrowWriter::try_new(write_file, schema.clone(), Some(props)).unwrap();
 
         for batch in record_batches {
+
+            // use json as an intermediate format to align record batches schema fields order
+            // @todo - clearly we want something more efficient
             let json = record_batches_to_json_rows(vec![&batch].as_slice()).unwrap();
             let mut decoder = ReaderBuilder::new(schema.clone()).build_decoder().unwrap();
+
             decoder.serialize(&json).unwrap();
 
             let aligned_batch = decoder.flush().unwrap().unwrap();
@@ -466,14 +454,6 @@ impl WalFilePartition {
             writer.write(&aligned_batch).expect("Error writing to parquet file");
 
         }
-
-
-        // for batch in unified_record_batches {
-        //
-        //     println!("Writing {} colums to parquet", batch.num_columns());
-        //
-        //     writer.write(&batch).expect("Error writing to parquet file");
-        // }
 
         writer.close().unwrap();
 
