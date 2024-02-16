@@ -192,6 +192,9 @@ impl Buffers {
     pub async fn compact_all_partitions(force: bool, offsets_db: Arc<Offsets>) {
         let mut wal_index = WAL_INDEX.write();
 
+        wal_index.index.clear(); // avoid duplicates
+        // @todo - implement better, persistent  indexing
+
         wal_index.recover(offsets_db).expect("Failed to recover WAL index");
 
         let mut compacted_index_partitions = Vec::new();
@@ -219,7 +222,7 @@ impl Buffers {
             // fs::remove_dir_all(wal_partition_dir).unwrap();
         // }
 
-        wal_index.index.clear();
+        // wal_index.index.clear();
     }
 
 }
@@ -416,10 +419,10 @@ impl WalFilePartition {
 
             compacted_files.push(wal_file.path.clone());
 
-            let read_batches = wal_file.read_from_stream().expect(format!("Failed to read from WAL file: {} of bytes: {}", wal_file.path.to_str().unwrap(), wal_file.file.metadata().unwrap().len()).as_str());
-            for record_batch in read_batches {
-                record_batches.push(record_batch);
-            }
+            record_batches = wal_file.read_from_stream().expect(format!("Failed to read from WAL file: {} of bytes: {}", wal_file.path.to_str().unwrap(), wal_file.file.metadata().unwrap().len()).as_str());
+            // for record_batch in read_batches {
+            //     record_batches.push(record_batch);
+            // }
 
         }
 
