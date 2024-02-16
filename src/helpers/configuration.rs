@@ -213,6 +213,11 @@ impl Config {
         if ini.sections().contains(&profile_name) == true
             || profile_name == "default" {
 
+            if ini.sections().contains(&profile_name) == false {
+                // support local work without a profile
+                return;
+            }
+
             let workspace = ini.get(&profile_name, "workspace").expect(&format!("'workspace' not found for profile '{}' in credentials file {}", profile_name, credentials_file_path));
             let api_token = ini.get(&profile_name, "api_token").expect(&format!("'api_token' not found for profile '{}' in credentials file {}", profile_name, credentials_file_path));
 
@@ -1215,7 +1220,7 @@ impl Config {
         let metadata: Result<HashMap<String, Metadata>, bool> = match response {
             Ok(resp) => match resp.status() {
                 StatusCode::OK => {
-                    let metadata = match resp.json::<HashMap<String, Metadata>>().await {
+                    let mut metadata = match resp.json::<HashMap<String, Metadata>>().await {
                         Ok(metadata) => metadata,
                         Err(err) => {
                             panic!("Metadata HTTP Error: {:?}", err);

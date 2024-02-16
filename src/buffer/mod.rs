@@ -30,7 +30,7 @@ use glob::{glob_with, MatchOptions};
 
 use parquet::data_type::AsBytes;
 use parquet::file::reader::Length;
-use crate::{BUFFER_FINALISE_RUNNING, METADATA};
+use crate::{METADATA};
 use crate::converters::skippr_arrow::convert_skippr_to_arrow;
 use crate::discover::Metadata;
 

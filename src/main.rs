@@ -98,7 +98,7 @@ use crate::plugins::stdout_output::DataOutputStdoutPlugin;
 use datafusion::prelude::*;
 use sqlparser::test_utils::alter_table_op_with_name;
 use tokio::fs::metadata;
-use crate::buffer::ingest_buffer::{Buffers, WAL_INDEX};
+use crate::buffer::ingest_buffer::{Buffers, TOTAL_ROWS, WAL_INDEX};
 use crate::helpers::Helpers;
 // use crate::buffer::BufferChunker;
 use crate::helpers::timed_rwlock::TimedRwLock;
@@ -117,14 +117,14 @@ pub static RUNNING: Lazy<TimedRwLock<AtomicBool>> = Lazy::new(|| TimedRwLock::ne
 pub static OUTPUT_RUNNING: Lazy<TimedRwLock<AtomicBool>> =
     Lazy::new(|| TimedRwLock::new("output_running".to_string(), AtomicBool::new(false)));
 
-pub static BUFFER_FINALISE_RUNNING: Lazy<TimedRwLock<AtomicBool>> =
-    Lazy::new(|| TimedRwLock::new("buffer_finalise_running".to_string(), AtomicBool::new(false)));
+// pub static BUFFER_FINALISE_RUNNING: Lazy<TimedRwLock<AtomicBool>> =
+//     Lazy::new(|| TimedRwLock::new("buffer_finalise_running".to_string(), AtomicBool::new(false)));
 
 pub static OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE: Lazy<TimedRwLock<AtomicBool>> =
     Lazy::new(|| TimedRwLock::new("output_graceful_shutdown_complete".to_string(), AtomicBool::new(false)));
 
 pub static LOGGER: Lazy<Arc<tokio::sync::RwLock<Logger>>> = Lazy::new(|| Logger::new(100));
-pub static METRICS: Lazy<Arc<TimedRwLock<Metrics>>> = Lazy::new(|| Arc::new(TimedRwLock::new("metrics".to_string(),Metrics::new())));
+pub static METRICS: Lazy<Arc<TimedRwLock<Metrics>>> = Lazy::new(|| Arc::new(TimedRwLock::new("metrics".to_string(), Metrics::new())));
 pub static METADATA: Lazy<Arc<TimedRwLock<HashMap<String, Metadata>>>> = Lazy::new(|| Arc::new(TimedRwLock::new("metadata".to_string(), HashMap::new())));
 // pub static NEW_METADATA: Lazy<Arc<TimedRwLock<HashMap<String, Metadata>>>> = Lazy::new(|| Arc::new(TimedRwLock::new("new_metadata".to_string(), HashMap::new())));
 
@@ -498,16 +498,16 @@ async fn query(sql: &str) {
 
             println!("Alter table alter schema: {} column type from {} to {}", stmt.table_name, stmt.column_name, stmt.new_type);
         },
-        Err(e) => {
-
-            println!("Unknown SQL Dialect: {}", sql);
-        },
+        // Err(e) => {
+        //
+        //     println!("Unknown SQL Dialect: {}", sql);
+        // },
         _ => {
 
             let mut table_name = "".to_string();
 
             if sql.to_lowercase().split("from").collect::<Vec<&str>>().len() > 1 {
-                println!("Invalid query, must be in the format: SELECT * FROM <table_name>");
+                // println!("Invalid query, must be in the format: SELECT * FROM <table_name>");
                 // process::exit(1);
 
                 table_name = sql.to_lowercase().split("from").collect::<Vec<&str>>()[1].split(" ").collect::<Vec<&str>>()[1].trim().replace(";", "");
@@ -899,9 +899,9 @@ async fn sync() {
                 // let mut output_files = OUTPUT_FILES_STATIC.write();
                 // Ingest::rotate_buffers(true, &mut output_files);
 
-                while BUFFER_FINALISE_RUNNING.read().load(Ordering::SeqCst) {
-                    sleep(Duration::from_secs(1));
-                }
+                // while BUFFER_FINALISE_RUNNING.read().load(Ordering::SeqCst) {
+                //     sleep(Duration::from_secs(1));
+                // }
 
                 // Buffers::force_flush();
 
@@ -1097,18 +1097,21 @@ async fn sync() {
                         // BufferChunker::rotate_buffers(false);
 
                         while OUTPUT_RUNNING.read().load(Ordering::SeqCst) {
-                            // sleep(Duration::from_secs(1));
-                            return;
+                            sleep(Duration::from_secs(1));
+                            // return;
                         }
 
                         // BufferChunker::rotate_buffers(false);
 
-                        Buffers::compact_all_partitions(false).await;
+                        let offsets_clone = offsets_clone.clone();
+
+                        {
+                            OUTPUT_RUNNING.write().store(true, Ordering::SeqCst);
+                        }
+
+                        Buffers::compact_all_partitions(false, offsets_clone).await;
 
                         if Config::get_pipeline_config().output.is_some() {
-                            {
-                                OUTPUT_RUNNING.write().store(true, Ordering::SeqCst);
-                            }
 
                             sync_output_plugin(Config::get_pipeline_output_plugin_name().as_str(), "output".to_string()).await;
                         }
@@ -1150,17 +1153,21 @@ async fn sync() {
 
     }
 
-    Buffers::compact_all_partitions(true).await;
-
     // RUNNING.write().unwrap().store(false, Ordering::SeqCst); // the prevents metrics from printing while shutting down, BUT also prevents output serialisatin
 
     while OUTPUT_RUNNING.read().load(Ordering::SeqCst) {
         sleep(Duration::from_secs(1));
     }
 
-    while BUFFER_FINALISE_RUNNING.read().load(Ordering::SeqCst) {
-        sleep(Duration::from_secs(1));
+    {
+        OUTPUT_RUNNING.write().store(true, Ordering::SeqCst);
     }
+
+    Buffers::compact_all_partitions(true, offsets).await;
+
+    // while BUFFER_FINALISE_RUNNING.read().load(Ordering::SeqCst) {
+    //     sleep(Duration::from_secs(1));
+    // }
 
     if Config::get_pipeline_config().output.is_some() {
         sync_output_plugin(Config::get_pipeline_output_plugin_name().as_str(), "output".to_string()).await;
@@ -1169,6 +1176,10 @@ async fn sync() {
     if Config::get_pipeline_config().deadletter.is_some() {
         sync_output_plugin(&Config::get_pipeline_deadletter_plugin_name(), "deadletter".to_string()).await;
     }
+
+    OUTPUT_RUNNING
+        .write()
+        .store(false, Ordering::SeqCst);
 
     let metrics_lock = METRICS.read();
 
@@ -1190,6 +1201,8 @@ async fn sync() {
         println!("{}: {}ms", key, value.as_millis());
     }
 
+    let mut total_rows = TOTAL_ROWS.read().load(Ordering::Relaxed);
+    println!("Total WAL files read: {}", total_rows);
 
     {
         LOGGER.write()

@@ -98,11 +98,12 @@ pub struct Ingest {
     tx: Sender<()>,
     active_count: Arc<AtomicUsize>,
     buffers: Arc<TimedRwLock<Buffers>>,
+    run_id: String,
 }
 
 impl Drop for Ingest {
     fn drop(&mut self) {
-        println!("Waiting for {} ingest tasks to finish", self.active_count.load(Ordering::SeqCst));
+        println!("Dropping Ingest Struct: Waiting for {} ingest tasks to finish", self.active_count.load(Ordering::SeqCst));
 
         self.wait_for_completion();
     }
@@ -126,12 +127,16 @@ impl Ingest {
         let mut buffers = Buffers::new();
         let mut buffers = Arc::new(TimedRwLock::new("buffers".to_string(), buffers));
 
+        let metrics = METRICS.read();
+        let run_id = metrics.run_id.clone();
+
         Ingest {
             num_cpus,
             thread_pool,
             tx,
             active_count,
-            buffers
+            buffers,
+            run_id
         }
     }
 
@@ -163,6 +168,7 @@ impl Ingest {
 
         // If we're not running, exit after current threads finish.
         if !RUNNING.read().load(Ordering::SeqCst) {
+            println!("Not running, exiting");
             self.wait_for_completion();
             exit(0);
         } else {
@@ -190,9 +196,11 @@ impl Ingest {
 
             let buffers_clone = self.buffers.clone();
 
+            let run_id = self.run_id.clone();
+
             self.thread_pool.execute(move || {
                 // println!("Processing batch of {} events on core {}", datas_clone.len(), core_count);
-                Ingest::process_batch(&mut datas_clone, &offset_db_clone, buffers_clone, &core_id.to_string());
+                Ingest::process_batch(&mut datas_clone, &offset_db_clone, buffers_clone, &core_id.to_string(), run_id);
                 tx.send(()).unwrap();
             });
 
@@ -201,7 +209,7 @@ impl Ingest {
 
     }
 
-    fn deadletter(record: &str, buffers: &Arc<TimedRwLock<Buffers>>) {
+    fn deadletter(record: &str, buffers: &Buffers) {
         let data_dir = Config::get_data_dir();
         let deadletter_dir = format!("{}/deadletter_buffer", data_dir);
 
@@ -217,6 +225,7 @@ impl Ingest {
         offset_db_clone: &Arc<Offsets>,
         buffers: Arc<TimedRwLock<Buffers>>,
         core_id: &str,
+        run_id: String,
     ) {
 
         // let mut avro_schemas = AVRO_SCHEMA.lock().unwrap();
@@ -235,6 +244,7 @@ impl Ingest {
         // let offset_db_clone = offset_db.clone();
 
         // let mut buffers: Buffers = BUFFER_INDEX.read().get(&output_dir).unwrap().clone();
+        let mut buffers = Buffers::new();
 
         let mut bytes: u64 = 0;
         let mut i: u64 = 0;
@@ -267,7 +277,7 @@ impl Ingest {
         let mut batch_offset_files: HashMap<OffsetKey, u64> = HashMap::new();
         let mut buffer_batchs: HashMap<String, String> = HashMap::new();
 
-        let mut buf: HashMap<(String, String, Option<i64>), IngestBufferBatch> = HashMap::new();
+        let mut buf: HashMap<(String, String, Option<i64>, String), IngestBufferBatch> = HashMap::new();
 
         for ingest_batch in datas {
 
@@ -526,10 +536,13 @@ impl Ingest {
                         record: record_value,
                     };
 
+                    // println!("run_id: {}", run_id);
+
                     let buf_entry = buf.entry((
                         skpr_namespace.clone(),
                         skpr_partition.clone(),
                         skpr_time_bucket.clone(),
+                        run_id.clone(),
                     )).or_insert_with(|| {
                         IngestBufferBatch {
                             offset: OffsetKeySerialize {
@@ -540,6 +553,7 @@ impl Ingest {
                             namespace: skpr_namespace.clone(),
                             partition: skpr_partition.clone(),
                             time: skpr_time_bucket,
+                            shard: run_id.clone(),
                             records: Vec::new(),
                         }
                     });
@@ -580,9 +594,9 @@ impl Ingest {
         // }
 
         // @todo - write() Buffers
-        buffers.write().write(buf);
+        buffers.write(buf);
 
-        buffers.write().flush().unwrap();
+        buffers.flush().unwrap();
 
 
         // for buffer in buffers.buffers.iter() {
