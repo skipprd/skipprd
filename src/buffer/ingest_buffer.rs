@@ -419,7 +419,7 @@ impl WalFilePartition {
 
             compacted_files.push(wal_file.path.clone());
 
-            record_batches = wal_file.read_from_stream().expect(format!("Failed to read from WAL file: {} of bytes: {}", wal_file.path.to_str().unwrap(), wal_file.file.metadata().unwrap().len()).as_str());
+            record_batches.extend(wal_file.read_from_stream().expect(format!("Failed to read from WAL file: {} of bytes: {}", wal_file.path.to_str().unwrap(), wal_file.file.metadata().unwrap().len()).as_str()));
             // for record_batch in read_batches {
             //     record_batches.push(record_batch);
             // }
@@ -452,10 +452,6 @@ impl WalFilePartition {
             .set_compression(Compression::SNAPPY)
             .build();
 
-        //
-
-        // let mut unified_record_batches: Vec<RecordBatch> = Vec::new();
-
         let mut writer = ArrowWriter::try_new(write_file, schema.clone(), Some(props)).unwrap();
 
         for batch in record_batches {
@@ -463,10 +459,7 @@ impl WalFilePartition {
             let mut decoder = ReaderBuilder::new(schema.clone()).build_decoder().unwrap();
             decoder.serialize(&json).unwrap();
 
-            // println!("Aligned {} rows to schema", batch.num_rows());
-
             let aligned_batch = decoder.flush().unwrap().unwrap();
-            // unified_record_batches.push(decoder.flush().unwrap().unwrap());
 
             println!("Writing {} rows to parquet", aligned_batch.num_rows());
 
