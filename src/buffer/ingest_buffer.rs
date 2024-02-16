@@ -18,6 +18,7 @@ use arrow::compute::concat;
 use arrow::ipc::{CompressionType};
 use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
+use arrow::json::writer::record_batches_to_json_rows;
 use arrow::record_batch::RecordBatchOptions;
 use bincode;
 use serde_cbor;
@@ -30,9 +31,12 @@ use icu::properties::sets::print;
 use lazy_static::lazy_static;
 use libc::exit;
 use once_cell::sync::Lazy;
-use parquet::arrow::ArrowWriter;
+use parquet::arrow::{arrow_to_parquet_schema, ArrowWriter};
+use parquet::arrow::arrow_writer::{ArrowLeafColumn, compute_leaves, get_column_writers};
 use parquet::basic::Compression;
-use parquet::file::properties::WriterProperties;
+use parquet::file::properties::{ReaderProperties, WriterProperties};
+use parquet::file::reader::SerializedFileReader;
+use parquet::file::writer::SerializedFileWriter;
 use serde_derive::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::runtime::Runtime;
@@ -402,7 +406,7 @@ impl WalFilePartition {
                 println!("Ignoring empty WAL file: {}", wal_file.path.to_str().unwrap());
                 continue;
             } else {
-                // println!("Reading WAL file: {}, of bytes: {}", wal_file.path.to_str().unwrap(), wal_file.file.metadata().unwrap().len());
+                println!("Reading WAL file: {}, of bytes: {}", wal_file.path.to_str().unwrap(), wal_file.file.metadata().unwrap().len());
 
                 let mut total_rows = TOTAL_ROWS.read().load(Ordering::Relaxed);
                 total_rows += 1;
@@ -412,10 +416,11 @@ impl WalFilePartition {
 
             compacted_files.push(wal_file.path.clone());
 
-            record_batches.extend(wal_file.read_from_stream()
-                .expect(format!("Failed to read from WAL file: {} of bytes: {}", wal_file.path.to_str().unwrap(), wal_file.file.metadata().unwrap().len()).as_str()));
+            let read_batches = wal_file.read_from_stream().expect(format!("Failed to read from WAL file: {} of bytes: {}", wal_file.path.to_str().unwrap(), wal_file.file.metadata().unwrap().len()).as_str());
+            for record_batch in read_batches {
+                record_batches.push(record_batch);
+            }
 
-            wal_file.flush().expect("Failed to flush WAL file");
         }
 
         // println!("Schema: {:?}", schema);
@@ -444,11 +449,35 @@ impl WalFilePartition {
             .set_compression(Compression::SNAPPY)
             .build();
 
-        let mut writer = ArrowWriter::try_new(write_file, schema, Some(props)).unwrap();
+        //
+
+        // let mut unified_record_batches: Vec<RecordBatch> = Vec::new();
+
+        let mut writer = ArrowWriter::try_new(write_file, schema.clone(), Some(props)).unwrap();
 
         for batch in record_batches {
-            writer.write(&batch).expect("Error writing to parquet file");
+            let json = record_batches_to_json_rows(vec![&batch].as_slice()).unwrap();
+            let mut decoder = ReaderBuilder::new(schema.clone()).build_decoder().unwrap();
+            decoder.serialize(&json).unwrap();
+
+            // println!("Aligned {} rows to schema", batch.num_rows());
+
+            let aligned_batch = decoder.flush().unwrap().unwrap();
+            // unified_record_batches.push(decoder.flush().unwrap().unwrap());
+
+            println!("Writing {} rows to parquet", aligned_batch.num_rows());
+
+            writer.write(&aligned_batch).expect("Error writing to parquet file");
+
         }
+
+
+        // for batch in unified_record_batches {
+        //
+        //     println!("Writing {} colums to parquet", batch.num_columns());
+        //
+        //     writer.write(&batch).expect("Error writing to parquet file");
+        // }
 
         writer.close().unwrap();
 
@@ -463,7 +492,7 @@ impl WalFilePartition {
             // if fs::metadata(&wal_file_path).is_ok() {
                 match fs::rename(&wal_file_path, tombstone_path) {
                     Ok(_) => {
-                        // println!("Tombstoned WAL file: {}", wal_file_path.to_str().unwrap());
+                        println!("Tombstoned WAL file: {}", wal_file_path.to_str().unwrap());
                     },
                     Err(e) => {
                         println!("Failed to tombstone WAL file: {}, Error: {}", wal_file_path.to_str().unwrap(), e);
@@ -476,6 +505,77 @@ impl WalFilePartition {
             // }
 
         }
+
+    }
+
+    pub fn parquet_write(&mut self, mut write_file: File, record_batches: &Vec<RecordBatch>) {
+
+        let schema = ARROW_SCHEMA.read().get(&self.namespace).unwrap().clone();
+
+        // Compute the parquet schema
+        let parquet_schema = arrow_to_parquet_schema(schema.as_ref()).unwrap();
+
+        // let props = Arc::new(WriterProperties::default());
+        let props = Arc::new(WriterProperties::builder()
+            .set_dictionary_enabled(false)
+            .set_encoding(parquet::basic::Encoding::PLAIN)
+            .set_compression(Compression::SNAPPY)
+            .build());
+
+
+        // Create writers for each of the leaf columns
+        let col_writers = get_column_writers(&parquet_schema, &props, &schema).unwrap();
+
+        // Spawn a worker thread for each column
+        // This is for demonstration purposes, a thread-pool e.g. rayon or tokio, would be better
+        let mut workers: Vec<_> = col_writers
+            .into_iter()
+            .map(|mut col_writer| {
+                let (send, recv) = std::sync::mpsc::channel::<ArrowLeafColumn>();
+                let handle = std::thread::spawn(move || {
+                    for col in recv {
+                        col_writer.write(&col)?;
+                    }
+                    col_writer.close()
+                });
+                (handle, send)
+            })
+            .collect();
+
+        // Create parquet writer
+        let root_schema = parquet_schema.root_schema_ptr();
+        // let mut out = Vec::with_capacity(1024); // This could be a File
+        let mut writer = SerializedFileWriter::new(&mut write_file, root_schema, props.clone()).unwrap();
+
+        // Start row group
+        let mut row_group = writer.next_row_group().unwrap();
+
+        // Columns to encode
+        // let to_write = vec![
+        //     Arc::new(Int32Array::from_iter_values([1, 2, 3])) as _,
+        //     Arc::new(Float32Array::from_iter_values([1., 45., -1.])) as _,
+        // ];
+
+        // Spawn work to encode columns
+        let mut worker_iter = workers.iter_mut();
+        for to_write in record_batches {
+            for (arr, field) in to_write.columns().iter().zip(&to_write.schema().fields) {
+                for leaves in compute_leaves(field, arr).unwrap() {
+                    worker_iter.next().unwrap().1.send(leaves).unwrap();
+                }
+            }
+        }
+
+        // Finish up parallel column encoding
+        for (handle, send) in workers {
+            drop(send); // Drop send side to signal termination
+            let chunk = handle.join().unwrap().unwrap();
+            chunk.append_to_row_group(&mut row_group).unwrap();
+        }
+        row_group.close().unwrap();
+
+        let metadata = writer.close().unwrap();
+        // assert_eq!(metadata.num_rows, 3);
 
     }
 
@@ -1120,17 +1220,40 @@ impl WalFile {
 
         writer.seek(io::SeekFrom::End(0))?;
 
-        // let mut size: usize = 0;
+        let mut size: usize = 0;
         let codec = Some(CompressionType::LZ4_FRAME);
         let options = IpcWriteOptions::default().try_with_compression(codec)?;
 
         let mut stream_writer = StreamWriter::try_new_with_options(writer, &record_batches[0].schema(), options)?;
         for batch in record_batches {
-            // size += batch.get_array_memory_size() / 10; // @todo - approximate 10x compression ratio
+            size += batch.get_array_memory_size() / 10; // @todo - approximate 10x compression ratio
             stream_writer.write(batch).expect("Failed to write record batch to stream writer");
         }
 
         stream_writer.finish()?;
+
+
+        // let write_file = OpenOptions::new()
+        //     .create(true)
+        //     .write(true)
+        //     .open(&self.path)
+        //     .unwrap();
+        //
+        // let props = WriterProperties::builder()
+        //     .set_dictionary_enabled(false)
+        //     .set_encoding(parquet::basic::Encoding::PLAIN)
+        //     .set_compression(Compression::SNAPPY)
+        //     .build();
+        //
+        // let schema = ARROW_SCHEMA.read().get(&self.namespace).unwrap().clone();
+        //
+        // let mut writer = ArrowWriter::try_new(write_file, schema, Some(props)).unwrap();
+        //
+        // for batch in record_batches {
+        //     writer.write(&batch).expect("Error writing to parquet file");
+        // }
+        //
+        // writer.close().unwrap();
 
         self.bytes += self.file.metadata().unwrap().len();
 
