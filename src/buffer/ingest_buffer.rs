@@ -300,10 +300,10 @@ impl WalPartitionIndex {
         for file_path in wal_files {
 
             // remove file if zero bytes
-            if fs::metadata(&file_path)?.len() == 0 {
+            // if fs::metadata(&file_path)?.len() == 0 {
                 // fs::remove_file(&file_path)?; // not now we're always indexing
-                continue;
-            }
+                // continue;
+            // }
 
             let wal_file = WalFile::from_path(&file_path)?;
 
