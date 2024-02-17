@@ -1,6 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::{fs, io,};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Cursor, Read, Seek, Write};
 use std::ops::{Deref, Index};
@@ -29,6 +29,7 @@ use datafusion::execution::options::ArrowReadOptions;
 use datafusion::parquet::data_type::AsBytes;
 use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
 use icu::properties::sets::print;
+use indexmap::IndexMap;
 use lazy_static::lazy_static;
 use libc::exit;
 use once_cell::sync::Lazy;
@@ -84,14 +85,14 @@ pub struct IngestBufferBatch {
 }
 
 pub struct Buffers {
-    buf: HashMap<(String, String, Option<i64>, String), IngestBufferBatch>,
+    buf: IndexMap<(String, String, Option<i64>, String), IngestBufferBatch>,
 }
 
 impl Buffers {
 
     pub fn new() -> Self {
         Buffers {
-            buf: HashMap::new(),
+            buf: IndexMap::new(),
         }
     }
 
