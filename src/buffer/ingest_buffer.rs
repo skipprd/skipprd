@@ -82,6 +82,7 @@ pub struct IngestBufferBatch {
     pub(crate) time: Option<i64>,
     pub(crate) shard: String,
     pub(crate) records: Vec<IngestRecord>,
+    pub(crate) schema: SchemaRef,
 }
 
 pub struct Buffers {
@@ -106,7 +107,7 @@ impl Buffers {
 
     pub async fn flush(&mut self) -> Result<(), ArrowError> {
 
-        let arrow_schema_guard = ARROW_SCHEMA.read();
+        // let arrow_schema_guard = ARROW_SCHEMA.read().clone();
 
         // let mut index = WAL_INDEX.write();
 
@@ -151,7 +152,9 @@ impl Buffers {
             //      }
             //  );
 
-            let arrow_schema = arrow_schema_guard.get(&ingest_buffer_batch.namespace).unwrap().clone();
+            // let arrow_schema = arrow_schema_guard.get(&ingest_buffer_batch.namespace).unwrap().clone();
+
+            let arrow_schema = ingest_buffer_batch.schema.clone();
 
             let mut decoder = ReaderBuilder::new(arrow_schema).build_decoder().unwrap();
 
@@ -479,7 +482,7 @@ impl WalPartition {
             .set_compression(Compression::SNAPPY)
             .build();
 
-        let schema = self.files.last_mut().unwrap().read_schema_from_stream().expect("Failed to read schema from WAL file");
+        let schema = self.files.first_mut().unwrap().read_schema_from_stream().expect("Failed to read schema from WAL file");
 
         let mut writer = ArrowWriter::try_new(write_file, schema, Some(props)).unwrap();
         // let mut writer = ArrowWriter::try_new(write_file, schema.clone(), Some(props)).unwrap();
@@ -500,7 +503,9 @@ impl WalPartition {
                 //
                 // writer.write(&aligned_batch).expect("Error writing to parquet file");
 
-                println!("Writing {} rows to parquet", batch.num_rows());
+                let run_id = format!("{:?}", md5::compute(format!("{:?}", batch.schema())));
+
+                println!("Writing {} rows to parquet, of shard: {} and schema Id: {}", batch.num_rows(), wal_file.shard, run_id);
 
                 writer.write(&batch).expect("Error writing to parquet file");
             }

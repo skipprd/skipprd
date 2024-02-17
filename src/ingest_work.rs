@@ -98,7 +98,7 @@ pub struct Ingest {
     tx: Sender<()>,
     active_count: Arc<AtomicUsize>,
     buffers: Arc<TimedRwLock<Buffers>>,
-    run_id: String,
+    // run_id: String,
 }
 
 impl Drop for Ingest {
@@ -127,8 +127,8 @@ impl Ingest {
         let mut buffers = Buffers::new();
         let mut buffers = Arc::new(TimedRwLock::new("buffers".to_string(), buffers));
 
-        let metrics = METRICS.read();
-        let run_id = metrics.run_id.clone();
+        // let metrics = METRICS.read();
+        // let run_id = metrics.run_id.clone();
 
         Ingest {
             num_cpus,
@@ -136,7 +136,7 @@ impl Ingest {
             tx,
             active_count,
             buffers,
-            run_id
+            // run_id: schema_md5_str
         }
     }
 
@@ -196,8 +196,14 @@ impl Ingest {
 
             let buffers_clone = self.buffers.clone();
 
-            let run_id = self.run_id.clone();
+            // let run_id = self.run_id.clone();
 
+            // let metrics = METRICS.read();
+            // let run_id = metrics.run_id.clone();
+
+
+            let schema = ARROW_SCHEMA.read();
+            let run_id = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
 
             self.thread_pool.execute(move || {
                 // println!("Processing batch of {} events on core {}", datas_clone.len(), core_count);
@@ -236,6 +242,8 @@ impl Ingest {
         core_id: &str,
         run_id: String,
     ) {
+
+        let mut run_id = run_id.clone();
 
         // let mut avro_schemas = AVRO_SCHEMA.lock().unwrap();
 
@@ -513,6 +521,12 @@ impl Ingest {
                                         lock.insert(skpr_namespace.clone(), default_message);
 
                                         Ingest::prepare_arrow_schema(&skpr_namespace, flatten).unwrap();
+
+                                        let schema = ARROW_SCHEMA.read();
+                                        run_id = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
+
+                                        println!("Updated schema, new run id: {}", run_id);
+
                                     }
                                 }
 
@@ -547,12 +561,18 @@ impl Ingest {
 
                     // println!("run_id: {}", run_id);
 
+                    let schema =  ARROW_SCHEMA.read().get(&skpr_namespace).unwrap().clone();
+                    run_id = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
+
                     let buf_entry = buf.entry((
                         skpr_namespace.clone(),
                         skpr_partition.clone(),
                         skpr_time_bucket.clone(),
                         run_id.clone(),
                     )).or_insert_with(|| {
+
+                        // let arrow_schema = ARROW_SCHEMA.read().get(&skpr_namespace).unwrap().clone();
+
                         IngestBufferBatch {
                             offset: OffsetKeySerialize {
                                 position: 0,
@@ -564,6 +584,7 @@ impl Ingest {
                             time: skpr_time_bucket,
                             shard: run_id.clone(),
                             records: Vec::new(),
+                            schema: schema
                         }
                     });
 
