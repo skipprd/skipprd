@@ -503,7 +503,7 @@ impl WalPartition {
                 //
                 // writer.write(&aligned_batch).expect("Error writing to parquet file");
 
-                let run_id = format!("{:?}", md5::compute(format!("{:?}", batch.schema())));
+                // let run_id = format!("{:?}", md5::compute(format!("{:?}", batch.schema())));
 
                 // println!("Writing {} rows to parquet, of shard: {} and schema Id: {}", batch.num_rows(), wal_file.shard, run_id);
 
