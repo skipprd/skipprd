@@ -205,6 +205,12 @@ impl Ingest {
             let schema = ARROW_SCHEMA.read();
             let run_id = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
 
+            let mut schema_hashes = HashMap::new();
+            let schemas = ARROW_SCHEMA.read();
+            for (namespace, schema) in schemas.iter() {
+                schema_hashes.insert(namespace.clone(), format!("{:?}", md5::compute(format!("{:?}", schema.deref()))));
+            }
+
             self.thread_pool.execute(move || {
                 // println!("Processing batch of {} events on core {}", datas_clone.len(), core_count);
                 // Ingest::process_batch(&mut datas_clone, &offset_db_clone, buffers_clone, &core_id.to_string(), run_id).await;
@@ -213,7 +219,7 @@ impl Ingest {
                 // Use a new Tokio runtime or an appropriate async runtime
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 rt.block_on(async {
-                    Ingest::process_batch(&mut datas_clone, &offset_db_clone, buffers_clone, &core_id.to_string(), run_id).await;
+                    Ingest::process_batch(&mut datas_clone, &offset_db_clone, buffers_clone, &core_id.to_string(), run_id, &mut schema_hashes).await;
                     tx.send(()).unwrap(); // Assuming this is a synchronous channel
                 });
             });
@@ -241,9 +247,10 @@ impl Ingest {
         buffers: Arc<TimedRwLock<Buffers>>,
         core_id: &str,
         run_id: String,
+        schema_hashes: &mut HashMap<String, String>,
     ) {
 
-        let mut schema_hashes = HashMap::new();
+        let default_schema_hash = format!("{:?}", md5::compute(Helpers::random_str(10)));
 
         let mut run_id = run_id.clone();
 
@@ -565,32 +572,10 @@ impl Ingest {
 
                     // println!("run_id: {}", run_id);
 
-                    let schema_hash = match  schema_hashes.get(&skpr_namespace) {
+                    let schema_hash = match schema_hashes.get(&skpr_namespace) {
                         Some(hash) => hash.clone(),
                         None => {
-                            match ARROW_SCHEMA.read().get(&skpr_namespace) {
-                                Some(arrow_schema) => {
-                                    // let hash = format!("{:?}", md5::compute(format!("{:?}", arrow_schema.deref()))).clone();
-                                    // schema_hashes.insert(skpr_namespace.clone(), hash.clone());
-                                    // hash
-                                    format!("{:?}", md5::compute(format!("{:?}", arrow_schema.deref()))).clone()
-                                },
-                                None => {
-                                    // let schema = Ingest::prepare_arrow_schema(&skpr_namespace, flatten).unwrap();
-                                    // let hash = format!("{:?}", md5::compute(format!("{:?}", schema.deref()))).clone();
-                                    // schema_hashes.insert(skpr_namespace.clone(), hash.clone());
-                                    // hash
-                                    let schema = Ingest::prepare_arrow_schema(&skpr_namespace, flatten).unwrap();
-                                    let hash = format!("{:?}", md5::compute(format!("{:?}", schema.deref()))).clone();
-                                    schema_hashes.insert(skpr_namespace.clone(), hash.clone());
-                                    hash
-                                }
-                            }
-                            // schema_hashes.insert(skpr_namespace.clone(), format!("{:?}", md5::compute(format!("{:?}", arrow_schema.deref()))));
-                            // let hash = format!("{:?}", md5::compute(Helpers::random_str(10))).clone();
-                            // schema_hashes.insert(skpr_namespace.clone(), hash.clone());
-                            // hash
-                            // panic!("Failed to find schema for namespace: {}", skpr_namespace)
+                            default_schema_hash.clone()
                         }
                     };
 
