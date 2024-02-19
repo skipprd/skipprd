@@ -1321,8 +1321,7 @@ impl WalFile {
             Some(namespace),
             Some(partition),
             time,
-            // Some(shard),
-            None
+            Some(shard),
         );
 
         let wal_partition_dir = WalFile::get_wal_partition_dir(namespace, partition, time, shard);
