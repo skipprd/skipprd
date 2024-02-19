@@ -243,7 +243,7 @@ impl Ingest {
         run_id: String,
     ) {
 
-        let mut arrow_schema = ARROW_SCHEMA.read();
+        let mut arrow_schema = ARROW_SCHEMA.read().clone();
 
         let mut run_id = run_id.clone();
 
@@ -524,7 +524,7 @@ impl Ingest {
 
                                         Ingest::prepare_arrow_schema(&skpr_namespace, flatten).unwrap();
 
-                                        arrow_schema = ARROW_SCHEMA.read();
+                                        arrow_schema = ARROW_SCHEMA.read().clone();
                                         // let schema = ARROW_SCHEMA.read();
                                         // run_id = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
 
@@ -564,7 +564,14 @@ impl Ingest {
 
                     // println!("run_id: {}", run_id);
 
-                    let schema = arrow_schema.get(&skpr_namespace).unwrap().clone();
+                    let schema = match arrow_schema.get(&skpr_namespace) {
+                        Some(schema) => schema.clone(),
+                        None => {
+                            Arc::new(Schema::empty())
+                            // panic!("Failed to find schema for namespace: {}", skpr_namespace)
+                        }
+                    };
+
                     run_id = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
 
                     let buf_entry = buf.entry((

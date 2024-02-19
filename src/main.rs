@@ -298,7 +298,15 @@ async fn query(sql: &str) {
                 Mode::Query(options) => {
                     let mut metadata = Config::get_metadata().await.expect(format!("No metadata found for pipeline: {}", pipeline_name).as_str());
 
-                    metadata.get_mut(&pipeline_name).unwrap().sql = Some(sql.to_string());
+                    match metadata.get_mut(&pipeline_name) {
+                        Some(pipeline_metadata) => {
+                            pipeline_metadata.sql = Some(sql.to_string());
+                        },
+                        None => {
+                            println!("Pipeline '{}' not found", pipeline_name);
+                            return;
+                        }
+                    }
 
                     Config::set_metadata(&metadata, false).await;
 
