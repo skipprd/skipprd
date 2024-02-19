@@ -291,7 +291,7 @@ async fn query(sql: &str) {
 
             match CLI_MODE.read().clone() {
                 Mode::Sync(options) => {
-                    let _ = fs::remove_dir_all(&data_dir);
+                    let _ = fs::remove_dir_all(&data_dir).expect(format!("Failed to remove dir: {}", data_dir).as_str());
                     Config::delete_metadata().await;
                     println!("Dropped Pipeline");
                 },
@@ -776,11 +776,12 @@ async fn sync() {
 
                             println!("Recieved SQL: '{}'", sql);
 
-                            query(&sql).await;
-
+                            // remove the SQL from metadata
                             metadata.get_mut(pipeline_name.as_str()).unwrap().sql = None;
-
                             Config::set_metadata(&metadata, false).await;
+
+                            // important to exec the SQL after saving metadata, as the SQL may drop or otherwise alter the metadata
+                            query(&sql).await;
 
                             return;
                         }

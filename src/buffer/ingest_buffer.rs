@@ -505,7 +505,7 @@ impl WalPartition {
 
                 let run_id = format!("{:?}", md5::compute(format!("{:?}", batch.schema())));
 
-                println!("Writing {} rows to parquet, of shard: {} and schema Id: {}", batch.num_rows(), wal_file.shard, run_id);
+                // println!("Writing {} rows to parquet, of shard: {} and schema Id: {}", batch.num_rows(), wal_file.shard, run_id);
 
                 writer.write(&batch).expect("Error writing to parquet file");
             }

@@ -525,7 +525,7 @@ impl Ingest {
                                         let schema = ARROW_SCHEMA.read();
                                         run_id = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
 
-                                        println!("Updated schema, new run id: {}", run_id);
+                                        // println!("Updated schema, new run id: {}", run_id);
 
                                     }
                                 }
@@ -561,8 +561,8 @@ impl Ingest {
 
                     // println!("run_id: {}", run_id);
 
-                    let schema =  ARROW_SCHEMA.read().get(&skpr_namespace).unwrap().clone();
-                    run_id = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
+                    // let schema =  ARROW_SCHEMA.read().get(&skpr_namespace).unwrap().clone();
+                    // run_id = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
 
                     let buf_entry = buf.entry((
                         skpr_namespace.clone(),
@@ -571,7 +571,7 @@ impl Ingest {
                         run_id.clone(),
                     )).or_insert_with(|| {
 
-                        // let arrow_schema = ARROW_SCHEMA.read().get(&skpr_namespace).unwrap().clone();
+                        let schema = ARROW_SCHEMA.read().get(&skpr_namespace).unwrap().clone();
 
                         IngestBufferBatch {
                             offset: OffsetKeySerialize {
