@@ -243,7 +243,7 @@ impl Ingest {
         run_id: String,
     ) {
 
-        let mut arrow_schema = ARROW_SCHEMA.read().clone();
+        let mut schema_hashes = HashMap::new();
 
         let mut run_id = run_id.clone();
 
@@ -524,7 +524,8 @@ impl Ingest {
 
                                         Ingest::prepare_arrow_schema(&skpr_namespace, flatten).unwrap();
 
-                                        arrow_schema = ARROW_SCHEMA.read().clone();
+                                        let arrow_schema = ARROW_SCHEMA.read().get(&skpr_namespace).unwrap().clone();
+                                        schema_hashes.insert(skpr_namespace.clone(), format!("{:?}", md5::compute(format!("{:?}", arrow_schema.deref()))));
                                         // let schema = ARROW_SCHEMA.read();
                                         // run_id = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
 
@@ -564,24 +565,45 @@ impl Ingest {
 
                     // println!("run_id: {}", run_id);
 
-                    let schema = match arrow_schema.get(&skpr_namespace) {
-                        Some(schema) => schema.clone(),
+                    let schema_hash = match  schema_hashes.get(&skpr_namespace) {
+                        Some(hash) => hash.clone(),
                         None => {
-                            Arc::new(Schema::empty())
+                            match ARROW_SCHEMA.read().get(&skpr_namespace) {
+                                Some(arrow_schema) => {
+                                    // let hash = format!("{:?}", md5::compute(format!("{:?}", arrow_schema.deref()))).clone();
+                                    // schema_hashes.insert(skpr_namespace.clone(), hash.clone());
+                                    // hash
+                                    format!("{:?}", md5::compute(format!("{:?}", arrow_schema.deref()))).clone()
+                                },
+                                None => {
+                                    // let schema = Ingest::prepare_arrow_schema(&skpr_namespace, flatten).unwrap();
+                                    // let hash = format!("{:?}", md5::compute(format!("{:?}", schema.deref()))).clone();
+                                    // schema_hashes.insert(skpr_namespace.clone(), hash.clone());
+                                    // hash
+                                    let schema = Ingest::prepare_arrow_schema(&skpr_namespace, flatten).unwrap();
+                                    let hash = format!("{:?}", md5::compute(format!("{:?}", schema.deref()))).clone();
+                                    schema_hashes.insert(skpr_namespace.clone(), hash.clone());
+                                    hash
+                                }
+                            }
+                            // schema_hashes.insert(skpr_namespace.clone(), format!("{:?}", md5::compute(format!("{:?}", arrow_schema.deref()))));
+                            // let hash = format!("{:?}", md5::compute(Helpers::random_str(10))).clone();
+                            // schema_hashes.insert(skpr_namespace.clone(), hash.clone());
+                            // hash
                             // panic!("Failed to find schema for namespace: {}", skpr_namespace)
                         }
                     };
 
-                    run_id = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
+                    // run_id = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
 
                     let buf_entry = buf.entry((
                         skpr_namespace.clone(),
                         skpr_partition.clone(),
                         skpr_time_bucket.clone(),
-                        run_id.clone(),
+                       schema_hash
                     )).or_insert_with(|| {
 
-                        // let schema = ARROW_SCHEMA.read().get(&skpr_namespace).unwrap().clone();
+                        let schema = ARROW_SCHEMA.read().get(&skpr_namespace).unwrap().clone();
 
                         IngestBufferBatch {
                             offset: OffsetKeySerialize {
