@@ -572,12 +572,15 @@ impl Ingest {
 
                     // println!("run_id: {}", run_id);
 
-                    let schema_hash = match schema_hashes.get(&skpr_namespace) {
-                        Some(hash) => hash.clone(),
-                        None => {
-                            default_schema_hash.clone()
-                        }
-                    };
+                    // let schema_hash = match schema_hashes.get(&skpr_namespace) {
+                    //     Some(hash) => hash.clone(),
+                    //     None => {
+                    //         default_schema_hash.clone()
+                    //     }
+                    // };
+
+                    // let arrow_schema = ARROW_SCHEMA.read().get(&skpr_namespace).unwrap().clone();
+                    let schema_hash = format!("{:?}", md5::compute(format!("{:?}", ARROW_SCHEMA.read().get(&skpr_namespace).unwrap().deref())));
 
                     // run_id = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
 
