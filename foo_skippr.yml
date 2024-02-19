@@ -1,6 +1,6 @@
-skippr:
-  api_token: B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg
-  workspace: dev
+#skippr:
+#  api_token: B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg
+#  workspace: dev
 
 
 pipelines:
@@ -23,15 +23,15 @@ pipelines:
 #    reset_offsets: yes
 #    reset_metadata: yes
     auto_approve: yes
-    env: dev
+#    env: dev
     buffer_threshold_bytes: 200000000
     buffer_threshold_seconds: 600
-    transform:
-      batch_time_fields: system.datetime_posix_utc_seconds
-      batch_time_unit: day
-      flatten_events: yes
-    input: data_inputs.s3_device_data
-    output: data_outputs.ds_datalake
+#    transform:
+#      batch_time_fields: system.datetime_posix_utc_seconds
+#      batch_time_unit: day
+#      flatten_events: yes
+    input: data_inputs.s3_device_data_dev
+#    output: data_outputs.ds_datalake
 ##    schema: schema_outputs.glue_datalake
 #    deadletter: data_deadletters.ccrussbucket
 
@@ -85,16 +85,16 @@ pipelines:
   bike_hire:
 #    reset_offsets: yes
 #    reset_metadata: yes
-    chaos_mode: no
+#    chaos_mode: yes
     auto_approve: yes
     env: dev
 #    data_dir: /Volumes/PaulTimemachine/data
-    buffer_threshold_bytes: 50000000
+    buffer_threshold_bytes: 5000000
     buffer_threshold_seconds: 60
     transform:
-#      batch_time_fields: event_date
-#      batch_time_unit: day
-#      namespace_fields: message_type
+      batch_time_fields: event_date
+      batch_time_unit: day
+      namespace_fields: message_type
 #      batch_partition_fields: event_type,hardware.model,hardware.manufacturer
 #      batch_partition_fields: event_type
     input: data_inputs.local_bike_hire
@@ -239,7 +239,7 @@ data_inputs:
       s3_prefix: enriched-ieu.trip/
   s3_bike_hire:
     s3:
-      batch_size_bytes: 48000
+      batch_size_bytes: 2048000
       s3_bucket: skippr-e2e-sample-data
       s3_prefix: bike-hire/
   local_bike_hire:

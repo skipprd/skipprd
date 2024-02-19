@@ -525,7 +525,7 @@ impl WalPartition {
             // if fs::metadata(&wal_file_path).is_ok() {
                 match fs::rename(&wal_file.path, tombstone_path) {
                     Ok(_) => {
-                        println!("Tombstoned WAL file: {}", wal_file.path.to_str().unwrap());
+                        // println!("Tombstoned WAL file: {}", wal_file.path.to_str().unwrap());
                     },
                     Err(e) => {
                         println!("Failed to tombstone WAL file: {}, Error: {}", wal_file.path.to_str().unwrap(), e);
@@ -1321,7 +1321,8 @@ impl WalFile {
             Some(namespace),
             Some(partition),
             time,
-            Some(shard),
+            // Some(shard),
+            None
         );
 
         let wal_partition_dir = WalFile::get_wal_partition_dir(namespace, partition, time, shard);

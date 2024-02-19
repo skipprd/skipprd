@@ -255,8 +255,11 @@ impl Config {
         let mut file = match File::open(&file_path) {
             Ok(file) => file,
             Err(_error) => {
-                let mut app_config = APP_CONFIG.write();
-                app_config.replace(Config::new());
+                {
+                    let mut app_config = APP_CONFIG.write();
+                    app_config.replace(Config::new());
+                }
+                Config::parse_skippr_profile();
                 return;
             }
         };
