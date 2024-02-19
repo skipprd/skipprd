@@ -51,7 +51,7 @@ use crate::discover::Metadata;
 mod converters;
 // use self::converters::avro_parquet::AvroSchema;
 mod cli;
-use crate::cli::{Cli, Mode};
+use crate::cli::{Cli, Mode, CLI_MODE};
 
 extern crate clap;
 extern crate core;
@@ -108,8 +108,6 @@ use crate::sql::operators::drop_column::alter_column_drop;
 use crate::sql::parser::{PipelineToggle, SParser, Statement};
 // use crate::plugins::pcap_input::DataSourcePcapPlugin;
 
-
-
 // pub static DISPLAY_METRICS: Lazy<TimedRwLock<AtomicBool>> =
 //     Lazy::new(|| TimedRwLock::new("display_metrics".to_string(), AtomicBool::new(false)));
 
@@ -143,6 +141,8 @@ async fn main() {
     // }
 
     let cli: Cli = Cli::parse();
+
+    CLI_MODE.write().clone_from(&cli.mode);
 
     match cli.mode {
 
@@ -289,11 +289,24 @@ async fn query(sql: &str) {
 
             println!("Dropping all schemas and data for: {}", pipeline_name);
 
-            let _ = fs::remove_dir_all(&data_dir);
+            match CLI_MODE.read().clone() {
+                Mode::Sync(options) => {
+                    let _ = fs::remove_dir_all(&data_dir);
+                    Config::delete_metadata().await;
+                    println!("Dropped Pipeline");
+                },
+                Mode::Query(options) => {
+                    let mut metadata = Config::get_metadata().await.expect(format!("No metadata found for pipeline: {}", pipeline_name).as_str());
 
-            Config::delete_metadata().await;
+                    metadata.get_mut(&pipeline_name).unwrap().sql = Some(sql.to_string());
 
-            println!("Dropped Pipeline");
+                    Config::set_metadata(&metadata, false).await;
+
+                    println!("Done. Pipeline will drop on next sync run");
+                },
+                _ => {}
+            }
+
         },
         Ok(Statement::PipelineReset(stmt)) => {
 
@@ -304,11 +317,26 @@ async fn query(sql: &str) {
             let data_dir = Config::get_data_dir();
             let pipeline_name = Config::get_pipeline_name();
 
-            println!("Resetting offset and purging buffer files for pipeline: {}", pipeline_name);
+            println!("Resetting offset database and purging WAL files for pipeline: {}, dir: {}", pipeline_name, data_dir);
 
-            let _ = fs::remove_dir_all(&data_dir);
+            match CLI_MODE.read().clone() {
+                Mode::Sync(options) => {
+                    let _ = fs::remove_dir_all(&data_dir).expect(format!("Failed to remove dir: {}", data_dir).as_str());
 
-            println!("Reset Pipeline, on next sync all data will be re-ingested");
+                    println!("Pipeline reset, on next sync run all data will be re-ingested");
+                },
+                Mode::Query(options) => {
+                    let mut metadata = Config::get_metadata().await.expect(format!("No metadata found for pipeline: {}", pipeline_name).as_str());
+
+                    metadata.get_mut(&pipeline_name).unwrap().sql = Some(sql.to_string());
+
+                    Config::set_metadata(&metadata, false).await;
+
+                    println!("Done. Pipeline will reset on next sync run");
+                },
+                _ => {}
+            }
+
         },
         Ok(Statement::SchemaDrop(stmt)) => {
 
@@ -348,11 +376,10 @@ async fn query(sql: &str) {
             };
 
             {
-                println!("Metadata enabled: {}", skippr_metadata.get(&format!("{}", &stmt.pipeline)).unwrap().enabled);
                 METADATA.write().clone_from(&skippr_metadata);
             }
 
-            Config::set_metadata(&skippr_metadata, true).await;
+            Config::set_metadata(&skippr_metadata, false).await;
 
             println!("Toggled pipeline '{}' to: {}d", stmt.pipeline, stmt.toggle);
         },
@@ -729,20 +756,32 @@ async fn sync() {
         Err(_err) => {}
     }
 
-    let offsets = Arc::new(Offsets::init().unwrap());
-
-    let offset_buffer_clone = offsets.clone();
 
     let skippr_metadata = match Config::get_metadata().await {
-        Ok(metadata) => {
+        Ok(mut metadata) => {
             println!("Found Skippr metadata");
 
             {
                 let pipeline_name = PIPELINE_NAME.read().clone();
-                match metadata.get(pipeline_name.as_str()) {
+                match metadata.get_mut(pipeline_name.as_str()) {
                     Some(pipeline_metadata) => {
+
                         if !pipeline_metadata.enabled {
                             println!("Pipeline '{}' disabled, skipping.", pipeline_name);
+                            return;
+                        }
+
+                        if pipeline_metadata.sql.is_some() {
+                            let sql = pipeline_metadata.sql.clone().unwrap();
+
+                            println!("Recieved SQL: '{}'", sql);
+
+                            query(&sql).await;
+
+                            metadata.get_mut(pipeline_name.as_str()).unwrap().sql = None;
+
+                            Config::set_metadata(&metadata, false).await;
+
                             return;
                         }
                     },
@@ -764,6 +803,10 @@ async fn sync() {
         // NEW_METADATA.write().clear();
         METADATA.write().clone_from(&skippr_metadata);
     }
+
+    let offsets = Arc::new(Offsets::init().unwrap());
+
+    let offset_buffer_clone = offsets.clone();
 
     {
         let mut wal_index = WAL_PARTITION_INDEX.write();
@@ -1349,6 +1392,7 @@ mod tests {
             out_field_name: "parent_child".to_string(),
             determined_type: "string".to_string(),
             determined_type_values: "".to_string(),
+            sql: None,
         };
 
         fields.insert("child".to_string(), metadata_child.clone());
@@ -1364,6 +1408,7 @@ mod tests {
             out_field_name: "parent".to_string(),
             determined_type: "record".to_string(),
             determined_type_values: "".to_string(),
+            sql: None,
         };
 
         let mut flattened: HashMap<String, Metadata> = HashMap::new();

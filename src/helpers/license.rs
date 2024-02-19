@@ -101,9 +101,9 @@ impl LicenseChecker {
 
         match self.license_is_valid {
             true => {
-                println!("Found valid license for API key");
+                // println!("Found valid license for API key");
                 println!("By using this software, you agree to the terms of the End User License Agreement (EULA) available at https://skippr.io/terms/eula");
-                println!("");
+                // println!("");
                 Ok(())
             }
             _false => {

@@ -100,6 +100,7 @@ pub struct Metadata {
     pub(crate) out_field_name: String,
     pub(crate) determined_type: String,
     pub(crate) determined_type_values: String,
+    pub(crate) sql: Option<String>
 }
 
 impl Metadata {
@@ -117,6 +118,7 @@ impl Metadata {
             out_field_name: "".to_string(),
             determined_type: "".to_string(),
             determined_type_values: "".to_string(),
+            sql: None,
         })
     }
 

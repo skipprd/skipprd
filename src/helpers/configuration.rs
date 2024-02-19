@@ -132,7 +132,7 @@ pub struct Pipeline {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
-    pub skippr: Skippr,
+    pub skippr: Option<Skippr>,
     pub pipelines: HashMap<String, Pipeline>,
     pub data_inputs: Option<HashMap<String, PluginConfig>>,
     pub data_outputs: Option<HashMap<String, PluginConfig>>,
@@ -147,10 +147,10 @@ impl Config {
 
     pub fn new() -> Config {
         Config {
-            skippr: Skippr {
+            skippr: Some(Skippr {
                 api_token: None,
                 workspace: None,
-            },
+            }),
             pipelines: HashMap::new(),
             data_inputs: None,
             data_outputs: None,
@@ -201,6 +201,7 @@ impl Config {
         let credentials_file_contents = fs::read_to_string(&credentials_file_path).unwrap_or(String::new());
 
         if credentials_file_contents.is_empty() {
+            println!("No credentials file found at {}", credentials_file_path);
             return;
         }
 
@@ -209,30 +210,35 @@ impl Config {
             panic!("Error parsing credentials file");
         });
 
+        if ini.sections().contains(&profile_name) == false {
+            // support local work without a profile
+            println!("Profile '{}' not found in credentials file {}", profile_name, credentials_file_path);
+            return;
+        }
+
         // check if profile exists
         if ini.sections().contains(&profile_name) == true
             || profile_name == "default" {
-
-            if ini.sections().contains(&profile_name) == false {
-                // support local work without a profile
-                return;
-            }
 
             let workspace = ini.get(&profile_name, "workspace").expect(&format!("'workspace' not found for profile '{}' in credentials file {}", profile_name, credentials_file_path));
             let api_token = ini.get(&profile_name, "api_token").expect(&format!("'api_token' not found for profile '{}' in credentials file {}", profile_name, credentials_file_path));
 
             // Update app config
-            let mut app_config = APP_CONFIG.write().clone();
-            match app_config {
-                Some(mut conf) => {
-                    conf.skippr.workspace = Some(workspace);
-                    conf.skippr.api_token = Some(api_token);
+            let mut app_config = APP_CONFIG.write();
+            let mut app_config = app_config.as_mut().unwrap();
+
+            // app_config.skippr.workspace = Some(workspace);
+            // app_config.skippr.api_token = Some(api_token);
+            match app_config.skippr.as_mut() {
+                Some(skippr) => {
+                    skippr.workspace = Some(workspace);
+                    skippr.api_token = Some(api_token);
                 }
                 None => {
-                    let mut conf = Config::new();
-                    conf.skippr.workspace = Some(workspace);
-                    conf.skippr.api_token = Some(api_token);
-                    app_config.replace(conf);
+                    app_config.skippr = Some(Skippr {
+                        workspace: Some(workspace),
+                        api_token: Some(api_token),
+                    });
                 }
             }
 
@@ -541,7 +547,13 @@ impl Config {
 
             let token = Config::getenv("SKIPPR_API_TOKEN", DEFAULT_CONFIG);
 
-            let token = config.skippr.api_token.as_ref().or(Some(&token)).unwrap().to_string();
+            let token = config.skippr.or(Some(
+                Skippr {
+                    api_token: Some(token.clone()),
+                    workspace: None,
+                }
+            )).unwrap().api_token.as_ref().or(Some(&token)).unwrap().to_string();
+
             Config::set_evncache("SKIPPR_API_TOKEN", &token.clone());
             token
         }
@@ -1134,7 +1146,8 @@ impl Config {
 
             let default_token = Config::getenv("WORKSPACE_NAME", "default");
 
-            let workspace_name = match config.skippr.workspace.as_ref() {
+            let workspace_name = match config.skippr.unwrap()
+                .workspace.as_ref() {
                 Some(workspace) => {
                     workspace.to_string()
                 }
@@ -1299,97 +1312,98 @@ impl Config {
     }
 
     pub async fn set_metadata(metadata: &HashMap<String, Metadata>, evolved: bool) {
+
+        // let data_dir = Config::get_data_dir();
+        // let metadata_file = format!("{}/metadata-{}.json", data_dir, Helpers::random_str(10));
+        //
+        // let file = OpenOptions::new()
+        //     .create(true)
+        //     .write(true)
+        //     .truncate(true)
+        //     .open(metadata_file)
+        //     .unwrap();
+        //
+        // let writer = BufWriter::new(file);
+        //
+        // serde_json::to_writer(writer, &metadata).unwrap();
+        //
+        // println!("saved metadata file");
+
+        ///////////
+
+        if !*HAS_LICENSE.read().unwrap() {
+            // println!("ERROR: No license found, please set the 'LICENSE' environment variable.");
+            return;
+        }
+
+        let workspace = Self::get_workspace_name();
+        let pipeline = Self::get_pipeline_name();
+
+        // let uri = Config::getenv("SKIPPR_API_ENDPOINT", "");
+        let env = Config::get_pipeline_env();
+        let uri = if env != "prod" {
+            format!("https://metadata.{}.api.skippr.io", env)
+        } else {
+            String::from("https://metadata.api.skippr.io")
+        };
+
+        let token = Config::get_skippr_api_token();
+
+        let mut headers = HeaderMap::new();
+        let auth_header = HeaderName::from_static("x-api-key");
+
+        headers.insert(auth_header, HeaderValue::from_str(&token).unwrap());
+
+        let client = Client::builder().default_headers(headers).build().unwrap();
+
+        let path = "";
+
+        let auto_approve_evolution = Config::get_auto_approve();
+
+        let schema_status = if !evolved {
+            "approved"
+        } else if !auto_approve_evolution && evolved {
+            "pending"
+        } else {
+            "approved"
+        };
+
+        let data = json!({
+            "workspace": workspace,
+            "pipeline": pipeline,
+            "metadata": metadata,
+            "status": schema_status
+        });
+
+        // println!("Posting data: {:?}", data);
+
+        let response = client
+            .put(&format!("{}/{}", uri, path))
+            .json(&data)
+            .send()
+            .await;
+
+        match response {
+            Ok(resp) => {
+                match resp.status() {
+                    StatusCode::OK => {
+                        // println!("Metadata HTTP resp: {:?}", resp);
+                        println!("Updated pipeline metadata in Skippr SaaS");
+                    }
+                    err => println!("Metadata HTTP Error: {:?}", err),
+                };
+            }
+            Err(err) => {
+                println!("Metadata HTTP Error: {:?}", err);
+            } // Ok(resp) => {
+              //     println!("Metadata HTTP Success: {:?}", resp);
+              // }
+              // Err(err) => {
+              //     println!("Metadata HTTP Error: {:?}", err);
+              // }
+        }
+
         if evolved {
-
-            // let data_dir = Config::get_data_dir();
-            // let metadata_file = format!("{}/metadata-{}.json", data_dir, Helpers::random_str(10));
-            //
-            // let file = OpenOptions::new()
-            //     .create(true)
-            //     .write(true)
-            //     .truncate(true)
-            //     .open(metadata_file)
-            //     .unwrap();
-            //
-            // let writer = BufWriter::new(file);
-            //
-            // serde_json::to_writer(writer, &metadata).unwrap();
-            //
-            // println!("saved metadata file");
-
-            ///////////
-
-            if !*HAS_LICENSE.read().unwrap() {
-                // println!("ERROR: No license found, please set the 'LICENSE' environment variable.");
-                return;
-            }
-
-            let workspace = Self::get_workspace_name();
-            let pipeline = Self::get_pipeline_name();
-
-            // let uri = Config::getenv("SKIPPR_API_ENDPOINT", "");
-            let env = Config::get_pipeline_env();
-            let uri = if env != "prod" {
-                format!("https://metadata.{}.api.skippr.io", env)
-            } else {
-                String::from("https://metadata.api.skippr.io")
-            };
-
-            let token = Config::get_skippr_api_token();
-
-            let mut headers = HeaderMap::new();
-            let auth_header = HeaderName::from_static("x-api-key");
-
-            headers.insert(auth_header, HeaderValue::from_str(&token).unwrap());
-
-            let client = Client::builder().default_headers(headers).build().unwrap();
-
-            let path = "";
-
-            let auto_approve_evolution = Config::get_auto_approve();
-
-            let schema_status = if !evolved {
-                "approved"
-            } else if !auto_approve_evolution && evolved {
-                "pending"
-            } else {
-                "approved"
-            };
-
-            let data = json!({
-                "workspace": workspace,
-                "pipeline": pipeline,
-                "metadata": metadata,
-                "status": schema_status
-            });
-
-            // println!("Posting data: {:?}", data);
-
-            let response = client
-                .put(&format!("{}/{}", uri, path))
-                .json(&data)
-                .send()
-                .await;
-
-            match response {
-                Ok(resp) => {
-                    match resp.status() {
-                        StatusCode::OK => {
-                            // println!("Metadata HTTP resp: {:?}", resp);
-                            println!("Updated pipeline metadata in Skippr SaaS");
-                        }
-                        err => println!("Metadata HTTP Error: {:?}", err),
-                    };
-                }
-                Err(err) => {
-                    println!("Metadata HTTP Error: {:?}", err);
-                } // Ok(resp) => {
-                  //     println!("Metadata HTTP Success: {:?}", resp);
-                  // }
-                  // Err(err) => {
-                  //     println!("Metadata HTTP Error: {:?}", err);
-                  // }
-            }
 
             Config::sync_schema(metadata).await;
         }
