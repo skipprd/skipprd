@@ -52,6 +52,7 @@ use crate::serdes::xml::SerdeXml;
 use arrow::datatypes::Schema;
 use arrow::error::ArrowError;
 use arrow::datatypes;
+use arrow_schema::SchemaRef;
 use crate::converters::skippr_arrow::convert_skippr_to_arrow;
 
 
@@ -92,12 +93,18 @@ pub static DEADLETTER_FILE_NAME: Lazy<String> = Lazy::new(|| BufferChunker::enco
 //     Mutex::new(avro_schemas)
 // });
 
+#[derive(Clone, Debug)]
+struct SchemaHash {
+    schema: SchemaRef,
+    hash: String,
+}
 pub struct Ingest {
     thread_pool: ThreadPool,
     num_cpus: usize,
     tx: Sender<()>,
     active_count: Arc<AtomicUsize>,
     buffers: Arc<TimedRwLock<Buffers>>,
+    schema_hashes: HashMap<String, SchemaHash>,
     // run_id: String,
 }
 
@@ -127,8 +134,21 @@ impl Ingest {
         let mut buffers = Buffers::new();
         let mut buffers = Arc::new(TimedRwLock::new("buffers".to_string(), buffers));
 
-        // let metrics = METRICS.read();
-        // let run_id = metrics.run_id.clone();
+
+
+        let mut schema_hashes = HashMap::new();
+
+        // Scope to ensure read lock is released immediately after cloning
+        {
+            let schemas = ARROW_SCHEMA.read();
+            schema_hashes = schemas.iter().map(|(namespace, schema)| {
+                let schema_hash = SchemaHash {
+                    schema: Arc::clone(schema),
+                    hash: format!("{:?}", md5::compute(format!("{:?}", Arc::clone(schema).deref())))
+                };
+                (namespace.clone(), schema_hash)
+            }).collect::<HashMap<_, _>>();
+        }
 
         Ingest {
             num_cpus,
@@ -136,6 +156,7 @@ impl Ingest {
             tx,
             active_count,
             buffers,
+            schema_hashes
             // run_id: schema_md5_str
         }
     }
@@ -202,14 +223,10 @@ impl Ingest {
             // let run_id = metrics.run_id.clone();
 
 
-            let schema = ARROW_SCHEMA.read();
-            let run_id = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
+            // let schemas = ARROW_SCHEMA.read();
+            // let run_id = format!("{:?}", md5::compute(format!("{:?}", schemas.deref())));
 
-            let mut schema_hashes = HashMap::new();
-            let schemas = ARROW_SCHEMA.read();
-            for (namespace, schema) in schemas.iter() {
-                schema_hashes.insert(namespace.clone(), format!("{:?}", md5::compute(format!("{:?}", schema.deref()))));
-            }
+            let mut schema_hashes = self.schema_hashes.clone();
 
             self.thread_pool.execute(move || {
                 // println!("Processing batch of {} events on core {}", datas_clone.len(), core_count);
@@ -219,7 +236,7 @@ impl Ingest {
                 // Use a new Tokio runtime or an appropriate async runtime
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 rt.block_on(async {
-                    Ingest::process_batch(&mut datas_clone, &offset_db_clone, buffers_clone, &core_id.to_string(), run_id, &mut schema_hashes).await;
+                    Ingest::process_batch(&mut datas_clone, &offset_db_clone, buffers_clone, &core_id.to_string(), &mut schema_hashes).await;
                     tx.send(()).unwrap(); // Assuming this is a synchronous channel
                 });
             });
@@ -246,13 +263,10 @@ impl Ingest {
         offset_db_clone: &Arc<Offsets>,
         buffers: Arc<TimedRwLock<Buffers>>,
         core_id: &str,
-        run_id: String,
-        schema_hashes: &mut HashMap<String, String>,
+        schema_hashes: &mut HashMap<String, SchemaHash>
     ) {
 
         let default_schema_hash = format!("{:?}", md5::compute(Helpers::random_str(10)));
-
-        let mut run_id = run_id.clone();
 
         // let mut avro_schemas = AVRO_SCHEMA.lock().unwrap();
 
@@ -531,8 +545,25 @@ impl Ingest {
 
                                         Ingest::prepare_arrow_schema(&skpr_namespace, flatten).unwrap();
 
-                                        let arrow_schema = ARROW_SCHEMA.read().get(&skpr_namespace).unwrap().clone();
-                                        schema_hashes.insert(skpr_namespace.clone(), format!("{:?}", md5::compute(format!("{:?}", arrow_schema.deref()))));
+                                        {
+                                            let schemas = ARROW_SCHEMA.read();
+
+                                            let schema = Arc::clone(schemas.get(&skpr_namespace).unwrap());
+                                            let hash = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
+
+                                            schema_hashes.insert(skpr_namespace.clone(), SchemaHash {
+                                                schema: schema,
+                                                hash: hash
+                                            });
+                                        }
+
+                                       // schema_hashes.insert(skpr_namespace.clone(), SchemaHash {
+                                       //     schema: format!("{:?}", ARROW_SCHEMA.read().get(&skpr_namespace).unwrap().deref()),
+                                       //     hash: format!("{:?}", md5::compute(format!("{:?}", ARROW_SCHEMA.read().get(&skpr_namespace).unwrap().deref())))
+                                       //  });
+
+                                        // let arrow_schema = ARROW_SCHEMA.read().get(&skpr_namespace).unwrap().clone();
+                                        // schema_hashes.insert(skpr_namespace.clone(), format!("{:?}", md5::compute(format!("{:?}", arrow_schema.deref()))));
                                         // let schema = ARROW_SCHEMA.read();
                                         // run_id = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
 
@@ -575,12 +606,37 @@ impl Ingest {
                     // let schema_hash = match schema_hashes.get(&skpr_namespace) {
                     //     Some(hash) => hash.clone(),
                     //     None => {
-                    //         default_schema_hash.clone()
+                    //         format!("{:?}", md5::compute(format!("{:?}", ARROW_SCHEMA.read().get(&skpr_namespace).unwrap().deref())))
                     //     }
                     // };
 
-                    // let arrow_schema = ARROW_SCHEMA.read().get(&skpr_namespace).unwrap().clone();
-                    let schema_hash = format!("{:?}", md5::compute(format!("{:?}", ARROW_SCHEMA.read().get(&skpr_namespace).unwrap().deref())));
+                    let schema_hash = match schema_hashes.get(&skpr_namespace) {
+                        Some(hash) => hash.clone(),
+                        None => {
+                            {
+                                let schemas = ARROW_SCHEMA.read();
+
+                                let schema = Arc::clone(schemas.get(&skpr_namespace).unwrap());
+                                let hash = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
+
+                                let schema_hash = SchemaHash {
+                                    schema: schema,
+                                    hash: hash
+                                };
+
+                                schema_hashes.insert(skpr_namespace.clone(), schema_hash.clone());
+
+                                schema_hash
+                            }
+                        }
+                    };
+
+
+                    // let hash = schema_hashes.get(&skpr_namespace).unwrap().hash.clone();
+                    // let arrow_schema = schema_hashes.get(&skpr_namespace).unwrap().schema.clone();
+
+                    // let arrow_schema = ARROW_SCHEMA.read().get(&skpr_namespace).unwrap().clone().deref();
+                    // let schema_hash = format!("{:?}", md5::compute(format!("{:?}", ARROW_SCHEMA.read().get(&skpr_namespace).unwrap().deref())));
 
                     // run_id = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
 
@@ -588,10 +644,10 @@ impl Ingest {
                         skpr_namespace.clone(),
                         skpr_partition.clone(),
                         skpr_time_bucket.clone(),
-                       schema_hash
+                        schema_hash.hash
                     )).or_insert_with(|| {
 
-                        let schema = ARROW_SCHEMA.read().get(&skpr_namespace).unwrap().clone();
+                        // let schema = ARROW_SCHEMA.read().get(&skpr_namespace).unwrap().clone();
 
                         IngestBufferBatch {
                             offset: OffsetKeySerialize {
@@ -602,9 +658,9 @@ impl Ingest {
                             namespace: skpr_namespace.clone(),
                             partition: skpr_partition.clone(),
                             time: skpr_time_bucket,
-                            shard: run_id.clone(),
+                            shard: "".to_string(),
                             records: Vec::new(),
-                            schema: schema
+                            schema: schema_hash.schema,
                         }
                     });
 

@@ -155,6 +155,7 @@ impl Buffers {
             // let arrow_schema = arrow_schema_guard.get(&ingest_buffer_batch.namespace).unwrap().clone();
 
             let arrow_schema = ingest_buffer_batch.schema.clone();
+            // let arrow_schema = ARROW_SCHEMA.read().get(&ingest_buffer_batch.namespace).unwrap().clone();
 
             let mut decoder = ReaderBuilder::new(arrow_schema).build_decoder().unwrap();
 
