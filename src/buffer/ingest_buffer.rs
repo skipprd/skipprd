@@ -178,6 +178,8 @@ impl Buffers {
             // wal_file_partition.bytes += wal_file.bytes;
             // println!("Wrote records to WAL file: {}", wal_file.path.to_str().unwrap());
 
+            wal_file.flush()?;
+
             wal_file.close()?;
 
             let offset_key = OffsetKey {
@@ -186,8 +188,6 @@ impl Buffers {
             };
             offsets_db.insert(&offset_key, OffsetTypes::Line, ingest_buffer_batch.offset.position.clone());
             offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
-
-            wal_file.flush()?;
 
 
             partition_entry.push(wal_file);
