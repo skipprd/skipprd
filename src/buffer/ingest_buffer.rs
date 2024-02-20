@@ -6,7 +6,7 @@ use std::io::{BufRead, BufReader, Cursor, Read, Seek, Write};
 use std::ops::{Deref, Index};
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 use arrow::array::{Array, ArrayRef, RecordBatch};
 use arrow::json::ReaderBuilder;
@@ -199,36 +199,45 @@ impl Buffers {
 
         self.buf.clear();
 
-        let mut index = WAL_PARTITION_INDEX.write();
+        let mut compact_index_partitions: HashMap<(String, String, Option<i64>, String), WalPartition> = HashMap::new();
 
-        for ((namespace, partition, time, shard), wal_files) in partitions.iter_mut() {
-            let mut wal_partition = index.index.entry((namespace.clone(), partition.clone(), time.clone(), shard.clone()))
-                .or_insert_with(|| WalPartition {
-                files: Vec::new(),
-                namespace: namespace.clone(),
-                partition: partition.clone(),
-                time: time.clone(),
-                shard: shard.clone(),
-                updated_at: SystemTime::now(),
-                bytes: 0,
-            });
+        {
+            let mut index = WAL_PARTITION_INDEX.write();
 
-            wal_partition.files.append(wal_files);
-        }
+            for ((namespace, partition, time, shard), wal_files) in partitions.iter_mut() {
+                let mut wal_partition = index.index.entry((namespace.clone(), partition.clone(), time.clone(), shard.clone()))
+                    .or_insert_with(|| WalPartition {
+                        files: Vec::new(),
+                        namespace: namespace.clone(),
+                        partition: partition.clone(),
+                        time: time.clone(),
+                        shard: shard.clone(),
+                        updated_at: SystemTime::now(),
+                        bytes: 0,
+                    });
 
-
-        let mut compacted_index_partitions = Vec::new();
-
-        for ((namespace, partition, time, shard), wal_partition) in index.index.iter_mut() {
-            let rotated = wal_partition.check_wal_rotate().await;
-
-            if rotated {
-                compacted_index_partitions.push((wal_partition.namespace.clone(), wal_partition.partition.clone(), wal_partition.time.clone(), wal_partition.shard.clone()));
+                wal_partition.files.append(wal_files);
             }
+
+            // Evaluate candidates for compaction
+            for (key, wal_partition) in index.index.iter() {
+
+                if wal_partition.check_wal_rotate().await {
+                    compact_index_partitions.insert(key.clone(), wal_partition.clone());
+                }
+            }
+
+            // pop partitions ready for compaction from the index.
+            // in failure scenario, index is recovered on startup.
+            for key in compact_index_partitions.keys() {
+                index.index.remove(&key);
+            }
+
         }
 
-        for (namespace, partition, time, shard) in compacted_index_partitions {
-            index.index.remove(&(namespace.clone(), partition.clone(), time.clone(), shard));
+        // Compact the partitions (now the index is unlocked)
+        for partition in compact_index_partitions.values_mut() {
+            partition.compact_batches_to_parquet().await;
         }
 
         // println!("Wrote {} rows to WAL", rows);
@@ -274,7 +283,7 @@ impl Buffers {
 
 }
 
-// #[derive(Default, Debug)]
+#[derive(Default, Clone)]
 pub struct WalPartitionIndex {
     // Maps namespace, partition, and time to WAL file information
     index: HashMap<(String, String, Option<i64>, String), WalPartition>,
@@ -384,7 +393,7 @@ impl WalPartitionIndex {
 
 }
 
-#[derive(Debug)]
+#[derive(Clone)]
 struct WalPartition {
     files: Vec<WalFile>,
     pub(crate) namespace: String,
@@ -415,10 +424,10 @@ impl WalPartition {
             > ttl as u64
     }
 
-    pub async fn check_wal_rotate(&mut self) -> bool {
+    pub async fn check_wal_rotate(&self) -> bool {
         if self.is_file_size_exceeded() || self.is_file_time_exceeded() {
             println!("Compacting WAL: {} Bytes: {}, Segment Files {}", self.namespace, self.bytes, self.files.len());
-            self.compact_batches_to_parquet().await;
+            // self.compact_batches_to_parquet().await;
 
             return true
         }
@@ -490,7 +499,7 @@ impl WalPartition {
 
         for wal_file in self.files.iter_mut() {
 
-            for batch in wal_file.read_from_stream().expect(format!("Failed to read from WAL file: {} of bytes: {}", wal_file.path.to_str().unwrap(), wal_file.file.metadata().unwrap().len()).as_str()) {
+            for batch in wal_file.read_from_stream().expect(format!("Failed to read from WAL file: {} of bytes: {}", wal_file.path.to_str().unwrap(), wal_file.file.read().metadata().unwrap().len()).as_str()) {
                 // use json as an intermediate format to align record batches schema fields order
                 // @todo - clearly we want something more efficient
                 // let json = record_batches_to_json_rows(vec![&batch].as_slice()).unwrap();
@@ -925,7 +934,7 @@ impl WalPartition {
             }
 
             // check for empty file
-            if wal_file.file.metadata().unwrap().len() == 0 {
+            if wal_file.file.read().metadata().unwrap().len() == 0 {
                 println!("Ignoring empty WAL file: {}", wal_file.path.to_str().unwrap());
                 continue;
             }
@@ -1113,7 +1122,7 @@ impl WalPartition {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone)]
 pub struct WalFile {
     pub(crate) path: PathBuf,
     pub(crate) namespace: String,
@@ -1121,7 +1130,7 @@ pub struct WalFile {
     pub(crate) time: Option<i64>,
     pub(crate) shard: String,
     pub(crate) bytes: u64,
-    pub(crate) file: File,
+    pub(crate) file: Arc<TimedRwLock<File>>, // we really only Arc this so we can clone the partition index to avoid writes waiting on compaction reads
     pub(crate) updated_at: SystemTime,
     pub(crate) offset: OffsetKeySerialize,
 }
@@ -1140,7 +1149,7 @@ impl WalFile {
             partition: partition.to_string(),
             time,
             shard: shard.to_string(),
-            file,
+            file: Arc::new(TimedRwLock::new("wal_file".to_string(), file)),
             updated_at: SystemTime::now(),
             offset
         })
@@ -1170,7 +1179,7 @@ impl WalFile {
             partition,
             time,
             shard,
-            file,
+            file: Arc::new(TimedRwLock::new("wal_file".to_string(), file)),
             updated_at,
             offset
         })
@@ -1209,7 +1218,9 @@ impl WalFile {
 
     pub fn read_schema_from_stream(&mut self) -> Result<SchemaRef, ArrowError> {
 
-        let mut reader = io::BufReader::new(&self.file);
+        let file= self.file.read().try_clone().expect("Failed to clone WAL file");
+
+        let mut reader = io::BufReader::new(&file);
 
         Self::seek_offset(&mut reader)?;
 
@@ -1222,7 +1233,9 @@ impl WalFile {
 
     pub fn read_from_stream(&mut self) -> Result<Vec<RecordBatch>, ArrowError> {
 
-        let mut reader = io::BufReader::new(&self.file);
+        let file= self.file.read().try_clone().expect("Failed to clone WAL file");
+
+        let mut reader = io::BufReader::new(&file);
 
         Self::seek_offset(&mut reader)?;
 
@@ -1241,7 +1254,10 @@ impl WalFile {
 
     pub fn write_to_stream(&mut self, record_batches: &[RecordBatch]) -> Result<u64, ArrowError> {
         // let writer = self.file.as_mut().ok_or(ArrowError::IoError("Can't write to WAL file".to_string(), io::Error::new(io::ErrorKind::NotFound, "File not found")))?;
-        let mut writer = io::BufWriter::new(&self.file);
+
+        let file = self.file.read().try_clone().expect("Failed to clone WAL file");
+
+        let mut writer = io::BufWriter::new(&file);
 
         writer.seek(io::SeekFrom::Start(0))?;
 
@@ -1289,7 +1305,7 @@ impl WalFile {
         //
         // writer.close().unwrap();
 
-        self.bytes += self.file.metadata().unwrap().len();
+        self.bytes += self.file.read().metadata().unwrap().len();
 
         Ok(self.bytes)
     }
@@ -1344,14 +1360,14 @@ impl WalFile {
 
 impl Seek for WalFile {
     fn seek(&mut self, pos: io::SeekFrom) -> std::io::Result<u64> {
-        self.file.seek(pos)
+        self.file.write().seek(pos)
     }
 }
 
 impl Drop for WalFile {
     fn drop(&mut self) {
 
-        let fd = self.file.as_raw_fd();
+        let fd = self.file.read().as_raw_fd();
         unsafe {
             libc::fsync(fd);
         };
@@ -1360,18 +1376,18 @@ impl Drop for WalFile {
 
 impl Read for WalFile {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.file.read(buf)
+        self.file.write().read(buf)
     }
 }
 
 impl Write for WalFile {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.file.write(buf)
+        self.file.write().write(buf)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
 
-        let fd = self.file.as_raw_fd();
+        let fd = self.file.write().as_raw_fd();
         unsafe {
             libc::fsync(fd);
         };
@@ -1380,6 +1396,6 @@ impl Write for WalFile {
     }
 
     fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
-        self.file.write_all(buf)
+        self.file.write().write_all(buf)
     }
 }
