@@ -681,10 +681,10 @@ impl Ingest {
 
 
 
-            batch_offset_lines.insert(ingest_batch.offset_key.clone(), batch_line);
+            // batch_offset_lines.insert(ingest_batch.offset_key.clone(), batch_line);
 
             // offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
-            batch_offset_files.insert(ingest_batch.offset_key.clone(), 1);
+            // batch_offset_files.insert(ingest_batch.offset_key.clone(), 1);
 
         }
 
@@ -702,7 +702,8 @@ impl Ingest {
         // @todo - write() Buffers
         buffers.write(buf);
 
-        buffers.flush().await.unwrap();
+        let offset_db_clone = offset_db_clone.clone();
+        buffers.flush(offset_db_clone).await.unwrap();
 
 
         // for buffer in buffers.buffers.iter() {
@@ -710,15 +711,15 @@ impl Ingest {
         //     buffer_lock.flush().unwrap();
         // }
 
-        batch_offset_lines.iter().for_each(|(offset_key, i)| {
-            offset_db_clone.insert(offset_key, OffsetTypes::Line, *i);
-        });
+        // batch_offset_lines.iter().for_each(|(offset_key, i)| {
+        //     offset_db_clone.insert(offset_key, OffsetTypes::Line, *i);
+        // });
+        //
+        // batch_offset_files.iter().for_each(|(offset_key, i)| {
+        //     offset_db_clone.insert(offset_key, OffsetTypes::Closed, 1);
+        // });
 
-        batch_offset_files.iter().for_each(|(offset_key, i)| {
-            offset_db_clone.insert(offset_key, OffsetTypes::Closed, 1);
-        });
-
-        offset_db_clone.flush();
+        // offset_db_clone.flush();
 
         if *updated_schema_clone.lock().unwrap() == "yes".to_string() {
             *updated_schema_clone.lock().unwrap() = "no".to_string();

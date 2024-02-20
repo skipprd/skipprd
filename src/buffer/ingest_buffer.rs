@@ -54,7 +54,7 @@ use crate::helpers::timed_rwlock::TimedRwLock;
 pub static TOTAL_ROWS: Lazy<TimedRwLock<AtomicU64>> =
     Lazy::new(|| TimedRwLock::new("record_batch_total".to_string(), AtomicU64::new(0)));
 
-pub static WAL_PARTITION_INDEX: Lazy<TimedRwLock<WalPartitionIndex>> = Lazy::new(|| TimedRwLock::new("wal_index".to_string(), WalPartitionIndex::new()));
+pub static WAL_PARTITION_INDEX: Lazy<TimedRwLock<WalPartitionIndex>> = Lazy::new(|| TimedRwLock::new("wal_partition_index".to_string(), WalPartitionIndex::new()));
 
 // lazy_static! {
 //     pub static ref WAL_INDEX: TimedRwLock<WalIndex> = TimedRwLock::new("wal_index".to_string(), WalIndex::new());
@@ -105,7 +105,7 @@ impl Buffers {
 
     }
 
-    pub async fn flush(&mut self) -> Result<(), ArrowError> {
+    pub async fn flush(&mut self, offsets_db: Arc<Offsets>) -> Result<(), ArrowError> {
 
         // let arrow_schema_guard = ARROW_SCHEMA.read().clone();
 
@@ -235,7 +235,24 @@ impl Buffers {
 
         }
 
-        // Compact the partitions (now the index is unlocked)
+        // commit offsets having persisted WAL files
+        for (_key, wal_partition) in compact_index_partitions.iter_mut() {
+
+            // ensure offsets committed
+            for wal_file in wal_partition.files.iter_mut() {
+                let offset_key = OffsetKey {
+                    namespace: wal_file.offset.source_namespace.clone(),
+                    partition: wal_file.offset.source_partition.clone(),
+                };
+
+                offsets_db.insert(&offset_key, OffsetTypes::Line, wal_file.offset.position);
+                offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
+            }
+        }
+
+        offsets_db.flush();
+
+        // Compact the partitions (now the index is unlocked, WAL flushed and offset committed)
         for partition in compact_index_partitions.values_mut() {
             partition.compact_batches_to_parquet().await;
         }
@@ -249,7 +266,6 @@ impl Buffers {
         let mut wal_index = WAL_PARTITION_INDEX.write();
 
         wal_index.index.clear(); // avoid duplicates
-        // @todo - implement better, persistent  indexing
 
         wal_index.recover(offsets_db).expect("Failed to recover WAL index");
 
