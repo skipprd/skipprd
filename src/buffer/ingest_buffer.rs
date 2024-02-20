@@ -189,7 +189,7 @@ impl Buffers {
             // offsets_db.insert(&offset_key, OffsetTypes::Line, ingest_buffer_batch.offset.position.clone());
             // offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
 
-            println!("Committing {} offsets", ingest_buffer_batch.offsets.len());
+            // println!("Committing {} offsets", ingest_buffer_batch.offsets.len());
 
             ingest_buffer_batch.offsets.iter().for_each(|(offset, position)| {
                 let offset_key = OffsetKey {
