@@ -664,7 +664,11 @@ impl Ingest {
                     //         position: batch_line
                     //     };
 
-                    buf_entry.offsets.entry(ingest_batch.offset_key.clone()).or_insert_with(|| batch_line);
+                    // buf_entry.offsets.entry(ingest_batch.offset_key.clone())
+                    //     .or_insert_with(|| batch_line);
+
+                    buf_entry.offsets.insert(ingest_batch.offset_key.clone(), batch_line);
+
                     // buf_entry.offsets.push(O);
 
                     buf_entry.records.push(ingest_record);
