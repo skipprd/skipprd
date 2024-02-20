@@ -664,6 +664,8 @@ impl Ingest {
                         }
                     });
 
+                    buf_entry.offset.source_namespace = ingest_batch.offset_key.namespace.clone();
+                    buf_entry.offset.source_partition =  ingest_batch.offset_key.partition.clone();
                     buf_entry.offset.position = batch_line;
                     buf_entry.records.push(ingest_record);
 
