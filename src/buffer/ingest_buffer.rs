@@ -11,7 +11,7 @@ use std::time::SystemTime;
 use arrow::array::{Array, ArrayRef, RecordBatch};
 use arrow::json::ReaderBuilder;
 use arrow_schema::{ArrowError, DataType, Field, SchemaRef, Schema};
-use dashmap::DashMap;
+use dashmap::{DashMap, Map};
 use glob::{glob_with, MatchOptions};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use arrow::compute::concat;
@@ -60,7 +60,7 @@ pub static WAL_PARTITION_INDEX: Lazy<TimedRwLock<WalPartitionIndex>> = Lazy::new
 //     pub static ref WAL_INDEX: TimedRwLock<WalIndex> = TimedRwLock::new("wal_index".to_string(), WalIndex::new());
 // }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 pub struct OffsetKeySerialize {
     pub(crate) source_namespace: String,
     pub(crate) source_partition: String,
@@ -76,7 +76,7 @@ pub struct IngestRecord {
 }
 
 pub struct IngestBufferBatch {
-    pub(crate) offset: OffsetKeySerialize,
+    pub(crate) offsets: HashMap<OffsetKey, u64>,
     pub(crate) namespace: String,
     pub(crate) partition: String,
     pub(crate) time: Option<i64>,
@@ -129,7 +129,7 @@ impl Buffers {
                 partition,
                 *time,
                 shard,
-                ingest_buffer_batch.offset.clone(),
+                ingest_buffer_batch.offsets.clone(),
             ).unwrap();
 
 
@@ -182,12 +182,24 @@ impl Buffers {
 
             wal_file.close()?;
 
-            let offset_key = OffsetKey {
-                namespace: ingest_buffer_batch.offset.source_namespace.clone(),
-                partition: ingest_buffer_batch.offset.source_partition.clone(),
-            };
-            offsets_db.insert(&offset_key, OffsetTypes::Line, ingest_buffer_batch.offset.position.clone());
-            offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
+            // let offset_key = OffsetKey {
+            //     namespace: ingest_buffer_batch.offset.source_namespace.clone(),
+            //     partition: ingest_buffer_batch.offset.source_partition.clone(),
+            // };
+            // offsets_db.insert(&offset_key, OffsetTypes::Line, ingest_buffer_batch.offset.position.clone());
+            // offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
+
+            println!("Committing {} offsets", ingest_buffer_batch.offsets.len());
+
+            ingest_buffer_batch.offsets.iter().for_each(|(offset, position)| {
+                let offset_key = OffsetKey {
+                    namespace: offset.namespace.clone(),
+                    partition: offset.partition.clone(),
+                };
+
+                offsets_db.insert(&offset_key, OffsetTypes::Line, *position);
+                offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
+            });
 
             offsets_db.flush();
 
@@ -352,13 +364,25 @@ impl WalPartitionIndex {
 
             // ensure offsets committed
             for wal_file in wal_partition.files.iter_mut() {
-                let offset_key = OffsetKey {
-                    namespace: wal_file.offset.source_namespace.clone(),
-                    partition: wal_file.offset.source_partition.clone(),
-                };
+                // wal_file.offsets.iter().for_each(|offset| {
+                //     let offset_key = OffsetKey {
+                //         namespace: offset.source_namespace.clone(),
+                //         partition: offset.source_partition.clone(),
+                //     };
+                //
+                //     offsets_db.insert(&offset_key, OffsetTypes::Line, offset.position);
+                //     offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
+                // });
 
-                offsets_db.insert(&offset_key, OffsetTypes::Line, wal_file.offset.position);
-                offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
+                wal_file.offsets.iter().for_each(|(offset, position)| {
+                    let offset_key = OffsetKey {
+                        namespace: offset.namespace.clone(),
+                        partition: offset.partition.clone(),
+                    };
+
+                    offsets_db.insert(&offset_key, OffsetTypes::Line, *position);
+                    offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
+                });
             }
         }
 
@@ -1132,11 +1156,11 @@ pub struct WalFile {
     pub(crate) bytes: u64,
     pub(crate) file: Arc<TimedRwLock<File>>, // we really only Arc this so we can clone the partition index to avoid writes waiting on compaction reads
     pub(crate) updated_at: SystemTime,
-    pub(crate) offset: OffsetKeySerialize,
+    pub(crate) offsets: HashMap<OffsetKey, u64>,
 }
 
 impl WalFile {
-    pub fn new(namespace: &str, partition: &str, time: Option<i64>, shard: &str, offset: OffsetKeySerialize) -> io::Result<Self> {
+    pub fn new(namespace: &str, partition: &str, time: Option<i64>, shard: &str, offsets: HashMap<OffsetKey, u64>,) -> io::Result<Self> {
 
         let path_str = Self::generate_temp_wal_file_name(namespace, partition, time, shard);
         let path= PathBuf::from(&path_str);
@@ -1151,14 +1175,14 @@ impl WalFile {
             shard: shard.to_string(),
             file: Arc::new(TimedRwLock::new("wal_file".to_string(), file)),
             updated_at: SystemTime::now(),
-            offset
+            offsets
         })
     }
 
     fn from_path(path: &PathBuf) -> io::Result<Self> {
         let file = OpenOptions::new().read(true).open(&path)?;
 
-        let offset = Self::offset_from_path(path).unwrap();
+        let offsets = Self::offset_from_path(path).unwrap();
 
         let namespace = BufferChunker::decode_file_namespace(path.to_str().unwrap());
         let partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
@@ -1181,11 +1205,11 @@ impl WalFile {
             shard,
             file: Arc::new(TimedRwLock::new("wal_file".to_string(), file)),
             updated_at,
-            offset
+            offsets
         })
     }
 
-    pub fn offset_from_path(path: &PathBuf) -> io::Result<OffsetKeySerialize> {
+    pub fn offset_from_path(path: &PathBuf) -> io::Result<HashMap<OffsetKey, u64>,> {
         let mut file = OpenOptions::new().read(true).open(&path)?;
 
         let mut offset_size = [0u8; 8];
@@ -1261,7 +1285,7 @@ impl WalFile {
 
         writer.seek(io::SeekFrom::Start(0))?;
 
-        let bin_offset = bincode::serialize(&self.offset).unwrap();
+        let bin_offset = bincode::serialize(&self.offsets).unwrap();
 
         let offset_size: u64 = bin_offset.len() as u64;
 

@@ -647,14 +647,8 @@ impl Ingest {
                         schema_hash.hash
                     )).or_insert_with(|| {
 
-                        // let schema = ARROW_SCHEMA.read().get(&skpr_namespace).unwrap().clone();
-
                         IngestBufferBatch {
-                            offset: OffsetKeySerialize {
-                                position: 0,
-                                source_namespace: ingest_batch.offset_key.namespace.clone(),
-                                source_partition: ingest_batch.offset_key.partition.clone(),
-                            },
+                            offsets: HashMap::new(),
                             namespace: skpr_namespace.clone(),
                             partition: skpr_partition.clone(),
                             time: skpr_time_bucket,
@@ -664,9 +658,15 @@ impl Ingest {
                         }
                     });
 
-                    buf_entry.offset.source_namespace = ingest_batch.offset_key.namespace.clone();
-                    buf_entry.offset.source_partition =  ingest_batch.offset_key.partition.clone();
-                    buf_entry.offset.position = batch_line;
+                    // let key = OffsetKeySerialize {
+                    //         source_namespace: ingest_batch.offset_key.namespace.clone(),
+                    //         source_partition: ingest_batch.offset_key.partition.clone(),
+                    //         position: batch_line
+                    //     };
+
+                    buf_entry.offsets.entry(ingest_batch.offset_key.clone()).or_insert_with(|| batch_line);
+                    // buf_entry.offsets.push(O);
+
                     buf_entry.records.push(ingest_record);
 
                     j += 1;
@@ -706,7 +706,6 @@ impl Ingest {
 
         let offset_db_clone = offset_db_clone.clone();
         buffers.flush(offset_db_clone).await.unwrap();
-
 
         // for buffer in buffers.buffers.iter() {
         //     let mut buffer_lock = buffer.write();

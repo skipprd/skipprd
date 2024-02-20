@@ -4,7 +4,7 @@ use Result;
 
 use crate::helpers::configuration::Config;
 use serde::__private::de::IdentifierDeserializer;
-use serde_derive::Serialize;
+use serde_derive::{Deserialize, Serialize};
 use sled::{IVec};
 use {
     byteorder::{BigEndian, LittleEndian},
@@ -21,7 +21,7 @@ pub const SLED_NAME: &str = "db";
 // does not have alignment requirements.
 // sled does not guarantee any particular
 // value alignment as of now.
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[repr(C)]
 pub struct OffsetKey {
     pub(crate) namespace: String,
