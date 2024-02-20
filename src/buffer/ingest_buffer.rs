@@ -183,19 +183,19 @@ impl Buffers {
 
             wal_file.close()?;
 
+            let offset_key = OffsetKey {
+                namespace: wal_file.offset.source_namespace.clone(),
+                partition: wal_file.offset.source_partition.clone(),
+            };
+
+            offsets_db.insert(&offset_key, OffsetTypes::Line, wal_file.offset.position.clone());
+            offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
+
             partition_entry.push(wal_file);
 
-
-            // wal_file_partition.updated_at = SystemTime::now();
-            // wal_file_partition.files.push(wal_file);
-
-            // let rotated = wal_file_partition.check_wal_rotate();
-            //
-            // if rotated {
-            //     index.index.remove(&(namespace.clone(), partition.clone(), time.clone()));
-            // }
-
         }
+
+        offsets_db.flush();
 
         self.buf.clear();
 
@@ -235,22 +235,6 @@ impl Buffers {
 
         }
 
-        // commit offsets having persisted WAL files
-        for (_key, wal_partition) in compact_index_partitions.iter_mut() {
-
-            // ensure offsets committed
-            for wal_file in wal_partition.files.iter_mut() {
-                let offset_key = OffsetKey {
-                    namespace: wal_file.offset.source_namespace.clone(),
-                    partition: wal_file.offset.source_partition.clone(),
-                };
-
-                offsets_db.insert(&offset_key, OffsetTypes::Line, wal_file.offset.position);
-                offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
-            }
-        }
-
-        offsets_db.flush();
 
         // Compact the partitions (now the index is unlocked, WAL flushed and offset committed)
         for partition in compact_index_partitions.values_mut() {
