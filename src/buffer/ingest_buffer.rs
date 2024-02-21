@@ -340,7 +340,7 @@ impl WalPartitionIndex {
                 partition: wal_file.partition.clone(),
                 time: wal_file.time.clone(),
                 shard: wal_file.shard.clone(),
-                updated_at: SystemTime::now(),
+                updated_at: SystemTime::UNIX_EPOCH,
                 bytes: 0,
             });
 
@@ -397,8 +397,7 @@ impl WalPartitionIndex {
         let data_dir = Config::get_data_dir();
         let wal_dir = PathBuf::from(format!("{}/ingest_buffer", data_dir));
         let mut wal_files = Vec::new();
-        // for entry in fs::read_dir(wal_dir)? {
-        // recursive glob directory
+
         let options = MatchOptions {
             case_sensitive: false,
             require_literal_separator: false,
