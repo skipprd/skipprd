@@ -1203,7 +1203,7 @@ impl WalFile {
 
         let file = OpenOptions::new().read(true).open(&path)?;
 
-        let offsets = Self::offset_from_path(path).unwrap();
+        let offsets = Self::offset_from_path(path)?;
 
         let namespace = BufferChunker::decode_file_namespace(path.to_str().unwrap());
         let partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
