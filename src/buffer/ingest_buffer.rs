@@ -564,7 +564,7 @@ impl WalPartition {
             // if fs::metadata(&wal_file_path).is_ok() {
                 match fs::rename(&wal_file.path, tombstone_path) {
                     Ok(_) => {
-                        println!("Tombstoned WAL file: {}", wal_file.path.to_str().unwrap());
+                        // println!("Tombstoned WAL file: {}", wal_file.path.to_str().unwrap());
                     },
                     Err(e) => {
                         println!("Failed to tombstone WAL file: {}, Error: {}", wal_file.path.to_str().unwrap(), e);
