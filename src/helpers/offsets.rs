@@ -187,6 +187,7 @@ impl Offsets {
         // let bytes: &[u8] = unsafe { self.any_as_u8_slice(&key) };
 
         let new_val = match offset_type {
+            // @todo - deprecated, we never implement Filesize
             OffsetTypes::Filesize => {
                  sled::IVec::from(
                     OffsetValue {
@@ -196,6 +197,8 @@ impl Offsets {
                     }.as_bytes(),
                 )
             }
+            // @todo - will this always represent a line? I think not. Do we really mean 'position: Int'
+            // @todo - compare and swap, we should only insert offsets that are greater than value in db
             OffsetTypes::Line => {
                 sled::IVec::from(
                     OffsetValue {

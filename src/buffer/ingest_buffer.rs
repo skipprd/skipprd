@@ -180,7 +180,7 @@ impl Buffers {
 
             wal_file.flush()?;
 
-            wal_file.close()?;
+            wal_file.finish()?;
 
             // let offset_key = OffsetKey {
             //     namespace: ingest_buffer_batch.offset.source_namespace.clone(),
@@ -523,7 +523,7 @@ impl WalPartition {
 
         for wal_file in self.files.iter_mut() {
 
-            for batch in wal_file.read_from_stream().expect(format!("Failed to read from WAL file: {} of bytes: {}", wal_file.path.to_str().unwrap(), wal_file.file.read().metadata().unwrap().len()).as_str()) {
+            for batch in wal_file.read_from_stream().expect(format!("Failed to read from WAL file: {} of bytes: {}", wal_file.path.to_str().unwrap(), wal_file.get_or_open_file().unwrap().metadata().unwrap().len()).as_str()) {
                 // use json as an intermediate format to align record batches schema fields order
                 // @todo - clearly we want something more efficient
                 // let json = record_batches_to_json_rows(vec![&batch].as_slice()).unwrap();
@@ -559,7 +559,7 @@ impl WalPartition {
             // if fs::metadata(&wal_file_path).is_ok() {
                 match fs::rename(&wal_file.path, tombstone_path) {
                     Ok(_) => {
-                        // println!("Tombstoned WAL file: {}", wal_file.path.to_str().unwrap());
+                        println!("Tombstoned WAL file: {}", wal_file.path.to_str().unwrap());
                     },
                     Err(e) => {
                         println!("Failed to tombstone WAL file: {}, Error: {}", wal_file.path.to_str().unwrap(), e);
@@ -958,7 +958,7 @@ impl WalPartition {
             }
 
             // check for empty file
-            if wal_file.file.read().metadata().unwrap().len() == 0 {
+            if wal_file.get_or_open_file().unwrap().metadata().unwrap().len() == 0 {
                 println!("Ignoring empty WAL file: {}", wal_file.path.to_str().unwrap());
                 continue;
             }
@@ -1154,7 +1154,9 @@ pub struct WalFile {
     pub(crate) time: Option<i64>,
     pub(crate) shard: String,
     pub(crate) bytes: u64,
-    pub(crate) file: Arc<TimedRwLock<File>>, // we really only Arc this so we can clone the partition index to avoid writes waiting on compaction reads
+    // We really only Arc File to support clone of the partition index to avoid future writes waiting on compaction reads
+    // Additionally, the file is optional with lazy opening of a handle to avoid "Too many open files error", there may be thousands of WAL file segments
+    pub(crate) file: Arc<TimedRwLock<Option<File>>>,
     pub(crate) updated_at: SystemTime,
     pub(crate) offsets: HashMap<OffsetKey, u64>,
 }
@@ -1164,7 +1166,9 @@ impl WalFile {
 
         let path_str = Self::generate_temp_wal_file_name(namespace, partition, time, shard);
         let path= PathBuf::from(&path_str);
-        let file = OpenOptions::new().write(true).read(true).create(true).open(&path)?;
+
+        // Ensure file exists but allow the fp to drop out of scope
+        OpenOptions::new().append(true).read(true).create(true).open(&path)?;
 
         Ok(WalFile {
             path,
@@ -1173,13 +1177,25 @@ impl WalFile {
             partition: partition.to_string(),
             time,
             shard: shard.to_string(),
-            file: Arc::new(TimedRwLock::new("wal_file".to_string(), file)),
+            file: Arc::new(TimedRwLock::new("wal_file".to_string(), None)),
             updated_at: SystemTime::now(),
             offsets
         })
     }
 
+    fn get_or_open_file(&self) -> io::Result<File> {
+        // let mut file_lock = self.file.write();
+        OpenOptions::new().read(true).create(true).append(true).open(&self.path)
+        // file.try_clone()
+        // if file.is_none() {
+        //     *file_lock = Some(OpenOptions::new().write(true).read(true).create(true).open(&self.path)?);
+        // }
+        // // Clone the file handle via Arc. File itself does not implement Clone.
+        // file_lock.as_ref().unwrap().try_clone()
+    }
+
     fn from_path(path: &PathBuf) -> io::Result<Self> {
+
         let file = OpenOptions::new().read(true).open(&path)?;
 
         let offsets = Self::offset_from_path(path).unwrap();
@@ -1203,7 +1219,7 @@ impl WalFile {
             partition,
             time,
             shard,
-            file: Arc::new(TimedRwLock::new("wal_file".to_string(), file)),
+            file: Arc::new(TimedRwLock::new("wal_file".to_string(), None)),
             updated_at,
             offsets
         })
@@ -1214,7 +1230,7 @@ impl WalFile {
 
         let mut offset_size = [0u8; 8];
 
-        file.read_exact(&mut offset_size).expect("Failed to read offset size from WAL");
+        file.read_exact(&mut offset_size).expect(&format!("Failed to read offset size from WAL file: {:?}", path.to_str()));
 
         let mut bin_offset = vec![0u8; u64::from_le_bytes(offset_size) as usize];
 
@@ -1242,8 +1258,7 @@ impl WalFile {
 
     pub fn read_schema_from_stream(&mut self) -> Result<SchemaRef, ArrowError> {
 
-        let file= self.file.read().try_clone().expect("Failed to clone WAL file");
-
+        let file= self.get_or_open_file().expect("Failed to clone WAL file handle for schema read");
         let mut reader = io::BufReader::new(&file);
 
         Self::seek_offset(&mut reader)?;
@@ -1257,8 +1272,7 @@ impl WalFile {
 
     pub fn read_from_stream(&mut self) -> Result<Vec<RecordBatch>, ArrowError> {
 
-        let file= self.file.read().try_clone().expect("Failed to clone WAL file");
-
+        let file= self.get_or_open_file().expect("Failed to clone WAL file handle for data read");
         let mut reader = io::BufReader::new(&file);
 
         Self::seek_offset(&mut reader)?;
@@ -1279,8 +1293,7 @@ impl WalFile {
     pub fn write_to_stream(&mut self, record_batches: &[RecordBatch]) -> Result<u64, ArrowError> {
         // let writer = self.file.as_mut().ok_or(ArrowError::IoError("Can't write to WAL file".to_string(), io::Error::new(io::ErrorKind::NotFound, "File not found")))?;
 
-        let file = self.file.read().try_clone().expect("Failed to clone WAL file");
-
+        let file = self.get_or_open_file().expect("Failed to clone WAL file for write");
         let mut writer = io::BufWriter::new(&file);
 
         writer.seek(io::SeekFrom::Start(0))?;
@@ -1329,7 +1342,8 @@ impl WalFile {
         //
         // writer.close().unwrap();
 
-        self.bytes += self.file.read().metadata().unwrap().len();
+        let file = self.get_or_open_file().expect("Failed to get file for metadata read");
+        self.bytes += file.metadata().unwrap().len();
 
         Ok(self.bytes)
     }
@@ -1373,45 +1387,54 @@ impl WalFile {
     }
 
     // close file by renaming it .tmp to .wal
-    pub fn close(&mut self) -> io::Result<()> {
+    pub fn finish(&mut self) -> io::Result<()> {
         let wal_file_name = self.path.to_str().unwrap().replace(".tmp", ".wal");
         fs::rename(&self.path, &wal_file_name)?;
         self.path = PathBuf::from(wal_file_name);
         Ok(())
     }
 
+    // pub fn close(&mut self) {
+    //     let mut file_lock = self.file.write();
+    //         // .expect("Failed to lock file for closing");
+    //
+    //     if file_lock.is_some() {
+    //         file_lock.as_mut().unwrap().sync_all().expect("Failed to sync WAL file");
+    //         // Drop the file by replacing it with None, which closes the file
+    //         *file_lock = None;
+    //     }
+    // }
+
 }
 
 impl Seek for WalFile {
     fn seek(&mut self, pos: io::SeekFrom) -> std::io::Result<u64> {
-        self.file.write().seek(pos)
+        self.get_or_open_file().unwrap().seek(pos)
     }
 }
 
-impl Drop for WalFile {
-    fn drop(&mut self) {
-
-        let fd = self.file.read().as_raw_fd();
-        unsafe {
-            libc::fsync(fd);
-        };
-    }
-}
+// impl Drop for WalFile {
+//     fn drop(&mut self) {
+//         // let fd = self.get_or_open_file().unwrap().as_raw_fd();
+//         // unsafe {
+//         //     libc::fsync(fd);
+//         // };
+//     }
+// }
 
 impl Read for WalFile {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.file.write().read(buf)
+        self.get_or_open_file().unwrap().read(buf)
     }
 }
 
 impl Write for WalFile {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.file.write().write(buf)
+        self.get_or_open_file().unwrap().write(buf)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-
-        let fd = self.file.write().as_raw_fd();
+        let fd = self.get_or_open_file().unwrap().as_raw_fd();
         unsafe {
             libc::fsync(fd);
         };
@@ -1420,6 +1443,6 @@ impl Write for WalFile {
     }
 
     fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
-        self.file.write().write_all(buf)
+        self.get_or_open_file().unwrap().write_all(buf)
     }
 }

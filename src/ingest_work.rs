@@ -667,6 +667,7 @@ impl Ingest {
                     // buf_entry.offsets.entry(ingest_batch.offset_key.clone())
                     //     .or_insert_with(|| batch_line);
 
+                    // an ingest batch consist of many small files/queue messages, etc. Each will need its offset committed in the WAL.
                     buf_entry.offsets.insert(ingest_batch.offset_key.clone(), batch_line);
 
                     // buf_entry.offsets.push(O);
