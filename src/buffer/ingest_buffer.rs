@@ -523,6 +523,11 @@ impl WalPartition {
 
         for wal_file in self.files.iter_mut() {
 
+            if wal_file.get_or_open_file().unwrap().metadata().unwrap().len() == 0 {
+                println!("Ignoring empty WAL file: {}", wal_file.path.to_str().unwrap());
+                continue;
+            }
+
             for batch in wal_file.read_from_stream().expect(format!("Failed to read from WAL file: {} of bytes: {}", wal_file.path.to_str().unwrap(), wal_file.get_or_open_file().unwrap().metadata().unwrap().len()).as_str()) {
                 // use json as an intermediate format to align record batches schema fields order
                 // @todo - clearly we want something more efficient
