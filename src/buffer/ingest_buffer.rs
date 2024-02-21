@@ -312,25 +312,25 @@ impl WalPartitionIndex {
 
         let mut count = 0;
 
+        println!("Indexing WAL");
+
         let wal_files = Self::list_wal_files()?;
 
         if wal_files.len() == 0 {
             return Ok(());
         }
 
-        println!("Indexing WAL");
-
         let wal_files_count = wal_files.len();
 
         for file_path in wal_files {
 
-            // remove file if zero bytes
-            // if fs::metadata(&file_path)?.len() == 0 {
-                // fs::remove_file(&file_path)?; // not now we're always indexing
-                // continue;
-            // }
-
-            let wal_file = WalFile::from_path(&file_path)?;
+            let wal_file = match WalFile::from_path(&file_path) {
+                Ok(wal_file) => wal_file,
+                Err(e) => {
+                    // Probably a zero byte file being written to
+                    continue;
+                }
+            };
 
             let partition_key = (wal_file.namespace.clone(), wal_file.partition.clone(), wal_file.time.clone(), wal_file.shard.clone());
 
