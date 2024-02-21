@@ -1230,18 +1230,18 @@ impl WalFile {
         })
     }
 
-    pub fn offset_from_path(path: &PathBuf) -> io::Result<HashMap<OffsetKey, u64>,> {
+    pub fn offset_from_path(path: &PathBuf) -> io::Result<HashMap<OffsetKey, u64>> {
         let mut file = OpenOptions::new().read(true).open(&path)?;
 
         let mut offset_size = [0u8; 8];
 
-        file.read_exact(&mut offset_size).expect(&format!("Failed to read offset size from WAL file: {:?}", path.to_str()));
+        file.read_exact(&mut offset_size)?;
 
         let mut bin_offset = vec![0u8; u64::from_le_bytes(offset_size) as usize];
 
         let mut reader = io::BufReader::new(file);
 
-        reader.read_exact(&mut bin_offset).expect("Failed to read offset from WAL");
+        reader.read_exact(&mut bin_offset)?;
 
         Ok(bincode::deserialize(&bin_offset).unwrap())
     }
@@ -1253,7 +1253,7 @@ impl WalFile {
         // println!("Reading offset from WAL file: {}", self.path.to_str().unwrap());
 
         let mut offset_size = [0u8; 8];
-        reader.read_exact(&mut offset_size).expect("Failed to read offset size from WAL");
+        reader.read_exact(&mut offset_size)?;
 
         reader.seek(io::SeekFrom::Current(i64::from_le_bytes(offset_size))).unwrap();
 
@@ -1263,12 +1263,12 @@ impl WalFile {
 
     pub fn read_schema_from_stream(&mut self) -> Result<SchemaRef, ArrowError> {
 
-        let file= self.get_or_open_file().expect("Failed to clone WAL file handle for schema read");
+        let file= self.get_or_open_file()?;
         let mut reader = io::BufReader::new(&file);
 
         Self::seek_offset(&mut reader)?;
 
-        let mut stream_reader = StreamReader::try_new(reader, None).expect("Failed to create WAL stream reader");
+        let mut stream_reader = StreamReader::try_new(reader, None)?;
 
         let schema = stream_reader.schema();
 
@@ -1277,7 +1277,7 @@ impl WalFile {
 
     pub fn read_from_stream(&mut self) -> Result<Vec<RecordBatch>, ArrowError> {
 
-        let file= self.get_or_open_file().expect("Failed to clone WAL file handle for data read");
+        let file= self.get_or_open_file()?;
         let mut reader = io::BufReader::new(&file);
 
         Self::seek_offset(&mut reader)?;
@@ -1288,7 +1288,7 @@ impl WalFile {
         let mut record_batches = Vec::new();
 
         for batch in stream_reader {
-            let batch = batch.expect("Failed to read record batch from WAL stream reader");
+            let batch = batch?;
             record_batches.push(batch);
         }
 
