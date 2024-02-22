@@ -328,6 +328,7 @@ impl WalPartitionIndex {
                 Ok(wal_file) => wal_file,
                 Err(e) => {
                     // Probably a zero byte file being written to
+                    println!("Failed to read WAL file: {}, Error: {}", file_path.to_str().unwrap(), e);
                     continue;
                 }
             };
@@ -352,6 +353,10 @@ impl WalPartitionIndex {
             wal_file_partition.files.push(wal_file);
 
             count += 1;
+
+            if count % 1000 == 0 {
+                println!("Indexed {} of {} WAL files", count, wal_files_count);
+            }
         }
 
         println!("Syncing offsets to DB");
@@ -407,9 +412,9 @@ impl WalPartitionIndex {
         for entry in glob_with(&format!("{}/**/*.wal", wal_dir.to_str().unwrap()), options).expect("Failed to read WAL files") {
 
             let path = entry.expect("Failed to read WAL file");
-            if path.is_file() && path.extension().and_then(OsStr::to_str) == Some("wal") {
+            // if path.is_file() && path.extension().and_then(OsStr::to_str) == Some("wal") {
                 wal_files.push(path);
-            }
+            // }
         }
         Ok(wal_files)
     }
@@ -1200,9 +1205,11 @@ impl WalFile {
 
     fn from_path(path: &PathBuf) -> io::Result<Self> {
 
-        let file = OpenOptions::new().read(true).open(&path)?;
+        let mut file = OpenOptions::new()
+            .read(true)
+            .open(&path)?;
 
-        let offsets = Self::offset_from_path(path)?;
+        let offsets = Self::offset_from_file(&mut file)?;
 
         let namespace = BufferChunker::decode_file_namespace(path.to_str().unwrap());
         let partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
@@ -1211,14 +1218,15 @@ impl WalFile {
 
         let shard = BufferChunker::decode_file_shard(path.to_str().unwrap());
 
-        let updated_at = match file.metadata() {
-            Ok(metadata) => metadata.modified().unwrap_or_else(|_err| SystemTime::now()),
-            Err(_err) => SystemTime::now(),
-        };
+        let metadata = file.metadata()?;
+
+        let updated_at = metadata.modified().unwrap_or_else(|_err| SystemTime::now());
+
+        let bytes = metadata.len();
 
         Ok(WalFile {
             path: path.clone(),
-            bytes: file.metadata().unwrap().len(),
+            bytes,
             namespace,
             partition,
             time,
@@ -1229,8 +1237,8 @@ impl WalFile {
         })
     }
 
-    pub fn offset_from_path(path: &PathBuf) -> io::Result<HashMap<OffsetKey, u64>> {
-        let mut file = OpenOptions::new().read(true).open(&path)?;
+    pub fn offset_from_file(file: &mut File) -> io::Result<HashMap<OffsetKey, u64>> {
+        // let mut file = OpenOptions::new().read(true).open(&path)?;
 
         let mut offset_size = [0u8; 8];
 
