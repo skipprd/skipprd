@@ -315,7 +315,8 @@ impl WalPartitionIndex {
         println!("Purging tombstone WAL files");
         let data_dir = Config::get_data_dir();
         let wal_dir = PathBuf::from(format!("{}/ingest_buffer/done", data_dir));
-        fs::remove_dir_all(wal_dir).unwrap_or_default();
+        fs::remove_dir_all(&wal_dir).unwrap_or_default();
+        fs::create_dir_all(&wal_dir).unwrap();
 
         println!("Indexing WAL");
 
