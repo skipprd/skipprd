@@ -228,6 +228,14 @@ impl Buffers {
                         bytes: 0,
                     });
 
+
+                wal_files.iter().for_each(|wal_file| wal_partition.bytes += wal_file.bytes);
+                wal_files.iter().for_each(|wal_file| {
+                    if wal_file.updated_at > wal_partition.updated_at {
+                        wal_partition.updated_at = wal_file.updated_at
+                    }
+                });
+
                 wal_partition.files.append(wal_files);
             }
 
@@ -1340,7 +1348,7 @@ impl WalFile {
 
         let mut stream_writer = StreamWriter::try_new_with_options(writer, &record_batches[0].schema(), options)?;
         for batch in record_batches {
-            size += batch.get_array_memory_size() / 10; // @todo - approximate 10x compression ratio
+            size += batch.get_array_memory_size(); // @todo - account for compression ratio, observed ~50% reduction
             stream_writer.write(batch).expect("Failed to write record batch to stream writer");
         }
 
