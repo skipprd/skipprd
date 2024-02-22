@@ -272,6 +272,7 @@ impl SkipprTypes {
             "integer" => Some(SkipprTypes::Integer),
             "int" => Some(SkipprTypes::Integer),
             "long" => Some(SkipprTypes::Long),
+            "bigint" => Some(SkipprTypes::Long),
             "double" => Some(SkipprTypes::Double),
             "boolean" => Some(SkipprTypes::Boolean),
             "date" => Some(SkipprTypes::Date),

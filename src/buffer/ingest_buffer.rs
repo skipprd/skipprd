@@ -520,7 +520,14 @@ impl WalPartition {
             .set_compression(Compression::SNAPPY)
             .build();
 
-        let schema = self.files.first_mut().unwrap().read_schema_from_stream().expect("Failed to read schema from WAL file");
+        let schema = match self.files.first_mut().unwrap().read_schema_from_stream() {
+            Ok(schema) => schema,
+            Err(e) => {
+                let file = self.files.first().unwrap();
+                println!("Failed to read schema from WAL file: {} of bytes: {}, Error {}. Continue to next WAL partition.", file.path.to_str().unwrap(), file.bytes, e);
+                return;
+            }
+        };
 
         let mut writer = ArrowWriter::try_new(write_file, schema, Some(props)).unwrap();
         // let mut writer = ArrowWriter::try_new(write_file, schema.clone(), Some(props)).unwrap();
