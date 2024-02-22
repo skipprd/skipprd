@@ -1229,7 +1229,7 @@ impl WalFile {
         let namespace = BufferChunker::decode_file_namespace(path.to_str().unwrap());
         let partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
         let time = BufferChunker::decode_file_time(path.to_str().unwrap());
-        let time = if time > 0 { None } else { Some(time) };
+        let time = if time > 0 { Some(time) } else { None };
 
         let shard = BufferChunker::decode_file_shard(path.to_str().unwrap());
 
