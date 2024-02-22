@@ -312,6 +312,11 @@ impl WalPartitionIndex {
 
         let mut count = 0;
 
+        println!("Purging tombstone WAL files");
+        let data_dir = Config::get_data_dir();
+        let wal_dir = PathBuf::from(format!("{}/ingest_buffer/done", data_dir));
+        fs::remove_dir_all(wal_dir).unwrap_or_default();
+
         println!("Indexing WAL");
 
         let wal_files = Self::list_wal_files()?;
@@ -328,7 +333,9 @@ impl WalPartitionIndex {
                 Ok(wal_file) => wal_file,
                 Err(e) => {
                     // Probably a zero byte file being written to
-                    println!("Failed to read WAL file: {}, Error: {}", file_path.to_str().unwrap(), e);
+                    // println!("Failed to read WAL file: {}, Error: {}", file_path.to_str().unwrap(), e);
+                    println!("Failed to index WAL file: {} of bytes: {}, Error {}.", file_path.to_str().unwrap(), file_path.metadata().unwrap().len(), e);
+
                     continue;
                 }
             };
