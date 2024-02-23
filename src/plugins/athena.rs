@@ -6,9 +6,7 @@ use crate::helpers::Helpers;
 use crate::{discover, flatten_metadata, METADATA};
 use aws_sdk_athena::types::{EncryptionConfiguration, EncryptionOption, ResultConfiguration, ResultConfigurationUpdates, Tag, WorkGroupConfiguration, WorkGroupConfigurationUpdates};
 use aws_sdk_athena::Client as AthenaClient;
-use aws_sdk_glue::types::{
-    Column, DatabaseInput, PartitionIndex, PartitionInput, SerDeInfo, StorageDescriptor, TableInput,
-};
+use aws_sdk_glue::types::{Column, DatabaseInput, PartitionIndex, PartitionInput, SerDeInfo, StorageDescriptor, Table, TableInput};
 use aws_sdk_glue::Client as GlueClient;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::{Client as S3Client, Error};
@@ -19,6 +17,8 @@ use std::fs;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
+use aws_sdk_glue::operation::get_table::{GetTableError, GetTableOutput};
+use aws_smithy_http::result::SdkError;
 
 use serde_derive::Deserialize;
 
@@ -409,7 +409,7 @@ impl AwsAthena {
         }
 
         match AwsAthena::glue_get_table(namespace).await {
-            Ok(true) => match AwsAthena::glue_update_table(namespace, schema).await {
+            Ok(table) => match AwsAthena::glue_update_table(namespace, schema, table).await {
                 Ok(_) => {
                     // println!("Update table {}", namespace)
                 }
@@ -417,7 +417,6 @@ impl AwsAthena {
                     println!("ERROR updating Glue table: {}", err);
                 }
             },
-            Ok(false) => {}
             Err(_err) => {
                 match AwsAthena::glue_create_table(namespace, schema).await {
                     Ok(_) => {}
@@ -481,7 +480,7 @@ impl AwsAthena {
         }
     }
 
-    pub async fn glue_get_table(namespace: &str) -> Result<bool, String> {
+    pub async fn glue_get_table(namespace: &str) -> Result<GetTableOutput, SdkError<GetTableError>> {
         let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
 
         let database_name = config.glue_database_name;
@@ -490,22 +489,12 @@ impl AwsAthena {
 
         let glue_client = GlueClient::new(&aws_config);
 
-        match glue_client
+        glue_client
             .get_table()
             .database_name(&database_name)
             .name(namespace)
             .send()
             .await
-        {
-            Ok(output) => {
-                if let Some(table) = output.table() {
-                    return Ok(table.name().unwrap() == namespace);
-                } else {
-                    Ok(false)
-                }
-            }
-            Err(err) => Err(err.into_service_error().to_string()),
-        }
     }
 
     pub async fn create_workgroup() -> Result<bool, String> {
@@ -774,12 +763,12 @@ impl AwsAthena {
     pub async fn glue_update_table(
         namespace: &str,
         metadata: &Metadata,
+        existing_table: GetTableOutput
     ) -> Result<bool, String> {
         let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
 
         let database = config.glue_database_name;
         let bucket = config.s3_bucket;
-        let granularity_target = Config::get_transform_batch_time_unit();
 
         let path = config.s3_prefix;
         let path = path.trim_matches('/');
@@ -789,37 +778,6 @@ impl AwsAthena {
             .to_str()
             .unwrap()
             .to_string();
-
-        let mut partitions: Vec<Column> = Vec::new();
-        // let mut partition_indexes: Vec<PartitionIndex> = Vec::new();
-        // let mut partition_index_keys:  Vec<String> = Vec::new();
-
-        AwsAthena::get_partition_by_fields(&mut partitions);
-
-        // Time Partitioning
-        if !granularity_target.is_empty() {
-            for granularity in GRANULARITIES.iter() {
-                partitions.push(
-                    Column::builder()
-                        .name(granularity.to_string())
-                        .r#type("int")
-                        .build(),
-                );
-
-                // partition_index_keys.push(granularity.to_string());
-
-                // partition_indexes.push(
-                //     PartitionIndex::builder()
-                //         .index_name(granularity_target.to_string())
-                //         .set_keys(Some(partition_index_keys.clone()))
-                //         .build()
-                // );
-
-                if granularity == &granularity_target {
-                    break;
-                }
-            }
-        }
 
         let columns = SkipprHive::convert_skippr_to_hive(metadata).unwrap();
 
@@ -852,9 +810,14 @@ impl AwsAthena {
             )
             .table_type("EXTERNAL_TABLE");
 
-        if !partitions.is_empty() {
-            // println!("Partition keys: {:?}", partitions);
-            table_input = table_input.set_partition_keys(Some(partitions));
+
+        // Not valid to update partitions, would require a migration of all data and partition indexes.
+        // Additionally, when issuing `ALTER SCHEMA` - we may be local and not have a config file specifying
+        // the partition time unit (year, month, day, hour, minute).
+        // So we inherit the existing partition keys.
+        if existing_table.table().is_some() {
+            let existing_table = existing_table.table().unwrap();
+            table_input = table_input.set_partition_keys(existing_table.partition_keys.clone());
         }
 
         match glue_client
