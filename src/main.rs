@@ -372,7 +372,7 @@ async fn query(sql: &str) {
                 }
             };
 
-            let metadata = skippr_metadata.get_mut(&format!("{}", &stmt.pipeline)).unwrap();
+            let metadata = skippr_metadata.get_mut(&format!("{}", &stmt.pipeline)).expect(&format!("Pipeline '{}' not found", stmt.pipeline));
 
             metadata.enabled = match stmt.toggle {
                 PipelineToggle::Enable => {
@@ -1252,9 +1252,6 @@ async fn sync() {
     for (key, value) in total_times.iter() {
         println!("{}: {}ms", key, value.as_millis());
     }
-
-    let mut total_rows = TOTAL_ROWS.read().load(Ordering::Relaxed);
-    println!("\nTotal Rows written: {}\n", total_rows);
 
     {
         LOGGER.write()
