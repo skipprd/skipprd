@@ -320,12 +320,6 @@ impl WalPartitionIndex {
 
         let mut count = 0;
 
-        println!("Purging tombstone WAL files");
-        let data_dir = Config::get_data_dir();
-        let wal_dir = PathBuf::from(format!("{}/ingest_buffer/done", data_dir));
-        fs::remove_dir_all(&wal_dir).unwrap_or_default();
-        fs::create_dir_all(&wal_dir).unwrap();
-
         println!("Indexing WAL");
 
         let wal_files = Self::list_wal_files()?;
@@ -449,9 +443,12 @@ struct WalPartition {
 }
 
 impl WalPartition {
-    pub fn recover_from_wal(&mut self) -> io::Result<()> {
-
-        Ok(())
+    fn prune_tombstone_wals(&mut self) {
+        println!("Purging tombstone WAL files");
+        let data_dir = Config::get_data_dir();
+        let wal_dir = PathBuf::from(format!("{}/ingest_buffer/done", data_dir));
+        fs::remove_dir_all(&wal_dir).unwrap_or_default();
+        fs::create_dir_all(&wal_dir).unwrap();
     }
 
     fn is_file_size_exceeded(&self) -> bool {
@@ -604,6 +601,8 @@ impl WalPartition {
             // }
 
         }
+
+        self.prune_tombstone_wals();
 
     }
 
