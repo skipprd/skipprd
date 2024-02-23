@@ -77,8 +77,8 @@ impl DataSourceS3Plugin {
             .timeout_config(
                 TimeoutConfig::builder()
                     .operation_timeout(Duration::from_secs(5))
-                    .operation_attempt_timeout(Duration::from_secs(3))
-                    .connect_timeout(Duration::from_secs(3))
+                    .operation_attempt_timeout(Duration::from_secs(5))
+                    .connect_timeout(Duration::from_secs(5))
                     .build()
             )
             .retry_config(retry_config)
