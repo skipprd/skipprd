@@ -471,6 +471,50 @@ impl Helpers {
 }
 
 #[cfg(test)]
+mod date_timezones {
+    use chrono::{DateTime, Utc};
+    use crate::helpers::Helpers;
+    use crate::discover::AnalyseSchema;
+    use chrono::TimeZone;
+
+    #[test]
+    fn it_parses_datetime_with_positive_offset_to_utc() {
+        let datetime_str = "2022-02-22T22:22:22+01:00";
+        let format = "%Y-%m-%dT%H:%M:%S%:z";
+        let expected = Utc.ymd(2022, 2, 22).and_hms(21, 22, 22); // Adjusted to UTC
+        let result = Helpers::parse_date_from_string(datetime_str, format).unwrap();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn it_parses_datetime_with_negative_offset_to_utc() {
+        let datetime_str = "2022-02-22T22:22:22-01:00";
+        let format = "%Y-%m-%dT%H:%M:%S%:z";
+        let expected = Utc.ymd(2022, 2, 22).and_hms(23, 22, 22); // Adjusted to UTC
+        let result = Helpers::parse_date_from_string(datetime_str, format).unwrap();
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn it_handles_incorrect_format_gracefully() {
+        let datetime_str = "2022-02-22 22:22:22";
+        let format = "%Y-%m-%dT%H:%M:%S%:z"; // Incorrect format for the input
+        let result = Helpers::parse_date_from_string(datetime_str, format);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Could not parse date 2022-02-22 22:22:22 with format %Y-%m-%dT%H:%M:%S%:z");
+    }
+
+    #[test]
+    fn it_parses_naive_datetime_to_utc() {
+        let datetime_str = "2022-02-22T22:22:22";
+        let format = "%Y-%m-%dT%H:%M:%S"; // No timezone information
+        let expected = Utc.ymd(2022, 2, 22).and_hms(22, 22, 22); // Assumed to already be in UTC
+        let result = Helpers::parse_date_from_string(datetime_str, format).unwrap();
+        assert_eq!(result, expected);
+    }
+}
+
+#[cfg(test)]
 mod tests_get_nested_value_from_dot_notation {
     use super::*;
     use serde_json::json;
