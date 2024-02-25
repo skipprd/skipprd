@@ -104,7 +104,7 @@ pub struct Ingest {
     tx: Sender<()>,
     active_count: Arc<AtomicUsize>,
     buffers: Arc<TimedRwLock<Buffers>>,
-    schema_hashes: HashMap<String, SchemaHash>,
+    schema_hashes: DashMap<String, SchemaHash>,
     // run_id: String,
 }
 
@@ -136,7 +136,7 @@ impl Ingest {
 
 
 
-        let mut schema_hashes = HashMap::new();
+        let mut schema_hashes = DashMap::new();
 
         // Scope to ensure read lock is released immediately after cloning
         {
@@ -147,7 +147,7 @@ impl Ingest {
                     hash: format!("{:?}", md5::compute(format!("{:?}", Arc::clone(schema).deref())))
                 };
                 (namespace.clone(), schema_hash)
-            }).collect::<HashMap<_, _>>();
+            }).collect::<DashMap<_, _>>();
         }
 
         Ingest {
@@ -263,7 +263,7 @@ impl Ingest {
         offset_db_clone: &Arc<Offsets>,
         buffers: Arc<TimedRwLock<Buffers>>,
         core_id: &str,
-        schema_hashes: &mut HashMap<String, SchemaHash>
+        schema_hashes: &mut DashMap<String, SchemaHash>
     ) {
 
         let default_schema_hash = format!("{:?}", md5::compute(Helpers::random_str(10)));
@@ -532,43 +532,29 @@ impl Ingest {
                             if Config::get_auto_approve() {
 
                                 if updated_schema_clone.lock().unwrap().as_str() == "yes" {
+                                    let mut default_message = Value::Null;
                                     {
-                                        // METADATA.write().clear();
-                                        // METADATA.write().extend(NEW_METADATA.read().clone());
-
-                                        // let skpr_namespace = BufferChunker::decode_file_namespace(&output_file_name);
-
                                         let metadata = METADATA.read();
-                                        let default_message = create_default_nested_message(&metadata.get(&skpr_namespace).unwrap().fields);
+                                        default_message = create_default_nested_message(&metadata.get(&skpr_namespace).unwrap().fields);
+                                    }
+
+                                    {
                                         let mut lock = DEFAULT_NESTED_MESSAGE.write();
                                         lock.insert(skpr_namespace.clone(), default_message);
+                                    }
 
-                                        Ingest::prepare_arrow_schema(&skpr_namespace, flatten).unwrap();
+                                    Ingest::prepare_arrow_schema(&skpr_namespace, flatten).unwrap();
 
-                                        {
-                                            let schemas = ARROW_SCHEMA.read();
+                                    {
+                                        let schemas = ARROW_SCHEMA.read();
 
-                                            let schema = Arc::clone(schemas.get(&skpr_namespace).unwrap());
-                                            let hash = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
+                                        let schema = Arc::clone(schemas.get(&skpr_namespace).unwrap());
+                                        let hash = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
 
-                                            schema_hashes.insert(skpr_namespace.clone(), SchemaHash {
-                                                schema: schema,
-                                                hash: hash
-                                            });
-                                        }
-
-                                       // schema_hashes.insert(skpr_namespace.clone(), SchemaHash {
-                                       //     schema: format!("{:?}", ARROW_SCHEMA.read().get(&skpr_namespace).unwrap().deref()),
-                                       //     hash: format!("{:?}", md5::compute(format!("{:?}", ARROW_SCHEMA.read().get(&skpr_namespace).unwrap().deref())))
-                                       //  });
-
-                                        // let arrow_schema = ARROW_SCHEMA.read().get(&skpr_namespace).unwrap().clone();
-                                        // schema_hashes.insert(skpr_namespace.clone(), format!("{:?}", md5::compute(format!("{:?}", arrow_schema.deref()))));
-                                        // let schema = ARROW_SCHEMA.read();
-                                        // run_id = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
-
-                                        // println!("Updated schema, new run id: {}", run_id);
-
+                                        schema_hashes.insert(skpr_namespace.clone(), SchemaHash {
+                                            schema: schema,
+                                            hash: hash
+                                        });
                                     }
                                 }
 
