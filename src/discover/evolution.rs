@@ -306,7 +306,7 @@ mod tests_evolve_field {
 
         assert!(result.is_ok());
         // Assert the Evolution
-        assert_eq!(metadata.get(&field).unwrap().evolution.get(&expected_data_type).unwrap().new_field, expected_new_field);
+        assert_eq!(metadata.get(&field).unwrap().evolution.get(&expected_new_field).unwrap().new_field, expected_new_field);
         // Assert the new evolved fields Metadata
         assert_eq!(metadata.get(&expected_new_field).unwrap().determined_type, expected_data_type);
         // Assert old field is unchanged
@@ -327,7 +327,7 @@ mod tests_evolve_field {
 
         assert!(result.is_ok());
         // Assert the Evolution
-        assert_eq!(metadata.get(&field).unwrap().evolution.get(&expected_data_type).unwrap().new_field, expected_new_field);
+        assert_eq!(metadata.get(&field).unwrap().evolution.get(&expected_new_field).unwrap().new_field, expected_new_field);
         // Assert the new evolved fields Metadata
         assert_eq!(metadata.get(&expected_new_field).unwrap().determined_type, expected_data_type);
         // Assert old field is unchanged
@@ -349,7 +349,7 @@ mod tests_evolve_field {
 
         assert!(result.is_ok());
         // Assert the Evolution
-        assert_eq!(metadata.get(&field).unwrap().evolution.get(&expected_data_type).unwrap().new_field, expected_new_field);
+        assert_eq!(metadata.get(&field).unwrap().evolution.get(&expected_new_field).unwrap().new_field, expected_new_field);
         // Assert the new evolved fields Metadata
         assert_eq!(metadata.get(&expected_new_field).unwrap().determined_type, expected_data_type);
         // Assert old field is unchanged
@@ -370,7 +370,7 @@ mod tests_evolve_field {
 
         assert!(result.is_ok());
         // Assert the Evolution
-        assert_eq!(metadata.get(&field).unwrap().evolution.get(&expected_data_type).unwrap().new_field, expected_new_field);
+        assert_eq!(metadata.get(&field).unwrap().evolution.get(&expected_new_field).unwrap().new_field, expected_new_field);
         // Assert no evolution was performed
         assert!(metadata.get(&expected_new_field).is_none());
         // Assert old field is unchanged
@@ -392,7 +392,7 @@ mod tests_evolve_field {
 
         assert!(result.is_ok());
         // Assert the Evolution
-        assert_eq!(metadata.get(&field).unwrap().evolution.get(&expected_data_type).unwrap().new_field, expected_new_field);
+        assert_eq!(metadata.get(&field).unwrap().evolution.get(&expected_new_field).unwrap().new_field, expected_new_field);
         // Assert the new evolved fields Metadata
         assert_eq!(metadata.get(&expected_new_field).unwrap().determined_type, expected_data_type);
         // Assert old field is unchanged
@@ -415,7 +415,7 @@ mod tests_evolve_field {
 
         assert!(result.is_ok());
         // Assert the Evolution
-        assert_eq!(metadata.get(&field).unwrap().evolution.get(&expected_data_type).unwrap().new_field, expected_new_field);
+        assert_eq!(metadata.get(&field).unwrap().evolution.get(&expected_new_field).unwrap().new_field, expected_new_field);
         // Assert the new evolved fields Metadata
         assert_eq!(metadata.get(&expected_new_field).unwrap().determined_type, expected_data_type);
         assert_eq!(metadata.get(&expected_new_field).unwrap().determined_type_values, "string");
@@ -441,7 +441,7 @@ mod tests_evolve_field {
 
         assert!(result.is_ok());
         // Assert the Evolution
-        assert_eq!(metadata.get(&field).unwrap().evolution.get(&expected_data_type).unwrap().new_field, expected_new_field);
+        assert_eq!(metadata.get(&field).unwrap().evolution.get(&expected_new_field).unwrap().new_field, expected_new_field);
         // Assert the new evolved fields Metadata
         assert_eq!(metadata.get(&expected_new_field).unwrap().determined_type, expected_data_type);
         // Assert old field is unchanged
