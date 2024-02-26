@@ -110,7 +110,7 @@ pub struct Ingest {
 
 impl Drop for Ingest {
     fn drop(&mut self) {
-        println!("Dropping Ingest Struct: Waiting for {} ingest tasks to finish", self.active_count.load(Ordering::SeqCst));
+        println!("Exiting, waiting for {} ingest tasks to finish", self.active_count.load(Ordering::SeqCst));
 
         self.wait_for_completion();
     }

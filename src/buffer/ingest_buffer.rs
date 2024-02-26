@@ -111,7 +111,7 @@ impl Buffers {
 
         // let mut index = WAL_INDEX.write();
 
-        let mut rows = 0;
+        let mut stats: (u64, u64) = (0, 0);
 
         // println!("Flushing {} WAL files", self.buf.len());
 
@@ -163,7 +163,7 @@ impl Buffers {
 
             // @todo - faster to build a vec and pass to decoder?
 
-            rows += ingest_buffer_batch.records.len();
+            ingest_buffer_batch.records.len();
 
             let json_values = ingest_buffer_batch.records.iter().map(|record| &record.record).collect::<Vec<&Value>>();
             decoder.serialize(&json_values).unwrap();
@@ -172,7 +172,11 @@ impl Buffers {
 
             // let mut ingest_batch = WalRecordBatches::new(offset, record_batches);
 
-            wal_file.write_to_stream(&record_batches)?;
+            let stat = wal_file.write_to_stream(&record_batches)?;
+
+            stats.0 += stat.0;
+            stats.1 += stat.1;
+
             // wal_file_partition.bytes += wal_file.write_to_stream(&record_batches)?;
 
             // wal_file_partition.bytes += wal_file.bytes;
@@ -207,7 +211,7 @@ impl Buffers {
 
         }
 
-
+        println!("Ingested {} rows of {} bytes to WAL", stats.0, stats.1);
 
         self.buf.clear();
 
@@ -444,7 +448,7 @@ struct WalPartition {
 
 impl WalPartition {
     fn prune_tombstone_wals(&mut self) {
-        println!("Purging tombstone WAL files");
+        // println!("Purging tombstone WAL files");
         let data_dir = Config::get_data_dir();
         let wal_dir = PathBuf::from(format!("{}/ingest_buffer/done", data_dir));
         fs::remove_dir_all(&wal_dir).unwrap_or_default();
@@ -1324,7 +1328,12 @@ impl WalFile {
         Ok(record_batches)
     }
 
-    pub fn write_to_stream(&mut self, record_batches: &[RecordBatch]) -> Result<u64, ArrowError> {
+    /**
+     * Write record batches to the WAL file
+     * @param record_batches
+     * @return tuple of bytes and total rows written (bytes, row_count)
+     */
+    pub fn write_to_stream(&mut self, record_batches: &[RecordBatch]) -> Result<(u64, u64), ArrowError> {
         // let writer = self.file.as_mut().ok_or(ArrowError::IoError("Can't write to WAL file".to_string(), io::Error::new(io::ErrorKind::NotFound, "File not found")))?;
 
         let file = self.get_or_open_file().expect("Failed to clone WAL file for write");
@@ -1345,9 +1354,12 @@ impl WalFile {
         let codec = Some(CompressionType::LZ4_FRAME);
         let options = IpcWriteOptions::default().try_with_compression(codec)?;
 
+        let mut row_count = 0;
+
         let mut stream_writer = StreamWriter::try_new_with_options(writer, &record_batches[0].schema(), options)?;
         for batch in record_batches {
             size += batch.get_array_memory_size(); // @todo - account for compression ratio, observed ~50% reduction
+            row_count += batch.num_rows();
             stream_writer.write(batch).expect("Failed to write record batch to stream writer");
         }
 
@@ -1379,7 +1391,7 @@ impl WalFile {
         let file = self.get_or_open_file().expect("Failed to get file for metadata read");
         self.bytes += file.metadata().unwrap().len();
 
-        Ok(self.bytes)
+        Ok((self.bytes, row_count as u64))
     }
 
     fn get_wal_partition_dir(namespace: &str, partition: &str, time: Option<i64>, shard: &str) -> String {

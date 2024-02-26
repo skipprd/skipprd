@@ -2,7 +2,9 @@ use std::fmt::Debug;
 use std::ops::Sub;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime};
-use chrono::DateTime;
+use chrono::{DateTime};
+use core::time::Duration;
+use std::collections::HashMap;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_derive::{Deserialize, Serialize};
 use serde_json::json;
@@ -10,6 +12,7 @@ use serde_json::json;
 use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
 use crate::helpers::license::{HAS_LICENSE, TENANT_ID};
+use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::METRICS;
 
 pub static LAST_MESSAGES_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -190,6 +193,8 @@ impl Metrics {
         let current_time = chrono::Utc::now();
         let run_time_seconds = (current_time - metrics.start_time).num_seconds();
 
+        let total_times: Vec<(String, Duration)> = TimedRwLock::<()>::get_total_wait_times();
+        let wait_times: HashMap<String, Duration> = total_times.iter().cloned().collect();
 
         let data = json!({
             "metrics": {
@@ -202,6 +207,7 @@ impl Metrics {
                 "run_time_seconds": run_time_seconds,
                 "bytes_current": metrics.bytes_current,
                 "bytes_total": metrics.bytes_total,
+                "lock_wait_times": wait_times,
             },
             "type": "metric",
             "run_id": metrics.run_id,
