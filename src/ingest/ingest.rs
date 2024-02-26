@@ -457,7 +457,8 @@ pub fn set_value(
                 // }
             } else if data_type == "array" {
 
-                if metadata.get(field).unwrap().determined_type_values == "record" {
+                if metadata.get(field).unwrap().determined_type_values == "record"
+                    && value.is_array() {
 
                     let mut arr_new_value: Vec<Value> = Vec::new();
 
