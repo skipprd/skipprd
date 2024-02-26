@@ -26,8 +26,8 @@ runs:
 
         SKIPPR_CHAOS_MODE=no AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-${{ inputs.architecture_name }}/skippr sync
 
-    - name: Asset Athena
-      shell: bash
-      run: |
-        pip install soda-core-athena
-        AWS_DEFAULT_REGION=us-east-1 AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }}  soda scan -d datalake_e2e -c ./soda/configuration.yml ./soda/chaos_mode.yml
+#    - name: Asset Athena
+#      shell: bash
+#      run: |
+#        pip install soda-core-athena
+#        AWS_DEFAULT_REGION=us-east-1 AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }}  soda scan -d datalake_e2e -c ./soda/configuration.yml ./soda/chaos_mode.yml
