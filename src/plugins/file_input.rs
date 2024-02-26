@@ -4,6 +4,7 @@ use std::io::prelude::*;
 
 use std::{fs};
 use std::io::BufReader;
+use std::ops::{Deref, DerefMut};
 use std::path::Path;
 
 
@@ -182,8 +183,6 @@ impl DataSourceLocalFilePlugin {
                                     let decoder = GzDecoder::new(file);
                                     let reader = BufReader::new(decoder);
 
-
-
                                     for line in reader.lines() {
                                         let line = line.unwrap();
                                         // let line_len = line.len() as i64;
@@ -334,32 +333,43 @@ impl DataSourceLocalFilePlugin {
                                 },
                                 _ => {
                                     let reader = BufReader::new(file);
+                                    let mut ingest_data = String::new();
+                                    let mut batch_bytes = 0;
 
                                     for line in reader.lines() {
                                         let line = match line {
                                             Ok(line) => line,
                                             Err(_) => continue,
                                         };
-                                        let line_len = line.len() as i64;
-                                        if batch_bytes + line_len > chunk_size && !current_batch.is_empty() {
-                                            tx.unbounded_send(current_batch.clone()).unwrap();
-                                            current_batch.clear();
+
+                                        let ingest_line = format!("{}{}", if batch_bytes == 0 { "" } else { "\n" }, line);
+
+                                        if batch_bytes > 0 {
+                                            ingest_data.extend(ingest_line.chars());
+                                            batch_bytes += ingest_line.len() as i64;
+                                        }
+                                        ingest_data.push_str(&line);
+                                        batch_bytes += line.len() as i64;
+
+                                        if batch_bytes >= chunk_size {
+                                            let batch = IngestBatch {
+                                                offset_key: offset_key.clone(),
+                                                data: ingest_data.clone(),
+                                            };
+                                            let current_batch: Vec<IngestBatch> = vec![batch];
+                                            tx.unbounded_send(current_batch).unwrap();
+                                            ingest_data.clear();
                                             batch_bytes = 0;
                                         }
-
-                                        let ingest_data = format!("{}{}", if batch_bytes == 0 { "" } else { "\n" }, line);
-                                        batch_bytes += ingest_data.len() as i64;
-
-                                        current_batch.push(IngestBatch {
-                                            offset_key: offset_key.clone(),
-                                            data: ingest_data,
-                                        });
                                     }
 
-                                    if !current_batch.is_empty() {
-                                        tx.unbounded_send(current_batch.clone()).unwrap();
-                                        current_batch.clear();
-                                        batch_bytes = 0;
+                                    if !ingest_data.is_empty() {
+                                        let batch = IngestBatch {
+                                            offset_key: offset_key.clone(),
+                                            data: ingest_data,
+                                        };
+                                        let current_batch: Vec<IngestBatch> = vec![batch];
+                                        tx.unbounded_send(current_batch).unwrap();
                                     }
                                 },
                             }

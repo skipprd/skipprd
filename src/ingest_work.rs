@@ -16,6 +16,7 @@ use std::io;
 
 
 use std::io::Write;
+use std::ops::Deref;
 use std::os::fd::AsRawFd;
 
 use std::path::PathBuf;
@@ -42,7 +43,7 @@ use crate::ingest::fast_ingest::{create_default_nested_message, DEFAULT_NESTED_M
 
 use tokio::io::AsyncWriteExt;
 use helpers::timed_rwlock::TimedRwLock;
-use crate::buffer::ingest_buffer::{Buffer, Buffers, WalFile};
+use crate::buffer::ingest_buffer::{Buffers, IngestBufferBatch, IngestRecord, OffsetKeySerialize, WalFile};
 use crate::serdes::csv::SerderCsv;
 
 use crate::serdes::xml::SerdeXml;
@@ -96,7 +97,7 @@ pub struct Ingest {
     num_cpus: usize,
     tx: Sender<()>,
     active_count: Arc<AtomicUsize>,
-    buffers: Arc<Buffers>
+    buffers: Arc<TimedRwLock<Buffers>>,
 }
 
 impl Drop for Ingest {
@@ -122,7 +123,8 @@ impl Ingest {
             }
         });
 
-        let buffers = Arc::new(Buffers::new());
+        let mut buffers = Buffers::new();
+        let mut buffers = Arc::new(TimedRwLock::new("buffers".to_string(), buffers));
 
         Ingest {
             num_cpus,
@@ -186,7 +188,7 @@ impl Ingest {
 
             let core_id = self.thread_pool.active_count();
 
-            let buffers_clone = Arc::clone(&self.buffers);
+            let buffers_clone = self.buffers.clone();
 
             self.thread_pool.execute(move || {
                 // println!("Processing batch of {} events on core {}", datas_clone.len(), core_count);
@@ -199,7 +201,7 @@ impl Ingest {
 
     }
 
-    fn deadletter(record: &str, buffers: &Arc<Buffers>) {
+    fn deadletter(record: &str, buffers: &Arc<TimedRwLock<Buffers>>) {
         let data_dir = Config::get_data_dir();
         let deadletter_dir = format!("{}/deadletter_buffer", data_dir);
 
@@ -213,11 +215,20 @@ impl Ingest {
     fn process_batch(
         datas: &mut Vec<IngestBatch>,
         offset_db_clone: &Arc<Offsets>,
-        buffers: Arc<Buffers>,
+        buffers: Arc<TimedRwLock<Buffers>>,
         core_id: &str,
     ) {
 
         // let mut avro_schemas = AVRO_SCHEMA.lock().unwrap();
+
+        let mut buf: IngestBufferBatch = IngestBufferBatch {
+            offset: OffsetKeySerialize {
+                position: 0,
+                namespace: "".to_string(),
+                partition: "".to_string(),
+            },
+            records: Vec::new(),
+        };
 
         let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.or(Some("no".to_string())).unwrap());
 
@@ -292,6 +303,9 @@ impl Ingest {
             let mut unwrapped_records: Vec<Value> = Vec::new();
 
             for record in records {
+
+                // println!("Record: {}", record);
+
                 match record.as_object() {
                     Some(_v) => unwrapped_records.push(record),
                     None => {
@@ -385,13 +399,13 @@ impl Ingest {
                             Some(BufferChunker::event_time_bucket(skpr_time.unwrap()));
                     }
 
-                    let output_file_name = BufferChunker::encode_chunk_name(
-                        "output",
-                        Some(&skpr_namespace),
-                        Some(&skpr_partition),
-                        skpr_time_bucket,
-                        Some(core_id),
-                    );
+                    // let output_file_name = BufferChunker::encode_chunk_name(
+                    //     "output",
+                    //     Some(&skpr_namespace),
+                    //     Some(&skpr_partition),
+                    //     skpr_time_bucket,
+                    //     Some(core_id),
+                    // );
 
                     if METADATA.read().get(&skpr_namespace).is_none() {
                         METADATA.write().insert(skpr_namespace.clone(), Metadata::new().unwrap());
@@ -469,7 +483,7 @@ impl Ingest {
                                         // METADATA.write().clear();
                                         // METADATA.write().extend(NEW_METADATA.read().clone());
 
-                                        let skpr_namespace = BufferChunker::decode_file_namespace(&output_file_name);
+                                        // let skpr_namespace = BufferChunker::decode_file_namespace(&output_file_name);
 
                                         let metadata = METADATA.read();
                                         let default_message = create_default_nested_message(&metadata.get(&skpr_namespace).unwrap().fields);
@@ -506,7 +520,7 @@ impl Ingest {
                         }
                     };
 
-                    let output_file = format!("{}/{}.merged", output_dir.clone(), &output_file_name);
+                    // let output_file = format!("{}/{}.merged", output_dir.clone(), &output_file_name);
 
                     // let pretty_json = match serde_json::to_string_pretty(&record_value) {
                     //     Ok(pretty_json) => pretty_json,
@@ -519,16 +533,45 @@ impl Ingest {
 
                     // Serialize your JSON value to a vector
 
-                    let record_vec = serde_json::to_string(&record_value).unwrap();
-                    bytes += record_vec.len() as u64;
+                    // let record_vec = serde_json::to_string(&record_value).unwrap();
+                    // bytes += record_vec.len() as u64;
 
                     // let output_file_name_str = output_file_name.to_string();
-                    let buffer = buffers.buffers.entry(output_file_name.clone()).or_insert_with(|| {
-                        TimedRwLock::new(output_file_name.clone(), Buffer::new(&output_file_name))
-                    });
+                    // let buffer = buffers.buffers.entry(output_file_name.clone()).or_insert_with(|| {
+                    //     TimedRwLock::new(output_file_name_str, Buffer::new(&output_file_name.clone()))
+                    // });
 
-                    buffer.write().write(&record_vec.as_bytes());
-                    buffer_batchs.insert(output_file_name.clone(), "foo".to_string());
+                    let offset_key_serialized = OffsetKeySerialize {
+                        position: batch_line,
+                        namespace: ingest_batch.offset_key.namespace.clone(),
+                        partition: ingest_batch.offset_key.partition.clone(),
+                    };
+                    //
+                    // let ingest_buffer_batch: IngestBufferBatch = IngestBufferBatch {
+                    //     namespace: skpr_namespace,
+                    //     offset: offset_key_serialized.clone(),
+                    //     record: record_value,
+                    // };
+
+                    // buffer.write().write(ingest_buffer_batch);
+
+                    let ingest_record = IngestRecord {
+                        namespace: skpr_namespace,
+                        partition: skpr_partition,
+                        time: skpr_time,
+                        record: record_value,
+                    };
+
+                    // buf.entry(na).or_insert_with(|| {
+                    //     IngestBufferBatch {
+                    //         offset: offset_key_serialized.clone(),
+                    //         records: Vec::new(),
+                    //     }
+                    // });
+                    buf.offset = offset_key_serialized;
+                    buf.records.push(ingest_record);
+
+                    // buffer_batchs.insert(output_file_name.clone(), "foo".to_string());
 
                     j += 1;
 
@@ -547,6 +590,27 @@ impl Ingest {
 
         }
 
+        // write and flush each buf to Buffer in buffers.buffers
+        // for (namespace, ingest_buffer_batch) in buf {
+        //
+        //     let buffer = buffers.buffers.entry(namespace.clone()).or_insert_with(|| {
+        //         TimedRwLock::new(namespace.clone(), Buffer::new(&namespace.clone()))
+        //     });
+        //
+        //     buffer.write().write(ingest_buffer_batch);
+        //     buffer.write().flush().unwrap();
+        // }
+
+        // @todo - write() Buffers
+        buffers.write().write(buf);
+        buffers.write().flush().unwrap();
+
+
+        // for buffer in buffers.buffers.iter() {
+        //     let mut buffer_lock = buffer.write();
+        //     buffer_lock.flush().unwrap();
+        // }
+
         batch_offset_lines.iter().for_each(|(offset_key, i)| {
             offset_db_clone.insert(offset_key, OffsetTypes::Line, *i);
         });
@@ -554,15 +618,6 @@ impl Ingest {
         batch_offset_files.iter().for_each(|(offset_key, i)| {
             offset_db_clone.insert(offset_key, OffsetTypes::Closed, *i);
         });
-        
-        // let keys: Vec<String> = buffers.buffers.iter().map(|entry| entry.key().clone()).collect();
-        let keys = buffer_batchs.iter().map(|entry| entry.0.clone()).collect::<Vec<String>>();
-        for key in keys {
-            // flush each buffer, locking the dashmap in the process
-            if let Some(buffer) = buffers.buffers.get(&key) {
-                buffer.write().flush();
-            }
-        }
 
         offset_db_clone.flush();
 

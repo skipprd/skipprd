@@ -182,11 +182,20 @@ fn get_type(value: &str) -> String {
         }
     }
 
-    match value.parse::<f32>() {
+    match &value.parse::<f32>() {
         Ok(_bool) => {
             return "double".to_string();
         }
-        Err(..) => {}
+        Err(_) => {
+            let timmed_value = value.trim_matches('"');
+            let json_value: Result<f32, _> = serde_json::from_str(timmed_value);
+            match json_value {
+                Ok(_) => {
+                    return "double".to_string();
+                }
+                Err(_) => {}
+            }
+        }
     }
 
     let v: Value = serde_json::from_str(value).unwrap_or_default();
@@ -610,7 +619,7 @@ impl AnalyseSchema {
 
         let mut data_type = get_type(value);
 
-        if data_type == *"string" || data_type == *"integer" || data_type == *"double" {
+        if data_type == *"string" || data_type == *"integer" {
             // String really an int?
             data_type = self.check_string_or_int(value);
 
@@ -636,9 +645,7 @@ impl AnalyseSchema {
             }
 
             // if self.is_float(value) {
-            //     if Some(Float(value)) {
-            //         data_type = "double";
-            //     }
+            //     data_type = "double".to_string();
             // }
         }
 

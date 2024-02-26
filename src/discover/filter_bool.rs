@@ -1,6 +1,6 @@
 
 
-pub fn parse_bool(value: &mut String) -> Result<bool, i32> {
+pub fn parse_bool(value: &mut str) -> Result<bool, i32> {
     let len = value.chars().count();
     let str = value;
     let mut ret: i32 = -1;
@@ -17,7 +17,7 @@ pub fn parse_bool(value: &mut String) -> Result<bool, i32> {
         1 => {
             if str == "1" {
                 ret = -1;
-            } else if *str == "0" {
+            } else if str == "0" {
                 ret = -1;
             } else {
                 ret = -1;

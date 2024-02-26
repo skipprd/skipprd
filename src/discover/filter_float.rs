@@ -2,7 +2,7 @@ const FILTER_FLAG_ALLOW_THOUSAND: bool = false;
 
 #[cfg(test)]
 mod tests {
-
+    use serde_json::Value;
     use crate::discover::get_type;
 
     #[test]
@@ -70,12 +70,12 @@ mod tests {
     }
 
     // #[test]
-    // fn test_get_type_float_3() {
-    //     let expected_type = "double".to_string();
-    //
-    //     let subject = 2.0;
-    //     assert_eq!(get_type(&mut String::from(subject.to_string())), expected_type);
-    // }
+    fn test_get_type_float_3() {
+        let expected_type = "double".to_string();
+
+        let subject = 2.0;
+        assert_eq!(get_type(&mut String::from(subject.to_string())), expected_type);
+    }
 
     #[test]
     fn test_get_type_float_4() {
@@ -83,6 +83,16 @@ mod tests {
 
         let subject = "0.0";
         assert_eq!(get_type(&mut subject.to_string()), expected_type);
+    }
+
+    #[test]
+    fn test_get_type_float_4_2() {
+        let expected_type = "double".to_string();
+
+        let subject = "23.4";
+        let json_value: Value = serde_json::from_str(subject).unwrap();
+        let value: &mut String = &mut json_value.to_string();
+        assert_eq!(get_type(value), expected_type);
     }
 
     #[test]

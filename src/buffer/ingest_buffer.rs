@@ -1,6 +1,7 @@
 use std::fs::{File, OpenOptions};
 use std::{fs, io,};
-use std::io::{BufRead, Read, Write};
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Cursor, Read, Seek, Write};
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -10,140 +11,266 @@ use arrow::json::ReaderBuilder;
 use arrow_schema::{ArrowError, SchemaRef};
 use dashmap::DashMap;
 use glob::{glob_with, MatchOptions};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use arrow::ipc::CompressionType;
+use arrow::ipc::reader::StreamReader;
+use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
+use bincode;
+use serde_cbor;
+use byteorder::LittleEndian;
+use datafusion::datasource::MemTable;
+use datafusion::parquet::data_type::AsBytes;
+use datafusion::prelude::{SessionConfig, SessionContext};
+use lazy_static::lazy_static;
+use libc::exit;
+use once_cell::sync::Lazy;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
+use serde_derive::{Deserialize, Serialize};
+use serde_json::Value;
+use tokio::runtime::Runtime;
+use yaml_rust::Yaml::Hash;
+use zerocopy::U64;
 use crate::{ARROW_SCHEMA, BUFFER_FINALISE_RUNNING, RUNNING};
 use crate::buffer::BufferChunker;
 use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
+use crate::helpers::offsets::{Offset, OffsetKey, OffsetValue};
 use crate::helpers::timed_rwlock::TimedRwLock;
 
-pub struct Buffer {
-    name: &'static str,
-    buf: Vec<u8>,
-    // record_batch: Vec<Arc<RecordBatch>>,
-    // inner_count: u64,
-    // count: u64,
-    bytes: u64,
-    updated_at: SystemTime,
-    wal_file: WalFile,
+pub static TOTAL_ROWS: Lazy<TimedRwLock<AtomicU64>> =
+    Lazy::new(|| TimedRwLock::new("record_batch_total".to_string(), AtomicU64::new(0)));
+
+lazy_static! {
+    static ref WAL_INDEX: TimedRwLock<WalIndex> = TimedRwLock::new("wal_index".to_string(), WalIndex::new());
 }
 
-// impl Drop for Buffer {
-//     fn drop(&mut self) {
-//         println!("Flushing buffer: {}", self.name);
-//         self.flush();
-//     }
-// }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OffsetKeySerialize {
+    pub(crate) namespace: String,
+    pub(crate) partition: String,
+    pub(crate) position: u64,
+}
 
-impl Buffer {
-    pub fn new(name: &str) -> Self {
-        Buffer {
-            name: Box::leak(name.to_string().into_boxed_str()),
-            buf: Vec::new(),
-            // record_batch: Vec::new(),
-            // inner_count: 0,
-            // count: 0,
-            bytes: 0,
-            updated_at: SystemTime::now(),
-            wal_file: WalFile::new(name).unwrap()
+#[derive(Debug, Clone)]
+pub struct IngestRecord {
+    pub(crate) namespace: String,
+    pub(crate) partition: String,
+    pub(crate) time: Option<i64>,
+    pub(crate) record: Value
+}
+
+pub struct IngestBufferBatch {
+    pub(crate) offset: OffsetKeySerialize,
+    pub(crate) records: Vec<IngestRecord>,
+}
+
+pub struct WalRecordBatches {
+    pub(crate) offset: OffsetKeySerialize,
+    pub(crate) record_batches: Vec<RecordBatch>,
+}
+
+impl WalRecordBatches {
+    pub fn new(offset: OffsetKeySerialize, record_batches: Vec<RecordBatch>) -> Self {
+        WalRecordBatches {
+            offset,
+            record_batches,
         }
     }
 
-    pub fn write(&mut self, json_value: &[u8]) {
+    pub fn read_from_stream<R: Read + Seek>(reader: &mut R) -> Result<Self, ArrowError> {
 
-        self.buf.extend_from_slice(json_value);
+        reader.seek(io::SeekFrom::Start(0)).unwrap();
 
-        // self.inner_count += 1;
+        let mut offset_size = [0u8; 8];
+        reader.read_exact(&mut offset_size).expect("Failed to read offset size from WAL");
 
-        // self.wal_file.write_to_wal(json_value).unwrap();
+        let mut bin_offset = vec![0u8; u64::from_le_bytes(offset_size) as usize];
+        reader.read_exact(&mut bin_offset).expect("Failed to read offset from WAL");
 
-        self.bytes += json_value.len() as u64;
+        let offset: OffsetKeySerialize = bincode::deserialize(&bin_offset).unwrap();
 
-        // self.flush();
+        // println!("Offset of size: {} value {:?}", u64::from_le_bytes(offset_size), offset);
 
-        self.updated_at = SystemTime::now();
+        // Deserialize RecordBatch using Arrow's IPC format
+        // let mut buf = Vec::new();
+        // reader.read_to_end(&mut buf)?;
+        // let cursor = Cursor::new(buf);
+        let mut stream_reader = StreamReader::try_new(reader, None).unwrap();
 
-        self.check_wal_rotate();
+        let mut record_batches = Vec::new();
+        while let Some(batch) = stream_reader.next() {
+            let batch = batch.unwrap();
+            record_batches.push(batch);
+        }
+
+        Ok(WalRecordBatches {
+            offset,
+            record_batches,
+        })
+    }
+
+    pub fn write_to_stream<W: Write + Seek>(&mut self, writer: &mut W) -> Result<usize, ArrowError> {
+
+        // seek to start of file
+        writer.seek(io::SeekFrom::Start(0))?;
+
+        let bin_offset = bincode::serialize(&self.offset).unwrap();
+        let offset_size = bin_offset.len() as u64;
+
+        writer.write_all(&offset_size.as_bytes())?;
+        writer.write_all(&bin_offset)?;
+
+        // seek to end of file
+        writer.seek(io::SeekFrom::End(0))?;
+
+        let mut size: usize = 0;
+
+        let codec = Some(CompressionType::LZ4_FRAME);
+        let options = IpcWriteOptions::default().try_with_compression(codec)?;
+
+        let mut stream_writer = StreamWriter::try_new_with_options(writer, &self.record_batches[0].schema(), options)?;
+        for batch in &self.record_batches {
+            stream_writer.write(batch).expect("Failed to write record batch to stream writer");
+            size += batch.get_array_memory_size();
+        }
+
+        stream_writer.finish()?;
+
+        Ok(size)
+    }
+}
+
+pub struct Buffers {
+    buf: IngestBufferBatch,
+    index: WalIndex
+}
+
+impl Buffers {
+    pub fn new() -> Self {
+        Buffers {
+            buf: IngestBufferBatch {
+                offset: OffsetKeySerialize {
+                    namespace: "".to_string(),
+                    partition: "".to_string(),
+                    position: 0,
+                },
+                records: Vec::new(),
+            },
+            index: WalIndex::new(),
+        }
+    }
+
+    pub fn write(&mut self, ingest_buffer_batch: IngestBufferBatch) {
+        self.buf = ingest_buffer_batch;
 
     }
 
-    pub fn clear(&mut self) {
-        self.wal_file = WalFile::new(self.name).unwrap();
-        self.bytes = 0;
-        self.updated_at = SystemTime::now();
+    pub fn flush(&mut self) -> Result<(), ArrowError> {
+
+        let mut buffers: HashMap<(String, String, i64), Vec<IngestRecord>> = HashMap::new();
+
+        for record in self.buf.records.iter_mut() {
+            let key = (record.namespace.clone(), record.partition.clone(), record.time.unwrap_or(0));
+
+            buffers.entry(key).or_insert_with(|| Vec::new()).push(record.clone());
+        }
+
+        let arrow_schema_guard = ARROW_SCHEMA.read();
+
+        let mut index = WAL_INDEX.write();
+
+        for ((namespace, partition, time), ingest_records) in buffers.iter_mut() {
+
+            // add a new wal file to index.index
+            let wal_file_name = format!("{}-{}-{}-{}", namespace, partition, time, Helpers::random_str(32));
+            let wal_file = WalFile::new(namespace).unwrap();
+
+            let mut wal_file_partition = index.index.entry((namespace.clone(), partition.clone(), *time)).or_insert_with(
+                || WalFilePartition {
+                    files: Vec::new(),
+                    namespace: namespace.clone(),
+                    partition: partition.clone(),
+                    time: *time,
+                    updated_at: SystemTime::now(),
+                    bytes: 0,
+                }
+            );
+
+            wal_file_partition.files.push(wal_file);
+
+            let arrow_schema = arrow_schema_guard.get(namespace).unwrap().clone();
+
+            let mut decoder = ReaderBuilder::new(arrow_schema).build_decoder().unwrap();
+
+            let mut record_batches = Vec::new();
+
+            for ingest_record in ingest_records.iter_mut() {
+                let json_value = serde_json::to_vec(&ingest_record.record).unwrap();
+
+                println!("JSON value: {}", ingest_record.record.to_string());
+
+                decoder.serialize(&json_value).unwrap();
+
+            }
+
+            record_batches.push(decoder.flush().unwrap().unwrap());
+
+            let offset = self.buf.offset.clone();
+            let mut ingest_batch = WalRecordBatches::new(offset, record_batches);
+
+            // get the WAL file we just added to the index
+            let mut wal_file = wal_file_partition.files.last_mut().unwrap();
+
+            ingest_batch.write_to_stream(&mut wal_file.file.as_mut().unwrap())?;
+
+            wal_file.file.as_mut().unwrap().flush()?;
+
+            wal_file_partition.updated_at = SystemTime::now();
+            wal_file_partition.bytes += ingest_batch.record_batches.iter().map(|batch| batch.get_array_memory_size() as u64).sum::<u64>();
+
+            wal_file_partition.check_wal_rotate();
+
+
+        }
+
+
+        Ok(())
+
     }
 
-    pub fn flush(&mut self) {
-
-        // let mut wal_file = match self.wal_file {
-        //     Some(file) => file,
-        //     None => {
-        //         // It was flushed by another thead between this thread write() and flush()
-        //         println!("No WAL file found for buffer: {}", self.name);
-        //         return;
-        //     }
-        // };
-
-        // println!("Count group: {}", self.inner_count);
-        // self.count += self.inner_count;
-        // self.inner_count = 0;
-        // println!("Count total: {}", self.count);
-
-        self.wal_file.write_to_wal(&self.buf).unwrap();
-
-        /*
-         * Flush WAL file
-         */
-        // let wal_file = match &self.wal_file {
-        //     Some(file) => file,
-        //     None => {
-        //         // It was flushed by another thead between this thread write() and flush()
-        //         println!("No WAL file found for buffer: {}", self.name);
-        //         return;
-        //     }
-        // };
-
-        self.wal_file.flush().unwrap();
 
 
-        /*
-         * Write data buffer to arrow record batches
-         */
-        // self.data.set_position(0);
-        // let reader = io::BufReader::new(self.data.get_ref().as_slice());
-        //
-        // let name = self.name.clone();
-        // let namespace = BufferChunker::decode_file_namespace(name);
-        //
-        // let arrow_schema_guard = ARROW_SCHEMA.read();
-        // let arrow_schema = arrow_schema_guard.get(&namespace).unwrap();
-        //
-        // let record_batches = Self::read_from_json(reader, Arc::clone(arrow_schema)).unwrap();
-        // for batch in record_batches {
-        //     self.record_batch.push(Arc::from(batch.unwrap()));
-        // }
-        //
-        // self.updated_at = SystemTime::now();
-        // self.calculate_bytes();
-        // // println!("Record batch bytes: {}, Rows {}", self.bytes, self.record_batch.iter().map(|batch| batch.num_rows()).sum::<usize>());
 
-        self.buf.clear();
+}
 
-        self.updated_at = SystemTime::now();
+#[derive(Default, Debug)]
+struct WalIndex {
+    // Maps namespace, partition, and time to WAL file information
+    index: HashMap<(String, String, i64), WalFilePartition>,
+}
 
-        self.check_wal_rotate();
-
+impl WalIndex {
+    fn new() -> Self {
+        WalIndex {
+            index: HashMap::new(),
+        }
     }
+}
 
+#[derive(Debug)]
+struct WalFilePartition {
+    files: Vec<WalFile>,
+    pub(crate) namespace: String,
+    pub(crate) partition: String,
+    pub(crate) time: i64,
+    updated_at: SystemTime,
+    bytes: u64,
+}
+
+impl WalFilePartition {
     pub fn recover_from_wal(&mut self) -> io::Result<()> {
-            self.bytes = self.wal_file.bytes;
-            self.updated_at = self.wal_file.path.metadata()?.modified()?;
-            // let data = wal_file.recover_data()?;
-            // self.data.get_mut().extend(data);
-            // self.data.set_position(0);
 
         Ok(())
     }
@@ -165,244 +292,21 @@ impl Buffer {
     pub fn check_wal_rotate(&mut self) {
         if self.is_file_size_exceeded() || self.is_file_time_exceeded() {
             // println!("Rotating WAL file: {}", self.name);
-            self.wal_rotate();
+            self.output_finalise();
         }
     }
 
-    pub fn wal_rotate(&mut self) {
-        let current_path = self.wal_file.path.to_str().unwrap().to_string();
-        let closed_path = current_path.replace(".wal", "");
-        let closed_path = format!("{}-{}.merged", closed_path, Helpers::random_str(32));
+    async fn output_finalise(&mut self) {
 
-        fs::rename(current_path, closed_path).unwrap();
-
-        self.clear();
-
-
-        // let wal_file = WalFile::new(self.name).unwrap();
-        // let wal_file = WalFile::new(self.name).unwrap();
-        // self.wal_file = wal_file;
-
-    }
-
-    fn read_from_json<R: BufRead>(
-        mut reader: R,
-        schema: SchemaRef,
-    ) -> Result<impl Iterator<Item = Result<RecordBatch, ArrowError>>, ArrowError> {
-        let mut decoder = ReaderBuilder::new(schema).build_decoder()?;
-        let mut next = move || {
-            loop {
-                // Decoder is agnostic that buf doesn't contain whole records
-                let buf = reader.fill_buf()?;
-                if buf.is_empty() {
-                    break; // Input exhausted
-                }
-                let read = buf.len();
-                let decoded = decoder.decode(buf)?;
-
-                // Consume the number of bytes read
-                reader.consume(decoded);
-                if decoded != read {
-                    break; // Read batch size
-                }
-            }
-            decoder.flush()
-        };
-        Ok(std::iter::from_fn(move || next().transpose()))
-    }
-
-
-    fn json_to_arrow(json_value: &[u8], namespace: &str) -> Result<RecordBatch, arrow::error::ArrowError> {
-
-        let arrow_schema_guard = ARROW_SCHEMA.read();
-        let arrow_schema = arrow_schema_guard.get(namespace).unwrap();
-
-        let mut decoder = ReaderBuilder::new(Arc::clone(arrow_schema)).build_decoder().unwrap();
-        // decoder.serialize(json_value).unwrap();
-        let decoded = decoder.decode(json_value)?;
-        let batch = decoder.flush().unwrap().unwrap();
-        Ok(batch)
-    }
-
-    fn append_record_batches(&self, batch1: &RecordBatch, batch2: &RecordBatch) -> RecordBatch {
-        let mut columns = Vec::new();
-
-        if batch1.schema() != batch2.schema() {
-            panic!("Schemas of record batches do not match"); // Handle this error appropriately
-        }
-
-        for i in 0..batch1.num_columns() {
-            let column1 = batch1.column(i);
-            let column2 = batch2.column(i);
-
-            // Concatenate the arrays
-            let combined_column = match arrow::compute::concat(&[column1.as_ref(), column2.as_ref()]) {
-                Ok(array) => array,
-                Err(error) => panic!("Error concatenating arrays: {}", error),
-            };
-
-            columns.push(combined_column);
-        }
-
-        RecordBatch::try_new(batch1.schema(), columns).unwrap() // Handle this error appropriately
-    }
-
-    // fn calculate_bytes(&mut self) {
-    //     self.bytes = self.record_batch.iter().map(|batch| batch.get_array_memory_size() as u64).sum();
-    // }
-
-}
-
-pub struct Buffers {
-    pub(crate) buffers: DashMap<String, TimedRwLock<Buffer>>,
-}
-
-impl Buffers {
-    pub fn new() -> Self {
-        Buffers {
-            buffers: DashMap::new(),
-        }
-    }
-
-    pub fn clear(self, key: &str) {
-        if let Some(mut buffer) = self.buffers.get_mut(key) {
-            buffer.write().clear();
-        }
-    }
-
-    pub fn clear_all(self) {
-        unimplemented!("clear_all() is not yet implemented");
-    }
-
-    pub fn force_flush() {
-        let data_dir = Config::get_data_dir();
-
-        let options = MatchOptions {
-            case_sensitive: false,
-            require_literal_separator: false,
-            require_literal_leading_dot: false,
-        };
-
-        let patterns = vec![
-            format!("{}/ingest_buffer/*.wal", data_dir),
-            format!("{}/ingest_buffer/*.merged", data_dir),
-        ];
-
-        let paths = patterns.iter().flat_map(|pattern| {
-            glob_with(pattern, options)
-                .expect("Failed to read glob pattern")
-                .filter_map(Result::ok)
-                .collect::<Vec<_>>()
-        }).collect::<Vec<_>>();
-
-        for path in paths {
-            let filename = path.to_str().unwrap();
-            let file = File::open(filename).unwrap();
-            let mut file = SyncWriteFile::new(file).unwrap();
-            file.flush().unwrap();
-        }
-    }
-
-    pub fn force_rotate() {
-
-        if BUFFER_FINALISE_RUNNING.read().load(Ordering::SeqCst) {
-            return;
-        } else {
-            BUFFER_FINALISE_RUNNING.write().store(true, Ordering::SeqCst);
-        }
+        // println!("Finalising output file: {}", filename);
 
         let data_dir = Config::get_data_dir();
-
-        let options = MatchOptions {
-            case_sensitive: false,
-            require_literal_separator: false,
-            require_literal_leading_dot: false,
-        };
-
-        let patterns = vec![
-            format!("{}/ingest_buffer/*.wal", data_dir),
-            format!("{}/ingest_buffer/*.merged", data_dir),
-        ];
-
-        let paths = patterns.iter().flat_map(|pattern| {
-            glob_with(pattern, options)
-                .expect("Failed to read glob pattern")
-                .filter_map(Result::ok)
-                .collect::<Vec<_>>()
-        }).collect::<Vec<_>>();
-
-        for path in paths {
-
-            if !RUNNING.read().load(Ordering::SeqCst) {
-                break;
-            }
-
-            let filename = path.to_str().unwrap();
-            Self::output_finalise(filename);
-        }
-
-        BUFFER_FINALISE_RUNNING
-            .write()
-            .store(false, Ordering::SeqCst);
-
-    }
-
-    pub fn finalise() {
-        if BUFFER_FINALISE_RUNNING.read().load(Ordering::SeqCst) {
-            return;
-        } else {
-            BUFFER_FINALISE_RUNNING.write().store(true, Ordering::SeqCst);
-        }
-
-        let data_dir = Config::get_data_dir();
-
-        let options = MatchOptions {
-            case_sensitive: false,
-            require_literal_separator: false,
-            require_literal_leading_dot: false,
-        };
-
-        let paths = glob_with(&format!("{}/ingest_buffer/*.merged", data_dir), options)
-            .expect("Failed to read glob pattern")
-            .filter_map(Result::ok)
-            .collect::<Vec<_>>();
-
-        for path in paths
-        {
-            if !RUNNING.read().load(Ordering::SeqCst) {
-                break;
-            }
-
-            let filename = path.to_str().unwrap();
-            Self::output_finalise(filename);
-        }
-
-        BUFFER_FINALISE_RUNNING
-            .write()
-            .store(false, Ordering::SeqCst);
-    }
-
-    fn output_finalise(filename: &str) {
-
-        println!("Finalising output file: {}", filename);
-
-        let data_dir = Config::get_data_dir();
-
-        let namespace = BufferChunker::decode_file_namespace(filename);
-
-        let arrow_schema_guard = ARROW_SCHEMA.read();
-        let arrow_schema = arrow_schema_guard.get(&namespace).unwrap().clone();
-
-        let skpr_namespace = BufferChunker::decode_file_namespace(filename);
-        let skpr_partition = BufferChunker::decode_file_partition(filename);
-        let source_time = BufferChunker::decode_file_time(filename);
-        let shard = BufferChunker::decode_file_shard(filename);
 
         let output_file_name = BufferChunker::encode_chunk_name(
             "output",
-            Some(&skpr_namespace),
-            Some(&skpr_partition),
-            Some(source_time),
+            Some(&self.namespace),
+            Some(&self.partition),
+            Some(self.time),
             None,
         );
 
@@ -421,36 +325,147 @@ impl Buffers {
             .set_compression(Compression::SNAPPY)
             .build();
 
+        let schema = ARROW_SCHEMA.read().get(&self.namespace).unwrap().clone();
 
-        let reader = io::BufReader::new(File::open(&filename).unwrap());
+        let mut writer = ArrowWriter::try_new(write_file, schema, Some(props)).unwrap();
 
-        let record_batches = Buffer::read_from_json(reader, Arc::clone(&arrow_schema)).unwrap();
+        for wal_file in self.files.iter_mut() {
 
-        let mut writer = ArrowWriter::try_new(write_file, arrow_schema, Some(props)).unwrap();
+            let filename = format!("{}/ingest_buffer/{}.wal", data_dir, wal_file.path.file_name().unwrap().to_str().unwrap());
 
-        for batch in record_batches {
-            let batch = batch.unwrap();
-            match writer.write(&batch) {
-                Ok(_g) => {}
-                Err(_err) => {
-                    panic!("Error writing to parquet file: {}", _err.to_string());
+            let mut reader = io::BufReader::new(File::open(&filename).unwrap());
+
+            // create record batches from arrow IPC WAL file
+            let record_batch_ingest_batch = WalRecordBatches::read_from_stream(&mut reader).unwrap();
+
+            /**
+            * Support optional SQL query to transform data before writing to parquet
+            */
+            let mut batches = Vec::new();
+
+            let sql = None; // "SELECT * FROM my_table";
+
+            if sql.is_some() {
+                batches = Self::apply_sql_on_ipc_stream(record_batch_ingest_batch.record_batches, sql.unwrap()).await.unwrap();
+            } else {
+                batches = record_batch_ingest_batch.record_batches;
+            }
+
+            for batch in batches {
+                match writer.write(&batch) {
+                    Ok(_g) => {}
+                    Err(_err) => {
+                        panic!("Error writing to parquet file: {}", _err.to_string());
+                    }
                 }
             }
+
+            // tombstone by naming .tombstone and moving to ./done dir
+            let tombstone_path = format!("{}/ingest_buffer/done/{}.tombstone", data_dir, Helpers::random_str(32));
+            fs::rename(filename, tombstone_path).unwrap();
+
         }
 
         writer.close().unwrap();
 
+
         let parquet_path = temp_file_path.replace(".temp", ".parquet");
         fs::rename(&temp_file_path, parquet_path).unwrap();
 
-        // tombstone by naming .tombstone and moving to ./done dir
-        let tombstone_path = format!("{}/ingest_buffer/done/{}.tombstone", data_dir, Helpers::random_str(32));
-        fs::rename(filename, tombstone_path).unwrap();
-
     }
 
+    async fn apply_sql_on_ipc_stream(record_batches: Vec<arrow::array::RecordBatch>, sql: &str) -> Result<Vec<arrow::array::RecordBatch>, Box<dyn std::error::Error>> {
+
+        let mut session_config = SessionConfig::new();
+        session_config = session_config.set("datafusion.catalog.information_schema", "true".into());
+        session_config = session_config.set("datafusion.catalog.default_catalog", "skippr".into());
+        session_config = session_config.set("datafusion.execution.collect_statistics", "true".into());
+
+        let ctx = SessionContext::with_config(session_config);
+
+        // Create a new DataFusion context
+        // let mut ctx = ExecutionContext::new();
+
+        // Read batches and register them as a table in the context
+        let schema_ref = record_batches[0].schema();
+
+        ctx.register_table("my_table", Arc::new(MemTable::try_new(schema_ref, vec![record_batches])?))?;
+
+        // Execute the SQL query
+        let df = ctx.sql(sql).await?;
+        let results = df.collect().await?;
+
+        Ok(results)
+    }
 }
 
+#[derive(Debug)]
+pub struct WalFile {
+    pub(crate) path: PathBuf,
+    pub(crate) namespace: String,
+    pub(crate) bytes: u64,
+    pub(crate) file: Option<SyncWriteFile>,
+    pub(crate) rotated: Option<bool>,
+}
+
+impl WalFile {
+    pub fn new(namespace: &str) -> io::Result<Self> {
+        let path_str = Self::generate_wal_file_path(namespace);
+        // println!("Creating WAL file: {}", path_str);
+        let path= PathBuf::from(&path_str);
+        let file = OpenOptions::new().append(true).create(true).open(&path)?;
+        let file = SyncWriteFile::new(file)?;
+        Ok(WalFile {
+            path,
+            bytes: 0,
+            namespace: namespace.to_string(),
+            file: Some(file),
+            rotated: None,
+        })
+    }
+
+    fn generate_wal_file_path(name: &str) -> String {
+        let data_dir = Config::get_data_dir();
+        let output_dir = &format!("{}/ingest_buffer", data_dir);
+
+        format!("{}/{}.wal", output_dir, name)
+    }
+
+    fn write_to_wal(&mut self, data: &[u8]) -> io::Result<()> {
+        if let Some(sync_file) = &mut self.file.as_mut() {
+            sync_file.write_all(data)?;
+            self.bytes += data.len() as u64;
+            // sync_file.flush()?;
+        }
+        Ok(())
+    }
+
+    pub fn recover_data(&mut self) -> io::Result<Vec<u8>> {
+        let mut data = Vec::new();
+        if let Some(sync_file) = &mut self.file.as_mut() {
+            sync_file.read_to_end(&mut data)?;
+        }
+
+        Ok(data)
+    }
+
+    pub fn flush(&mut self) -> io::Result<()> {
+        if let Some(sync_file) = &mut self.file.as_mut() {
+
+            sync_file.flush()?;
+
+            // unsafe {
+            //     libc::fsync(sync_file.file.as_raw_fd());
+            // }
+
+        }
+        Ok(())
+    }
+
+    // @todo - Additional methods for handling file rotation, error handling, etc.
+}
+
+#[derive(Debug)]
 pub struct SyncWriteFile {
     file: File,
 }
@@ -458,6 +473,12 @@ pub struct SyncWriteFile {
 impl SyncWriteFile {
     pub fn new(file: File) -> std::io::Result<Self> {
         Ok(SyncWriteFile { file })
+    }
+}
+
+impl Seek for SyncWriteFile {
+    fn seek(&mut self, pos: io::SeekFrom) -> std::io::Result<u64> {
+        self.file.seek(pos)
     }
 }
 
@@ -510,68 +531,4 @@ impl Write for SyncWriteFile {
     fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
         self.file.write_all(buf)
     }
-}
-
-pub struct WalFile {
-    pub(crate) path: PathBuf,
-    pub(crate) bytes: u64,
-    // non buffered writer
-    pub(crate) file: Option<SyncWriteFile>,
-    pub(crate) rotated: Option<bool>,
-}
-
-impl WalFile {
-    pub fn new(name: &str) -> io::Result<Self> {
-        let path_str = Self::generate_wal_file_path(name);
-        // println!("Creating WAL file: {}", path_str);
-        let path= PathBuf::from(&path_str);
-        let file = OpenOptions::new().append(true).create(true).open(&path)?;
-        let file = SyncWriteFile::new(file)?;
-        Ok(WalFile {
-            path,
-            bytes: 0,
-            file: Some(file),
-            rotated: None,
-        })
-    }
-
-    fn generate_wal_file_path(name: &str) -> String {
-        let data_dir = Config::get_data_dir();
-        let output_dir = &format!("{}/ingest_buffer", data_dir);
-
-        format!("{}/{}.wal", output_dir, name)
-    }
-
-    fn write_to_wal(&mut self, data: &[u8]) -> io::Result<()> {
-        if let Some(sync_file) = &mut self.file.as_mut() {
-            sync_file.write_all(data)?;
-            self.bytes += data.len() as u64;
-            // sync_file.flush()?;
-        }
-        Ok(())
-    }
-
-    pub fn recover_data(&mut self) -> io::Result<Vec<u8>> {
-        let mut data = Vec::new();
-        if let Some(sync_file) = &mut self.file.as_mut() {
-            sync_file.read_to_end(&mut data)?;
-        }
-
-        Ok(data)
-    }
-
-    pub fn flush(&mut self) -> io::Result<()> {
-        if let Some(sync_file) = &mut self.file.as_mut() {
-
-            sync_file.flush()?;
-
-            // unsafe {
-            //     libc::fsync(sync_file.file.as_raw_fd());
-            // }
-
-        }
-        Ok(())
-    }
-
-    // @todo - Additional methods for handling file rotation, error handling, etc.
 }

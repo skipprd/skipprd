@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::ops::Deref;
 
 use std::path::PathBuf;
 
@@ -385,7 +386,7 @@ impl SerdeParquet {
                             println!("Moved file to deadletter: {}", deadletter_file_path)
                         }
                         Err(_err) => {
-                            panic!("Error moving file to deadletter: {}", _err.to_string());
+                            panic!("Error moving file to deadletter dir: {}, file: {}, Error: {}", deadletter_dir, path.to_str().unwrap(), _err.to_string());
                         }
                     }
 
