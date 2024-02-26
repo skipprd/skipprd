@@ -1,7 +1,4 @@
-use crate::discover::date_formats::DateFormats::{
-    Asctime, Atom, AtomZ, Cookie, DateOnly, Iso8601, Iso8601_2, Iso8601_3, Mysql, Rfc1036, Rfc1123,
-    Rfc2822, Rfc3339, Rfc7231, Rfc822, Rfc850, Rss, W3c,
-};
+use crate::discover::date_formats::DateFormats::{Asctime, Atom, AtomZ, Cookie, DateOnly, Iso8601, Iso8601_2, Iso8601_3, Iso8601_4, Iso8601_5, Mysql, Rfc1036, Rfc1123, Rfc2822, Rfc3339, Rfc3339_2, Rfc7231, Rfc822, Rfc850, Rss, W3c};
 use std::slice::Iter;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -9,8 +6,11 @@ pub enum DateFormats {
     Iso8601,
     Iso8601_2,
     Iso8601_3,
+    Iso8601_4,
+    Iso8601_5,
     Rfc2822,
     Rfc3339,
+    Rfc3339_2,
     Atom,
     AtomZ,
     Asctime,
@@ -28,8 +28,8 @@ pub enum DateFormats {
 
 impl DateFormats {
     pub fn iterator() -> Iter<'static, DateFormats> {
-        static FORMATS: [DateFormats; 18] = [
-            Iso8601, Iso8601_2, Iso8601_3, Rfc2822, Rfc3339, Atom, AtomZ, Asctime, Cookie, Rfc822,
+        static FORMATS: [DateFormats; 22] = [
+            Iso8601, Iso8601_2, Iso8601_3, Iso8601_4, Iso8601_5, Iso8601_3, Rfc2822, Rfc3339, Rfc3339_2, Atom, AtomZ, Asctime, Cookie, Rfc822,
             Rfc850, Rfc1036, Rfc1123, Rfc7231, Rss, W3c, Mysql, DateOnly,
         ];
         FORMATS.iter()
@@ -40,8 +40,11 @@ impl DateFormats {
             DateFormats::Iso8601 => "Iso8601",
             DateFormats::Iso8601_2 => "Iso8601_2",
             DateFormats::Iso8601_3 => "Iso8601_3",
+            DateFormats::Iso8601_4 => "Iso8601_4",
+            DateFormats::Iso8601_5 => "Iso8601_5",
             DateFormats::Rfc2822 => "Rfc2822",
             DateFormats::Rfc3339 => "Rfc3339",
+            DateFormats::Rfc3339_2 => "Rfc3339_2",
             DateFormats::Atom => "Atom",
             DateFormats::AtomZ => "AtomZ",
             DateFormats::Asctime => "Asctime",
@@ -63,8 +66,11 @@ impl DateFormats {
             DateFormats::Iso8601 => "%Y-%m-%dT%H:%M:%S.%fZ",
             DateFormats::Iso8601_2 => "%Y-%m-%dT%H:%M:%S%.3fZ",
             DateFormats::Iso8601_3 => "%Y-%m-%dT%H:%M:%S.%f",
+            DateFormats::Iso8601_4 => "%Y-%m-%dT%H:%M:%S.%f%:z",
+            DateFormats::Iso8601_5 => "%Y-%m-%dT%H:%M:%S%.3f%:z",
             DateFormats::Rfc2822 => "%a, %d %b %Y %T %z",
-            DateFormats::Rfc3339 => "%Y-%m-%dT%H:%M:%S%.f%:z",
+            DateFormats::Rfc3339 => "%Y-%m-%dT%H:%M:%S.%f%:z",
+            DateFormats::Rfc3339_2 => "%Y-%m-%dT%H:%M:%S%:z",
             DateFormats::Atom => "%Y-%m-%dT%H:%M:%S",
             DateFormats::AtomZ => "%Y-%m-%dT%H:%M:%SZ",
             DateFormats::Asctime => "%a %b %e %H:%M:%S %Y",
@@ -86,8 +92,11 @@ impl DateFormats {
             "Iso8601" => Ok(DateFormats::Iso8601),
             "Iso8601_2" => Ok(DateFormats::Iso8601_2),
             "Iso8601_3" => Ok(DateFormats::Iso8601_3),
+            "Iso8601_4" => Ok(DateFormats::Iso8601_4),
+            "Iso8601_5" => Ok(DateFormats::Iso8601_5),
             "Rfc2822" => Ok(DateFormats::Rfc2822),
             "Rfc3339" => Ok(DateFormats::Rfc3339),
+            "Rfc3339_2" => Ok(DateFormats::Rfc3339_2),
             "Atom" => Ok(DateFormats::Atom),
             "AtomZ" => Ok(DateFormats::AtomZ),
             "Asctime" => Ok(DateFormats::Asctime),
@@ -107,5 +116,46 @@ impl DateFormats {
                 // Err(Error)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{DateTime};
+
+    // Helper function to parse and assert dates
+    fn assert_date_parse(format: DateFormats, date_str: &str, expected_utc: &str) {
+        let format_str = format.as_str();
+        let parsed_date = DateTime::parse_from_str(date_str, format_str).unwrap();
+        let expected_date = DateTime::parse_from_str(expected_utc, DateFormats::Iso8601.as_str()).unwrap();
+        assert_eq!(parsed_date, expected_date);
+    }
+
+    #[test]
+    fn test_iso8601() {
+        assert_date_parse(DateFormats::Iso8601, "2023-03-03T15:00:00.000Z", "2023-03-03T15:00:00.000Z");
+    }
+
+    #[test]
+    fn test_iso8601_2() {
+        assert_date_parse(DateFormats::Iso8601_2, "2023-03-03T15:00:00.123Z", "2023-03-03T15:00:00.123Z");
+    }
+
+    #[test]
+    fn test_rfc2822() {
+        assert_date_parse(DateFormats::Rfc2822, "Fri, 03 Mar 2023 15:00:00 +0000", "2023-03-03T15:00:00Z");
+    }
+
+    // Continue with similar tests for each DateFormats variant...
+
+    #[test]
+    fn test_mysql() {
+        assert_date_parse(DateFormats::Mysql, "2023-03-03 15:00:00", "2023-03-03T15:00:00Z");
+    }
+
+    #[test]
+    fn test_date_only() {
+        assert_date_parse(DateFormats::DateOnly, "2023-03-03", "2023-03-03T00:00:00Z");
     }
 }
