@@ -1,6 +1,7 @@
 use std::fs::{File, OpenOptions};
 use std::{fs, io,};
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Cursor, Read, Seek, Write};
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
@@ -21,6 +22,7 @@ use byteorder::LittleEndian;
 use datafusion::datasource::MemTable;
 use datafusion::parquet::data_type::AsBytes;
 use datafusion::prelude::{SessionConfig, SessionContext};
+use icu::properties::sets::print;
 use lazy_static::lazy_static;
 use libc::exit;
 use once_cell::sync::Lazy;
@@ -28,7 +30,7 @@ use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 use serde_derive::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::runtime::Runtime;
 use yaml_rust::Yaml::Hash;
 use zerocopy::U64;
@@ -36,14 +38,14 @@ use crate::{ARROW_SCHEMA, BUFFER_FINALISE_RUNNING, RUNNING};
 use crate::buffer::BufferChunker;
 use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
-use crate::helpers::offsets::{Offset, OffsetKey, OffsetValue};
+use crate::helpers::offsets::{Offset, OffsetKey, Offsets, OffsetTypes, OffsetValue};
 use crate::helpers::timed_rwlock::TimedRwLock;
 
 pub static TOTAL_ROWS: Lazy<TimedRwLock<AtomicU64>> =
     Lazy::new(|| TimedRwLock::new("record_batch_total".to_string(), AtomicU64::new(0)));
 
 lazy_static! {
-    static ref WAL_INDEX: TimedRwLock<WalIndex> = TimedRwLock::new("wal_index".to_string(), WalIndex::new());
+    pub static ref WAL_INDEX: TimedRwLock<WalIndex> = TimedRwLock::new("wal_index".to_string(), WalIndex::new());
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,128 +68,64 @@ pub struct IngestBufferBatch {
     pub(crate) records: Vec<IngestRecord>,
 }
 
-pub struct WalRecordBatches {
-    pub(crate) offset: OffsetKeySerialize,
-    pub(crate) record_batches: Vec<RecordBatch>,
-}
-
-impl WalRecordBatches {
-    pub fn new(offset: OffsetKeySerialize, record_batches: Vec<RecordBatch>) -> Self {
-        WalRecordBatches {
-            offset,
-            record_batches,
-        }
-    }
-
-    pub fn read_from_stream<R: Read + Seek>(reader: &mut R) -> Result<Self, ArrowError> {
-
-        reader.seek(io::SeekFrom::Start(0)).unwrap();
-
-        let mut offset_size = [0u8; 8];
-        reader.read_exact(&mut offset_size).expect("Failed to read offset size from WAL");
-
-        let mut bin_offset = vec![0u8; u64::from_le_bytes(offset_size) as usize];
-        reader.read_exact(&mut bin_offset).expect("Failed to read offset from WAL");
-
-        let offset: OffsetKeySerialize = bincode::deserialize(&bin_offset).unwrap();
-
-        // println!("Offset of size: {} value {:?}", u64::from_le_bytes(offset_size), offset);
-
-        // Deserialize RecordBatch using Arrow's IPC format
-        // let mut buf = Vec::new();
-        // reader.read_to_end(&mut buf)?;
-        // let cursor = Cursor::new(buf);
-        let mut stream_reader = StreamReader::try_new(reader, None).unwrap();
-
-        let mut record_batches = Vec::new();
-        while let Some(batch) = stream_reader.next() {
-            let batch = batch.unwrap();
-            record_batches.push(batch);
-        }
-
-        Ok(WalRecordBatches {
-            offset,
-            record_batches,
-        })
-    }
-
-    pub fn write_to_stream<W: Write + Seek>(&mut self, writer: &mut W) -> Result<usize, ArrowError> {
-
-        // seek to start of file
-        writer.seek(io::SeekFrom::Start(0))?;
-
-        let bin_offset = bincode::serialize(&self.offset).unwrap();
-        let offset_size = bin_offset.len() as u64;
-
-        writer.write_all(&offset_size.as_bytes())?;
-        writer.write_all(&bin_offset)?;
-
-        // seek to end of file
-        writer.seek(io::SeekFrom::End(0))?;
-
-        let mut size: usize = 0;
-
-        let codec = Some(CompressionType::LZ4_FRAME);
-        let options = IpcWriteOptions::default().try_with_compression(codec)?;
-
-        let mut stream_writer = StreamWriter::try_new_with_options(writer, &self.record_batches[0].schema(), options)?;
-        for batch in &self.record_batches {
-            stream_writer.write(batch).expect("Failed to write record batch to stream writer");
-            size += batch.get_array_memory_size();
-        }
-
-        stream_writer.finish()?;
-
-        Ok(size)
-    }
-}
-
 pub struct Buffers {
-    buf: IngestBufferBatch,
+    buf: Vec<IngestBufferBatch>,
     index: WalIndex
 }
 
 impl Buffers {
     pub fn new() -> Self {
         Buffers {
-            buf: IngestBufferBatch {
+            buf: vec![IngestBufferBatch {
                 offset: OffsetKeySerialize {
                     namespace: "".to_string(),
                     partition: "".to_string(),
                     position: 0,
                 },
                 records: Vec::new(),
-            },
+            }],
             index: WalIndex::new(),
         }
     }
 
     pub fn write(&mut self, ingest_buffer_batch: IngestBufferBatch) {
-        self.buf = ingest_buffer_batch;
+        self.buf.push(ingest_buffer_batch);
 
     }
 
     pub fn flush(&mut self) -> Result<(), ArrowError> {
 
-        let mut buffers: HashMap<(String, String, i64), Vec<IngestRecord>> = HashMap::new();
+        let mut buffers: HashMap<(String, String, i64), Vec<IngestBufferBatch>> = HashMap::new();
 
-        for record in self.buf.records.iter_mut() {
-            let key = (record.namespace.clone(), record.partition.clone(), record.time.unwrap_or(0));
+        // Merge record batches into a partitions by namespace, partition, and time
+        for ingest_buffer_batch in self.buf.iter_mut() {
+            for record in ingest_buffer_batch.records.iter_mut() {
+                let key = (record.namespace.clone(), record.partition.clone(), record.time.unwrap_or(0));
 
-            buffers.entry(key).or_insert_with(|| Vec::new()).push(record.clone());
+                let buf = buffers.entry(key).or_insert_with(|| Vec::new());
+
+                buf.push(IngestBufferBatch {
+                    offset: ingest_buffer_batch.offset.clone(),
+                    records: vec![record.clone()],
+                });
+            }
         }
+
+        self.buf.clear();
 
         let arrow_schema_guard = ARROW_SCHEMA.read();
 
         let mut index = WAL_INDEX.write();
 
-        for ((namespace, partition, time), ingest_records) in buffers.iter_mut() {
+        let mut rows = 0;
 
-            // add a new wal file to index.index
-            let wal_file_name = format!("{}-{}-{}-{}", namespace, partition, time, Helpers::random_str(32));
-            let wal_file = WalFile::new(namespace).unwrap();
+        for ((namespace, partition, time), ingest_buffer_batches) in buffers.iter_mut() {
 
-            let mut wal_file_partition = index.index.entry((namespace.clone(), partition.clone(), *time)).or_insert_with(
+            let offset = ingest_buffer_batches.last().unwrap().offset.clone();
+
+            let mut wal_file = WalFile::new(namespace, partition, *time, offset).unwrap();
+
+            let wal_file_partition = index.index.entry((namespace.clone(), partition.clone(), *time)).or_insert_with(
                 || WalFilePartition {
                     files: Vec::new(),
                     namespace: namespace.clone(),
@@ -198,55 +136,49 @@ impl Buffers {
                 }
             );
 
-            wal_file_partition.files.push(wal_file);
-
             let arrow_schema = arrow_schema_guard.get(namespace).unwrap().clone();
 
             let mut decoder = ReaderBuilder::new(arrow_schema).build_decoder().unwrap();
 
             let mut record_batches = Vec::new();
 
-            for ingest_record in ingest_records.iter_mut() {
-                let json_value = serde_json::to_vec(&ingest_record.record).unwrap();
+            // @todo - faster to build a vec and pass to decoder?
+            for ingest_buffer_batch in ingest_buffer_batches.iter_mut() {
 
-                println!("JSON value: {}", ingest_record.record.to_string());
+                rows += ingest_buffer_batch.records.len();
 
-                decoder.serialize(&json_value).unwrap();
+
+                let json_values = ingest_buffer_batch.records.iter().map(|record| &record.record).collect::<Vec<&Value>>();
+                decoder.serialize(&json_values).unwrap();
 
             }
 
             record_batches.push(decoder.flush().unwrap().unwrap());
 
-            let offset = self.buf.offset.clone();
-            let mut ingest_batch = WalRecordBatches::new(offset, record_batches);
 
-            // get the WAL file we just added to the index
-            let mut wal_file = wal_file_partition.files.last_mut().unwrap();
+            // let mut ingest_batch = WalRecordBatches::new(offset, record_batches);
 
-            ingest_batch.write_to_stream(&mut wal_file.file.as_mut().unwrap())?;
+            wal_file_partition.bytes = wal_file.write_to_stream(&record_batches)? as u64;
+
+            // println!("Wrote records to WAL file: {}", wal_file.path.to_str().unwrap());
 
             wal_file.file.as_mut().unwrap().flush()?;
 
             wal_file_partition.updated_at = SystemTime::now();
-            wal_file_partition.bytes += ingest_batch.record_batches.iter().map(|batch| batch.get_array_memory_size() as u64).sum::<u64>();
+            wal_file_partition.files.push(wal_file);
 
             wal_file_partition.check_wal_rotate();
 
-
         }
 
+        // println!("Wrote {} rows to WAL", rows);
 
         Ok(())
-
     }
-
-
-
-
 }
 
 #[derive(Default, Debug)]
-struct WalIndex {
+pub struct WalIndex {
     // Maps namespace, partition, and time to WAL file information
     index: HashMap<(String, String, i64), WalFilePartition>,
 }
@@ -257,6 +189,75 @@ impl WalIndex {
             index: HashMap::new(),
         }
     }
+
+    pub fn recover(&mut self, offsets_db: Arc<Offsets>) -> io::Result<()> {
+
+        let mut count = 0;
+
+        let wal_files = Self::list_wal_files()?;
+
+        if wal_files.len() == 0 {
+            return Ok(());
+        }
+
+        println!("Recovering from WAL");
+
+        let wal_files_count = wal_files.len();
+
+        for file_path in wal_files {
+            let wal_file = WalFile::from_path(&file_path)?;
+
+            let offset_key: OffsetKey = OffsetKey {
+                namespace: wal_file.offset.namespace.clone(),
+                partition: wal_file.offset.partition.clone(),
+            };
+
+            offsets_db.insert(&offset_key, OffsetTypes::Line, wal_file.offset.position);
+
+            let partition_key = (wal_file.namespace.clone(), wal_file.partition.clone(), wal_file.time.clone());
+
+            let wal_file_partition = self.index.entry(partition_key).or_insert_with(|| WalFilePartition {
+                files: Vec::new(),
+                namespace: wal_file.namespace.clone(),
+                partition: wal_file.partition.clone(),
+                time: wal_file.time.clone(),
+                updated_at: SystemTime::now(),
+                bytes: 0,
+            });
+
+            if wal_file_partition.updated_at < wal_file.updated_at {
+                wal_file_partition.updated_at = wal_file.updated_at;
+            }
+            wal_file_partition.bytes += wal_file.bytes;
+
+            wal_file_partition.files.push(wal_file);
+
+            count += 1;
+        }
+
+        println!("Syncing offset to DB");
+
+        offsets_db.flush();
+
+        println!("Rebuilt index from {} of {} WAL files", count, wal_files_count);
+
+        Ok(())
+    }
+
+    fn list_wal_files() -> io::Result<Vec<PathBuf>> {
+        let data_dir = Config::get_data_dir();
+        let wal_dir = PathBuf::from(format!("{}/ingest_buffer", data_dir));
+        let mut wal_files = Vec::new();
+        for entry in fs::read_dir(wal_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file() && path.extension().and_then(OsStr::to_str) == Some("wal") {
+                wal_files.push(path);
+            }
+        }
+        Ok(wal_files)
+    }
+
 }
 
 #[derive(Debug)]
@@ -291,12 +292,12 @@ impl WalFilePartition {
 
     pub fn check_wal_rotate(&mut self) {
         if self.is_file_size_exceeded() || self.is_file_time_exceeded() {
-            // println!("Rotating WAL file: {}", self.name);
-            self.output_finalise();
+            println!("Rotating WAL file: {}", self.namespace);
+            self.compact_to_parquet();
         }
     }
 
-    async fn output_finalise(&mut self) {
+    fn compact_to_parquet(&mut self) {
 
         // println!("Finalising output file: {}", filename);
 
@@ -331,27 +332,27 @@ impl WalFilePartition {
 
         for wal_file in self.files.iter_mut() {
 
-            let filename = format!("{}/ingest_buffer/{}.wal", data_dir, wal_file.path.file_name().unwrap().to_str().unwrap());
+            // let filename = format!("{}/ingest_buffer/{}.wal", data_dir, wal_file.path.file_name().unwrap().to_str().unwrap());
 
-            let mut reader = io::BufReader::new(File::open(&filename).unwrap());
+            // let mut reader = io::BufReader::new(File::open(&filename).unwrap());
 
             // create record batches from arrow IPC WAL file
-            let record_batch_ingest_batch = WalRecordBatches::read_from_stream(&mut reader).unwrap();
+            let record_batch_ingest_batch = wal_file.read_from_stream().unwrap();
 
             /**
             * Support optional SQL query to transform data before writing to parquet
             */
-            let mut batches = Vec::new();
+            // let mut batches = Vec::new();
+            //
+            // let sql = None; // "SELECT * FROM my_table";
+            //
+            // if sql.is_some() {
+            //     batches = Self::apply_sql_on_ipc_stream(record_batch_ingest_batch.record_batches, sql.unwrap()).await.unwrap();
+            // } else {
+            //     batches = record_batch_ingest_batch.record_batches;
+            // }
 
-            let sql = None; // "SELECT * FROM my_table";
-
-            if sql.is_some() {
-                batches = Self::apply_sql_on_ipc_stream(record_batch_ingest_batch.record_batches, sql.unwrap()).await.unwrap();
-            } else {
-                batches = record_batch_ingest_batch.record_batches;
-            }
-
-            for batch in batches {
+            for batch in record_batch_ingest_batch.iter() {
                 match writer.write(&batch) {
                     Ok(_g) => {}
                     Err(_err) => {
@@ -362,7 +363,7 @@ impl WalFilePartition {
 
             // tombstone by naming .tombstone and moving to ./done dir
             let tombstone_path = format!("{}/ingest_buffer/done/{}.tombstone", data_dir, Helpers::random_str(32));
-            fs::rename(filename, tombstone_path).unwrap();
+            fs::rename(&wal_file.path, tombstone_path).unwrap();
 
         }
 
@@ -403,14 +404,18 @@ impl WalFilePartition {
 pub struct WalFile {
     pub(crate) path: PathBuf,
     pub(crate) namespace: String,
+    pub(crate) partition: String,
+    pub(crate) time: i64,
     pub(crate) bytes: u64,
     pub(crate) file: Option<SyncWriteFile>,
-    pub(crate) rotated: Option<bool>,
+    pub(crate) updated_at: SystemTime,
+    pub(crate) offset: OffsetKeySerialize,
 }
 
 impl WalFile {
-    pub fn new(namespace: &str) -> io::Result<Self> {
-        let path_str = Self::generate_wal_file_path(namespace);
+    pub fn new(namespace: &str, partition: &str, time: i64, offset: OffsetKeySerialize) -> io::Result<Self> {
+
+        let path_str = Self::generate_wal_file_path(namespace, partition, time);
         // println!("Creating WAL file: {}", path_str);
         let path= PathBuf::from(&path_str);
         let file = OpenOptions::new().append(true).create(true).open(&path)?;
@@ -419,16 +424,134 @@ impl WalFile {
             path,
             bytes: 0,
             namespace: namespace.to_string(),
+            partition: partition.to_string(),
+            time,
             file: Some(file),
-            rotated: None,
+            updated_at: SystemTime::now(),
+            offset
         })
     }
 
-    fn generate_wal_file_path(name: &str) -> String {
+    fn from_path(path: &PathBuf) -> io::Result<Self> {
+        let file = OpenOptions::new().append(true).create(true).open(&path)?;
+
+        let offset = Self::offset_from_path(path).unwrap();
+
+        let sync_file = SyncWriteFile::new(file)?;
+
+        let namespace = BufferChunker::decode_file_namespace(path.to_str().unwrap());
+        let partition = BufferChunker::decode_file_partition(path.to_str().unwrap());
+        let time = BufferChunker::decode_file_time(path.to_str().unwrap());
+
+        let updated_at = match sync_file.file.metadata() {
+            Ok(metadata) => metadata.modified().unwrap_or_else(|_err| SystemTime::now()),
+            Err(_err) => SystemTime::now(),
+        };
+
+        Ok(WalFile {
+            path: path.clone(),
+            bytes: sync_file.file.metadata().unwrap().len(),
+            namespace,
+            partition,
+            time,
+            file: Some(sync_file),
+            updated_at,
+            offset
+        })
+    }
+
+    pub fn offset_from_path(path: &PathBuf) -> io::Result<OffsetKeySerialize> {
+        let mut file = OpenOptions::new().read(true).open(&path)?;
+
+        let mut offset_size = [0u8; 8];
+
+        file.read_exact(&mut offset_size).expect("Failed to read offset size from WAL");
+
+        let mut bin_offset = vec![0u8; u64::from_le_bytes(offset_size) as usize];
+
+        let mut reader = io::BufReader::new(file);
+
+        reader.read_exact(&mut bin_offset).expect("Failed to read offset from WAL");
+
+        Ok(bincode::deserialize(&bin_offset).unwrap())
+    }
+
+    // read offset from beginning of WAL file
+    pub fn read_offset(&mut self) -> Result<OffsetKeySerialize, ArrowError> {
+
+        let reader = self.file.as_mut().ok_or(ArrowError::IoError("Can't write to WAL file".to_string(), io::Error::new(io::ErrorKind::NotFound, "File not found")))?;
+
+        reader.seek(io::SeekFrom::Start(0)).unwrap();
+
+        let mut offset_size = [0u8; 8];
+        reader.read_exact(&mut offset_size).expect("Failed to read offset size from WAL");
+
+        let mut bin_offset = vec![0u8; u64::from_le_bytes(offset_size) as usize];
+        reader.read_exact(&mut bin_offset).expect("Failed to read offset from WAL");
+
+        bincode::deserialize(&bin_offset).map_err(|err| ArrowError::IoError("Failed to deserialize offset".to_string(), io::Error::new(io::ErrorKind::NotFound, err.to_string())))
+    }
+
+    pub fn read_from_stream(&mut self) -> Result<Vec<RecordBatch>, ArrowError> {
+
+        self.offset = self.read_offset()?;
+
+        let reader = self.file.as_mut().ok_or(ArrowError::IoError("Can't write to WAL file".to_string(), io::Error::new(io::ErrorKind::NotFound, "File not found")))?;
+
+        let mut stream_reader = StreamReader::try_new(reader, None).unwrap();
+
+        let mut record_batches = Vec::new();
+        while let Some(batch) = stream_reader.next() {
+            let batch = batch.unwrap();
+            record_batches.push(batch);
+        }
+
+        Ok(record_batches)
+    }
+
+    pub fn write_to_stream(&mut self, record_batches: &[RecordBatch]) -> Result<usize, ArrowError> {
+        let writer = self.file.as_mut().ok_or(ArrowError::IoError("Can't write to WAL file".to_string(), io::Error::new(io::ErrorKind::NotFound, "File not found")))?;
+
+        writer.seek(io::SeekFrom::Start(0))?;
+
+        let bin_offset = bincode::serialize(&self.offset).unwrap();
+        let offset_size = bin_offset.len() as u64;
+
+        writer.write_all(&offset_size.to_le_bytes())?;
+        writer.write_all(&bin_offset)?;
+
+        writer.seek(io::SeekFrom::End(0))?;
+
+        let mut size: usize = 0;
+        let codec = Some(CompressionType::LZ4_FRAME);
+        let options = IpcWriteOptions::default().try_with_compression(codec)?;
+
+        let mut stream_writer = StreamWriter::try_new_with_options(writer, &record_batches[0].schema(), options)?;
+        for batch in record_batches {
+            stream_writer.write(batch).expect("Failed to write record batch to stream writer");
+            size += batch.get_array_memory_size();
+        }
+
+        stream_writer.finish()?;
+
+        Ok(size)
+    }
+
+    fn generate_wal_file_path(namespace: &str, partition: &str, time: i64) -> String {
         let data_dir = Config::get_data_dir();
         let output_dir = &format!("{}/ingest_buffer", data_dir);
 
-        format!("{}/{}.wal", output_dir, name)
+        let wal_file_name = BufferChunker::encode_chunk_name(
+            "ingest",
+            Some(namespace),
+            Some(partition),
+            Some(time),
+            None,
+        );
+
+        let wal_file_name = format!("{}-{}", wal_file_name, Helpers::random_str(32));
+
+        format!("{}/{}.wal", output_dir, wal_file_name)
     }
 
     fn write_to_wal(&mut self, data: &[u8]) -> io::Result<()> {
@@ -451,18 +574,10 @@ impl WalFile {
 
     pub fn flush(&mut self) -> io::Result<()> {
         if let Some(sync_file) = &mut self.file.as_mut() {
-
             sync_file.flush()?;
-
-            // unsafe {
-            //     libc::fsync(sync_file.file.as_raw_fd());
-            // }
-
         }
         Ok(())
     }
-
-    // @todo - Additional methods for handling file rotation, error handling, etc.
 }
 
 #[derive(Debug)]
@@ -485,13 +600,6 @@ impl Seek for SyncWriteFile {
 impl Drop for SyncWriteFile {
     fn drop(&mut self) {
 
-        // match self.file.sync_all() {
-        //     Ok(_g) => {}
-        //     Err(_err) => {
-        //         println!("Error syncing file: {}", _err.to_string());
-        //     }
-        // }
-
         let fd = self.file.as_raw_fd();
         unsafe {
             libc::fsync(fd);
@@ -499,7 +607,6 @@ impl Drop for SyncWriteFile {
     }
 }
 
-// implement read_to_end for SyncWriteFile
 impl Read for SyncWriteFile {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         self.file.read(buf)
@@ -512,13 +619,6 @@ impl Write for SyncWriteFile {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-
-        // match self.file.sync_all() {
-        //     Ok(_g) => {}
-        //     Err(_err) => {
-        //         println!("Error syncing file: {}", _err.to_string());
-        //     }
-        // }
 
         let fd = self.file.as_raw_fd();
         unsafe {
