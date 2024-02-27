@@ -1229,20 +1229,20 @@ async fn sync() {
         .write()
         .store(false, Ordering::SeqCst);
 
-    let metrics_lock = METRICS.read();
-
-    let now_lock = now.lock().unwrap();
-
-    // metrics_lock.bytes_total += metrics_lock.bytes_current;
-
-    // metrics_lock.run_time_seconds = now_lock.elapsed().as_secs();
-
-    println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
-    println!("Messages Total: {}", metrics_lock.messages_total);
-    println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
-    println!("Bytes: {}", metrics_lock.bytes_total);
-
-    drop(metrics_lock);
+    // let metrics_lock = METRICS.read();
+    //
+    // let now_lock = now.lock().unwrap();
+    //
+    // // metrics_lock.bytes_total += metrics_lock.bytes_current;
+    //
+    // // metrics_lock.run_time_seconds = now_lock.elapsed().as_secs();
+    //
+    // println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
+    // println!("Messages Total: {}", metrics_lock.messages_total);
+    // println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
+    // println!("Bytes: {}", metrics_lock.bytes_total);
+    //
+    // drop(metrics_lock);
 
     // let total_times: Vec<(String, Duration)> = TimedRwLock::<()>::get_total_wait_times();
     // for (key, value) in total_times.iter() {
