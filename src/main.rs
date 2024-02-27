@@ -1045,38 +1045,43 @@ async fn sync() {
         move || {
             if RUNNING.read().load(Ordering::SeqCst) {
 
-                // let metrics_lock = METRICS.read();
-                //
-                // let now_lock = now_clone.lock().unwrap();
-                //
-                // // metrics_lock.bytes_total += metrics_lock.bytes_current;
-                //
-                // // metrics_lock.run_time_seconds = now_lock.elapsed().as_secs();
-                //
-                // println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
-                //
-                // let last_messages_total_val = *last_messages_total.lock().unwrap();
-                // let ingested_current = metrics_lock.messages_total - last_messages_total_val;
-                // *last_messages_total.lock().unwrap() = metrics_lock.messages_total;
-                //
-                //
-                // // if DISPLAY_METRICS.read().unwrap().load(Ordering::SeqCst) {
-                //     println!("Messages per Min: {}", ingested_current);
-                //     println!("Messages Fixed: {}", metrics_lock.ingeted_slow_total);
-                //     println!("Messages Total: {}", metrics_lock.messages_total);
-                //     println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
-                //     // println!("Bytes per Min: {}", metrics_lock.bytes_current);
-                //     println!("Bytes: {}", metrics_lock.bytes_total);
-                // // }
-                // // metrics_lock.bytes_current = 0;
-                //
-                // let total_times: Vec<(String, Duration)> = TimedRwLock::<()>::get_total_wait_times();
-                // for (key, value) in total_times.iter() {
-                //     println!("{}: {}ms", key, value.as_millis());
+                let metrics_lock = METRICS.read();
+
+                let now_lock = now_clone.lock().unwrap();
+
+                // metrics_lock.bytes_total += metrics_lock.bytes_current;
+
+                // metrics_lock.run_time_seconds = now_lock.elapsed().as_secs();
+
+                println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
+
+                let last_messages_total_val = *last_messages_total.lock().unwrap();
+                let ingested_current = metrics_lock.messages_total - last_messages_total_val;
+                *last_messages_total.lock().unwrap() = metrics_lock.messages_total;
+
+
+                // if DISPLAY_METRICS.read().unwrap().load(Ordering::SeqCst) {
+                if ingested_current > 0 {
+                    println!("Messages per Min: {}", ingested_current);
+                    println!("Messages Fixed: {}", metrics_lock.ingeted_slow_total);
+                    println!("Messages Total: {}", metrics_lock.messages_total);
+                    println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
+                    // println!("Bytes per Min: {}", metrics_lock.bytes_current);
+                    println!("Bytes: {}", metrics_lock.bytes_total);
+
+                    let total_times: Vec<(String, Duration)> = TimedRwLock::<()>::get_total_wait_times();
+                    for (key, value) in total_times.iter() {
+                        println!("{}: {}ms", key, value.as_millis());
+                    }
+                }
+
                 // }
-                //
-                //
-                // drop(metrics_lock);
+                // metrics_lock.bytes_current = 0;
+
+
+
+
+                drop(metrics_lock);
 
                 tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
