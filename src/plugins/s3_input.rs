@@ -170,7 +170,8 @@ impl DataSourceS3Plugin {
             .max_keys(10000);
 
 
-        let max_empty_objects = 100;
+        // important to check few times, else slowly arriving drip of objects will result in us never proceeding to the next pipeline
+        let max_empty_objects = 2;
         let mut empty_objects = 0;
 
         loop {
