@@ -774,11 +774,6 @@ async fn sync() {
                 match metadata.get_mut(pipeline_name.as_str()) {
                     Some(pipeline_metadata) => {
 
-                        if !pipeline_metadata.enabled {
-                            println!("Pipeline '{}' disabled, skipping.", pipeline_name);
-                            return;
-                        }
-
                         if pipeline_metadata.sql.is_some() {
                             let sql = pipeline_metadata.sql.clone().unwrap();
 
@@ -791,6 +786,11 @@ async fn sync() {
                             // important to exec the SQL after saving metadata, as the SQL may drop or otherwise alter the metadata
                             query(&sql).await;
 
+                            return;
+                        }
+
+                        if !pipeline_metadata.enabled {
+                            println!("Pipeline '{}' disabled, skipping.", pipeline_name);
                             return;
                         }
                     },
