@@ -211,7 +211,7 @@ impl Buffers {
 
         }
 
-        // println!("Ingested {} rows of {} bytes to WAL", stats.1, stats.0);
+        println!("Ingested {} rows of {} bytes to WAL", stats.1, stats.0);
 
         self.buf.clear();
 
@@ -1422,12 +1422,12 @@ impl WalFile {
             Some(namespace),
             Some(partition),
             time,
-            Some(shard),
+            None,
         );
 
         let wal_partition_dir = WalFile::get_wal_partition_dir(namespace, partition, time, shard);
 
-        let wal_file_name = format!("{}/{}&id={}", wal_partition_dir, wal_file_name, Helpers::random_str(32));
+        let wal_file_name = format!("{}/{}&id={}", wal_partition_dir, wal_file_name, Helpers::random_str(8));
 
         format!("{}.tmp", wal_file_name)
     }
