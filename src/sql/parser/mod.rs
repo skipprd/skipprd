@@ -185,14 +185,16 @@ pub(crate) struct AlterTableAddColumn {
 pub(crate) struct AlterSchemaDropColumn {
     pub(crate) pipeline: ObjectName,
     pub(crate) schema: Option<ObjectName>,
-    pub(crate) column_name: Ident,
+    // support field names with dots representing nested fields (e.g. foo.bar.baz), hence ObjectName instead of Ident
+    pub(crate) column_name: ObjectName,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AlterSchemaAlterColumnType {
     pub(crate) pipeline: ObjectName,
     pub(crate) schema: Option<ObjectName>,
-    pub(crate) column_name: Ident,
+    // support field names with dots representing nested fields (e.g. foo.bar.baz), hence ObjectName instead of Ident
+    pub(crate) column_name: ObjectName,
     pub(crate) new_type: DataType,
     pub(crate) values_new_type: Option<DataType>,
 
@@ -394,7 +396,7 @@ impl<'a> SParser<'a> {
                 },
                 Keyword::DROP => {
                     self.parser.expect_keyword(Keyword::COLUMN)?;
-                    let column_name = self.parser.parse_identifier()?;
+                    let column_name = self.parser.parse_object_name()?;
                     Ok(Statement::AlterSchemaDropColumn(AlterSchemaDropColumn {
                         pipeline: ObjectName(vec![Ident::new(pipeline)]),
                         schema,
@@ -403,7 +405,7 @@ impl<'a> SParser<'a> {
                 },
                 Keyword::ALTER => {
                     self.parser.expect_keyword(Keyword::COLUMN)?;
-                    let column_name = self.parser.parse_identifier()?;
+                    let column_name = self.parser.parse_object_name()?;
 
                     self.parser.expect_keyword(Keyword::TYPE)?;
 

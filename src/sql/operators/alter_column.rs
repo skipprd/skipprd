@@ -3,7 +3,7 @@ use crate::sql::parser::{AlterSchemaAlterColumnType};
 
 pub fn alter_column_type(metadata: &mut Metadata, alteration: &AlterSchemaAlterColumnType) -> Result<Metadata, String> {
 
-    let column_metadata = Metadata::get_nested_metadata_from_field_notation(metadata, &alteration.column_name.value)
+    let column_metadata = Metadata::get_nested_metadata_from_field_notation(metadata, &alteration.column_name.to_string())
         .ok_or_else(|| format!("Column '{}' not found", alteration.column_name))?;
 
     let skippr_new_type = SkipprTypes::from_string(&alteration.new_type.to_string())
