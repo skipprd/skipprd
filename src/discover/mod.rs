@@ -89,6 +89,50 @@ pub fn discover_ingest(
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct PipelineMetadata {
+    pub(crate) name: String,
+    pub(crate) metadata: HashMap<String, Metadata>,
+    pub(crate) sql: Option<Vec<String>>,
+    pub(crate) enabled: bool,
+}
+
+impl crate::discover::PipelineMetadata {
+    #[inline]
+    #[must_use]
+    pub(crate) fn new() -> Self {
+        let pipeline_name = Config::get_pipeline_name();
+        Self {
+            name: pipeline_name,
+            metadata: HashMap::new(),
+            sql: None,
+            enabled: true,
+        }
+    }
+
+    pub(crate) fn from_metadata(metadata: HashMap<String, Metadata>) -> Result<Self, bool> {
+        let pipeline_name = Config::get_pipeline_name();
+        Ok(Self {
+            name: pipeline_name,
+            metadata: metadata,
+            sql: None,
+            enabled: true,
+        })
+    }
+
+    pub(crate) fn append_sql(&mut self, sql_str: String) {
+        let sql = self.sql.as_mut();
+        match sql {
+            Some(mut pipeline_sql) => {
+                pipeline_sql.push(sql_str);
+            },
+            None => {
+                self.sql = Some(vec![sql_str]);
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Metadata {
     pub(crate) count: i32,
     pub(crate) types: HashMap<String, u32>,
@@ -100,7 +144,6 @@ pub struct Metadata {
     pub(crate) out_field_name: String,
     pub(crate) determined_type: String,
     pub(crate) determined_type_values: String,
-    pub(crate) sql: Option<String>
 }
 
 impl Metadata {
@@ -118,7 +161,6 @@ impl Metadata {
             out_field_name: "".to_string(),
             determined_type: "".to_string(),
             determined_type_values: "".to_string(),
-            sql: None,
         })
     }
 

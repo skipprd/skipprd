@@ -4,6 +4,7 @@ use std::fmt::{Debug};
 use std::fs;
 use std::fs::{File};
 use std::io::{Read};
+use std::ops::Deref;
 
 use std::path::Path;
 
@@ -29,7 +30,7 @@ use reqwest::header::HeaderValue;
 use reqwest::header::{HeaderMap, HeaderName};
 use reqwest::{Client, StatusCode};
 
-use crate::discover::Metadata;
+use crate::discover::{Metadata, PipelineMetadata};
 use crate::{flatten_metadata, METADATA};
 
 
@@ -1189,7 +1190,7 @@ impl Config {
         // return doc;
     }
 
-    pub async fn get_metadata() -> Result<HashMap<String, Metadata>, bool> {
+    pub async fn get_metadata() -> Result<PipelineMetadata, bool> {
 
         if !*HAS_LICENSE.read().unwrap() {
             // println!("ERROR: No license found, please set the 'LICENSE' environment variable.");
@@ -1233,16 +1234,39 @@ impl Config {
             .send()
             .await;
 
-        let metadata: Result<HashMap<String, Metadata>, bool> = match response {
+        let pipeline_metadata: Result<PipelineMetadata, bool> = match response {
             Ok(resp) => match resp.status() {
                 StatusCode::OK => {
-                    let mut metadata = match resp.json::<HashMap<String, Metadata>>().await {
-                        Ok(metadata) => metadata,
-                        Err(err) => {
-                            panic!("Metadata HTTP Error: {:?}", err);
-                        }
-                    };
-                    Ok(metadata)
+                    let json_result = resp.json::<PipelineMetadata>().await;
+                    match json_result {
+                        Ok(pipeline_metadata) => Ok(pipeline_metadata),
+                        Err(_) => {
+                            // Re-fetch the response as it's already moved
+                            let resp = client
+                                .get(&format!("{}/{}", uri, path))
+                                .timeout(Duration::from_secs(15))
+                                .send()
+                                .await;
+
+                            match resp {
+                                Ok(resp) => {
+                                    // migrate to new PipelineMetadata format
+                                    let metadata_result = resp.json::<HashMap<String, crate::discover::Metadata>>().await;
+                                    match metadata_result {
+                                        Ok(metadata) => {
+                                            println!("Migrating metadata to new format");
+                                            let pipeline_metadata = PipelineMetadata::from_metadata(metadata)?;
+                                            // set metadata
+                                            Config::set_metadata(&pipeline_metadata, false).await;
+                                            Ok(pipeline_metadata)
+                                        },
+                                        Err(_) => Err(false),
+                                    }
+                                },
+                                Err(_) => Err(false),
+                            }
+                        },
+                    }
                 }
                 StatusCode::NOT_FOUND => {
                     Err(false)
@@ -1264,7 +1288,7 @@ impl Config {
             }
         };
 
-        metadata
+        pipeline_metadata
     }
 
     pub async fn delete_metadata() {
@@ -1314,7 +1338,7 @@ impl Config {
         }
     }
 
-    pub async fn set_metadata(metadata: &HashMap<String, Metadata>, evolved: bool) {
+    pub async fn set_metadata(pipeline_metadata: &PipelineMetadata, evolved: bool) {
 
         // let data_dir = Config::get_data_dir();
         // let metadata_file = format!("{}/metadata-{}.json", data_dir, Helpers::random_str(10));
@@ -1374,7 +1398,7 @@ impl Config {
         let data = json!({
             "workspace": workspace,
             "pipeline": pipeline,
-            "metadata": metadata,
+            "metadata": pipeline_metadata,
             "status": schema_status
         });
 
@@ -1408,7 +1432,11 @@ impl Config {
 
         if evolved {
 
-            Config::sync_schema(metadata).await;
+            {
+                METADATA.write().clone_from(&pipeline_metadata);
+            }
+
+            Config::sync_schema(&pipeline_metadata.metadata).await;
         }
     }
 

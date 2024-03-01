@@ -1,7 +1,7 @@
 use crate::discover::{Metadata, SkipprTypes};
-use crate::sql::parser::{AlterTableAlterColumnType};
+use crate::sql::parser::{AlterSchemaAlterColumnType};
 
-pub fn alter_column_type(metadata: &mut Metadata, alteration: &AlterTableAlterColumnType) -> Result<Metadata, String> {
+pub fn alter_column_type(metadata: &mut Metadata, alteration: &AlterSchemaAlterColumnType) -> Result<Metadata, String> {
 
     let column_metadata = Metadata::get_nested_metadata_from_field_notation(metadata, &alteration.column_name.value)
         .ok_or_else(|| format!("Column '{}' not found", alteration.column_name))?;

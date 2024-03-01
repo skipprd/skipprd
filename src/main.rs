@@ -46,7 +46,7 @@ mod metrics;
 mod internalfields;
 
 mod discover;
-use crate::discover::AnalyseSchema;
+use crate::discover::{AnalyseSchema, PipelineMetadata};
 use crate::discover::Metadata;
 mod converters;
 // use self::converters::avro_parquet::AvroSchema;
@@ -106,6 +106,7 @@ use crate::ingest_work::Ingest;
 use crate::sql::operators::alter_column::alter_column_type;
 use crate::sql::operators::drop_column::alter_column_drop;
 use crate::sql::parser::{PipelineToggle, SParser, Statement};
+use crate::sql::query::query;
 // use crate::plugins::pcap_input::DataSourcePcapPlugin;
 
 // pub static DISPLAY_METRICS: Lazy<TimedRwLock<AtomicBool>> =
@@ -123,7 +124,7 @@ pub static OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE: Lazy<TimedRwLock<AtomicBool>> =
 
 pub static LOGGER: Lazy<Arc<tokio::sync::RwLock<Logger>>> = Lazy::new(|| Logger::new(100));
 pub static METRICS: Lazy<Arc<TimedRwLock<Metrics>>> = Lazy::new(|| Arc::new(TimedRwLock::new("metrics".to_string(), Metrics::new())));
-pub static METADATA: Lazy<Arc<TimedRwLock<HashMap<String, Metadata>>>> = Lazy::new(|| Arc::new(TimedRwLock::new("metadata".to_string(), HashMap::new())));
+pub static METADATA: Lazy<Arc<TimedRwLock<PipelineMetadata>>> = Lazy::new(|| Arc::new(TimedRwLock::new("metadata".to_string(), PipelineMetadata::new())));
 // pub static NEW_METADATA: Lazy<Arc<TimedRwLock<HashMap<String, Metadata>>>> = Lazy::new(|| Arc::new(TimedRwLock::new("new_metadata".to_string(), HashMap::new())));
 
 //Arc<Schema>
@@ -273,331 +274,7 @@ async fn schema(pipeline: &str) {
     }
 }
 
-async fn query(sql: &str) {
 
-    let mut parser = SParser::new(sql).unwrap();
-
-    match parser.parse_statement() {
-        Ok(Statement::PipelineDrop(stmt)) => {
-
-            PIPELINE_NAME.write().clear();
-            PIPELINE_NAME.write().push_str(format!("{}", &stmt.table).as_str());
-            Config::init().await;
-
-            let data_dir = Config::get_data_dir();
-            let pipeline_name = Config::get_pipeline_name();
-
-            println!("Dropping all schemas and data for: {}", pipeline_name);
-
-            match CLI_MODE.read().clone() {
-                Mode::Sync(options) => {
-                    let _ = fs::remove_dir_all(&data_dir).expect(format!("Failed to remove dir: {}", data_dir).as_str());
-                    Config::delete_metadata().await;
-                    println!("Dropped Pipeline");
-                },
-                Mode::Query(options) => {
-                    let mut metadata = Config::get_metadata().await.expect(format!("No metadata found for pipeline: {}", pipeline_name).as_str());
-
-                    match metadata.get_mut(&pipeline_name) {
-                        Some(pipeline_metadata) => {
-                            pipeline_metadata.sql = Some(sql.to_string());
-                        },
-                        None => {
-                            println!("Pipeline '{}' not found", pipeline_name);
-                            return;
-                        }
-                    }
-
-                    Config::set_metadata(&metadata, false).await;
-
-                    println!("Done. Pipeline will drop on next sync run");
-                },
-                _ => {}
-            }
-
-        },
-        Ok(Statement::PipelineReset(stmt)) => {
-
-            PIPELINE_NAME.write().clear();
-            PIPELINE_NAME.write().push_str(format!("{}", &stmt.table).as_str());
-            Config::init().await;
-
-            let data_dir = Config::get_data_dir();
-            let pipeline_name = Config::get_pipeline_name();
-
-            println!("Resetting offset database and purging WAL files for pipeline: {}, dir: {}", pipeline_name, data_dir);
-
-            match CLI_MODE.read().clone() {
-                Mode::Sync(options) => {
-                    let _ = fs::remove_dir_all(&data_dir).expect(format!("Failed to remove dir: {}", data_dir).as_str());
-
-                    println!("Pipeline reset, on next sync run all data will be re-ingested");
-                },
-                Mode::Query(options) => {
-                    let mut metadata = Config::get_metadata().await.expect(format!("No metadata found for pipeline: {}", pipeline_name).as_str());
-
-                    metadata.get_mut(&pipeline_name).unwrap().sql = Some(sql.to_string());
-
-                    Config::set_metadata(&metadata, false).await;
-
-                    println!("Done. Pipeline will reset on next sync run");
-                },
-                _ => {}
-            }
-
-        },
-        Ok(Statement::SchemaDrop(stmt)) => {
-
-            PIPELINE_NAME.write().clear();
-            PIPELINE_NAME.write().push_str(format!("{}", &stmt.table).as_str());
-            Config::init().await;
-
-            println!("Resetting metadata for pipeline: {}", Config::get_pipeline_name());
-            Config::delete_metadata().await;
-            println!("Dropped Schema, on next sync schema will be re-discovered");
-        },
-        Ok(Statement::PipelineToggle(stmt)) => {
-
-            PIPELINE_NAME.write().clear();
-            PIPELINE_NAME.write().push_str(format!("{}", &stmt.pipeline).as_str());
-            Config::init().await;
-
-            let mut skippr_metadata = match Config::get_metadata().await {
-                Ok(metadata) => {
-                    metadata
-                }
-                Err(_e) => {
-                    println!("Pipeline '{}' not found", stmt.pipeline);
-                    return;
-                }
-            };
-
-            let metadata = skippr_metadata.get_mut(&format!("{}", &stmt.pipeline)).expect(&format!("Pipeline '{}' not found", stmt.pipeline));
-
-            metadata.enabled = match stmt.toggle {
-                PipelineToggle::Enable => {
-                    true
-                },
-                PipelineToggle::Disable => {
-                    false
-                }
-            };
-
-            {
-                METADATA.write().clone_from(&skippr_metadata);
-            }
-
-            Config::set_metadata(&skippr_metadata, false).await;
-
-            println!("Toggled pipeline '{}' to: {}d", stmt.pipeline, stmt.toggle);
-        },
-        Ok(Statement::SchemaLoad(stmt)) => {
-
-            PIPELINE_NAME.write().clear();
-            PIPELINE_NAME.write().push_str(format!("{}", &stmt.table).as_str());
-            Config::init().await;
-            let workspace = Config::get_workspace_name();
-
-            // get current metadata
-            let skippr_metadata = match Config::get_metadata().await {
-                Ok(metadata) => {
-                    metadata
-                }
-                Err(_e) => {
-                    println!("No existing schema for {}", stmt.table);
-                    return;
-                }
-            };
-
-            let mut metadata = skippr_metadata.get(&format!("{}", &stmt.table)).expect(&format!("Schema not found for table {}", stmt.table));
-
-            // read schema from file
-            let data_dir = Config::get_data_dir();
-            let metadata_file = format!("{}/{}", data_dir, stmt.source);
-
-            let file = OpenOptions::new()
-                .read(true)
-                .open(&metadata_file)
-                .expect(&format!("Failed to open source schema file {}", &metadata_file));
-
-            let reader = BufReader::new(file);
-
-            let file_content_metadata: Metadata = match serde_json::from_reader(reader) {
-                Ok(file_content_metadata) => file_content_metadata,
-                Err(err) => {
-                    panic!("Error loading schema: {}", err);
-                }
-            };
-
-            // update metadata
-            metadata.clone_from(&&file_content_metadata);
-
-            {
-                METADATA.write().clone_from(&skippr_metadata);
-            }
-
-            Config::set_metadata(&skippr_metadata, true).await;
-
-            println!("Schema loaded from file.");
-        },
-        Ok(Statement::SchemaDump(stmt)) => {
-
-            PIPELINE_NAME.write().clear();
-            PIPELINE_NAME.write().push_str(format!("{}", &stmt.table).as_str());
-            Config::init().await;
-            let workspace = Config::get_workspace_name();
-
-            let skippr_metadata = match Config::get_metadata().await {
-                Ok(metadata) => {
-                    metadata
-                }
-                Err(_e) => {
-                    println!("No existing schema for {}", stmt.table);
-                    return;
-                }
-            };
-
-            let metadata = skippr_metadata.get(&format!("{}", &stmt.table)).expect(&format!("Schema not found for table {}", stmt.table));
-
-            let data_dir = Config::get_data_dir();
-            let metadata_file = format!("{}/{}", data_dir, stmt.target);
-
-            let file = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(&metadata_file)
-                .expect(&format!("Failed to open target schema file {}", &metadata_file));
-
-            let writer = BufWriter::new(file);
-
-            serde_json::to_writer(writer, &metadata).expect(&format!("Failed to write schema to file {}", stmt.target));
-
-            println!("Schema dumped.");
-        },
-        Ok(Statement::AlterTableDropColumn(stmt)) => {
-
-            println!("Alter table drop column: {}", stmt.column_name);
-
-            PIPELINE_NAME.write().clear();
-            PIPELINE_NAME.write().push_str(format!("{}", &stmt.table_name).as_str());
-            Config::init().await;
-            let workspace = Config::get_workspace_name();
-
-            let mut skippr_metadata = match Config::get_metadata().await {
-                Ok(metadata) => {
-                    metadata
-                }
-                Err(_e) => {
-                    println!("No existing schema for {}", stmt.table_name);
-                    return;
-                }
-            };
-
-            let mut metadata = skippr_metadata.get_mut(&format!("{}", &stmt.table_name)).expect(&format!("Schema not found for table {}", stmt.table_name));
-            alter_column_drop(&mut metadata, &stmt).expect("Failed to alter column type");
-
-            {
-                METADATA.write().clone_from(&skippr_metadata);
-            }
-
-            Config::set_metadata(&skippr_metadata, true).await;
-
-            println!("Alter table drop column.");
-        },
-        Ok(Statement::AlterTableAlterColumnType(stmt)) => {
-
-            PIPELINE_NAME.write().clear();
-            PIPELINE_NAME.write().push_str(format!("{}", &stmt.table_name).as_str());
-            Config::init().await;
-            let workspace = Config::get_workspace_name();
-
-            let mut skippr_metadata = match Config::get_metadata().await {
-                Ok(metadata) => {
-                    metadata
-                }
-                Err(_e) => {
-                    println!("No existing schema for {}", stmt.table_name);
-                    return;
-                }
-            };
-
-            let mut metadata = skippr_metadata.get_mut(&format!("{}", &stmt.table_name)).expect(&format!("Schema not found for table {}", stmt.table_name));
-            alter_column_type(&mut metadata, &stmt).expect("Failed to alter column type");
-
-            {
-                METADATA.write().clone_from(&skippr_metadata);
-            }
-
-            Config::set_metadata(&skippr_metadata, true).await;
-
-            println!("Alter table alter schema: {} column type from {} to {}", stmt.table_name, stmt.column_name, stmt.new_type);
-        },
-        // Err(e) => {
-        //
-        //     println!("Unknown SQL Dialect: {}", sql);
-        // },
-        _ => {
-
-            let mut table_name = "".to_string();
-
-            if sql.to_lowercase().split("from").collect::<Vec<&str>>().len() > 1 {
-                // println!("Invalid query, must be in the format: SELECT * FROM <table_name>");
-                // process::exit(1);
-
-                table_name = sql.to_lowercase().split("from").collect::<Vec<&str>>()[1].split(" ").collect::<Vec<&str>>()[1].trim().replace(";", "");
-
-            }
-            // else {
-            //     table_name = "bike_hire".to_string();
-            // }
-
-
-            PIPELINE_NAME.write().clear();
-            PIPELINE_NAME.write().push_str(&table_name);
-            Config::init().await;
-            let workspace = Config::get_workspace_name();
-
-            let data_dir = Config::get_data_dir();
-            let output_dir = format!("{}/output_buffer", data_dir);
-
-            println!("Querying data dir: {}", output_dir);
-
-            let mut session_config = SessionConfig::new();
-            session_config = session_config.set("datafusion.catalog.information_schema", "true".into());
-            session_config = session_config.set("datafusion.catalog.default_catalog", "skippr".into());
-            session_config = session_config.set("datafusion.execution.collect_statistics", "true".into());
-
-            let ctx = SessionContext::with_config(session_config);
-
-            match ctx.register_parquet(&table_name, &output_dir, ParquetReadOptions::default()).await {
-                Ok(_) => {}
-                Err(e) => {
-                    println!("Can't find data for table: {} in dir: {}. Error: {:?}", table_name, output_dir, e);
-                    process::exit(1);
-                }
-            }
-
-            let df = match ctx.sql(sql).await {
-                Ok(df) => df,
-                Err(e) => {
-                    println!("Error: {}", e);
-                    process::exit(1);
-                }
-            };
-
-            match df.show().await {
-                Ok(res) => {
-                    res
-                }
-                Err(e) => {
-                    println!("Error: {}", e);
-                    process::exit(1);
-                }
-            }
-        }
-    }
-}
 
 async fn discover() {
     println!("Analysing data and generating Skippr metadata");
@@ -619,20 +296,20 @@ async fn discover() {
     let metadata_file = format!("{}/metadata.json", data_dir);
 
     // Get existing metadata
-    let mut skippr_metadata: HashMap<String, Metadata> = match File::open(metadata_file) {
+    let mut skippr_metadata: PipelineMetadata = match File::open(metadata_file) {
         Ok(file) => {
             let reader = BufReader::new(file);
             match serde_json::from_reader(reader) {
                 Ok(metadata) => metadata,
                 Err(_e) => {
                     // println!("No existing metadata {}", e);
-                    HashMap::new()
+                    PipelineMetadata::new()
                 }
             }
         }
         Err(_e) => {
             // println!("No existing metadata {}", e);
-            HashMap::new()
+            PipelineMetadata::new()
         }
     };
 
@@ -668,7 +345,7 @@ async fn discover() {
                             &mut foo,
                             input_file,
                             Some(1000),
-                            &mut skippr_metadata,
+                            &mut skippr_metadata.metadata,
                         );
 
                         // println!("Skippr schema: {:?}", skippr_metadata);
@@ -697,7 +374,7 @@ async fn discover() {
 
     let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.unwrap());
 
-    AnalyseSchema::determine_field_types(&mut skippr_metadata, None, None, flatten);
+    AnalyseSchema::determine_field_types(&mut skippr_metadata.metadata, None, None, flatten);
 
     Config::set_metadata(&skippr_metadata, true).await;
 
@@ -765,52 +442,48 @@ async fn sync() {
     }
 
 
-    let skippr_metadata = match Config::get_metadata().await {
-        Ok(mut metadata) => {
+    let pipeline_metadata = match Config::get_metadata().await {
+        Ok(mut pipeline_metadata) => {
             println!("Found Skippr metadata");
 
-            {
-                let pipeline_name = PIPELINE_NAME.read().clone();
-                match metadata.get_mut(pipeline_name.as_str()) {
-                    Some(pipeline_metadata) => {
+            let pipeline_name = PIPELINE_NAME.read().clone();
 
-                        if pipeline_metadata.sql.is_some() {
-                            let sql = pipeline_metadata.sql.clone().unwrap();
+            match pipeline_metadata.sql {
+                Some(sql) => {
 
-                            println!("Recieved SQL: '{}'", sql);
+                    for stmt in sql {
+                        println!("Recieved SQL statement: '{}'", stmt);
 
-                            // remove the SQL from metadata
-                            metadata.get_mut(pipeline_name.as_str()).unwrap().sql = None;
-                            Config::set_metadata(&metadata, false).await;
+                        // Important to exec the SQL after saving metadata, as the SQL may drop or otherwise alter the metadata
+                        query(&stmt).await;
+                    }
 
-                            // important to exec the SQL after saving metadata, as the SQL may drop or otherwise alter the metadata
-                            query(&sql).await;
+                    // remove the SQL stmt from metadata
+                    pipeline_metadata.sql = None;
+                    Config::set_metadata(&pipeline_metadata, false).await;
 
-                            return;
-                        }
+                    return;
 
-                        if !pipeline_metadata.enabled {
-                            println!("Pipeline '{}' disabled, skipping.", pipeline_name);
-                            return;
-                        }
-                    },
-                    None => {}
-                }
+                },
+                None => {}
             }
 
-            metadata
+            if !pipeline_metadata.enabled {
+                println!("Pipeline '{}' disabled, skipping.", pipeline_name);
+                return;
+            }
+
+            pipeline_metadata
         }
         Err(_e) => {
             println!("No existing Skippr metadata, will discover and evolve schemas as we sync");
-            let _empty_meta = Metadata::new().unwrap();
 
-            HashMap::new()
+            PipelineMetadata::new()
         }
     };
 
     {
-        // NEW_METADATA.write().clear();
-        METADATA.write().clone_from(&skippr_metadata);
+        METADATA.write().clone_from(&pipeline_metadata);
     }
 
     let offsets = Arc::new(Offsets::init().unwrap());
@@ -822,7 +495,7 @@ async fn sync() {
         wal_index.recover(offset_buffer_clone).expect("Failed to recover WAL index");
     }
 
-    Config::sync_schema(&skippr_metadata).await;
+    Config::sync_schema(&pipeline_metadata.metadata).await;
 
     let now = Arc::new(Mutex::new(Instant::now()));
 
@@ -1399,7 +1072,6 @@ mod tests {
             out_field_name: "parent_child".to_string(),
             determined_type: "string".to_string(),
             determined_type_values: "".to_string(),
-            sql: None,
         };
 
         fields.insert("child".to_string(), metadata_child.clone());
@@ -1415,7 +1087,6 @@ mod tests {
             out_field_name: "parent".to_string(),
             determined_type: "record".to_string(),
             determined_type_values: "".to_string(),
-            sql: None,
         };
 
         let mut flattened: HashMap<String, Metadata> = HashMap::new();

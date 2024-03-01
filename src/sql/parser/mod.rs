@@ -8,7 +8,9 @@ use datafusion::sql::sqlparser::dialect::Dialect;
 use datafusion::sql::sqlparser::keywords::Keyword;
 use datafusion::sql::sqlparser::parser::{Parser, ParserError};
 use datafusion::sql::sqlparser::tokenizer::{Token, Tokenizer};
+use indexmap::Equivalent;
 use sqlparser::ast::{ArrayElemTypeDef, DataType, Ident};
+use sqlparser::tokenizer::Token::EOF;
 
 // Keywords used in Skippr SQL
 // Defined as a separate enum to avoid conflicts with `sqlparser::ast::Keyword`
@@ -120,24 +122,25 @@ impl fmt::Display for PipelineToggle {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SchemaDumpStatement {
     /// From where the data comes from
-    pub(crate)  table: SchemaDumpSource,
+    pub(crate) pipeline: SchemaDumpSource,
     /// The URL to where the data is heading
-    pub(crate)  target: String,
+    pub(crate) target: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SchemaDropStatement {
-    pub(crate)  table: ObjectName,
+    pub(crate) pipeline: ObjectName,
+    pub(crate) schema: Option<ObjectName>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PipelineDropStatement {
-    pub(crate)  table: ObjectName,
+    pub(crate) pipeline: ObjectName,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PipelineResetStatement {
-    pub(crate)  table: ObjectName,
+    pub(crate) pipeline: ObjectName,
 }
 
 /// Skppr extension DDL for `SCHEMA LOAD`
@@ -158,9 +161,9 @@ pub(crate) struct PipelineResetStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SchemaLoadStatement {
     /// The object name to where the data is heading
-    pub(crate)  table: SchemaLoadDest,
+    pub(crate) pipeline: SchemaLoadDest,
     /// The url from where the data comes
-    pub(crate)  source: String,
+    pub(crate) source: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,14 +182,16 @@ pub(crate) struct AlterTableAddColumn {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AlterTableDropColumn {
-    pub(crate) table_name: ObjectName,
+pub(crate) struct AlterSchemaDropColumn {
+    pub(crate) pipeline: ObjectName,
+    pub(crate) schema: Option<ObjectName>,
     pub(crate) column_name: Ident,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AlterTableAlterColumnType {
-    pub(crate) table_name: ObjectName,
+pub(crate) struct AlterSchemaAlterColumnType {
+    pub(crate) pipeline: ObjectName,
+    pub(crate) schema: Option<ObjectName>,
     pub(crate) column_name: Ident,
     pub(crate) new_type: DataType,
     pub(crate) values_new_type: Option<DataType>,
@@ -211,8 +216,8 @@ pub enum Statement {
     SchemaLoad(SchemaLoadStatement),
     PipelineToggle(PipelineToggleStatement),
     // AlterTableAddColumn(AlterTableAddColumn),
-    AlterTableDropColumn(AlterTableDropColumn),
-    AlterTableAlterColumnType(AlterTableAlterColumnType),
+    AlterSchemaDropColumn(AlterSchemaDropColumn),
+    AlterSchemaAlterColumnType(AlterSchemaAlterColumnType),
 }
 
 
@@ -368,16 +373,19 @@ impl<'a> SParser<'a> {
     // This is a simplified sketch and needs to be integrated with your existing parsing logic.
 
     pub fn parse_alter_schema(&mut self) -> Result<Statement, ParserError> {
-        let table_name = self.parser.parse_object_name()?;
 
-        // self.parser.next_token(); // TABLE
-        // self.parser.expect_keyword(Keyword::ALTER)?;
-        // self.parser.next_token(); // ALTER
-        // self.parser.expect_keyword(Keyword::COLUMN)?;
-        // self.parser.next_token(); // COLUMN
+        let pipeline = self.parser.next_token().token.to_string();
 
-        // println!("table_name {}", table_name.to_string());
-        // println!("next {}", self.parser.peek_token().to_string());
+        let schema = match self.parser.peek_token().token.to_string().as_str() {
+            "." => {
+                self.parser.next_token(); // .
+                let schema = self.parser.next_token().token.to_string();
+                Some(ObjectName(vec![Ident::new(schema)]))
+            },
+            _ => {
+                None
+            }
+        };
 
         match self.parser.next_token().token {
             Token::Word(w) => match w.keyword {
@@ -387,8 +395,9 @@ impl<'a> SParser<'a> {
                 Keyword::DROP => {
                     self.parser.expect_keyword(Keyword::COLUMN)?;
                     let column_name = self.parser.parse_identifier()?;
-                    Ok(Statement::AlterTableDropColumn(AlterTableDropColumn {
-                        table_name,
+                    Ok(Statement::AlterSchemaDropColumn(AlterSchemaDropColumn {
+                        pipeline: ObjectName(vec![Ident::new(pipeline)]),
+                        schema,
                         column_name,
                     }))
                 },
@@ -405,8 +414,9 @@ impl<'a> SParser<'a> {
                             match value_type {
                                 ArrayElemTypeDef::AngleBracket(value) => {
 
-                                    Ok(Statement::AlterTableAlterColumnType(AlterTableAlterColumnType {
-                                        table_name,
+                                    Ok(Statement::AlterSchemaAlterColumnType(AlterSchemaAlterColumnType {
+                                        pipeline: ObjectName(vec![Ident::new(pipeline)]),
+                                        schema,
                                         column_name,
                                         // strip the <value type> from ARRAY<value type> to support matching against `SkipprTypes`
                                         new_type: DataType::Array(ArrayElemTypeDef::None),
@@ -419,8 +429,9 @@ impl<'a> SParser<'a> {
                             }
                         },
                         _ => {
-                            Ok(Statement::AlterTableAlterColumnType(AlterTableAlterColumnType {
-                                table_name,
+                            Ok(Statement::AlterSchemaAlterColumnType(AlterSchemaAlterColumnType {
+                                pipeline: ObjectName(vec![Ident::new(pipeline)]),
+                                schema,
                                 column_name,
                                 new_type: column_new_type,
                                 values_new_type: None
@@ -547,7 +558,7 @@ impl<'a> SParser<'a> {
                         // println!("table_name: {}", table_name);
 
                         Ok(Statement::SchemaDump(SchemaDumpStatement {
-                            table: SchemaDumpSource::Relation(table_name),
+                            pipeline: SchemaDumpSource::Relation(table_name),
                             target
                         }))
 
@@ -575,7 +586,7 @@ impl<'a> SParser<'a> {
                         let table_name = self.parser.parse_object_name()?;
 
                         Ok(Statement::PipelineReset(PipelineResetStatement {
-                            table: table_name
+                            pipeline: table_name
                         }))
 
                     }
@@ -599,11 +610,24 @@ impl<'a> SParser<'a> {
 
                         self.parser.next_token(); // SCHEMA
 
-                        let table_name = self.parser.parse_object_name()?;
+                        let pipeline = self.parser.next_token().token.to_string();
+
+                        let schema = match self.parser.peek_token().token.to_string().as_str() {
+                            "." => {
+                                self.parser.next_token(); // .
+                                let schema = self.parser.next_token().token.to_string();
+                                Some(schema)
+                            },
+                            _ => {
+                                None
+                            }
+                        };
 
                         Ok(Statement::SchemaDrop(SchemaDropStatement {
-                            table: table_name
+                            pipeline: ObjectName(vec![Ident::new(pipeline)]),
+                            schema: schema.map(|s| ObjectName(vec![Ident::new(s)]))
                         }))
+                        // }
 
                     }
                     Some(SkipprKeyword::PIPELINE) => {
@@ -613,7 +637,7 @@ impl<'a> SParser<'a> {
                         let table_name = self.parser.parse_object_name()?;
 
                         Ok(Statement::PipelineDrop(PipelineDropStatement {
-                            table: table_name
+                            pipeline: table_name
                         }))
 
                     }

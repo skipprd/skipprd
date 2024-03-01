@@ -460,12 +460,12 @@ impl Ingest {
                     //     Some(core_id),
                     // );
 
-                    if METADATA.read().get(&skpr_namespace).is_none() {
-                        METADATA.write().insert(skpr_namespace.clone(), Metadata::new().unwrap());
+                    if METADATA.read().metadata.get(&skpr_namespace).is_none() {
+                        METADATA.write().metadata.insert(skpr_namespace.clone(), Metadata::new().unwrap());
                         println!("New namespace: {}", skpr_namespace);
                     }
 
-                    let msg = match METADATA.read().get(&skpr_namespace) {
+                    let msg = match METADATA.read().metadata.get(&skpr_namespace) {
                         Some(metadata) => {
                             fast_path_ingest(
                                 &record,
@@ -499,7 +499,7 @@ impl Ingest {
                             let msg = match ingest(
                                 &record,
                                 // &mut NEW_METADATA.write().get_mut(&skpr_namespace).unwrap().fields,
-                                &mut METADATA.write().get_mut(&skpr_namespace).unwrap().fields,
+                                &mut METADATA.write().metadata.get_mut(&skpr_namespace).unwrap().fields,
                                 &skpr_namespace,
                                 &mut updated_schema_clone.lock().unwrap(),
                                 flatten,
@@ -535,7 +535,7 @@ impl Ingest {
                                     let mut default_message = Value::Null;
                                     {
                                         let metadata = METADATA.read();
-                                        default_message = create_default_nested_message(&metadata.get(&skpr_namespace).unwrap().fields);
+                                        default_message = create_default_nested_message(&metadata.metadata.get(&skpr_namespace).unwrap().fields);
                                     }
 
                                     {
@@ -746,7 +746,7 @@ impl Ingest {
 
         let metadata = METADATA.read();
 
-        if metadata.get(skpr_namespace).is_none() {
+        if metadata.metadata.get(skpr_namespace).is_none() {
             return Err(ArrowError::SchemaError(format!("Failed to find metadata for namespace: {}", skpr_namespace)));
             // panic!("Failed to find metadata for namespace: {}", skpr_namespace);
         }
@@ -755,13 +755,13 @@ impl Ingest {
         if flatten {
             let mut meta: HashMap<String, Metadata> = HashMap::new();
 
-            crate::flatten_metadata(metadata.get(skpr_namespace).unwrap(), &mut meta);
+            crate::flatten_metadata(metadata.metadata.get(skpr_namespace).unwrap(), &mut meta);
 
             let mut flat: Metadata = Metadata::new().unwrap();
             flat.fields = Box::new(meta);
             output_metadata.insert(skpr_namespace.to_string(), flat);
         } else {
-            output_metadata = metadata.clone();
+            output_metadata = metadata.metadata.clone();
         }
 
         // println!("Preparing schema for namespace: {}", skpr_namespace);
