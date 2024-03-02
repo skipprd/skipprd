@@ -16,8 +16,6 @@ use aws_sdk_s3::operation::get_object::{GetObjectError, GetObjectOutput};
 
 use std::time::Duration;
 use std::{fs};
-use aws_sdk_athena::config::timeout::TimeoutConfig;
-use aws_sdk_s3::config::retry::RetryConfig;
 
 
 use futures::future::join_all;
@@ -70,22 +68,7 @@ pub struct DataSourceS3Plugin {
 
 impl DataSourceS3Plugin {
     pub async fn new() -> DataSourceS3Plugin {
-
-        let retry_config = RetryConfig::standard().with_max_attempts(5);
-
-        let sdk_config = aws_config::from_env()
-            .timeout_config(
-                TimeoutConfig::builder()
-                    .operation_timeout(Duration::from_secs(5))
-                    .operation_attempt_timeout(Duration::from_secs(5))
-                    .connect_timeout(Duration::from_secs(5))
-                    .build()
-            )
-            .retry_config(retry_config)
-        .load().await;
-
-        let s3_config = aws_sdk_s3::config::Builder::from(&sdk_config)
-            .build();
+        let s3_config = aws_config::from_env().load().await;
 
         let data_dir = Config::get_data_dir();
         let temp_dir = &format!("{}/source_buffer", data_dir);
@@ -95,7 +78,7 @@ impl DataSourceS3Plugin {
             Err(_err) => {}
         }
 
-        let s3_client = Client::from_conf(s3_config);
+        let s3_client = Client::new(&s3_config);
 
         let config: DataSourceS3PluginConfig = match Config::get_pipline_plugin_config("input") {
             Ok(config) => config.into(),
