@@ -211,7 +211,7 @@ impl Buffers {
 
         }
 
-        println!("Ingested {} rows of {} bytes to WAL", stats.1, stats.0);
+        // println!("Ingested {} rows of {} bytes to WAL", stats.1, stats.0);
 
         self.buf.clear();
 

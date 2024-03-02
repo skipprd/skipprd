@@ -10,6 +10,7 @@ use serde_derive::Serialize;
 use std::fmt;
 use std::sync::Arc;
 use tokio::sync::{RwLock};
+use crate::METRICS;
 
 #[derive(Debug, Clone, Serialize, Hash, PartialEq, Eq)]
 pub enum LogLevel {
@@ -117,6 +118,9 @@ impl Logger {
 
         let tenant_id = TENANT_ID.read().unwrap().clone();
 
+        let metrics = METRICS.read();
+        let run_id = metrics.run_id.clone();
+
         let data = json!({
             "logs": logs.iter().map(|(_time, log)| {
                 json!({
@@ -129,6 +133,7 @@ impl Logger {
             "tenant_id": tenant_id,
             "workspace_name": workspace,
             "pipeline_name": pipeline,
+            "run_id": run_id,
             "datetime": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             "exit_code": exit_code
         });
