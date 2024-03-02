@@ -253,6 +253,19 @@ impl Ingest {
 
         let output_file = format!("{}/{}", deadletter_dir.clone(), &DEADLETTER_FILE_NAME.as_str());
 
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&output_file)
+            .unwrap();
+
+        let mut file = io::BufWriter::new(file);
+
+        file.write(record.as_bytes()).or(Err("Could not write to deadletter file")).unwrap();
+        file.write("\n".as_bytes()).or(Err("Could not write to deadletter file")).unwrap();
+
+        file.flush().or(Err("Could not flush deadletter file")).unwrap();
+
         // buffers.write(&output_file, record.as_bytes());
         // buffers.write(&output_file, "\n".as_bytes());
 

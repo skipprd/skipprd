@@ -511,11 +511,11 @@ impl Config {
 
             if pipline.deadletter.is_some() {
                 // split dot string
-                let input_plugin_name = pipline.deadletter.as_ref().unwrap().split('.').collect::<Vec<&str>>()[1].to_string();
+                let deadletter_plugin_name = pipline.deadletter.as_ref().unwrap().split('.').collect::<Vec<&str>>()[1].to_string();
 
                 let res = match config.data_deadletters.as_ref() {
                     Some(data_deadletters) => {
-                        match data_deadletters.get(&input_plugin_name) {
+                        match data_deadletters.get(&deadletter_plugin_name) {
                             Some(plugin_config) => {
                                 plugin_config.plugin_name().clone().or(Some("".to_string())).unwrap()
                             },
