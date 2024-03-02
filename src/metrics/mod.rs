@@ -80,7 +80,7 @@ impl MetricsEnvConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum MetricsStatus {
     Running,
     Stopped,
@@ -104,7 +104,7 @@ impl MetricsStatus {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Metrics {
     pub messages_total: u64,
     pub deadletters_total: u64,
@@ -139,7 +139,10 @@ impl Metrics {
         exit_code: Option<i8>,
     ) -> Result<(), Box<dyn std::error::Error>> {
 
-        let metrics = METRICS.read();
+        let metrics: Metrics;
+        {
+            metrics = METRICS.read().clone();
+        }
 
         let workspace = Config::get_workspace_name();
         let pipeline = Config::get_pipeline_name();
@@ -153,8 +156,10 @@ impl Metrics {
 
         let mut default_api_key = "";
 
-        if !*HAS_LICENSE.read().unwrap() {
-            default_api_key = "XxIVftJXN4LF6ARrRqJvKAsv30vhIZHR"
+        {
+            if !*HAS_LICENSE.read() {
+                default_api_key = "XxIVftJXN4LF6ARrRqJvKAsv30vhIZHR"
+            }
         }
 
         let mut token = Config::get_skippr_api_token();
@@ -173,7 +178,10 @@ impl Metrics {
 
         let path = "";
 
-        let tenant_id = TENANT_ID.read().unwrap().clone();
+        let tenant_id;
+        {
+            tenant_id = TENANT_ID.read().clone();
+        }
 
         let last_messages_total = LAST_MESSAGES_TOTAL.load(Ordering::Relaxed);
         let ingested_current = metrics.messages_total - last_messages_total;
@@ -245,7 +253,10 @@ impl Metrics {
 
     pub(crate) async fn send_config() -> Result<(), Box<dyn std::error::Error>> {
 
-        let metrics = METRICS.read();
+        let metrics: Metrics;
+        {
+            metrics = METRICS.read().clone();
+        }
 
         let workspace = Config::get_workspace_name();
         let pipeline = Config::get_pipeline_name();
@@ -259,7 +270,7 @@ impl Metrics {
 
         let mut default_api_key = "";
 
-        if !*HAS_LICENSE.read().unwrap() {
+        if !*HAS_LICENSE.read() {
             default_api_key = "XxIVftJXN4LF6ARrRqJvKAsv30vhIZHR"
         }
 
@@ -279,7 +290,10 @@ impl Metrics {
 
         let path = "";
 
-        let tenant_id = TENANT_ID.read().unwrap().clone();
+        let tenant_id;
+        {
+            tenant_id = TENANT_ID.read().clone();
+        }
 
         let current_time = chrono::Utc::now();
         let run_time_seconds = (current_time - metrics.start_time).num_seconds();

@@ -96,12 +96,15 @@ pub fn fast_path_ingest(
     // @todo - create a default message containing every field in metadata, including nested fields
     // let mut message = create_default_nested_message(metadata);
 
-    let mut message = match DEFAULT_NESTED_MESSAGE.read().get(namespace) {
-        Some(m) => m.clone(),
-        None => {
-           Value::Null
-        }
-    };
+    let mut message: Value;
+    {
+        message = match DEFAULT_NESTED_MESSAGE.read().get(namespace) {
+            Some(m) => m.clone(),
+            None => {
+                Value::Null
+            }
+        };
+    }
 
     // panic!("message is: {:?}", message);
 

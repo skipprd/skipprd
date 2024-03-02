@@ -1,6 +1,6 @@
 use crate::buffer::BufferChunker;
 use crate::converters::skippr_hive::SkipprHive;
-use crate::discover::Metadata;
+use crate::discover::{Metadata, PipelineMetadata};
 use crate::helpers::configuration::{Config, PluginConfig};
 use crate::helpers::Helpers;
 use crate::{discover, flatten_metadata, METADATA};
@@ -227,7 +227,10 @@ impl DataOutputAwsAthenaPlugin {
                 // for (namespace, _schema) in &metadata {
                 out_meta.insert(namespace.to_string(), Metadata::new().unwrap());
 
-                let metadata = METADATA.read();
+                let metadata: PipelineMetadata;
+                {
+                    metadata = METADATA.read().clone();
+                }
 
                 let partition_metadata = if flatten {
                     flatten_metadata(

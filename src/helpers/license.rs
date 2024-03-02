@@ -7,11 +7,13 @@ use reqwest::{header::HeaderName, Client, Url};
 use serde_derive::{Deserialize, Serialize};
 
 use std::error::Error;
+use std::string::ToString;
 
 use std::sync::{RwLock};
+use crate::helpers::timed_rwlock::TimedRwLock;
 
-pub static TENANT_ID: Lazy<RwLock<String>> = Lazy::new(|| RwLock::new("".to_string()));
-pub static HAS_LICENSE: Lazy<RwLock<bool>> = Lazy::new(|| RwLock::new(false));
+pub static TENANT_ID: Lazy<TimedRwLock<String>> = Lazy::new(|| TimedRwLock::new("tenant_id".to_string(), "".to_string()));
+pub static HAS_LICENSE: Lazy<TimedRwLock<bool>> = Lazy::new(|| TimedRwLock::new("has_license".to_string(), false));
 
 const API_KEY_ENV_VAR: &str = "SKIPPR_API_TOKEN";
 const APP_ENV: &str = "APP_ENV";
@@ -70,11 +72,9 @@ impl LicenseChecker {
 
             TENANT_ID
                 .write()
-                .unwrap()
                 .clear();
             TENANT_ID
                 .write()
-                .unwrap()
                 .push_str(&self.license.as_ref().unwrap().tenant);
 
             self.license_is_valid = self
@@ -82,15 +82,7 @@ impl LicenseChecker {
                 .as_ref()
                 .map_or(false, |l| &self.api_key == &l.api_key);
 
-            let mut has_license = match HAS_LICENSE.write() {
-                Ok(val) => {
-                    val
-                },
-                Err(err) => {
-                    println!("Error: {:?}", err);
-                    std::process::exit(1)
-                }
-            };
+            let mut has_license = HAS_LICENSE.write();
 
             *has_license = self.license_is_valid;
 

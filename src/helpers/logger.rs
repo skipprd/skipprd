@@ -96,8 +96,10 @@ impl Logger {
 
         let mut default_api_key = "";
 
-        if !*HAS_LICENSE.read().unwrap() {
-            default_api_key = "XxIVftJXN4LF6ARrRqJvKAsv30vhIZHR"
+        {
+            if !*HAS_LICENSE.read() {
+                default_api_key = "XxIVftJXN4LF6ARrRqJvKAsv30vhIZHR"
+            }
         }
 
         let mut token = Config::get_skippr_api_token();
@@ -116,10 +118,15 @@ impl Logger {
 
         let path = "";
 
-        let tenant_id = TENANT_ID.read().unwrap().clone();
+        let mut tenant_id = "".to_string();
+        {
+            tenant_id = TENANT_ID.read().clone();
+        }
 
-        let metrics = METRICS.read();
-        let run_id = metrics.run_id.clone();
+        let mut run_id = "".to_string();
+        {
+            run_id = METRICS.read().run_id.clone();
+        }
 
         let data = json!({
             "logs": logs.iter().map(|(_time, log)| {

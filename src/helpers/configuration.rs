@@ -1192,7 +1192,7 @@ impl Config {
 
     pub async fn get_metadata() -> Result<PipelineMetadata, bool> {
 
-        if !*HAS_LICENSE.read().unwrap() {
+        if !*HAS_LICENSE.read() {
             // println!("ERROR: No license found, please set the 'LICENSE' environment variable.");
             return Err(false);
         }
@@ -1292,7 +1292,7 @@ impl Config {
     }
 
     pub async fn delete_metadata() {
-        if !*HAS_LICENSE.read().unwrap() {
+        if !*HAS_LICENSE.read() {
             // println!("ERROR: No license found, please set the 'LICENSE' environment variable.");
             return;
         }
@@ -1358,7 +1358,7 @@ impl Config {
 
         ///////////
 
-        if !*HAS_LICENSE.read().unwrap() {
+        if !*HAS_LICENSE.read() {
             // println!("ERROR: No license found, please set the 'LICENSE' environment variable.");
             return;
         }
@@ -1442,7 +1442,7 @@ impl Config {
 
     pub async fn sync_schema(metadata: &HashMap<String, Metadata>) {
 
-        if *HAS_LICENSE.read().unwrap() {
+        if *HAS_LICENSE.read() {
             let flatten = Config::get_transform_flatten_events();
 
             for (namespace, schema) in metadata.into_iter() {

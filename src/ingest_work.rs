@@ -1,5 +1,5 @@
 use crate::buffer::{BufferChunker};
-use crate::discover::Metadata;
+use crate::discover::{Metadata, PipelineMetadata};
 use crate::helpers::configuration::Config;
 use crate::helpers::offsets::{OffsetKey, Offsets, OffsetTypes};
 use crate::helpers::Helpers;
@@ -599,21 +599,19 @@ impl Ingest {
                     let schema_hash = match schema_hashes.get(&skpr_namespace) {
                         Some(hash) => hash.clone(),
                         None => {
-                            {
-                                let schemas = ARROW_SCHEMA.read();
+                            let schemas = ARROW_SCHEMA.read();
 
-                                let schema = Arc::clone(schemas.get(&skpr_namespace).unwrap());
-                                let hash = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
+                            let schema = Arc::clone(schemas.get(&skpr_namespace).unwrap());
+                            let hash = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
 
-                                let schema_hash = SchemaHash {
-                                    schema: schema,
-                                    hash: hash
-                                };
+                            let schema_hash = SchemaHash {
+                                schema: schema,
+                                hash: hash
+                            };
 
-                                schema_hashes.insert(skpr_namespace.clone(), schema_hash.clone());
+                            schema_hashes.insert(skpr_namespace.clone(), schema_hash.clone());
 
-                                schema_hash
-                            }
+                            schema_hash
                         }
                     };
 
@@ -717,15 +715,11 @@ impl Ingest {
             *updated_schema_clone.lock().unwrap() = "no".to_string();
 
             // update metadata at control pane, this may or may not be automatically approved
-            // tokio::runtime::Builder::new_multi_thread()
-            //     .enable_all()
-            //     .build()
-            //     .unwrap()
-            //     .block_on(async {
-            //         Config::set_metadata(&METADATA.read(), true).await;
-            //     });
-
-            Config::set_metadata(&METADATA.read(), true).await;
+            let metadata: PipelineMetadata;
+            {
+                metadata = METADATA.read().clone();
+            }
+            Config::set_metadata(&metadata, true).await;
         }
 
         let mut counter_lock = METRICS.write();
@@ -744,7 +738,10 @@ impl Ingest {
         let mut arrow_schema: Result<datatypes::Schema, ArrowError> = Ok(datatypes::Schema::empty());
         let mut schema_ref = Arc::new(datatypes::Schema::empty());
 
-        let metadata = METADATA.read();
+        let metadata: PipelineMetadata;
+        {
+            metadata = METADATA.read().clone();
+        }
 
         if metadata.metadata.get(skpr_namespace).is_none() {
             return Err(ArrowError::SchemaError(format!("Failed to find metadata for namespace: {}", skpr_namespace)));

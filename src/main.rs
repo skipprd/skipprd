@@ -446,7 +446,7 @@ async fn sync() {
         Ok(mut pipeline_metadata) => {
             println!("Found Skippr metadata");
 
-            let pipeline_name = PIPELINE_NAME.read().clone();
+            let pipeline_name = Config::get_pipeline_name();
 
             match pipeline_metadata.sql {
                 Some(sql) => {
@@ -718,7 +718,10 @@ async fn sync() {
         move || {
             if RUNNING.read().load(Ordering::SeqCst) {
 
-                let metrics_lock = METRICS.read();
+                let metrics: Metrics;
+                {
+                    metrics = METRICS.read().clone();
+                }
 
                 let now_lock = now_clone.lock().unwrap();
 
@@ -729,18 +732,18 @@ async fn sync() {
                 println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
 
                 let last_messages_total_val = *last_messages_total.lock().unwrap();
-                let ingested_current = metrics_lock.messages_total - last_messages_total_val;
-                *last_messages_total.lock().unwrap() = metrics_lock.messages_total;
+                let ingested_current = metrics.messages_total - last_messages_total_val;
+                *last_messages_total.lock().unwrap() = metrics.messages_total;
 
 
                 // if DISPLAY_METRICS.read().unwrap().load(Ordering::SeqCst) {
                 if ingested_current > 0 {
                     println!("Messages per Min: {}", ingested_current);
-                    println!("Messages Fixed: {}", metrics_lock.ingeted_slow_total);
-                    println!("Messages Total: {}", metrics_lock.messages_total);
-                    println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
-                    // println!("Bytes per Min: {}", metrics_lock.bytes_current);
-                    println!("Bytes: {}", metrics_lock.bytes_total);
+                    println!("Messages Fixed: {}", metrics.ingeted_slow_total);
+                    println!("Messages Total: {}", metrics.messages_total);
+                    println!("Deadletter Messages: {}", metrics.deadletters_total);
+                    // println!("Bytes per Min: {}", metrics.bytes_current);
+                    println!("Bytes: {}", metrics.bytes_total);
 
                     let total_times: Vec<(String, Duration)> = TimedRwLock::<()>::get_total_wait_times();
                     for (key, value) in total_times.iter() {
@@ -749,12 +752,9 @@ async fn sync() {
                 }
 
                 // }
-                // metrics_lock.bytes_current = 0;
+                // metrics.bytes_current = 0;
 
-
-
-
-                drop(metrics_lock);
+                drop(metrics);
 
                 tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
@@ -770,8 +770,6 @@ async fn sync() {
                         LOGGER.write().await.flush().await.unwrap();
 
                     });
-
-                // let mut metrics_lock = METRICS.read().unwrap();
 
 
 
@@ -973,7 +971,7 @@ pub async fn sync_output_plugin(plugin_name: &str, buffer_name: String) {
                 .await;
         }
         "s3" => {
-            if *HAS_LICENSE.read().unwrap() {
+            if *HAS_LICENSE.read() {
                 let output = DataOutputS3Plugin::new(buffer_name).await;
                 output
                     .sync()
@@ -984,7 +982,7 @@ pub async fn sync_output_plugin(plugin_name: &str, buffer_name: String) {
 
         }
         "athena" => {
-            if *HAS_LICENSE.read().unwrap() {
+            if *HAS_LICENSE.read() {
                 let output = DataOutputAwsAthenaPlugin::new(buffer_name).await;
                 output
                     .sync()
@@ -1033,7 +1031,7 @@ pub async fn sync_input_plugin(offsets_clone: Arc<Offsets>) {
             input.sync(offsets_clone).await;
         }
         "s3_inventory" => {
-            if *HAS_LICENSE.read().unwrap() {
+            if *HAS_LICENSE.read() {
                 let mut input = DataSourceS3InventoryPlugin::new().await;
                 input.sync(
                     offsets_clone,
