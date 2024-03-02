@@ -20,23 +20,10 @@ runs:
           -e AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} \
           -e AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} \
           -e AWS_DEFAULT_REGION=us-east-1 \
-          -e CHAOS_MODE=no \
-          -e DATA_SOURCE_PLUGIN_NAME=s3 \
-          -e DATA_SOURCE_S3_BUCKET=skippr-e2e-sample-data \
-          -e DATA_SOURCE_S3_PREFIX=bike-hire-many \
-          -e DATA_SOURCE_BATCH_SIZE_BYTES=2048000 \
-          -e DATA_OUTPUT_PLUGIN_NAME=athena \
-          -e DATA_OUTPUT_S3_BUCKET=skippr-e2e-sample-data-output \
-          -e DATA_OUTPUT_S3_PREFIX=bikehire \
-          -e SCHEMA_OUTPUT_PLUGIN_NAME=glue \
-          -e SCHEMA_OUTPUT_GLUE_DATABASE_NAME=bikehire \
-          -e DATA_OUTPUT_ATHENA_WORKGROUP_NAME=bikehire \
-          -e PIPELINE_NAME=chaos_mode \
-          -e SKIPPR_API_TOKEN=B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg \
-          -e APP_ENV=test \
-          -e DATA_DIR=./data \
-        
-          skippr/skippr:latest sync
+          skippr/skippr:latest sync --pipeline bike_hire_many
+        docker logs skippr
+        docker container wait skippr
+        docker container rm skippr
     - name: Asset Athena
       shell: bash
       run: |

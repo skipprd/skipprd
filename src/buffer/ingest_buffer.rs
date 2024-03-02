@@ -471,7 +471,7 @@ impl WalPartition {
 
     pub async fn check_wal_rotate(&self) -> bool {
         if self.is_file_size_exceeded() || self.is_file_time_exceeded() {
-            println!("Compacting WAL: {} Bytes: {}, Segment Files {}", self.namespace, self.bytes, self.files.len());
+            println!("Compacting WAL: {} Bytes: {}, Segment Files: {}", self.namespace, self.bytes, self.files.len());
             // self.compact_batches_to_parquet().await;
 
             return true
