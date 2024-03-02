@@ -1422,12 +1422,12 @@ impl WalFile {
             Some(namespace),
             Some(partition),
             time,
-            None,
+            Some(shard),
         );
 
         let wal_partition_dir = WalFile::get_wal_partition_dir(namespace, partition, time, shard);
 
-        let wal_file_name = format!("{}/{}&id={}", wal_partition_dir, wal_file_name, Helpers::random_str(8));
+        let wal_file_name = format!("{}/{}&id={}", wal_partition_dir, wal_file_name, Helpers::random_str(32));
 
         format!("{}.tmp", wal_file_name)
     }
