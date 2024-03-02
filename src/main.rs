@@ -762,7 +762,7 @@ async fn sync() {
                     .unwrap()
                     .block_on(async {
 
-                        match Metrics::send_metrics(Some(0)).await {
+                        match Metrics::send_metrics(None).await {
                             Ok(_g) => {}
                             Err(_err) => {}
                         }
