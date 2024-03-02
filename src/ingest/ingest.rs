@@ -1004,7 +1004,6 @@ mod tests_set_date {
                 out_field_name: String::from(field),
                 determined_type: String::from("date"),
                 determined_type_values: "".to_string(),
-                sql: None
             },
         );
 

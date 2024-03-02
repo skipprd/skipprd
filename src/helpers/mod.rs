@@ -912,7 +912,6 @@ mod flattern_tests {
                 out_field_name: "field".into(),
                 determined_type: "".into(),
                 determined_type_values: "".into(),
-                sql: None
             },
         );
         metadata.insert(
@@ -928,7 +927,6 @@ mod flattern_tests {
                 out_field_name: "contact_name".into(),
                 determined_type: "".into(),
                 determined_type_values: "".into(),
-                sql: None
             },
         );
         metadata.insert(
@@ -944,7 +942,6 @@ mod flattern_tests {
                 out_field_name: "contact_tel".into(),
                 determined_type: "".into(),
                 determined_type_values: "".into(),
-                sql: None
             },
         );
         let flattened = Helpers::flatten(&json, &metadata);
