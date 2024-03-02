@@ -1254,7 +1254,7 @@ impl Config {
                                     let metadata_result = resp.json::<HashMap<String, crate::discover::Metadata>>().await;
                                     match metadata_result {
                                         Ok(metadata) => {
-                                            println!("Migrating metadata to new format");
+                                            println!("Migrating Skippr metadata format from v4 to v5");
                                             let pipeline_metadata = PipelineMetadata::from_metadata(metadata)?;
                                             // set metadata
                                             Config::set_metadata(&pipeline_metadata, false).await;

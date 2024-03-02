@@ -16,10 +16,20 @@ runs:
     - name: Run Skippr in Docker
       shell: bash
       run: |
+        ls -la `pwd`/
+        ls -la `pwd`/.github/
+        ls -la `pwd`/.github/actions/
+        ls -la `pwd`/.github/actions/e2e-docker/
+        ls -la `pwd`/.github/actions/e2e-docker/bike_hire_many/
+        docker run --rm \
+          -v `pwd`/.github/actions/e2e-docker/bike_hire_many/:/foo/ \
+          alpine ls -la /foo/
         docker run --name skippr \
           -e AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} \
           -e AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} \
           -e AWS_DEFAULT_REGION=us-east-1 \
+          -e SKIPPR_CONFIG_FILE=/foo/skippr.yml \
+          -v `pwd`/.github/actions/e2e-docker/bike_hire_many/:/foo/ \
           skippr/skippr:latest sync --pipeline bike_hire_many
         docker logs skippr
         docker container wait skippr
@@ -29,9 +39,3 @@ runs:
       run: |
         pip install soda-core-athena
         AWS_DEFAULT_REGION=us-east-1 AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }}  soda scan -d datalake_e2e -c ./soda/configuration.yml ./soda/bike_hire_many.yml
-      #        docker run --name soda -e AWS_DEFAULT_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY -v `pwd`/soda:/soda sodadata/soda-core scan -d datalake_e2e -c /soda/configuration.yml /soda/chaos_mode.yml
-      #        if [[ "$(docker logs soda >& container-logs ; cat container-logs | grep 'All is good' | wc -l)" -gt 0 ]]; then exit 0; fi
-      #        if [[ "$(docker container wait soda)" -gt 0 ]]; then exit 1; fi
-
-
-      # ... (your existing Asset Athena step)
