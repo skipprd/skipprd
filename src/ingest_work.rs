@@ -498,7 +498,8 @@ impl Ingest {
                             // println!("Falling back to slow path due to: {}", err);
                             let msg = match ingest(
                                 &record,
-                                // &mut NEW_METADATA.write().get_mut(&skpr_namespace).unwrap().fields,
+                                // we do want to write lock here to prevent simultaneous updates to this namespace
+                                // @todo - would be better to lock on the nested structure allowing other namespaces to conitnue
                                 &mut METADATA.write().metadata.get_mut(&skpr_namespace).unwrap().fields,
                                 &skpr_namespace,
                                 &mut updated_schema_clone.lock().unwrap(),

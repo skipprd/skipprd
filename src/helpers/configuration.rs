@@ -226,7 +226,7 @@ impl Config {
 
             // Update app config
             let mut app_config = APP_CONFIG.write();
-            let mut app_config = app_config.as_mut().unwrap();
+            let app_config = app_config.as_mut().unwrap();
 
             // app_config.skippr.workspace = Some(workspace);
             // app_config.skippr.api_token = Some(api_token);
@@ -1449,8 +1449,10 @@ impl Config {
                 println!("Updating Hive '{}' schema", namespace);
 
                 let default_message = create_default_nested_message(&schema.fields);
-                let mut lock = DEFAULT_NESTED_MESSAGE.write();
-                lock.insert(namespace.clone(), default_message);
+                {
+                    let mut lock = DEFAULT_NESTED_MESSAGE.write();
+                    lock.insert(namespace.clone(), default_message);
+                }
 
                 Ingest::prepare_arrow_schema(&namespace, flatten).unwrap();
 

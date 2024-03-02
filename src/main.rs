@@ -901,9 +901,11 @@ async fn sync() {
         sync_output_plugin(&Config::get_pipeline_deadletter_plugin_name(), "deadletter".to_string()).await;
     }
 
-    OUTPUT_RUNNING
-        .write()
-        .store(false, Ordering::SeqCst);
+    {
+        OUTPUT_RUNNING
+            .write()
+            .store(false, Ordering::SeqCst);
+    }
 
     // let metrics_lock = METRICS.read();
     //
