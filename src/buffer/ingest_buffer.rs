@@ -417,6 +417,36 @@ impl WalPartitionIndex {
         let wal_dir = PathBuf::from(format!("{}/ingest_buffer", data_dir));
         let mut wal_files = Vec::new();
 
+        // remove empty dirs
+        for entry in glob_with(&format!("{}/**/*", wal_dir.to_str().unwrap()), MatchOptions {
+            case_sensitive: false,
+            require_literal_separator: false,
+            require_literal_leading_dot: false,
+        }).expect("Failed to clean WAL dir") {
+
+            let path = entry.expect("Failed to read WAL file");
+
+            // remove empty files
+            if path.is_file() && path.metadata().unwrap().len() == 0 {
+                println!("Removing empty WAL file: {}", path.to_str().unwrap());
+                fs::remove_file(&path).unwrap();
+            }
+
+            // remove .tmp files
+            if path.is_file() && path.extension().and_then(OsStr::to_str) == Some("tmp") {
+                println!("Removing temp WAL file: {}", path.to_str().unwrap());
+                fs::remove_file(&path).unwrap();
+            }
+
+            // remove empty dirs
+            // if path.is_dir() {
+            //     if fs::read_dir(&path).unwrap().count() == 0 {
+            //         println!("Removing empty WAL dir: {}", path.to_str().unwrap());
+            //         fs::remove_dir_all(&path).unwrap();
+            //     }
+            // }
+        }
+
         let options = MatchOptions {
             case_sensitive: false,
             require_literal_separator: false,
@@ -426,9 +456,7 @@ impl WalPartitionIndex {
         for entry in glob_with(&format!("{}/**/*.wal", wal_dir.to_str().unwrap()), options).expect("Failed to read WAL files") {
 
             let path = entry.expect("Failed to read WAL file");
-            // if path.is_file() && path.extension().and_then(OsStr::to_str) == Some("wal") {
-                wal_files.push(path);
-            // }
+            wal_files.push(path);
         }
         Ok(wal_files)
     }
