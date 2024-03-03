@@ -105,7 +105,7 @@ impl Buffers {
 
     }
 
-    pub async fn flush(&mut self, offsets_db: Arc<Offsets>) -> Result<(), ArrowError> {
+    pub fn flush(&mut self, offsets_db: Arc<Offsets>) -> Result<(), ArrowError> {
 
         // let arrow_schema_guard = ARROW_SCHEMA.read().clone();
 
@@ -246,7 +246,7 @@ impl Buffers {
             // Evaluate candidates for compaction
             for (key, wal_partition) in index.index.iter() {
 
-                if wal_partition.check_wal_rotate().await {
+                if wal_partition.check_wal_rotate() {
                     compact_index_partitions.insert(key.clone(), wal_partition.clone());
                 }
             }
@@ -262,7 +262,7 @@ impl Buffers {
 
         // Compact the partitions (now the index is unlocked, WAL flushed and offset committed)
         for partition in compact_index_partitions.values_mut() {
-            partition.compact_batches_to_parquet().await;
+            partition.compact_batches_to_parquet();
         }
 
         // println!("Wrote {} rows to WAL", rows);
@@ -270,7 +270,7 @@ impl Buffers {
         Ok(())
     }
 
-    pub async fn compact_all_partitions(force: bool, offsets_db: Arc<Offsets>) {
+    pub fn compact_all_partitions(force: bool, offsets_db: Arc<Offsets>) {
         let mut wal_index = WAL_PARTITION_INDEX.write();
 
         wal_index.index.clear(); // avoid duplicates
@@ -282,11 +282,11 @@ impl Buffers {
         for (_key, wal_partition) in wal_index.index.iter_mut() {
 
             if force {
-                wal_partition.compact_batches_to_parquet().await;
+                wal_partition.compact_batches_to_parquet();
                 compacted_index_partitions.push((wal_partition.namespace.clone(), wal_partition.partition.clone(), wal_partition.time.clone(), wal_partition.shard.clone()));
 
             } else {
-                let rotated = wal_partition.check_wal_rotate().await;
+                let rotated = wal_partition.check_wal_rotate();
 
                 if rotated {
                    compacted_index_partitions.push((wal_partition.namespace.clone(), wal_partition.partition.clone(), wal_partition.time.clone(), wal_partition.shard.clone()));
@@ -328,11 +328,12 @@ impl WalPartitionIndex {
 
         let wal_files = Self::list_wal_files()?;
 
-        if wal_files.len() == 0 {
+        let wal_files_count = wal_files.len();
+
+        if wal_files_count == 0 {
+            println!("Indexed {} of {} WAL files", count, wal_files_count);
             return Ok(());
         }
-
-        let wal_files_count = wal_files.len();
 
         for file_path in wal_files {
 
@@ -497,18 +498,16 @@ impl WalPartition {
             > ttl as u64
     }
 
-    pub async fn check_wal_rotate(&self) -> bool {
+    pub fn check_wal_rotate(&self) -> bool {
         if self.is_file_size_exceeded() || self.is_file_time_exceeded() {
             println!("Compacting WAL: {} Bytes: {}, Segment Files: {}", self.namespace, self.bytes, self.files.len());
-            // self.compact_batches_to_parquet().await;
-
             return true
         }
 
         false
     }
 
-    async fn compact_batches_to_parquet(&mut self) {
+    fn compact_batches_to_parquet(&mut self) {
         let data_dir = Config::get_data_dir();
         let output_file_name = BufferChunker::encode_chunk_name(
             "output",

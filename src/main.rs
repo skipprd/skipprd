@@ -887,7 +887,7 @@ async fn sync() {
         OUTPUT_RUNNING.write().store(true, Ordering::SeqCst);
     }
 
-    Buffers::compact_all_partitions(true, offsets).await;
+    Buffers::compact_all_partitions(true, offsets);
 
     // while BUFFER_FINALISE_RUNNING.read().load(Ordering::SeqCst) {
     //     sleep(Duration::from_secs(1));

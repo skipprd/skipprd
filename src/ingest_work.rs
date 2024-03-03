@@ -230,15 +230,8 @@ impl Ingest {
 
             self.thread_pool.execute(move || {
                 // println!("Processing batch of {} events on core {}", datas_clone.len(), core_count);
-                // Ingest::process_batch(&mut datas_clone, &offset_db_clone, buffers_clone, &core_id.to_string(), run_id).await;
-                // tx.send(()).unwrap();
-
-                // Use a new Tokio runtime or an appropriate async runtime
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                rt.block_on(async {
-                    Ingest::process_batch(&mut datas_clone, &offset_db_clone, buffers_clone, &core_id.to_string(), &mut schema_hashes).await;
-                    tx.send(()).unwrap(); // Assuming this is a synchronous channel
-                });
+                Ingest::process_batch(&mut datas_clone, &offset_db_clone, buffers_clone, &core_id.to_string(), &mut schema_hashes);
+                tx.send(()).unwrap();
             });
 
 
@@ -271,7 +264,7 @@ impl Ingest {
 
     }
 
-    async fn process_batch(
+    fn process_batch(
         datas: &mut Vec<IngestBatch>,
         offset_db_clone: &Arc<Offsets>,
         buffers: Arc<TimedRwLock<Buffers>>,
@@ -710,7 +703,7 @@ impl Ingest {
         buffers.write(buf);
 
         let offset_db_clone = offset_db_clone.clone();
-        buffers.flush(offset_db_clone).await.unwrap();
+        buffers.flush(offset_db_clone).unwrap();
 
         // for buffer in buffers.buffers.iter() {
         //     let mut buffer_lock = buffer.write();
@@ -730,12 +723,15 @@ impl Ingest {
         if updated_schema.as_str() == "yes" {
             updated_schema = "no".to_string();
 
-            // update metadata at control pane, this may or may not be automatically approved
-            let metadata: PipelineMetadata;
-            {
-                metadata = METADATA.read().clone();
-            }
-            Config::set_metadata(&metadata, true).await;
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                // update metadata at control pane, this may or may not be automatically approved
+                let metadata: PipelineMetadata;
+                {
+                    metadata = METADATA.read().clone();
+                }
+                Config::set_metadata(&metadata, true).await;
+            });
         }
 
         let mut counter_lock = METRICS.write();
