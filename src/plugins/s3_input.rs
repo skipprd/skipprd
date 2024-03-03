@@ -6,7 +6,7 @@ pub use aws_smithy_http::byte_stream::AggregatedBytes;
 
 use flate2::read::GzDecoder;
 
-use std::io::{Cursor, Read};
+use std::io::{Cursor, Read, Write};
 
 use std::sync::{Arc};
 
@@ -15,7 +15,8 @@ use aws_sdk_s3::operation::get_object::{GetObjectError, GetObjectOutput};
 
 
 use std::time::Duration;
-use std::{fs};
+use std::{fs, io};
+use std::fs::File;
 
 
 use futures::future::join_all;
@@ -30,6 +31,7 @@ use crate::ingest_work::{Ingest, IngestBatch};
 use tokio::sync::Semaphore;
 use crate::helpers::timed_rwlock::TimedRwLock;
 
+const CONTINUATION_TOKEN_FILE: &str = "s3_input_last_continuation_token.txt";
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct DataSourceS3PluginConfig {
@@ -132,8 +134,6 @@ impl DataSourceS3Plugin {
 
         let mut skipped_objects = 0;
 
-        let mut continuation_token: Option<String> = None;
-
         let chunk_size = self.config.batch_size_bytes.clone().unwrap_or(10000000);
 
         let mut i = 0;
@@ -145,12 +145,15 @@ impl DataSourceS3Plugin {
             s3_prefix = "".to_string();
         }
 
+        let mut continuation_token: Option<String> = Self::read_continuation_token().unwrap_or_else(|_| None);
+
         let mut list_obj_req = self
             .s3_client
             .list_objects_v2()
             .bucket(s3_bucket.clone())
             .prefix(s3_prefix.clone())
-            .max_keys(10000);
+            .max_keys(10000)
+            .set_continuation_token(continuation_token.clone());
 
 
         // important to check few times, else slowly arriving drip of objects will result in us never proceeding to the next pipeline
@@ -247,18 +250,15 @@ impl DataSourceS3Plugin {
                         }
                     }
 
-                    if output.clone().next_continuation_token.is_some() {
-                        continuation_token = output.clone().next_continuation_token;
-
-                        // println!(
-                        //     "Listing with next continuation token {}",
-                        //     continuation_token.clone().unwrap()
-                        // );
-
-                        list_obj_req =
-                            list_obj_req.set_continuation_token(continuation_token.clone());
+                    if let Some(token) = output.next_continuation_token {
+                        continuation_token = Some(token.to_string());
+                        list_obj_req = list_obj_req.set_continuation_token(Some(token.to_string()));
                     } else {
                         println!("Reached end of S3 pagination");
+
+                        if let Err(e) = Self::save_continuation_token(&continuation_token) {
+                            println!("Error saving S3 continuation token: {}", e);
+                        }
 
                         if !outputs.is_empty() {
                             self.download_and_ingest(
@@ -266,11 +266,12 @@ impl DataSourceS3Plugin {
                                 &outputs,
                                 &offsets_clone,
                             )
-                            .await;
+                                .await;
                         }
 
                         break;
                     }
+
                 }
             }
         }
@@ -435,6 +436,27 @@ impl DataSourceS3Plugin {
         self.ingest.ingest_file(batch, &offsets_clone);
     }
 
+    fn save_continuation_token(token: &Option<String>) -> io::Result<()> {
+        match token {
+            Some(t) => {
+                let mut file = File::create(CONTINUATION_TOKEN_FILE)?;
+                file.write_all(t.as_bytes()).expect("Failed to write S3 continuation token");
+                Ok(())
+            },
+            None => Err(io::Error::new(io::ErrorKind::NotFound, "No token to save")),
+        }
+    }
+
+    fn read_continuation_token() -> io::Result<Option<String>> {
+        match File::open(CONTINUATION_TOKEN_FILE) {
+            Ok(mut file) => {
+                let mut token = String::new();
+                file.read_to_string(&mut token)?;
+                Ok(Some(token))
+            },
+            Err(_) => Ok(None), // If there's no file, just proceed without a token
+        }
+    }
 }
 
 struct Download {
