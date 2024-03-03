@@ -252,13 +252,14 @@ impl DataSourceS3Plugin {
 
                     if let Some(token) = output.next_continuation_token {
                         continuation_token = Some(token.to_string());
-                        list_obj_req = list_obj_req.set_continuation_token(Some(token.to_string()));
-                    } else {
-                        println!("Reached end of S3 pagination");
 
                         if let Err(e) = Self::save_continuation_token(&continuation_token) {
                             println!("Error saving S3 continuation token: {}", e);
                         }
+
+                        list_obj_req = list_obj_req.set_continuation_token(Some(token.to_string()));
+                    } else {
+                        println!("Reached end of S3 pagination");
 
                         if !outputs.is_empty() {
                             self.download_and_ingest(
