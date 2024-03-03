@@ -159,7 +159,7 @@ jobs:
 
   macos_x86:
     name: cargo build (mac x86)
-    needs: smoke_test
+#    needs: smoke_test
     runs-on:
       - macOS
       - self-hosted
