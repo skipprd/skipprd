@@ -22,7 +22,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter};
 use std::ops::{Add};
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc};
 use std::thread;
 
 
@@ -497,7 +497,7 @@ async fn sync() {
 
     Config::sync_schema(&pipeline_metadata.metadata).await;
 
-    let now = Arc::new(Mutex::new(Instant::now()));
+    let now = Arc::new(TimedRwLock::new("now".to_string(), Instant::now()));
 
     // let logger_clone = Arc::clone(&logger);
 
@@ -712,7 +712,7 @@ async fn sync() {
 
     let now_clone = now.clone();
 
-    let last_messages_total = Arc::new(Mutex::new(0));
+    let last_messages_total = Arc::new(TimedRwLock::new("last_messages_total".to_string(), 0));
 
     planner.add(
         move || {
@@ -723,7 +723,7 @@ async fn sync() {
                     metrics = METRICS.read().clone();
                 }
 
-                let now_lock = now_clone.lock().unwrap();
+                let now_lock = now_clone.read();
 
                 // metrics_lock.bytes_total += metrics_lock.bytes_current;
 
@@ -731,9 +731,9 @@ async fn sync() {
 
                 println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
 
-                let last_messages_total_val = *last_messages_total.lock().unwrap();
+                let mut last_messages_total_val = *last_messages_total.write();
                 let ingested_current = metrics.messages_total - last_messages_total_val;
-                *last_messages_total.lock().unwrap() = metrics.messages_total;
+                last_messages_total_val = metrics.messages_total;
 
 
                 // if DISPLAY_METRICS.read().unwrap().load(Ordering::SeqCst) {

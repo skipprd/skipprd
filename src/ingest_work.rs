@@ -22,7 +22,7 @@ use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::process::exit;
 use std::string::ToString;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::{SystemTime};
 use threadpool::ThreadPool;
 use std::sync::mpsc::channel;
@@ -291,9 +291,11 @@ impl Ingest {
 
         let _aprox_now = SystemTime::now();
 
-        let updated_schema: Arc<Mutex<String>> = Arc::new(Mutex::new("no".to_string()));
+        // static CLEAN_FIELD_CACHE: Lazy<Arc<DashMap<String, String>>> = Lazy::new(|| Arc::new(DashMap::new()));
+        // let updated_schema: Arc<Mutex<String>> = Arc::new(Mutex::new("no".to_string()));
+        let mut updated_schema= "no".to_string();
 
-        let updated_schema_clone = updated_schema;
+        // let updated_schema_clone = updated_schema;
         // let offset_db_clone = offset_db.clone();
 
         // let mut buffers: Buffers = BUFFER_INDEX.read().get(&output_dir).unwrap().clone();
@@ -515,7 +517,7 @@ impl Ingest {
                                 // @todo - would be better to lock on the nested structure allowing other namespaces to conitnue
                                 &mut METADATA.write().metadata.get_mut(&skpr_namespace).unwrap().fields,
                                 &skpr_namespace,
-                                &mut updated_schema_clone.lock().unwrap(),
+                                &mut updated_schema,
                                 flatten,
                             ) {
                                 Ok(msg) => msg,
@@ -545,7 +547,7 @@ impl Ingest {
                             // update metadata in runtime and ingest message
                             if Config::get_auto_approve() {
 
-                                if updated_schema_clone.lock().unwrap().as_str() == "yes" {
+                                if updated_schema.as_str() == "yes" {
                                     let mut default_message = Value::Null;
                                     {
                                         let metadata = METADATA.read();
@@ -725,8 +727,8 @@ impl Ingest {
 
         // offset_db_clone.flush();
 
-        if *updated_schema_clone.lock().unwrap() == "yes".to_string() {
-            *updated_schema_clone.lock().unwrap() = "no".to_string();
+        if updated_schema.as_str() == "yes" {
+            updated_schema = "no".to_string();
 
             // update metadata at control pane, this may or may not be automatically approved
             let metadata: PipelineMetadata;

@@ -6,7 +6,7 @@ use std::io::{BufRead, BufReader, Cursor, Read, Seek, Write};
 use std::ops::{Deref, Index};
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc};
 use std::time::SystemTime;
 use arrow::array::{Array, ArrayRef, RecordBatch};
 use arrow::json::ReaderBuilder;

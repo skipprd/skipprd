@@ -17,23 +17,26 @@ pub mod logger;
 pub mod offsets;
 pub mod timed_rwlock;
 
-// let clean_field_cache = Arc::new(Mutex::new(HashMap<String, bool> = HashMap::new()));
+// let CLEAN_FIELD_CACHE = Arc::new(Mutex::new(HashMap<String, bool> = HashMap::new()));
 
 use crate::discover::date_formats::DateFormats;
 use crate::discover::Metadata;
 use crate::helpers::configuration::Config;
 use once_cell::sync::Lazy;
-use std::sync::Mutex;
+use std::sync::{Arc};
+use dashmap::DashMap;
+use crate::helpers::timed_rwlock::TimedRwLock;
 
-// static clean_field_cache: Lazy<Mutex<i64>> = Lazy::new(|| Mutex::new(1));
-static clean_field_cache: Lazy<Mutex<HashMap<String, String>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+// static CLEAN_FIELD_CACHE: Lazy<Mutex<i64>> = Lazy::new(|| Mutex::new(1));
+// static CLEAN_FIELD_CACHE: Lazy<TimedRwLock<DashMap<String, String>>> =
+//     Lazy::new(|| TimedRwLock::new("clean_field_cache".to_string(), DashMap::new()));
+static CLEAN_FIELD_CACHE: Lazy<Arc<DashMap<String, String>>> = Lazy::new(|| Arc::new(DashMap::new()));
 
 pub struct Helpers {}
 
 impl Helpers {
-    // let clean_field_cache: HashMap<String, bool> = HashMap::new();
-    // pub(crate) clean_field_cache: HashMap<String, bool> = HashMap::new();
+    // let CLEAN_FIELD_CACHE: HashMap<String, bool> = HashMap::new();
+    // pub(crate) CLEAN_FIELD_CACHE: HashMap<String, bool> = HashMap::new();
 
     // pub fn explode_field(field: &str) -> Vec<&str> {
     //     let mut field_haystack: Vec<&str> = Vec::new();
@@ -69,50 +72,48 @@ impl Helpers {
     }
 
     pub fn clean_field_name<'a>(field: String) -> String {
-        let mut clean = field.to_string();
-
-        let clean_field_cache_lock = &mut *clean_field_cache.lock().unwrap();
-
-        if clean_field_cache_lock.contains_key(&field)
-            && clean_field_cache_lock[&field] != "no".to_string()
         {
-            return clean_field_cache_lock[&field].to_string();
-        } else if !clean_field_cache_lock.contains_key(&field) {
-            if field.parse::<i32>().is_ok() {
-                clean = "item_".to_string() + &field;
+            if let Some(cached) = CLEAN_FIELD_CACHE.get(&field) {
+                if cached.value() != "no" {
+                    return cached.value().to_string();
+                }
             }
+        }
 
-            clean = clean.to_lowercase();
+        let mut clean = field.clone();
+        if field.parse::<i32>().is_ok() {
+            clean = "item_".to_string() + &field;
+        }
 
-            let re =
-                Regex::new(r"[^_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ]")
-                    .unwrap();
-            clean = re.replace_all(&clean, "_").to_string();
-            clean = regex::Regex::new(r"_+")
-                .unwrap()
-                .replace_all(&clean, "_")
-                .to_string();
+        clean = clean.to_lowercase();
 
-            // let pattern = "/[^" + preg_quote(
-            //     "_0123456789_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ",
-            //     "/"
-            // ) + "]/";
-            // clean = preg_replace(pattern, "_", field);
+        let re =
+            Regex::new(r"[^_0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ]")
+                .unwrap();
+        clean = re.replace_all(&clean, "_").to_string();
+        clean = regex::Regex::new(r"_+")
+            .unwrap()
+            .replace_all(&clean, "_")
+            .to_string();
 
-            let x: &[_] = &['1', '2', '3', '4', '5', '6', '7', '8', '9'];
-            clean = clean.trim_start_matches(x).to_string();
-            // clean = ltrim(clean, "0123456789");
+        // let pattern = "/[^" + preg_quote(
+        //     "_0123456789_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        //     "/"
+        // ) + "]/";
+        // clean = preg_replace(pattern, "_", field);
 
-            // '_' at the beginning is common and probably allowable
-            clean = clean.trim_matches('_').to_string();
-            // clean = trim(clean, '_');
+        let x: &[_] = &['1', '2', '3', '4', '5', '6', '7', '8', '9'];
+        clean = clean.trim_start_matches(x).to_string();
+        // clean = ltrim(clean, "0123456789");
 
+        // '_' at the beginning is common and probably allowable
+        clean = clean.trim_matches('_').to_string();
+        // clean = trim(clean, '_');
+
+        {
+            let mut cache = CLEAN_FIELD_CACHE.entry(field.clone()).or_insert_with(|| "no".to_string());
             if clean != field {
-                // println!("Cleaned {} field to {}", field, clean);
-                clean_field_cache_lock.insert(field, clean.clone());
-            } else {
-                // println!("Not cleaned {} field to {}", field, clean);
-                clean_field_cache_lock.insert(field, "no".to_string());
+                *cache = clean.clone();
             }
         }
 
@@ -565,8 +566,7 @@ mod clean_field_name_tests {
     fn test_clean_field_name() {
         // Cache is empty, alphanumeric input
         {
-            let mut clean_field_cache_lock = clean_field_cache.lock().unwrap();
-            clean_field_cache_lock.clear();
+            CLEAN_FIELD_CACHE.clear();
         }
         assert_eq!(
             Helpers::clean_field_name("testField".to_string()),
@@ -575,8 +575,7 @@ mod clean_field_name_tests {
 
         // Cache is empty, input with special characters
         {
-            let mut clean_field_cache_lock = clean_field_cache.lock().unwrap();
-            clean_field_cache_lock.clear();
+            CLEAN_FIELD_CACHE.clear();
         }
         assert_eq!(
             Helpers::clean_field_name("test!@#Field$%^&".to_string()),
@@ -585,8 +584,7 @@ mod clean_field_name_tests {
 
         // Cache is empty, input starts with numbers
         {
-            let mut clean_field_cache_lock = clean_field_cache.lock().unwrap();
-            clean_field_cache_lock.clear();
+            CLEAN_FIELD_CACHE.clear();
         }
         assert_eq!(
             Helpers::clean_field_name("123testField".to_string()),
@@ -595,8 +593,7 @@ mod clean_field_name_tests {
 
         // Cache is empty, input starts with underscore and numbers
         {
-            let mut clean_field_cache_lock = clean_field_cache.lock().unwrap();
-            clean_field_cache_lock.clear();
+            CLEAN_FIELD_CACHE.clear();
         }
         assert_eq!(
             Helpers::clean_field_name("_123testField".to_string()),
@@ -605,8 +602,7 @@ mod clean_field_name_tests {
 
         // Cache is empty, input is numbers
         {
-            let mut clean_field_cache_lock = clean_field_cache.lock().unwrap();
-            clean_field_cache_lock.clear();
+            CLEAN_FIELD_CACHE.clear();
         }
         assert_eq!(
             Helpers::clean_field_name("1".to_string()),
@@ -615,8 +611,8 @@ mod clean_field_name_tests {
 
         // Cache has a record
         {
-            let mut clean_field_cache_lock = clean_field_cache.lock().unwrap();
-            clean_field_cache_lock.insert("cachedField".to_string(), "cachedfield".to_string());
+            CLEAN_FIELD_CACHE.clear();
+            CLEAN_FIELD_CACHE.insert("cachedField".to_string(), "cachedfield".to_string());
         }
         assert_eq!(
             Helpers::clean_field_name("cachedField".to_string()),
@@ -625,8 +621,8 @@ mod clean_field_name_tests {
 
         // Cache has a record marked as "no"
         {
-            let mut clean_field_cache_lock = clean_field_cache.lock().unwrap();
-            clean_field_cache_lock.insert("no_change_field".to_string(), "no".to_string());
+            CLEAN_FIELD_CACHE.clear();
+            CLEAN_FIELD_CACHE.insert("no_change_field".to_string(), "no".to_string());
         }
         assert_eq!(
             Helpers::clean_field_name("no_change_field".to_string()),

@@ -9,7 +9,6 @@ use serde_derive::{Deserialize, Serialize};
 use std::error::Error;
 use std::string::ToString;
 
-use std::sync::{RwLock};
 use crate::helpers::timed_rwlock::TimedRwLock;
 
 pub static TENANT_ID: Lazy<TimedRwLock<String>> = Lazy::new(|| TimedRwLock::new("tenant_id".to_string(), "".to_string()));
