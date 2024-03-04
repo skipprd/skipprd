@@ -442,6 +442,7 @@ impl DataSourceS3Plugin {
             Some(t) => {
                 let mut file = File::create(CONTINUATION_TOKEN_FILE)?;
                 file.write_all(t.as_bytes()).expect("Failed to write S3 continuation token");
+                file.flush()?;
                 Ok(())
             },
             None => Err(io::Error::new(io::ErrorKind::NotFound, "No token to save")),
@@ -453,6 +454,7 @@ impl DataSourceS3Plugin {
             Ok(mut file) => {
                 let mut token = String::new();
                 file.read_to_string(&mut token)?;
+                println!("Found previous S3 List continuation token: {}", token);
                 Ok(Some(token))
             },
             Err(_) => Ok(None), // If there's no file, just proceed without a token
