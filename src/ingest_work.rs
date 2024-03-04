@@ -15,7 +15,7 @@ use std::fs::{File, OpenOptions};
 use std::io;
 
 
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::ops::Deref;
 use std::os::fd::AsRawFd;
 
@@ -81,6 +81,21 @@ pub static DEADLETTER_FILE_NAME: Lazy<String> = Lazy::new(|| BufferChunker::enco
     None
 ));
 
+pub static DEADLETTER_FILE: Lazy<Arc<TimedRwLock<BufWriter<File>>>> = Lazy::new(|| {
+    let data_dir = Config::get_data_dir();
+    let deadletter_dir = format!("{}/deadletter_buffer", data_dir);
+    let output_file = format!("{}/{}", deadletter_dir.clone(), &DEADLETTER_FILE_NAME.as_str());
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&output_file)
+        .unwrap();
+
+    let writer = BufWriter::new(file);
+
+    Arc::new(TimedRwLock::new("deadletter_file".to_string(), writer))
+});
+
 // static AVRO_SCHEMA: Lazy<Mutex<HashMap<String, Schema>>> = Lazy::new(|| {
 //
 //     let mut avro_schemas: HashMap<String, Schema> = HashMap::new();
@@ -134,8 +149,7 @@ impl Ingest {
         let mut buffers = Buffers::new();
         let mut buffers = Arc::new(TimedRwLock::new("buffers".to_string(), buffers));
 
-
-
+        // Schema hashes
         let mut schema_hashes = DashMap::new();
 
         // Scope to ensure read lock is released immediately after cloning
@@ -241,23 +255,13 @@ impl Ingest {
     }
 
     fn deadletter(record: &str, buffers: &Buffers) {
-        let data_dir = Config::get_data_dir();
-        let deadletter_dir = format!("{}/deadletter_buffer", data_dir);
 
-        let output_file = format!("{}/{}", deadletter_dir.clone(), &DEADLETTER_FILE_NAME.as_str());
+        let mut deadletter_file = DEADLETTER_FILE.write();
 
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&output_file)
-            .unwrap();
+        deadletter_file.write(record.as_bytes()).or(Err("Could not write to deadletter file")).unwrap();
+        deadletter_file.write("\n".as_bytes()).or(Err("Could not write to deadletter file")).unwrap();
 
-        let mut file = io::BufWriter::new(file);
-
-        file.write(record.as_bytes()).or(Err("Could not write to deadletter file")).unwrap();
-        file.write("\n".as_bytes()).or(Err("Could not write to deadletter file")).unwrap();
-
-        file.flush().or(Err("Could not flush deadletter file")).unwrap();
+        deadletter_file.flush().or(Err("Could not flush deadletter file")).unwrap();
 
         // buffers.write(&output_file, record.as_bytes());
         // buffers.write(&output_file, "\n".as_bytes());
@@ -390,6 +394,7 @@ impl Ingest {
                                 };
 
                                 Self::deadletter(line_str, &buffers);
+                                offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, batch_line);
 
                                 d += 1;
 
@@ -424,6 +429,7 @@ impl Ingest {
 
 
                     Self::deadletter(line_str, &buffers);
+                    offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, batch_line);
 
                     d += 1;
 
@@ -527,6 +533,7 @@ impl Ingest {
                                     };
 
                                     Self::deadletter(line_str, &buffers);
+                                    offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, batch_line);
 
                                     d += 1;
 
@@ -581,7 +588,7 @@ impl Ingest {
                                 };
 
                                 Self::deadletter(line_str, &buffers);
-
+                                offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, batch_line);
                                 d += 1;
 
                                 continue;
@@ -683,7 +690,8 @@ impl Ingest {
 
             // batch_offset_lines.insert(ingest_batch.offset_key.clone(), batch_line);
 
-            // offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
+            // may have deadlettered some records, so we need to update the offset since they won't be in the WAL
+            offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
             // batch_offset_files.insert(ingest_batch.offset_key.clone(), 1);
 
         }
