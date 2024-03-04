@@ -62,6 +62,7 @@ use clap::Parser;
 use signal_hook::iterator::Signals;
 
 use std::panic;
+use std::path::{Path, PathBuf};
 use std::string::ToString;
 use datafusion::common::ExprSchema;
 
@@ -107,6 +108,8 @@ use crate::sql::operators::alter_column::alter_column_type;
 use crate::sql::operators::drop_column::alter_column_drop;
 use crate::sql::parser::{PipelineToggle, SParser, Statement};
 use crate::sql::query::query;
+
+use walkdir::WalkDir;
 // use crate::plugins::pcap_input::DataSourcePcapPlugin;
 
 // pub static DISPLAY_METRICS: Lazy<TimedRwLock<AtomicBool>> =
@@ -393,6 +396,52 @@ async fn discover() {
     // }).join().unwrap();
 }
 
+fn list_dir_recursively_with_size(start_dir: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    // Use a HashMap to keep track of directory sizes
+    let mut dir_sizes: std::collections::HashMap<PathBuf, u64> = std::collections::HashMap::new();
+
+    // Walk through the directory recursively
+    for entry in WalkDir::new(start_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if path.is_file() {
+            // Get file metadata
+            let metadata = fs::metadata(path)?;
+            let file_size = metadata.len();
+
+            // Add file size to its parent directory total
+            let parent_dir = path.parent().unwrap_or_else(|| Path::new("/"));
+            *dir_sizes.entry(PathBuf::from(parent_dir)).or_insert(0) += file_size;
+        }
+    }
+
+    // To mimic `du -h`, sort directories by their path
+    let mut sorted_dirs: Vec<_> = dir_sizes.iter().collect();
+    sorted_dirs.sort_by_key(|&(dir, _)| dir);
+
+    // Print sizes in a human-readable format
+    for (dir, size) in sorted_dirs {
+        println!("{}:\t{}", dir.display(), human_readable_size(*size));
+    }
+
+    Ok(())
+}
+
+fn human_readable_size(bytes: u64) -> String {
+    let units = ["B", "KB", "MB", "GB", "TB", "PB", "EB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+
+    while size >= 1024.0 && unit < units.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+
+    format!("{:.1} {}", size, units[unit])
+}
+
 async fn sync() {
     {
         LOGGER.write()
@@ -417,6 +466,13 @@ async fn sync() {
     }
 
     let data_dir = Config::get_data_dir();
+
+    let mut data_dir_path = PathBuf::from(&data_dir);
+    match list_dir_recursively_with_size(&data_dir_path) {
+        Ok(_) => (),
+        Err(e) => eprintln!("Error: {}", e),
+    }
+
     let ingest_dir = &format!("{}/ingest_buffer", data_dir);
     let deadletter_dir = &format!("{}/deadletter_buffer", data_dir);
     let output_dir = &format!("{}/output_buffer", data_dir);

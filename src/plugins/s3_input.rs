@@ -173,6 +173,7 @@ impl DataSourceS3Plugin {
                     let objects = match output.contents() {
                         Some(objects) => {
                             // empty_objects = 0;
+                            println!("Found {} objects in S3", objects.len());
                             objects
                         },
                         None => {
