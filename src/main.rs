@@ -821,7 +821,7 @@ async fn sync() {
                         // BufferChunker::rotate_buffers(false);
 
                         while OUTPUT_RUNNING.read().load(Ordering::SeqCst) {
-                            sleep(Duration::from_secs(1));
+                            // sleep(Duration::from_secs(1));
                             // return;
                         }
 
