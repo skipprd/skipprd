@@ -729,12 +729,14 @@ async fn sync() {
 
                 // metrics_lock.run_time_seconds = now_lock.elapsed().as_secs();
 
-                println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
 
-                let mut last_messages_total_val = *last_messages_total.write();
-                let ingested_current = metrics.messages_total - last_messages_total_val;
-                last_messages_total_val = metrics.messages_total;
 
+                let ingested_current: u64;
+                {
+                    let mut last_messages_total_val = last_messages_total.write();
+                    ingested_current  = metrics.messages_total - *last_messages_total_val;
+                    *last_messages_total_val = metrics.messages_total;
+                }
 
                 // if DISPLAY_METRICS.read().unwrap().load(Ordering::SeqCst) {
                 if ingested_current > 0 {
@@ -750,6 +752,8 @@ async fn sync() {
                         println!("{}: {}ms", key, value.as_millis());
                     }
                 }
+
+                println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
 
                 // }
                 // metrics.bytes_current = 0;
