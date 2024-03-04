@@ -254,7 +254,7 @@ impl Ingest {
 
     }
 
-    fn deadletter(record: &str, buffers: &Buffers) {
+    fn deadletter(record: &str) {
 
         let mut deadletter_file = DEADLETTER_FILE.write();
 
@@ -393,7 +393,7 @@ impl Ingest {
                                     None => ""
                                 };
 
-                                Self::deadletter(line_str, &buffers);
+                                Self::deadletter(line_str);
                                 offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, batch_line);
 
                                 d += 1;
@@ -428,7 +428,7 @@ impl Ingest {
                     };
 
 
-                    Self::deadletter(line_str, &buffers);
+                    Self::deadletter(line_str);
                     offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, batch_line);
 
                     d += 1;
@@ -532,7 +532,7 @@ impl Ingest {
                                         }
                                     };
 
-                                    Self::deadletter(line_str, &buffers);
+                                    Self::deadletter(line_str);
                                     offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, batch_line);
 
                                     d += 1;
@@ -587,7 +587,7 @@ impl Ingest {
                                     }
                                 };
 
-                                Self::deadletter(line_str, &buffers);
+                                Self::deadletter(line_str);
                                 offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, batch_line);
                                 d += 1;
 
