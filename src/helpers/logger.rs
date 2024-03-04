@@ -154,11 +154,9 @@ impl Logger {
             .await?;
 
         match response.error_for_status() {
-            Ok(_resp) => {
-                println!("Notified Metrics API");
-            }
+            Ok(_resp) => {},
             Err(err) => {
-                println!("Metrics HTTP Error: {:?}", err);
+                println!("Logs API Error: {:?}", err);
             }
         }
 
