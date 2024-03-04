@@ -729,8 +729,6 @@ async fn sync() {
 
                 // metrics_lock.run_time_seconds = now_lock.elapsed().as_secs();
 
-
-
                 let ingested_current: u64;
                 {
                     let mut last_messages_total_val = last_messages_total.write();
@@ -774,8 +772,6 @@ async fn sync() {
                         LOGGER.write().await.flush().await.unwrap();
 
                     });
-
-
 
             }
         },
@@ -830,8 +826,6 @@ async fn sync() {
                         }
 
                         // BufferChunker::rotate_buffers(false);
-
-                        let offsets_clone = offsets_clone.clone();
 
                         {
                             OUTPUT_RUNNING.write().store(true, Ordering::SeqCst);
