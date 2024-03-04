@@ -668,7 +668,7 @@ async fn sync() {
 
                 // println!("Looking for temp files in {}", &format!("{}/output_buffer/*parquet.temp", data_dir));
 
-                for entry in glob_with(&format!("{}/output_buffer/*.temp", data_dir), options)
+                for entry in glob_with(&format!("{}/output_buffer/*.tmp", data_dir), options)
                     .expect("Failed to read glob 'finalised' pattern")
                 {
                     match entry {
@@ -822,7 +822,7 @@ async fn sync() {
 
                         while OUTPUT_RUNNING.read().load(Ordering::SeqCst) {
                             // sleep(Duration::from_secs(1));
-                            // return;
+                            return;
                         }
 
                         // BufferChunker::rotate_buffers(false);
