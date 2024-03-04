@@ -796,10 +796,8 @@ async fn sync() {
                 if ingested_current > 0 {
                     println!("Messages per Min: {}", ingested_current);
                     println!("Messages Fixed: {}", metrics.ingeted_slow_total);
-                    println!("Messages Total: {}", metrics.messages_total);
-                    println!("Deadletter Messages: {}", metrics.deadletters_total);
                     // println!("Bytes per Min: {}", metrics.bytes_current);
-                    println!("Bytes: {}", metrics.bytes_total);
+
 
                     let total_times: Vec<(String, Duration)> = TimedRwLock::<()>::get_total_wait_times();
                     for (key, value) in total_times.iter() {
@@ -807,6 +805,9 @@ async fn sync() {
                     }
                 }
 
+                println!("Bytes Total: {}", metrics.bytes_total);
+                println!("Messages Total: {}", metrics.messages_total);
+                println!("Deadletter Total: {}", metrics.deadletters_total);
                 println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
 
                 // }
