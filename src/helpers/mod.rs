@@ -498,7 +498,7 @@ impl Helpers {
 
         // Print sizes in a human-readable format
         for (dir, size) in sorted_dirs {
-            println!("{}:\t{}", dir.display(), crate::human_readable_size(*size));
+            println!("{}:\t{}", dir.display(), Helpers::human_readable_size(*size));
         }
 
         Ok(())
