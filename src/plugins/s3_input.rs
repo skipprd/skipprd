@@ -23,7 +23,7 @@ use futures::future::join_all;
 use futures::{StreamExt};
 
 use serde_derive::Deserialize;
-
+use once_cell::sync::Lazy;
 
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::ingest_work::{Ingest, IngestBatch};
@@ -31,7 +31,10 @@ use crate::ingest_work::{Ingest, IngestBatch};
 use tokio::sync::Semaphore;
 use crate::helpers::timed_rwlock::TimedRwLock;
 
-const CONTINUATION_TOKEN_FILE: &str = "s3_input_last_continuation_token.txt";
+// in data_dir
+const CONTINUATION_TOKEN_FILE: Lazy<String> = Lazy::new(|| {
+    format!("{}/s3_continuation_token", Config::get_data_dir())
+});
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct DataSourceS3PluginConfig {
@@ -157,7 +160,7 @@ impl DataSourceS3Plugin {
 
 
         // important to check few times, else slowly arriving drip of objects will result in us never proceeding to the next pipeline
-        let max_empty_objects = 2;
+        let max_empty_objects = 100;
         let mut empty_objects = 0;
 
         loop {
@@ -169,12 +172,12 @@ impl DataSourceS3Plugin {
                 Ok(output) => {
                     let objects = match output.contents() {
                         Some(objects) => {
-                            empty_objects = 0;
+                            // empty_objects = 0;
                             objects
                         },
                         None => {
                             if empty_objects >= max_empty_objects {
-                                println!("No objects found in S3, skipping Bucket: {} Prefix: {}", s3_bucket, s3_prefix);
+                                println!("No more objects found in S3, skipping Bucket: {} Prefix: {}", s3_bucket, s3_prefix);
                                 break;
                             }
                             empty_objects += 1;
@@ -225,12 +228,12 @@ impl DataSourceS3Plugin {
                                 if chunk_size_current >= chunk_size {
                                     // println!("Proccessing {} Objects, totalling {} bytes (batch size config {} bytes)", i, chunk_size_current, chunk_size);
 
-                                    self.download_and_ingest(
-                                        &s3_bucket,
-                                        &outputs,
-                                        &offsets_clone
-                                    )
-                                    .await;
+                                    // self.download_and_ingest(
+                                    //     &s3_bucket,
+                                    //     &outputs,
+                                    //     &offsets_clone
+                                    // )
+                                    // .await;
 
                                     outputs = Vec::new();
                                     i = 0;
@@ -262,12 +265,12 @@ impl DataSourceS3Plugin {
                         println!("Reached end of S3 pagination");
 
                         if !outputs.is_empty() {
-                            self.download_and_ingest(
-                                &s3_bucket,
-                                &outputs,
-                                &offsets_clone,
-                            )
-                                .await;
+                            // self.download_and_ingest(
+                            //     &s3_bucket,
+                            //     &outputs,
+                            //     &offsets_clone,
+                            // )
+                            //     .await;
                         }
 
                         break;
@@ -440,7 +443,7 @@ impl DataSourceS3Plugin {
     fn save_continuation_token(token: &Option<String>) -> io::Result<()> {
         match token {
             Some(t) => {
-                let mut file = File::create(CONTINUATION_TOKEN_FILE)?;
+                let mut file = File::create(CONTINUATION_TOKEN_FILE.to_string())?;
                 file.write_all(t.as_bytes()).expect("Failed to write S3 continuation token");
                 file.flush()?;
                 Ok(())
@@ -450,7 +453,7 @@ impl DataSourceS3Plugin {
     }
 
     fn read_continuation_token() -> io::Result<Option<String>> {
-        match File::open(CONTINUATION_TOKEN_FILE) {
+        match File::open(CONTINUATION_TOKEN_FILE.to_string()) {
             Ok(mut file) => {
                 let mut token = String::new();
                 file.read_to_string(&mut token)?;
