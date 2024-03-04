@@ -2,7 +2,7 @@ use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone, Utc};
 use memory_stats::memory_stats;
 use regex::Regex;
 use std::collections::HashMap;
-use std::env;
+use std::{env, fs};
 
 use std::str;
 
@@ -10,6 +10,7 @@ use rand::seq::SliceRandom;
 use rand::Rng;
 use serde_json::{Map, Value};
 use std::error::Error;
+use std::path::{Path, PathBuf};
 
 pub mod configuration;
 pub mod license;
@@ -26,6 +27,7 @@ use once_cell::sync::Lazy;
 use std::sync::{Arc};
 use dashmap::DashMap;
 use crate::helpers::timed_rwlock::TimedRwLock;
+use walkdir::WalkDir;
 
 // static CLEAN_FIELD_CACHE: Lazy<Mutex<i64>> = Lazy::new(|| Mutex::new(1));
 // static CLEAN_FIELD_CACHE: Lazy<TimedRwLock<DashMap<String, String>>> =
@@ -467,6 +469,52 @@ impl Helpers {
 
         // If no matching Metadata is found in this branch, return None
         None
+    }
+
+    fn list_dir_recursively_with_size(start_dir: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+        // Use a HashMap to keep track of directory sizes
+        let mut dir_sizes: std::collections::HashMap<PathBuf, u64> = std::collections::HashMap::new();
+
+        // Walk through the directory recursively
+        for entry in WalkDir::new(start_dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let path = entry.path();
+            if path.is_file() {
+                // Get file metadata
+                let metadata = fs::metadata(path)?;
+                let file_size = metadata.len();
+
+                // Add file size to its parent directory total
+                let parent_dir = path.parent().unwrap_or_else(|| Path::new("/"));
+                *dir_sizes.entry(PathBuf::from(parent_dir)).or_insert(0) += file_size;
+            }
+        }
+
+        // To mimic `du -h`, sort directories by their path
+        let mut sorted_dirs: Vec<_> = dir_sizes.iter().collect();
+        sorted_dirs.sort_by_key(|&(dir, _)| dir);
+
+        // Print sizes in a human-readable format
+        for (dir, size) in sorted_dirs {
+            println!("{}:\t{}", dir.display(), crate::human_readable_size(*size));
+        }
+
+        Ok(())
+    }
+
+    fn human_readable_size(bytes: u64) -> String {
+        let units = ["B", "KB", "MB", "GB", "TB", "PB", "EB"];
+        let mut size = bytes as f64;
+        let mut unit = 0;
+
+        while size >= 1024.0 && unit < units.len() - 1 {
+            size /= 1024.0;
+            unit += 1;
+        }
+
+        format!("{:.1} {}", size, units[unit])
     }
 
 }
