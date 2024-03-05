@@ -148,7 +148,8 @@ impl DataSourceS3Plugin {
             s3_prefix = "".to_string();
         }
 
-        let mut continuation_token: Option<String> = Self::read_continuation_token().unwrap_or_else(|_| None);
+        // let mut continuation_token: Option<String> = Self::read_continuation_token().unwrap_or_else(|_| None);
+        let mut continuation_token: Option<String> = None;
 
         let mut list_obj_req = self
             .s3_client
