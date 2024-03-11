@@ -523,7 +523,7 @@ impl WalPartition {
 
     async fn compact_batches_to_parquet(&mut self, shared_output: Arc<TimedRwLock<DataOutputAwsAthenaPlugin>>) {
         let data_dir = Config::get_data_dir();
-        let output_file_name = BufferChunker::encode_chunk_name(
+        let mut output_file_name = BufferChunker::encode_chunk_name(
             "output",
             Some(&self.namespace),
             Some(&self.partition),
@@ -531,12 +531,17 @@ impl WalPartition {
             Some(&self.shard)
         );
 
+        // @todo - replace random_str with a sequence/segment number for imdepotent object uploads.
+        // Suspect that will be required to handle retries and failures, while still avoiding overwriting existing data.
+        output_file_name = format!("{}-{}", output_file_name, Helpers::random_str(32));
+
         let mut wal_compacted_bytes_total = 0;
         let mut wal_compacted_rows_total = 0;
         let mut wal_compacted_files_total = 0;
 
 
         // let temp_file_path = format!("{}/{}-{}.temp", data_dir, output_file_name, Helpers::random_str(32));
+
 
         // let write_file = OpenOptions::new()
         //     .create(true)
