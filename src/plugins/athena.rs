@@ -3,7 +3,7 @@ use crate::converters::skippr_hive::SkipprHive;
 use crate::discover::{Metadata, PipelineMetadata};
 use crate::helpers::configuration::{Config, PluginConfig};
 use crate::helpers::Helpers;
-use crate::{discover, flatten_metadata, METADATA};
+use crate::{discover, flatten_metadata, METADATA, METRICS};
 use aws_sdk_athena::types::{EncryptionConfiguration, EncryptionOption, ResultConfiguration, ResultConfigurationUpdates, Tag, WorkGroupConfiguration, WorkGroupConfigurationUpdates};
 use aws_sdk_athena::Client as AthenaClient;
 use aws_sdk_glue::types::{Column, DatabaseInput, PartitionIndex, PartitionInput, SerDeInfo, StorageDescriptor, Table, TableInput};
@@ -19,9 +19,17 @@ use std::io::{BufReader, Read};
 use std::path::Path;
 use aws_sdk_glue::operation::get_table::{GetTableError, GetTableOutput};
 use aws_smithy_http::result::SdkError;
+use bytes::Bytes;
+use datafusion::physical_plan::SendableRecordBatchStream;
+use futures::{Stream, StreamExt};
+use parquet::arrow::arrow_reader::ArrowReaderBuilder;
+use parquet::arrow::ArrowWriter;
+use parquet::basic::Compression;
+use parquet::file::properties::WriterProperties;
 
 use serde_derive::Deserialize;
 use tokio::join;
+use crate::metrics::MetricsStatus;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataOutputAwsAthenaPluginConfig {
@@ -35,6 +43,12 @@ pub struct DataOutputAwsAthenaPluginConfig {
     pub athena_workgroup_name: String,
     pub glue_database_name: String,
 
+}
+
+pub struct ParquetBytes {
+    pub bytes: bytes::Bytes,
+    pub size_bytes: u64,
+    pub meta_data: parquet::format::FileMetaData,
 }
 
 impl From<PluginConfig> for DataOutputAwsAthenaPluginConfig {
@@ -96,41 +110,41 @@ impl DataOutputAwsAthenaPlugin {
         }
     }
 
-    pub async fn sync(&self) {
+    pub async fn sync(&self, stream: SendableRecordBatchStream, filename: String) -> Result<(), std::io::Error> {
         let mut partition_cache: Vec<String> = vec![];
 
-        let mut promises: Vec<tokio::task::JoinHandle<Result<(), std::io::Error>>> = vec![];
+        // let mut promises: Vec<tokio::task::JoinHandle<Result<(), std::io::Error>>> = vec![];
 
-        while let Some(filename) = BufferChunker::next_file(&self.buffer_name) {
+        // while let Some(filename) = BufferChunker::next_file(&self.buffer_name) {
 
             // while promises.len() >= self.max_async_uploads as usize {
             //     promises.pop().unwrap().await.unwrap().expect("TODO: panic message");
             // }
 
-            let mut file = BufReader::new(match File::open(&filename) {
-                Ok(file) => file,
-                Err(err) => {
-                    println!(
-                        "Failed to open file {} for reading, Error: {}",
-                        filename,
-                        err.to_string()
-                    );
-                    continue;
-                }
-            });
+            // let mut file = BufReader::new(match File::open(&filename) {
+            //     Ok(file) => file,
+            //     Err(err) => {
+            //         println!(
+            //             "Failed to open file {} for reading, Error: {}",
+            //             filename,
+            //             err.to_string()
+            //         );
+            //         continue;
+            //     }
+            // });
 
-            let mut contents = Vec::new();
-            match file.read_to_end(&mut contents) {
-                Ok(_bytes) => {}
-                Err(err) => {
-                    println!(
-                        "Failed to read file {}, Error: {}",
-                        filename,
-                        err.to_string()
-                    );
-                    continue;
-                }
-            }
+            // let mut contents = Vec::new();
+            // match file.read_to_end(&mut contents) {
+            //     Ok(_bytes) => {}
+            //     Err(err) => {
+            //         println!(
+            //             "Failed to read file {}, Error: {}",
+            //             filename,
+            //             err.to_string()
+            //         );
+            //         continue;
+            //     }
+            // }
 
             let _bucket = &self.config.s3_bucket;
             let key = &self.config.s3_prefix;
@@ -196,7 +210,8 @@ impl DataOutputAwsAthenaPlugin {
                             time_partition_str,
                             err.to_string()
                         );
-                        continue;
+                        // continue;
+                        return Err(io::Error::new(io::ErrorKind::Other, "Failed to parse time partition string"));
                     }
                 };
 
@@ -241,14 +256,16 @@ impl DataOutputAwsAthenaPlugin {
                             Some(meta) => meta,
                             None => {
                                 println!("Failed to find metadata for namespace: {}", namespace);
-                                continue;
+                                // continue;
+                                return Err(io::Error::new(io::ErrorKind::Other, "Failed to find metadata for namespace"));
                             }
                         },
                         match out_meta.get_mut(&namespace) {
                             Some(meta) => meta.fields.as_mut(),
                             None => {
                                 println!("Failed to find metadata for namespace: {}", namespace);
-                                continue;
+                                // continue;
+                                return Err(io::Error::new(io::ErrorKind::Other, "Failed to find metadata for namespace"));
                             }
                         }
                     );
@@ -273,52 +290,99 @@ impl DataOutputAwsAthenaPlugin {
                 // }
             }
 
-            // md5 hash of the filename
+            // consistent md5 hash of the filename
             let md5_digest = md5::compute(&filename);
             let md5_string = hex::encode(&md5_digest.0);
 
             let final_key = format!("{}/{}", full_key, md5_string);
 
-            let in_progress_filename = format!("{}.in-progress", filename);
-            fs::rename(&filename, &in_progress_filename).unwrap();
+            // let in_progress_filename = format!("{}.in-progress", filename);
+            // fs::rename(&filename, &in_progress_filename).unwrap();
 
-            let promise = DataOutputAwsAthenaPlugin::upload_object(
+           DataOutputAwsAthenaPlugin::upload_object(
                 self.s3_client.clone(),
                 self.config.s3_bucket.clone(),
                 final_key,
-                filename,
+                stream,
                 tags,
-            );
+            ).await
 
-            promises.push(tokio::spawn(promise));
+        // promise
+
+            // promises.push(tokio::spawn(promise));
+        // }
+        //
+        // for promise in promises {
+        //     match promise.await {
+        //         Ok(result) => {
+        //             match result {
+        //                 Ok(_) => {}
+        //                 Err(err) => {
+        //                     println!("Failed to upload file to S3: {}", err);
+        //                 }
+        //             }
+        //         }
+        //         Err(err) => {
+        //             println!("Failed to upload file to S3: {}", err);
+        //         }
+        //     }
+        // }
+    }
+
+    async fn serialize_to_parquet(
+        mut batches: SendableRecordBatchStream,
+    ) -> Result<ParquetBytes, io::Error> {
+        // The ArrowWriter::write() call will return an error if any subsequent
+        // batch does not match this schema, enforcing schema uniformity.
+        let schema = batches.schema();
+
+        // let stream = batches;
+        let mut bytes = Vec::new();
+        // pin_mut!(stream);
+
+        // Construct the arrow serializer with the metadata as part of the parquet
+        // file properties.
+        let props = WriterProperties::builder()
+            .set_dictionary_enabled(false)
+            .set_encoding(parquet::basic::Encoding::PLAIN)
+            .set_compression(Compression::SNAPPY)
+            .build();
+
+        let mut writer = ArrowWriter::try_new(
+            &mut bytes,
+            schema,
+            Some(props),
+        )?;
+
+        while let Some(batch) = batches.next().await {
+            let batch = batch?;
+            writer.write(&batch)?;
+        }
+        // writer.write(&.unwrap()?)?;
+
+        let writer_meta = writer.close()?;
+        if writer_meta.num_rows == 0 {
+            return Err(io::Error::new(io::ErrorKind::Other, "No rows to write to parquet"));
         }
 
-        for promise in promises {
-            match promise.await {
-                Ok(result) => {
-                    match result {
-                        Ok(_) => {}
-                        Err(err) => {
-                            println!("Failed to upload file to S3: {}", err);
-                        }
-                    }
-                }
-                Err(err) => {
-                    println!("Failed to upload file to S3: {}", err);
-                }
-            }
-        }
+        let size_bytes = bytes.len() as u64;
+
+        Ok(ParquetBytes {
+            meta_data: writer_meta,
+            bytes: Bytes::from(bytes),
+            size_bytes,
+        })
     }
 
     async fn upload_object(
         client: S3Client,
         bucket: String,
         key: String,
-        filename: String,
+        stream: SendableRecordBatchStream,
         tag_hashmap: HashMap<String, String>
     ) -> Result<(), std::io::Error> {
 
-        let in_progress_filename = format!("{}.in-progress", filename);
+        // let in_progress_filename = format!("{}.in-progress", filename);
         // match fs::rename(&filename, &in_progress_filename) {
         //     Ok(_) => {}
         //     Err(err) => {
@@ -326,46 +390,37 @@ impl DataOutputAwsAthenaPlugin {
         //     }
         // }
 
-        let body = match ByteStream::from_path(Path::new(&in_progress_filename)).await {
-            Ok(b) => b,
-            Err(e) => {
-                return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to read file before uploading: {}, will retry later. Error {}", filename, e)));
-            }
-        };
+        // let body = match ByteStream::from_path(Path::new(&in_progress_filename)).await {
+        //     Ok(b) => b,
+        //     Err(e) => {
+        //         return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to read file before uploading: {}, will retry later. Error {}", filename, e)));
+        //     }
+        // };
 
         let tags = tag_hashmap.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<String>>().join("&");
+
+        let parquet = Self::serialize_to_parquet(stream).await?;
 
         match client
             .put_object()
             .bucket(&bucket)
             .key(&key)
-            .body(body)
+            .body(ByteStream::from(parquet.bytes))
             .tagging(tags)
             .send()
             .await
         {
             Ok(_resp) => {
-                match fs::remove_file(Path::new(&in_progress_filename)) {
-                    Ok(_) => {
-                        println!("Uploaded {} to S3: {}", filename, key);
-                        Ok(())
-                    }
-                    Err(err) => {
-                        match fs::rename(&in_progress_filename, &filename) {
-                            Ok(_) => {
-                                Err(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to revert in-progress file: {}. Will try again later. Error: {}", in_progress_filename, err)))
-                            }
-                            Err(err) => {
-                                Err(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to remove in-progress file: {}. Will try again later. Error: {}", in_progress_filename, err)))
-                            }
-
-                        }
-                    }
-                }
+                println!("Uploaded {} to S3", key);
+                let mut counter_lock = METRICS.write();
+                counter_lock.parquet_persisted_bytes_total += parquet.size_bytes;
+                counter_lock.parquet_persisted_objects_total += 1;
+                counter_lock.parquet_persisted_rows_total += parquet.meta_data.num_rows as u64;
+                // counter_lock.status = MetricsStatus::Finishing;
+                Ok(())
             }
             Err(err) => {
-                fs::rename(&in_progress_filename, &filename).unwrap();
-                Err(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to upload file: {} to bucket {}, will retry later. Error: {}", filename, bucket, err.into_service_error())))
+                Err(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to upload to bucket {}, will retry later. Error: {}", bucket, err.into_service_error())))
             }
         }
 

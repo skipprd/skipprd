@@ -27,6 +27,8 @@ use byteorder::LittleEndian;
 use datafusion::datasource::MemTable;
 use datafusion::execution::options::ArrowReadOptions;
 use datafusion::parquet::data_type::AsBytes;
+use datafusion::physical_plan::memory::MemoryStream;
+use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
 use icu::properties::sets::print;
 use indexmap::IndexMap;
@@ -44,12 +46,13 @@ use serde_json::{json, Value};
 use tokio::runtime::Runtime;
 use yaml_rust::Yaml::Hash;
 use zerocopy::U64;
-use crate::{ARROW_SCHEMA, METRICS, RUNNING};
+use crate::{ARROW_SCHEMA, METRICS, RUNNING, sync_output_plugin};
 use crate::buffer::BufferChunker;
 use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
 use crate::helpers::offsets::{Offset, OffsetKey, Offsets, OffsetTypes, OffsetValue};
 use crate::helpers::timed_rwlock::TimedRwLock;
+use crate::metrics::Metrics;
 
 pub static TOTAL_ROWS: Lazy<TimedRwLock<AtomicU64>> =
     Lazy::new(|| TimedRwLock::new("record_batch_total".to_string(), AtomicU64::new(0)));
@@ -104,13 +107,14 @@ impl Buffers {
         }
     }
 
-    pub fn flush(&mut self, offsets_db: Arc<Offsets>) -> Result<(), ArrowError> {
+    pub async fn flush(&mut self, offsets_db: Arc<Offsets>) -> Result<(), ArrowError> {
 
         // let arrow_schema_guard = ARROW_SCHEMA.read().clone();
 
         // let mut index = WAL_INDEX.write();
 
-        let mut stats: (u64, u64) = (0, 0);
+        let mut bytes: u64 = 0;
+        let mut rows: u64 = 0;
 
         // println!("Flushing {} WAL files", self.buf.len());
 
@@ -173,8 +177,8 @@ impl Buffers {
 
             let stat = wal_file.write_to_stream(&record_batches)?;
 
-            stats.0 += stat.0;
-            stats.1 += stat.1;
+            bytes += stat.0;
+            rows += stat.1;
 
             // wal_file_partition.bytes += wal_file.write_to_stream(&record_batches)?;
 
@@ -213,6 +217,12 @@ impl Buffers {
         // println!("Ingested {} rows of {} bytes to WAL", stats.1, stats.0);
 
         self.buf.clear();
+
+        {
+            let mut counter_lock = METRICS.write();
+            counter_lock.wal_write_bytes_total += bytes;
+            counter_lock.wal_write_rows_total += rows;
+        }
 
         let mut compact_index_partitions: HashMap<(String, String, Option<i64>, String), WalPartition> = HashMap::new();
 
@@ -261,7 +271,7 @@ impl Buffers {
 
         // Compact the partitions (now the index is unlocked, WAL flushed and offset committed)
         for partition in compact_index_partitions.values_mut() {
-            partition.compact_batches_to_parquet();
+            partition.compact_batches_to_parquet().await;
         }
 
         // println!("Wrote {} rows to WAL", rows);
@@ -269,7 +279,7 @@ impl Buffers {
         Ok(())
     }
 
-    pub fn compact_all_partitions(force: bool, offsets_db: Arc<Offsets>) {
+    pub async fn compact_all_partitions(force: bool, offsets_db: Arc<Offsets>) {
         let mut wal_index = WAL_PARTITION_INDEX.write();
 
         wal_index.index.clear(); // avoid duplicates
@@ -281,7 +291,7 @@ impl Buffers {
         for (_key, wal_partition) in wal_index.index.iter_mut() {
 
             if force {
-                wal_partition.compact_batches_to_parquet();
+                wal_partition.compact_batches_to_parquet().await;
                 compacted_index_partitions.push((wal_partition.namespace.clone(), wal_partition.partition.clone(), wal_partition.time.clone(), wal_partition.shard.clone()));
 
             } else {
@@ -506,7 +516,7 @@ impl WalPartition {
         false
     }
 
-    fn compact_batches_to_parquet(&mut self) {
+    async fn compact_batches_to_parquet(&mut self) {
         let data_dir = Config::get_data_dir();
         let output_file_name = BufferChunker::encode_chunk_name(
             "output",
@@ -516,20 +526,24 @@ impl WalPartition {
             Some(&self.shard)
         );
 
+        let mut wal_compacted_bytes_total = 0;
+        let mut wal_compacted_rows_total = 0;
+        let mut wal_compacted_files_total = 0;
 
-        let temp_file_path = format!("{}/{}-{}.temp", data_dir, output_file_name, Helpers::random_str(32));
 
-        let write_file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(&temp_file_path)
-            .unwrap();
+        // let temp_file_path = format!("{}/{}-{}.temp", data_dir, output_file_name, Helpers::random_str(32));
 
-        let props = WriterProperties::builder()
-            .set_dictionary_enabled(false)
-            .set_encoding(parquet::basic::Encoding::PLAIN)
-            .set_compression(Compression::SNAPPY)
-            .build();
+        // let write_file = OpenOptions::new()
+        //     .create(true)
+        //     .write(true)
+        //     .open(&temp_file_path)
+        //     .unwrap();
+        //
+        // let props = WriterProperties::builder()
+        //     .set_dictionary_enabled(false)
+        //     .set_encoding(parquet::basic::Encoding::PLAIN)
+        //     .set_compression(Compression::SNAPPY)
+        //     .build();
 
         let schema = match self.files.first_mut().unwrap().read_schema_from_stream() {
             Ok(schema) => schema,
@@ -540,39 +554,88 @@ impl WalPartition {
             }
         };
 
-        let mut writer = ArrowWriter::try_new(write_file, schema, Some(props)).unwrap();
 
-        for wal_file in self.files.iter_mut() {
+        let batches = self.files.iter_mut().map(|wal_file| {
+            wal_compacted_bytes_total += wal_file.bytes;
+            wal_compacted_files_total += 1;
 
-            for batch in wal_file.read_from_stream().expect(format!("Failed to read from WAL file: {} of bytes: {}", wal_file.path.to_str().unwrap(), wal_file.get_or_open_file().unwrap().metadata().unwrap().len()).as_str()) {
+            let batches = wal_file.read_from_stream().unwrap();
 
-                writer.write(&batch).expect("Error writing to parquet file");
+            wal_compacted_rows_total += batches.iter().map(|batch| batch.num_rows()).sum::<usize>() as u64;
 
-            }
-        }
+            batches
 
-        writer.close().unwrap();
+        }).flatten().collect::<Vec<RecordBatch>>();
 
-        let parquet_output = format!("{}/{}/{}-{}.parquet", data_dir, "output_buffer", output_file_name, Helpers::random_str(32));
+        let batch_stream: SendableRecordBatchStream = Box::pin(MemoryStream::try_new(batches, schema.clone(), None).unwrap());
 
-        fs::rename(&temp_file_path, parquet_output).unwrap();
 
-        // Rename the processed WAL file to a tombstone file
-        for wal_file in self.files.iter() {
-            let tombstone_path = format!("{}/ingest_buffer/done/{}.tombstone", data_dir, Helpers::random_str(32));
+        match sync_output_plugin("athena", "output".to_string(), batch_stream, output_file_name).await {
+            Ok(()) => {
+                println!("Synced WAL partition to Athena: {} {}", self.namespace, self.partition);
 
-            match fs::rename(&wal_file.path, tombstone_path) {
-                Ok(_) => {
-                    // println!("Tombstoned WAL file: {}", wal_file.path.to_str().unwrap());
-                },
-                Err(e) => {
-                    println!("Failed to tombstone WAL file: {}, Error: {}", wal_file.path.to_str().unwrap(), e);
+                {
+                    let mut counter_lock = METRICS.write();
+                    counter_lock.wal_compacted_bytes_total += wal_compacted_bytes_total;
+                    counter_lock.wal_compacted_rows_total += wal_compacted_rows_total;
+                    counter_lock.wal_compacted_files_total += wal_compacted_files_total;
+
                 }
 
+                // Rename the processed WAL file to a tombstone file
+                for wal_file in self.files.iter() {
+                    let tombstone_path = format!("{}/ingest_buffer/done/{}.tombstone", data_dir, Helpers::random_str(32));
+
+                    match fs::rename(&wal_file.path, tombstone_path) {
+                        Ok(_) => {
+                            // println!("Tombstoned WAL file: {}", wal_file.path.to_str().unwrap());
+                        },
+                        Err(e) => {
+                            println!("Failed to tombstone WAL file: {}, Error: {}", wal_file.path.to_str().unwrap(), e);
+                        }
+
+                    }
+                }
+
+                self.prune_tombstone_wals();
+            },
+            Err(e) => {
+                println!("Failed to sync WAL partition to Athena: {} {}", self.namespace, self.partition);
             }
         }
 
-        self.prune_tombstone_wals();
+
+        // for wal_file in self.files.iter_mut() {
+        //
+        //     for batch in wal_file.read_from_stream().expect(format!("Failed to read from WAL file: {} of bytes: {}", wal_file.path.to_str().unwrap(), wal_file.get_or_open_file().unwrap().metadata().unwrap().len()).as_str()) {
+        //
+        //         writer.write(&batch).expect("Error writing to parquet file");
+        //
+        //     }
+        // }
+        //
+        // writer.close().unwrap();
+
+        // let parquet_output = format!("{}/{}/{}-{}.parquet", data_dir, "output_buffer", output_file_name, Helpers::random_str(32));
+
+        // fs::rename(&temp_file_path, parquet_output).unwrap();
+
+        // Rename the processed WAL file to a tombstone file
+        // for wal_file in self.files.iter() {
+        //     let tombstone_path = format!("{}/ingest_buffer/done/{}.tombstone", data_dir, Helpers::random_str(32));
+        //
+        //     match fs::rename(&wal_file.path, tombstone_path) {
+        //         Ok(_) => {
+        //             // println!("Tombstoned WAL file: {}", wal_file.path.to_str().unwrap());
+        //         },
+        //         Err(e) => {
+        //             println!("Failed to tombstone WAL file: {}, Error: {}", wal_file.path.to_str().unwrap(), e);
+        //         }
+        //
+        //     }
+        // }
+        //
+        // self.prune_tombstone_wals();
 
     }
 

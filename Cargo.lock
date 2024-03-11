@@ -4110,6 +4110,7 @@ dependencies = [
  "aws-types",
  "bincode",
  "byteorder",
+ "bytes",
  "chrono",
  "clap",
  "csv",

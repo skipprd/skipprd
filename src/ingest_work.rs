@@ -53,6 +53,7 @@ use arrow::datatypes::Schema;
 use arrow::error::ArrowError;
 use arrow::datatypes;
 use arrow_schema::SchemaRef;
+use tokio::runtime;
 use crate::converters::skippr_arrow::convert_skippr_to_arrow;
 
 
@@ -242,9 +243,11 @@ impl Ingest {
 
             let mut schema_hashes = self.schema_hashes.clone();
 
+            let handle = runtime::Handle::current();
+
             self.thread_pool.execute(move || {
                 // println!("Processing batch of {} events on core {}", datas_clone.len(), core_count);
-                Ingest::process_batch(&mut datas_clone, &offset_db_clone, buffers_clone, &core_id.to_string(), &mut schema_hashes);
+                Ingest::process_batch(&mut datas_clone, &offset_db_clone, buffers_clone, &core_id.to_string(), &mut schema_hashes, handle);
                 tx.send(()).unwrap();
             });
 
@@ -273,7 +276,8 @@ impl Ingest {
         offset_db_clone: &Arc<Offsets>,
         buffers: Arc<TimedRwLock<Buffers>>,
         core_id: &str,
-        schema_hashes: &mut DashMap<String, SchemaHash>
+        schema_hashes: &mut DashMap<String, SchemaHash>,
+        handle: runtime::Handle,
     ) {
 
         let default_schema_hash = format!("{:?}", md5::compute(Helpers::random_str(10)));
@@ -299,6 +303,7 @@ impl Ingest {
         let mut buffers = Buffers::new();
 
         let mut bytes: u64 = 0;
+        let mut latest_timestamp: i64 = 0;
         let mut i: u64 = 0;
         let mut j = 0;
         let mut d = 0;
@@ -332,6 +337,8 @@ impl Ingest {
         let mut buf: HashMap<(String, String, Option<i64>, String), IngestBufferBatch> = HashMap::new();
 
         for ingest_batch in datas {
+
+            bytes += ingest_batch.data.len() as u64;
 
             // let mut buf: IngestBufferBatch = IngestBufferBatch {
             //     offset: OffsetKeySerialize {
@@ -464,6 +471,10 @@ impl Ingest {
                     if skpr_time.is_some() {
                         skpr_time_bucket =
                             Some(BufferChunker::event_time_bucket(skpr_time.unwrap()));
+
+                        if skpr_time_bucket.unwrap() > latest_timestamp {
+                            latest_timestamp = skpr_time_bucket.unwrap();
+                        }
                     }
 
                     // let output_file_name = BufferChunker::encode_chunk_name(
@@ -671,6 +682,7 @@ impl Ingest {
                     buf_entry.offsets.insert(ingest_batch.offset_key.clone(), batch_line);
 
                     // buf_entry.offsets.push(O);
+                    // bytes += ingest_record.record.to_string().len() as u64;
 
                     buf_entry.records.push(ingest_record);
 
@@ -711,7 +723,9 @@ impl Ingest {
         buffers.write(buf);
 
         let offset_db_clone = offset_db_clone.clone();
-        buffers.flush(offset_db_clone).unwrap();
+        handle.block_on(async {
+            buffers.flush(offset_db_clone).await.expect("Failed to flush buffers")
+        });
 
         // for buffer in buffers.buffers.iter() {
         //     let mut buffer_lock = buffer.write();
@@ -746,8 +760,11 @@ impl Ingest {
         counter_lock.deadletters_total += d;
         counter_lock.ingeted_slow_total += x;
         counter_lock.messages_total += i;
-        counter_lock.bytes_current += bytes;
-        counter_lock.bytes_total += bytes;
+        counter_lock.source_bytes_total += bytes;
+
+        if latest_timestamp as u64 > counter_lock.latest_timestamp {
+            counter_lock.latest_timestamp = latest_timestamp as u64;
+        }
 
     }
 

@@ -13,7 +13,7 @@ extern crate nix;
 
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
-use std::process;
+use std::{io, process};
 
 use std::collections::HashMap;
 
@@ -65,6 +65,8 @@ use std::panic;
 use std::path::{Path, PathBuf};
 use std::string::ToString;
 use datafusion::common::ExprSchema;
+use datafusion::physical_plan::memory::MemoryStream;
+use datafusion::physical_plan::SendableRecordBatchStream;
 
 
 use once_cell::sync::Lazy;
@@ -752,7 +754,9 @@ async fn sync() {
                     }
                 }
 
-                println!("Bytes Total: {}", metrics.bytes_total);
+                let human_bytes = Helpers::human_readable_size(metrics.source_bytes_total);
+
+                println!("Bytes Total: {}", human_bytes);
                 println!("Messages Total: {}", metrics.messages_total);
                 println!("Deadletter Total: {}", metrics.deadletters_total);
                 println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
@@ -813,44 +817,44 @@ async fn sync() {
             }, periodic::Every::new(Duration::from_secs(rand::thread_rng().gen_range(60..90))),
         );
     }
-    out_pnanner.add(
-        move || {
-            if RUNNING.read().load(Ordering::SeqCst) {
-                tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap()
-                    .block_on(async {
-
-                        // BufferChunker::rotate_buffers(false);
-
-                        while OUTPUT_RUNNING.read().load(Ordering::SeqCst) {
-                            // sleep(Duration::from_secs(1));
-                            return;
-                        }
-
-                        // BufferChunker::rotate_buffers(false);
-
-                        {
-                            OUTPUT_RUNNING.write().store(true, Ordering::SeqCst);
-                        }
-
-                        // Buffers::compact_all_partitions(false, offsets_clone).await;
-
-                        if Config::get_pipeline_config().output.is_some() {
-
-                            sync_output_plugin(Config::get_pipeline_output_plugin_name().as_str(), "output".to_string()).await;
-                        }
-
-                        OUTPUT_RUNNING
-                            .write()
-                            .store(false, Ordering::SeqCst);
-                    });
-            }
-        },
-        periodic::Every::new(Duration::from_secs(10)),
-    );
-    out_pnanner.start();
+    // out_pnanner.add(
+    //     move || {
+    //         if RUNNING.read().load(Ordering::SeqCst) {
+    //             tokio::runtime::Builder::new_multi_thread()
+    //                 .enable_all()
+    //                 .build()
+    //                 .unwrap()
+    //                 .block_on(async {
+    //
+    //                     // BufferChunker::rotate_buffers(false);
+    //
+    //                     while OUTPUT_RUNNING.read().load(Ordering::SeqCst) {
+    //                         // sleep(Duration::from_secs(1));
+    //                         return;
+    //                     }
+    //
+    //                     // BufferChunker::rotate_buffers(false);
+    //
+    //                     {
+    //                         OUTPUT_RUNNING.write().store(true, Ordering::SeqCst);
+    //                     }
+    //
+    //                     // Buffers::compact_all_partitions(false, offsets_clone).await;
+    //
+    //                     if Config::get_pipeline_config().output.is_some() {
+    //
+    //                         sync_output_plugin(Config::get_pipeline_output_plugin_name().as_str(), "output".to_string()).await;
+    //                     }
+    //
+    //                     OUTPUT_RUNNING
+    //                         .write()
+    //                         .store(false, Ordering::SeqCst);
+    //                 });
+    //         }
+    //     },
+    //     periodic::Every::new(Duration::from_secs(10)),
+    // );
+    // out_pnanner.start();
 
     // @todo - share across s3 ingests
     // let _parse_namespace_cache: HashMap<String, String> = HashMap::new();
@@ -889,19 +893,19 @@ async fn sync() {
         OUTPUT_RUNNING.write().store(true, Ordering::SeqCst);
     }
 
-    Buffers::compact_all_partitions(true, offsets);
+    Buffers::compact_all_partitions(true, offsets).await;
 
     // while BUFFER_FINALISE_RUNNING.read().load(Ordering::SeqCst) {
     //     sleep(Duration::from_secs(1));
     // }
 
-    if Config::get_pipeline_config().output.is_some() {
-        sync_output_plugin(Config::get_pipeline_output_plugin_name().as_str(), "output".to_string()).await;
-    }
-
-    if Config::get_pipeline_config().deadletter.is_some() {
-        sync_output_plugin(&Config::get_pipeline_deadletter_plugin_name(), "deadletter".to_string()).await;
-    }
+    // if Config::get_pipeline_config().output.is_some() {
+    //     sync_output_plugin(Config::get_pipeline_output_plugin_name().as_str(), "output".to_string()).await;
+    // }
+    //
+    // if Config::get_pipeline_config().deadletter.is_some() {
+    //     sync_output_plugin(&Config::get_pipeline_deadletter_plugin_name(), "deadletter".to_string()).await;
+    // }
 
     {
         OUTPUT_RUNNING
@@ -960,46 +964,49 @@ pub fn flatten_metadata(metadata: &Metadata, flattened: &mut HashMap<String, Met
     }
 }
 
-pub async fn sync_output_plugin(plugin_name: &str, buffer_name: String) {
+pub async fn sync_output_plugin(plugin_name: &str, buffer_name: String, stream: SendableRecordBatchStream, filename: String) -> Result<(), std::io::Error> {
     match plugin_name {
-        "stdout" => {
-            let output = DataOutputStdoutPlugin::new(buffer_name).await;
-            output
-                .sync()
-                .await;
-        }
-        "file" => {
-            let output = DataOutputFilePlugin::new(buffer_name).await;
-            output
-                .sync()
-                .await;
-        }
-        "s3" => {
-            if *HAS_LICENSE.read() {
-                let output = DataOutputS3Plugin::new(buffer_name).await;
-                output
-                    .sync()
-                    .await;
-            } else {
-                println!("No license found for S3 output plugin. Visit https://skippr.io to get a license.");
-            }
-
-        }
+        // "stdout" => {
+        //     let output = DataOutputStdoutPlugin::new(buffer_name).await;
+        //     output
+        //         .sync()
+        //         .await;
+        // }
+        // "file" => {
+        //     let output = DataOutputFilePlugin::new(buffer_name).await;
+        //     output
+        //         .sync()
+        //         .await;
+        // }
+        // "s3" => {
+        //     if *HAS_LICENSE.read() {
+        //         let output = DataOutputS3Plugin::new(buffer_name).await;
+        //         output
+        //             .sync()
+        //             .await;
+        //     } else {
+        //         println!("No license found for S3 output plugin. Visit https://skippr.io to get a license.");
+        //     }
+        //
+        // }
         "athena" => {
             if *HAS_LICENSE.read() {
                 let output = DataOutputAwsAthenaPlugin::new(buffer_name).await;
                 output
-                    .sync()
-                    .await;
+                    .sync(stream, filename)
+                    .await
             } else {
-                println!("No license found for Athena output plugin. Visit https://skippr.io to get a license.");
+                // println!("No license found for Athena output plugin. Visit https://skippr.io to get a license.");
+                Err(io::Error::new(io::ErrorKind::Other, "No license found for Athena output plugin. Visit https://skippr.io to get a license."))
             }
         }
         "" => {
-            println!("No Data {} plugin specified", buffer_name);
+            // println!("No Data {} plugin specified", buffer_name);
+            Err(io::Error::new(io::ErrorKind::Other, "No Data plugin specified"))
         }
         _ => {
-            println!("Unknown Data {} plugin specified", buffer_name);
+            // println!("Unknown Data {} plugin specified", buffer_name);
+            Err(io::Error::new(io::ErrorKind::Other, "Unknown Data plugin specified"))
         }
     }
 }

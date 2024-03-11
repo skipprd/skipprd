@@ -504,7 +504,7 @@ impl Helpers {
         Ok(())
     }
 
-    fn human_readable_size(bytes: u64) -> String {
+    pub fn human_readable_size(bytes: u64) -> String {
         let units = ["B", "KB", "MB", "GB", "TB", "PB", "EB"];
         let mut size = bytes as f64;
         let mut unit = 0;

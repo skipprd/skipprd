@@ -18,6 +18,14 @@ use crate::METRICS;
 pub static LAST_MESSAGES_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static LAST_FIXED_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static LAST_DEADLETTERS_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static LAST_SOURCE_BYTES_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static LAST_WAL_WRITE_BYTES_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static LAST_WAL_WRITE_ROWS_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static LAST_WAL_COMPACTED_BYTES_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static LAST_WAL_COMPACTED_FILES_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static LAST_PARQUET_PERSISTED_BYTES_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static LAST_PARQUET_PERSISTED_ROWS_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static LAST_PARQUET_PERSISTED_OBJECTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 
 const VERSION: Option<&str> = option_env!("CARGO_PKG_VERSION");
@@ -106,12 +114,26 @@ impl MetricsStatus {
 
 #[derive(Debug, Clone)]
 pub struct Metrics {
+    pub source_bytes_total: u64,
+
     pub messages_total: u64,
     pub deadletters_total: u64,
     pub ingeted_slow_total: u64,
+
+    pub wal_write_bytes_total: u64,
+    pub wal_write_rows_total: u64,
+
+    pub wal_compacted_bytes_total: u64,
+    pub wal_compacted_rows_total: u64,
+    pub wal_compacted_files_total: u64,
+
+    pub parquet_persisted_bytes_total: u64,
+    pub parquet_persisted_rows_total: u64,
+    pub parquet_persisted_objects_total: u64,
+
+    pub latest_timestamp: u64,
+
     pub start_time: DateTime<chrono::Utc>,
-    pub bytes_current: u64,
-    pub bytes_total: u64,
     pub status: MetricsStatus,
     pub run_id: String,
 }
@@ -123,13 +145,26 @@ impl Metrics {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            // msgs_total: 0,
+            source_bytes_total: 0,
+
             messages_total: 0,
             deadletters_total: 0,
             ingeted_slow_total: 0,
+
+            wal_write_bytes_total: 0,
+            wal_write_rows_total: 0,
+
+            wal_compacted_bytes_total: 0,
+            wal_compacted_rows_total: 0,
+            wal_compacted_files_total: 0,
+
+            parquet_persisted_bytes_total: 0,
+            parquet_persisted_rows_total: 0,
+            parquet_persisted_objects_total: 0,
+
+            latest_timestamp: 0,
+
             start_time: DateTime::<chrono::Utc>::from(SystemTime::now()),
-            bytes_current: 0,
-            bytes_total: 0,
             status: MetricsStatus::Unknown,
             run_id: Helpers::random_password(32),
         }
@@ -139,7 +174,7 @@ impl Metrics {
         exit_code: Option<i8>,
     ) -> Result<(), Box<dyn std::error::Error>> {
 
-        let metrics: Metrics;
+        let mut metrics: Metrics;
         {
             metrics = METRICS.read().clone();
         }
@@ -183,6 +218,38 @@ impl Metrics {
             tenant_id = TENANT_ID.read().clone();
         }
 
+        let wal_write_bytes_total = LAST_WAL_WRITE_BYTES_TOTAL.load(Ordering::Relaxed);
+        let wal_write_bytes_current = metrics.wal_write_bytes_total - wal_write_bytes_total;
+        LAST_WAL_WRITE_BYTES_TOTAL.store(metrics.wal_write_bytes_total, Ordering::Relaxed);
+
+        let wal_write_rows_total = LAST_WAL_WRITE_ROWS_TOTAL.load(Ordering::Relaxed);
+        let wal_write_rows_current = metrics.wal_write_rows_total - wal_write_rows_total;
+        LAST_WAL_WRITE_ROWS_TOTAL.store(metrics.wal_write_rows_total, Ordering::Relaxed);
+
+        let wal_compacted_bytes_total = LAST_WAL_COMPACTED_BYTES_TOTAL.load(Ordering::Relaxed);
+        let wal_compacted_bytes_current = metrics.wal_compacted_bytes_total - wal_compacted_bytes_total;
+        LAST_WAL_COMPACTED_BYTES_TOTAL.store(metrics.wal_compacted_bytes_total, Ordering::Relaxed);
+
+        let wal_compacted_files_total = LAST_WAL_COMPACTED_FILES_TOTAL.load(Ordering::Relaxed);
+        let wal_compacted_files_current = metrics.wal_compacted_files_total - wal_compacted_files_total;
+        LAST_WAL_COMPACTED_FILES_TOTAL.store(metrics.wal_compacted_files_total, Ordering::Relaxed);
+
+        let parquet_persisted_bytes_total = LAST_PARQUET_PERSISTED_BYTES_TOTAL.load(Ordering::Relaxed);
+        let parquet_persisted_bytes_current = metrics.parquet_persisted_bytes_total - parquet_persisted_bytes_total;
+        LAST_PARQUET_PERSISTED_BYTES_TOTAL.store(metrics.parquet_persisted_bytes_total, Ordering::Relaxed);
+
+        let parquet_persisted_rows_total = LAST_PARQUET_PERSISTED_ROWS_TOTAL.load(Ordering::Relaxed);
+        let parquet_persisted_rows_current = metrics.parquet_persisted_rows_total - parquet_persisted_rows_total;
+        LAST_PARQUET_PERSISTED_ROWS_TOTAL.store(metrics.parquet_persisted_rows_total, Ordering::Relaxed);
+
+        let parquet_persisted_objects_total = LAST_PARQUET_PERSISTED_OBJECTS_TOTAL.load(Ordering::Relaxed);
+        let parquet_persisted_objects_current = metrics.parquet_persisted_objects_total - parquet_persisted_objects_total;
+        LAST_PARQUET_PERSISTED_OBJECTS_TOTAL.store(metrics.parquet_persisted_objects_total, Ordering::Relaxed);
+
+        let source_bytes_total = LAST_SOURCE_BYTES_TOTAL.load(Ordering::Relaxed);
+        let source_bytes_current = metrics.source_bytes_total - source_bytes_total;
+        LAST_SOURCE_BYTES_TOTAL.store(metrics.source_bytes_total, Ordering::Relaxed);
+
         let last_messages_total = LAST_MESSAGES_TOTAL.load(Ordering::Relaxed);
         let ingested_current = metrics.messages_total - last_messages_total;
         LAST_MESSAGES_TOTAL.store(metrics.messages_total, Ordering::Relaxed);
@@ -212,9 +279,24 @@ impl Metrics {
                 "ingeted_current": ingested_current,
                 "fixed_current": fixed_current,
                 "deadletters_current": deadletters_current,
+                "latest_timestamp": metrics.latest_timestamp,
                 "run_time_seconds": run_time_seconds,
-                "bytes_current": metrics.bytes_current,
-                "bytes_total": metrics.bytes_total,
+                "bytes_current": source_bytes_current,
+                "bytes_total": metrics.source_bytes_total,
+                "wal_write_bytes_total": metrics.wal_write_bytes_total,
+                "wal_write_bytes_current": wal_write_bytes_current,
+                "wal_write_rows_total": metrics.wal_write_rows_total,
+                "wal_write_rows_current": wal_write_rows_current,
+                "wal_compacted_bytes_total": metrics.wal_compacted_bytes_total,
+                "wal_compacted_bytes_current": wal_compacted_bytes_current,
+                "wal_compacted_files_total": metrics.wal_compacted_files_total,
+                "wal_compacted_files_current": wal_compacted_files_current,
+                "parquet_persisted_bytes_total": metrics.parquet_persisted_bytes_total,
+                "parquet_persisted_bytes_current": parquet_persisted_bytes_current,
+                "parquet_persisted_rows_total": metrics.parquet_persisted_rows_total,
+                "parquet_persisted_rows_current": parquet_persisted_rows_current,
+                "parquet_persisted_objects_total": metrics.parquet_persisted_objects_total,
+                "parquet_persisted_objects_current": parquet_persisted_objects_current,
                 "lock_wait_times": wait_times,
             },
             "type": "metric",
@@ -228,6 +310,13 @@ impl Metrics {
             "version": VERSION.unwrap_or("unknown"),
             "exit_code": exit_code
         });
+
+        metrics.wal_write_bytes_total = 0;
+        metrics.wal_write_rows_total = 0;
+        metrics.wal_compacted_bytes_total = 0;
+        metrics.wal_compacted_files_total = 0;
+        metrics.parquet_persisted_bytes_total = 0;
+        metrics.parquet_persisted_objects_total = 0;
 
         // println!("Posting data: {:?}", data);
 
