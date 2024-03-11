@@ -13,7 +13,7 @@ use aws_sdk_s3::{Client as S3Client, Error};
 use chrono::prelude::*;
 
 use std::collections::HashMap;
-use std::fs;
+use std::{fs, io};
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
@@ -21,6 +21,7 @@ use aws_sdk_glue::operation::get_table::{GetTableError, GetTableOutput};
 use aws_smithy_http::result::SdkError;
 
 use serde_derive::Deserialize;
+use tokio::join;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataOutputAwsAthenaPluginConfig {
@@ -53,6 +54,7 @@ pub struct DataOutputAwsAthenaPlugin {
     // s3_bucket: String,
     // s3_prefix: String,
     // time_bucket: String,
+    max_async_uploads: i64,
 }
 
 const GRANULARITIES: [&str; 5] = ["year", "month", "day", "hour", "minute"];
@@ -82,7 +84,6 @@ impl DataOutputAwsAthenaPlugin {
         // let s3_prefix = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
         // let time_bucket = Config::getenv("TRANSFORM_BATCH_TIME_UNIT", "");
 
-
         // let athena_config: DataOutputAwsAthenaPluginConfig = Config::get_pipline_plugin_config("output").unwrap().into();
         let athena_config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
 
@@ -91,13 +92,21 @@ impl DataOutputAwsAthenaPlugin {
             athena_client,
             config: athena_config,
             buffer_name: buffer_name,
+            max_async_uploads: 10,
         }
     }
 
     pub async fn sync(&self) {
         let mut partition_cache: Vec<String> = vec![];
 
+        let mut promises: Vec<tokio::task::JoinHandle<Result<(), std::io::Error>>> = vec![];
+
         while let Some(filename) = BufferChunker::next_file(&self.buffer_name) {
+
+            // while promises.len() >= self.max_async_uploads as usize {
+            //     promises.pop().unwrap().await.unwrap().expect("TODO: panic message");
+            // }
+
             let mut file = BufReader::new(match File::open(&filename) {
                 Ok(file) => file,
                 Err(err) => {
@@ -155,14 +164,8 @@ impl DataOutputAwsAthenaPlugin {
                 let collection: Vec<&str> = parts.collect();
 
                 for item in &collection {
-                    let mut key = match item.split("=").next() {
-                        Some(key) => key,
-                        None => "",
-                    };
-                    let mut value = match item.split("=").last() {
-                        Some(value) => value,
-                        None => "",
-                    };
+                    let mut key = item.split("=").next().unwrap_or_else(|| "");
+                    let mut value = item.split("=").last().unwrap_or_else(|| "");
 
                     if key == "" {
                         key = "none";
@@ -276,103 +279,96 @@ impl DataOutputAwsAthenaPlugin {
 
             let final_key = format!("{}/{}", full_key, md5_string);
 
-            DataOutputAwsAthenaPlugin::upload_object(
-                &self.s3_client,
-                &self.config.s3_bucket,
-                &final_key,
-                &filename,
+            let in_progress_filename = format!("{}.in-progress", filename);
+            fs::rename(&filename, &in_progress_filename).unwrap();
+
+            let promise = DataOutputAwsAthenaPlugin::upload_object(
+                self.s3_client.clone(),
+                self.config.s3_bucket.clone(),
+                final_key,
+                filename,
                 tags,
-            )
-            .await
-            .unwrap();
+            );
+
+            promises.push(tokio::spawn(promise));
+        }
+
+        for promise in promises {
+            match promise.await {
+                Ok(result) => {
+                    match result {
+                        Ok(_) => {}
+                        Err(err) => {
+                            println!("Failed to upload file to S3: {}", err);
+                        }
+                    }
+                }
+                Err(err) => {
+                    println!("Failed to upload file to S3: {}", err);
+                }
+            }
         }
     }
 
-    // Upload a file to a bucket.
-    // snippet-start:[s3.rust.s3-helloworld]
     async fn upload_object(
-        client: &S3Client,
-        bucket: &str,
-        key: &str,
-        filename: &str,
+        client: S3Client,
+        bucket: String,
+        key: String,
+        filename: String,
         tag_hashmap: HashMap<String, String>
-    ) -> Result<(), Error> {
-        // let resp = client.list_buckets().send().await?;
+    ) -> Result<(), std::io::Error> {
 
-        // for bucket in resp.buckets().unwrap_or_default() {
-        //     println!("bucket: {:?}", bucket.name().unwrap_or_default())
+        let in_progress_filename = format!("{}.in-progress", filename);
+        // match fs::rename(&filename, &in_progress_filename) {
+        //     Ok(_) => {}
+        //     Err(err) => {
+        //         return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to mark file as in-progress: {}. Will try again later. Error: {}", filename, err)));
+        //     }
         // }
 
-        // println!();
-
-        let body = ByteStream::from_path(Path::new(filename)).await;
+        let body = match ByteStream::from_path(Path::new(&in_progress_filename)).await {
+            Ok(b) => b,
+            Err(e) => {
+                return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to read file before uploading: {}, will retry later. Error {}", filename, e)));
+            }
+        };
 
         let tags = tag_hashmap.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<String>>().join("&");
 
-        match body {
-            Ok(b) => {
-                // println!("Uploading file: {} to Bucket: {} and Prefix: {} and Tags: {}", filename, bucket, key, tags);
-
-                match client
-                    .put_object()
-                    .bucket(bucket)
-                    .key(key)
-                    .body(b)
-                    .tagging(tags)
-                    .send()
-                    .await
-                {
-                    Ok(_resp) => {
+        match client
+            .put_object()
+            .bucket(&bucket)
+            .key(&key)
+            .body(body)
+            .tagging(tags)
+            .send()
+            .await
+        {
+            Ok(_resp) => {
+                match fs::remove_file(Path::new(&in_progress_filename)) {
+                    Ok(_) => {
                         println!("Uploaded {} to S3: {}", filename, key);
-                        match fs::remove_file(Path::new(&filename)) {
-                            Ok(_) => {}
-                            Err(_) => {
-                                // @todo - log this back to skippr platform
-                            }
-                        };
+                        Ok(())
                     }
                     Err(err) => {
-                        println!("Failed to upload file: {} to bucket {}, will retry later.", filename, bucket);
-                        println!("{:?}", err.raw_response());
+                        match fs::rename(&in_progress_filename, &filename) {
+                            Ok(_) => {
+                                Err(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to revert in-progress file: {}. Will try again later. Error: {}", in_progress_filename, err)))
+                            }
+                            Err(err) => {
+                                Err(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to remove in-progress file: {}. Will try again later. Error: {}", in_progress_filename, err)))
+                            }
 
-
-                        // tokio::spawn(async move {
-                        // LOGGER
-                        //     .write()
-                        //     .await
-                        //     .log(
-                        //         LogLevel::Error,
-                        //         format!(
-                        //         "Athena Plugin failed to upload file: {}, key: {} with error: {:?}",
-                        //         filename,
-                        //         key,
-                        //         err.into_service_error()
-                        //     ),
-                        //     )
-                        //     .await;
-                        // });
-                        // LOGGER.lock().unwrap().push(format!(
-                        //     "Athena Plugin failed to upload file: {}, key: {} with error: {:?}",
-                        //     filename,
-                        //     key,
-                        //     err.into_service_error()
-                        // ));
+                        }
                     }
                 }
-
-                // let resp = client.get_object().bucket(bucket).key(key).send().await?;
-                // println!("Response: {:?}", resp);
-
-                // let data = resp.body.collect().await;
-                // println!("data: {:?}", data.unwrap().into_bytes());
             }
-            Err(e) => {
-                println!("Failed to read file before uploading: {}, will retry later.", filename);
-                println!("{}", e);
+            Err(err) => {
+                fs::rename(&in_progress_filename, &filename).unwrap();
+                Err(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to upload file: {} to bucket {}, will retry later. Error: {}", filename, bucket, err.into_service_error())))
             }
         }
 
-        Ok(())
     }
 }
 
