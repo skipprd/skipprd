@@ -88,15 +88,15 @@ use crate::helpers::license::HAS_LICENSE;
 use crate::plugins::athena::DataOutputAwsAthenaPlugin;
 
 use crate::plugins::s3_input::DataSourceS3Plugin;
-use crate::plugins::s3_inventory::DataSourceS3InventoryPlugin;
+// use crate::plugins::s3_inventory::DataSourceS3InventoryPlugin;
 
 
 use crate::metrics::{Metrics, MetricsStatus};
 use crate::plugins::file_input::DataSourceLocalFilePlugin;
-use crate::plugins::file_output::DataOutputFilePlugin;
-use crate::plugins::s3_output::DataOutputS3Plugin;
-use crate::plugins::stdin_input::DataSourceStdinPlugin;
-use crate::plugins::stdout_output::DataOutputStdoutPlugin;
+// use crate::plugins::file_output::DataOutputFilePlugin;
+// use crate::plugins::s3_output::DataOutputS3Plugin;
+// use crate::plugins::stdin_input::DataSourceStdinPlugin;
+// use crate::plugins::stdout_output::DataOutputStdoutPlugin;
 
 use datafusion::prelude::*;
 use sqlparser::test_utils::alter_table_op_with_name;
@@ -502,6 +502,9 @@ async fn sync() {
 
     Config::sync_schema(&pipeline_metadata.metadata).await;
 
+    let output = DataOutputAwsAthenaPlugin::new("output".to_string()).await;
+    let shared_output = Arc::new(TimedRwLock::new("athena_output".to_string(), output));
+
     let now = Arc::new(TimedRwLock::new("now".to_string(), Instant::now()));
 
     // let logger_clone = Arc::clone(&logger);
@@ -868,7 +871,8 @@ async fn sync() {
 
     let offsets_clone = offsets.clone();
 
-    sync_input_plugin(offsets_clone).await;
+    let shared_output_clone = shared_output.clone();
+    sync_input_plugin(offsets_clone, shared_output_clone).await;
 
     println!("Ingest completed, flushing remaining buffers to output plugin {}", Config::get_pipeline_config().output.or(Some("".to_string())).unwrap());
 
@@ -893,7 +897,8 @@ async fn sync() {
         OUTPUT_RUNNING.write().store(true, Ordering::SeqCst);
     }
 
-    Buffers::compact_all_partitions(true, offsets).await;
+    let shared_output_clone = shared_output.clone();
+    Buffers::compact_all_partitions(true, offsets, shared_output_clone).await;
 
     // while BUFFER_FINALISE_RUNNING.read().load(Ordering::SeqCst) {
     //     sleep(Duration::from_secs(1));
@@ -1011,47 +1016,48 @@ pub async fn sync_output_plugin(plugin_name: &str, buffer_name: String, stream: 
     }
 }
 
-pub async fn sync_input_plugin(offsets_clone: Arc<Offsets>) {
+pub async fn sync_input_plugin(offsets_clone: Arc<Offsets>, shared_output: Arc<TimedRwLock<DataOutputAwsAthenaPlugin>>) {
     match Config::get_pipeline_input_plugin_name().as_str() {
-        "pcap" => {
-            panic!("PCAP input plugin not installed, please contact support")
-            // let mut input = DataSourcePcapPlugin::new().await;
-            // input
-            //     .sync(
-            //         offsets_clone,
-            //     )
-            //     .await;
-        }
-        "stdin" => {
-            let mut input = DataSourceStdinPlugin::new().await;
-            input
-                .sync(
-                    offsets_clone,
-                )
-                .await;
-        }
+        // "pcap" => {
+        //     panic!("PCAP input plugin not installed, please contact support")
+        //     // let mut input = DataSourcePcapPlugin::new().await;
+        //     // input
+        //     //     .sync(
+        //     //         offsets_clone,
+        //     //     )
+        //     //     .await;
+        // }
+        // "stdin" => {
+        //     let mut input = DataSourceStdinPlugin::new().await;
+        //     input
+        //         .sync(
+        //             offsets_clone,
+        //         )
+        //         .await;
+        // }
         "file" => {
             let mut input = DataSourceLocalFilePlugin::new().await;
             input.sync(
-                offsets_clone
+                offsets_clone,
+                shared_output
             )
                 .await;
         }
         "s3" => {
             let mut input = DataSourceS3Plugin::new().await;
-            input.sync(offsets_clone).await;
+            input.sync(offsets_clone, shared_output).await;
         }
-        "s3_inventory" => {
-            if *HAS_LICENSE.read() {
-                let mut input = DataSourceS3InventoryPlugin::new().await;
-                input.sync(
-                    offsets_clone,
-                )
-                    .await;
-            } else {
-                println!("No license found for S3 Inventory input plugin. Visit https://skippr.io to get a license.");
-            }
-        }
+        // "s3_inventory" => {
+        //     if *HAS_LICENSE.read() {
+        //         let mut input = DataSourceS3InventoryPlugin::new().await;
+        //         input.sync(
+        //             offsets_clone,
+        //         )
+        //             .await;
+        //     } else {
+        //         println!("No license found for S3 Inventory input plugin. Visit https://skippr.io to get a license.");
+        //     }
+        // }
         "" => {
             println!("No Data Source plugin specified. You must specify a data source plugin, see documentation for the DATA_SOURCE_PLUGIN_NAME environment variable.");
         }

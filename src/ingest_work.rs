@@ -55,6 +55,7 @@ use arrow::datatypes;
 use arrow_schema::SchemaRef;
 use tokio::runtime;
 use crate::converters::skippr_arrow::convert_skippr_to_arrow;
+use crate::plugins::athena::DataOutputAwsAthenaPlugin;
 
 
 #[derive(Clone, Debug)]
@@ -147,6 +148,7 @@ impl Ingest {
             }
         });
 
+
         let mut buffers = Buffers::new();
         let mut buffers = Arc::new(TimedRwLock::new("buffers".to_string(), buffers));
 
@@ -199,6 +201,7 @@ impl Ingest {
         &self,
         datas: Vec<IngestBatch>,
         offset_db: &Arc<Offsets>,
+        shared_output: Arc<TimedRwLock<DataOutputAwsAthenaPlugin>>,
     ) {
         // println!("Ingesting {} events", datas.len());
 
@@ -245,9 +248,11 @@ impl Ingest {
 
             let handle = runtime::Handle::current();
 
+            let shared_output_clone = shared_output.clone();
+
             self.thread_pool.execute(move || {
                 // println!("Processing batch of {} events on core {}", datas_clone.len(), core_count);
-                Ingest::process_batch(&mut datas_clone, &offset_db_clone, buffers_clone, &core_id.to_string(), &mut schema_hashes, handle);
+                Ingest::process_batch(&mut datas_clone, &offset_db_clone, buffers_clone, &core_id.to_string(), &mut schema_hashes, handle, shared_output_clone);
                 tx.send(()).unwrap();
             });
 
@@ -278,6 +283,7 @@ impl Ingest {
         core_id: &str,
         schema_hashes: &mut DashMap<String, SchemaHash>,
         handle: runtime::Handle,
+        shared_output: Arc<TimedRwLock<DataOutputAwsAthenaPlugin>>,
     ) {
 
         let default_schema_hash = format!("{:?}", md5::compute(Helpers::random_str(10)));
@@ -723,8 +729,9 @@ impl Ingest {
         buffers.write(buf);
 
         let offset_db_clone = offset_db_clone.clone();
+        let shared_output_clone = shared_output.clone();
         handle.block_on(async {
-            buffers.flush(offset_db_clone).await.expect("Failed to flush buffers")
+            buffers.flush(offset_db_clone, shared_output_clone).await.expect("Failed to flush buffers")
         });
 
         // for buffer in buffers.buffers.iter() {

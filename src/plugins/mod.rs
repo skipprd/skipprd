@@ -4,13 +4,13 @@
 // use crate::helpers::offsets::Offsets;
 
 pub mod athena;
-pub mod stdin_input;
+// pub mod stdin_input;
 pub mod s3_input;
-pub mod s3_inventory;
+// pub mod s3_inventory;
 pub mod file_input;
-pub mod s3_output;
-pub mod file_output;
-pub mod stdout_output;
+// pub mod s3_output;
+// pub mod file_output;
+// pub mod stdout_output;
 // pub mod pcap_input;
 
 // #[async_trait]

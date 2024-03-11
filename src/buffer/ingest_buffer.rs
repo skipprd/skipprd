@@ -53,6 +53,7 @@ use crate::helpers::Helpers;
 use crate::helpers::offsets::{Offset, OffsetKey, Offsets, OffsetTypes, OffsetValue};
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::metrics::Metrics;
+use crate::plugins::athena::DataOutputAwsAthenaPlugin;
 
 pub static TOTAL_ROWS: Lazy<TimedRwLock<AtomicU64>> =
     Lazy::new(|| TimedRwLock::new("record_batch_total".to_string(), AtomicU64::new(0)));
@@ -107,7 +108,7 @@ impl Buffers {
         }
     }
 
-    pub async fn flush(&mut self, offsets_db: Arc<Offsets>) -> Result<(), ArrowError> {
+    pub async fn flush(&mut self, offsets_db: Arc<Offsets>, shared_output: Arc<TimedRwLock<DataOutputAwsAthenaPlugin>>) -> Result<(), ArrowError> {
 
         // let arrow_schema_guard = ARROW_SCHEMA.read().clone();
 
@@ -269,9 +270,11 @@ impl Buffers {
         }
 
 
+        let shared_output_clone = shared_output.clone();
         // Compact the partitions (now the index is unlocked, WAL flushed and offset committed)
         for partition in compact_index_partitions.values_mut() {
-            partition.compact_batches_to_parquet().await;
+            let shared_output_clone2 = shared_output_clone.clone();
+            partition.compact_batches_to_parquet(shared_output_clone2).await;
         }
 
         // println!("Wrote {} rows to WAL", rows);
@@ -279,7 +282,7 @@ impl Buffers {
         Ok(())
     }
 
-    pub async fn compact_all_partitions(force: bool, offsets_db: Arc<Offsets>) {
+    pub async fn compact_all_partitions(force: bool, offsets_db: Arc<Offsets>, shared_output: Arc<TimedRwLock<DataOutputAwsAthenaPlugin>>) {
         let mut wal_index = WAL_PARTITION_INDEX.write();
 
         wal_index.index.clear(); // avoid duplicates
@@ -288,10 +291,12 @@ impl Buffers {
 
         let mut compacted_index_partitions = Vec::new();
 
+        let cloned_shared_output = shared_output.clone();
         for (_key, wal_partition) in wal_index.index.iter_mut() {
 
+            let shared_output2 = cloned_shared_output.clone();
             if force {
-                wal_partition.compact_batches_to_parquet().await;
+                wal_partition.compact_batches_to_parquet(shared_output2).await;
                 compacted_index_partitions.push((wal_partition.namespace.clone(), wal_partition.partition.clone(), wal_partition.time.clone(), wal_partition.shard.clone()));
 
             } else {
@@ -516,7 +521,7 @@ impl WalPartition {
         false
     }
 
-    async fn compact_batches_to_parquet(&mut self) {
+    async fn compact_batches_to_parquet(&mut self, shared_output: Arc<TimedRwLock<DataOutputAwsAthenaPlugin>>) {
         let data_dir = Config::get_data_dir();
         let output_file_name = BufferChunker::encode_chunk_name(
             "output",
@@ -570,7 +575,8 @@ impl WalPartition {
         let batch_stream: SendableRecordBatchStream = Box::pin(MemoryStream::try_new(batches, schema.clone(), None).unwrap());
 
 
-        match sync_output_plugin("athena", "output".to_string(), batch_stream, output_file_name).await {
+        // match sync_output_plugin("athena", "output".to_string(), batch_stream, output_file_name).await {
+        match shared_output.write().sync(batch_stream, output_file_name).await {
             Ok(()) => {
                 println!("Synced WAL partition to Athena: {} {}", self.namespace, self.partition);
 

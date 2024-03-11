@@ -30,6 +30,7 @@ use crate::ingest_work::{Ingest, IngestBatch};
 
 use tokio::sync::Semaphore;
 use crate::helpers::timed_rwlock::TimedRwLock;
+use crate::plugins::athena::DataOutputAwsAthenaPlugin;
 
 // in data_dir
 const CONTINUATION_TOKEN_FILE: Lazy<String> = Lazy::new(|| {
@@ -107,6 +108,7 @@ impl DataSourceS3Plugin {
     pub async fn sync(
         &mut self,
         offsets: Arc<Offsets>,
+        shared_output: Arc<TimedRwLock<DataOutputAwsAthenaPlugin>>,
     ) {
 
         // let offsets = Arc::new(Offsets::init().unwrap());
@@ -233,7 +235,8 @@ impl DataSourceS3Plugin {
                                     self.download_and_ingest(
                                         &s3_bucket,
                                         &outputs,
-                                        &offsets_clone
+                                        &offsets_clone,
+                                        shared_output.clone()
                                     )
                                     .await;
 
@@ -271,6 +274,7 @@ impl DataSourceS3Plugin {
                                 &s3_bucket,
                                 &outputs,
                                 &offsets_clone,
+                                shared_output.clone()
                             )
                                 .await;
                         }
@@ -338,6 +342,7 @@ impl DataSourceS3Plugin {
         bucket_name: &String,
         object_keys: &Vec<String>,
         offsets_clone: &Arc<Offsets>,
+        shared_output: Arc<TimedRwLock<DataOutputAwsAthenaPlugin>>,
     ) {
         let s3_client = self.s3_client.clone();
 
@@ -439,7 +444,8 @@ impl DataSourceS3Plugin {
 
         // @todo - pass datas to ingest_file without cloning
         let batch = datas.read().clone();
-        self.ingest.ingest_file(batch, &offsets_clone);
+        let shared_output_clone = shared_output.clone();
+        self.ingest.ingest_file(batch, &offsets_clone, shared_output_clone);
     }
 
     fn save_continuation_token(token: &Option<String>) -> io::Result<()> {
