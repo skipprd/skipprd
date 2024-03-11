@@ -745,8 +745,9 @@ impl Ingest {
         if updated_schema.as_str() == "yes" {
             updated_schema = "no".to_string();
 
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async {
+            // let rt = tokio::runtime::Runtime::new().unwrap();
+            // rt.block_on(async {
+            handle.block_on(async {
                 // update metadata at control pane, this may or may not be automatically approved
                 let metadata: PipelineMetadata;
                 {
