@@ -84,7 +84,7 @@ pub struct DataOutputAwsAthenaPlugin {
     max_async_uploads: i64,
 }
 
-const GRANULARITIES: [&str; 5] = ["year", "month", "day", "hour", "minute"];
+pub(crate) const GRANULARITIES: [&str; 5] = ["year", "month", "day", "hour", "minute"];
 
 impl DataOutputAwsAthenaPlugin {
 
@@ -126,220 +126,166 @@ impl DataOutputAwsAthenaPlugin {
     pub async fn inner_sync(&self, stream: SendableRecordBatchStream, filename: String) -> Result<(), std::io::Error> {
         let mut partition_cache: Vec<String> = vec![];
 
-        // let mut promises: Vec<tokio::task::JoinHandle<Result<(), std::io::Error>>> = vec![];
+        let _bucket = &self.config.s3_bucket;
+        let key = &self.config.s3_prefix;
 
-        // while let Some(filename) = BufferChunker::next_file(&self.buffer_name) {
+        let namespace = BufferChunker::decode_file_namespace(&filename);
+        // let _time_partition = BufferChunker::decode_file_time(&filename);
 
-            // while promises.len() >= self.max_async_uploads as usize {
-            //     promises.pop().unwrap().await.unwrap().expect("TODO: panic message");
-            // }
+        let trimmed_key = &key.trim_matches('/').to_string();
 
-            // let mut file = BufReader::new(match File::open(&filename) {
-            //     Ok(file) => file,
-            //     Err(err) => {
-            //         println!(
-            //             "Failed to open file {} for reading, Error: {}",
-            //             filename,
-            //             err.to_string()
-            //         );
-            //         continue;
-            //     }
-            // });
+        let mut tags: HashMap<String, String> = HashMap::new();
 
-            // let mut contents = Vec::new();
-            // match file.read_to_end(&mut contents) {
-            //     Ok(_bytes) => {}
-            //     Err(err) => {
-            //         println!(
-            //             "Failed to read file {}, Error: {}",
-            //             filename,
-            //             err.to_string()
-            //         );
-            //         continue;
-            //     }
-            // }
-
-            let _bucket = &self.config.s3_bucket;
-            let key = &self.config.s3_prefix;
-
-            let namespace = BufferChunker::decode_file_namespace(&filename);
-            // let _time_partition = BufferChunker::decode_file_time(&filename);
-
-            let trimmed_key = &key.trim_matches('/').to_string();
-
-            let mut tags: HashMap<String, String> = HashMap::new();
-
-            let mut full_key = "".to_string();
-            if !namespace.is_empty() {
-                if !trimmed_key.is_empty() {
-                    full_key = format!("{}/{}", trimmed_key, namespace);
-                } else {
-                    full_key = format!("{}", namespace);
-                }
-
-                tags.insert("namespace".to_string(), namespace.to_string());
+        let mut full_key = "".to_string();
+        if !namespace.is_empty() {
+            if !trimmed_key.is_empty() {
+                full_key = format!("{}/{}", trimmed_key, namespace);
+            } else {
+                full_key = format!("{}", namespace);
             }
 
-            // Partitioning
-            let mut partition_values: Vec<String> = vec![];
+            tags.insert("namespace".to_string(), namespace.to_string());
+        }
 
-            let partition_path = BufferChunker::decode_file_partition(&filename);
+        // Partitioning
+        let mut partition_values: Vec<String> = vec![];
 
-            if !partition_path.is_empty() {
-                let parts = partition_path.split('/');
-                // let parts = partition_path.split("%2F"); // '/'
-                let collection: Vec<&str> = parts.collect();
+        let partition_path = BufferChunker::decode_file_partition(&filename);
 
-                for item in &collection {
-                    let mut key = item.split("=").next().unwrap_or_else(|| "");
-                    let mut value = item.split("=").last().unwrap_or_else(|| "");
+        if !partition_path.is_empty() {
+            let parts = partition_path.split('/');
+            // let parts = partition_path.split("%2F"); // '/'
+            let collection: Vec<&str> = parts.collect();
 
-                    if key == "" {
-                        key = "none";
-                    }
+            for item in &collection {
+                let mut key = item.split("=").next().unwrap_or_else(|| "");
+                let mut value = item.split("=").last().unwrap_or_else(|| "");
 
-                    if value == "" {
-                        value = "none";
-                    }
-
-                    partition_values.push(value.to_string());
-                    tags.insert(key.to_string(), value.to_string());
+                if key == "" {
+                    key = "none";
                 }
 
-                // .collect().join("/")
-                full_key = format!("{}/{}", full_key, partition_path);
+                if value == "" {
+                    value = "none";
+                }
+
+                partition_values.push(value.to_string());
+                tags.insert(key.to_string(), value.to_string());
             }
 
-            let time_partition_str = BufferChunker::decode_file_time_to_datetime_string(&filename);
+            full_key = format!("{}/{}", full_key, partition_path);
+        }
 
-            if !time_partition_str.is_empty() {
-                let granularity_target = Config::get_transform_batch_time_unit();
+        let time_partition_str = BufferChunker::decode_file_time_to_datetime_string(&filename);
 
-                let date = match DateTime::parse_from_rfc3339(&time_partition_str) {
-                    Ok(date) => date,
-                    Err(err) => {
-                        println!(
-                            "Failed to parse time partition string {}, Error: {}",
-                            time_partition_str,
-                            err.to_string()
-                        );
-                        // continue;
-                        return Err(io::Error::new(io::ErrorKind::Other, "Failed to parse time partition string"));
-                    }
-                };
+        if !time_partition_str.is_empty() {
+            let granularity_target = Config::get_transform_batch_time_unit();
 
-                for granularity in GRANULARITIES.iter() {
-                    let foo: u32 = match granularity {
-                        &"year" => date.year() as u32,
-                        &"month" => date.month(),
-                        &"day" => date.day(),
-                        &"hour" => date.hour(),
-                        &"minute" => date.minute(),
-                        _ => {
-                            panic!("Did not recognise date granularity of {}", granularity);
-                        }
-                    };
-
-                    full_key = format!("{}/{}={}", full_key, granularity, foo);
-                    partition_values.push(format!("{}", foo));
-
-                    if granularity == &granularity_target {
-                        break;
-                    }
-                }
-            }
-
-            if !partition_values.is_empty() {
-                let flatten =
-                    Config::get_transform_flatten_events();
-
-                let mut out_meta: HashMap<String, Metadata> = HashMap::new();
-
-                // for (namespace, _schema) in &metadata {
-                out_meta.insert(namespace.to_string(), Metadata::new().unwrap());
-
-                let metadata: PipelineMetadata;
-                {
-                    metadata = METADATA.read().clone();
-                }
-
-                let partition_metadata = if flatten {
-                    flatten_metadata(
-                        match metadata.metadata.get(&namespace) {
-                            Some(meta) => meta,
-                            None => {
-                                println!("Failed to find metadata for namespace: {}", namespace);
-                                // continue;
-                                return Err(io::Error::new(io::ErrorKind::Other, "Failed to find metadata for namespace"));
-                            }
-                        },
-                        match out_meta.get_mut(&namespace) {
-                            Some(meta) => meta.fields.as_mut(),
-                            None => {
-                                println!("Failed to find metadata for namespace: {}", namespace);
-                                // continue;
-                                return Err(io::Error::new(io::ErrorKind::Other, "Failed to find metadata for namespace"));
-                            }
-                        }
+            let date = match DateTime::parse_from_rfc3339(&time_partition_str) {
+                Ok(date) => date,
+                Err(err) => {
+                    println!(
+                        "Failed to parse time partition string {}, Error: {}",
+                        time_partition_str,
+                        err.to_string()
                     );
-                    out_meta.get(&namespace)
-                } else {
-                    metadata.metadata.get(&namespace)
+                    // continue;
+                    return Err(io::Error::new(io::ErrorKind::Other, "Failed to parse time partition string"));
+                }
+            };
+
+            for granularity in GRANULARITIES.iter() {
+                let foo: u32 = match granularity {
+                    &"year" => date.year() as u32,
+                    &"month" => date.month(),
+                    &"day" => date.day(),
+                    &"hour" => date.hour(),
+                    &"minute" => date.minute(),
+                    _ => {
+                        panic!("Did not recognise date granularity of {}", granularity);
+                    }
                 };
 
-                if partition_metadata.is_some() {
-                    if let Err(_err) = AwsAthena::glue_create_partition(
-                        &namespace,
-                        partition_values.clone(),
-                        &full_key,
-                        &mut partition_cache,
-                        partition_metadata.unwrap(),
-                    )
-                    .await
-                    {
-                        // Handle the error
-                    }
+                full_key = format!("{}/{}={}", full_key, granularity, foo);
+                partition_values.push(format!("{}", foo));
+
+                if granularity == &granularity_target {
+                    break;
                 }
-                // }
+            }
+        }
+
+        if !partition_values.is_empty() {
+            let flatten =
+                Config::get_transform_flatten_events();
+
+            let mut out_meta: HashMap<String, Metadata> = HashMap::new();
+
+            // for (namespace, _schema) in &metadata {
+            out_meta.insert(namespace.to_string(), Metadata::new().unwrap());
+
+            let metadata: PipelineMetadata;
+            {
+                metadata = METADATA.read().clone();
             }
 
-            // consistent md5 hash of the filename
-            let md5_digest = md5::compute(&filename);
-            let md5_string = hex::encode(&md5_digest.0);
+            let partition_metadata = if flatten {
+                flatten_metadata(
+                    match metadata.metadata.get(&namespace) {
+                        Some(meta) => meta,
+                        None => {
+                            println!("Failed to find metadata for namespace: {}", namespace);
+                            // continue;
+                            return Err(io::Error::new(io::ErrorKind::Other, "Failed to find metadata for namespace"));
+                        }
+                    },
+                    match out_meta.get_mut(&namespace) {
+                        Some(meta) => meta.fields.as_mut(),
+                        None => {
+                            println!("Failed to find metadata for namespace: {}", namespace);
+                            // continue;
+                            return Err(io::Error::new(io::ErrorKind::Other, "Failed to find metadata for namespace"));
+                        }
+                    }
+                );
+                out_meta.get(&namespace)
+            } else {
+                metadata.metadata.get(&namespace)
+            };
 
-            let final_key = format!("{}/{}", full_key, md5_string);
+            if partition_metadata.is_some() {
+                if let Err(_err) = AwsAthena::glue_create_partition(
+                    &namespace,
+                    partition_values.clone(),
+                    &full_key,
+                    &mut partition_cache,
+                    partition_metadata.unwrap(),
+                )
+                .await
+                {
+                    // Handle the error
+                }
+            }
+            // }
+        }
 
-            // let in_progress_filename = format!("{}.in-progress", filename);
-            // fs::rename(&filename, &in_progress_filename).unwrap();
+        // consistent md5 hash of the filename
+        let md5_digest = md5::compute(&filename);
+        let md5_string = hex::encode(&md5_digest.0);
 
-           DataOutputAwsAthenaPlugin::upload_object(
-                self.s3_client.clone(),
-                self.config.s3_bucket.clone(),
-                final_key,
-                stream,
-                tags,
-            ).await
+        let final_key = format!("{}/{}", full_key, md5_string);
 
-        // promise
+        // let in_progress_filename = format!("{}.in-progress", filename);
+        // fs::rename(&filename, &in_progress_filename).unwrap();
 
-            // promises.push(tokio::spawn(promise));
-        // }
-        //
-        // for promise in promises {
-        //     match promise.await {
-        //         Ok(result) => {
-        //             match result {
-        //                 Ok(_) => {}
-        //                 Err(err) => {
-        //                     println!("Failed to upload file to S3: {}", err);
-        //                 }
-        //             }
-        //         }
-        //         Err(err) => {
-        //             println!("Failed to upload file to S3: {}", err);
-        //         }
-        //     }
-        // }
+       DataOutputAwsAthenaPlugin::upload_object(
+            self.s3_client.clone(),
+            self.config.s3_bucket.clone(),
+            final_key,
+            stream,
+            tags,
+        ).await
+
     }
 
     pub(crate) async fn serialize_to_parquet(
