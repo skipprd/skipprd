@@ -535,6 +535,8 @@ impl WalPartition {
         // Suspect that will be required to handle retries and failures, while still avoiding overwriting existing data.
         output_file_name = format!("{}-{}", output_file_name, Helpers::random_str(32));
 
+        println!("Compacting WAL partition to Parquet, Namespace: {} Partition: {} {}", self.namespace, self.partition, self.time.unwrap_or(0));
+
         let mut wal_compacted_bytes_total = 0;
         let mut wal_compacted_rows_total = 0;
         let mut wal_compacted_files_total = 0;
@@ -583,7 +585,7 @@ impl WalPartition {
         // match sync_output_plugin("athena", "output".to_string(), batch_stream, output_file_name).await {
         match shared_output.write().sync(batch_stream, output_file_name).await {
             Ok(()) => {
-                println!("Synced WAL partition to Athena: {} {}", self.namespace, self.partition);
+                // println!("Synced WAL partition to Athena: {} {}", self.namespace, self.partition);
 
                 {
                     let mut counter_lock = METRICS.write();
