@@ -107,6 +107,7 @@ impl Evolution {
         parent_data_type: Option<&str>,
         metadata: &mut HashMap<String, Metadata>,
         mut updated_schema: &mut String,
+        flatten: bool
     ) -> Result<ResolvedFieldValue, Box<dyn std::error::Error>> {
 
         // println!("Handling value error for field: '{}'", field);
@@ -189,7 +190,7 @@ impl Evolution {
                 }
             };
 
-            match Evolution::apply_evolution_factory(field, value, metadata) {
+            match Evolution::apply_evolution_factory(field, value, metadata, flatten) {
                 Ok(v) => Ok(v),
                 Err(e) => {
                     // println!("#### Error applying evolution factory: {}", e);
@@ -212,6 +213,7 @@ impl Evolution {
         field: &str,
         value: &Value,
         metadata: &HashMap<String, Metadata>,
+        flatten: bool
     ) -> Result<ResolvedFieldValue, Box<dyn std::error::Error>> {
 
         // println!("Applying evolution factory for field: '{}'", field);
@@ -224,7 +226,7 @@ impl Evolution {
                 if let Some(field_metadata) = metadata.get(field) {
                     if let Some(evolution) = field_metadata.evolution.get(evolution_key) {
                         // match match_scalar_value_fast(&evolution.new_field, &evolution_key, value, metadata, false) {
-                        match fast_set_value(evolution_key, &evolution.new_field,  value, metadata, Some(false)) {
+                        match fast_set_value(evolution_key, &evolution.new_field,  value, metadata, Some(false), flatten) {
                             Ok(v) => {
                                 // set value if the evolution succeeds
                                 // println!("Cached evolution succeeded for field: '{}' with evolution: '{}'", field, evolution_key);
@@ -247,7 +249,7 @@ impl Evolution {
                 for (evolution_key, evolution) in field_metadata.evolution.iter() {
                     // println!("Trying evolution: '{}' for field: '{}'", evolution_key, field);
                     // match match_scalar_value_fast(&evolution.new_field, evolution_key, value, metadata, false) {
-                    match fast_set_value(&evolution.type_string, &evolution.new_field, value, metadata, Some(false)) {
+                    match fast_set_value(&evolution.type_string, &evolution.new_field, value, metadata, Some(false), flatten) {
                         Ok(v) => {
                             // cache the last evolution that worked
                             LAST_SUCCESSFUL_EVOLUTION.with(|last_evolution_refcell| {
@@ -298,9 +300,10 @@ mod tests_evolve_field {
         let mut metadata = setup_metadata();
         let field = "test_field".to_string();
         let value = Value::String("12356789101112".to_string());
+        let flatten = false;
         let mut updated_schema= "no".to_string();
 
-        let result = Evolution::evolve_field(&field, &value, None, None, &mut metadata, &mut updated_schema);
+        let result = Evolution::evolve_field(&field, &value, None, None, &mut metadata, &mut updated_schema, flatten);
 
         let expected_data_type = "long".to_string();
         let expected_new_field = format!("{}_{}", &field, expected_data_type).to_string();
@@ -319,9 +322,10 @@ mod tests_evolve_field {
         let mut metadata = setup_metadata();
         let field = "test_field".to_string();
         let value = Value::Number(123.into());
+        let flatten = false;
         let mut updated_schema= "no".to_string();
 
-        let result = Evolution::evolve_field(&field, &value, None, None, &mut metadata, &mut updated_schema);
+        let result = Evolution::evolve_field(&field, &value, None, None, &mut metadata, &mut updated_schema, flatten);
 
         let expected_data_type = "integer".to_string();
         let expected_new_field = format!("{}_{}", &field, expected_data_type).to_string();
@@ -340,10 +344,11 @@ mod tests_evolve_field {
         let mut metadata = setup_metadata();
         let field = "test_field".to_string();
         let value = Value::Bool(true);
+        let flatten = false;
 
         let mut updated_schema= "no".to_string();
 
-        let result = Evolution::evolve_field(&field, &value, None, None, &mut metadata, &mut updated_schema);
+        let result = Evolution::evolve_field(&field, &value, None, None, &mut metadata, &mut updated_schema, flatten);
 
         let expected_data_type = "boolean".to_string();
         let expected_new_field = format!("{}_{}", &field, expected_data_type).to_string();
@@ -362,9 +367,10 @@ mod tests_evolve_field {
         let mut metadata = setup_metadata();
         let field = "test_field".to_string();
         let value = Value::Null;
+        let flatten = false;
         let mut updated_schema= "no".to_string();
 
-        let result = Evolution::evolve_field(&field, &value, None, None, &mut metadata, &mut updated_schema);
+        let result = Evolution::evolve_field(&field, &value, None, None, &mut metadata, &mut updated_schema, flatten);
 
         let expected_data_type = "string".to_string();
         let expected_new_field = format!("{}_{}", &field, expected_data_type).to_string();
@@ -383,10 +389,11 @@ mod tests_evolve_field {
         let mut metadata = setup_metadata();
         let field = "test_field".to_string();
         let value = Value::Array(vec![Value::String("test".to_string())]);
-
+        let flatten = false;
+        
         let mut updated_schema= "no".to_string();
 
-        let result = Evolution::evolve_field(&field, &value, None, None, &mut metadata, &mut updated_schema);
+        let result = Evolution::evolve_field(&field, &value, None, None, &mut metadata, &mut updated_schema, flatten);
 
         let expected_data_type = "array".to_string();
         let expected_new_field = format!("{}_{}", &field, expected_data_type).to_string();
@@ -405,11 +412,12 @@ mod tests_evolve_field {
         let mut metadata = setup_metadata();
         let field = "test_field".to_string();
         let mut value = Value::Object(serde_json::Map::new());
+        let flatten = false;
         value.as_object_mut().unwrap().insert("test".to_string(), Value::String("test".to_string()));
         value.as_object_mut().unwrap().insert("test2".to_string(), Value::String("test2".to_string()));
         let mut updated_schema= "no".to_string();
 
-        let result = Evolution::evolve_field(&field, &value, None, None, &mut metadata, &mut updated_schema);
+        let result = Evolution::evolve_field(&field, &value, None, None, &mut metadata, &mut updated_schema, flatten);
 
         let expected_data_type = "map".to_string();
         let expected_new_field = format!("{}_{}", &field, expected_data_type).to_string();
@@ -433,9 +441,10 @@ mod tests_evolve_field {
         complex_struct.insert("test2".to_string(), Value::Number(123.into()));
         complex_struct.insert("test2".to_string(), Value::Array(vec![Value::String("test".to_string())]));
         let value = Value::Object(complex_struct);
+        let flatten = false;
         let mut updated_schema= "no".to_string();
 
-        let result = Evolution::evolve_field(&field, &value, None, None, &mut metadata, &mut updated_schema);
+        let result = Evolution::evolve_field(&field, &value, None, None, &mut metadata, &mut updated_schema, flatten);
 
         let expected_data_type = "record".to_string();
         let expected_new_field = format!("{}_{}", &field, expected_data_type).to_string();
