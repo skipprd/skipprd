@@ -106,6 +106,8 @@ use crate::helpers::Helpers;
 // use crate::buffer::BufferChunker;
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::ingest_work::Ingest;
+use crate::plugins::DataOutputPlugin;
+use crate::plugins::file_output::DataOutputFilePlugin;
 use crate::sql::operators::alter_column::alter_column_type;
 use crate::sql::operators::drop_column::alter_column_drop;
 use crate::sql::parser::{PipelineToggle, SParser, Statement};
@@ -502,7 +504,8 @@ async fn sync() {
 
     Config::sync_schema(&pipeline_metadata.metadata).await;
 
-    let output = DataOutputAwsAthenaPlugin::new("output".to_string()).await;
+    // let output = DataOutputAwsAthenaPlugin::new("output".to_string()).await;
+    let output = sync_output_plugin(Config::get_pipeline_output_plugin_name().as_str(), "output".to_string()).await.unwrap();
     let shared_output = Arc::new(TimedRwLock::new("athena_output".to_string(), output));
 
     let now = Arc::new(TimedRwLock::new("now".to_string(), Instant::now()));
@@ -969,7 +972,7 @@ pub fn flatten_metadata(metadata: &Metadata, flattened: &mut HashMap<String, Met
     }
 }
 
-pub async fn sync_output_plugin(plugin_name: &str, buffer_name: String, stream: SendableRecordBatchStream, filename: String) -> Result<(), std::io::Error> {
+pub async fn sync_output_plugin(plugin_name: &str, buffer_name: String) -> Result<Box<dyn DataOutputPlugin + Send + Sync>, io::Error> {
     match plugin_name {
         // "stdout" => {
         //     let output = DataOutputStdoutPlugin::new(buffer_name).await;
@@ -977,12 +980,11 @@ pub async fn sync_output_plugin(plugin_name: &str, buffer_name: String, stream: 
         //         .sync()
         //         .await;
         // }
-        // "file" => {
-        //     let output = DataOutputFilePlugin::new(buffer_name).await;
-        //     output
-        //         .sync()
-        //         .await;
-        // }
+        "file" => {
+            let plugin = DataOutputFilePlugin::new(buffer_name).await;
+            Ok(Box::new(plugin) as Box<dyn DataOutputPlugin + Send + Sync>)
+
+        }
         // "s3" => {
         //     if *HAS_LICENSE.read() {
         //         let output = DataOutputS3Plugin::new(buffer_name).await;
@@ -996,18 +998,17 @@ pub async fn sync_output_plugin(plugin_name: &str, buffer_name: String, stream: 
         // }
         "athena" => {
             if *HAS_LICENSE.read() {
-                let output = DataOutputAwsAthenaPlugin::new(buffer_name).await;
-                output
-                    .sync(stream, filename)
-                    .await
+                let plugin = DataOutputAwsAthenaPlugin::new(buffer_name).await;
+                Ok(Box::new(plugin) as Box<dyn DataOutputPlugin + Send + Sync>)
             } else {
                 // println!("No license found for Athena output plugin. Visit https://skippr.io to get a license.");
                 Err(io::Error::new(io::ErrorKind::Other, "No license found for Athena output plugin. Visit https://skippr.io to get a license."))
             }
         }
         "" => {
-            // println!("No Data {} plugin specified", buffer_name);
-            Err(io::Error::new(io::ErrorKind::Other, "No Data plugin specified"))
+            println!("No Data {} plugin specified, defaulting to local file", buffer_name);
+            let plugin = DataOutputFilePlugin::new(buffer_name).await;
+            Ok(Box::new(plugin) as Box<dyn DataOutputPlugin + Send + Sync>)
         }
         _ => {
             // println!("Unknown Data {} plugin specified", buffer_name);
@@ -1016,7 +1017,7 @@ pub async fn sync_output_plugin(plugin_name: &str, buffer_name: String, stream: 
     }
 }
 
-pub async fn sync_input_plugin(offsets_clone: Arc<Offsets>, shared_output: Arc<TimedRwLock<DataOutputAwsAthenaPlugin>>) {
+pub async fn sync_input_plugin(offsets_clone: Arc<Offsets>, shared_output: Arc<TimedRwLock<Box<dyn DataOutputPlugin + Send + Sync>>>) {
     match Config::get_pipeline_input_plugin_name().as_str() {
         // "pcap" => {
         //     panic!("PCAP input plugin not installed, please contact support")

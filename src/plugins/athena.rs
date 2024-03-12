@@ -17,6 +17,8 @@ use std::{fs, io};
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
+use std::sync::Arc;
+use async_trait::async_trait;
 use aws_sdk_glue::operation::get_table::{GetTableError, GetTableOutput};
 use aws_smithy_http::result::SdkError;
 use bytes::Bytes;
@@ -29,7 +31,11 @@ use parquet::file::properties::WriterProperties;
 
 use serde_derive::Deserialize;
 use tokio::join;
+use crate::helpers::offsets::Offsets;
+use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::metrics::MetricsStatus;
+use crate::plugins::DataOutputPlugin;
+use crate::plugins::file_input::DataSourceLocalFilePluginConfig;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataOutputAwsAthenaPluginConfig {
@@ -57,6 +63,13 @@ impl From<PluginConfig> for DataOutputAwsAthenaPluginConfig {
             PluginConfig::athena(athena_config) => athena_config,
             _ => panic!("Invalid plugin type"),
         }
+    }
+}
+
+#[async_trait]
+impl DataOutputPlugin for DataOutputAwsAthenaPlugin {
+    async fn sync(&mut self, stream: SendableRecordBatchStream, filename: String) -> Result<(), std::io::Error> {
+        self.inner_sync(stream, filename).await
     }
 }
 
@@ -110,7 +123,7 @@ impl DataOutputAwsAthenaPlugin {
         }
     }
 
-    pub async fn sync(&self, stream: SendableRecordBatchStream, filename: String) -> Result<(), std::io::Error> {
+    pub async fn inner_sync(&self, stream: SendableRecordBatchStream, filename: String) -> Result<(), std::io::Error> {
         let mut partition_cache: Vec<String> = vec![];
 
         // let mut promises: Vec<tokio::task::JoinHandle<Result<(), std::io::Error>>> = vec![];
@@ -329,7 +342,7 @@ impl DataOutputAwsAthenaPlugin {
         // }
     }
 
-    async fn serialize_to_parquet(
+    pub(crate) async fn serialize_to_parquet(
         mut batches: SendableRecordBatchStream,
     ) -> Result<ParquetBytes, io::Error> {
         // The ArrowWriter::write() call will return an error if any subsequent

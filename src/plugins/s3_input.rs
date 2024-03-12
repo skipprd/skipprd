@@ -2,8 +2,6 @@ use crate::helpers::configuration::{Config, PluginConfig};
 
 use aws_sdk_s3::Client;
 
-pub use aws_smithy_http::byte_stream::AggregatedBytes;
-
 use flate2::read::GzDecoder;
 
 use std::io::{Cursor, Read, Write};
@@ -30,7 +28,7 @@ use crate::ingest_work::{Ingest, IngestBatch};
 
 use tokio::sync::Semaphore;
 use crate::helpers::timed_rwlock::TimedRwLock;
-use crate::plugins::athena::DataOutputAwsAthenaPlugin;
+use crate::plugins::DataOutputPlugin;
 
 // in data_dir
 const CONTINUATION_TOKEN_FILE: Lazy<String> = Lazy::new(|| {
@@ -53,12 +51,6 @@ impl From<PluginConfig> for DataSourceS3PluginConfig {
             PluginConfig::s3(s3_config) => s3_config,
             _ => panic!("Invalid plugin type"),
         }
-    }
-}
-
-impl Into<PluginConfig> for DataSourceS3PluginConfig {
-    fn into(self) -> PluginConfig {
-        PluginConfig::s3(self)
     }
 }
 
@@ -108,7 +100,7 @@ impl DataSourceS3Plugin {
     pub async fn sync(
         &mut self,
         offsets: Arc<Offsets>,
-        shared_output: Arc<TimedRwLock<DataOutputAwsAthenaPlugin>>,
+        shared_output: Arc<TimedRwLock<Box<dyn DataOutputPlugin + Send + Sync>>>,
     ) {
 
         // let offsets = Arc::new(Offsets::init().unwrap());
@@ -342,7 +334,7 @@ impl DataSourceS3Plugin {
         bucket_name: &String,
         object_keys: &Vec<String>,
         offsets_clone: &Arc<Offsets>,
-        shared_output: Arc<TimedRwLock<DataOutputAwsAthenaPlugin>>,
+        shared_output: Arc<TimedRwLock<Box<dyn DataOutputPlugin + Send + Sync>>>,
     ) {
         let s3_client = self.s3_client.clone();
 

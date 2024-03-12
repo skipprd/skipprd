@@ -54,6 +54,7 @@ use crate::helpers::offsets::{Offset, OffsetKey, Offsets, OffsetTypes, OffsetVal
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::metrics::Metrics;
 use crate::plugins::athena::DataOutputAwsAthenaPlugin;
+use crate::plugins::DataOutputPlugin;
 
 pub static TOTAL_ROWS: Lazy<TimedRwLock<AtomicU64>> =
     Lazy::new(|| TimedRwLock::new("record_batch_total".to_string(), AtomicU64::new(0)));
@@ -108,7 +109,7 @@ impl Buffers {
         }
     }
 
-    pub async fn flush(&mut self, offsets_db: Arc<Offsets>, shared_output: Arc<TimedRwLock<DataOutputAwsAthenaPlugin>>) -> Result<(), ArrowError> {
+    pub async fn flush(&mut self, offsets_db: Arc<Offsets>, shared_output: Arc<TimedRwLock<Box<dyn DataOutputPlugin + Send + Sync>>>) -> Result<(), ArrowError> {
 
         // let arrow_schema_guard = ARROW_SCHEMA.read().clone();
 
@@ -282,7 +283,7 @@ impl Buffers {
         Ok(())
     }
 
-    pub async fn compact_all_partitions(force: bool, offsets_db: Arc<Offsets>, shared_output: Arc<TimedRwLock<DataOutputAwsAthenaPlugin>>) {
+    pub async fn compact_all_partitions(force: bool, offsets_db: Arc<Offsets>, shared_output: Arc<TimedRwLock<Box<dyn DataOutputPlugin + Send + Sync>>>) {
         let mut wal_index = WAL_PARTITION_INDEX.write();
 
         wal_index.index.clear(); // avoid duplicates
@@ -521,7 +522,7 @@ impl WalPartition {
         false
     }
 
-    async fn compact_batches_to_parquet(&mut self, shared_output: Arc<TimedRwLock<DataOutputAwsAthenaPlugin>>) {
+    async fn compact_batches_to_parquet(&mut self, shared_output: Arc<TimedRwLock<Box<dyn DataOutputPlugin + Send + Sync>>>) {
         let data_dir = Config::get_data_dir();
         let mut output_file_name = BufferChunker::encode_chunk_name(
             "output",
@@ -613,7 +614,7 @@ impl WalPartition {
                 self.prune_tombstone_wals();
             },
             Err(e) => {
-                println!("Failed to sync WAL partition to Athena: {} {}", self.namespace, self.partition);
+                println!("Failed to sync WAL partition to Athena: {} {}, Error {}", self.namespace, self.partition, e);
             }
         }
 

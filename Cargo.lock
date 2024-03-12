@@ -4101,6 +4101,7 @@ dependencies = [
  "array-init",
  "arrow",
  "arrow-schema",
+ "async-trait",
  "avro-rs",
  "aws-config",
  "aws-sdk-athena",

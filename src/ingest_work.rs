@@ -56,6 +56,7 @@ use arrow_schema::SchemaRef;
 use tokio::runtime;
 use crate::converters::skippr_arrow::convert_skippr_to_arrow;
 use crate::plugins::athena::DataOutputAwsAthenaPlugin;
+use crate::plugins::DataOutputPlugin;
 
 
 #[derive(Clone, Debug)]
@@ -201,7 +202,7 @@ impl Ingest {
         &self,
         datas: Vec<IngestBatch>,
         offset_db: &Arc<Offsets>,
-        shared_output: Arc<TimedRwLock<DataOutputAwsAthenaPlugin>>,
+        shared_output: Arc<TimedRwLock<Box<dyn DataOutputPlugin + Send + Sync>>>,
     ) {
         // println!("Ingesting {} events", datas.len());
 
@@ -283,7 +284,7 @@ impl Ingest {
         core_id: &str,
         schema_hashes: &mut DashMap<String, SchemaHash>,
         handle: runtime::Handle,
-        shared_output: Arc<TimedRwLock<DataOutputAwsAthenaPlugin>>,
+        shared_output: Arc<TimedRwLock<Box<dyn DataOutputPlugin + Send + Sync>>>,
     ) {
 
         let default_schema_hash = format!("{:?}", md5::compute(Helpers::random_str(10)));
