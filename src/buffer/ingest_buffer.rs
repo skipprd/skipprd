@@ -515,7 +515,8 @@ impl WalPartition {
 
     pub fn check_wal_rotate(&self) -> bool {
         if self.is_file_size_exceeded() || self.is_file_time_exceeded() {
-            println!("Compacting WAL: {} Bytes: {}, Segment Files: {}", self.namespace, self.bytes, self.files.len());
+            // println!("Compacting WAL: {} Bytes: {}, Segment Files: {}", self.namespace, self.bytes, self.files.len());
+            println!("Compacting WAL partition Namespace: {}, Partition: {}, Time: {}, of Bytes: {}, Segment Files: {}", self.namespace, self.partition, self.time.unwrap_or(0), self.bytes, self.files.len());
             return true
         }
 
@@ -536,7 +537,7 @@ impl WalPartition {
         // Suspect that will be required to handle retries and failures, while still avoiding overwriting existing data.
         output_file_name = format!("{}-{}", output_file_name, Helpers::random_str(32));
 
-        println!("Compacting WAL partition to Parquet, Namespace: {} Partition: {} {}", self.namespace, self.partition, self.time.unwrap_or(0));
+        // println!("Compacting WAL partition to Parquet, Namespace: {} Partition: {} {}", self.namespace, self.partition, self.time.unwrap_or(0));
 
         let mut wal_compacted_bytes_total = 0;
         let mut wal_compacted_rows_total = 0;
@@ -586,7 +587,7 @@ impl WalPartition {
         // match sync_output_plugin("athena", "output".to_string(), batch_stream, output_file_name).await {
         match shared_output.write().sync(batch_stream, output_file_name).await {
             Ok(()) => {
-                // println!("Synced WAL partition to Athena: {} {}", self.namespace, self.partition);
+                // println!("Synced WAL partition to output: {} {}", self.namespace, self.partition);
 
                 {
                     let mut counter_lock = METRICS.write();
@@ -614,7 +615,8 @@ impl WalPartition {
                 self.prune_tombstone_wals();
             },
             Err(e) => {
-                println!("Failed to sync WAL partition to Athena: {} {}, Error {}", self.namespace, self.partition, e);
+                let output_plugin_name = Config::get_pipeline_output_plugin_name();
+                println!("Failed to sync WAL partition to output plugin: {}, Namespace {}, Partition {}, Error {}", output_plugin_name, self.namespace, self.partition, e);
             }
         }
 
