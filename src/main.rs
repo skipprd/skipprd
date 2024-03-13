@@ -730,6 +730,10 @@ async fn sync() {
 
     let last_messages_total = Arc::new(TimedRwLock::new("last_messages_total".to_string(), 0));
 
+    // get curent tokio runtime
+    let handle = runtime::Handle::current();
+    let handle_clone = handle.clone();
+
     planner.add(
         move || {
             if RUNNING.read().load(Ordering::SeqCst) {
@@ -777,12 +781,12 @@ async fn sync() {
 
                 drop(metrics);
 
-                tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap()
-                    .block_on(async {
-
+                // tokio::runtime::Builder::new_multi_thread()
+                //     .enable_all()
+                //     .build()
+                //     .unwrap()
+                //     .block_on(async {
+                handle_clone.spawn(async move {
                         match Metrics::send_metrics(None).await {
                             Ok(_g) => {}
                             Err(_err) => {}
