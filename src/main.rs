@@ -185,6 +185,11 @@ async fn main() {
                         PIPELINE_NAME.write().push_str(&pipeline);
                         Config::init().await;
 
+                        {
+                            let mut counter_lock = METRICS.write();
+                            counter_lock.reset();
+                        }
+
                         sync().await;
 
                     }

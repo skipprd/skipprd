@@ -170,6 +170,43 @@ impl Metrics {
         }
     }
 
+    pub(crate) fn reset(&mut self) {
+        self.source_bytes_total = 0;
+
+        self.messages_total = 0;
+        self.deadletters_total = 0;
+        self.ingeted_slow_total = 0;
+
+        self.wal_write_bytes_total = 0;
+        self.wal_write_rows_total = 0;
+
+        self.wal_compacted_bytes_total = 0;
+        self.wal_compacted_rows_total = 0;
+        self.wal_compacted_files_total = 0;
+
+        self.parquet_persisted_bytes_total = 0;
+        self.parquet_persisted_rows_total = 0;
+        self.parquet_persisted_objects_total = 0;
+
+        self.latest_timestamp = 0;
+
+        self.start_time = DateTime::<chrono::Utc>::from(SystemTime::now());
+        self.status = MetricsStatus::Unknown;
+
+        LAST_WAL_WRITE_BYTES_TOTAL.store(0, Ordering::Relaxed);
+        LAST_WAL_WRITE_ROWS_TOTAL.store(0, Ordering::Relaxed);
+        LAST_WAL_COMPACTED_BYTES_TOTAL.store(0, Ordering::Relaxed);
+        LAST_WAL_COMPACTED_FILES_TOTAL.store(0, Ordering::Relaxed);
+        LAST_PARQUET_PERSISTED_BYTES_TOTAL.store(0, Ordering::Relaxed);
+        LAST_PARQUET_PERSISTED_ROWS_TOTAL.store(0, Ordering::Relaxed);
+        LAST_PARQUET_PERSISTED_OBJECTS_TOTAL.store(0, Ordering::Relaxed);
+        LAST_SOURCE_BYTES_TOTAL.store(0, Ordering::Relaxed);
+        LAST_MESSAGES_TOTAL.store(0, Ordering::Relaxed);
+        LAST_FIXED_TOTAL.store(0, Ordering::Relaxed);
+        LAST_DEADLETTERS_TOTAL.store(0, Ordering::Relaxed);
+
+    }
+
     pub(crate) async fn send_metrics<'a>(
         exit_code: Option<i8>,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -264,7 +301,7 @@ impl Metrics {
 
         let start_time_utc_str = metrics.start_time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
-        // get runtime in seocds from metrics.start_time
+        // get runtime in seconds from metrics.start_time
         let current_time = chrono::Utc::now();
         let run_time_seconds = (current_time - metrics.start_time).num_seconds();
 
@@ -311,12 +348,12 @@ impl Metrics {
             "exit_code": exit_code
         });
 
-        metrics.wal_write_bytes_total = 0;
-        metrics.wal_write_rows_total = 0;
-        metrics.wal_compacted_bytes_total = 0;
-        metrics.wal_compacted_files_total = 0;
-        metrics.parquet_persisted_bytes_total = 0;
-        metrics.parquet_persisted_objects_total = 0;
+        // metrics.wal_write_bytes_total = 0;
+        // metrics.wal_write_rows_total = 0;
+        // metrics.wal_compacted_bytes_total = 0;
+        // metrics.wal_compacted_files_total = 0;
+        // metrics.parquet_persisted_bytes_total = 0;
+        // metrics.parquet_persisted_objects_total = 0;
 
         // println!("Posting data: {:?}", data);
 
