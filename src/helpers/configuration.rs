@@ -1486,8 +1486,14 @@ impl Config {
 
     pub async fn init() {
 
-        let license = LicenseChecker::new();
-        license.unwrap().get_license().await.unwrap();
+        let mut license = LicenseChecker::new();
+        match license.get_license().await {
+            Ok(license) => {}
+            Err(err) => unsafe {
+                println!("Error: {}", err);
+                exit(1);
+            }
+        }
 
         Config::get_data_dir();
 
