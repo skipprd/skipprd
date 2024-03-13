@@ -3,7 +3,7 @@ use crate::converters::skippr_hive::SkipprHive;
 use crate::discover::{Metadata, PipelineMetadata};
 use crate::helpers::configuration::{Config, PluginConfig};
 use crate::helpers::Helpers;
-use crate::{discover, flatten_metadata, METADATA};
+use crate::{discover, flatten_metadata, METADATA, METRICS};
 use aws_sdk_athena::types::{EncryptionConfiguration, EncryptionOption, ResultConfiguration, ResultConfigurationUpdates, Tag, WorkGroupConfiguration, WorkGroupConfigurationUpdates};
 use aws_sdk_athena::Client as AthenaClient;
 use aws_sdk_glue::types::{Column, DatabaseInput, PartitionIndex, PartitionInput, SerDeInfo, StorageDescriptor, Table, TableInput};
@@ -13,14 +13,29 @@ use aws_sdk_s3::{Client as S3Client, Error};
 use chrono::prelude::*;
 
 use std::collections::HashMap;
-use std::fs;
+use std::{fs, io};
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
+use std::sync::Arc;
+use async_trait::async_trait;
 use aws_sdk_glue::operation::get_table::{GetTableError, GetTableOutput};
 use aws_smithy_http::result::SdkError;
+use bytes::Bytes;
+use datafusion::physical_plan::SendableRecordBatchStream;
+use futures::{Stream, StreamExt};
+use parquet::arrow::arrow_reader::ArrowReaderBuilder;
+use parquet::arrow::ArrowWriter;
+use parquet::basic::Compression;
+use parquet::file::properties::WriterProperties;
 
 use serde_derive::Deserialize;
+use tokio::join;
+use crate::helpers::offsets::Offsets;
+use crate::helpers::timed_rwlock::TimedRwLock;
+use crate::metrics::MetricsStatus;
+use crate::plugins::DataOutputPlugin;
+use crate::plugins::file_input::DataSourceLocalFilePluginConfig;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataOutputAwsAthenaPluginConfig {
@@ -36,12 +51,25 @@ pub struct DataOutputAwsAthenaPluginConfig {
 
 }
 
+pub struct ParquetBytes {
+    pub bytes: bytes::Bytes,
+    pub size_bytes: u64,
+    pub meta_data: parquet::format::FileMetaData,
+}
+
 impl From<PluginConfig> for DataOutputAwsAthenaPluginConfig {
     fn from(plugin_config: PluginConfig) -> Self {
         match plugin_config {
             PluginConfig::athena(athena_config) => athena_config,
             _ => panic!("Invalid plugin type"),
         }
+    }
+}
+
+#[async_trait]
+impl DataOutputPlugin for DataOutputAwsAthenaPlugin {
+    async fn sync(&mut self, stream: SendableRecordBatchStream, filename: String) -> Result<(), std::io::Error> {
+        self.inner_sync(stream, filename).await
     }
 }
 
@@ -53,9 +81,10 @@ pub struct DataOutputAwsAthenaPlugin {
     // s3_bucket: String,
     // s3_prefix: String,
     // time_bucket: String,
+    max_async_uploads: i64,
 }
 
-const GRANULARITIES: [&str; 5] = ["year", "month", "day", "hour", "minute"];
+pub(crate) const GRANULARITIES: [&str; 5] = ["year", "month", "day", "hour", "minute"];
 
 impl DataOutputAwsAthenaPlugin {
 
@@ -82,7 +111,6 @@ impl DataOutputAwsAthenaPlugin {
         // let s3_prefix = Config::getenv("DATA_OUTPUT_S3_PREFIX", "");
         // let time_bucket = Config::getenv("TRANSFORM_BATCH_TIME_UNIT", "");
 
-
         // let athena_config: DataOutputAwsAthenaPluginConfig = Config::get_pipline_plugin_config("output").unwrap().into();
         let athena_config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
 
@@ -91,288 +119,270 @@ impl DataOutputAwsAthenaPlugin {
             athena_client,
             config: athena_config,
             buffer_name: buffer_name,
+            max_async_uploads: 10,
         }
     }
 
-    pub async fn sync(&self) {
+    pub async fn inner_sync(&self, stream: SendableRecordBatchStream, filename: String) -> Result<(), std::io::Error> {
         let mut partition_cache: Vec<String> = vec![];
 
-        while let Some(filename) = BufferChunker::next_file(&self.buffer_name) {
-            let mut file = BufReader::new(match File::open(&filename) {
-                Ok(file) => file,
-                Err(err) => {
-                    println!(
-                        "Failed to open file {} for reading, Error: {}",
-                        filename,
-                        err.to_string()
-                    );
-                    continue;
-                }
-            });
+        let _bucket = &self.config.s3_bucket;
+        let key = &self.config.s3_prefix;
 
-            let mut contents = Vec::new();
-            match file.read_to_end(&mut contents) {
-                Ok(_bytes) => {}
-                Err(err) => {
-                    println!(
-                        "Failed to read file {}, Error: {}",
-                        filename,
-                        err.to_string()
-                    );
-                    continue;
-                }
+        let namespace = BufferChunker::decode_file_namespace(&filename);
+        // let _time_partition = BufferChunker::decode_file_time(&filename);
+
+        let trimmed_key = &key.trim_matches('/').to_string();
+
+        let mut tags: HashMap<String, String> = HashMap::new();
+
+        let mut full_key = "".to_string();
+        if !namespace.is_empty() {
+            if !trimmed_key.is_empty() {
+                full_key = format!("{}/{}", trimmed_key, namespace);
+            } else {
+                full_key = format!("{}", namespace);
             }
 
-            let _bucket = &self.config.s3_bucket;
-            let key = &self.config.s3_prefix;
-
-            let namespace = BufferChunker::decode_file_namespace(&filename);
-            // let _time_partition = BufferChunker::decode_file_time(&filename);
-
-            let trimmed_key = &key.trim_matches('/').to_string();
-
-            let mut tags: HashMap<String, String> = HashMap::new();
-
-            let mut full_key = "".to_string();
-            if !namespace.is_empty() {
-                if !trimmed_key.is_empty() {
-                    full_key = format!("{}/{}", trimmed_key, namespace);
-                } else {
-                    full_key = format!("{}", namespace);
-                }
-
-                tags.insert("namespace".to_string(), namespace.to_string());
-            }
-
-            // Partitioning
-            let mut partition_values: Vec<String> = vec![];
-
-            let partition_path = BufferChunker::decode_file_partition(&filename);
-
-            if !partition_path.is_empty() {
-                let parts = partition_path.split('/');
-                // let parts = partition_path.split("%2F"); // '/'
-                let collection: Vec<&str> = parts.collect();
-
-                for item in &collection {
-                    let mut key = match item.split("=").next() {
-                        Some(key) => key,
-                        None => "",
-                    };
-                    let mut value = match item.split("=").last() {
-                        Some(value) => value,
-                        None => "",
-                    };
-
-                    if key == "" {
-                        key = "none";
-                    }
-
-                    if value == "" {
-                        value = "none";
-                    }
-
-                    partition_values.push(value.to_string());
-                    tags.insert(key.to_string(), value.to_string());
-                }
-
-                // .collect().join("/")
-                full_key = format!("{}/{}", full_key, partition_path);
-            }
-
-            let time_partition_str = BufferChunker::decode_file_time_to_datetime_string(&filename);
-
-            if !time_partition_str.is_empty() {
-                let granularity_target = Config::get_transform_batch_time_unit();
-
-                let date = match DateTime::parse_from_rfc3339(&time_partition_str) {
-                    Ok(date) => date,
-                    Err(err) => {
-                        println!(
-                            "Failed to parse time partition string {}, Error: {}",
-                            time_partition_str,
-                            err.to_string()
-                        );
-                        continue;
-                    }
-                };
-
-                for granularity in GRANULARITIES.iter() {
-                    let foo: u32 = match granularity {
-                        &"year" => date.year() as u32,
-                        &"month" => date.month(),
-                        &"day" => date.day(),
-                        &"hour" => date.hour(),
-                        &"minute" => date.minute(),
-                        _ => {
-                            panic!("Did not recognise date granularity of {}", granularity);
-                        }
-                    };
-
-                    full_key = format!("{}/{}={}", full_key, granularity, foo);
-                    partition_values.push(format!("{}", foo));
-
-                    if granularity == &granularity_target {
-                        break;
-                    }
-                }
-            }
-
-            if !partition_values.is_empty() {
-                let flatten =
-                    Config::get_transform_flatten_events();
-
-                let mut out_meta: HashMap<String, Metadata> = HashMap::new();
-
-                // for (namespace, _schema) in &metadata {
-                out_meta.insert(namespace.to_string(), Metadata::new().unwrap());
-
-                let metadata: PipelineMetadata;
-                {
-                    metadata = METADATA.read().clone();
-                }
-
-                let partition_metadata = if flatten {
-                    flatten_metadata(
-                        match metadata.metadata.get(&namespace) {
-                            Some(meta) => meta,
-                            None => {
-                                println!("Failed to find metadata for namespace: {}", namespace);
-                                continue;
-                            }
-                        },
-                        match out_meta.get_mut(&namespace) {
-                            Some(meta) => meta.fields.as_mut(),
-                            None => {
-                                println!("Failed to find metadata for namespace: {}", namespace);
-                                continue;
-                            }
-                        }
-                    );
-                    out_meta.get(&namespace)
-                } else {
-                    metadata.metadata.get(&namespace)
-                };
-
-                if partition_metadata.is_some() {
-                    if let Err(_err) = AwsAthena::glue_create_partition(
-                        &namespace,
-                        partition_values.clone(),
-                        &full_key,
-                        &mut partition_cache,
-                        partition_metadata.unwrap(),
-                    )
-                    .await
-                    {
-                        // Handle the error
-                    }
-                }
-                // }
-            }
-
-            // md5 hash of the filename
-            let md5_digest = md5::compute(&filename);
-            let md5_string = hex::encode(&md5_digest.0);
-
-            let final_key = format!("{}/{}", full_key, md5_string);
-
-            DataOutputAwsAthenaPlugin::upload_object(
-                &self.s3_client,
-                &self.config.s3_bucket,
-                &final_key,
-                &filename,
-                tags,
-            )
-            .await
-            .unwrap();
+            tags.insert("namespace".to_string(), namespace.to_string());
         }
+
+        // Partitioning
+        let mut partition_values: Vec<String> = vec![];
+
+        let partition_path = BufferChunker::decode_file_partition(&filename);
+
+        if !partition_path.is_empty() {
+            let parts = partition_path.split('/');
+            // let parts = partition_path.split("%2F"); // '/'
+            let collection: Vec<&str> = parts.collect();
+
+            for item in &collection {
+                let mut key = item.split("=").next().unwrap_or_else(|| "");
+                let mut value = item.split("=").last().unwrap_or_else(|| "");
+
+                if key == "" {
+                    key = "none";
+                }
+
+                if value == "" {
+                    value = "none";
+                }
+
+                partition_values.push(value.to_string());
+                tags.insert(key.to_string(), value.to_string());
+            }
+
+            full_key = format!("{}/{}", full_key, partition_path);
+        }
+
+        let time_partition_str = BufferChunker::decode_file_time_to_datetime_string(&filename);
+
+        if !time_partition_str.is_empty() {
+            let granularity_target = Config::get_transform_batch_time_unit();
+
+            let date = match DateTime::parse_from_rfc3339(&time_partition_str) {
+                Ok(date) => date,
+                Err(err) => {
+                    println!(
+                        "Failed to parse time partition string {}, Error: {}",
+                        time_partition_str,
+                        err.to_string()
+                    );
+                    // continue;
+                    return Err(io::Error::new(io::ErrorKind::Other, "Failed to parse time partition string"));
+                }
+            };
+
+            for granularity in GRANULARITIES.iter() {
+                let foo: u32 = match granularity {
+                    &"year" => date.year() as u32,
+                    &"month" => date.month(),
+                    &"day" => date.day(),
+                    &"hour" => date.hour(),
+                    &"minute" => date.minute(),
+                    _ => {
+                        panic!("Did not recognise date granularity of {}", granularity);
+                    }
+                };
+
+                full_key = format!("{}/{}={}", full_key, granularity, foo);
+                partition_values.push(format!("{}", foo));
+
+                if granularity == &granularity_target {
+                    break;
+                }
+            }
+        }
+
+        if !partition_values.is_empty() {
+            let flatten =
+                Config::get_transform_flatten_events();
+
+            let mut out_meta: HashMap<String, Metadata> = HashMap::new();
+
+            // for (namespace, _schema) in &metadata {
+            out_meta.insert(namespace.to_string(), Metadata::new().unwrap());
+
+            let metadata: PipelineMetadata;
+            {
+                metadata = METADATA.read().clone();
+            }
+
+            let partition_metadata = if flatten {
+                flatten_metadata(
+                    match metadata.metadata.get(&namespace) {
+                        Some(meta) => meta,
+                        None => {
+                            println!("Failed to find metadata for namespace: {}", namespace);
+                            // continue;
+                            return Err(io::Error::new(io::ErrorKind::Other, "Failed to find metadata for namespace"));
+                        }
+                    },
+                    match out_meta.get_mut(&namespace) {
+                        Some(meta) => meta.fields.as_mut(),
+                        None => {
+                            println!("Failed to find metadata for namespace: {}", namespace);
+                            // continue;
+                            return Err(io::Error::new(io::ErrorKind::Other, "Failed to find metadata for namespace"));
+                        }
+                    }
+                );
+                out_meta.get(&namespace)
+            } else {
+                metadata.metadata.get(&namespace)
+            };
+
+            if partition_metadata.is_some() {
+                if let Err(_err) = AwsAthena::glue_create_partition(
+                    &namespace,
+                    partition_values.clone(),
+                    &full_key,
+                    &mut partition_cache,
+                    partition_metadata.unwrap(),
+                )
+                .await
+                {
+                    // Handle the error
+                }
+            }
+            // }
+        }
+
+        // consistent md5 hash of the filename
+        let md5_digest = md5::compute(&filename);
+        let md5_string = hex::encode(&md5_digest.0);
+
+        let final_key = format!("{}/{}", full_key, md5_string);
+
+        // let in_progress_filename = format!("{}.in-progress", filename);
+        // fs::rename(&filename, &in_progress_filename).unwrap();
+
+       DataOutputAwsAthenaPlugin::upload_object(
+            self.s3_client.clone(),
+            self.config.s3_bucket.clone(),
+            final_key,
+            stream,
+            tags,
+        ).await
+
     }
 
-    // Upload a file to a bucket.
-    // snippet-start:[s3.rust.s3-helloworld]
-    async fn upload_object(
-        client: &S3Client,
-        bucket: &str,
-        key: &str,
-        filename: &str,
-        tag_hashmap: HashMap<String, String>
-    ) -> Result<(), Error> {
-        // let resp = client.list_buckets().send().await?;
+    pub(crate) async fn serialize_to_parquet(
+        mut batches: SendableRecordBatchStream,
+    ) -> Result<ParquetBytes, io::Error> {
+        // The ArrowWriter::write() call will return an error if any subsequent
+        // batch does not match this schema, enforcing schema uniformity.
+        let schema = batches.schema();
 
-        // for bucket in resp.buckets().unwrap_or_default() {
-        //     println!("bucket: {:?}", bucket.name().unwrap_or_default())
+        // let stream = batches;
+        let mut bytes = Vec::new();
+        // pin_mut!(stream);
+
+        // Construct the arrow serializer with the metadata as part of the parquet
+        // file properties.
+        let props = WriterProperties::builder()
+            .set_dictionary_enabled(false)
+            .set_encoding(parquet::basic::Encoding::PLAIN)
+            .set_compression(Compression::SNAPPY)
+            .build();
+
+        let mut writer = ArrowWriter::try_new(
+            &mut bytes,
+            schema,
+            Some(props),
+        )?;
+
+        while let Some(batch) = batches.next().await {
+            let batch = batch?;
+            writer.write(&batch)?;
+        }
+        // writer.write(&.unwrap()?)?;
+
+        let writer_meta = writer.close()?;
+        if writer_meta.num_rows == 0 {
+            return Err(io::Error::new(io::ErrorKind::Other, "No rows to write to parquet"));
+        }
+
+        let size_bytes = bytes.len() as u64;
+
+        Ok(ParquetBytes {
+            meta_data: writer_meta,
+            bytes: Bytes::from(bytes),
+            size_bytes,
+        })
+    }
+
+    async fn upload_object(
+        client: S3Client,
+        bucket: String,
+        key: String,
+        stream: SendableRecordBatchStream,
+        tag_hashmap: HashMap<String, String>
+    ) -> Result<(), std::io::Error> {
+
+        // let in_progress_filename = format!("{}.in-progress", filename);
+        // match fs::rename(&filename, &in_progress_filename) {
+        //     Ok(_) => {}
+        //     Err(err) => {
+        //         return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to mark file as in-progress: {}. Will try again later. Error: {}", filename, err)));
+        //     }
         // }
 
-        // println!();
-
-        let body = ByteStream::from_path(Path::new(filename)).await;
+        // let body = match ByteStream::from_path(Path::new(&in_progress_filename)).await {
+        //     Ok(b) => b,
+        //     Err(e) => {
+        //         return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to read file before uploading: {}, will retry later. Error {}", filename, e)));
+        //     }
+        // };
 
         let tags = tag_hashmap.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<String>>().join("&");
 
-        match body {
-            Ok(b) => {
-                // println!("Uploading file: {} to Bucket: {} and Prefix: {} and Tags: {}", filename, bucket, key, tags);
+        let parquet = Self::serialize_to_parquet(stream).await?;
 
-                match client
-                    .put_object()
-                    .bucket(bucket)
-                    .key(key)
-                    .body(b)
-                    .tagging(tags)
-                    .send()
-                    .await
-                {
-                    Ok(_resp) => {
-                        println!("Uploaded {} to S3: {}", filename, key);
-                        match fs::remove_file(Path::new(&filename)) {
-                            Ok(_) => {}
-                            Err(_) => {
-                                // @todo - log this back to skippr platform
-                            }
-                        };
-                    }
-                    Err(err) => {
-                        println!("Failed to upload file: {} to bucket {}, will retry later.", filename, bucket);
-                        println!("{:?}", err.raw_response());
-
-
-                        // tokio::spawn(async move {
-                        // LOGGER
-                        //     .write()
-                        //     .await
-                        //     .log(
-                        //         LogLevel::Error,
-                        //         format!(
-                        //         "Athena Plugin failed to upload file: {}, key: {} with error: {:?}",
-                        //         filename,
-                        //         key,
-                        //         err.into_service_error()
-                        //     ),
-                        //     )
-                        //     .await;
-                        // });
-                        // LOGGER.lock().unwrap().push(format!(
-                        //     "Athena Plugin failed to upload file: {}, key: {} with error: {:?}",
-                        //     filename,
-                        //     key,
-                        //     err.into_service_error()
-                        // ));
-                    }
-                }
-
-                // let resp = client.get_object().bucket(bucket).key(key).send().await?;
-                // println!("Response: {:?}", resp);
-
-                // let data = resp.body.collect().await;
-                // println!("data: {:?}", data.unwrap().into_bytes());
+        match client
+            .put_object()
+            .bucket(&bucket)
+            .key(&key)
+            .body(ByteStream::from(parquet.bytes))
+            .tagging(tags)
+            .send()
+            .await
+        {
+            Ok(_resp) => {
+                println!("Uploaded {} to S3", key);
+                let mut counter_lock = METRICS.write();
+                counter_lock.parquet_persisted_bytes_total += parquet.size_bytes;
+                counter_lock.parquet_persisted_objects_total += 1;
+                counter_lock.parquet_persisted_rows_total += parquet.meta_data.num_rows as u64;
+                // counter_lock.status = MetricsStatus::Finishing;
+                Ok(())
             }
-            Err(e) => {
-                println!("Failed to read file before uploading: {}, will retry later.", filename);
-                println!("{}", e);
+            Err(err) => {
+                Err(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to upload to bucket {}, will retry later. Error: {}", bucket, err.into_service_error())))
             }
         }
 
-        Ok(())
     }
 }
 

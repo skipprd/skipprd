@@ -27,6 +27,8 @@ use byteorder::LittleEndian;
 use datafusion::datasource::MemTable;
 use datafusion::execution::options::ArrowReadOptions;
 use datafusion::parquet::data_type::AsBytes;
+use datafusion::physical_plan::memory::MemoryStream;
+use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
 use icu::properties::sets::print;
 use indexmap::IndexMap;
@@ -44,12 +46,15 @@ use serde_json::{json, Value};
 use tokio::runtime::Runtime;
 use yaml_rust::Yaml::Hash;
 use zerocopy::U64;
-use crate::{ARROW_SCHEMA, METRICS, RUNNING};
+use crate::{ARROW_SCHEMA, METRICS, RUNNING, sync_output_plugin};
 use crate::buffer::BufferChunker;
 use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
 use crate::helpers::offsets::{Offset, OffsetKey, Offsets, OffsetTypes, OffsetValue};
 use crate::helpers::timed_rwlock::TimedRwLock;
+use crate::metrics::Metrics;
+use crate::plugins::athena::DataOutputAwsAthenaPlugin;
+use crate::plugins::DataOutputPlugin;
 
 pub static TOTAL_ROWS: Lazy<TimedRwLock<AtomicU64>> =
     Lazy::new(|| TimedRwLock::new("record_batch_total".to_string(), AtomicU64::new(0)));
@@ -102,16 +107,16 @@ impl Buffers {
         for batch in ingest_buffer_batch {
             self.buf.insert(batch.0, batch.1);
         }
-
     }
 
-    pub fn flush(&mut self, offsets_db: Arc<Offsets>) -> Result<(), ArrowError> {
+    pub async fn flush(&mut self, offsets_db: Arc<Offsets>, shared_output: Arc<TimedRwLock<Box<dyn DataOutputPlugin + Send + Sync>>>) -> Result<(), ArrowError> {
 
         // let arrow_schema_guard = ARROW_SCHEMA.read().clone();
 
         // let mut index = WAL_INDEX.write();
 
-        let mut stats: (u64, u64) = (0, 0);
+        let mut bytes: u64 = 0;
+        let mut rows: u64 = 0;
 
         // println!("Flushing {} WAL files", self.buf.len());
 
@@ -174,8 +179,8 @@ impl Buffers {
 
             let stat = wal_file.write_to_stream(&record_batches)?;
 
-            stats.0 += stat.0;
-            stats.1 += stat.1;
+            bytes += stat.0;
+            rows += stat.1;
 
             // wal_file_partition.bytes += wal_file.write_to_stream(&record_batches)?;
 
@@ -214,6 +219,12 @@ impl Buffers {
         // println!("Ingested {} rows of {} bytes to WAL", stats.1, stats.0);
 
         self.buf.clear();
+
+        {
+            let mut counter_lock = METRICS.write();
+            counter_lock.wal_write_bytes_total += bytes;
+            counter_lock.wal_write_rows_total += rows;
+        }
 
         let mut compact_index_partitions: HashMap<(String, String, Option<i64>, String), WalPartition> = HashMap::new();
 
@@ -260,9 +271,11 @@ impl Buffers {
         }
 
 
+        let shared_output_clone = shared_output.clone();
         // Compact the partitions (now the index is unlocked, WAL flushed and offset committed)
         for partition in compact_index_partitions.values_mut() {
-            partition.compact_batches_to_parquet();
+            let shared_output_clone2 = shared_output_clone.clone();
+            partition.compact_batches_to_parquet(shared_output_clone2).await;
         }
 
         // println!("Wrote {} rows to WAL", rows);
@@ -270,7 +283,7 @@ impl Buffers {
         Ok(())
     }
 
-    pub fn compact_all_partitions(force: bool, offsets_db: Arc<Offsets>) {
+    pub async fn compact_all_partitions(force: bool, offsets_db: Arc<Offsets>, shared_output: Arc<TimedRwLock<Box<dyn DataOutputPlugin + Send + Sync>>>) {
         let mut wal_index = WAL_PARTITION_INDEX.write();
 
         wal_index.index.clear(); // avoid duplicates
@@ -279,10 +292,12 @@ impl Buffers {
 
         let mut compacted_index_partitions = Vec::new();
 
+        let cloned_shared_output = shared_output.clone();
         for (_key, wal_partition) in wal_index.index.iter_mut() {
 
+            let shared_output2 = cloned_shared_output.clone();
             if force {
-                wal_partition.compact_batches_to_parquet();
+                wal_partition.compact_batches_to_parquet(shared_output2).await;
                 compacted_index_partitions.push((wal_partition.namespace.clone(), wal_partition.partition.clone(), wal_partition.time.clone(), wal_partition.shard.clone()));
 
             } else {
@@ -500,16 +515,17 @@ impl WalPartition {
 
     pub fn check_wal_rotate(&self) -> bool {
         if self.is_file_size_exceeded() || self.is_file_time_exceeded() {
-            println!("Compacting WAL: {} Bytes: {}, Segment Files: {}", self.namespace, self.bytes, self.files.len());
+            // println!("Compacting WAL: {} Bytes: {}, Segment Files: {}", self.namespace, self.bytes, self.files.len());
+            println!("Compacting WAL partition Namespace: {}, Partition: {}, Time: {}, of Bytes: {}, Segment Files: {}", self.namespace, self.partition, self.time.unwrap_or(0), self.bytes, self.files.len());
             return true
         }
 
         false
     }
 
-    fn compact_batches_to_parquet(&mut self) {
+    async fn compact_batches_to_parquet(&mut self, shared_output: Arc<TimedRwLock<Box<dyn DataOutputPlugin + Send + Sync>>>) {
         let data_dir = Config::get_data_dir();
-        let output_file_name = BufferChunker::encode_chunk_name(
+        let mut output_file_name = BufferChunker::encode_chunk_name(
             "output",
             Some(&self.namespace),
             Some(&self.partition),
@@ -517,52 +533,31 @@ impl WalPartition {
             Some(&self.shard)
         );
 
+        // @todo - replace random_str with a sequence/segment number for imdepotent object uploads.
+        // Suspect that will be required to handle retries and failures, while still avoiding overwriting existing data.
+        output_file_name = format!("{}-{}", output_file_name, Helpers::random_str(32));
 
-        // let schema = ARROW_SCHEMA.read().get(&self.namespace).unwrap().clone();
+        // println!("Compacting WAL partition to Parquet, Namespace: {} Partition: {} {}", self.namespace, self.partition, self.time.unwrap_or(0));
 
-        let temp_file_path = format!("{}/{}-{}.temp", data_dir, output_file_name, Helpers::random_str(32));
+        let mut wal_compacted_bytes_total = 0;
+        let mut wal_compacted_rows_total = 0;
+        let mut wal_compacted_files_total = 0;
 
-        // let mut record_batches = Vec::new();
 
-        // let mut compacted_files = Vec::new();
+        // let temp_file_path = format!("{}/{}-{}.temp", data_dir, output_file_name, Helpers::random_str(32));
 
-        // @todo - I think this file empty check is redundant now we're building the index as we write
-        // for wal_file in self.files.iter_mut() {
-        //     if wal_file.bytes == 0 {
-        //         println!("Ignoring empty bytes WAL file: {}", wal_file.path.to_str().unwrap());
-        //         continue;
-        //     }
+
+        // let write_file = OpenOptions::new()
+        //     .create(true)
+        //     .write(true)
+        //     .open(&temp_file_path)
+        //     .unwrap();
         //
-        //     // check for empty file
-        //     if wal_file.file.metadata().unwrap().len() == 0 {
-        //         println!("Ignoring empty WAL file: {}", wal_file.path.to_str().unwrap());
-        //         continue;
-        //     } else {
-        //         println!("Reading WAL file: {}, of bytes: {}", wal_file.path.to_str().unwrap(), wal_file.file.metadata().unwrap().len());
-        //
-        //         let mut total_rows = TOTAL_ROWS.read().load(Ordering::Relaxed);
-        //         total_rows += 1;
-        //         TOTAL_ROWS.read().store(total_rows, Ordering::Relaxed);
-        //
-        //     }
-        //
-        //     compacted_files.push(wal_file.path.clone());
-        //
-        //     record_batches.extend(wal_file.read_from_stream().expect(format!("Failed to read from WAL file: {} of bytes: {}", wal_file.path.to_str().unwrap(), wal_file.file.metadata().unwrap().len()).as_str()));
-        //
-        // }
-
-        let write_file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(&temp_file_path)
-            .unwrap();
-
-        let props = WriterProperties::builder()
-            .set_dictionary_enabled(false)
-            .set_encoding(parquet::basic::Encoding::PLAIN)
-            .set_compression(Compression::SNAPPY)
-            .build();
+        // let props = WriterProperties::builder()
+        //     .set_dictionary_enabled(false)
+        //     .set_encoding(parquet::basic::Encoding::PLAIN)
+        //     .set_compression(Compression::SNAPPY)
+        //     .build();
 
         let schema = match self.files.first_mut().unwrap().read_schema_from_stream() {
             Ok(schema) => schema,
@@ -573,539 +568,90 @@ impl WalPartition {
             }
         };
 
-        let mut writer = ArrowWriter::try_new(write_file, schema, Some(props)).unwrap();
-        // let mut writer = ArrowWriter::try_new(write_file, schema.clone(), Some(props)).unwrap();
 
-        for wal_file in self.files.iter_mut() {
+        let batches = self.files.iter_mut().map(|wal_file| {
+            wal_compacted_bytes_total += wal_file.bytes;
+            wal_compacted_files_total += 1;
 
-            // if wal_file.get_or_open_file().unwrap().metadata().unwrap().len() == 0 {
-            //     println!("Ignoring empty WAL file: {}", wal_file.path.to_str().unwrap());
-            //     continue;
-            // }
+            let batches = wal_file.read_from_stream().unwrap();
 
-            for batch in wal_file.read_from_stream().expect(format!("Failed to read from WAL file: {} of bytes: {}", wal_file.path.to_str().unwrap(), wal_file.get_or_open_file().unwrap().metadata().unwrap().len()).as_str()) {
-                // use json as an intermediate format to align record batches schema fields order
-                // @todo - clearly we want something more efficient
-                // let json = record_batches_to_json_rows(vec![&batch].as_slice()).unwrap();
-                // let mut decoder = ReaderBuilder::new(schema.clone()).build_decoder().unwrap();
-                //
-                // decoder.serialize(&json).unwrap();
-                //
-                // let aligned_batch = decoder.flush().unwrap().unwrap();
-                //
-                // println!("Writing {} rows to parquet", aligned_batch.num_rows());
-                //
-                // writer.write(&aligned_batch).expect("Error writing to parquet file");
+            wal_compacted_rows_total += batches.iter().map(|batch| batch.num_rows()).sum::<usize>() as u64;
 
-                // let run_id = format!("{:?}", md5::compute(format!("{:?}", batch.schema())));
+            batches
 
-                // println!("Writing {} rows to parquet, of shard: {} and schema Id: {}", batch.num_rows(), wal_file.shard, run_id);
+        }).flatten().collect::<Vec<RecordBatch>>();
 
-                writer.write(&batch).expect("Error writing to parquet file");
+        let batch_stream: SendableRecordBatchStream = Box::pin(MemoryStream::try_new(batches, schema.clone(), None).unwrap());
+
+
+        // match sync_output_plugin("athena", "output".to_string(), batch_stream, output_file_name).await {
+        match shared_output.write().sync(batch_stream, output_file_name).await {
+            Ok(()) => {
+                // println!("Synced WAL partition to output: {} {}", self.namespace, self.partition);
+
+                {
+                    let mut counter_lock = METRICS.write();
+                    counter_lock.wal_compacted_bytes_total += wal_compacted_bytes_total;
+                    counter_lock.wal_compacted_rows_total += wal_compacted_rows_total;
+                    counter_lock.wal_compacted_files_total += wal_compacted_files_total;
+
+                }
+
+                // Rename the processed WAL file to a tombstone file
+                for wal_file in self.files.iter() {
+                    let tombstone_path = format!("{}/ingest_buffer/done/{}.tombstone", data_dir, Helpers::random_str(32));
+
+                    match fs::rename(&wal_file.path, tombstone_path) {
+                        Ok(_) => {
+                            // println!("Tombstoned WAL file: {}", wal_file.path.to_str().unwrap());
+                        },
+                        Err(e) => {
+                            println!("Failed to tombstone WAL file: {}, Error: {}", wal_file.path.to_str().unwrap(), e);
+                        }
+
+                    }
+                }
+
+                self.prune_tombstone_wals();
+            },
+            Err(e) => {
+                let output_plugin_name = Config::get_pipeline_output_plugin_name();
+                println!("Failed to sync WAL partition to output plugin: {}, Namespace {}, Partition {}, Error {}", output_plugin_name, self.namespace, self.partition, e);
             }
-
         }
 
-        writer.close().unwrap();
 
-        let parquet_output = format!("{}/{}/{}-{}.parquet", data_dir, "output_buffer", output_file_name, Helpers::random_str(32));
+        // for wal_file in self.files.iter_mut() {
+        //
+        //     for batch in wal_file.read_from_stream().expect(format!("Failed to read from WAL file: {} of bytes: {}", wal_file.path.to_str().unwrap(), wal_file.get_or_open_file().unwrap().metadata().unwrap().len()).as_str()) {
+        //
+        //         writer.write(&batch).expect("Error writing to parquet file");
+        //
+        //     }
+        // }
+        //
+        // writer.close().unwrap();
 
-        fs::rename(&temp_file_path, parquet_output).unwrap();
+        // let parquet_output = format!("{}/{}/{}-{}.parquet", data_dir, "output_buffer", output_file_name, Helpers::random_str(32));
+
+        // fs::rename(&temp_file_path, parquet_output).unwrap();
 
         // Rename the processed WAL file to a tombstone file
-        for wal_file in self.files.iter() {
-            let tombstone_path = format!("{}/ingest_buffer/done/{}.tombstone", data_dir, Helpers::random_str(32));
-
-            // if fs::metadata(&wal_file_path).is_ok() {
-                match fs::rename(&wal_file.path, tombstone_path) {
-                    Ok(_) => {
-                        // println!("Tombstoned WAL file: {}", wal_file.path.to_str().unwrap());
-                    },
-                    Err(e) => {
-                        println!("Failed to tombstone WAL file: {}, Error: {}", wal_file.path.to_str().unwrap(), e);
-                    }
-
-                }
-                    //.expect(format!("Failed to tombstone WAL file: {}, it doesn't exist", wal_file_path.to_str().unwrap()).as_str());
-            // } else {
-            //     println!("Failed to tombstone WAL file: {}, it doesn't exist", wal_file_path.to_str().unwrap());
-            // }
-
-        }
-
-        self.prune_tombstone_wals();
-
-    }
-
-    pub fn parquet_write(&mut self, mut write_file: File, record_batches: &Vec<RecordBatch>) {
-
-        let schema = ARROW_SCHEMA.read().get(&self.namespace).unwrap().clone();
-
-        // Compute the parquet schema
-        let parquet_schema = arrow_to_parquet_schema(schema.as_ref()).unwrap();
-
-        // let props = Arc::new(WriterProperties::default());
-        let props = Arc::new(WriterProperties::builder()
-            .set_dictionary_enabled(false)
-            .set_encoding(parquet::basic::Encoding::PLAIN)
-            .set_compression(Compression::SNAPPY)
-            .build());
-
-
-        // Create writers for each of the leaf columns
-        let col_writers = get_column_writers(&parquet_schema, &props, &schema).unwrap();
-
-        // Spawn a worker thread for each column
-        // This is for demonstration purposes, a thread-pool e.g. rayon or tokio, would be better
-        let mut workers: Vec<_> = col_writers
-            .into_iter()
-            .map(|mut col_writer| {
-                let (send, recv) = std::sync::mpsc::channel::<ArrowLeafColumn>();
-                let handle = std::thread::spawn(move || {
-                    for col in recv {
-                        col_writer.write(&col)?;
-                    }
-                    col_writer.close()
-                });
-                (handle, send)
-            })
-            .collect();
-
-        // Create parquet writer
-        let root_schema = parquet_schema.root_schema_ptr();
-        // let mut out = Vec::with_capacity(1024); // This could be a File
-        let mut writer = SerializedFileWriter::new(&mut write_file, root_schema, props.clone()).unwrap();
-
-        // Start row group
-        let mut row_group = writer.next_row_group().unwrap();
-
-        // Columns to encode
-        // let to_write = vec![
-        //     Arc::new(Int32Array::from_iter_values([1, 2, 3])) as _,
-        //     Arc::new(Float32Array::from_iter_values([1., 45., -1.])) as _,
-        // ];
-
-        // Spawn work to encode columns
-        let mut worker_iter = workers.iter_mut();
-        for to_write in record_batches {
-            for (arr, field) in to_write.columns().iter().zip(&to_write.schema().fields) {
-                for leaves in compute_leaves(field, arr).unwrap() {
-                    worker_iter.next().unwrap().1.send(leaves).unwrap();
-                }
-            }
-        }
-
-        // Finish up parallel column encoding
-        for (handle, send) in workers {
-            drop(send); // Drop send side to signal termination
-            let chunk = handle.join().unwrap().unwrap();
-            chunk.append_to_row_group(&mut row_group).unwrap();
-        }
-        row_group.close().unwrap();
-
-        let metadata = writer.close().unwrap();
-        // assert_eq!(metadata.num_rows, 3);
-
-    }
-
-    pub fn concat_batches<'a>(
-        schema: &SchemaRef,
-        input_batches: impl IntoIterator<Item = &'a RecordBatch>,
-    ) -> Result<RecordBatch, ArrowError> {
-
-        let batches: Vec<&RecordBatch> = input_batches.into_iter().collect();
-        if batches.is_empty() {
-            return Ok(RecordBatch::new_empty(schema.clone()));
-        }
-        let field_num = schema.fields().len();
-        let mut arrays = Vec::with_capacity(field_num);
-        for i in 0..field_num {
-            let array = concat(
-                &batches
-                    .iter()
-                    .map(|batch| {
-                        // batch.column(i).as_ref()
-                        let field = schema.field(i);
-                        let field_name = field.name();
-                        let index = batch.schema().index_of(field_name).unwrap();
-
-                        // println!("Schema field: {} {}, Batch field {} {}", field_name, i, batch.schema().field(index).name(), index);
-
-                        batch.column(index).as_ref()
-                    })
-                    .collect::<Vec<_>>(),
-            )?;
-            arrays.push(array);
-        }
-
-        let mut options = RecordBatchOptions::new();
-        options.match_field_names = false;
-
-        RecordBatch::try_new_with_options(schema.clone(), arrays, &options)
-    }
-
-    fn recusive_sort(schema_ref: SchemaRef, record_batches: &mut Vec<RecordBatch>) -> Vec<RecordBatch> {
-        let mut sorted_batches = Vec::new();
-
-        let schema = schema_ref.as_ref();
-
-        for batch in record_batches {
-            let mut sorted_batch = Vec::new();
-
-            let field_num = schema.fields().len();
-            for i in 0..field_num {
-
-            // for field in schema.fields() {
-
-                let field = schema.field(i);
-
-                println!("Field: {}", field.name());
-
-                match field.data_type() {
-                    DataType::Struct(_) => {
-
-                        let index = batch.schema().index_of(field.name()).unwrap();
-                        sorted_batch.push(batch.column(index).clone());
-
-                        println!("Schema struct field: {} {}, Batch field {} {}", field.name(), i, batch.schema().field(index).name(), index);
-
-                        // println!("schema: {:?} \n", field);
-
-
-                        // Find the index of the parent field in the original schema
-                        let parent_field_index = schema.index_of(field.name()).ok().unwrap();
-
-                        // Get the parent field from the original schema
-                        let parent_field = schema.field(parent_field_index);
-
-                        // Check if the parent field is a struct
-                        let struct_data_type = match parent_field.data_type() {
-                            DataType::Struct(fields) => fields,
-                            _ => panic!("Parent field is not a struct")
-                        };
-
-                        // Create a new schema with the subfields of the parent field
-                        let field_schema = Arc::new(Schema::new(struct_data_type.clone()));
-
-                        println!("field schema: {:?} \n", field_schema);
-
-
-                        let sub_batch = batch.column(index).clone();
-                        // let sub_batch_record_batches: RecordBatch = sub_batch.as_any().downcast_ref::<RecordBatch>().unwrap().clone();
-
-                        // Create a vector of array references, one for each column
-                        let mut columns: Vec<ArrayRef> = vec![];
-
-
-
-                        // let mut sub_batch_record_batches: Vec<RecordBatch> = sub_batch.as_any().downcast_ref::<Vec<RecordBatch>>().unwrap().clone();
-
-
-
-                        // let mut subfield_batches: Vec<RecordBatch> = Vec::new();
-                        //
-                        // for subfield in struct_data_type {
-                        // // //
-                        // // //     println!("sub field: {:?}", subfield);
-                        //     let subfield_index = field_schema.index_of(subfield.name()).unwrap();
-                        // // //
-                        // // //     let batch_schema = batch.schema();
-                        // // //     let sub_batch_schema = Arc::new(Schema::new(batch_schema));
-                        // // //
-                        // // //     let sub_batch: RecordBatch = RecordBatch::try_new(sub_batch_schema, vec![batch.column(subfield_index).clone()]).unwrap();
-                        // // //
-                        // // //     // println!("field data: {:?} \n", sub_batch);
-                        // // //
-                        // // //     subfield_batches.push(sub_batch);
-                        // //
-                        // //     let sub_batch = batch.column(index).clone();
-                        // //
-                        //
-                        //     let sub_batch_field = batch.column(subfield_index).clone();
-                        //     columns.push(sub_batch_field);
-                        // }
-
-
-                        let index = batch.schema().index_of(field.name()).unwrap();
-                        let foo = batch.column(index).clone();
-
-                        let sub_batch_schema_index = batch.schema().index_of(field.name()).unwrap();
-                        let sub_batch_schema = batch.schema().field(sub_batch_schema_index).clone();
-                        let sub_batch_schema = match sub_batch_schema.data_type() {
-                            DataType::Struct(fields) => fields,
-                            _ => panic!("Parent field is not a struct")
-                        };
-
-                        let sub_batch_schema = Arc::new(Schema::new(sub_batch_schema.clone()));
-
-                        // create record batch with the data and schema of the sub batch.
-                        // We'll later parse this with the expected schema
-                        let mut sub_batch_record_batches = vec![RecordBatch::try_new(sub_batch_schema, vec![foo]).unwrap()];
-
-                        // let mut sub_batch_record_batches = vec![RecordBatch::try_new(field_schema.clone(), columns).unwrap()];
-
-
-                        // let subfield_batches = RecordBatch::try_new(field_schema.clone(), subfield_batches).unwrap();
-
-                        // println!("field data: {:?} \n", subfield_batches);
-
-                        let sorted_array = Self::recusive_sort(field_schema, &mut sub_batch_record_batches);
-                        // let sorted_array = Self::recusive_sort_feild(&field_schema, &mut subfield_batches);
-
-                        // println!("sorted array: {:?} \n", sorted_array);
-
-                        // return vec![RecordBatch::try_new(field_schema.clone(), sorted_array).unwrap()];
-                        return sorted_array;
-
-
-
-                    },
-                    DataType::List(_) => {
-
-                        // println!("Schema list field: {} {}, Batch field {} {}", field.name(), i, batch.schema().field(index).name(), index);
-                        let index = batch.schema().index_of(field.name()).unwrap();
-                        sorted_batch.push(batch.column(index).clone());
-
-                        println!("Schema list field: {} {}, Batch field {} {}", field.name(), i, batch.schema().field(index).name(), index);
-
-                    },
-                    _ => {
-                        // println!("Data type: {:?}", field.data_type());
-                        let index = batch.schema().index_of(field.name()).unwrap();
-                        sorted_batch.push(batch.column(index).clone());
-
-                        println!("Schema field: {} {}, Batch field {} {}", field.name(), i, batch.schema().field(index).name(), index);
-
-                    }
-                }
-
-                // let field_name = field.name();
-                // let index = batch.schema().index_of(field_name).unwrap();
-                // sorted_batch.push(batch.column(index).clone());
-            }
-
-            let mut options = RecordBatchOptions::new();
-            options.match_field_names = false;
-
-            sorted_batches.push(RecordBatch::try_new_with_options(schema_ref.clone(), sorted_batch, &options).unwrap());
-        }
-
-        sorted_batches
-    }
-
-    fn recusive_sort_feild(schema_ref: &SchemaRef, array: &mut Vec<arrow::array::ArrayRef>) -> Vec<arrow::array::ArrayRef> {
-
-        let mut sorted_batch = Vec::new();
-
-        let field_num = schema_ref.fields().len();
-
-        for i in 0..field_num {
-
-            let field = schema_ref.field(i);
-
-            println!("Sub Field: {}, Data Type: {}", field.name(), field.data_type());
-
-            // let mut sorted_fields = Vec::new();
-
-            match field.data_type() {
-                DataType::Struct(_) => {
-                    println!("Struct sub field sort: {}", field.name());
-                    // println!("{:?}", field);
-                    for field in Self::_fields(field.data_type()) {
-
-                        // println!("sub field iter name: {}", field.name());
-                        let field_schema = Arc::new(Schema::new(vec![field.clone()]));
-
-                        let mut sub_array = vec![array[i].clone()];
-
-                        let sub_field = Self::recusive_sort_feild(&field_schema, &mut sub_array);
-
-                        println!("sub field struct field: {}", field.name());
-                        sorted_batch.extend(sub_field);
-                    }
-                },
-                // Field { name: \"tags\", data_type: List(Field { name: \"item\", data_type: Struct([Field { name: \"value\", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: \"name\", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }]), nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }), nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }]
-                DataType::List(_) => {
-
-                    println!("List sub field sort: {}", field.name());
-
-                    for field in Self::_fields(field.data_type()) {
-                        println!("sub field list name: {}", field.name());
-                        let field_schema = Arc::new(Schema::new(vec![field.clone()]));
-
-                        let mut sub_array = vec![array[i].clone()];
-                        let sub_field = Self::recusive_sort_feild(&field_schema, &mut sub_array);
-
-                        println!("sub field list field: {}", field.name());
-                        sorted_batch.extend(sub_field);
-                    }
-
-                    // sorted_batch.push(sub_field);
-                },
-                _ => {
-                    // arrow::compute::sort(array, None).unwrap();
-
-                    let field_name = field.name();
-                    // let index = batch.schema().index_of(field_name).unwrap();
-                    // let index = field.
-                    // sorted_batch.push(batch.column(index).clone());
-
-                    let index = schema_ref.index_of(field_name).unwrap();
-                    let sub_field = array[index].clone();
-
-                    // println!("Sub field value sort: {}", field.name());
-
-                    println!("Schema field: {} {}, Array field {}", field.name(), i, index);
-                    // println!("{:?}", sub_field);
-
-                    sorted_batch.push(sub_field);
-                }
-            }
-        }
-
-        return sorted_batch;
-    }
-
-    fn _fields(dt: &DataType) -> Vec<&Field> {
-        match dt {
-            DataType::Struct(fields) => fields.iter().flat_map(|f| Self::_fields(f.data_type())).collect(),
-            DataType::Union(fields, _) => fields.iter().flat_map(|(_, f)| Self::_fields(f.data_type())).collect(),
-            DataType::List(field)
-            | DataType::LargeList(field)
-            | DataType::FixedSizeList(field, _)
-            | DataType::Map(field, _) => Self::_fields(field.data_type()),
-            DataType::Dictionary(_, value_field) => Self::_fields(value_field.as_ref()),
-            _ => vec![],
-        }
-    }
-
-  async fn compact_to_parquet(&mut self) {
-        let data_dir = Config::get_data_dir();
-        let output_file_name = BufferChunker::encode_chunk_name(
-            "output",
-            Some(&self.namespace),
-            Some(&self.partition),
-            self.time,
-            None,
-        );
-
-
-
-        // let schema = ARROW_SCHEMA.read().get(&self.namespace).unwrap().clone();
-        // let wal_file = self.files.last_mut().unwrap();
-        // let schema = wal_file.read_schema_from_stream().expect("Failed to read schema from WAL file");
-        // let mut writer = ArrowWriter::try_new(write_file, schema, Some(props)).unwrap();
-
-        // let schema = wal_file.read_schema_from_stream().expect("Failed to read schema from WAL file");
-        let schema = ARROW_SCHEMA.read().get(&self.namespace).unwrap().clone();
-
-        let namespace = match self.namespace.as_str() {
-           "" => "none",
-            _ => self.namespace.as_str()
-        };
-        let partition = match self.partition.as_str() {
-            "" => "none",
-            _ => self.partition.as_str()
-        };
-        let time = self.time.unwrap_or(0);
-        let sub_dir = format!("tmp/{}-{}-{}", namespace, partition, time);
-        let temp_parquet_path = format!("{}/{}", data_dir, sub_dir);
-        fs::create_dir_all(&temp_parquet_path).unwrap();
-
-
-        for wal_file in self.files.iter_mut() {
-
-            if wal_file.bytes == 0 {
-                continue;
-            }
-
-            // check for empty file
-            if wal_file.get_or_open_file().unwrap().metadata().unwrap().len() == 0 {
-                println!("Ignoring empty WAL file: {}", wal_file.path.to_str().unwrap());
-                continue;
-            }
-
-            let temp_file_path = format!("{}/{}-{}.temp", temp_parquet_path, output_file_name, Helpers::random_str(32));
-
-            let record_batches = wal_file.read_from_stream().expect("Failed to read from WAL file");
-
-            let write_file = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .open(&temp_file_path)
-                .unwrap();
-
-            let props = WriterProperties::builder()
-                .set_dictionary_enabled(false)
-                .set_encoding(parquet::basic::Encoding::PLAIN)
-                .set_compression(Compression::SNAPPY)
-                .build();
-
-
-            let schema = wal_file.read_schema_from_stream().expect("Failed to read schema from WAL file");
-            let mut writer = ArrowWriter::try_new(write_file, schema, Some(props)).unwrap();
-
-            for batch in record_batches {
-                writer.write(&batch).expect("Error writing to parquet file");
-            }
-
-            writer.close().unwrap();
-
-            let temp_parquet_file = temp_file_path.replace(".temp", ".parquet");
-            fs::rename(&temp_file_path, temp_parquet_file).unwrap();
-
-        }
-
-
-        let parquet_output = format!("{}/{}/{}-{}.parquet", data_dir, "output_buffer", output_file_name, Helpers::random_str(32));
-
-
-        /**
-         * Support optional SQL query to transform data before writing to parquet
-         */
-        let sql = Some("SELECT * FROM my_table");
-
-        let record_batches = Self::apply_sql_on_ipc_stream(&temp_parquet_path, sql.unwrap(), schema).await.unwrap();
-
-        let write_file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .open(&parquet_output)
-            .unwrap();
-
-        let props = WriterProperties::builder()
-            .set_dictionary_enabled(false)
-            .set_encoding(parquet::basic::Encoding::PLAIN)
-            .set_compression(Compression::SNAPPY)
-            .build();
-
-        let schema = ARROW_SCHEMA.read().get(&self.namespace).unwrap().clone();
-
-        let mut writer = ArrowWriter::try_new(write_file, schema.clone(), Some(props)).unwrap();
-
-        for batch in record_batches {
-            writer.write(&batch).expect("Error writing to parquet file");
-        }
-
-        writer.close().unwrap();
-
-        fs::remove_dir_all(temp_parquet_path).unwrap();
-
-
-        // Rename the processed WAL file to a tombstone file
-        for wal_file in self.files.iter_mut() {
-            let tombstone_path = format!("{}/ingest_buffer/done/{}.tombstone", data_dir, Helpers::random_str(32));
-
-            if fs::metadata(&tombstone_path).is_ok() {
-                fs::rename(&wal_file.path, tombstone_path).expect("Failed to tombstone WAL file");
-            } else {
-                println!("Failed to tombstone WAL file: {}, it doesn't exist", wal_file.path.to_str().unwrap());
-            }
-
-        }
-
-        let wal_partition_dir = WalFile::get_wal_partition_dir(&self.namespace, &self.partition, self.time, &self.shard);
-        fs::remove_dir_all(wal_partition_dir).unwrap();
+        // for wal_file in self.files.iter() {
+        //     let tombstone_path = format!("{}/ingest_buffer/done/{}.tombstone", data_dir, Helpers::random_str(32));
+        //
+        //     match fs::rename(&wal_file.path, tombstone_path) {
+        //         Ok(_) => {
+        //             // println!("Tombstoned WAL file: {}", wal_file.path.to_str().unwrap());
+        //         },
+        //         Err(e) => {
+        //             println!("Failed to tombstone WAL file: {}, Error: {}", wal_file.path.to_str().unwrap(), e);
+        //         }
+        //
+        //     }
+        // }
+        //
+        // self.prune_tombstone_wals();
 
     }
 

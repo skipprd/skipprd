@@ -27,6 +27,9 @@ use glob::{glob_with};
 use futures::stream::StreamExt;
 
 use serde_derive::Deserialize;
+use crate::helpers::timed_rwlock::TimedRwLock;
+use crate::plugins::athena::DataOutputAwsAthenaPlugin;
+use crate::plugins::DataOutputPlugin;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSourceLocalFilePluginConfig {
@@ -83,6 +86,7 @@ impl DataSourceLocalFilePlugin {
     pub async fn sync(
         &mut self,
         offsets: Arc<Offsets>,
+        shared_output: Arc<TimedRwLock<Box<dyn DataOutputPlugin + Send + Sync>>>,
     ) {
         let offsets_clone = offsets.clone();
 
@@ -94,14 +98,17 @@ impl DataSourceLocalFilePlugin {
             self.config.batch_size_bytes.unwrap_or(1000000) as i64
         ));
 
+        let shared_output_clone = shared_output.clone();
+
         while let Some(batch) = data_batches_stream.next().await {
 
             let offsets_clone = offsets_clone.clone();
+            let shared_output_clone = shared_output_clone.clone();
 
             // let ingest_handle = task::spawn_blocking(move || {
 
                 // println!("Ingesting batch: {:?}", batch);
-                self.ingest.ingest_file(batch, &offsets_clone);
+                self.ingest.ingest_file(batch, &offsets_clone, shared_output_clone);
             // });
             // ingest_handle.await.unwrap();
 

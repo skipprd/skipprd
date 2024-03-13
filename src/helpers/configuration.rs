@@ -44,7 +44,7 @@ use crate::ingest::fast_ingest::{create_default_nested_message, DEFAULT_NESTED_M
 use crate::ingest_work::Ingest;
 use crate::plugins::file_input::{DataSourceLocalFilePluginConfig};
 use crate::plugins::s3_input::DataSourceS3PluginConfig;
-use crate::plugins::s3_inventory::{DataSourceS3InventoryPluginConfig};
+// use crate::plugins::s3_inventory::{DataSourceS3InventoryPluginConfig};
 
 lazy_static! {
     static ref ENV_CACHE: TimedRwLock<DashMap<String, String>> = TimedRwLock::new("env_cache".to_string(), DashMap::new());
@@ -71,7 +71,7 @@ pub struct Transform {
 #[derive(Debug, Deserialize, Clone)]
 pub enum PluginConfig {
     s3(DataSourceS3PluginConfig),
-    s3_inventory(DataSourceS3InventoryPluginConfig),
+    // s3_inventory(DataSourceS3InventoryPluginConfig),
     athena(DataOutputAwsAthenaPluginConfig),
     file(DataSourceLocalFilePluginConfig),
 }
@@ -80,7 +80,7 @@ impl PluginConfig {
     pub fn format(&self) -> String {
         match self {
             PluginConfig::s3(s3_config) => s3_config.format.clone().or(Some("json".to_string())).as_ref().unwrap().clone(),
-            PluginConfig::s3_inventory(s3_inventory_config) => s3_inventory_config.format.clone().or(Some("json".to_string())).as_ref().unwrap().clone(),
+            // PluginConfig::s3_inventory(s3_inventory_config) => s3_inventory_config.format.clone().or(Some("json".to_string())).as_ref().unwrap().clone(),
             PluginConfig::athena(athena_config) => athena_config.format.clone().or(Some("json".to_string())).as_ref().unwrap().clone(),
             PluginConfig::file(file_config) => file_config.format.clone().or(Some("json".to_string())).unwrap(),
         }
@@ -89,7 +89,7 @@ impl PluginConfig {
     pub fn plugin_name(&self) -> Option<String> {
         match self {
             PluginConfig::s3(_s3_config) => Some("s3".to_string()),
-            PluginConfig::s3_inventory(_s3_inventory_config) => Some("s3_inventory".to_string()),
+            // PluginConfig::s3_inventory(_s3_inventory_config) => Some("s3_inventory".to_string()),
             PluginConfig::athena(_athena_config) => Some("athena".to_string()),
             PluginConfig::file(_file_config) => Some("file".to_string()),
         }
@@ -98,7 +98,7 @@ impl PluginConfig {
     pub fn batch_size_bytes(&self) -> Option<i64> {
         match self {
             PluginConfig::s3(s3_config) => s3_config.batch_size_bytes.clone(),
-            PluginConfig::s3_inventory(s3_inventory_config) => s3_inventory_config.batch_size_bytes.clone(),
+            // PluginConfig::s3_inventory(s3_inventory_config) => s3_inventory_config.batch_size_bytes.clone(),
             PluginConfig::athena(_athena_config) => None,
             PluginConfig::file(file_config) => file_config.batch_size_bytes.clone(),
         }
@@ -107,7 +107,7 @@ impl PluginConfig {
     pub fn batch_size_seconds(&self) -> Option<i64> {
         match self {
             PluginConfig::s3(s3_config) => s3_config.batch_size_seconds.clone(),
-            PluginConfig::s3_inventory(s3_inventory_config) => s3_inventory_config.batch_size_seconds.clone(),
+            // PluginConfig::s3_inventory(s3_inventory_config) => s3_inventory_config.batch_size_seconds.clone(),
             PluginConfig::athena(_athena_config) => None,
             PluginConfig::file(file_config) => file_config.batch_size_seconds.clone(),
         }
@@ -1486,8 +1486,14 @@ impl Config {
 
     pub async fn init() {
 
-        let license = LicenseChecker::new();
-        license.unwrap().get_license().await.unwrap();
+        let mut license = LicenseChecker::new();
+        match license.get_license().await {
+            Ok(license) => {}
+            Err(err) => unsafe {
+                println!("Error: {}", err);
+                exit(1);
+            }
+        }
 
         Config::get_data_dir();
 

@@ -91,12 +91,13 @@ pub fn ingest(
             None,
             metadata,
             updated_schema,
-            true
+            true,
+            flatten
         ) {
             Ok(v) => v,
             Err(_e) => {
                 // apply evolution strategy
-                match Evolution::evolve_field(&field.to_string(), value, None, None, metadata, updated_schema) {
+                match Evolution::evolve_field(&field.to_string(), value, None, None, metadata, updated_schema, flatten) {
                     Ok(v) => v,
                     Err(e) => {
                         return Err(e)
@@ -170,6 +171,7 @@ pub fn set_value(
     metadata: &mut HashMap<String, Metadata>,
     updated_schema: &mut String,
     allow_evolve: bool,
+    flatten: bool,
 ) -> Result<ResolvedFieldValue,Box<dyn std::error::Error>> {
     // let _parent_type = match metadata.get_mut(field) {
     //     Some(pt) => &pt.parent_type,
@@ -260,7 +262,8 @@ pub fn set_value(
                                 Some(data_type),
                                 &mut metadata.get_mut(&field.to_string()).unwrap().fields,
                                 updated_schema,
-                                allow_evolve
+                                allow_evolve,
+                                flatten
                             );
 
                             match newval {
@@ -342,7 +345,8 @@ pub fn set_value(
                                 Some(data_type),
                                 &mut metadata.get_mut(&field.to_string()).unwrap().fields,
                                 updated_schema,
-                                allow_evolve
+                                allow_evolve,
+                                flatten
                             );
 
                             match newval {
@@ -431,7 +435,8 @@ pub fn set_value(
                                     Some(data_type),
                                     &mut metadata.get_mut(field).unwrap().fields,
                                     updated_schema,
-                                    allow_evolve
+                                    allow_evolve,
+                                    flatten
                                 );
 
                                 match newval {
@@ -504,7 +509,8 @@ pub fn set_value(
                             Some("array"),
                             &mut metadata.get_mut(field).unwrap().fields,
                             updated_schema,
-                            true
+                            true,
+                            flatten
                         );
 
                         // println!("Array ingested field: {:?}", foo);
@@ -600,7 +606,8 @@ pub fn set_value(
                                         parent_data_type,
                                         &mut metadata.borrow_mut(),
                                         updated_schema,
-                                        false
+                                        false,
+                                        flatten
                                     );
 
                                     let res = match foo {
@@ -630,7 +637,7 @@ pub fn set_value(
                 // println!("data_type is {}", data_type);
 
                 if data_type == "date" {
-                    new_value = set_date(field, value, parent_field, parent_data_type, metadata, updated_schema);
+                    new_value = set_date(field, value, parent_field, parent_data_type, metadata, updated_schema, flatten);
                     // let date_new_value = set_date(field, value, parent_field, parent_data_type, metadata, updated_schema);
                     // new_value = date_new_value.unwrap_or(ResolvedFieldValue::new(field.to_string(), Value::Null));
                 } else {
@@ -645,7 +652,7 @@ pub fn set_value(
                     // };
 
                     // @todo - handle return Result<Value, Error>
-                    new_value = match_scalar_value(field, data_type, value, parent_field, parent_data_type, metadata, updated_schema, allow_evolve)
+                    new_value = match_scalar_value(field, data_type, value, parent_field, parent_data_type, metadata, updated_schema, allow_evolve, flatten);
 
                     // let scalar_value = match_scalar_value(field, data_type, value, parent_field, parent_data_type, metadata, updated_schema);
 
@@ -712,7 +719,8 @@ pub fn set_value(
                 parent_data_type,
                 metadata,
                 updated_schema,
-                allow_evolve
+                allow_evolve,
+                flatten
             );
         } else {
             return Ok(ResolvedFieldValue::new(field.to_string(), Value::Null));
@@ -728,7 +736,8 @@ fn match_scalar_value(
     parent_data_type: Option<&str>,
     metadata: &mut HashMap<String, Metadata>,
     updated_schema: &mut String,
-    allow_evolve: bool
+    allow_evolve: bool,
+    flatten: bool,
 ) -> Result<ResolvedFieldValue, Box<dyn std::error::Error>> {
     match data_type {
         "string" => match value.as_str().map(Value::from) {
@@ -745,7 +754,7 @@ fn match_scalar_value(
                                 return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Field: {} => {} value: {} is not a string", parent_field.unwrap_or("root"), field, value))));
                             }
                             // Handle the value error applying the Evolution Strategy
-                            Evolution::evolve_field(&field.to_string(), value, parent_field, parent_data_type, metadata, updated_schema)
+                            Evolution::evolve_field(&field.to_string(), value, parent_field, parent_data_type, metadata, updated_schema, flatten)
                         }
                     }
                 }
@@ -765,7 +774,7 @@ fn match_scalar_value(
                                 return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Field: {} => {} value: {} is not an integer", parent_field.unwrap_or("root"), field, value))));
                             }
                             // Handle the value error applying the Evolution Strategy
-                            Evolution::evolve_field(&field.to_string(), value, parent_field, parent_data_type, metadata, updated_schema)
+                            Evolution::evolve_field(&field.to_string(), value, parent_field, parent_data_type, metadata, updated_schema, flatten)
                         }
                     }
                 }
@@ -802,7 +811,7 @@ fn match_scalar_value(
                             }
                             // println!("Field {} Value {} is not an integer", field, value);
                             // Handle the value error applying the Evolution Strategy
-                            Evolution::evolve_field(&field.to_string(), value, parent_field, parent_data_type, metadata, updated_schema)
+                            Evolution::evolve_field(&field.to_string(), value, parent_field, parent_data_type, metadata, updated_schema, flatten)
                         }
                     }
                 }
@@ -823,7 +832,7 @@ fn match_scalar_value(
                                 return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Field: {} => {} value: {} is not a double", parent_field.unwrap_or("root"), field, value))));
                             }
                             // Handle the value error applying the Evolution Strategy
-                            Evolution::evolve_field(&field.to_string(), value, parent_field, parent_data_type, metadata, updated_schema)
+                            Evolution::evolve_field(&field.to_string(), value, parent_field, parent_data_type, metadata, updated_schema, flatten)
                         }
                     }
                 }
@@ -851,7 +860,7 @@ fn match_scalar_value(
                             }
                             // println!("Value {} is not a boolean", value);
                             // Handle the value error applying the Evolution Strategy
-                            Evolution::evolve_field(&field.to_string(), value, parent_field, parent_data_type, metadata, updated_schema)
+                            Evolution::evolve_field(&field.to_string(), value, parent_field, parent_data_type, metadata, updated_schema, flatten)
                         }
                     }
                 }
@@ -937,7 +946,8 @@ pub fn set_date(
     parent_field: Option<&str>,
     parent_data_type: Option<&str>,
     metadata: &mut HashMap<String, Metadata>,
-    updated_schema: &mut String
+    updated_schema: &mut String,
+    flatten: bool,
 ) -> Result<ResolvedFieldValue, Box<dyn std::error::Error>> {
     // Hive Timestamp doesn't support string dates
     match value.clone().as_str() {
@@ -966,7 +976,7 @@ pub fn set_date(
         None => {
             // println!("Could not format date {} to int using format {} for field {}", value, metadata.get(field).unwrap().date_candidate.as_ref().unwrap().format, field);
             // Handle the value error applying the Evolution Strategy
-            Evolution::evolve_field(&field.to_string(), value, parent_field, parent_data_type, metadata, updated_schema)
+            Evolution::evolve_field(&field.to_string(), value, parent_field, parent_data_type, metadata, updated_schema, flatten)
             // Value::Null
         }
     }
@@ -1026,7 +1036,7 @@ mod tests_set_date {
 
         let mut updated_schema = "no".to_string();
 
-        let result = set_date(field, &value, None, None, &mut meta, &mut updated_schema);
+        let result = set_date(field, &value, None, None, &mut meta, &mut updated_schema, false);
 
         let expected_date = Helpers::parse_date_from_string(date_str, format).unwrap();
 
@@ -1053,7 +1063,7 @@ mod tests_set_date {
 
         let mut updated_schema = "no".to_string();
 
-        let result = set_date(field, &value, None, None, &mut meta, &mut updated_schema);
+        let result = set_date(field, &value, None, None, &mut meta, &mut updated_schema, false);
 
         let expected_date = Helpers::parse_date_from_string(date_str, format).unwrap();
 
@@ -1081,7 +1091,7 @@ mod tests_set_date {
 
         let mut updated_schema = "no".to_string();
 
-        let result = set_date(field, &value, None, None, &mut meta, &mut updated_schema);
+        let result = set_date(field, &value, None, None, &mut meta, &mut updated_schema, false);
 
         let expected_date =  Helpers::parse_date_from_string(date_str, format).unwrap();
 

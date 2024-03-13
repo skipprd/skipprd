@@ -3,14 +3,21 @@
 // use async_trait::async_trait;
 // use crate::helpers::offsets::Offsets;
 
+use std::sync::Arc;
+use async_trait::async_trait;
+use datafusion::execution::SendableRecordBatchStream;
+use crate::helpers::offsets::Offsets;
+use crate::helpers::timed_rwlock::TimedRwLock;
+use crate::plugins::athena::DataOutputAwsAthenaPlugin;
+
 pub mod athena;
-pub mod stdin_input;
+// pub mod stdin_input;
 pub mod s3_input;
-pub mod s3_inventory;
+// pub mod s3_inventory;
 pub mod file_input;
-pub mod s3_output;
+// pub mod s3_output;
 pub mod file_output;
-pub mod stdout_output;
+// pub mod stdout_output;
 // pub mod pcap_input;
 
 // #[async_trait]
@@ -38,3 +45,12 @@ pub mod stdout_output;
 //     }
 // }
 
+#[async_trait]
+pub(crate) trait DataInputPlugin {
+    async fn sync(&mut self, offsets: Arc<Offsets>, shared_output: Arc<TimedRwLock<DataOutputAwsAthenaPlugin>>);
+}
+
+#[async_trait]
+pub(crate) trait DataOutputPlugin: Send + Sync {
+    async fn sync(&mut self, stream: SendableRecordBatchStream, filename: String) -> Result<(), std::io::Error>;
+}

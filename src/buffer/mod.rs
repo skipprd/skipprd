@@ -873,7 +873,7 @@ impl BufferChunker {
 
     pub fn next_file(buffer_name: &str) -> Option<String> {
         let data_dir = Config::get_data_dir();
-        let pattern = format!("{}/{}_buffer/buffer={}*", data_dir, buffer_name, buffer_name);
+        let pattern = format!("{}/{}_buffer/buffer={}*.parquet", data_dir, buffer_name, buffer_name);
 
         let filenames = match glob::glob(&pattern) {
             Ok(filenames) => filenames
@@ -889,9 +889,9 @@ impl BufferChunker {
 
         for filename in filenames {
 
-            if filename.to_str().unwrap().contains(".temp") {
-                continue;
-            }
+            // if filename.to_str().unwrap().contains(".temp") {
+            //     continue;
+            // }
 
             match File::open(&filename) {
                 Err(ref e) if e.kind() == ErrorKind::NotFound => {

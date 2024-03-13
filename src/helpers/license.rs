@@ -1,12 +1,13 @@
 extern crate reqwest;
 extern crate serde_json;
 
+use std::error::Error;
 use crate::helpers::configuration::Config;
 use once_cell::sync::Lazy;
 use reqwest::{header::HeaderName, Client, Url};
 use serde_derive::{Deserialize, Serialize};
 
-use std::error::Error;
+use thiserror::Error;
 use std::string::ToString;
 
 use crate::helpers::timed_rwlock::TimedRwLock;
@@ -14,9 +15,11 @@ use crate::helpers::timed_rwlock::TimedRwLock;
 pub static TENANT_ID: Lazy<TimedRwLock<String>> = Lazy::new(|| TimedRwLock::new("tenant_id".to_string(), "".to_string()));
 pub static HAS_LICENSE: Lazy<TimedRwLock<bool>> = Lazy::new(|| TimedRwLock::new("has_license".to_string(), false));
 
-const API_KEY_ENV_VAR: &str = "SKIPPR_API_TOKEN";
-const APP_ENV: &str = "APP_ENV";
 const DEFAULT_ENV: &str = "prod";
+
+#[derive(Debug, Error)]
+#[error("Found no license for the provided API key: {0}")]
+struct NoLicenseError(String);
 
 pub struct LicenseChecker {
     client: Client,
@@ -35,14 +38,14 @@ pub struct LicenseRecord {
 }
 
 impl LicenseChecker {
-    pub fn new() -> Result<Self, Box<dyn Error>> {
+    pub fn new() -> Self {
         let api_key = Config::get_skippr_api_token();
-        Ok(Self {
+        Self {
             client: Client::new(),
             license_is_valid: false,
             license: None,
             api_key,
-        })
+        }
     }
 
     pub async fn get_license(&mut self) -> Result<(), Box<dyn Error>> {
@@ -53,7 +56,7 @@ impl LicenseChecker {
             String::from("https://license.api.skippr.io")
         };
 
-        let _url = Url::parse(&base_url)?.join(&format!("license-api/check/{}", self.api_key))?;
+        // let url = Url::parse(&base_url)?.join(&format!("license-api/check/{}", self.api_key))?;
 
         let auth_header = HeaderName::from_static("x-api-key");
 
@@ -67,7 +70,6 @@ impl LicenseChecker {
         if response.status().is_success() {
             let body = response.json::<LicenseRecord>().await?;
             self.license = Some(body);
-            // println!("{:?}", self.license);
 
             TENANT_ID
                 .write()
@@ -87,26 +89,15 @@ impl LicenseChecker {
 
         } else {
             self.license_is_valid = false;
-            // println!("{:?}", response.json::<HashMap<String, String>>().await?);
         }
 
         match self.license_is_valid {
             true => {
-                // println!("Found valid license for API key");
                 println!("By using this software, you agree to the terms of the End User License Agreement (EULA) available at https://skippr.io/terms/eula");
-                // println!("");
                 Ok(())
             }
             _false => {
-                // ASCI art generated from http://patorjk.com/software/taag/#p=display&f=ANSI%20Shadow&t=Skippr
-
-                println!("Free local developer version. Visit https://skippr.io/pricing for additional plugins, schema evolution and metadata API.");
-                println!("");
-                println!("By using this software, you agree to the terms of the End User License Agreement (EULA) available at https://skippr.io/terms/eula");
-                println!("");
-
-
-                Ok(())
+               Err(NoLicenseError(self.api_key.clone()).into())
             }
         }
     }

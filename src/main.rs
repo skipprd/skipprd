@@ -13,7 +13,7 @@ extern crate nix;
 
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
-use std::process;
+use std::{io, process};
 
 use std::collections::HashMap;
 
@@ -65,6 +65,8 @@ use std::panic;
 use std::path::{Path, PathBuf};
 use std::string::ToString;
 use datafusion::common::ExprSchema;
+use datafusion::physical_plan::memory::MemoryStream;
+use datafusion::physical_plan::SendableRecordBatchStream;
 
 
 use once_cell::sync::Lazy;
@@ -86,15 +88,15 @@ use crate::helpers::license::HAS_LICENSE;
 use crate::plugins::athena::DataOutputAwsAthenaPlugin;
 
 use crate::plugins::s3_input::DataSourceS3Plugin;
-use crate::plugins::s3_inventory::DataSourceS3InventoryPlugin;
+// use crate::plugins::s3_inventory::DataSourceS3InventoryPlugin;
 
 
 use crate::metrics::{Metrics, MetricsStatus};
 use crate::plugins::file_input::DataSourceLocalFilePlugin;
-use crate::plugins::file_output::DataOutputFilePlugin;
-use crate::plugins::s3_output::DataOutputS3Plugin;
-use crate::plugins::stdin_input::DataSourceStdinPlugin;
-use crate::plugins::stdout_output::DataOutputStdoutPlugin;
+// use crate::plugins::file_output::DataOutputFilePlugin;
+// use crate::plugins::s3_output::DataOutputS3Plugin;
+// use crate::plugins::stdin_input::DataSourceStdinPlugin;
+// use crate::plugins::stdout_output::DataOutputStdoutPlugin;
 
 use datafusion::prelude::*;
 use sqlparser::test_utils::alter_table_op_with_name;
@@ -104,6 +106,8 @@ use crate::helpers::Helpers;
 // use crate::buffer::BufferChunker;
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::ingest_work::Ingest;
+use crate::plugins::DataOutputPlugin;
+use crate::plugins::file_output::DataOutputFilePlugin;
 use crate::sql::operators::alter_column::alter_column_type;
 use crate::sql::operators::drop_column::alter_column_drop;
 use crate::sql::parser::{PipelineToggle, SParser, Statement};
@@ -180,6 +184,11 @@ async fn main() {
                         PIPELINE_NAME.write().clear();
                         PIPELINE_NAME.write().push_str(&pipeline);
                         Config::init().await;
+
+                        {
+                            let mut counter_lock = METRICS.write();
+                            counter_lock.reset();
+                        }
 
                         sync().await;
 
@@ -500,6 +509,10 @@ async fn sync() {
 
     Config::sync_schema(&pipeline_metadata.metadata).await;
 
+    // let output = DataOutputAwsAthenaPlugin::new("output".to_string()).await;
+    let output = sync_output_plugin(Config::get_pipeline_output_plugin_name().as_str(), "output".to_string()).await.unwrap();
+    let shared_output = Arc::new(TimedRwLock::new("athena_output".to_string(), output));
+
     let now = Arc::new(TimedRwLock::new("now".to_string(), Instant::now()));
 
     // let logger_clone = Arc::clone(&logger);
@@ -717,6 +730,10 @@ async fn sync() {
 
     let last_messages_total = Arc::new(TimedRwLock::new("last_messages_total".to_string(), 0));
 
+    // get curent tokio runtime
+    let handle = runtime::Handle::current();
+    let handle_clone = handle.clone();
+
     planner.add(
         move || {
             if RUNNING.read().load(Ordering::SeqCst) {
@@ -746,13 +763,15 @@ async fn sync() {
                     // println!("Bytes per Min: {}", metrics.bytes_current);
 
 
-                    let total_times: Vec<(String, Duration)> = TimedRwLock::<()>::get_total_wait_times();
-                    for (key, value) in total_times.iter() {
-                        println!("{}: {}ms", key, value.as_millis());
-                    }
+                    // let total_times: Vec<(String, Duration)> = TimedRwLock::<()>::get_total_wait_times();
+                    // for (key, value) in total_times.iter() {
+                    //     println!("{}: {}ms", key, value.as_millis());
+                    // }
                 }
 
-                println!("Bytes Total: {}", metrics.bytes_total);
+                let human_bytes = Helpers::human_readable_size(metrics.source_bytes_total);
+
+                println!("Bytes Total: {}", human_bytes);
                 println!("Messages Total: {}", metrics.messages_total);
                 println!("Deadletter Total: {}", metrics.deadletters_total);
                 println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
@@ -762,12 +781,12 @@ async fn sync() {
 
                 drop(metrics);
 
-                tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap()
-                    .block_on(async {
-
+                // tokio::runtime::Builder::new_multi_thread()
+                //     .enable_all()
+                //     .build()
+                //     .unwrap()
+                //     .block_on(async {
+                handle_clone.spawn(async move {
                         match Metrics::send_metrics(None).await {
                             Ok(_g) => {}
                             Err(_err) => {}
@@ -813,44 +832,44 @@ async fn sync() {
             }, periodic::Every::new(Duration::from_secs(rand::thread_rng().gen_range(60..90))),
         );
     }
-    out_pnanner.add(
-        move || {
-            if RUNNING.read().load(Ordering::SeqCst) {
-                tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap()
-                    .block_on(async {
-
-                        // BufferChunker::rotate_buffers(false);
-
-                        while OUTPUT_RUNNING.read().load(Ordering::SeqCst) {
-                            // sleep(Duration::from_secs(1));
-                            return;
-                        }
-
-                        // BufferChunker::rotate_buffers(false);
-
-                        {
-                            OUTPUT_RUNNING.write().store(true, Ordering::SeqCst);
-                        }
-
-                        // Buffers::compact_all_partitions(false, offsets_clone).await;
-
-                        if Config::get_pipeline_config().output.is_some() {
-
-                            sync_output_plugin(Config::get_pipeline_output_plugin_name().as_str(), "output".to_string()).await;
-                        }
-
-                        OUTPUT_RUNNING
-                            .write()
-                            .store(false, Ordering::SeqCst);
-                    });
-            }
-        },
-        periodic::Every::new(Duration::from_secs(10)),
-    );
-    out_pnanner.start();
+    // out_pnanner.add(
+    //     move || {
+    //         if RUNNING.read().load(Ordering::SeqCst) {
+    //             tokio::runtime::Builder::new_multi_thread()
+    //                 .enable_all()
+    //                 .build()
+    //                 .unwrap()
+    //                 .block_on(async {
+    //
+    //                     // BufferChunker::rotate_buffers(false);
+    //
+    //                     while OUTPUT_RUNNING.read().load(Ordering::SeqCst) {
+    //                         // sleep(Duration::from_secs(1));
+    //                         return;
+    //                     }
+    //
+    //                     // BufferChunker::rotate_buffers(false);
+    //
+    //                     {
+    //                         OUTPUT_RUNNING.write().store(true, Ordering::SeqCst);
+    //                     }
+    //
+    //                     // Buffers::compact_all_partitions(false, offsets_clone).await;
+    //
+    //                     if Config::get_pipeline_config().output.is_some() {
+    //
+    //                         sync_output_plugin(Config::get_pipeline_output_plugin_name().as_str(), "output".to_string()).await;
+    //                     }
+    //
+    //                     OUTPUT_RUNNING
+    //                         .write()
+    //                         .store(false, Ordering::SeqCst);
+    //                 });
+    //         }
+    //     },
+    //     periodic::Every::new(Duration::from_secs(10)),
+    // );
+    // out_pnanner.start();
 
     // @todo - share across s3 ingests
     // let _parse_namespace_cache: HashMap<String, String> = HashMap::new();
@@ -864,7 +883,8 @@ async fn sync() {
 
     let offsets_clone = offsets.clone();
 
-    sync_input_plugin(offsets_clone).await;
+    let shared_output_clone = shared_output.clone();
+    sync_input_plugin(offsets_clone, shared_output_clone).await;
 
     println!("Ingest completed, flushing remaining buffers to output plugin {}", Config::get_pipeline_config().output.or(Some("".to_string())).unwrap());
 
@@ -889,19 +909,20 @@ async fn sync() {
         OUTPUT_RUNNING.write().store(true, Ordering::SeqCst);
     }
 
-    Buffers::compact_all_partitions(true, offsets);
+    let shared_output_clone = shared_output.clone();
+    Buffers::compact_all_partitions(true, offsets, shared_output_clone).await;
 
     // while BUFFER_FINALISE_RUNNING.read().load(Ordering::SeqCst) {
     //     sleep(Duration::from_secs(1));
     // }
 
-    if Config::get_pipeline_config().output.is_some() {
-        sync_output_plugin(Config::get_pipeline_output_plugin_name().as_str(), "output".to_string()).await;
-    }
-
-    if Config::get_pipeline_config().deadletter.is_some() {
-        sync_output_plugin(&Config::get_pipeline_deadletter_plugin_name(), "deadletter".to_string()).await;
-    }
+    // if Config::get_pipeline_config().output.is_some() {
+    //     sync_output_plugin(Config::get_pipeline_output_plugin_name().as_str(), "output".to_string()).await;
+    // }
+    //
+    // if Config::get_pipeline_config().deadletter.is_some() {
+    //     sync_output_plugin(&Config::get_pipeline_deadletter_plugin_name(), "deadletter".to_string()).await;
+    // }
 
     {
         OUTPUT_RUNNING
@@ -960,91 +981,93 @@ pub fn flatten_metadata(metadata: &Metadata, flattened: &mut HashMap<String, Met
     }
 }
 
-pub async fn sync_output_plugin(plugin_name: &str, buffer_name: String) {
+pub async fn sync_output_plugin(plugin_name: &str, buffer_name: String) -> Result<Box<dyn DataOutputPlugin + Send + Sync>, io::Error> {
     match plugin_name {
-        "stdout" => {
-            let output = DataOutputStdoutPlugin::new(buffer_name).await;
-            output
-                .sync()
-                .await;
-        }
+        // "stdout" => {
+        //     let output = DataOutputStdoutPlugin::new(buffer_name).await;
+        //     output
+        //         .sync()
+        //         .await;
+        // }
         "file" => {
-            let output = DataOutputFilePlugin::new(buffer_name).await;
-            output
-                .sync()
-                .await;
-        }
-        "s3" => {
-            if *HAS_LICENSE.read() {
-                let output = DataOutputS3Plugin::new(buffer_name).await;
-                output
-                    .sync()
-                    .await;
-            } else {
-                println!("No license found for S3 output plugin. Visit https://skippr.io to get a license.");
-            }
+            let plugin = DataOutputFilePlugin::new(buffer_name).await;
+            Ok(Box::new(plugin) as Box<dyn DataOutputPlugin + Send + Sync>)
 
         }
+        // "s3" => {
+        //     if *HAS_LICENSE.read() {
+        //         let output = DataOutputS3Plugin::new(buffer_name).await;
+        //         output
+        //             .sync()
+        //             .await;
+        //     } else {
+        //         println!("No license found for S3 output plugin. Visit https://skippr.io to get a license.");
+        //     }
+        //
+        // }
         "athena" => {
             if *HAS_LICENSE.read() {
-                let output = DataOutputAwsAthenaPlugin::new(buffer_name).await;
-                output
-                    .sync()
-                    .await;
+                let plugin = DataOutputAwsAthenaPlugin::new(buffer_name).await;
+                Ok(Box::new(plugin) as Box<dyn DataOutputPlugin + Send + Sync>)
             } else {
-                println!("No license found for Athena output plugin. Visit https://skippr.io to get a license.");
+                // println!("No license found for Athena output plugin. Visit https://skippr.io to get a license.");
+                Err(io::Error::new(io::ErrorKind::Other, "No license found for Athena output plugin. Visit https://skippr.io to get a license."))
             }
         }
         "" => {
-            println!("No Data {} plugin specified", buffer_name);
+            println!("No Data {} plugin specified, defaulting to local file", buffer_name);
+            let plugin = DataOutputFilePlugin::new(buffer_name).await;
+            Ok(Box::new(plugin) as Box<dyn DataOutputPlugin + Send + Sync>)
         }
         _ => {
-            println!("Unknown Data {} plugin specified", buffer_name);
+            // println!("Unknown Data {} plugin specified", buffer_name);
+            Err(io::Error::new(io::ErrorKind::Other, "Unknown Data plugin specified"))
         }
     }
 }
 
-pub async fn sync_input_plugin(offsets_clone: Arc<Offsets>) {
+pub async fn sync_input_plugin(offsets_clone: Arc<Offsets>, shared_output: Arc<TimedRwLock<Box<dyn DataOutputPlugin + Send + Sync>>>) {
     match Config::get_pipeline_input_plugin_name().as_str() {
-        "pcap" => {
-            panic!("PCAP input plugin not installed, please contact support")
-            // let mut input = DataSourcePcapPlugin::new().await;
-            // input
-            //     .sync(
-            //         offsets_clone,
-            //     )
-            //     .await;
-        }
-        "stdin" => {
-            let mut input = DataSourceStdinPlugin::new().await;
-            input
-                .sync(
-                    offsets_clone,
-                )
-                .await;
-        }
+        // "pcap" => {
+        //     panic!("PCAP input plugin not installed, please contact support")
+        //     // let mut input = DataSourcePcapPlugin::new().await;
+        //     // input
+        //     //     .sync(
+        //     //         offsets_clone,
+        //     //     )
+        //     //     .await;
+        // }
+        // "stdin" => {
+        //     let mut input = DataSourceStdinPlugin::new().await;
+        //     input
+        //         .sync(
+        //             offsets_clone,
+        //         )
+        //         .await;
+        // }
         "file" => {
             let mut input = DataSourceLocalFilePlugin::new().await;
             input.sync(
-                offsets_clone
+                offsets_clone,
+                shared_output
             )
                 .await;
         }
         "s3" => {
             let mut input = DataSourceS3Plugin::new().await;
-            input.sync(offsets_clone).await;
+            input.sync(offsets_clone, shared_output).await;
         }
-        "s3_inventory" => {
-            if *HAS_LICENSE.read() {
-                let mut input = DataSourceS3InventoryPlugin::new().await;
-                input.sync(
-                    offsets_clone,
-                )
-                    .await;
-            } else {
-                println!("No license found for S3 Inventory input plugin. Visit https://skippr.io to get a license.");
-            }
-        }
+        // "s3_inventory" => {
+        //     if *HAS_LICENSE.read() {
+        //         let mut input = DataSourceS3InventoryPlugin::new().await;
+        //         input.sync(
+        //             offsets_clone,
+        //         )
+        //             .await;
+        //     } else {
+        //         println!("No license found for S3 Inventory input plugin. Visit https://skippr.io to get a license.");
+        //     }
+        // }
         "" => {
             println!("No Data Source plugin specified. You must specify a data source plugin, see documentation for the DATA_SOURCE_PLUGIN_NAME environment variable.");
         }
