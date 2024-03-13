@@ -1,5 +1,0 @@
-parameters:
-    excludes_analyse:
-        - %rootDir%/../../../src/**/Generated/*.php
-    ignoreErrors:
-        - '#Using $this outside a class#'
