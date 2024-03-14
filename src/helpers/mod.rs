@@ -236,6 +236,9 @@ impl Helpers {
             for entity_field_dot in
                 Config::get_transform_batch_partition_fields().split(',')
             {
+                // strip whitespace
+                let entity_field_dot = entity_field_dot.trim();
+
                 let clean_entity_value =
                     match Helpers::get_nested_value_from_dot_notation(message, entity_field_dot) {
                         Some(entity_value) => {
@@ -766,7 +769,7 @@ mod parse_partition_tests {
     #[serial]
     fn test_parse_partition_field_no_config() {
         let message = json!({"foo": "bar", "abc1": "def"});
-        std::env::set_var("TRANSFORM_BATCH_PARTITION_FIELDS", "");
+        Config::setenv("TRANSFORM_BATCH_PARTITION_FIELDS", "");
         let partition = Helpers::parse_partition_field(&message);
         assert_eq!(partition, "");
     }
@@ -775,7 +778,7 @@ mod parse_partition_tests {
     #[serial]
     fn test_parse_partition_field_empty_field() {
         let message = json!({"foo": "", "abc1": "def"});
-        std::env::set_var("TRANSFORM_BATCH_PARTITION_FIELDS", "foo");
+        Config::setenv("TRANSFORM_BATCH_PARTITION_FIELDS", "foo");
         let partition = Helpers::parse_partition_field(&message);
         assert_eq!(partition, "p_foo=");
     }
@@ -784,7 +787,8 @@ mod parse_partition_tests {
     #[serial]
     fn test_parse_partition_field_single_field() {
         let message = json!({"foo": "bar", "abc1": "def"});
-        std::env::set_var("TRANSFORM_BATCH_PARTITION_FIELDS", "foo");
+        Config::get_envcache("TRANSFORM_BATCH_PARTITION_FIELDS").clear();
+        Config::setenv("TRANSFORM_BATCH_PARTITION_FIELDS", "foo");
         let partition = Helpers::parse_partition_field(&message);
         assert_eq!(partition, "p_foo=bar");
     }
@@ -793,7 +797,7 @@ mod parse_partition_tests {
     #[serial]
     fn test_parse_partition_field_composite_key() {
         let message = json!({"foo": {"bar": "baz"}, "abc1": "def"});
-        std::env::set_var("TRANSFORM_BATCH_PARTITION_FIELDS", "foo.bar");
+        Config::setenv("TRANSFORM_BATCH_PARTITION_FIELDS", "foo.bar");
         let partition = Helpers::parse_partition_field(&message);
         assert_eq!(partition, "p_bar=baz");
     }
@@ -802,7 +806,16 @@ mod parse_partition_tests {
     #[serial]
     fn test_parse_partition_field_several_composite_keys() {
         let message = json!({"foo": {"bar": "baz"}, "abc1": "def"});
-        std::env::set_var("TRANSFORM_BATCH_PARTITION_FIELDS", "foo.bar,abc1");
+        Config::setenv("TRANSFORM_BATCH_PARTITION_FIELDS", "foo.bar,abc1");
+        let partition = Helpers::parse_partition_field(&message);
+        assert_eq!(partition, "p_bar=baz/p_abc1=def");
+    }
+
+    #[test]
+    #[serial]
+    fn test_parse_partition_field_several_composite_keys_with_spaces() {
+        let message = json!({"foo": {"bar": "baz"}, "abc1": "def"});
+        Config::setenv("TRANSFORM_BATCH_PARTITION_FIELDS", " foo.bar  , abc1  ");
         let partition = Helpers::parse_partition_field(&message);
         assert_eq!(partition, "p_bar=baz/p_abc1=def");
     }
