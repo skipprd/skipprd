@@ -385,9 +385,11 @@ impl WalPartitionIndex {
             count += 1;
 
             if count % 1000 == 0 {
-                println!("Indexed {} of {} WAL files", count, wal_files_count);
+                println!("Indexed {} of {} WAL files in {} partitions", count, wal_files_count, self.index.len());
             }
         }
+
+        println!("Indexed {} of {} WAL files in {} partitions", count, wal_files_count, self.index.len());
 
         println!("Syncing offsets to DB");
 
@@ -423,7 +425,6 @@ impl WalPartitionIndex {
 
         offsets_db.flush();
 
-        println!("Indexed {} of {} WAL files", count, wal_files_count);
 
         Ok(())
     }
