@@ -142,8 +142,10 @@ impl DataSourceS3Plugin {
             s3_prefix = "".to_string();
         }
 
-        // let mut continuation_token: Option<String> = Self::read_continuation_token().unwrap_or_else(|_| None);
-        let mut continuation_token: Option<String> = None;
+        let mut continuation_token_watermark: Option<String> = None;
+
+        let mut continuation_token: Option<String> = Self::read_continuation_token().unwrap_or_else(|_| None);
+        // let mut continuation_token: Option<String> = None;
 
         let mut list_obj_req = self
             .s3_client
@@ -159,8 +161,10 @@ impl DataSourceS3Plugin {
         let mut empty_objects = 0;
 
         loop {
-            match list_obj_req.clone().send().await {
 
+            i += 1;
+
+            match list_obj_req.clone().send().await {
                 Err(err) => {
                     println!("S3 Error: {:?}", err);
                 },
@@ -253,11 +257,23 @@ impl DataSourceS3Plugin {
                     if let Some(token) = output.next_continuation_token {
                         continuation_token = Some(token.to_string());
 
-                        if let Err(e) = Self::save_continuation_token(&continuation_token) {
-                            println!("Error saving S3 continuation token: {}", e);
+                        if i % 20 == 0 {
+                            // println!("Saving S3 continuation token: {}", token);
+
+                            if let Err(e) = Self::save_continuation_token(&continuation_token_watermark) {
+                                println!("Error saving S3 continuation token: {}", e);
+                            }
+
+                            continuation_token_watermark = continuation_token.clone();
+
                         }
 
                         list_obj_req = list_obj_req.set_continuation_token(Some(token.to_string()));
+
+                        if continuation_token_watermark.is_none() {
+                            continuation_token_watermark = continuation_token;
+                        }
+
                     } else {
                         println!("Reached end of S3 pagination");
 
