@@ -136,7 +136,7 @@ impl DataOutputFilePlugin {
         buf_writer.write_all(&parquet_bytes.bytes)?;
         buf_writer.flush()?;
 
-        println!("Created output file: {}", output_file.display());
+        // println!("Created output file: {}", output_file.display());
 
         Ok(())
 
