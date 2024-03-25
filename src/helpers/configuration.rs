@@ -212,8 +212,11 @@ impl Config {
         });
 
         if ini.sections().contains(&profile_name) == false {
-            // support local work without a profile
-            println!("Profile '{}' not found in credentials file {}", profile_name, credentials_file_path);
+            if profile_name != "default" {
+                panic!("Profile '{}' not found in credentials file {}", profile_name, credentials_file_path);
+            } else { // support local work without a profile if user has not set SKIPPR_PROFILE
+                println!("Profile '{}' not found in credentials file {}", profile_name, credentials_file_path);
+            }
             return;
         }
 
