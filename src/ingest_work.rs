@@ -23,12 +23,12 @@ use std::path::PathBuf;
 use std::process::exit;
 use std::string::ToString;
 use std::sync::{Arc, RwLock};
-use std::time::{SystemTime};
+use std::time::{Instant, SystemTime};
 use threadpool::ThreadPool;
 use std::sync::mpsc::channel;
 extern crate num_cpus;
 use std::sync::mpsc::Sender;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::atomic::Ordering::AcqRel;
 use arrow::json::ReaderBuilder;
 use arrow::record_batch::RecordBatch;
@@ -621,19 +621,31 @@ impl Ingest {
                         record: record_value,
                     };
 
-                    // println!("run_id: {}", run_id);
-
-                    // let schema_hash = match schema_hashes.get(&skpr_namespace) {
-                    //     Some(hash) => hash.clone(),
-                    //     None => {
-                    //         format!("{:?}", md5::compute(format!("{:?}", ARROW_SCHEMA.read().get(&skpr_namespace).unwrap().deref())))
-                    //     }
-                    // };
-
                     let schema_hash = match schema_hashes.get(&skpr_namespace) {
                         Some(hash) => hash.clone(),
                         None => {
-                            let schemas = ARROW_SCHEMA.read();
+
+                            let mut schemas: HashMap<String, SchemaRef> = HashMap::new();
+                            {
+                                schemas = ARROW_SCHEMA.read().clone()
+                            }
+                            if schemas.get(&skpr_namespace).is_none() {
+                                let start_time = Instant::now();
+                                
+                                while ARROW_SCHEMA.read().get(&skpr_namespace).is_none() {
+                                    // sleep
+                                    println!("Waiting for schema to be prepared for namespace: {}", skpr_namespace);
+                                    std::thread::sleep(std::time::Duration::from_millis(100));
+                                }
+                                schemas = ARROW_SCHEMA.read().clone();
+
+                                let elapsed = start_time.elapsed();
+                                let nanos = elapsed.as_nanos() as u64;
+                                crate::helpers::timed_rwlock::TOTAL_WAIT_TIMES
+                                    .entry("new_schema_hash".to_string())
+                                    .or_insert_with(|| AtomicU64::new(0))
+                                    .fetch_add(nanos, Ordering::Relaxed);
+                            }
 
                             let schema = Arc::clone(schemas.get(&skpr_namespace).unwrap());
                             let hash = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));

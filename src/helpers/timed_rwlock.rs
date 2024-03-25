@@ -8,7 +8,7 @@ use lazy_static::lazy_static;
 lazy_static! {
     static ref PROFILE_PERFORMANCE: bool = true;
     static ref WAITING_ON: DashMap<String, Instant> = DashMap::new();
-    static ref TOTAL_WAIT_TIMES: DashMap<String, AtomicU64> = DashMap::new();
+    pub static ref TOTAL_WAIT_TIMES: DashMap<String, AtomicU64> = DashMap::new();
 }
 
 pub struct TimedRwLock<T> {
