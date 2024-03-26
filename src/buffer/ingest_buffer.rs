@@ -517,7 +517,8 @@ impl WalPartition {
     pub fn check_wal_rotate(&self) -> bool {
         if self.is_file_size_exceeded() || self.is_file_time_exceeded() {
             // println!("Compacting WAL: {} Bytes: {}, Segment Files: {}", self.namespace, self.bytes, self.files.len());
-            println!("Compacting WAL partition Namespace: {}, Partition: {}, Time: {}, of Bytes: {}, Segment Files: {}", self.namespace, self.partition, self.time.unwrap_or(0), self.bytes, self.files.len());
+            let elapsed = SystemTime::now().duration_since(self.updated_at).unwrap().as_secs();
+            println!("Compacting WAL partition Namespace: {}, Partition: {}, Time: {}, of Bytes: {}, Elapsed Secs: {}, Segment Files: {}", self.namespace, self.partition, self.time.unwrap_or(0), self.bytes, elapsed, self.files.len());
             return true
         }
 
@@ -568,7 +569,7 @@ impl WalPartition {
 
         let first_file = self.files.first_mut().unwrap();
         
-        let filename = first_file.path.to_str().unwrap().clone().to_string();
+        let filename = first_file.path.to_str().unwrap().to_string();
         let file_bytes = first_file.bytes.clone();
                 // println!("Failed to read schema from WAL file: {} of bytes: {}, Error {}. Continue to next WAL partition.", file.path.to_str().unwrap(), file.bytes, e);
                 // println!("Failed to read schema from WAL file: {} of bytes: {}, Error {}. Retrying.", filename, file_bytes, e);
