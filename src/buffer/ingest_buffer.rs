@@ -7,7 +7,7 @@ use std::ops::{Deref, Index};
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::{Arc};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 use arrow::array::{Array, ArrayRef, RecordBatch};
 use arrow::json::ReaderBuilder;
 use arrow_schema::{ArrowError, DataType, Field, SchemaRef, Schema};
@@ -560,14 +560,44 @@ impl WalPartition {
         //     .set_compression(Compression::SNAPPY)
         //     .build();
 
-        let schema = match self.files.first_mut().unwrap().read_schema_from_stream() {
-            Ok(schema) => schema,
-            Err(e) => {
-                let file = self.files.first().unwrap();
-                println!("Failed to read schema from WAL file: {} of bytes: {}, Error {}. Continue to next WAL partition.", file.path.to_str().unwrap(), file.bytes, e);
-                return;
-            }
-        };
+        // let schema = match self.files.first_mut().unwrap().read_schema_from_stream() {
+        //     Ok(schema) => schema,
+        //     Err(e) => {
+        //         let filename = self.files.first_mut().unwrap().path.to_str().unwrap().clone();
+        //         let file_bytes = self.files.first_mut().unwrap().bytes.clone();
+
+        let first_file = self.files.first_mut().unwrap();
+        
+        let filename = first_file.path.to_str().unwrap().clone().to_string();
+        let file_bytes = first_file.bytes.clone();
+                // println!("Failed to read schema from WAL file: {} of bytes: {}, Error {}. Continue to next WAL partition.", file.path.to_str().unwrap(), file.bytes, e);
+                // println!("Failed to read schema from WAL file: {} of bytes: {}, Error {}. Retrying.", filename, file_bytes, e);
+
+                let start_time = Instant::now();
+        
+                while first_file.read_schema_from_stream().is_err() {
+                    // sleep
+                    println!("Waiting for schema read to succeed for: {}", filename);
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                
+                let schema = match first_file.read_schema_from_stream() {
+                    Ok(schema) => schema,
+                    Err(e) => {
+                        println!("Failed again to read schema from WAL file: {} of bytes: {}, Error {}. Continue to next WAL partition.", filename, file_bytes, e);
+                        return;
+                    }
+                };
+
+                let elapsed = start_time.elapsed();
+                let nanos = elapsed.as_nanos() as u64;
+                crate::helpers::timed_rwlock::TOTAL_WAIT_TIMES
+                    .entry("wal_file_schema_read".to_string())
+                    .or_insert_with(|| AtomicU64::new(0))
+                    .fetch_add(nanos, Ordering::Relaxed);
+                // return;
+        //     }
+        // };
 
 
         let batches = self.files.iter_mut().map(|wal_file| {
