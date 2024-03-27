@@ -762,19 +762,20 @@ async fn sync() {
                     println!("Messages Fixed: {}", metrics.ingeted_slow_total);
                     // println!("Bytes per Min: {}", metrics.bytes_current);
 
+                    let human_bytes = Helpers::human_readable_size(metrics.source_bytes_total);
 
+                    println!("Bytes Total: {}", human_bytes);
+                    println!("Messages Total: {}", metrics.messages_total);
+                    println!("Deadletter Total: {}", metrics.deadletters_total);
+                    println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
+                    
                     // let total_times: Vec<(String, Duration)> = TimedRwLock::<()>::get_total_wait_times();
                     // for (key, value) in total_times.iter() {
                     //     println!("{}: {}ms", key, value.as_millis());
                     // }
                 }
 
-                let human_bytes = Helpers::human_readable_size(metrics.source_bytes_total);
-
-                println!("Bytes Total: {}", human_bytes);
-                println!("Messages Total: {}", metrics.messages_total);
-                println!("Deadletter Total: {}", metrics.deadletters_total);
-                println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
+              
 
                 // }
                 // metrics.bytes_current = 0;
