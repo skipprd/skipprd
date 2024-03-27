@@ -934,7 +934,7 @@ impl AwsAthena {
                         .await
                     {
                         Ok(_) => {
-                            println!("Updated Athena partition");
+                            // println!("Updated Athena partition");
                             partition_cache.push(md5_digest);
                         }
                         Err(err) => {
