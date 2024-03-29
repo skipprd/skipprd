@@ -71,13 +71,11 @@ impl DataOutputFilePlugin {
         };
 
         let key = match TimePartitioner::new(&filename).process() {
-            Ok(k) => k,
-            Err(e) => {
-                return Err(e);
-            }
+            Ok(k) => {
+                full_key = format!("{}/{}", full_key, k);
+            },
+            Err(e) => {}
         };
-
-        full_key = format!("{}/{}", full_key, key);
 
         let md5_digest = md5::compute(&filename);
         let md5_string = hex::encode(&md5_digest.0);

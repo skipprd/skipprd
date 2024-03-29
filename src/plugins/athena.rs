@@ -177,15 +177,13 @@ impl DataOutputAwsAthenaPlugin {
         }
 
         let key = match TimePartitioner::new(&filename).process() {
-            Ok(k) => k,
-            Err(e) => {
-                return Err(e);
+            Ok(k) => {
+                full_key = format!("{}/{}", full_key, k);
+                partition_values.extend(TimePartitioner::get_granularities());
             }
+            Err(e) => {}
         };
-
-        full_key = format!("{}/{}", full_key, key);
-        partition_values.extend(TimePartitioner::get_granularities());
-
+        
         if !partition_values.is_empty() {
             let flatten =
                 Config::get_transform_flatten_events();
