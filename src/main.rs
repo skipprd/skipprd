@@ -498,7 +498,15 @@ async fn sync() {
         METADATA.write().clone_from(&pipeline_metadata);
     }
 
-    let offsets = Arc::new(Offsets::init().unwrap());
+    let offsets = match Offsets::init() {
+        Ok(offsets) => offsets,
+        Err(e) => {
+            println!("Skipping: {}", e);
+            return;
+        }
+    };
+    
+    let offsets = Arc::new(offsets);
 
     let offset_buffer_clone = offsets.clone();
 

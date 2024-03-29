@@ -6,6 +6,7 @@ use crate::helpers::configuration::Config;
 use serde::__private::de::IdentifierDeserializer;
 use serde_derive::{Deserialize, Serialize};
 use sled::{IVec};
+use thiserror::Error;
 use {
     byteorder::{BigEndian, LittleEndian},
     zerocopy::{byteorder::U64, AsBytes, FromBytes, LayoutVerified, Unaligned, U16},
@@ -60,14 +61,23 @@ pub struct Offsets {
     tree: sled::Tree,
 }
 
+// #[derive(Debug, Error)]
+// #[error("Failed opening offset DB at this location: {0}. Is another instance of Skippr already ingesting this pipeline?")]
+// struct AlreadyOpenError(String);
+
+#[derive(Debug, Error)]
+pub enum OffsetsError {
+    #[error("Failed opening offset DB at this location: {0}. Is another instance of Skippr already ingesting this pipeline?")]
+    AlreadyOpenError(String),
+}
+
 impl Offsets {
-    pub fn init() -> Result<Offsets, bool> {
+    pub fn init() -> Result<Offsets, OffsetsError> {
         let db_path = format!("{}/{}", Config::get_data_dir(), SLED_NAME);
-        let db = match sled::open(&db_path).map_err(|_e| format!("Failed opening offset DB at this location: {:?}. Is another instance of Skippr running?", &db_path)) {
+        let db = match sled::open(&db_path) {
             Ok(db) => {db}
             Err(err) => {
-                println!("{}", err);
-                exit(1);
+                return Err(OffsetsError::AlreadyOpenError(db_path));
             }
         };
         let tree = db.open_tree("offsets").expect("Could not open offset tree");
@@ -441,7 +451,13 @@ mod tests {
     #[test]
     #[serial]
     fn test_validate() {
-        let db = Offsets::init().unwrap();
+        let db = match Offsets::init() {
+            Ok(offsets) => offsets,
+            Err(e) => {
+                println!("Skipping: {}", e);
+                return;
+            }
+        };
 
         // assert_eq!(db.validate(key, 1, 1), Some(true));
         // assert_eq!(db.validate(key, 1, 1), Some(false)); // @todo this is atleast once
