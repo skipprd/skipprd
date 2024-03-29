@@ -466,7 +466,7 @@ async fn sync() {
                     for stmt in sql {
                         println!("Recieved SQL statement: '{}'", stmt);
 
-                        // Important to exec the SQL after saving metadata, as the SQL may drop or otherwise alter the metadata
+                        // Important to exec the SQL before saving metadata, as the SQL may drop or otherwise alter the metadata
                         query(&stmt).await;
                     }
 

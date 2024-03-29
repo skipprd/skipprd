@@ -544,29 +544,7 @@ impl WalPartition {
         let mut wal_compacted_bytes_total = 0;
         let mut wal_compacted_rows_total = 0;
         let mut wal_compacted_files_total = 0;
-
-
-        // let temp_file_path = format!("{}/{}-{}.temp", data_dir, output_file_name, Helpers::random_str(32));
-
-
-        // let write_file = OpenOptions::new()
-        //     .create(true)
-        //     .write(true)
-        //     .open(&temp_file_path)
-        //     .unwrap();
-        //
-        // let props = WriterProperties::builder()
-        //     .set_dictionary_enabled(false)
-        //     .set_encoding(parquet::basic::Encoding::PLAIN)
-        //     .set_compression(Compression::SNAPPY)
-        //     .build();
-
-        // let schema = match self.files.first_mut().unwrap().read_schema_from_stream() {
-        //     Ok(schema) => schema,
-        //     Err(e) => {
-        //         let filename = self.files.first_mut().unwrap().path.to_str().unwrap().clone();
-        //         let file_bytes = self.files.first_mut().unwrap().bytes.clone();
-
+        
         let first_file = self.files.first_mut().unwrap();
         
         let filename = first_file.path.to_str().unwrap().to_string();
@@ -616,23 +594,22 @@ impl WalPartition {
         let batch_stream: SendableRecordBatchStream = Box::pin(MemoryStream::try_new(batches, schema.clone(), None).unwrap());
 
 
-        // match sync_output_plugin("athena", "output".to_string(), batch_stream, output_file_name).await {
         match shared_output.write().sync(batch_stream, output_file_name).await {
             Ok(()) => {
                 // println!("Synced WAL partition to output: {} {}", self.namespace, self.partition);
-
+        
                 {
                     let mut counter_lock = METRICS.write();
                     counter_lock.wal_compacted_bytes_total += wal_compacted_bytes_total;
                     counter_lock.wal_compacted_rows_total += wal_compacted_rows_total;
                     counter_lock.wal_compacted_files_total += wal_compacted_files_total;
-
+        
                 }
-
+        
                 // Rename the processed WAL file to a tombstone file
                 for wal_file in self.files.iter() {
                     let tombstone_path = format!("{}/ingest_buffer/done/{}.tombstone", data_dir, Helpers::random_str(32));
-
+        
                     match fs::rename(&wal_file.path, tombstone_path) {
                         Ok(_) => {
                             // println!("Tombstoned WAL file: {}", wal_file.path.to_str().unwrap());
@@ -640,10 +617,10 @@ impl WalPartition {
                         Err(e) => {
                             println!("Failed to tombstone WAL file: {}, Error: {}", wal_file.path.to_str().unwrap(), e);
                         }
-
+        
                     }
                 }
-
+        
                 self.prune_tombstone_wals();
             },
             Err(e) => {
@@ -651,39 +628,6 @@ impl WalPartition {
                 println!("Failed to sync WAL partition to output plugin: {}, Namespace {}, Partition {}, Error {}", output_plugin_name, self.namespace, self.partition, e);
             }
         }
-
-
-        // for wal_file in self.files.iter_mut() {
-        //
-        //     for batch in wal_file.read_from_stream().expect(format!("Failed to read from WAL file: {} of bytes: {}", wal_file.path.to_str().unwrap(), wal_file.get_or_open_file().unwrap().metadata().unwrap().len()).as_str()) {
-        //
-        //         writer.write(&batch).expect("Error writing to parquet file");
-        //
-        //     }
-        // }
-        //
-        // writer.close().unwrap();
-
-        // let parquet_output = format!("{}/{}/{}-{}.parquet", data_dir, "output_buffer", output_file_name, Helpers::random_str(32));
-
-        // fs::rename(&temp_file_path, parquet_output).unwrap();
-
-        // Rename the processed WAL file to a tombstone file
-        // for wal_file in self.files.iter() {
-        //     let tombstone_path = format!("{}/ingest_buffer/done/{}.tombstone", data_dir, Helpers::random_str(32));
-        //
-        //     match fs::rename(&wal_file.path, tombstone_path) {
-        //         Ok(_) => {
-        //             // println!("Tombstoned WAL file: {}", wal_file.path.to_str().unwrap());
-        //         },
-        //         Err(e) => {
-        //             println!("Failed to tombstone WAL file: {}, Error: {}", wal_file.path.to_str().unwrap(), e);
-        //         }
-        //
-        //     }
-        // }
-        //
-        // self.prune_tombstone_wals();
 
     }
 
