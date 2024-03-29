@@ -15,6 +15,7 @@ use datafusion::execution::SendableRecordBatchStream;
 use parquet::arrow::ArrowWriter;
 use crate::helpers::offsets::Offsets;
 use crate::helpers::timed_rwlock::TimedRwLock;
+use crate::ingest::partition::TimePartitioner;
 use crate::plugins::athena::DataOutputAwsAthenaPlugin;
 use crate::plugins::DataOutputPlugin;
 use crate::plugins::file_input::DataSourceLocalFilePlugin;
@@ -69,43 +70,14 @@ impl DataOutputFilePlugin {
             _ => format!("{}/{}", full_key, BufferChunker::decode_file_partition(&filename)),
         };
 
-        let time_partition_str = BufferChunker::decode_file_time_to_datetime_string(&filename);
-
-        if !time_partition_str.is_empty() {
-            let granularity_target = Config::get_transform_batch_time_unit();
-
-            let date = match DateTime::parse_from_rfc3339(&time_partition_str) {
-                Ok(date) => date,
-                Err(err) => {
-                    println!(
-                        "Failed to parse time partition string {}, Error: {}",
-                        time_partition_str,
-                        err.to_string()
-                    );
-                    // continue;
-                    return Err(io::Error::new(io::ErrorKind::Other, "Failed to parse time partition string"));
-                }
-            };
-
-            for granularity in crate::plugins::athena::GRANULARITIES.iter() {
-                let foo: u32 = match granularity {
-                    &"year" => date.year() as u32,
-                    &"month" => date.month(),
-                    &"day" => date.day(),
-                    &"hour" => date.hour(),
-                    &"minute" => date.minute(),
-                    _ => {
-                        panic!("Did not recognise date granularity of {}", granularity);
-                    }
-                };
-
-                full_key = format!("{}/{}={}", full_key, granularity, foo);
-
-                if granularity == &granularity_target {
-                    break;
-                }
+        let key = match TimePartitioner::new(&filename).process() {
+            Ok(k) => k,
+            Err(e) => {
+                return Err(e);
             }
-        }
+        };
+
+        full_key = format!("{}/{}", full_key, key);
 
         let md5_digest = md5::compute(&filename);
         let md5_string = hex::encode(&md5_digest.0);

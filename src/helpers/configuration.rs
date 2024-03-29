@@ -66,6 +66,7 @@ pub struct Transform {
     pub record_field_path: Option<String>,
     pub batch_partition_fields: Option<String>,
     pub namespace_fields: Option<String>,
+    pub time_partition_prefix: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -624,6 +625,7 @@ impl Config {
                     record_field_path: None,
                     batch_partition_fields: None,
                     namespace_fields: None,
+                    time_partition_prefix: None,
                 }
             }
         }
@@ -779,6 +781,42 @@ impl Config {
 
             Config::set_evncache("TRANSFORM_BATCH_TIME_UNIT", &batch_time_unit.clone());
             batch_time_unit.to_string()
+        }
+    }
+
+    pub fn get_time_partition_prefix() -> Option<String> {
+        if Config::get_envcache("TRANSFORM_TIME_PARTITION_PREFIX") != "" {
+            if Config::get_envcache("TRANSFORM_TIME_PARTITION_PREFIX") == DEFAULT_CONFIG {
+                return None;
+            }
+            return Some(Config::get_envcache("TRANSFORM_TIME_PARTITION_PREFIX"))
+        } else {
+            let _config = Config::get();
+
+            let pipline = Config::get_pipeline_config();
+
+            let default = &Config::getenv("TRANSFORM_TIME_PARTITION_PREFIX", DEFAULT_CONFIG);
+
+            let batch_time_unit = match pipline.transform.as_ref() {
+                Some(transform) => {
+                    match transform.time_partition_prefix.as_ref() {
+                        Some(time_partition_prefix) => {
+                            Config::set_evncache("TRANSFORM_TIME_PARTITION_PREFIX", &time_partition_prefix.clone());
+                            Some(time_partition_prefix.to_string())
+                        }
+                        None => {
+                            Config::set_evncache("TRANSFORM_TIME_PARTITION_PREFIX", &default.clone());
+                            None
+                        }
+                       
+                    }
+                }
+                None => {
+                    None
+                }
+            };
+            
+            batch_time_unit
         }
     }
 

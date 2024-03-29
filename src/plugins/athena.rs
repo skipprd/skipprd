@@ -33,6 +33,7 @@ use serde_derive::Deserialize;
 use tokio::join;
 use crate::helpers::offsets::Offsets;
 use crate::helpers::timed_rwlock::TimedRwLock;
+use crate::ingest::partition::TimePartitioner;
 use crate::metrics::MetricsStatus;
 use crate::plugins::DataOutputPlugin;
 use crate::plugins::file_input::DataSourceLocalFilePluginConfig;
@@ -84,7 +85,6 @@ pub struct DataOutputAwsAthenaPlugin {
     max_async_uploads: i64,
 }
 
-pub(crate) const GRANULARITIES: [&str; 5] = ["year", "month", "day", "hour", "minute"];
 
 impl DataOutputAwsAthenaPlugin {
 
@@ -176,44 +176,15 @@ impl DataOutputAwsAthenaPlugin {
             full_key = format!("{}/{}", full_key, partition_path);
         }
 
-        let time_partition_str = BufferChunker::decode_file_time_to_datetime_string(&filename);
-
-        if !time_partition_str.is_empty() {
-            let granularity_target = Config::get_transform_batch_time_unit();
-
-            let date = match DateTime::parse_from_rfc3339(&time_partition_str) {
-                Ok(date) => date,
-                Err(err) => {
-                    println!(
-                        "Failed to parse time partition string {}, Error: {}",
-                        time_partition_str,
-                        err.to_string()
-                    );
-                    // continue;
-                    return Err(io::Error::new(io::ErrorKind::Other, "Failed to parse time partition string"));
-                }
-            };
-
-            for granularity in GRANULARITIES.iter() {
-                let foo: u32 = match granularity {
-                    &"year" => date.year() as u32,
-                    &"month" => date.month(),
-                    &"day" => date.day(),
-                    &"hour" => date.hour(),
-                    &"minute" => date.minute(),
-                    _ => {
-                        panic!("Did not recognise date granularity of {}", granularity);
-                    }
-                };
-
-                full_key = format!("{}/{}={}", full_key, granularity, foo);
-                partition_values.push(format!("{}", foo));
-
-                if granularity == &granularity_target {
-                    break;
-                }
+        let key = match TimePartitioner::new(&filename).process() {
+            Ok(k) => k,
+            Err(e) => {
+                return Err(e);
             }
-        }
+        };
+
+        full_key = format!("{}/{}", full_key, key);
+        partition_values.extend(TimePartitioner::get_granularities());
 
         if !partition_values.is_empty() {
             let flatten =
@@ -695,7 +666,7 @@ impl AwsAthena {
 
         // Time Partitioning
         if !granularity_target.is_empty() {
-            for granularity in GRANULARITIES.iter() {
+            for granularity in TimePartitioner::get_granularities() {
                 partitions.push(
                     Column::builder()
                         .name(granularity.to_string())
@@ -714,7 +685,7 @@ impl AwsAthena {
                     );
                 }
 
-                if granularity == &granularity_target {
+                if granularity == granularity_target {
                     break;
                 }
             }
