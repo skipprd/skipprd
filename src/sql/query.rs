@@ -3,7 +3,7 @@ use std::fs::OpenOptions;
 use std::io::{BufReader, BufWriter};
 use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
 use crate::cli::{CLI_MODE, Mode};
-use crate::discover::Metadata;
+use crate::discover::{Metadata, PipelineMetadata};
 use crate::helpers::configuration::{Config, PIPELINE_NAME};
 use crate::METADATA;
 use crate::sql::operators::alter_column::alter_column_type;
@@ -33,11 +33,12 @@ pub async fn query(sql_str: &str) {
                     println!("Dropped Pipeline");
                 },
                 Mode::Query(options) => {
-                    let mut metadata = Config::get_metadata().await.expect(format!("No metadata found for pipeline: {}", pipeline_name).as_str());
+                    Config::get_metadata().await.expect(format!("No metadata found for pipeline: {}", pipeline_name).as_str());
 
-                    metadata.append_sql(sql_str.to_string());
+                    let mut empty_pipeline_metadata = PipelineMetadata::new();
+                    empty_pipeline_metadata.append_sql(sql_str.to_string());
 
-                    Config::set_metadata(&metadata, false).await;
+                    Config::set_metadata(&empty_pipeline_metadata, false).await;
 
                     println!("Done. Pipeline will drop on next sync run");
                 },
@@ -56,13 +57,18 @@ pub async fn query(sql_str: &str) {
 
             println!("Resetting offset database and purging WAL files for pipeline: {}, dir: {}", pipeline_name, data_dir);
 
+            let mut metadata = Config::get_metadata().await.expect(format!("No metadata found for pipeline: {}", pipeline_name).as_str());
+            
             match CLI_MODE.read().clone() {
                 Mode::Sync(options) => {
                     let _ = fs::remove_dir_all(&data_dir).expect(format!("Failed to remove dir: {}", data_dir).as_str());
                     println!("Pipeline reset, on next sync run all data will be re-ingested");
+                    
+                    // remove the SQL stmt from metadata
+                    metadata.sql = None;
+                    Config::set_metadata(&metadata, false).await;
                 },
                 Mode::Query(options) => {
-                    let mut metadata = Config::get_metadata().await.expect(format!("No metadata found for pipeline: {}", pipeline_name).as_str());
 
                     metadata.append_sql(sql_str.to_string());
 

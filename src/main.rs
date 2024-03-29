@@ -470,10 +470,6 @@ async fn sync() {
                         query(&stmt).await;
                     }
 
-                    // remove the SQL stmt from metadata
-                    pipeline_metadata.sql = None;
-                    Config::set_metadata(&pipeline_metadata, false).await;
-
                     return;
 
                 },
