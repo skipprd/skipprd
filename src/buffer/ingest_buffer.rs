@@ -751,8 +751,12 @@ impl WalFile {
         let path_str = Self::generate_temp_wal_file_name(namespace, partition, time, shard);
         let path= PathBuf::from(&path_str);
 
-        // Ensure file exists but allow the fp to drop out of scope
-        OpenOptions::new().append(true).read(true).create(true).open(&path)?;
+        // Ensure file exists and then allow the fp to drop out of scope to limit open file handles
+        let fd = OpenOptions::new().append(true).read(true).create(true).open(&path)?;
+        fd.sync_all()?;
+        unsafe { // belt and braces
+            libc::fsync(fd.as_raw_fd());
+        };
 
         Ok(WalFile {
             path,
