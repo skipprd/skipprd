@@ -63,17 +63,17 @@ impl TimePartitioner {
         }
     }
 
-    pub fn get_granularities() -> Vec<String> {
+    pub fn get_granularity_names() -> Vec<String> {
 
         let granularity_target = Config::get_transform_batch_time_unit();
 
-        let mut granularities: Vec<String> = Vec::new();
+        let mut names: Vec<String> = Vec::new();
 
         for granularity in GRANULARITIES.iter() {
             
             let granularity_name = TimePartitioner::get_granularity_name(granularity);
 
-            granularities.push(granularity_name.clone());
+            names.push(granularity_name.clone());
 
             if granularity == &granularity_target {
                 break;
@@ -81,7 +81,32 @@ impl TimePartitioner {
 
         };
 
-        granularities
+        names
+    }
+    
+    pub fn get_granularity_values(&self) -> Result<Vec<u32>, io::Error> {
+        let time_partition_str = BufferChunker::decode_file_time_to_datetime_string(&self.filename);
+
+        if time_partition_str.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::Other, "Time partition string is empty"));
+        }
+
+        let date = self.parse_datetime(&time_partition_str)?;
+
+        let granularity_target = Config::get_transform_batch_time_unit();
+
+        let mut granularities: Vec<u32> = Vec::new();
+
+        for granularity in GRANULARITIES.iter() {
+            let date_part = TimePartitioner::get_date_component(date, &granularity)?;
+            granularities.push(date_part);
+
+            if granularity == &granularity_target {
+                break;
+            }
+        }
+
+        Ok(granularities)
     }
 
     pub fn get_granularity_name(granularity: &str) -> String {

@@ -154,7 +154,6 @@ impl DataOutputAwsAthenaPlugin {
 
         if !partition_path.is_empty() {
             let parts = partition_path.split('/');
-            // let parts = partition_path.split("%2F"); // '/'
             let collection: Vec<&str> = parts.collect();
 
             for item in &collection {
@@ -176,14 +175,22 @@ impl DataOutputAwsAthenaPlugin {
             full_key = format!("{}/{}", full_key, partition_path);
         }
 
-        let key = match TimePartitioner::new(&filename).process() {
-            Ok(k) => {
-                full_key = format!("{}/{}", full_key, k);
-                partition_values.extend(TimePartitioner::get_granularities());
-            }
-            Err(e) => {}
-        };
-        
+        let time_partition_str = BufferChunker::decode_file_time_to_datetime_string(&filename);
+
+        if !time_partition_str.is_empty() {
+
+            let time_partition_values =  TimePartitioner::new(&filename).get_granularity_values().unwrap();
+
+            let granularity_names = TimePartitioner::get_granularity_names();
+
+            partition_values.extend(time_partition_values.iter().map(|v| v.to_string()));
+
+            granularity_names.iter().enumerate().for_each(|(i, granularity)| {
+                full_key = format!("{}/{}={}", full_key, granularity, time_partition_values[i]);
+            });
+
+        }
+
         if !partition_values.is_empty() {
             let flatten =
                 Config::get_transform_flatten_events();
@@ -664,7 +671,7 @@ impl AwsAthena {
 
         // Time Partitioning
         if !granularity_target.is_empty() {
-            for granularity in TimePartitioner::get_granularities() {
+            for granularity in TimePartitioner::get_granularity_names() {
                 partitions.push(
                     Column::builder()
                         .name(granularity.to_string())
