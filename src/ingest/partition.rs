@@ -26,7 +26,7 @@ impl TimePartitioner {
 
         let mut full_key = String::new();
         for granularity in GRANULARITIES.iter() {
-            let foo = self.get_date_component(date, &granularity)?;
+            let foo = TimePartitioner::get_date_component(date, &granularity)?;
             let granularity_name = TimePartitioner::get_granularity_name(granularity);
             full_key = format!("{}/{}={}", full_key, granularity_name, foo);
 
@@ -52,7 +52,7 @@ impl TimePartitioner {
         }
     }
 
-    pub fn get_date_component(&self, date: DateTime<FixedOffset>, granularity: &str) -> Result<u32, io::Error> {
+    pub fn get_date_component(date: DateTime<FixedOffset>, granularity: &str) -> Result<u32, io::Error> {
         match granularity {
             "year" => Ok(date.year() as u32),
             "month" => Ok(date.month()),
@@ -64,15 +64,26 @@ impl TimePartitioner {
     }
 
     pub fn get_granularities() -> Vec<String> {
-        let prefix = Config::get_time_partition_prefix();
-        GRANULARITIES.iter().map(|g| {
-            if let Some(p) = &prefix {
-                format!("{}{}", p, g)
-            } else {
-                g.to_string()
+
+        let granularity_target = Config::get_transform_batch_time_unit();
+
+        let mut granularities: Vec<String> = Vec::new();
+
+        for granularity in GRANULARITIES.iter() {
+            
+            let granularity_name = TimePartitioner::get_granularity_name(granularity);
+
+            granularities.push(granularity_name.clone());
+
+            if granularity == &granularity_target {
+                break;
             }
-        }).collect()
+
+        };
+
+        granularities
     }
+
     pub fn get_granularity_name(granularity: &str) -> String {
         let prefix = Config::get_time_partition_prefix();
         if let Some(p) = &prefix {
