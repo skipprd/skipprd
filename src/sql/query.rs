@@ -8,6 +8,7 @@ use crate::helpers::configuration::{Config, PIPELINE_NAME};
 use crate::METADATA;
 use crate::sql::operators::alter_column::alter_column_type;
 use crate::sql::operators::drop_column::alter_column_drop;
+use crate::sql::operators::dump_schema::dump_schema;
 use crate::sql::parser::{PipelineToggle, SParser, Statement};
 
 pub async fn query(sql_str: &str) {
@@ -200,20 +201,8 @@ pub async fn query(sql_str: &str) {
 
             let metadata = skippr_metadata.metadata.get(&format!("{}", &stmt.pipeline)).expect(&format!("Schema not found for pipeline '{}'", stmt.pipeline));
 
-            let data_dir = Config::get_data_dir();
-            let metadata_file = format!("{}/{}", data_dir, stmt.target);
-
-            let file = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(&metadata_file)
-                .expect(&format!("Failed to open target schema file {}", &metadata_file));
-
-            let writer = BufWriter::new(file);
-
-            serde_json::to_writer(writer, &metadata).expect(&format!("Failed to write schema to file {}", stmt.target));
-
+            dump_schema(&metadata, &stmt).expect("Failed to drop column");
+            
             println!("Schema dumped.");
         },
         Ok(Statement::AlterSchemaDropColumn(stmt)) => {

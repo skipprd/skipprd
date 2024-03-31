@@ -540,7 +540,7 @@ impl<'a> SParser<'a> {
     }
 
     pub fn parse_dump(&mut self) -> Result<Statement, ParserError> {
-
+        
         return match self.parser.peek_token().token {
             Token::Word(w) => {
                 match SkipprKeyword::from_str(&w.value) {
@@ -555,10 +555,7 @@ impl<'a> SParser<'a> {
                         self.parser.expect_keyword(Keyword::TO)?;
 
                         let target = self.parser.parse_literal_string()?;
-
-                        // println!("target: {}", target);
-                        // println!("table_name: {}", table_name);
-
+                        
                         Ok(Statement::SchemaDump(SchemaDumpStatement {
                             pipeline: SchemaDumpSource::Relation(table_name),
                             target
