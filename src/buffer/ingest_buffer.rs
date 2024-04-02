@@ -544,39 +544,15 @@ impl WalPartition {
         let mut wal_compacted_bytes_total = 0;
         let mut wal_compacted_rows_total = 0;
         let mut wal_compacted_files_total = 0;
-        
-        let first_file = self.files.first_mut().unwrap();
-        
-        let filename = first_file.path.to_str().unwrap().to_string();
-        let file_bytes = first_file.bytes.clone();
-                // println!("Failed to read schema from WAL file: {} of bytes: {}, Error {}. Continue to next WAL partition.", file.path.to_str().unwrap(), file.bytes, e);
-                // println!("Failed to read schema from WAL file: {} of bytes: {}, Error {}. Retrying.", filename, file_bytes, e);
-
-                let start_time = Instant::now();
-        
-                while first_file.read_schema_from_stream().is_err() {
-                    // sleep
-                    println!("Waiting for schema read to succeed for: {}", filename);
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                }
-                
-                let schema = match first_file.read_schema_from_stream() {
-                    Ok(schema) => schema,
-                    Err(e) => {
-                        println!("Failed again to read schema from WAL file: {} of bytes: {}, Error {}. Continue to next WAL partition.", filename, file_bytes, e);
-                        return;
-                    }
-                };
-
-                let elapsed = start_time.elapsed();
-                let nanos = elapsed.as_nanos() as u64;
-                crate::helpers::timed_rwlock::TOTAL_WAIT_TIMES
-                    .entry("wal_file_schema_read".to_string())
-                    .or_insert_with(|| AtomicU64::new(0))
-                    .fetch_add(nanos, Ordering::Relaxed);
-                // return;
-        //     }
-        // };
+       
+        let schema = match self.files.first_mut().unwrap().read_schema_from_stream() {
+            Ok(schema) => schema,
+            Err(e) => {
+                let file = self.files.first().unwrap();
+                println!("Failed to read schema from WAL file: {} of bytes: {}, Error {}. Skipping to next WAL partition.", file.path.to_str().unwrap(), file.bytes, e);
+                return;
+            }
+        };
 
 
         let batches = self.files.iter_mut().map(|wal_file| {
