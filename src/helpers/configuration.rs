@@ -1280,7 +1280,16 @@ impl Config {
                 StatusCode::OK => {
                     let json_result = resp.json::<PipelineMetadata>().await;
                     match json_result {
-                        Ok(pipeline_metadata) => Ok(pipeline_metadata),
+                        Ok(mut pipeline_metadata) => {
+                            // bit of a hack to store the pipeline config that we need to maintain.
+                            // useful when running SQL DDL commands locally, where the pipeline yml config is not present.
+                            // For example, SCHEMA DUMP needs to know whether to output the flattened or nested schema.
+                            match &Config::get_transform_config().flatten_events {
+                                Some(val) => pipeline_metadata.flattened = Config::truth_value(val),
+                                None => {},
+                            };
+                            Ok(pipeline_metadata)
+                        },
                         Err(_) => {
                             // Re-fetch the response as it's already moved
                             let resp = client

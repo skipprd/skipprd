@@ -94,6 +94,8 @@ pub struct PipelineMetadata {
     pub(crate) metadata: HashMap<String, Metadata>,
     pub(crate) sql: Option<Vec<String>>,
     pub(crate) enabled: bool,
+    #[serde(default)]
+    pub(crate) flattened: bool,
 }
 
 impl crate::discover::PipelineMetadata {
@@ -101,21 +103,27 @@ impl crate::discover::PipelineMetadata {
     #[must_use]
     pub(crate) fn new() -> Self {
         let pipeline_name = Config::get_pipeline_name();
+        let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.or(Some("no".to_string())).unwrap());
+        
         Self {
             name: pipeline_name,
             metadata: HashMap::new(),
             sql: None,
             enabled: true,
+            flattened: flatten,
         }
     }
 
     pub(crate) fn from_metadata(metadata: HashMap<String, Metadata>) -> Result<Self, bool> {
         let pipeline_name = Config::get_pipeline_name();
+        let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.or(Some("no".to_string())).unwrap());
+        
         Ok(Self {
             name: pipeline_name,
             metadata: metadata,
             sql: None,
             enabled: true,
+            flattened: flatten,
         })
     }
 
