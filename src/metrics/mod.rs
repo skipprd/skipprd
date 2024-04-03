@@ -193,17 +193,17 @@ impl Metrics {
         self.start_time = DateTime::<chrono::Utc>::from(SystemTime::now());
         self.status = MetricsStatus::Unknown;
 
-        LAST_WAL_WRITE_BYTES_TOTAL.store(0, Ordering::Relaxed);
-        LAST_WAL_WRITE_ROWS_TOTAL.store(0, Ordering::Relaxed);
-        LAST_WAL_COMPACTED_BYTES_TOTAL.store(0, Ordering::Relaxed);
-        LAST_WAL_COMPACTED_FILES_TOTAL.store(0, Ordering::Relaxed);
-        LAST_PARQUET_PERSISTED_BYTES_TOTAL.store(0, Ordering::Relaxed);
-        LAST_PARQUET_PERSISTED_ROWS_TOTAL.store(0, Ordering::Relaxed);
-        LAST_PARQUET_PERSISTED_OBJECTS_TOTAL.store(0, Ordering::Relaxed);
-        LAST_SOURCE_BYTES_TOTAL.store(0, Ordering::Relaxed);
-        LAST_MESSAGES_TOTAL.store(0, Ordering::Relaxed);
-        LAST_FIXED_TOTAL.store(0, Ordering::Relaxed);
-        LAST_DEADLETTERS_TOTAL.store(0, Ordering::Relaxed);
+        LAST_WAL_WRITE_BYTES_TOTAL.store(0, Ordering::SeqCst);
+        LAST_WAL_WRITE_ROWS_TOTAL.store(0, Ordering::SeqCst);
+        LAST_WAL_COMPACTED_BYTES_TOTAL.store(0, Ordering::SeqCst);
+        LAST_WAL_COMPACTED_FILES_TOTAL.store(0, Ordering::SeqCst);
+        LAST_PARQUET_PERSISTED_BYTES_TOTAL.store(0, Ordering::SeqCst);
+        LAST_PARQUET_PERSISTED_ROWS_TOTAL.store(0, Ordering::SeqCst);
+        LAST_PARQUET_PERSISTED_OBJECTS_TOTAL.store(0, Ordering::SeqCst);
+        LAST_SOURCE_BYTES_TOTAL.store(0, Ordering::SeqCst);
+        LAST_MESSAGES_TOTAL.store(0, Ordering::SeqCst);
+        LAST_FIXED_TOTAL.store(0, Ordering::SeqCst);
+        LAST_DEADLETTERS_TOTAL.store(0, Ordering::SeqCst);
 
     }
 
@@ -255,49 +255,49 @@ impl Metrics {
             tenant_id = TENANT_ID.read().clone();
         }
 
-        let wal_write_bytes_total = LAST_WAL_WRITE_BYTES_TOTAL.load(Ordering::Relaxed);
+        let wal_write_bytes_total = LAST_WAL_WRITE_BYTES_TOTAL.load(Ordering::SeqCst);
         let wal_write_bytes_current = metrics.wal_write_bytes_total - wal_write_bytes_total;
-        LAST_WAL_WRITE_BYTES_TOTAL.store(metrics.wal_write_bytes_total, Ordering::Relaxed);
+        LAST_WAL_WRITE_BYTES_TOTAL.store(metrics.wal_write_bytes_total, Ordering::SeqCst);
 
-        let wal_write_rows_total = LAST_WAL_WRITE_ROWS_TOTAL.load(Ordering::Relaxed);
+        let wal_write_rows_total = LAST_WAL_WRITE_ROWS_TOTAL.load(Ordering::SeqCst);
         let wal_write_rows_current = metrics.wal_write_rows_total - wal_write_rows_total;
-        LAST_WAL_WRITE_ROWS_TOTAL.store(metrics.wal_write_rows_total, Ordering::Relaxed);
+        LAST_WAL_WRITE_ROWS_TOTAL.store(metrics.wal_write_rows_total, Ordering::SeqCst);
 
-        let wal_compacted_bytes_total = LAST_WAL_COMPACTED_BYTES_TOTAL.load(Ordering::Relaxed);
+        let wal_compacted_bytes_total = LAST_WAL_COMPACTED_BYTES_TOTAL.load(Ordering::SeqCst);
         let wal_compacted_bytes_current = metrics.wal_compacted_bytes_total - wal_compacted_bytes_total;
-        LAST_WAL_COMPACTED_BYTES_TOTAL.store(metrics.wal_compacted_bytes_total, Ordering::Relaxed);
+        LAST_WAL_COMPACTED_BYTES_TOTAL.store(metrics.wal_compacted_bytes_total, Ordering::SeqCst);
 
-        let wal_compacted_files_total = LAST_WAL_COMPACTED_FILES_TOTAL.load(Ordering::Relaxed);
+        let wal_compacted_files_total = LAST_WAL_COMPACTED_FILES_TOTAL.load(Ordering::SeqCst);
         let wal_compacted_files_current = metrics.wal_compacted_files_total - wal_compacted_files_total;
-        LAST_WAL_COMPACTED_FILES_TOTAL.store(metrics.wal_compacted_files_total, Ordering::Relaxed);
+        LAST_WAL_COMPACTED_FILES_TOTAL.store(metrics.wal_compacted_files_total, Ordering::SeqCst);
 
-        let parquet_persisted_bytes_total = LAST_PARQUET_PERSISTED_BYTES_TOTAL.load(Ordering::Relaxed);
+        let parquet_persisted_bytes_total = LAST_PARQUET_PERSISTED_BYTES_TOTAL.load(Ordering::SeqCst);
         let parquet_persisted_bytes_current = metrics.parquet_persisted_bytes_total - parquet_persisted_bytes_total;
-        LAST_PARQUET_PERSISTED_BYTES_TOTAL.store(metrics.parquet_persisted_bytes_total, Ordering::Relaxed);
+        LAST_PARQUET_PERSISTED_BYTES_TOTAL.store(metrics.parquet_persisted_bytes_total, Ordering::SeqCst);
 
-        let parquet_persisted_rows_total = LAST_PARQUET_PERSISTED_ROWS_TOTAL.load(Ordering::Relaxed);
+        let parquet_persisted_rows_total = LAST_PARQUET_PERSISTED_ROWS_TOTAL.load(Ordering::SeqCst);
         let parquet_persisted_rows_current = metrics.parquet_persisted_rows_total - parquet_persisted_rows_total;
-        LAST_PARQUET_PERSISTED_ROWS_TOTAL.store(metrics.parquet_persisted_rows_total, Ordering::Relaxed);
+        LAST_PARQUET_PERSISTED_ROWS_TOTAL.store(metrics.parquet_persisted_rows_total, Ordering::SeqCst);
 
-        let parquet_persisted_objects_total = LAST_PARQUET_PERSISTED_OBJECTS_TOTAL.load(Ordering::Relaxed);
+        let parquet_persisted_objects_total = LAST_PARQUET_PERSISTED_OBJECTS_TOTAL.load(Ordering::SeqCst);
         let parquet_persisted_objects_current = metrics.parquet_persisted_objects_total - parquet_persisted_objects_total;
-        LAST_PARQUET_PERSISTED_OBJECTS_TOTAL.store(metrics.parquet_persisted_objects_total, Ordering::Relaxed);
+        LAST_PARQUET_PERSISTED_OBJECTS_TOTAL.store(metrics.parquet_persisted_objects_total, Ordering::SeqCst);
 
-        let source_bytes_total = LAST_SOURCE_BYTES_TOTAL.load(Ordering::Relaxed);
+        let source_bytes_total = LAST_SOURCE_BYTES_TOTAL.load(Ordering::SeqCst);
         let source_bytes_current = metrics.source_bytes_total - source_bytes_total;
-        LAST_SOURCE_BYTES_TOTAL.store(metrics.source_bytes_total, Ordering::Relaxed);
+        LAST_SOURCE_BYTES_TOTAL.store(metrics.source_bytes_total, Ordering::SeqCst);
 
-        let last_messages_total = LAST_MESSAGES_TOTAL.load(Ordering::Relaxed);
+        let last_messages_total = LAST_MESSAGES_TOTAL.load(Ordering::SeqCst);
         let ingested_current = metrics.messages_total - last_messages_total;
-        LAST_MESSAGES_TOTAL.store(metrics.messages_total, Ordering::Relaxed);
+        LAST_MESSAGES_TOTAL.store(metrics.messages_total, Ordering::SeqCst);
 
-        let last_fixed_total = LAST_FIXED_TOTAL.load(Ordering::Relaxed);
+        let last_fixed_total = LAST_FIXED_TOTAL.load(Ordering::SeqCst);
         let fixed_current = metrics.ingeted_slow_total - last_fixed_total;
-        LAST_FIXED_TOTAL.store(metrics.ingeted_slow_total, Ordering::Relaxed);
+        LAST_FIXED_TOTAL.store(metrics.ingeted_slow_total, Ordering::SeqCst);
 
-        let last_deadletters_total = LAST_DEADLETTERS_TOTAL.load(Ordering::Relaxed);
+        let last_deadletters_total = LAST_DEADLETTERS_TOTAL.load(Ordering::SeqCst);
         let deadletters_current = metrics.deadletters_total - last_deadletters_total;
-        LAST_DEADLETTERS_TOTAL.store(metrics.deadletters_total, Ordering::Relaxed);
+        LAST_DEADLETTERS_TOTAL.store(metrics.deadletters_total, Ordering::SeqCst);
 
         let start_time_utc_str = metrics.start_time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
@@ -356,6 +356,10 @@ impl Metrics {
         // metrics.parquet_persisted_objects_total = 0;
 
         // println!("Posting data: {:?}", data);
+
+        // "bytes_current": source_bytes_current,
+        // "bytes_total": metrics.source_bytes_total,
+        println!("Bytes Current: {}, Bytes Total: {}", source_bytes_current, metrics.source_bytes_total);
 
         let response = client
             .put(format!("{}/{}", uri, path))
