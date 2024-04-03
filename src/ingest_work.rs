@@ -263,7 +263,7 @@ impl Ingest {
 
     }
 
-    fn deadletter(record: &str) {
+    pub(crate) fn deadletter(record: &str) {
 
         let mut deadletter_file = DEADLETTER_FILE.write();
 

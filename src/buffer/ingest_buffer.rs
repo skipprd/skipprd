@@ -52,6 +52,7 @@ use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
 use crate::helpers::offsets::{Offset, OffsetKey, Offsets, OffsetTypes, OffsetValue};
 use crate::helpers::timed_rwlock::TimedRwLock;
+use crate::ingest_work::Ingest;
 use crate::metrics::Metrics;
 use crate::plugins::athena::DataOutputAwsAthenaPlugin;
 use crate::plugins::DataOutputPlugin;
@@ -173,8 +174,23 @@ impl Buffers {
             let json_values = ingest_buffer_batch.records.iter().map(|record| &record.record).collect::<Vec<&Value>>();
             decoder.serialize(&json_values).unwrap();
 
-            record_batches.push(decoder.flush().unwrap().unwrap());
-
+            match decoder.flush() {
+                Ok(Some(batch)) => {
+                    record_batches.push(batch);
+                },
+                Ok(None) => {
+                    // println!("No record batch");
+                },
+                Err(e) => {
+                    println!("Error decoding record batch: {}. Deadlettering", e);
+                    
+                    let deadletters: String = ingest_buffer_batch.records.iter().map(|record| record.record.to_string()).collect::<Vec<String>>().join("\n");
+                    Ingest::deadletter(&deadletters);
+                    
+                    continue;
+                }
+            }
+            
             // let mut ingest_batch = WalRecordBatches::new(offset, record_batches);
 
             let stat = wal_file.write_to_stream(&record_batches)?;
