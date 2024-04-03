@@ -145,15 +145,14 @@ impl DataSourceS3Plugin {
         let mut continuation_token_watermark: Option<String> = None;
 
         let mut continuation_token: Option<String> = Self::read_continuation_token().unwrap_or_else(|_| None);
-        // let mut continuation_token: Option<String> = None;
 
         let mut list_obj_req = self
             .s3_client
             .list_objects_v2()
             .bucket(s3_bucket.clone())
             .prefix(s3_prefix.clone())
-            .max_keys(10000)
-            .set_continuation_token(continuation_token.clone());
+            .max_keys(10000);
+            // .set_continuation_token(continuation_token.clone());
 
 
         // important to check few times, else slowly arriving drip of objects will result in us never proceeding to the next pipeline
