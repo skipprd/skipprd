@@ -179,7 +179,7 @@ impl Ingest {
 
     pub fn ingest_file(
         &self,
-        datas: Vec<IngestBatch>,
+        datas: &Arc<Vec<IngestBatch>>,
         offset_db: &Arc<Offsets>,
         shared_output: Arc<TimedRwLock<Box<dyn DataOutputPlugin + Send + Sync>>>,
     ) {
@@ -230,7 +230,7 @@ impl Ingest {
     }
 
     fn process_batch(
-        datas: &mut Vec<IngestBatch>,
+        datas: &Arc<Vec<IngestBatch>>,
         offset_db_clone: &Arc<Offsets>,
         schema_hashes: &mut DashMap<String, SchemaHash>,
         handle: runtime::Handle,
@@ -265,14 +265,14 @@ impl Ingest {
         };
 
         // @todo - check PluginConfig format is xml
-        if format == "xml" {
-            let batch = IngestBatch {
-                offset_key: datas[0].offset_key.clone(),
-                data: datas.iter().map(|v| v.data.as_str()).collect::<Vec<&str>>().join(""),
-            };
-            datas.clear();
-            datas.push(batch);
-        }
+        // if format == "xml" {
+        //     let batch = IngestBatch {
+        //         offset_key: datas[0].offset_key.clone(),
+        //         data: datas.iter().map(|v| v.data.as_str()).collect::<Vec<&str>>().join(""),
+        //     };
+        //     datas.clear();
+        //     datas.push(batch);
+        // }
 
         let entity_field_dot = match Config::get_transform_config().record_field_path {
             Some(ref field) => field.clone(),
@@ -285,7 +285,7 @@ impl Ingest {
 
         let mut buf: HashMap<(String, String, Option<i64>, String), IngestBufferBatch> = HashMap::new();
 
-        for ingest_batch in datas {
+        for ingest_batch in datas.iter() {
 
             bytes += ingest_batch.data.len() as u64;
             

@@ -452,7 +452,7 @@ impl DataSourceS3Plugin {
         // @todo - pass datas to ingest_file without cloning
         let batch = datas.read().clone();
         let shared_output_clone = shared_output.clone();
-        self.ingest.ingest_file(batch, &offsets_clone, shared_output_clone);
+        self.ingest.ingest_file(&Arc::new(batch), &offsets_clone, shared_output_clone);
     }
 
     fn save_continuation_token(token: &Option<String>) -> io::Result<()> {

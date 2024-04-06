@@ -108,7 +108,7 @@ impl DataSourceLocalFilePlugin {
             // let ingest_handle = task::spawn_blocking(move || {
 
                 // println!("Ingesting batch: {:?}", batch);
-                self.ingest.ingest_file(batch, &offsets_clone, shared_output_clone);
+                self.ingest.ingest_file(&Arc::new(batch), &offsets_clone, shared_output_clone);
             // });
             // ingest_handle.await.unwrap();
 
