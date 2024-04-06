@@ -76,6 +76,7 @@ pub const WRITE_BUF_SIZE: usize = if cfg!(target_os = "espidf") {
 thread_local! {
     pub static PARSE_NAMESPACE_CACHE: Lazy<RwLock<HashMap<String, String>>> = Lazy::new(|| RwLock::new(HashMap::new()));
 }
+
 pub static DEADLETTER_FILE_NAME: Lazy<String> = Lazy::new(|| BufferChunker::encode_chunk_name(
     "deadletters",
     Some(Config::get_pipeline_name().as_str()),
@@ -99,31 +100,18 @@ pub static DEADLETTER_FILE: Lazy<Arc<TimedRwLock<BufWriter<File>>>> = Lazy::new(
     Arc::new(TimedRwLock::new("deadletter_file".to_string(), writer))
 });
 
-// static AVRO_SCHEMA: Lazy<Mutex<HashMap<String, Schema>>> = Lazy::new(|| {
-//
-//     let mut avro_schemas: HashMap<String, Schema> = HashMap::new();
-//
-//     for (namespace, schema) in METADATA.read().unwrap().iter() {
-//         let raw_schema = convert_skippr_to_avro_field_types(&schema.fields);
-//         avro_schemas.insert(namespace.to_string(), raw_schema.unwrap());
-//     }
-//
-//     Mutex::new(avro_schemas)
-// });
-
 #[derive(Clone, Debug)]
 struct SchemaHash {
     schema: SchemaRef,
     hash: String,
 }
+
 pub struct Ingest {
     thread_pool: ThreadPool,
     num_cpus: usize,
     tx: Sender<()>,
     active_count: Arc<AtomicUsize>,
-    buffers: Arc<TimedRwLock<Buffers>>,
     schema_hashes: DashMap<String, SchemaHash>,
-    // run_id: String,
 }
 
 impl Drop for Ingest {
@@ -148,15 +136,10 @@ impl Ingest {
                 active_count_clone.fetch_sub(1, Ordering::SeqCst);
             }
         });
-
-
-        let mut buffers = Buffers::new();
-        let mut buffers = Arc::new(TimedRwLock::new("buffers".to_string(), buffers));
-
+        
         // Schema hashes
         let mut schema_hashes = DashMap::new();
 
-        // Scope to ensure read lock is released immediately after cloning
         {
             let schemas = ARROW_SCHEMA.read();
             schema_hashes = schemas.iter().map(|(namespace, schema)| {
@@ -173,9 +156,7 @@ impl Ingest {
             thread_pool,
             tx,
             active_count,
-            buffers,
             schema_hashes
-            // run_id: schema_md5_str
         }
     }
 
@@ -189,9 +170,7 @@ impl Ingest {
                 println!("Waiting for {} ingest tasks to finish", self.active_count.load(Ordering::SeqCst));
                 current_active_count = self.active_count.load(Ordering::SeqCst);
             }
-
-            // Here you can do other work while waiting for threads to finish,
-            // or just sleep for a while if there's nothing else to do.
+            
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
 
@@ -204,8 +183,6 @@ impl Ingest {
         offset_db: &Arc<Offsets>,
         shared_output: Arc<TimedRwLock<Box<dyn DataOutputPlugin + Send + Sync>>>,
     ) {
-        // println!("Ingesting {} events", datas.len());
-
         // If we're not running, exit after current threads finish.
         if !RUNNING.read().load(Ordering::SeqCst) {
             println!("Not running, exiting");
@@ -215,36 +192,18 @@ impl Ingest {
 
             // Wait for an available thread if there's no capacity
             while self.active_count.load(Ordering::SeqCst) >= self.num_cpus {
-                // println!("Waiting for {} tasks to finish", self.active_count.load(Ordering::SeqCst));
-
-                // Here you can do other work while waiting for threads to finish,
-                // or just sleep for a while if there's nothing else to do.
+                
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
 
-            // Spawn a new thread for this 'datas' if there's capacity
-            // while self.active_count.load(Ordering::SeqCst) <= self.num_cpus {
-            // if self.thread_pool.queued_count() < self.num_cpus {
+            // Spawn a new thread for this 'datas'
             let tx = self.tx.clone();
             let offset_db_clone = offset_db.clone();
 
             self.active_count.fetch_add(1, Ordering::SeqCst);
 
             let mut datas_clone = datas.clone();
-
-            let core_id = self.thread_pool.active_count();
-
-            let buffers_clone = self.buffers.clone();
-
-            // let run_id = self.run_id.clone();
-
-            // let metrics = METRICS.read();
-            // let run_id = metrics.run_id.clone();
-
-
-            // let schemas = ARROW_SCHEMA.read();
-            // let run_id = format!("{:?}", md5::compute(format!("{:?}", schemas.deref())));
-
+            
             let mut schema_hashes = self.schema_hashes.clone();
 
             let handle = runtime::Handle::current();
@@ -252,45 +211,34 @@ impl Ingest {
             let shared_output_clone = shared_output.clone();
 
             self.thread_pool.execute(move || {
-                // println!("Processing batch of {} events on core {}", datas_clone.len(), core_count);
-                Ingest::process_batch(&mut datas_clone, &offset_db_clone, buffers_clone, &core_id.to_string(), &mut schema_hashes, handle, shared_output_clone);
+                Ingest::process_batch(&mut datas_clone, &offset_db_clone, &mut schema_hashes, handle, shared_output_clone);
                 tx.send(()).unwrap();
             });
-
-
-            // }
         }
 
     }
 
-    pub(crate) fn deadletter(record: &str) {
+    pub(crate) fn deadletter(lines: &str) {
 
         let mut deadletter_file = DEADLETTER_FILE.write();
 
-        deadletter_file.write(record.as_bytes()).or(Err("Could not write to deadletter file")).unwrap();
+        deadletter_file.write(lines.as_bytes()).or(Err("Could not write to deadletter file")).unwrap();
         deadletter_file.write("\n".as_bytes()).or(Err("Could not write to deadletter file")).unwrap();
 
         deadletter_file.flush().or(Err("Could not flush deadletter file")).unwrap();
-
-        // buffers.write(&output_file, record.as_bytes());
-        // buffers.write(&output_file, "\n".as_bytes());
 
     }
 
     fn process_batch(
         datas: &mut Vec<IngestBatch>,
         offset_db_clone: &Arc<Offsets>,
-        buffers: Arc<TimedRwLock<Buffers>>,
-        core_id: &str,
         schema_hashes: &mut DashMap<String, SchemaHash>,
         handle: runtime::Handle,
         shared_output: Arc<TimedRwLock<Box<dyn DataOutputPlugin + Send + Sync>>>,
     ) {
 
         let default_schema_hash = format!("{:?}", md5::compute(Helpers::random_str(10)));
-
-        // let mut avro_schemas = AVRO_SCHEMA.lock().unwrap();
-
+        
         let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.or(Some("no".to_string())).unwrap());
 
         let data_dir = Config::get_data_dir();
@@ -298,15 +246,9 @@ impl Ingest {
         let _deadletter_dir = format!("{}/deadletter_buffer", data_dir);
 
         let _aprox_now = SystemTime::now();
-
-        // static CLEAN_FIELD_CACHE: Lazy<Arc<DashMap<String, String>>> = Lazy::new(|| Arc::new(DashMap::new()));
-        // let updated_schema: Arc<Mutex<String>> = Arc::new(Mutex::new("no".to_string()));
+        
         let mut updated_schema= "no".to_string();
 
-        // let updated_schema_clone = updated_schema;
-        // let offset_db_clone = offset_db.clone();
-
-        // let mut buffers: Buffers = BUFFER_INDEX.read().get(&output_dir).unwrap().clone();
         let mut buffers = Buffers::new();
 
         let mut bytes: u64 = 0;
@@ -346,16 +288,7 @@ impl Ingest {
         for ingest_batch in datas {
 
             bytes += ingest_batch.data.len() as u64;
-
-            // let mut buf: IngestBufferBatch = IngestBufferBatch {
-            //     offset: OffsetKeySerialize {
-            //         position: 0,
-            //         source_namespace: ingest_batch.offset_key.namespace.clone(),
-            //         source_partition: ingest_batch.offset_key.partition.clone(),
-            //     },
-            //     records: Vec::new(),
-            // };
-
+            
             let has_offsets =
                 offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Closed, 0);
             let current_line_offset = offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Line, 0);
@@ -381,9 +314,7 @@ impl Ingest {
             let mut unwrapped_records: Vec<Value> = Vec::new();
 
             for record in records {
-
-                // println!("Record: {}", record);
-
+                
                 match record.as_object() {
                     Some(_v) => unwrapped_records.push(record),
                     None => {
@@ -422,7 +353,6 @@ impl Ingest {
 
             for record in unwrapped_records {
 
-                // println!("Record: {}", record);
                 batch_line += 1;
 
                 if record.is_null()
@@ -430,13 +360,9 @@ impl Ingest {
                     || (record.is_array() && record.as_array().unwrap().is_empty())
                 {
 
-                    // let line batch_line in ingest_batch.data
                     let line_str = match ingest_batch.data.lines().nth(batch_line as usize - 1) {
                         Some(line) => line,
                         None => {
-                            // println!("Could not find null line {} in batch", batch_line);
-                            // println!("Batch lines: {}", ingest_batch.data.lines().count());
-                            // panic!("Could not find null line {} in batch", batch_line);
                             ""
                         }
                     };
@@ -484,14 +410,6 @@ impl Ingest {
                         }
                     }
 
-                    // let output_file_name = BufferChunker::encode_chunk_name(
-                    //     "output",
-                    //     Some(&skpr_namespace),
-                    //     Some(&skpr_partition),
-                    //     skpr_time_bucket,
-                    //     Some(core_id),
-                    // );
-
                     if METADATA.read().metadata.get(&skpr_namespace).is_none() {
                         METADATA.write().metadata.insert(skpr_namespace.clone(), Metadata::new().unwrap());
                         println!("New namespace: {}", skpr_namespace);
@@ -507,25 +425,15 @@ impl Ingest {
                             )
                         }
                         None => {
-                            // println!("Failed to find metadata for namespace: {}", skpr_namespace);
                             Err(format!("Failed to find metadata for namespace: {}", skpr_namespace).into())
                         }
                     };
 
                     let record_value = match msg {
                         Ok(msg) => {
-                            // println!("Fast path ingest: {}", msg);
-                            // msg.to_string() + "\n"
-                            // buffers.write(&output_file_name, buf_str.as_bytes());
                             msg
                         },
                         Err(_err) => {
-
-                            // let old_metadata = NEW_METADATA.read().unwrap().clone();
-
-                            // if NEW_METADATA.read().get(&skpr_namespace).is_none() {
-                            //     NEW_METADATA.write().insert(skpr_namespace.clone(), Metadata::new().unwrap());
-                            // }
 
                             // println!("Falling back to slow path due to: {}", err);
                             let msg = match ingest(
@@ -559,9 +467,7 @@ impl Ingest {
                                 }
                             };
 
-
-                            // println!("Slow path ingest: {}", msg);
-
+                            
                             // update metadata in runtime and ingest message
                             if Config::get_auto_approve() {
 
@@ -633,7 +539,6 @@ impl Ingest {
                                 let start_time = Instant::now();
                                 
                                 while ARROW_SCHEMA.read().get(&skpr_namespace).is_none() {
-                                    // sleep
                                     println!("Waiting for schema to be prepared for namespace: {}", skpr_namespace);
                                     std::thread::sleep(std::time::Duration::from_millis(100));
                                 }
@@ -661,15 +566,6 @@ impl Ingest {
                         }
                     };
 
-
-                    // let hash = schema_hashes.get(&skpr_namespace).unwrap().hash.clone();
-                    // let arrow_schema = schema_hashes.get(&skpr_namespace).unwrap().schema.clone();
-
-                    // let arrow_schema = ARROW_SCHEMA.read().get(&skpr_namespace).unwrap().clone().deref();
-                    // let schema_hash = format!("{:?}", md5::compute(format!("{:?}", ARROW_SCHEMA.read().get(&skpr_namespace).unwrap().deref())));
-
-                    // run_id = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
-
                     let buf_entry = buf.entry((
                         skpr_namespace.clone(),
                         skpr_partition.clone(),
@@ -687,58 +583,22 @@ impl Ingest {
                             schema: schema_hash.schema,
                         }
                     });
-
-                    // let key = OffsetKeySerialize {
-                    //         source_namespace: ingest_batch.offset_key.namespace.clone(),
-                    //         source_partition: ingest_batch.offset_key.partition.clone(),
-                    //         position: batch_line
-                    //     };
-
-                    // buf_entry.offsets.entry(ingest_batch.offset_key.clone())
-                    //     .or_insert_with(|| batch_line);
-
+                    
                     // an ingest batch consist of many small files/queue messages, etc. Each will need its offset committed in the WAL.
                     buf_entry.offsets.insert(ingest_batch.offset_key.clone(), batch_line);
-
-                    // buf_entry.offsets.push(O);
-                    // bytes += ingest_record.record.to_string().len() as u64;
-
+                    
                     buf_entry.records.push(ingest_record);
 
                     j += 1;
-
-                    // offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, batch_line);
-
-
+                    
                 }
-                // else {
-                //     println!("Skipping line {} in batch", batch_line);
-                // }
-
             }
-
-
-
-            // batch_offset_lines.insert(ingest_batch.offset_key.clone(), batch_line);
 
             // may have deadlettered some records, so we need to update the offset since they won't be in the WAL
             offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
-            // batch_offset_files.insert(ingest_batch.offset_key.clone(), 1);
 
         }
-
-        // write and flush each buf to Buffer in buffers.buffers
-        // for (namespace, ingest_buffer_batch) in buf {
-        //
-        //     let buffer = buffers.buffers.entry(namespace.clone()).or_insert_with(|| {
-        //         TimedRwLock::new(namespace.clone(), Buffer::new(&namespace.clone()))
-        //     });
-        //
-        //     buffer.write().write(ingest_buffer_batch);
-        //     buffer.write().flush().unwrap();
-        // }
-
-        // @todo - write() Buffers
+        
         buffers.write(buf);
 
         let offset_db_clone = offset_db_clone.clone();
@@ -747,26 +607,9 @@ impl Ingest {
             buffers.flush(offset_db_clone, shared_output_clone).await.expect("Failed to flush buffers")
         });
 
-        // for buffer in buffers.buffers.iter() {
-        //     let mut buffer_lock = buffer.write();
-        //     buffer_lock.flush().unwrap();
-        // }
-
-        // batch_offset_lines.iter().for_each(|(offset_key, i)| {
-        //     offset_db_clone.insert(offset_key, OffsetTypes::Line, *i);
-        // });
-        //
-        // batch_offset_files.iter().for_each(|(offset_key, i)| {
-        //     offset_db_clone.insert(offset_key, OffsetTypes::Closed, 1);
-        // });
-
-        // offset_db_clone.flush();
-
         if updated_schema.as_str() == "yes" {
             updated_schema = "no".to_string();
-
-            // let rt = tokio::runtime::Runtime::new().unwrap();
-            // rt.block_on(async {
+            
             handle.block_on(async {
                 // update metadata at control pane, this may or may not be automatically approved
                 let metadata: PipelineMetadata;
@@ -790,9 +633,7 @@ impl Ingest {
     }
 
     pub(crate) fn prepare_arrow_schema(skpr_namespace: &str, flatten: bool) -> Result<Arc<Schema>, ArrowError> {
-
-        // println!("Preparing schema for namespace: {}", skpr_namespace);
-
+        
         let mut arrow_schema: Result<datatypes::Schema, ArrowError> = Ok(datatypes::Schema::empty());
         let mut schema_ref = Arc::new(datatypes::Schema::empty());
 
@@ -803,7 +644,6 @@ impl Ingest {
 
         if metadata.metadata.get(skpr_namespace).is_none() {
             return Err(ArrowError::SchemaError(format!("Failed to find metadata for namespace: {}", skpr_namespace)));
-            // panic!("Failed to find metadata for namespace: {}", skpr_namespace);
         }
 
         let mut output_metadata: HashMap<String, Metadata> = HashMap::new();
@@ -819,17 +659,6 @@ impl Ingest {
             output_metadata = metadata.metadata.clone();
         }
 
-        // println!("Preparing schema for namespace: {}", skpr_namespace);
-        // println!("Schema: {:?}", output_metadata);
-
-        // let skpr_partition = BufferChunker::decode_file_partition(filename);
-        // let shard = BufferChunker::decode_file_shard(filename);
-        // let source_time = BufferChunker::decode_file_time(filename);
-        // let mut skpr_time = None;
-        // if source_time >= 0 {
-        //     skpr_time = Some(source_time);
-        // }
-
         arrow_schema = convert_skippr_to_arrow(
             output_metadata.get(skpr_namespace).unwrap().fields.clone(),
         );
@@ -840,8 +669,7 @@ impl Ingest {
 
         Ok(schema_ref)
     }
-
-
+    
 }
 
 
