@@ -151,15 +151,21 @@ impl Logger {
             .put(format!("{}/{}", uri, path))
             .json(&data)
             .send()
-            .await?;
+            .await;
 
-        match response.error_for_status() {
-            Ok(_resp) => {},
+        match response {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    println!("Logs API Response: {:?}", resp);
+                } else {
+                    println!("Logs API Error: {:?}", resp);
+                }
+            }
             Err(err) => {
                 println!("Logs API Error: {:?}", err);
             }
         }
-
+        
         Ok(())
     }
 }
