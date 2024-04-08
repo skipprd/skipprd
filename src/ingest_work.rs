@@ -12,7 +12,7 @@ use once_cell::sync::Lazy;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io;
+use std::{fs, io};
 
 
 use std::io::{BufWriter, Write};
@@ -54,6 +54,7 @@ use arrow::error::ArrowError;
 use arrow::datatypes;
 use arrow_schema::SchemaRef;
 use tokio::runtime;
+use crate::cli::{Cli, CLI_MODE, Mode};
 use crate::converters::skippr_arrow::convert_skippr_to_arrow;
 use crate::plugins::athena::DataOutputAwsAthenaPlugin;
 use crate::plugins::DataOutputPlugin;
@@ -237,6 +238,31 @@ impl Ingest {
         shared_output: Arc<TimedRwLock<Box<dyn DataOutputPlugin + Send + Sync>>>,
     ) {
 
+        match CLI_MODE.read().clone() {
+            Mode::Sync(_) => {
+                
+            },
+            _ => {
+
+                for batch in datas.clone().iter() {
+                    let data_dir = Config::get_data_dir();
+                    let filename = &format!("{}/source_buffer/{}", data_dir, Helpers::random_str(10));
+
+                    let file = OpenOptions::new()
+                        .create(true)
+                        .write(true)
+                        .truncate(true)
+                        .open(filename)
+                        .unwrap();
+
+                    let mut writer = BufWriter::new(file);
+                    writer.write(batch.data.as_bytes()).unwrap();
+
+                    return;
+                }
+            }
+        }
+        
         let default_schema_hash = format!("{:?}", md5::compute(Helpers::random_str(10)));
         
         let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.or(Some("no".to_string())).unwrap());
@@ -278,11 +304,7 @@ impl Ingest {
             Some(ref field) => field.clone(),
             None => "".to_string()
         };
-
-        let mut batch_offset_lines: HashMap<OffsetKey, u64> = HashMap::new();
-        let mut batch_offset_files: HashMap<OffsetKey, u64> = HashMap::new();
-        let mut buffer_batchs: HashMap<String, String> = HashMap::new();
-
+        
         let mut buf: HashMap<(String, String, Option<i64>, String), IngestBufferBatch> = HashMap::new();
 
         for ingest_batch in datas.iter() {
@@ -595,18 +617,26 @@ impl Ingest {
             }
 
             // may have deadlettered some records, so we need to update the offset since they won't be in the WAL
-            offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
+            // offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
 
         }
         
-        buffers.write(buf);
+        match CLI_MODE.read().clone() {
+            Mode::Sync(_) => {
+                buffers.write(buf);
 
-        let offset_db_clone = offset_db_clone.clone();
-        let shared_output_clone = shared_output.clone();
-        handle.block_on(async {
-            buffers.flush(offset_db_clone, shared_output_clone).await.expect("Failed to flush buffers")
-        });
-
+                // let offset_db_clone = offset_db_clone.clone();
+                // let shared_output_clone = shared_output.clone();
+                // handle.block_on(async {
+                //     buffers.flush(offset_db_clone, shared_output_clone).await.expect("Failed to flush buffers")
+                // });
+            },
+            _ => {
+          
+            }
+        }
+        
+        
         if updated_schema.as_str() == "yes" {
             updated_schema = "no".to_string();
             

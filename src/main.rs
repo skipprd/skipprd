@@ -30,7 +30,7 @@ use std::fs;
 
 
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::thread::sleep;
 use std::time::Instant;
 
@@ -203,6 +203,8 @@ async fn main() {
 
         }
         Mode::Discover(options) => {
+            Config::build_config();
+
             if options.pipeline.is_some() {
                 // println!("Syncing pipeline: {}", options.pipeline.unwrap().clone());
                 PIPELINE_NAME.write().clear();
@@ -285,12 +287,16 @@ async fn schema(pipeline: &str) {
     }
 }
 
-
-
 async fn discover() {
     println!("Analysing data and generating Skippr metadata");
-
-    // thread::spawn(async move || {
+    
+    // @todo - currently only timeout is implemented, add num_rows and num_bytes
+    let num_rows: AtomicI64 = AtomicI64::new(100000);
+    let num_bytes: AtomicI64 = AtomicI64::new(10000000);
+    let timeout_seconds: u64 = 10;
+    
+    let start = Instant::now();
+    
     let options = MatchOptions {
         case_sensitive: false,
         require_literal_separator: false,
@@ -298,84 +304,80 @@ async fn discover() {
     };
 
     let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
-
-    let mut has_analysed = false;
-
-    // let mut skippr_metadata: HashMap<String, Metadata> = HashMap::new();
-
+    
     let data_dir = Config::get_data_dir();
-    let metadata_file = format!("{}/metadata.json", data_dir);
 
-    // Get existing metadata
-    let mut skippr_metadata: PipelineMetadata = match File::open(metadata_file) {
-        Ok(file) => {
-            let reader = BufReader::new(file);
-            match serde_json::from_reader(reader) {
-                Ok(metadata) => metadata,
-                Err(_e) => {
-                    // println!("No existing metadata {}", e);
-                    PipelineMetadata::new()
-                }
+    let mut pipeline_metadata = match Config::get_metadata().await {
+        Ok(mut pipeline_metadata) => {
+            println!("Found existing Skippr metadata, will update with schema discovered from sampled data");
+
+            let pipeline_name = Config::get_pipeline_name();
+
+            if !pipeline_metadata.enabled {
+                println!("Pipeline '{}' disabled, skipping.", pipeline_name);
+                return;
             }
+
+            pipeline_metadata
         }
         Err(_e) => {
-            // println!("No existing metadata {}", e);
+            println!("No existing Skippr metadata, will discover schemas");
+
             PipelineMetadata::new()
         }
     };
 
-    // @todo - invoke data input plugin in a mode that doesn't ingest data... just pipe it here
-    // @todo - we will probably still want to source_buffer, but won't want check pointing
+    {
+        METADATA.write().clone_from(&pipeline_metadata);
+    }
 
-    let _arrow_schema: Result<Schema, ArrowError> = Ok(Schema::empty());
+    let offsets = match Offsets::init() {
+        Ok(offsets) => offsets,
+        Err(e) => {
+            println!("Skipping: {}", e);
+            return;
+        }
+    };
 
-    let _schema_ref = Arc::new(Schema::empty());
+    let offsets = Arc::new(offsets);
 
-    let mut analyse_count = 0;
+    let output = sync_output_plugin(Config::get_pipeline_output_plugin_name().as_str(), "output".to_string()).await.unwrap();
+    let shared_output = Arc::new(TimedRwLock::new("output_plugin".to_string(), output));
 
+    let offsets_clone = offsets.clone();
+
+    let shared_output_clone = shared_output.clone();
+
+    thread::spawn(move || {
+        let rt = runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        rt.block_on(async {
+                sync_input_plugin(offsets_clone, shared_output_clone).await;
+        });
+    });
+    
     let data_dir = Config::get_data_dir();
-    let pattern = &format!("{}/source_buffer/*", data_dir);
+    let source_dir = &format!("{}/source_buffer", data_dir);
 
-    while !has_analysed && analyse_count < 10 {
-        analyse_count += 1;
+    while !( start.elapsed().as_secs() > timeout_seconds) {
 
-        for entry in glob_with(pattern, options).expect("Failed to read glob pattern") {
-            if !has_analysed {
+        for entry in glob_with(&format!("{}/*", source_dir), options).expect("Failed to read glob pattern") {
+            if !(start.elapsed().as_secs() > timeout_seconds) {
                 match entry {
                     Ok(path) => {
                         let input_file = File::open(path.clone()).unwrap();
 
-                        println!("Analysing path: {}", path.to_str().unwrap());
-
-                        // let mut buf_reader = BufReader::new(input_file);
-
-                        // skippr_metadata =
-                        //     AnalyseSchema::infer_json_schema(&mut foo, &mut buf_reader, Some(1000))
-                        //         .unwrap();
+                        // println!("Analysing schema of source data: {}", path.to_str().unwrap());
+                        
                         AnalyseSchema::infer_json_schema(
                             &mut foo,
                             input_file,
                             Some(1000),
-                            &mut skippr_metadata.metadata,
+                            &mut pipeline_metadata.metadata,
                         );
-
-                        // println!("Skippr schema: {:?}", skippr_metadata);
-
-                        // arrowSchema = convert_skippr_to_arrow(
-                        //     skippr_metadata.get(&"example_ns".to_string()).unwrap().fields.clone(),
-                        // );
-                        //
-                        // // let json = serde_json::to_string_pretty(&arrowSchema).unwrap();
-                        // // eprintln!("Schema:");
-                        // // println!("{}", json);
-                        //
-                        // // println!("Arrow schema: {:?}", arrowSchema);
-                        //
-                        // // let schema_ref = Arc::new(arrowSchema.unwrap());
-                        // schema_ref = Arc::new(arrowSchema.unwrap());
-                        // // schema_ref = arrowSchema.unwrap();
-
-                        has_analysed = true;
                     }
                     Err(e) => println!("{:?}", e),
                 }
@@ -383,33 +385,28 @@ async fn discover() {
         }
     }
 
-    let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.unwrap());
+    println!("Sampled source data, analysing schema");
+    
+    let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.unwrap_or("false".to_string()));
 
-    AnalyseSchema::determine_field_types(&mut skippr_metadata.metadata, None, None, flatten);
+    AnalyseSchema::determine_field_types(&mut pipeline_metadata.metadata, None, None, flatten);
 
-    Config::set_metadata(&skippr_metadata, true).await;
+    println!("Schema discovery complete, writing metadata to Skippr");
 
-    // let file = OpenOptions::new()
-    //     .create(true)
-    //     .write(true)
-    //     .truncate(true)
-    //     .open(&"metadata.json".to_string())
-    //     .unwrap();
-    //
-    // let writer = BufWriter::new(file);
-    //
-    // serde_json::to_writer(writer, &skippr_metadata).unwrap();
+    Config::set_metadata(&pipeline_metadata, false).await;
 
-    // skippr_metadata
-    // }).join().unwrap();
+    // empty source_dir dir
+    fs::remove_dir_all(source_dir).unwrap()
+
 }
 
 
 async fn sync() {
     {
+        let pipeline_name = Config::get_pipeline_name();
         LOGGER.write()
             .await
-            .log(LogLevel::Info, "Starting Skippr".to_string())
+            .log(LogLevel::Info, format!("Starting Skippr ingest pipeline: {}", pipeline_name))
             .await;
 
         let mut counter_lock = METRICS.write();
@@ -428,38 +425,12 @@ async fn sync() {
         }
     }
 
-    let data_dir = Config::get_data_dir();
-    let ingest_dir = &format!("{}/ingest_buffer", data_dir);
-    let deadletter_dir = &format!("{}/deadletter_buffer", data_dir);
-    let output_dir = &format!("{}/output_buffer", data_dir);
-    match fs::create_dir(deadletter_dir) {
-        Ok(_g) => {}
-        Err(_err) => {}
-    }
-    match fs::create_dir(format!("{}/done", deadletter_dir)) {
-        Ok(_g) => {}
-        Err(_err) => {}
-    }
-    match fs::create_dir(ingest_dir) {
-        Ok(_g) => {}
-        Err(_err) => {}
-    }
-    match fs::create_dir(format!("{}/done", ingest_dir)) {
-        Ok(_g) => {}
-        Err(_err) => {}
-    }
-    match fs::create_dir(output_dir) {
-        Ok(_g) => {}
-        Err(_err) => {}
-    }
-
-
+    let pipeline_name = Config::get_pipeline_name();
+    
     let pipeline_metadata = match Config::get_metadata().await {
         Ok(mut pipeline_metadata) => {
-            println!("Found Skippr metadata");
-
-            let pipeline_name = Config::get_pipeline_name();
-
+            println!("Found existing Skippr metadata");
+            
             match pipeline_metadata.sql {
                 Some(sql) => {
 
@@ -484,9 +455,10 @@ async fn sync() {
             pipeline_metadata
         }
         Err(_e) => {
-            println!("No existing Skippr metadata, will discover and evolve schemas as we sync");
+            println!("No existing Skippr metadata, skipping pipeline '{}'. Init the pipeline with 'skippr discover' to create metadata.", pipeline_name);
 
-            PipelineMetadata::new()
+            return;
+            // PipelineMetadata::new()
         }
     };
 
@@ -515,7 +487,7 @@ async fn sync() {
 
     // let output = DataOutputAwsAthenaPlugin::new("output".to_string()).await;
     let output = sync_output_plugin(Config::get_pipeline_output_plugin_name().as_str(), "output".to_string()).await.unwrap();
-    let shared_output = Arc::new(TimedRwLock::new("athena_output".to_string(), output));
+    let shared_output = Arc::new(TimedRwLock::new("output_plugin".to_string(), output));
 
     let now = Arc::new(TimedRwLock::new("now".to_string(), Instant::now()));
 

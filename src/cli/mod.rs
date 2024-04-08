@@ -15,7 +15,7 @@ pub struct Cli {
     pub(crate) mode: Mode,
 }
 
-#[derive(Parser, Clone)]
+#[derive(Parser, Clone, PartialEq)]
 pub enum Mode {
     Discover(DisocverOptions),
     Sync(SyncOptions),
@@ -24,28 +24,28 @@ pub enum Mode {
     // ... other modes
 }
 
-#[derive(Parser, Clone)]
+#[derive(Parser, Clone, PartialEq)]
 pub struct SyncOptions {
     /// The pipeline to use
     #[arg(short, long)]
     pub(crate) pipeline: Option<String>,
 }
 
-#[derive(Parser, Clone)]
+#[derive(Parser, Clone, PartialEq)]
 pub struct DisocverOptions {
     /// The pipeline to use
     #[arg(short, long)]
     pub(crate) pipeline: Option<String>,
 }
 
-#[derive(Parser, Clone)]
+#[derive(Parser, Clone, PartialEq)]
 pub struct QueryOptions {
     /// The SQL query to run
     #[arg(short, long)]
     pub(crate) sql: String,
 }
 
-#[derive(Parser, Clone)]
+#[derive(Parser, Clone, PartialEq)]
 pub struct SchemaOptions {
     /// The schema to use
     #[arg(short, long)]
