@@ -210,6 +210,29 @@ jobs:
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
 
+  linux_x86_many_est:
+    needs:
+      - cleanup
+      - purge_dynamodb
+      - linux_x86
+    name: test build (linux x86)
+    runs-on:
+      - ubuntu-latest-32-cores
+    #      - ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Download Artifacts
+        uses: actions/download-artifact@v3
+
+      - name: Test linux x86 release
+        uses: ./.github/actions/e2e/bike_hire_many
+        with:
+          architecture_name: linux_x86
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
+
 
   release:
     if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test')
@@ -290,23 +313,23 @@ jobs:
           docker push ${{ env.DOCKER_HUB_REPO }}/skippr:stable
 
 
-#  linux_x86_test_many:
-#    needs:
-#      - dockerize
-#    name: test (many) build (linux x86)
-#    runs-on:
-#      - ubuntu-latest-32-cores
-#    steps:
-#      - uses: actions/checkout@v3
-#
-#      - name: Download Artifacts
-#        uses: actions/download-artifact@v3
-#
-#      - name: Test (many) linux x86 release
-#        uses: ./.github/actions/e2e-docker/bike_hire_many
-#        with:
-#          architecture_name: linux_x86
-#          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-#          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-#          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
+  linux_x86_test_many:
+    needs:
+      - dockerize
+    name: test (many) build (linux x86)
+    runs-on:
+      - ubuntu-latest-32-cores
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Download Artifacts
+        uses: actions/download-artifact@v3
+
+      - name: Test (many) linux x86 release
+        uses: ./.github/actions/e2e-docker/bike_hire_many
+        with:
+          architecture_name: linux_x86
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
 
