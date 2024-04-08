@@ -210,7 +210,7 @@ jobs:
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
 
-  linux_x86_many_est:
+  linux_x86_many_test:
     needs:
       - cleanup
       - purge_dynamodb
