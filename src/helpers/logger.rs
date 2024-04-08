@@ -156,7 +156,7 @@ impl Logger {
         match response {
             Ok(resp) => {
                 if resp.status().is_success() {
-                    println!("Logs API Response: {:?}", resp);
+                    // println!("Logs API Response: {:?}", resp);
                 } else {
                     println!("Logs API Error: {:?}", resp);
                 }
