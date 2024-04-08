@@ -91,7 +91,7 @@ use crate::plugins::s3_input::DataSourceS3Plugin;
 // use crate::plugins::s3_inventory::DataSourceS3InventoryPlugin;
 
 
-use crate::metrics::{Metrics, MetricsStatus};
+use crate::metrics::{LAST_MESSAGES_TOTAL, Metrics, MetricsStatus};
 use crate::plugins::file_input::DataSourceLocalFilePlugin;
 // use crate::plugins::file_output::DataOutputFilePlugin;
 // use crate::plugins::s3_output::DataOutputS3Plugin;
@@ -704,7 +704,7 @@ async fn sync() {
 
     let now_clone = now.clone();
 
-    let last_messages_total = Arc::new(TimedRwLock::new("last_messages_total".to_string(), 0));
+    // let last_messages_total = Arc::new(TimedRwLock::new("last_messages_total".to_string(), 0));
 
     // get curent tokio runtime
     let handle = runtime::Handle::current();
@@ -724,14 +724,10 @@ async fn sync() {
                 // metrics_lock.bytes_total += metrics_lock.bytes_current;
 
                 // metrics_lock.run_time_seconds = now_lock.elapsed().as_secs();
-
-                let ingested_current: u64;
-                {
-                    let mut last_messages_total_val = last_messages_total.write();
-                    ingested_current  = metrics.messages_total - *last_messages_total_val;
-                    *last_messages_total_val = metrics.messages_total;
-                }
-
+                
+                let mut last_messages_total_val = LAST_MESSAGES_TOTAL.load(Ordering::SeqCst);
+                let ingested_current = metrics.messages_total - last_messages_total_val;
+                
                 // if DISPLAY_METRICS.read().unwrap().load(Ordering::SeqCst) {
                 if ingested_current > 0 {
                     println!("Messages per Min: {}", ingested_current);
