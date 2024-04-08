@@ -1,11 +1,11 @@
 use crate::buffer::{BufferChunker};
-use crate::discover::{Metadata, PipelineMetadata};
+use crate::discover::{AnalyseSchema, Metadata, num_analyised_records, PipelineMetadata};
 use crate::helpers::configuration::Config;
 use crate::helpers::offsets::{OffsetKey, Offsets, OffsetTypes};
 use crate::helpers::Helpers;
 use crate::ingest::ingest::ingest;
 use crate::serdes::json::SerdeJson;
-use crate::{ARROW_SCHEMA, helpers, METADATA, METRICS, RUNNING};
+use crate::{ARROW_SCHEMA, DISCOVER_RUNNING, helpers, METADATA, METRICS, RUNNING};
 
 
 use once_cell::sync::Lazy;
@@ -113,6 +113,7 @@ pub struct Ingest {
     tx: Sender<()>,
     active_count: Arc<AtomicUsize>,
     schema_hashes: DashMap<String, SchemaHash>,
+    analyse_schema: AnalyseSchema,
 }
 
 impl Drop for Ingest {
@@ -152,12 +153,15 @@ impl Ingest {
             }).collect::<DashMap<_, _>>();
         }
 
+        let analyse_schema: AnalyseSchema = AnalyseSchema { i: 0 };
+
         Ingest {
             num_cpus,
             thread_pool,
             tx,
             active_count,
-            schema_hashes
+            schema_hashes,
+            analyse_schema
         }
     }
 
@@ -186,10 +190,51 @@ impl Ingest {
     ) {
         // If we're not running, exit after current threads finish.
         if !RUNNING.read().load(Ordering::SeqCst) {
-            println!("Not running, exiting");
+            println!("Not running, shutting down ingest threads");
             self.wait_for_completion();
             exit(0);
+
         } else {
+
+            match CLI_MODE.read().clone() {
+                Mode::Sync(_) => {},
+                _ => {
+
+                    let max_records = 210000;
+
+                    let mut pipeline_metadata= METADATA.read().clone();
+
+                    let mut i = 0;
+
+                    for data in datas.iter() {
+
+                        i += 1;
+
+
+                        println!("Analysing schema on batch {} of {}", i, datas.len());
+
+                        self.analyse_schema.infer_json_schema(
+                            &mut data.data.clone(),
+                            Some(max_records),
+                            &mut pipeline_metadata.metadata,
+                        );
+
+                        println!("Analysed schema on batch {} of {}, total of {} records", i, datas.len(), num_analyised_records.load(Ordering::SeqCst));
+
+                    }
+
+                    println!("Completed schema analysis for batch");
+
+                    if num_analyised_records.load(Ordering::SeqCst) >= max_records {
+                        let mut pipeline = METADATA.write();
+                        *pipeline = pipeline_metadata;
+
+                        DISCOVER_RUNNING.write().store(false, Ordering::SeqCst);
+                    }
+
+                    return;
+                }
+            }
 
             // Wait for an available thread if there's no capacity
             while self.active_count.load(Ordering::SeqCst) >= self.num_cpus {
@@ -237,31 +282,6 @@ impl Ingest {
         handle: runtime::Handle,
         shared_output: Arc<TimedRwLock<Box<dyn DataOutputPlugin + Send + Sync>>>,
     ) {
-
-        match CLI_MODE.read().clone() {
-            Mode::Sync(_) => {
-                
-            },
-            _ => {
-
-                for batch in datas.clone().iter() {
-                    let data_dir = Config::get_data_dir();
-                    let filename = &format!("{}/source_buffer/{}", data_dir, Helpers::random_str(10));
-
-                    let file = OpenOptions::new()
-                        .create(true)
-                        .write(true)
-                        .truncate(true)
-                        .open(filename)
-                        .unwrap();
-
-                    let mut writer = BufWriter::new(file);
-                    writer.write(batch.data.as_bytes()).unwrap();
-
-                    return;
-                }
-            }
-        }
         
         let default_schema_hash = format!("{:?}", md5::compute(Helpers::random_str(10)));
         
@@ -361,7 +381,7 @@ impl Ingest {
                                 };
 
                                 Self::deadletter(line_str);
-                                offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, batch_line);
+                                // offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, batch_line);
 
                                 d += 1;
 
@@ -391,7 +411,7 @@ impl Ingest {
 
 
                     Self::deadletter(line_str);
-                    offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, batch_line);
+                    // offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, batch_line);
 
                     d += 1;
 
@@ -481,7 +501,7 @@ impl Ingest {
                                     };
 
                                     Self::deadletter(line_str);
-                                    offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, batch_line);
+                                    // offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, batch_line);
 
                                     d += 1;
 
@@ -534,7 +554,7 @@ impl Ingest {
                                 };
 
                                 Self::deadletter(line_str);
-                                offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, batch_line);
+                                // offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, batch_line);
                                 d += 1;
 
                                 continue;
@@ -621,22 +641,14 @@ impl Ingest {
 
         }
         
-        match CLI_MODE.read().clone() {
-            Mode::Sync(_) => {
-                buffers.write(buf);
+        buffers.write(buf);
 
-                // let offset_db_clone = offset_db_clone.clone();
-                // let shared_output_clone = shared_output.clone();
-                // handle.block_on(async {
-                //     buffers.flush(offset_db_clone, shared_output_clone).await.expect("Failed to flush buffers")
-                // });
-            },
-            _ => {
-          
-            }
-        }
-        
-        
+        let offset_db_clone = offset_db_clone.clone();
+        let shared_output_clone = shared_output.clone();
+        handle.block_on(async {
+            buffers.flush(offset_db_clone, shared_output_clone).await.expect("Failed to flush buffers")
+        });
+
         if updated_schema.as_str() == "yes" {
             updated_schema = "no".to_string();
             

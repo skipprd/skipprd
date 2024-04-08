@@ -27,7 +27,7 @@ use std::thread;
 
 
 use std::fs;
-
+use std::os::fd::AsRawFd;
 
 
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -119,6 +119,9 @@ use crate::sql::query::query;
 //     Lazy::new(|| TimedRwLock::new("display_metrics".to_string(), AtomicBool::new(false)));
 
 pub static RUNNING: Lazy<TimedRwLock<AtomicBool>> = Lazy::new(|| TimedRwLock::new("running".to_string(),AtomicBool::new(true)));
+
+pub static DISCOVER_RUNNING: Lazy<TimedRwLock<AtomicBool>> =
+    Lazy::new(|| TimedRwLock::new("discover_running".to_string(), AtomicBool::new(false)));
 pub static OUTPUT_RUNNING: Lazy<TimedRwLock<AtomicBool>> =
     Lazy::new(|| TimedRwLock::new("output_running".to_string(), AtomicBool::new(false)));
 
@@ -288,30 +291,18 @@ async fn schema(pipeline: &str) {
 }
 
 async fn discover() {
-    println!("Analysing data and generating Skippr metadata");
-    
-    // @todo - currently only timeout is implemented, add num_rows and num_bytes
-    let num_rows: AtomicI64 = AtomicI64::new(100000);
-    let num_bytes: AtomicI64 = AtomicI64::new(10000000);
-    let timeout_seconds: u64 = 10;
-    
-    let start = Instant::now();
-    
-    let options = MatchOptions {
-        case_sensitive: false,
-        require_literal_separator: false,
-        require_literal_leading_dot: false,
-    };
 
-    let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
-    
+    let pipeline_name = Config::get_pipeline_name();
+
+    println!("Analysing data and generating Skippr metadata for pipeline: {}", pipeline_name);
+
+    DISCOVER_RUNNING.write().store(true, Ordering::SeqCst);
+
     let data_dir = Config::get_data_dir();
 
-    let mut pipeline_metadata = match Config::get_metadata().await {
-        Ok(mut pipeline_metadata) => {
+    let pipeline_metadata = match Config::get_metadata().await {
+        Ok(pipeline_metadata) => {
             println!("Found existing Skippr metadata, will update with schema discovered from sampled data");
-
-            let pipeline_name = Config::get_pipeline_name();
 
             if !pipeline_metadata.enabled {
                 println!("Pipeline '{}' disabled, skipping.", pipeline_name);
@@ -348,55 +339,44 @@ async fn discover() {
 
     let shared_output_clone = shared_output.clone();
 
+    let source_dir = &format!("{}/source_buffer", data_dir);
+
     thread::spawn(move || {
+        while DISCOVER_RUNNING.read().load(Ordering::SeqCst) {
+            sleep(Duration::from_secs(1));
+        }
+
+        let mut pipeline_metadata= METADATA.read().clone();
+
+        if pipeline_metadata.metadata.len() == 0 {
+            println!("No data found in source buffer, skipping schema discovery");
+            return;
+        } else {
+            println!("Sampled source data, analysing schema");
+        }
+
+        let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.unwrap_or("false".to_string()));
+
+        for (namespace, metadata) in pipeline_metadata.metadata.iter_mut() {
+            AnalyseSchema::determine_field_types(&mut metadata.fields, None, None, flatten);
+        }
+
+        println!("Schema discovery complete, writing metadata to Skippr");
+
         let rt = runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .unwrap();
 
         rt.block_on(async {
-                sync_input_plugin(offsets_clone, shared_output_clone).await;
+            Config::set_metadata(&pipeline_metadata, false).await;
         });
+
+        RUNNING.write().store(false, Ordering::SeqCst);
+
     });
-    
-    let data_dir = Config::get_data_dir();
-    let source_dir = &format!("{}/source_buffer", data_dir);
 
-    while !( start.elapsed().as_secs() > timeout_seconds) {
-
-        for entry in glob_with(&format!("{}/*", source_dir), options).expect("Failed to read glob pattern") {
-            if !(start.elapsed().as_secs() > timeout_seconds) {
-                match entry {
-                    Ok(path) => {
-                        let input_file = File::open(path.clone()).unwrap();
-
-                        // println!("Analysing schema of source data: {}", path.to_str().unwrap());
-                        
-                        AnalyseSchema::infer_json_schema(
-                            &mut foo,
-                            input_file,
-                            Some(1000),
-                            &mut pipeline_metadata.metadata,
-                        );
-                    }
-                    Err(e) => println!("{:?}", e),
-                }
-            }
-        }
-    }
-
-    println!("Sampled source data, analysing schema");
-    
-    let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.unwrap_or("false".to_string()));
-
-    AnalyseSchema::determine_field_types(&mut pipeline_metadata.metadata, None, None, flatten);
-
-    println!("Schema discovery complete, writing metadata to Skippr");
-
-    Config::set_metadata(&pipeline_metadata, false).await;
-
-    // empty source_dir dir
-    fs::remove_dir_all(source_dir).unwrap()
+    sync_input_plugin(offsets_clone, shared_output_clone).await;
 
 }
 
@@ -426,11 +406,11 @@ async fn sync() {
     }
 
     let pipeline_name = Config::get_pipeline_name();
-    
+
     let pipeline_metadata = match Config::get_metadata().await {
         Ok(mut pipeline_metadata) => {
             println!("Found existing Skippr metadata");
-            
+
             match pipeline_metadata.sql {
                 Some(sql) => {
 
@@ -724,10 +704,10 @@ async fn sync() {
                 // metrics_lock.bytes_total += metrics_lock.bytes_current;
 
                 // metrics_lock.run_time_seconds = now_lock.elapsed().as_secs();
-                
+
                 let mut last_messages_total_val = LAST_MESSAGES_TOTAL.load(Ordering::SeqCst);
                 let ingested_current = metrics.messages_total - last_messages_total_val;
-                
+
                 // if DISPLAY_METRICS.read().unwrap().load(Ordering::SeqCst) {
                 if ingested_current > 0 {
                     println!("Messages per Min: {}", ingested_current);

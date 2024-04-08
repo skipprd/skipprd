@@ -4,10 +4,7 @@ use std::any::Any;
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{File};
 use std::io::Read;
-
-
-
-
+use std::sync::atomic::AtomicI64;
 
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
@@ -38,6 +35,7 @@ use crate::serdes::json::SerdeJson;
 
 use crate::discover::evolution::Evolution;
 
+pub static num_analyised_records: AtomicI64 = AtomicI64::new(0);
 
 thread_local! {
     static LAST_SUCCESSFUL_EVOLUTION: std::cell::RefCell<HashMap<String, String>> = std::cell::RefCell::new(HashMap::new());
@@ -272,6 +270,7 @@ impl Metadata {
 
 }
 
+#[derive(Debug, Copy, Clone)]
 pub struct AnalyseSchema {
     pub i: i32,
     // pub discovered_field_occurrence: HashMap<String, i32>,
@@ -460,13 +459,13 @@ impl AnalyseSchema {
     // }
 
     pub fn infer_json_schema(
-        &mut self,
-        input_file: File,
-        _max_read_records: Option<usize>,
+        &self,
+        str: &mut String,
+        max_read_records: Option<i64>,
         metadata: &mut HashMap<std::string::String, Metadata>,
     ) {
         // self.infer_json_schema_from_iterator(ValueIter::new(reader, max_read_records))
-        self.infer_json_schema_from_iterator(input_file, metadata);
+        self.infer_json_schema_from_iterator(str, metadata, max_read_records);
     }
 
     // pub fn infer_json_schema_from_iterator<I>(&mut self, value_iter: I) -> Result<HashMap<std::string::String, Metadata>, ArrowError>
@@ -474,9 +473,10 @@ impl AnalyseSchema {
     //         I: Iterator<Item = Result<Value, ArrowError>>,
     // {
     pub fn infer_json_schema_from_iterator(
-        &mut self,
-        mut input_file: File,
+        &self,
+        str: &mut String,
         metadata: &mut HashMap<std::string::String, Metadata>,
+        max_read_records: Option<i64>,
     ) {
         let mut parse_namespace_cache: HashMap<String, String> = HashMap::new();
 
@@ -490,14 +490,15 @@ impl AnalyseSchema {
         // let mut metadata = HashMap::new();
         // newMeta = &mut metadata;
 
-        let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
+        // let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
 
-        let str: &mut String = &mut "".to_string();
-        input_file.read_to_string(str).unwrap();
+        // let str: &mut String = &mut "".to_string();
+        // input_file.read_to_string(str).unwrap();
 
         let records: Vec<Value> = SerdeJson::deserialize(str);
 
-        let mut i = 0;
+        // self.i += 1;
+        // let mut i = 0;
 
         for v in records {
             skpr_namespace = Helpers::parse_namespace_field(
@@ -516,11 +517,11 @@ impl AnalyseSchema {
             // }
 
 
-            if i >= min_discovery_records {
-                break;
+            if num_analyised_records.load(std::sync::atomic::Ordering::SeqCst) >= max_read_records.unwrap_or(1000) {
+                return;
             }
 
-            i += 1;
+            // i += 1;
 
             // let string = record.unwrap().to_string();
 
@@ -550,8 +551,7 @@ impl AnalyseSchema {
                         record: v,
                     };
 
-                    AnalyseSchema::analyse_payload(
-                        &mut foo,
+                    self.analyse_payload(
                         &mut ingest_record.record,
                         &mut metadata
                             .get_mut(&ingest_record.skpr_namespace)
@@ -576,8 +576,8 @@ impl AnalyseSchema {
     }
 
     // pub fn analyse_payload(&mut self, message: &HashMap<String, String>, metadata: &mut HashMap<String, Metadata>) {
-    pub fn analyse_payload(&mut self, message: &Value, metadata: &mut HashMap<String, Metadata>) {
-        self.i += 1;
+    pub fn analyse_payload(&self, message: &Value, metadata: &mut HashMap<String, Metadata>) {
+        num_analyised_records.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
         // let mut helpers = Helpers { clean_field_cache: Default::default() };
 
@@ -1830,25 +1830,25 @@ mod tests {
 
         let json: Value = serde_json::from_str(field).unwrap();
 
-        let record_line = serde_json::to_string(&json).unwrap();
+        let mut record_line = serde_json::to_string(&json).unwrap();
 
         let _data_dir = Config::get_data_dir();
 
         let mut rng = rand::thread_rng();
         let random_tmp_file_name = rng.gen::<i32>();
 
-        let mut test_file = OpenOptions::new()
-            .write(true)
-            .truncate(true)
-            .create_new(true)
-            .open(format!("./{}", random_tmp_file_name))
-            .unwrap();
+        // let mut test_file = OpenOptions::new()
+        //     .write(true)
+        //     .truncate(true)
+        //     .create_new(true)
+        //     .open(format!("./{}", random_tmp_file_name))
+        //     .unwrap();
 
         // let mut test_file = File::create_new(format!("./{}", random_tmp_file_name)).unwrap();
 
-        test_file.write(record_line.as_bytes()).unwrap();
+        // test_file.write(record_line.as_bytes()).unwrap();
 
-        test_file.rewind().unwrap();
+        // test_file.rewind().unwrap();
 
         // let mut in_file = MemFile::create(rng.gen::<i32>(), CreateOptions::new()).unwrap();
         let in_file = File::open(format!("./{}", random_tmp_file_name)).unwrap();
@@ -1860,7 +1860,7 @@ mod tests {
 
         AnalyseSchema::infer_json_schema(
             &mut foo,
-            in_file,
+            &mut record_line,
             Some(1),
             &mut metadata,
         );
@@ -1941,23 +1941,23 @@ mod tests {
 
         let json: Value = serde_json::from_str(field).unwrap();
 
-        let record_line = serde_json::to_string(&json).unwrap();
+        let mut record_line = serde_json::to_string(&json).unwrap();
 
         let mut rng = rand::thread_rng();
         let random_tmp_file_name = rng.gen::<i32>();
 
-        let mut test_file = OpenOptions::new()
-            .write(true)
-            .truncate(true)
-            .create_new(true)
-            .open(format!("./{}", random_tmp_file_name))
-            .unwrap();
-
-        // let mut test_file = MemFile::create(rng.gen::<i32>(), CreateOptions::new()).unwrap();
-
-        test_file.write(record_line.as_bytes()).unwrap();
-
-        test_file.rewind().unwrap();
+        // let mut test_file = OpenOptions::new()
+        //     .write(true)
+        //     .truncate(true)
+        //     .create_new(true)
+        //     .open(format!("./{}", random_tmp_file_name))
+        //     .unwrap();
+        //
+        // // let mut test_file = MemFile::create(rng.gen::<i32>(), CreateOptions::new()).unwrap();
+        //
+        // test_file.write(record_line.as_bytes()).unwrap();
+        //
+        // test_file.rewind().unwrap();
 
         let in_file = File::open(format!("./{}", random_tmp_file_name)).unwrap();
         // let mut in_file = MemFile::create(rng.gen::<i32>(), CreateOptions::new()).unwrap();
@@ -1966,7 +1966,7 @@ mod tests {
 
         let mut metadata = HashMap::new();
 
-        AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1), &mut metadata);
+        AnalyseSchema::infer_json_schema(&mut foo, &mut record_line, Some(1), &mut metadata);
 
         AnalyseSchema::determine_field_types(&mut metadata.get_mut("default").unwrap().fields, None, None, false);
 
@@ -2149,29 +2149,29 @@ mod tests {
 
         let json: Value = serde_json::from_str(field).unwrap();
 
-        let record_line = serde_json::to_string(&json).unwrap();
+        let mut record_line = serde_json::to_string(&json).unwrap();
 
         let mut rng = rand::thread_rng();
         let random_tmp_file_name = rng.gen::<i32>();
 
-        let mut test_file = OpenOptions::new()
-            .write(true)
-            .truncate(true)
-            .create_new(true)
-            .open(format!("./{}", random_tmp_file_name))
-            .unwrap();
-        // let mut test_file = MemFile::create(rng.gen::<i32>(), CreateOptions::new()).unwrap();
-
-        test_file.write(record_line.as_bytes()).unwrap();
-
-        test_file.rewind().unwrap();
-
-        let in_file = File::open(format!("./{}", random_tmp_file_name)).unwrap();
+        // let mut test_file = OpenOptions::new()
+        //     .write(true)
+        //     .truncate(true)
+        //     .create_new(true)
+        //     .open(format!("./{}", random_tmp_file_name))
+        //     .unwrap();
+        // // let mut test_file = MemFile::create(rng.gen::<i32>(), CreateOptions::new()).unwrap();
+        //
+        // test_file.write(record_line.as_bytes()).unwrap();
+        //
+        // test_file.rewind().unwrap();
+        //
+        // let in_file = File::open(format!("./{}", random_tmp_file_name)).unwrap();
         // let mut in_file = MemFile::create(rng.gen::<i32>(), CreateOptions::new()).unwrap();
 
         let mut metadata = HashMap::new();
 
-        AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1), &mut metadata);
+        AnalyseSchema::infer_json_schema(&mut foo, &mut record_line, Some(1), &mut metadata);
 
         AnalyseSchema::determine_field_types(&mut metadata.get_mut("default").unwrap().fields, None, None, false);
 

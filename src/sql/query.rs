@@ -34,14 +34,20 @@ pub async fn query(sql_str: &str) {
                     println!("Dropped Pipeline");
                 },
                 Mode::Query(options) => {
-                    Config::get_metadata().await.expect(format!("No metadata found for pipeline: {}", pipeline_name).as_str());
+                    match Config::get_metadata().await {
+                        Ok(metadata) => {
+                            let mut empty_pipeline_metadata = PipelineMetadata::new();
+                            empty_pipeline_metadata.append_sql(sql_str.to_string());
 
-                    let mut empty_pipeline_metadata = PipelineMetadata::new();
-                    empty_pipeline_metadata.append_sql(sql_str.to_string());
+                            Config::set_metadata(&empty_pipeline_metadata, false).await;
 
-                    Config::set_metadata(&empty_pipeline_metadata, false).await;
-
-                    println!("Done. Pipeline will drop on next sync run");
+                            println!("Done. Pipeline will drop on next sync run");
+                        },
+                        Err(_e) => {
+                            println!("No metadata found for pipeline: {}", pipeline_name);
+                        }
+                    }
+                    
                 },
                 _ => {}
             }
