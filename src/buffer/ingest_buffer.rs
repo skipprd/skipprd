@@ -129,7 +129,6 @@ impl Buffers {
 
             let partition_entry = partitions.entry((namespace.clone(), partition.clone(), time.clone(), shard.clone())).or_insert_with(|| Vec::new());
 
-
             let mut wal_file = WalFile::new(
                 namespace,
                 partition,
@@ -222,7 +221,7 @@ impl Buffers {
                     partition: offset.partition.clone(),
                 };
 
-                offsets_db.insert(&offset_key, OffsetTypes::Line, *position);
+                offsets_db.insert(&offset_key, OffsetTypes::Position, *position);
                 offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
             });
 
@@ -433,7 +432,7 @@ impl WalPartitionIndex {
                         partition: offset.partition.clone(),
                     };
 
-                    offsets_db.insert(&offset_key, OffsetTypes::Line, *position);
+                    offsets_db.insert(&offset_key, OffsetTypes::Position, *position);
                     offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
                 });
             }

@@ -34,7 +34,7 @@ pub struct OffsetKey {
 #[derive(Debug)]
 pub enum OffsetTypes {
     Filesize,
-    Line,
+    Position,
     Closed,
 }
 
@@ -203,6 +203,33 @@ impl Offsets {
         }
     }
 
+    fn increment(&self, old: U64<LittleEndian>, new: U64<LittleEndian>) -> U64<LittleEndian> {
+        
+        // println!("Old: {:?}, New: {:?}", old, new);
+        // 
+        // let old_number = old.try_into()
+        //     .ok()
+        //     .map(|bytes: [u8; 8]| u64::from_be_bytes(bytes));
+        // 
+        // let new_number = new.try_into()
+        //     .ok()
+        //     .map(|bytes: [u8; 8]| u64::from_be_bytes(bytes));
+
+        println!("Old: {:?}, New: {:?}", old, new);
+        
+        if new.get() > old.get() {
+            println!("New is greater than old");
+            // let mut new = new;
+            // new.set(new.get() + 1);
+            // println!("New: {:?}", new);
+            // Some(new.into())
+            new
+        } else {
+            println!("New is less than old");
+            old
+        }
+    }
+    
     pub fn insert(&self, key: &OffsetKey, offset_type: OffsetTypes, offset: u64) -> Option<IVec> {
         let key = self.build_key(key);
         let bytes: &[u8] = key.as_bytes();
@@ -219,16 +246,40 @@ impl Offsets {
                     }.as_bytes(),
                 )
             }
-            // @todo - will this always represent a line? I think not. Do we really mean 'position: Int'
+            
             // @todo - compare and swap, we should only insert offsets that are greater than value in db
-            OffsetTypes::Line => {
-                sled::IVec::from(
-                    OffsetValue {
-                        filesize: U64::new(0),
-                        line: U64::new(offset),
-                        closed: U64::new(0),
-                    }.as_bytes(),
-                )
+            OffsetTypes::Position => {
+
+                let value_opt = self.tree.get(bytes).unwrap();
+                // self.tree.f(bytes, |value_opt| {
+                    if let Some(existing) = value_opt {
+                        let mut backing_bytes = sled::IVec::from(existing);
+
+                        let layout: LayoutVerified<&mut [u8], OffsetValue> =
+                            LayoutVerified::new_unaligned(&mut *backing_bytes)
+                                .expect("bytes do not fit schema");
+
+                        let old_value: &mut OffsetValue = layout.into_mut();
+
+                        let new_value = self.increment(old_value.line, offset.into());
+
+                        sled::IVec::from(
+                            OffsetValue {
+                                filesize: U64::new(0),
+                                line: new_value,
+                                closed: U64::new(0),
+                            }.as_bytes()
+                        )
+                    } else {
+                        sled::IVec::from(
+                            OffsetValue {
+                                filesize: U64::new(0),
+                                line: U64::new(offset),
+                                closed: U64::new(0),
+                            }.as_bytes()
+                        )
+                    }
+                
             }
             OffsetTypes::Closed => {
                 sled::IVec::from(
@@ -356,7 +407,7 @@ impl Offsets {
                             bool = true
                         }
                     }
-                    OffsetTypes::Line => {
+                    OffsetTypes::Position => {
                         if value.line.get() < offset_value {
                             // Some(false)
                             // println!("Setting filesize {}", filesize);
@@ -420,7 +471,7 @@ impl Offsets {
                     OffsetTypes::Filesize => {
                         value.filesize.set(offset);
                     }
-                    OffsetTypes::Line => {
+                    OffsetTypes::Position => {
                         value.line.set(offset);
                     }
                     OffsetTypes::Closed => {
@@ -462,6 +513,41 @@ mod tests {
 
     #[test]
     #[serial]
+    fn test_insert_position() {
+        let db = match Offsets::init() {
+            Ok(offsets) => offsets,
+            Err(e) => {
+                println!("Skipping: {}", e);
+                return;
+            }
+        };
+
+        db.tree.clear().unwrap();
+        
+        let key = &OffsetKey {
+            namespace: "foo".to_string(),
+            partition: "bar".to_string(),
+        };
+
+        db.insert(key, OffsetTypes::Position, 1);
+        assert_eq!(db.validate(key, OffsetTypes::Position, 1), Some(false));
+        assert_eq!(db.validate(key, OffsetTypes::Position, 2), Some(true));
+
+        db.insert(key, OffsetTypes::Position, 2);
+        assert_eq!(db.validate(key, OffsetTypes::Position, 1), Some(false));
+        assert_eq!(db.validate(key, OffsetTypes::Position, 2), Some(false));
+        assert_eq!(db.validate(key, OffsetTypes::Position, 3), Some(true));
+
+        db.insert(key, OffsetTypes::Position, 3);
+        assert_eq!(db.validate(key, OffsetTypes::Position, 1), Some(false));
+        assert_eq!(db.validate(key, OffsetTypes::Position, 2), Some(false));
+        assert_eq!(db.validate(key, OffsetTypes::Position, 3), Some(false));
+        assert_eq!(db.validate(key, OffsetTypes::Position, 4), Some(true));
+        
+    }
+    
+    #[test]
+    #[serial]
     fn test_validate() {
         let db = match Offsets::init() {
             Ok(offsets) => offsets,
@@ -470,6 +556,8 @@ mod tests {
                 return;
             }
         };
+        
+        db.tree.clear().unwrap();
 
         // assert_eq!(db.validate(key, 1, 1), Some(true));
         // assert_eq!(db.validate(key, 1, 1), Some(false)); // @todo this is atleast once

@@ -333,7 +333,7 @@ impl Ingest {
             
             let has_offsets =
                 offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Closed, 0);
-            let current_line_offset = offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Line, 0);
+            let current_line_offset = offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Position, 0);
 
             let mut records: Vec<Value> = Vec::new();
             if format == "csv" {
