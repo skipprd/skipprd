@@ -1185,29 +1185,29 @@ mod test_smoke_tests {
 
         let json: Value = serde_json::from_str(field).unwrap();
 
-        let record_line = serde_json::to_string(&json).unwrap();
+        let mut record_line = serde_json::to_string(&json).unwrap();
 
         let mut rng = rand::thread_rng();
         let random_tmp_file_name = rng.gen::<i32>();
 
-        let mut test_file = OpenOptions::new()
-            .write(true)
-            .truncate(true)
-            .create_new(true)
-            .open(format!("./{}", random_tmp_file_name))
-            .unwrap();
-        // let mut test_file = MemFile::create(rng.gen::<i32>(), CreateOptions::new()).unwrap();
+        // let mut test_file = OpenOptions::new()
+        //     .write(true)
+        //     .truncate(true)
+        //     .create_new(true)
+        //     .open(format!("./{}", random_tmp_file_name))
+        //     .unwrap();
+        // // let mut test_file = MemFile::create(rng.gen::<i32>(), CreateOptions::new()).unwrap();
+        // 
+        // test_file.write(record_line.as_bytes()).unwrap();
+        // 
+        // test_file.rewind().unwrap();
 
-        test_file.write(record_line.as_bytes()).unwrap();
-
-        test_file.rewind().unwrap();
-
-        let in_file = File::open(format!("./{}", random_tmp_file_name)).unwrap();
+        // let in_file = File::open(format!("./{}", random_tmp_file_name)).unwrap();
         // let mut in_file = MemFile::create(rng.gen::<i32>(), CreateOptions::new()).unwrap();
 
         let mut metadata = HashMap::new();
 
-        AnalyseSchema::infer_json_schema(&mut foo, in_file, Some(1), &mut metadata);
+        AnalyseSchema::infer_json_schema(&mut foo, &mut record_line, Some(1), &mut metadata);
 
         let str = r#"{"rider_id":"10e974bf-4a43-305a-9e39-1636c43cb22a","bike_id":"8b86f753-05f8-3254-aba6-739188a3c0b6","isbn":"9407496597","trip":{"start_temprature":0,"end_temprature":2},"last_crank":[2,15,33,45,56,57,47,36,19,5],"crank_torques":[[2,15,33,45,56,57,47,36,19,5],[1,13,33,48,56,58,45,35,15,6]],"hardware":{"manufacturer":"Beier, Emmerich and Rutherford","model":"synergize ubiquitous e-commerce","maintenance":{"last_rebuild":"20\/04\/2010","last_service":"12\/07\/1973"}},"metadata":{"rcvd_time":1615474895,"sent_time":1615474930,"prcd_micro_time":1615474853.999185,"tags":[{"name":"type","value":"trip"},{"name":"auto","value":false}]}}"#;
 
@@ -1253,6 +1253,6 @@ mod test_smoke_tests {
 
         assert_eq!(&map, &trip_map);
 
-        remove_file(Path::new(&format!("./{}", random_tmp_file_name))).unwrap();
+        // remove_file(Path::new(&format!("./{}", random_tmp_file_name))).unwrap();
     }
 }

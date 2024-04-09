@@ -1835,7 +1835,7 @@ mod tests {
         let _data_dir = Config::get_data_dir();
 
         let mut rng = rand::thread_rng();
-        let random_tmp_file_name = rng.gen::<i32>();
+        // let random_tmp_file_name = rng.gen::<i32>();
 
         // let mut test_file = OpenOptions::new()
         //     .write(true)
@@ -1851,7 +1851,7 @@ mod tests {
         // test_file.rewind().unwrap();
 
         // let mut in_file = MemFile::create(rng.gen::<i32>(), CreateOptions::new()).unwrap();
-        let in_file = File::open(format!("./{}", random_tmp_file_name)).unwrap();
+        // let in_file = File::open(format!("./{}", random_tmp_file_name)).unwrap();
 
         // let mut buf_reader = BufReader::new(in_file);
 
@@ -1867,7 +1867,7 @@ mod tests {
 
         AnalyseSchema::determine_field_types(&mut metadata.get_mut("default").unwrap().fields, None, None, false);
 
-        remove_file(Path::new(&format!("./{}", random_tmp_file_name))).unwrap();
+        // remove_file(Path::new(&format!("./{}", random_tmp_file_name))).unwrap();
 
         // println!("{:?}", metadata);
         // println!("{:?}", metadata.get("default").unwrap().fields);
@@ -1959,7 +1959,7 @@ mod tests {
         //
         // test_file.rewind().unwrap();
 
-        let in_file = File::open(format!("./{}", random_tmp_file_name)).unwrap();
+        // let in_file = File::open(format!("./{}", random_tmp_file_name)).unwrap();
         // let mut in_file = MemFile::create(rng.gen::<i32>(), CreateOptions::new()).unwrap();
 
         // let mut buf_reader = BufReader::new(in_file);
@@ -2175,7 +2175,7 @@ mod tests {
 
         AnalyseSchema::determine_field_types(&mut metadata.get_mut("default").unwrap().fields, None, None, false);
 
-        remove_file(Path::new(&format!("./{}", random_tmp_file_name))).unwrap();
+        // remove_file(Path::new(&format!("./{}", random_tmp_file_name))).unwrap();
 
         assert_eq!(
             metadata
