@@ -205,27 +205,9 @@ impl Offsets {
 
     fn increment(&self, old: U64<LittleEndian>, new: U64<LittleEndian>) -> U64<LittleEndian> {
         
-        // println!("Old: {:?}, New: {:?}", old, new);
-        // 
-        // let old_number = old.try_into()
-        //     .ok()
-        //     .map(|bytes: [u8; 8]| u64::from_be_bytes(bytes));
-        // 
-        // let new_number = new.try_into()
-        //     .ok()
-        //     .map(|bytes: [u8; 8]| u64::from_be_bytes(bytes));
-
-        println!("Old: {:?}, New: {:?}", old, new);
-        
         if new.get() > old.get() {
-            println!("New is greater than old");
-            // let mut new = new;
-            // new.set(new.get() + 1);
-            // println!("New: {:?}", new);
-            // Some(new.into())
             new
         } else {
-            println!("New is less than old");
             old
         }
     }
