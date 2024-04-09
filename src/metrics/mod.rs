@@ -132,6 +132,8 @@ pub struct Metrics {
     pub parquet_persisted_objects_total: u64,
 
     pub latest_timestamp: u64,
+    
+    pub offset_db_size: u64,
 
     pub start_time: DateTime<chrono::Utc>,
     pub status: MetricsStatus,
@@ -163,6 +165,8 @@ impl Metrics {
             parquet_persisted_objects_total: 0,
 
             latest_timestamp: 0,
+            
+            offset_db_size: 0,
 
             start_time: DateTime::<chrono::Utc>::from(SystemTime::now()),
             status: MetricsStatus::Unknown,
@@ -189,6 +193,8 @@ impl Metrics {
         self.parquet_persisted_objects_total = 0;
 
         self.latest_timestamp = 0;
+        
+        self.offset_db_size = 0;
 
         self.start_time = DateTime::<chrono::Utc>::from(SystemTime::now());
         self.status = MetricsStatus::Unknown;
@@ -317,6 +323,7 @@ impl Metrics {
                 "fixed_current": fixed_current,
                 "deadletters_current": deadletters_current,
                 "latest_timestamp": metrics.latest_timestamp,
+                "offset_db_size": metrics.offset_db_size,
                 "run_time_seconds": run_time_seconds,
                 "bytes_current": source_bytes_current,
                 "bytes_total": metrics.source_bytes_total,

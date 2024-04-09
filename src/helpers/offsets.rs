@@ -11,6 +11,8 @@ use {
     byteorder::{BigEndian, LittleEndian},
     zerocopy::{byteorder::U64, AsBytes, FromBytes, LayoutVerified, Unaligned, U16},
 };
+use crate::helpers::Helpers;
+use crate::METRICS;
 
 pub const SLED_NAME: &str = "db";
 
@@ -82,6 +84,16 @@ impl Offsets {
         };
         let tree = db.open_tree("offsets").expect("Could not open offset tree");
 
+        let total_size_bytes = db.size_on_disk().unwrap_or_else(|err| {
+            println!("Failed getting size of offsets DB, Error: {:?}", err);
+            0
+        });
+        
+        println!("Offset DB size: {} bytes", Helpers::human_readable_size(total_size_bytes));
+        
+        let mut metrics_lock = METRICS.write();
+        metrics_lock.offset_db_size = total_size_bytes;
+        
         // let names: Vec<String> = db
         //     .tree_names()
         //     .iter()
