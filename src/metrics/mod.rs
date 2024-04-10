@@ -350,6 +350,7 @@ impl Metrics {
                 "wal_index_files_total": metrics.wal_index_files_total,
                 "wal_index_bytes_total": metrics.wal_index_bytes_total,
                 "wal_write_bytes_total": metrics.wal_write_bytes_total,
+                "wal_index_metrics": metrics.wal_index_metrics,
                 "bytes_total": metrics.source_bytes_total,
                 "wal_write_bytes_total": metrics.wal_write_bytes_total,
                 "wal_write_bytes_current": wal_write_bytes_current,

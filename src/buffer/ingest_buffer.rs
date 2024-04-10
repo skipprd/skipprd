@@ -337,7 +337,7 @@ impl Buffers {
 
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 struct WalIndexMetric {
     namespace: String,
     partitions: u64,
@@ -345,7 +345,7 @@ struct WalIndexMetric {
     bytes: u64
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct WalIndexMetrics {
     metrics: HashMap<String, WalIndexMetric>
 }
