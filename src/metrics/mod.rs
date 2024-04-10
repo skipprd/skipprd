@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_derive::{Deserialize, Serialize};
 use serde_json::json;
+use crate::buffer::ingest_buffer::WalIndexMetrics;
 
 use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
@@ -120,6 +121,11 @@ pub struct Metrics {
     pub deadletters_total: u64,
     pub ingeted_slow_total: u64,
 
+    pub wal_index_namespaces_total: u64,
+    pub wal_index_partitions_total: u64,
+    pub wal_index_files_total: u64,
+    pub wal_index_metrics: WalIndexMetrics,
+    
     pub wal_write_bytes_total: u64,
     pub wal_write_rows_total: u64,
 
@@ -153,6 +159,11 @@ impl Metrics {
             deadletters_total: 0,
             ingeted_slow_total: 0,
 
+            wal_index_namespaces_total: 0,
+            wal_index_partitions_total: 0,
+            wal_index_files_total: 0,
+            wal_index_metrics: WalIndexMetrics::new(),
+            
             wal_write_bytes_total: 0,
             wal_write_rows_total: 0,
 

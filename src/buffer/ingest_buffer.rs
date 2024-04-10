@@ -337,6 +337,26 @@ impl Buffers {
 
 }
 
+#[derive(Debug, Clone)]
+struct WalIndexMetric {
+    namespace: String,
+    partitions: i64,
+    files: i64
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WalIndexMetrics {
+    metrics: HashMap<String, WalIndexMetric>
+}
+
+impl WalIndexMetrics {
+    pub fn new() -> Self {
+        WalIndexMetrics {
+            metrics: HashMap::new()
+        }
+    }
+}
+
 #[derive(Default, Clone)]
 pub struct WalPartitionIndex {
     // Maps namespace, partition, and time to WAL file information
@@ -368,7 +388,7 @@ impl WalPartitionIndex {
         let mut namespaces = HashSet::new();
         let mut namespace_partitions: HashMap<String, HashSet<(String, String, Option<i64>, String)>> = HashMap::new();
         let mut namespace_partition_files: HashMap<(String, String, Option<i64>, String), i64> = HashMap::new();
-        
+
         for file_path in wal_files {
 
             let wal_file = match WalFile::from_path(&file_path) {
@@ -388,7 +408,7 @@ impl WalPartitionIndex {
             namespace_partitions.entry(wal_file.namespace.clone()).or_insert_with(|| HashSet::new()).insert(partition_key.clone());
             let val = namespace_partition_files.entry(partition_key.clone()).or_insert(0);
             *val += 1;
-            
+
             let wal_file_partition = self.index.entry(partition_key).or_insert_with(|| WalPartition {
                 files: Vec::new(),
                 namespace: wal_file.namespace.clone(),
@@ -415,10 +435,29 @@ impl WalPartitionIndex {
 
         println!("Indexed {} of {} WAL files for {} namespaces in {} partitions", count, wal_files_count, namespaces.len(), self.index.len());
 
-        for (namespace, namespace_partition) in namespace_partitions {
-           println!("Namespace {} contains {} partitions and {} files", namespace, namespace_partition.len(), namespace_partition_files.iter().filter(|(k, _v)| k.0 == namespace).map(|(_k, v)| v).sum::<i64>());
+        let mut wal_index_metrics: WalIndexMetrics = WalIndexMetrics {
+            metrics: HashMap::new()
+        };
+
+        for (namespace, partition_key) in namespace_partitions {
+           println!("Namespace {} contains {} partitions and {} files", namespace, partition_key.len(), namespace_partition_files.iter().filter(|(k, _v)| k.0 == namespace).map(|(_k, v)| v).sum::<i64>());
+
+            wal_index_metrics.metrics.insert(namespace.clone(), WalIndexMetric {
+                namespace: namespace.clone(),
+                partitions: partition_key.len() as i64,
+                files: namespace_partition_files.iter().filter(|(k, _v)| k.0 == namespace).map(|(_k, v)| v).sum::<i64>()
+            });
+
         }
-        
+
+        {
+            let mut metrics = METRICS.write();
+            metrics.wal_index_namespaces_total = namespaces.len() as u64;
+            metrics.wal_index_partitions_total = self.index.len() as u64;
+            metrics.wal_index_files_total = count as u64;
+            metrics.wal_index_metrics = wal_index_metrics;
+        }
+
         println!("Syncing offsets to DB");
 
         // for wal_partition in self.index.values_mut() {
