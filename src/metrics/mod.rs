@@ -124,6 +124,7 @@ pub struct Metrics {
     pub wal_index_namespaces_total: u64,
     pub wal_index_partitions_total: u64,
     pub wal_index_files_total: u64,
+    pub wal_index_bytes_total: u64,
     pub wal_index_metrics: WalIndexMetrics,
     
     pub wal_write_bytes_total: u64,
@@ -162,6 +163,7 @@ impl Metrics {
             wal_index_namespaces_total: 0,
             wal_index_partitions_total: 0,
             wal_index_files_total: 0,
+            wal_index_bytes_total: 0,
             wal_index_metrics: WalIndexMetrics::new(),
             
             wal_write_bytes_total: 0,
@@ -192,6 +194,12 @@ impl Metrics {
         self.deadletters_total = 0;
         self.ingeted_slow_total = 0;
 
+        self.wal_index_namespaces_total = 0;
+        self.wal_index_partitions_total = 0;
+        self.wal_index_files_total = 0;
+        self.wal_index_bytes_total = 0;
+        self.wal_index_metrics = WalIndexMetrics::new();
+        
         self.wal_write_bytes_total = 0;
         self.wal_write_rows_total = 0;
 
@@ -337,6 +345,11 @@ impl Metrics {
                 "offset_db_size": metrics.offset_db_size,
                 "run_time_seconds": run_time_seconds,
                 "bytes_current": source_bytes_current,
+                "wal_index_namespaces_total": metrics.wal_index_namespaces_total,
+                "wal_index_partitions_total": metrics.wal_index_partitions_total,
+                "wal_index_files_total": metrics.wal_index_files_total,
+                "wal_index_bytes_total": metrics.wal_index_bytes_total,
+                "wal_write_bytes_total": metrics.wal_write_bytes_total,
                 "bytes_total": metrics.source_bytes_total,
                 "wal_write_bytes_total": metrics.wal_write_bytes_total,
                 "wal_write_bytes_current": wal_write_bytes_current,

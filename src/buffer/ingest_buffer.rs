@@ -340,12 +340,13 @@ impl Buffers {
 #[derive(Debug, Clone)]
 struct WalIndexMetric {
     namespace: String,
-    partitions: i64,
-    files: i64
+    partitions: u64,
+    files: u64,
+    bytes: u64
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct WalIndexMetrics {
+pub struct WalIndexMetrics {
     metrics: HashMap<String, WalIndexMetric>
 }
 
@@ -373,6 +374,7 @@ impl WalPartitionIndex {
     pub fn recover(&mut self, offsets_db: Arc<Offsets>) -> io::Result<()> {
 
         let mut count = 0;
+        let mut bytes = 0;
 
         println!("Indexing WAL");
 
@@ -387,7 +389,8 @@ impl WalPartitionIndex {
 
         let mut namespaces = HashSet::new();
         let mut namespace_partitions: HashMap<String, HashSet<(String, String, Option<i64>, String)>> = HashMap::new();
-        let mut namespace_partition_files: HashMap<(String, String, Option<i64>, String), i64> = HashMap::new();
+        let mut namespace_partition_files: HashMap<(String, String, Option<i64>, String), u64> = HashMap::new();
+        let mut namespace_partition_bytes: HashMap<(String, String, Option<i64>, String), u64> = HashMap::new();
 
         for file_path in wal_files {
 
@@ -409,6 +412,13 @@ impl WalPartitionIndex {
             let val = namespace_partition_files.entry(partition_key.clone()).or_insert(0);
             *val += 1;
 
+            namespace_partition_bytes.entry(partition_key.clone()).or_insert(0);
+            let val = namespace_partition_bytes.entry(partition_key.clone()).or_insert(0);
+            *val += wal_file.bytes;
+
+            count += 1;
+            bytes += wal_file.bytes;
+
             let wal_file_partition = self.index.entry(partition_key).or_insert_with(|| WalPartition {
                 files: Vec::new(),
                 namespace: wal_file.namespace.clone(),
@@ -426,8 +436,6 @@ impl WalPartitionIndex {
 
             wal_file_partition.files.push(wal_file);
 
-            count += 1;
-
             if count % 1000 == 0 {
                 println!("Indexed {} of {} WAL files for {} namespaces in {} partitions", count, wal_files_count, namespaces.len(), self.index.len());
             }
@@ -440,12 +448,13 @@ impl WalPartitionIndex {
         };
 
         for (namespace, partition_key) in namespace_partitions {
-           println!("Namespace {} contains {} partitions and {} files", namespace, partition_key.len(), namespace_partition_files.iter().filter(|(k, _v)| k.0 == namespace).map(|(_k, v)| v).sum::<i64>());
+           println!("Namespace {} contains {} partitions and {} files", namespace, partition_key.len(), namespace_partition_files.iter().filter(|(k, _v)| k.0 == namespace).map(|(_k, v)| v).sum::<u64>());
 
             wal_index_metrics.metrics.insert(namespace.clone(), WalIndexMetric {
                 namespace: namespace.clone(),
-                partitions: partition_key.len() as i64,
-                files: namespace_partition_files.iter().filter(|(k, _v)| k.0 == namespace).map(|(_k, v)| v).sum::<i64>()
+                partitions: partition_key.len() as u64,
+                files: namespace_partition_files.iter().filter(|(k, _v)| k.0 == namespace).map(|(_k, v)| v).sum(),
+                bytes: namespace_partition_bytes.iter().filter(|(k, _v)| k.0 == namespace).map(|(_k, v)| v).sum(),
             });
 
         }
@@ -455,6 +464,7 @@ impl WalPartitionIndex {
             metrics.wal_index_namespaces_total = namespaces.len() as u64;
             metrics.wal_index_partitions_total = self.index.len() as u64;
             metrics.wal_index_files_total = count as u64;
+            metrics.wal_index_bytes_total = bytes as u64;
             metrics.wal_index_metrics = wal_index_metrics;
         }
 
