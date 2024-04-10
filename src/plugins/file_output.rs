@@ -15,7 +15,7 @@ use datafusion::execution::SendableRecordBatchStream;
 use parquet::arrow::ArrowWriter;
 use crate::helpers::offsets::Offsets;
 use crate::helpers::timed_rwlock::TimedRwLock;
-use crate::ingest::partition::TimePartitioner;
+use crate::ingest::partition_time::TimePartitioner;
 use crate::plugins::athena::DataOutputAwsAthenaPlugin;
 use crate::plugins::DataOutputPlugin;
 use crate::plugins::file_input::DataSourceLocalFilePlugin;

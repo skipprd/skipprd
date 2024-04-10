@@ -65,6 +65,7 @@ pub struct Transform {
     pub flatten_events: Option<String>,
     pub record_field_path: Option<String>,
     pub batch_partition_fields: Option<String>,
+    pub partition_allowed_values: Option<String>,
     pub namespace_fields: Option<String>,
     pub time_partition_prefix: Option<String>,
 }
@@ -624,6 +625,7 @@ impl Config {
                     flatten_events: None,
                     record_field_path: None,
                     batch_partition_fields: None,
+                    partition_allowed_values: None,
                     namespace_fields: None,
                     time_partition_prefix: None,
                 }
@@ -653,6 +655,35 @@ impl Config {
 
             Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", &batch_partition_fields.clone());
             batch_partition_fields.to_string()
+        }
+    }
+    
+    pub fn get_partition_allowed_values() -> String {
+        if Config::get_envcache("TRANSFORM_PARTITION_ALLOWED_VALUES") != "" {
+            if Config::get_envcache("TRANSFORM_PARTITION_ALLOWED_VALUES") == DEFAULT_CONFIG {
+                return "".to_string();
+            }
+            return Config::get_envcache("TRANSFORM_PARTITION_ALLOWED_VALUES")
+        } else {
+            let pipline = Config::get_pipeline_config();
+
+            let default_partition_allowed_values = &Config::getenv("TRANSFORM_PARTITION_ALLOWED_VALUES", DEFAULT_CONFIG);
+            let partition_allowed_values = match pipline.transform.as_ref() {
+                Some(transform) => {
+                    transform.partition_allowed_values.as_ref().unwrap_or(default_partition_allowed_values)
+                }
+                None => {
+                    default_partition_allowed_values
+                }
+            };
+
+            Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", &partition_allowed_values.clone());
+
+            if partition_allowed_values == DEFAULT_CONFIG {
+                return "".to_string();
+            } else {
+                partition_allowed_values.to_string()
+            }
         }
     }
 

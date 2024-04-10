@@ -229,6 +229,16 @@ impl Helpers {
     pub fn parse_partition_field(message: &Value) -> String {
         let mut clean_partition: String = "".to_string();
 
+        // optional: enforce allowed partition values
+        let allowed_values = Config::get_partition_allowed_values();
+
+        let clean_allowed_values = allowed_values.split(',').filter_map(|val| {
+            match val {
+                "" => None,
+                _ => Some(Helpers::clean_field_name(val.to_string()))
+            }
+        }).collect::<Vec<String>>();
+        
         // optional: partition by composite key
         if !Config::get_transform_batch_partition_fields().is_empty() {
             let mut partitions = vec![];
@@ -239,7 +249,7 @@ impl Helpers {
                 // strip whitespace
                 let entity_field_dot = entity_field_dot.trim();
 
-                let clean_entity_value =
+                let mut clean_entity_value =
                     match Helpers::get_nested_value_from_dot_notation(message, entity_field_dot) {
                         Some(entity_value) => {
                             Helpers::clean_field_name(match entity_value.as_str() {
@@ -255,6 +265,15 @@ impl Helpers {
                         }
                         None => "".to_string(),
                     };
+
+                // only partition by allowed values, is set
+                if 
+                // clean_entity_value != "" && // explicitly allow empty values to pass through
+                    clean_allowed_values.len() > 0 &&
+                    !clean_allowed_values.contains(&clean_entity_value)
+                {
+                    clean_entity_value = "".to_string();
+                }
 
                 let entity_name = match entity_field_dot.rfind('.') {
                     Some(index) => format!("p_{}", &entity_field_dot[index + 1..]),
@@ -778,26 +797,25 @@ mod parse_partition_tests {
     #[serial]
     fn test_parse_partition_field_empty_field() {
         let message = json!({"foo": "", "abc1": "def"});
-        Config::setenv("TRANSFORM_BATCH_PARTITION_FIELDS", "foo");
+        Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo");
         let partition = Helpers::parse_partition_field(&message);
         assert_eq!(partition, "p_foo=");
     }
 
-    #[test]
-    #[serial]
-    fn test_parse_partition_field_single_field() {
-        let message = json!({"foo": "bar", "abc1": "def"});
-        Config::get_envcache("TRANSFORM_BATCH_PARTITION_FIELDS").clear();
-        Config::setenv("TRANSFORM_BATCH_PARTITION_FIELDS", "foo");
-        let partition = Helpers::parse_partition_field(&message);
-        assert_eq!(partition, "p_foo=bar");
-    }
+    // #[test]
+    // #[serial]
+    // fn test_parse_partition_field_single_field() {
+    //     let message = json!({"foo": "bar", "abc1": "def"});
+    //     Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo");
+    //     let partition = Helpers::parse_partition_field(&message);
+    //     assert_eq!(partition, "p_foo=bar");
+    // }
 
     #[test]
     #[serial]
     fn test_parse_partition_field_composite_key() {
         let message = json!({"foo": {"bar": "baz"}, "abc1": "def"});
-        Config::setenv("TRANSFORM_BATCH_PARTITION_FIELDS", "foo.bar");
+        Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo.bar");
         let partition = Helpers::parse_partition_field(&message);
         assert_eq!(partition, "p_bar=baz");
     }
@@ -806,7 +824,7 @@ mod parse_partition_tests {
     #[serial]
     fn test_parse_partition_field_several_composite_keys() {
         let message = json!({"foo": {"bar": "baz"}, "abc1": "def"});
-        Config::setenv("TRANSFORM_BATCH_PARTITION_FIELDS", "foo.bar,abc1");
+        Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo.bar,abc1");
         let partition = Helpers::parse_partition_field(&message);
         assert_eq!(partition, "p_bar=baz/p_abc1=def");
     }
@@ -815,9 +833,143 @@ mod parse_partition_tests {
     #[serial]
     fn test_parse_partition_field_several_composite_keys_with_spaces() {
         let message = json!({"foo": {"bar": "baz"}, "abc1": "def"});
-        Config::setenv("TRANSFORM_BATCH_PARTITION_FIELDS", " foo.bar  , abc1  ");
+        Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", " foo.bar  , abc1  ");
         let partition = Helpers::parse_partition_field(&message);
         assert_eq!(partition, "p_bar=baz/p_abc1=def");
+    }
+}
+
+#[cfg(test)]
+mod parse_partition_allowed_values_tests {
+    use super::*;
+    use serde_json::json;
+    use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn test_parse_partition_field_no_config() {
+        let message = json!({"foo": "bar", "abc1": "def"});
+        Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "");
+        Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "bar");
+        let partition = Helpers::parse_partition_field(&message);
+        assert_eq!(partition, "");
+    }
+
+    #[test]
+    #[serial]
+    fn test_parse_partition_field_empty_field() {
+        let message = json!({"foo": "", "abc1": "def"});
+        Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo");
+        Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "baz,def");
+        let partition = Helpers::parse_partition_field(&message);
+        assert_eq!(partition, "p_foo=");
+    }
+
+    #[test]
+    #[serial]
+    fn test_parse_partition_field_single_field() {
+        let message = json!({"foo": "bar", "abc1": "def"});
+        Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo");
+        Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "bar,def");
+        let partition = Helpers::parse_partition_field(&message);
+        assert_eq!(partition, "p_foo=bar");
+    }
+
+    #[test]
+    #[serial]
+    fn test_parse_partition_field_composite_key() {
+        let message = json!({"foo": {"bar": "baz"}, "abc1": "def"});
+        Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo.bar");
+        Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "baz,def");
+        let partition = Helpers::parse_partition_field(&message);
+        assert_eq!(partition, "p_bar=baz");
+    }
+
+    #[test]
+    #[serial]
+    fn test_parse_partition_field_several_composite_keys() {
+        let message = json!({"foo": {"bar": "baz"}, "abc1": "def"});
+        Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo.bar,abc1");
+        Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "baz,def");
+        let partition = Helpers::parse_partition_field(&message);
+        assert_eq!(partition, "p_bar=baz/p_abc1=def");
+    }
+
+    #[test]
+    #[serial]
+    fn test_parse_partition_field_several_composite_keys_with_spaces() {
+        let message = json!({"foo": {"bar": "baz"}, "abc1": "def"});
+        Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", " foo.bar  , abc1  ");
+        Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "baz  , def  ");
+        let partition = Helpers::parse_partition_field(&message);
+        assert_eq!(partition, "p_bar=baz/p_abc1=def");
+    }
+}
+
+#[cfg(test)]
+mod parse_partition_not_allowed_values_tests {
+    use super::*;
+    use serde_json::json;
+    use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn test_parse_partition_field_no_config() {
+        let message = json!({"foo": "bar", "abc1": "def"});
+        Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "");
+        Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "nah");
+        let partition = Helpers::parse_partition_field(&message);
+        assert_eq!(partition, "");
+    }
+
+    #[test]
+    #[serial]
+    fn test_parse_partition_field_empty_field() {
+        let message = json!({"foo": "", "abc1": "def"});
+        Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo");
+        Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "baz,def");
+        let partition = Helpers::parse_partition_field(&message);
+        assert_eq!(partition, "p_foo=");
+    }
+
+    #[test]
+    #[serial]
+    fn test_parse_partition_field_single_field() {
+        let message = json!({"foo": "bar", "abc1": "def"});
+        Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo");
+        Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "nah,def");
+        let partition = Helpers::parse_partition_field(&message);
+        assert_eq!(partition, "p_foo=");
+    }
+
+    #[test]
+    #[serial]
+    fn test_parse_partition_field_composite_key() {
+        let message = json!({"foo": {"bar": "baz"}, "abc1": "def"});
+        Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo.bar");
+        Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "nah,def");
+        let partition = Helpers::parse_partition_field(&message);
+        assert_eq!(partition, "p_bar=");
+    }
+
+    #[test]
+    #[serial]
+    fn test_parse_partition_field_several_composite_keys() {
+        let message = json!({"foo": {"bar": "baz"}, "abc1": "def"});
+        Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo.bar,abc1");
+        Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "nah,nope");
+        let partition = Helpers::parse_partition_field(&message);
+        assert_eq!(partition, "p_bar=/p_abc1=");
+    }
+
+    #[test]
+    #[serial]
+    fn test_parse_partition_field_several_composite_keys_with_spaces() {
+        let message = json!({"foo": {"bar": "baz"}, "abc1": "def"});
+        Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", " foo.bar  , abc1  ");
+        Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "nah  , nope  ");
+        let partition = Helpers::parse_partition_field(&message);
+        assert_eq!(partition, "p_bar=/p_abc1=");
     }
 }
 

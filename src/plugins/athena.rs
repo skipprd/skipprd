@@ -33,7 +33,7 @@ use serde_derive::Deserialize;
 use tokio::join;
 use crate::helpers::offsets::Offsets;
 use crate::helpers::timed_rwlock::TimedRwLock;
-use crate::ingest::partition::TimePartitioner;
+use crate::ingest::partition_time::TimePartitioner;
 use crate::metrics::MetricsStatus;
 use crate::plugins::DataOutputPlugin;
 use crate::plugins::file_input::DataSourceLocalFilePluginConfig;
