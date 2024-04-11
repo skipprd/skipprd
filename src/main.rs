@@ -303,12 +303,7 @@ async fn discover() {
     let pipeline_metadata = match Config::get_metadata().await {
         Ok(pipeline_metadata) => {
             println!("Found existing Skippr metadata, will update with schema discovered from sampled data");
-
-            if !pipeline_metadata.enabled {
-                println!("Pipeline '{}' disabled, skipping.", pipeline_name);
-                return;
-            }
-
+            
             pipeline_metadata
         }
         Err(_e) => {
@@ -338,9 +333,7 @@ async fn discover() {
     let offsets_clone = offsets.clone();
 
     let shared_output_clone = shared_output.clone();
-
-    let source_dir = &format!("{}/source_buffer", data_dir);
-
+    
     thread::spawn(move || {
         while DISCOVER_RUNNING.read().load(Ordering::SeqCst) {
             sleep(Duration::from_secs(1));
@@ -377,6 +370,14 @@ async fn discover() {
     });
 
     sync_input_plugin(offsets_clone, shared_output_clone).await;
+
+    // if we hit end of data, wait for schema discovery to complete
+    DISCOVER_RUNNING.write().store(false, Ordering::SeqCst);
+
+    while RUNNING.read().load(Ordering::SeqCst) {
+        sleep(Duration::from_secs(1));
+    }
+
 
 }
 

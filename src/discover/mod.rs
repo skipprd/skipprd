@@ -4,10 +4,11 @@ use std::any::Any;
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{File};
 use std::io::Read;
-use std::sync::atomic::AtomicI64;
+use std::sync::atomic::{AtomicBool, AtomicI64};
 
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
+use once_cell::sync::Lazy;
 
 use serde_derive::{Deserialize, Serialize};
 
@@ -34,8 +35,9 @@ use crate::serdes::json::SerdeJson;
 
 
 use crate::discover::evolution::Evolution;
+use crate::helpers::timed_rwlock::TimedRwLock;
 
-pub static num_analyised_records: AtomicI64 = AtomicI64::new(0);
+pub static NUM_ANALYSED_RECORDS: Lazy<TimedRwLock<AtomicI64>> = Lazy::new(|| TimedRwLock::new("num_analyised_records".to_string(), AtomicI64::new(0)));
 
 thread_local! {
     static LAST_SUCCESSFUL_EVOLUTION: std::cell::RefCell<HashMap<String, String>> = std::cell::RefCell::new(HashMap::new());
@@ -517,7 +519,7 @@ impl AnalyseSchema {
             // }
 
 
-            if num_analyised_records.load(std::sync::atomic::Ordering::SeqCst) >= max_read_records.unwrap_or(1000) {
+            if NUM_ANALYSED_RECORDS.read().load(std::sync::atomic::Ordering::SeqCst) >= max_read_records.unwrap_or(1000) {
                 return;
             }
 
@@ -577,7 +579,7 @@ impl AnalyseSchema {
 
     // pub fn analyse_payload(&mut self, message: &HashMap<String, String>, metadata: &mut HashMap<String, Metadata>) {
     pub fn analyse_payload(&self, message: &Value, metadata: &mut HashMap<String, Metadata>) {
-        num_analyised_records.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        NUM_ANALYSED_RECORDS.write().fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
         // let mut helpers = Helpers { clean_field_cache: Default::default() };
 

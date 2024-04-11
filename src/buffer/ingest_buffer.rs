@@ -347,13 +347,13 @@ struct WalIndexMetric {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WalIndexMetrics {
-    metrics: HashMap<String, WalIndexMetric>
+    metrics: Vec<WalIndexMetric>
 }
 
 impl WalIndexMetrics {
     pub fn new() -> Self {
         WalIndexMetrics {
-            metrics: HashMap::new()
+            metrics: Vec::new()
         }
     }
 }
@@ -444,13 +444,13 @@ impl WalPartitionIndex {
         println!("Indexed {} of {} WAL files for {} namespaces in {} partitions", count, wal_files_count, namespaces.len(), self.index.len());
 
         let mut wal_index_metrics: WalIndexMetrics = WalIndexMetrics {
-            metrics: HashMap::new()
+            metrics: Vec::new()
         };
 
         for (namespace, partition_key) in namespace_partitions {
            println!("Namespace {} contains {} partitions and {} files", namespace, partition_key.len(), namespace_partition_files.iter().filter(|(k, _v)| k.0 == namespace).map(|(_k, v)| v).sum::<u64>());
 
-            wal_index_metrics.metrics.insert(namespace.clone(), WalIndexMetric {
+            wal_index_metrics.metrics.push(WalIndexMetric {
                 namespace: namespace.clone(),
                 partitions: partition_key.len() as u64,
                 files: namespace_partition_files.iter().filter(|(k, _v)| k.0 == namespace).map(|(_k, v)| v).sum(),

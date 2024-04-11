@@ -2,6 +2,7 @@ use std::{fs, process};
 use std::fs::OpenOptions;
 use std::io::{BufReader, BufWriter};
 use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
+use sqlparser::ast::{Ident, ObjectName};
 use crate::cli::{CLI_MODE, Mode};
 use crate::discover::{Metadata, PipelineMetadata};
 use crate::helpers::configuration::{Config, PIPELINE_NAME};
@@ -200,16 +201,26 @@ pub async fn query(sql_str: &str) {
                     metadata
                 }
                 Err(_e) => {
-                    println!("No existing schema for {}", stmt.pipeline);
+                    println!("No existing schema for pipeline '{}'", stmt.pipeline);
                     return;
                 }
             };
 
-            let metadata = skippr_metadata.metadata.get(&format!("{}", &stmt.pipeline)).expect(&format!("Schema not found for pipeline '{}'", stmt.pipeline));
+            let schema_name = stmt.schema.clone().unwrap_or(stmt.pipeline.clone());
+
+            let metadata = match skippr_metadata.metadata.get(&format!("{}", schema_name)){
+                 Some(metadata) => {
+                    metadata
+                }
+                None => {
+                    println!("Schema '{}' not found for pipeline: '{}'", schema_name, &stmt.pipeline);
+                    return;
+                }
+            };
 
             dump_schema(&metadata, &stmt).expect("Failed to drop column");
             
-            println!("Schema dumped.");
+            println!("Schema dumped to '{}'", stmt.target);
         },
         Ok(Statement::AlterSchemaDropColumn(stmt)) => {
 
@@ -232,7 +243,13 @@ pub async fn query(sql_str: &str) {
             let schema = stmt.schema.clone().unwrap_or(stmt.pipeline.clone());
 
             let mut metadata = skippr_metadata.metadata.get_mut(&format!("{}", &schema)).expect(&format!("Schema '{}' not found for pipeline: '{}'", schema, &stmt.pipeline));
-            alter_column_drop(&mut metadata, &stmt).expect("Failed to drop column");
+            match alter_column_drop(&mut metadata, &stmt) {
+                Ok(_) => {}
+                Err(e) => {
+                    println!("Failed to drop column: {}", e);
+                    return;
+                }
+            }
 
             {
                 METADATA.write().clone_from(&skippr_metadata);
@@ -240,7 +257,7 @@ pub async fn query(sql_str: &str) {
 
             Config::set_metadata(&skippr_metadata, true).await;
 
-            println!("Alter schema, dropped column '{}, on pipeline: '{}' of schema '{}.", stmt.column_name, stmt.pipeline, schema);
+            println!("Alter schema, dropped column '{}, on pipeline: '{}' of schema '{}'.", stmt.column_name, stmt.pipeline, schema);
         },
         Ok(Statement::AlterSchemaAlterColumnType(stmt)) => {
 

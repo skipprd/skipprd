@@ -1,5 +1,5 @@
 use crate::buffer::{BufferChunker};
-use crate::discover::{AnalyseSchema, Metadata, num_analyised_records, PipelineMetadata};
+use crate::discover::{AnalyseSchema, Metadata, NUM_ANALYSED_RECORDS, PipelineMetadata};
 use crate::helpers::configuration::Config;
 use crate::helpers::offsets::{OffsetKey, Offsets, OffsetTypes};
 use crate::helpers::Helpers;
@@ -210,22 +210,23 @@ impl Ingest {
 
                         i += 1;
 
-
-                        println!("Analysing schema on batch {} of {}", i, datas.len());
-
                         self.analyse_schema.infer_json_schema(
                             &mut data.data.clone(),
                             Some(max_records),
                             &mut pipeline_metadata.metadata,
                         );
 
-                        println!("Analysed schema on batch {} of {}, total of {} records", i, datas.len(), num_analyised_records.load(Ordering::SeqCst));
-
                     }
 
-                    println!("Completed schema analysis for batch");
+                    {
+                        METADATA.write().metadata = pipeline_metadata.metadata.clone();
+                    }
 
-                    if num_analyised_records.load(Ordering::SeqCst) >= max_records {
+                    println!("Analysed schema for {}/{} records", NUM_ANALYSED_RECORDS.read().load(Ordering::SeqCst), max_records);
+
+                    // println!("Completed schema analysis for batch");
+
+                    if NUM_ANALYSED_RECORDS.read().load(Ordering::SeqCst) >= max_records {
                         let mut pipeline = METADATA.write();
                         *pipeline = pipeline_metadata;
 

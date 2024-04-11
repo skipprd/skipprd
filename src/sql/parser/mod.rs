@@ -122,7 +122,8 @@ impl fmt::Display for PipelineToggle {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SchemaDumpStatement {
     /// From where the data comes from
-    pub(crate) pipeline: SchemaDumpSource,
+    pub(crate) pipeline: ObjectName,
+    pub(crate) schema: Option<ObjectName>,
     /// The URL to where the data is heading
     pub(crate) target: String,
 }
@@ -545,19 +546,30 @@ impl<'a> SParser<'a> {
             Token::Word(w) => {
                 match SkipprKeyword::from_str(&w.value) {
                     Some(SkipprKeyword::SCHEMA) => {
-
-                        // @todo - this functions, but we need to think about how to serialise the dump
-
+                        
                         self.parser.next_token(); // SCHEMA
+                        
+                        let pipeline = self.parser.next_token().token.to_string();
 
-                        let table_name = self.parser.parse_object_name()?;
-
+                        let schema = match self.parser.peek_token().token.to_string().as_str() {
+                            "." => {
+                                self.parser.next_token(); // .
+                                let schema = self.parser.next_token().token.to_string();
+                                Some(schema)
+                            },
+                            _ => {
+                                None
+                            }
+                        };
+                        
                         self.parser.expect_keyword(Keyword::TO)?;
 
                         let target = self.parser.parse_literal_string()?;
                         
                         Ok(Statement::SchemaDump(SchemaDumpStatement {
-                            pipeline: SchemaDumpSource::Relation(table_name),
+                            // pipeline: SchemaDumpSource::Relation(pipeline),
+                            pipeline: ObjectName(vec![Ident::new(pipeline)]),
+                            schema: schema.map(|s| ObjectName(vec![Ident::new(s)])),
                             target
                         }))
 
