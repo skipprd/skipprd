@@ -111,11 +111,7 @@ impl Buffers {
     }
 
     pub async fn flush(&mut self, offsets_db: Arc<Offsets>, shared_output: Arc<TimedRwLock<Box<dyn DataOutputPlugin + Send + Sync>>>) -> Result<(), ArrowError> {
-
-        // let arrow_schema_guard = ARROW_SCHEMA.read().clone();
-
-        // let mut index = WAL_INDEX.write();
-
+        
         let mut bytes: u64 = 0;
         let mut rows: u64 = 0;
 
@@ -139,37 +135,13 @@ impl Buffers {
 
 
             // println!("WAL File {} offset: {:?}", wal_file.path.to_str().unwrap(), ingest_buffer_batch.offset);
-
-            //  let wal_file_partition = index.index.entry((
-            //      ingest_buffer_batch.namespace.clone(),
-            //      ingest_buffer_batch.partition.clone(),
-            //      ingest_buffer_batch.time.clone(),
-            //      ingest_buffer_batch.shard.clone(),
-            // )).or_insert_with(
-            //      || WalFilePartition {
-            //          files: Vec::new(),
-            //          namespace: ingest_buffer_batch.namespace.clone(),
-            //          partition: ingest_buffer_batch.partition.clone(),
-            //          time: ingest_buffer_batch.time.clone(),
-            //          shard: ingest_buffer_batch.shard.clone(),
-            //          updated_at: SystemTime::now(),
-            //          bytes: 0,
-            //      }
-            //  );
-
-            // let arrow_schema = arrow_schema_guard.get(&ingest_buffer_batch.namespace).unwrap().clone();
-
+            
             let arrow_schema = ingest_buffer_batch.schema.clone();
-            // let arrow_schema = ARROW_SCHEMA.read().get(&ingest_buffer_batch.namespace).unwrap().clone();
 
             let mut decoder = ReaderBuilder::new(arrow_schema).build_decoder().unwrap();
 
             let mut record_batches = Vec::new();
-
-            // @todo - faster to build a vec and pass to decoder?
-
-            ingest_buffer_batch.records.len();
-
+            
             let json_values = ingest_buffer_batch.records.iter().map(|record| &record.record).collect::<Vec<&Value>>();
             decoder.serialize(&json_values).unwrap();
 
@@ -190,29 +162,17 @@ impl Buffers {
                 }
             }
             
-            // let mut ingest_batch = WalRecordBatches::new(offset, record_batches);
-
             let stat = wal_file.write_to_stream(&record_batches)?;
 
             bytes += stat.0;
             rows += stat.1;
 
-            // wal_file_partition.bytes += wal_file.write_to_stream(&record_batches)?;
-
-            // wal_file_partition.bytes += wal_file.bytes;
             // println!("Wrote records to WAL file: {}", wal_file.path.to_str().unwrap());
 
             wal_file.flush()?;
 
             wal_file.finish()?;
-
-            // let offset_key = OffsetKey {
-            //     namespace: ingest_buffer_batch.offset.source_namespace.clone(),
-            //     partition: ingest_buffer_batch.offset.source_partition.clone(),
-            // };
-            // offsets_db.insert(&offset_key, OffsetTypes::Line, ingest_buffer_batch.offset.position.clone());
-            // offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
-
+            
             // println!("Committing {} offsets", ingest_buffer_batch.offsets.len());
 
             ingest_buffer_batch.offsets.iter().for_each(|(offset, position)| {
@@ -479,16 +439,6 @@ impl WalPartitionIndex {
 
             // ensure offsets committed
             for wal_file in wal_partition.files.iter_mut() {
-                // wal_file.offsets.iter().for_each(|offset| {
-                //     let offset_key = OffsetKey {
-                //         namespace: offset.source_namespace.clone(),
-                //         partition: offset.source_partition.clone(),
-                //     };
-                //
-                //     offsets_db.insert(&offset_key, OffsetTypes::Line, offset.position);
-                //     offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
-                // });
-
                 wal_file.offsets.iter().for_each(|(offset, position)| {
                     let offset_key = OffsetKey {
                         namespace: offset.namespace.clone(),
