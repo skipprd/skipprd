@@ -392,7 +392,7 @@ impl Metrics {
 
         // "bytes_current": source_bytes_current,
         // "bytes_total": metrics.source_bytes_total,
-        println!("Bytes Current: {}, Bytes Total: {}", source_bytes_current, metrics.source_bytes_total);
+        // println!("Bytes Current: {}, Bytes Total: {}", source_bytes_current, metrics.source_bytes_total);
 
         let response = client
             .put(format!("{}/{}", uri, path))

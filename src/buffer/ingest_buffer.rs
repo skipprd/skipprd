@@ -448,7 +448,8 @@ impl WalPartitionIndex {
         };
 
         for (namespace, partition_key) in namespace_partitions {
-           println!("Namespace {} contains {} partitions and {} files", namespace, partition_key.len(), namespace_partition_files.iter().filter(|(k, _v)| k.0 == namespace).map(|(_k, v)| v).sum::<u64>());
+            let human_bytes = Helpers::human_readable_size(namespace_partition_bytes.iter().filter(|(k, _v)| k.0 == namespace).map(|(_k, v)| v).sum::<u64>());
+           println!("Namespace {} contains {} partitions and {} files of {} bytes", namespace, partition_key.len(), namespace_partition_files.iter().filter(|(k, _v)| k.0 == namespace).map(|(_k, v)| v).sum::<u64>(), human_bytes);
 
             wal_index_metrics.metrics.push(WalIndexMetric {
                 namespace: namespace.clone(),
