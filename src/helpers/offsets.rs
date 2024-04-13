@@ -274,9 +274,9 @@ impl Offsets {
             }
         };
 
-        self.tree.insert(bytes, &new_val).unwrap();
+        let old_val = self.tree.insert(bytes, &new_val).unwrap();
 
-        Some(new_val)
+        old_val
     }
 
     pub fn get(&self, key: &OffsetKey) -> Option<IVec> {
@@ -489,9 +489,10 @@ impl Offsets {
 #[cfg(test)]
 mod tests {
 
-    use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
+    use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets, OffsetValue};
 
     use serial_test::serial;
+    use zerocopy::{AsBytes, U64};
 
     #[test]
     #[serial]
@@ -510,22 +511,57 @@ mod tests {
             namespace: "foo".to_string(),
             partition: "bar".to_string(),
         };
-
-        db.insert(key, OffsetTypes::Position, 1);
+        
+        assert_eq!(db.insert(key, OffsetTypes::Position, 1), None);
         assert_eq!(db.validate(key, OffsetTypes::Position, 1), Some(false));
         assert_eq!(db.validate(key, OffsetTypes::Position, 2), Some(true));
 
-        db.insert(key, OffsetTypes::Position, 2);
+        let return_val = sled::IVec::from(
+            OffsetValue {
+                filesize: U64::new(0),
+                line: U64::new(1),
+                closed: U64::new(0),
+            }
+                .as_bytes(),
+        );
+        assert_eq!(db.insert(key, OffsetTypes::Position, 2), Some(return_val));
         assert_eq!(db.validate(key, OffsetTypes::Position, 1), Some(false));
         assert_eq!(db.validate(key, OffsetTypes::Position, 2), Some(false));
         assert_eq!(db.validate(key, OffsetTypes::Position, 3), Some(true));
 
-        db.insert(key, OffsetTypes::Position, 3);
+        let return_val = sled::IVec::from(
+            OffsetValue {
+                filesize: U64::new(0),
+                line: U64::new(2),
+                closed: U64::new(0),
+            }
+                .as_bytes(),
+        );
+        assert_eq!(db.insert(key, OffsetTypes::Position, 3), Some(return_val));
         assert_eq!(db.validate(key, OffsetTypes::Position, 1), Some(false));
         assert_eq!(db.validate(key, OffsetTypes::Position, 2), Some(false));
         assert_eq!(db.validate(key, OffsetTypes::Position, 3), Some(false));
         assert_eq!(db.validate(key, OffsetTypes::Position, 4), Some(true));
-        
+
+        let return_val = sled::IVec::from(
+            OffsetValue {
+                filesize: U64::new(0),
+                line: U64::new(3),
+                closed: U64::new(0),
+            }
+                .as_bytes(),
+        );
+        assert_eq!(db.insert(key, OffsetTypes::Position, 3), Some(return_val));
+
+        let return_val = sled::IVec::from(
+            OffsetValue {
+                filesize: U64::new(0),
+                line: U64::new(3),
+                closed: U64::new(0),
+            }
+                .as_bytes(),
+        );
+        assert_eq!(db.insert(key, OffsetTypes::Position, 2), Some(return_val));
     }
     
     #[test]
