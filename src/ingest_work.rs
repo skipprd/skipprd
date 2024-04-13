@@ -448,8 +448,8 @@ impl Ingest {
                         skpr_time_bucket =
                             Some(BufferChunker::event_time_bucket(skpr_time.unwrap()));
 
-                        if skpr_time_bucket.unwrap() > latest_timestamp {
-                            latest_timestamp = skpr_time_bucket.unwrap();
+                        if skpr_time.unwrap() > latest_timestamp {
+                            latest_timestamp = skpr_time.unwrap();
                         }
                     }
 
