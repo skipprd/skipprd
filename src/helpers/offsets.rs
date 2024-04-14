@@ -79,13 +79,13 @@ pub enum OffsetsError {
 impl Offsets {
     pub fn init() -> Result<Offsets, OffsetsError> {
 
-        match Self::vacuum() {
-            Ok(size) => {}
-            Err(err) => {
-                println!("Failed vacuuming offsets database, Error: {:?}", err);
-                unsafe { exit(1); }
-            }
-        }
+        // match Self::vacuum() {
+        //     Ok(size) => {}
+        //     Err(err) => {
+        //         println!("Failed vacuuming offsets database, Error: {:?}", err);
+        //         unsafe { exit(1); }
+        //     }
+        // }
 
         let db_path = format!("{}/{}", Config::get_data_dir(), SLED_NAME);
         let db = match sled::open(&db_path) { // open in high-throughput mode
@@ -269,9 +269,7 @@ impl Offsets {
         drop(old_db);
 
         std::fs::remove_dir_all(&temp_db_path).unwrap();
-
-        println!("Vacuumed offsets database, new size: {} bytes", Helpers::human_readable_size(new_size));
-
+        
         Ok(new_size)
     }
 
