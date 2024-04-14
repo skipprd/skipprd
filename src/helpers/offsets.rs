@@ -1,17 +1,18 @@
 use sled;
-use std::process::exit;
 use Result;
+use libc::{exit, sleep};
 
 use crate::helpers::configuration::Config;
 use serde::__private::de::IdentifierDeserializer;
 use serde_derive::{Deserialize, Serialize};
-use sled::{IVec};
+use sled::{IVec, Mode};
 use thiserror::Error;
 use {
     byteorder::{BigEndian, LittleEndian},
     zerocopy::{byteorder::U64, AsBytes, FromBytes, LayoutVerified, Unaligned, U16},
 };
 use crate::helpers::Helpers;
+use crate::helpers::offsets::OffsetsError::VacuumError;
 use crate::METRICS;
 
 pub const SLED_NAME: &str = "db";
@@ -71,12 +72,23 @@ pub struct Offsets {
 pub enum OffsetsError {
     #[error("Failed opening offset DB at this location: {0}. Is another instance of Skippr already ingesting this pipeline?")]
     AlreadyOpenError(String),
+    #[error("Failed vacuuming offsets database, Error: {0}")]
+    VacuumError(sled::Error),
 }
 
 impl Offsets {
     pub fn init() -> Result<Offsets, OffsetsError> {
+
+        match Self::vacuum() {
+            Ok(size) => {}
+            Err(err) => {
+                println!("Failed vacuuming offsets database, Error: {:?}", err);
+                unsafe { exit(1); }
+            }
+        }
+
         let db_path = format!("{}/{}", Config::get_data_dir(), SLED_NAME);
-        let db = match sled::open(&db_path) {
+        let db = match sled::open(&db_path) { // open in high-throughput mode
             Ok(db) => {db}
             Err(err) => {
                 return Err(OffsetsError::AlreadyOpenError(db_path));
@@ -143,6 +155,135 @@ impl Offsets {
         let store = Offsets { db, tree };
 
         Ok(store)
+    }
+
+    // Sled remove() currently sets the value to None, and maintains the key in the tree.
+    // Since the key is the largest part of the data, we need to purge keys with None values
+    // periodically to save space.
+    fn vacuum() -> Result<u64, OffsetsError> {
+
+        // rollback any previous vacuum that was interrupted
+        match Self::rollback_vacuum() {
+            Ok(true) => {
+                println!("Rolled back previous interrupted offsets db vacuum");
+            },
+            Ok(false) => {},
+            Err(err) => {
+                println!("Failed rolling back previous interrupted offsets db vacuum, Error: {:?}", err);
+                unsafe { exit(1) }
+            }
+        }
+
+        // Rename database file to a temporary file
+        let db_path = format!("{}/{}", Config::get_data_dir(), SLED_NAME);
+        let temp_db_path = format!("{}/{}.tmp", Config::get_data_dir(), SLED_NAME);
+        std::fs::rename(&db_path, &temp_db_path).unwrap();
+
+        // open old db
+        let old_db = match sled::Config::default()
+            .path(&temp_db_path)
+            .mode(Mode::LowSpace)
+            .open() {
+            Ok(db) => {db}
+            Err(err) => {
+                return Err(OffsetsError::AlreadyOpenError(temp_db_path));
+            }
+        };
+        let old_tree = old_db.open_tree("offsets").expect("Could not open offset tree");
+
+        println!("Vacuuming offsets database of size: {}", Helpers::human_readable_size(old_db.size_on_disk().unwrap()));
+
+        // write all keys with values to a new database
+        let db = match sled::Config::default()
+            .path(&db_path)
+            .mode(Mode::LowSpace)
+            .open() {
+            Ok(db) => {db}
+            Err(err) => {
+                return Err(OffsetsError::AlreadyOpenError(db_path));
+            }
+        };
+        let tree = db.open_tree("offsets").expect("Could not open offset tree");
+
+        let key_count = old_tree.len();
+
+        let mut i = 0;
+        let mut count = 0;
+        
+        let mut pause_modus = key_count / 60; // 60 sec total pause for sled gc (plus marginal amount of insert time)
+        let pause_modus = pause_modus.max(1000);
+        
+        for kv in old_tree.iter() {
+            let key = kv.unwrap().0;
+            let op = match old_tree.get(&key) {
+                Ok(val) => match val {
+                    Some(val) => match tree.insert(&key, &val) {
+                        Ok(val) => Ok(val),
+                        Err(err) => Err(sled::Error::ReportableBug(format!("Failed inserting key into new tree, Error: {:?}", err)))
+                    },
+                    None => {
+                        count += 1;
+                        Ok(None)
+                    }
+                },
+                Err(err) => {
+                    Err(sled::Error::ReportableBug(format!("Failed getting key from old tree, Error: {:?}", err)))
+                }
+            };
+
+            i += 1;
+           
+            if i % pause_modus == 0 {
+                println!("Vacuumed {} offsets from db, evaluated {}/{} keys", count, i, key_count);
+                // after experimentation, sled does better job of GC with smaller writes. So we'll do it more often with shorter sleep
+                unsafe { sleep(1); }
+                count = 0;
+            }
+            
+            if let Err(err) = op {
+                // rollback
+                drop(tree);
+                drop(db);
+                drop(old_tree);
+                drop(old_db);
+                std::fs::remove_dir_all(&db_path).unwrap();
+                std::fs::rename(&temp_db_path, &db_path).unwrap();
+
+                return Err(VacuumError( err));
+            }
+        }
+
+        let new_size = db.size_on_disk().unwrap_or_else(|err| {
+            println!("Failed getting size of new offsets DB, Error: {:?}", err);
+            0
+        });
+
+        // delete old file
+        drop(tree);
+        drop(db);
+        drop(old_tree);
+        drop(old_db);
+
+        std::fs::remove_dir_all(&temp_db_path).unwrap();
+
+        println!("Vacuumed offsets database, new size: {} bytes", Helpers::human_readable_size(new_size));
+
+        Ok(new_size)
+    }
+
+    fn rollback_vacuum() -> Result<bool, OffsetsError> {
+
+        let db_path = format!("{}/{}", Config::get_data_dir(), SLED_NAME);
+        let temp_db_path = format!("{}/{}.tmp", Config::get_data_dir(), SLED_NAME);
+
+        if std::fs::metadata(&temp_db_path).is_ok() {
+            std::fs::remove_dir_all( & db_path).unwrap();
+            std::fs::rename(& temp_db_path, & db_path).unwrap();
+            return Ok(true);
+        }
+        
+        Ok(false)
+       
     }
 
     fn vec_8_to_u16(&self, bytes: &[u8]) -> Vec<U16<BigEndian>> {
@@ -327,15 +468,15 @@ impl Offsets {
         }
     }
 
-    pub fn remove(&self, key: &OffsetKey) -> Option<IVec> {
+    pub fn remove(&self, key: &OffsetKey) -> Result<Option<IVec>, sled::Error> {
         let key = self.build_key(key);
-        // let bytes: &[u8] = unsafe { self.any_as_u8_slice(&key) };
         let bytes: &[u8] = key.as_bytes();
+
         match self.tree.remove(bytes) {
-            Ok(val) => val,
+            Ok(val) => Ok(val),
+            // @todo - enumerate the possible sled::Error errors that can occur
             Err(err) => {
-                println!("Failed removing offset, Error: {:?}", err);
-                None
+                Err(sled::Error::ReportableBug(format!("Failed removing offset for key {:?}, Error: {:?}", key, err)))
             },
         }
     }
@@ -511,7 +652,7 @@ mod tests {
             namespace: "foo".to_string(),
             partition: "bar".to_string(),
         };
-        
+
         assert_eq!(db.insert(key, OffsetTypes::Position, 1), None);
         assert_eq!(db.validate(key, OffsetTypes::Position, 1), Some(false));
         assert_eq!(db.validate(key, OffsetTypes::Position, 2), Some(true));

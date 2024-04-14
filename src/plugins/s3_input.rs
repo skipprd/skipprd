@@ -14,11 +14,13 @@ use aws_sdk_s3::operation::get_object::{GetObjectError, GetObjectOutput};
 
 use std::time::Duration;
 use std::{fs, io};
-use std::fs::File;
+use std::collections::VecDeque;
+use std::fs::{File, OpenOptions};
 
 
 use futures::future::join_all;
 use futures::{StreamExt};
+use nix::unistd::sleep;
 
 use serde_derive::Deserialize;
 use once_cell::sync::Lazy;
@@ -62,6 +64,7 @@ pub struct DataSourceS3Plugin {
     ingest: Ingest,
     config: DataSourceS3PluginConfig,
     temp_dir: String,
+    continuation_tokens: VecDeque<String>,
 }
 
 impl DataSourceS3Plugin {
@@ -89,11 +92,14 @@ impl DataSourceS3Plugin {
             }
         };
 
+        let continuation_tokens = Self::read_continuation_token().unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::NotFound, "Failed to get S3 Input continuation token locally")).unwrap());
+
         DataSourceS3Plugin {
             s3_client,
             ingest: Ingest::new(),
             config,
             temp_dir: temp_dir.to_string(),
+            continuation_tokens
         }
     }
 
@@ -142,18 +148,22 @@ impl DataSourceS3Plugin {
             s3_prefix = "".to_string();
         }
 
-        let mut continuation_token_watermark: Option<String> = None;
+        let max_list_objects = 1000;
 
-        let mut continuation_token: Option<String> = Self::read_continuation_token().unwrap_or_else(|_| None);
+        let mut continuation_token: Option<String> = self.continuation_tokens.front().cloned();
 
         let mut list_obj_req = self
             .s3_client
             .list_objects_v2()
             .bucket(s3_bucket.clone())
             .prefix(s3_prefix.clone())
-            .max_keys(10000);
-            // .set_continuation_token(continuation_token.clone());
+            .max_keys(max_list_objects);
 
+
+        if let Some(token) = &continuation_token {
+            // println!("Continuing from token: {:?}", token);
+            list_obj_req = list_obj_req.set_continuation_token(Some(token.clone()));
+        }
 
         // important to check few times, else slowly arriving drip of objects will result in us never proceeding to the next pipeline
         let max_empty_objects = 2;
@@ -168,10 +178,53 @@ impl DataSourceS3Plugin {
                     println!("S3 Error: {:?}", err);
                 },
                 Ok(output) => {
+
                     let objects = match output.contents() {
                         Some(objects) => {
-                            // empty_objects = 0;
-                            // println!("Found {} objects in S3", objects.len());
+
+                            // println!("Current continuation token: {:?}", continuation_token.clone());
+
+                            // If current continuation token has been previously saved, it means we've skipped
+                            // this page before. So we can delete the offsets for the objects in the Sled offsets DB
+                            if continuation_token.is_some() &&
+                                self.continuation_tokens.contains(&continuation_token.clone().unwrap()) {
+
+                                println!("Rolling up offsets database, will vacuum to recover for disk space");
+
+                                let mut count = 0;
+
+                                for object in objects {
+                                    let offset_key = OffsetKey {
+                                        namespace: s3_bucket.clone(),
+                                        partition: object.key().unwrap().to_string(),
+                                    };
+                                    match offsets_clone.remove(&offset_key) {
+                                        Ok(old_val) => {
+                                            if old_val.is_some() {
+                                                count += 1;
+                                            }
+                                        },
+                                        Err(err) => {
+                                            println!("Failed to rollup offset database, Error: {:?}", err);
+                                            return;
+                                        }
+                                    }
+                                }
+
+                                sleep(1);
+                                // Not, sled doesn't delete the keys, just nulls the values.
+                                // So we vacuum the db on startup
+                                println!("Rolled up {} offsets", count);
+                                offsets_clone.flush().unwrap();
+
+                                // remove the token. @todo - should be able to pop front?
+                                self.continuation_tokens.iter().position(|x| x == &continuation_token.clone().unwrap()).map(|i| {
+                                    self.continuation_tokens.remove(i);
+                                });
+
+                                continue;
+                            }
+
                             objects
                         },
                         None => {
@@ -185,6 +238,11 @@ impl DataSourceS3Plugin {
                     };
 
                     if !objects.is_empty() {
+
+                        skipped_objects = 0;
+
+                        // println!("Processing {} objects", objects.len());
+
                         for object in objects {
                             // if object.is_empty() || object == null {
                             //     SkipprLogger::debug("object has no key");
@@ -227,13 +285,13 @@ impl DataSourceS3Plugin {
                                 if chunk_size_current >= chunk_size {
                                     // println!("Proccessing {} Objects, totalling {} bytes (batch size config {} bytes)", i, chunk_size_current, chunk_size);
 
-                                    self.download_and_ingest(
-                                        &s3_bucket,
-                                        &outputs,
-                                        &offsets_clone,
-                                        shared_output.clone()
-                                    )
-                                    .await;
+                                    // self.download_and_ingest(
+                                    //     &s3_bucket,
+                                    //     &outputs,
+                                    //     &offsets_clone,
+                                    //     shared_output.clone()
+                                    // )
+                                    // .await;
 
                                     outputs = Vec::new();
                                     i = 0;
@@ -246,44 +304,62 @@ impl DataSourceS3Plugin {
                         }
 
                         if skipped_objects > 0 {
-                            if skipped_objects >= 100000 {
-                                println!("Skipped {} objects... already processed", skipped_objects);
+                            if skipped_objects >= max_list_objects {
+                                // println!("Skipped {} objects... already processed.", skipped_objects);
+
+                                // Save continuation token if it's not the last page
+                                // and the token hasn't been saved before
+                                if let Some(new_token) = &output.next_continuation_token {
+
+                                    if continuation_token.is_some() &&
+                                        !self.continuation_tokens.contains(&continuation_token.clone().unwrap()) {
+
+                                        // println!("Saving continuation token: {}", &continuation_token.clone().unwrap());
+
+                                        self.continuation_tokens.push_back(continuation_token.unwrap().clone());
+                                        Self::save_continuation_token(&Some(self.continuation_tokens.clone())).unwrap();
+                                    }
+
+                                }
+
                                 skipped_objects = 0;
+
+                                // continuation tokens aren't consistent hashes, however a token will
+                                // imdempotently return the same results if the list of objects hasn't changed
+                                // If the list request returns a token, indicating there is more data, first use
+                                // our next saved token for the next page so we can rollup the offsets database
+                                // If we don't have a saved token, use the token returned by the list request
+                                if self.continuation_tokens.len() > 0 {
+                                    continuation_token = self.continuation_tokens.front().cloned();
+                                    println!("Continuation token: {:?}", &continuation_token.clone().unwrap());
+                                    list_obj_req = list_obj_req.set_continuation_token(Some(continuation_token.clone().unwrap()));
+                                    continue;
+                                }
+
                             }
                         }
                     }
 
-                    if let Some(token) = output.next_continuation_token {
-                        continuation_token = Some(token.to_string());
+                    if let Some(token) = &output.next_continuation_token {
 
-                        if i % 20 == 0 {
-                            // println!("Saving S3 continuation token: {}", token);
+                        continuation_token = Some(token.to_string().clone());
 
-                            if let Err(e) = Self::save_continuation_token(&continuation_token_watermark) {
-                                println!("Error saving S3 continuation token: {}", e);
-                            }
+                        println!("Continuation token: {:?}", continuation_token.clone());
 
-                            continuation_token_watermark = continuation_token.clone();
+                        list_obj_req = list_obj_req.set_continuation_token(Some(token.to_string().clone()));
 
-                        }
-
-                        list_obj_req = list_obj_req.set_continuation_token(Some(token.to_string()));
-
-                        if continuation_token_watermark.is_none() {
-                            continuation_token_watermark = continuation_token;
-                        }
 
                     } else {
                         println!("Reached end of S3 pagination");
 
                         if !outputs.is_empty() {
-                            self.download_and_ingest(
-                                &s3_bucket,
-                                &outputs,
-                                &offsets_clone,
-                                shared_output.clone()
-                            )
-                                .await;
+                            // self.download_and_ingest(
+                            //     &s3_bucket,
+                            //     &outputs,
+                            //     &offsets_clone,
+                            //     shared_output.clone()
+                            // )
+                            //     .await;
                         }
 
                         break;
@@ -313,7 +389,7 @@ impl DataSourceS3Plugin {
             match get_request.send().await {
                 Ok(result) => {
                     if retries > 0 {
-                        println!("Successful retry of object {}", key);
+                        // println!("Successful retry of object {}", key);
                     }
                     return Ok(result);
                 }
@@ -323,14 +399,14 @@ impl DataSourceS3Plugin {
 
                     backoff_duration *= 2;
 
-                    println!(
-                        "Failed to get object {}, retry {} of {} in {} seconds: {}",
-                        key,
-                        retries,
-                        max_retries,
-                        backoff_duration.as_secs(),
-                        err.to_string()
-                    );
+                    // println!(
+                    //     "Failed to get object {}, retry {} of {} in {} seconds: {}",
+                    //     key,
+                    //     retries,
+                    //     max_retries,
+                    //     backoff_duration.as_secs(),
+                    //     err.to_string()
+                    // );
 
                     // let wait_time = backoff_duration.as_secs_f64() * 2.0_f64.powi(retries);
                     tokio::time::sleep(Duration::from_secs_f64(backoff_duration.as_secs_f64())).await;
@@ -455,11 +531,11 @@ impl DataSourceS3Plugin {
         self.ingest.ingest_file(&Arc::new(batch), &offsets_clone, shared_output_clone);
     }
 
-    fn save_continuation_token(token: &Option<String>) -> io::Result<()> {
+    fn save_continuation_token(token: &Option<VecDeque<String>>) -> io::Result<()> {
         match token {
             Some(t) => {
                 let mut file = File::create(CONTINUATION_TOKEN_FILE.to_string())?;
-                file.write_all(t.as_bytes()).expect("Failed to write S3 continuation token");
+                file.write_all(serde_json::to_string(t).unwrap().as_bytes())?;
                 file.flush()?;
                 Ok(())
             },
@@ -467,15 +543,16 @@ impl DataSourceS3Plugin {
         }
     }
 
-    fn read_continuation_token() -> io::Result<Option<String>> {
-        match File::open(CONTINUATION_TOKEN_FILE.to_string()) {
+    fn read_continuation_token() -> io::Result<VecDeque<String>> {
+        match OpenOptions::new().read(true).write(true).create(true).open(CONTINUATION_TOKEN_FILE.to_string()) {
             Ok(mut file) => {
-                let mut token = String::new();
-                file.read_to_string(&mut token)?;
-                println!("Found previous S3 List continuation token: {}", token);
-                Ok(Some(token))
+                let mut buf = String::new();
+                file.read_to_string(&mut buf)?;
+                println!("Found previous S3 List continuation tokens: {}", buf);
+                let token: VecDeque<String> = serde_json::from_str(&buf).unwrap_or(VecDeque::new());
+                Ok(token)
             },
-            Err(_) => Ok(None), // If there's no file, just proceed without a token
+            Err(_) => Err(io::Error::new(io::ErrorKind::NotFound, "No token found")),
         }
     }
 }
