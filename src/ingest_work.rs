@@ -10,7 +10,7 @@ use crate::{ARROW_SCHEMA, DISCOVER_RUNNING, helpers, METADATA, METRICS, RUNNING}
 
 use once_cell::sync::Lazy;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::{fs, io};
 
@@ -32,7 +32,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::atomic::Ordering::AcqRel;
 use arrow::json::ReaderBuilder;
 use arrow::record_batch::RecordBatch;
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use nix::libc;
 
 use parquet::data_type::AsBytes;
@@ -76,6 +76,7 @@ pub const WRITE_BUF_SIZE: usize = if cfg!(target_os = "espidf") {
 
 thread_local! {
     pub static PARSE_NAMESPACE_CACHE: Lazy<RwLock<HashMap<String, String>>> = Lazy::new(|| RwLock::new(HashMap::new()));
+    pub static PARTITION_ALLOWED_VALUES_CACHE: Lazy<RwLock<HashSet<String>>> = Lazy::new(|| RwLock::new(HashSet::new()));
 }
 
 pub static DEADLETTER_FILE_NAME: Lazy<String> = Lazy::new(|| BufferChunker::encode_chunk_name(
@@ -138,6 +139,17 @@ impl Ingest {
                 active_count_clone.fetch_sub(1, Ordering::SeqCst);
             }
         });
+
+
+        // optional: enforce allowed partition values
+        let allowed_values = Config::get_partition_allowed_values();
+
+        PARTITION_ALLOWED_VALUES_CACHE.with(|cache| {
+            cache.write().unwrap().extend(allowed_values.split(",").map(|v| {
+                Helpers::clean_field_name(v.to_string())
+            }).collect::<HashSet<String>>());
+        });
+
         
         // Schema hashes
         let mut schema_hashes = DashMap::new();
@@ -439,7 +451,8 @@ impl Ingest {
                         PARSE_NAMESPACE_CACHE.with(|cache| cache.write().unwrap().extend(namesapce_cache));
                     }
 
-                    let skpr_partition = Helpers::parse_partition_field(&record);
+                    let allowed_values = PARTITION_ALLOWED_VALUES_CACHE.with(|cache| cache.read().unwrap().clone());
+                    let skpr_partition = Helpers::parse_partition_field(&record, allowed_values);
                     let skpr_time = Helpers::parse_time_field(&record);
 
                     let mut skpr_time_bucket: Option<i64> = None;
@@ -526,7 +539,7 @@ impl Ingest {
                                         }
                                         Config::set_metadata(&metadata, true).await;
                                     });
-                                    
+
                                     let mut default_message = Value::Null;
                                     {
                                         let metadata = METADATA.read();
@@ -661,7 +674,7 @@ impl Ingest {
         handle.block_on(async {
             buffers.flush(offset_db_clone, shared_output_clone).await.expect("Failed to flush buffers")
         });
-        
+
         let mut counter_lock = METRICS.write();
         counter_lock.deadletters_total += d;
         counter_lock.ingeted_slow_total += x;

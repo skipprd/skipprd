@@ -1,7 +1,7 @@
 use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone, Utc};
 use memory_stats::memory_stats;
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::{env, fs};
 
 use std::str;
@@ -25,7 +25,7 @@ use crate::discover::Metadata;
 use crate::helpers::configuration::Config;
 use once_cell::sync::Lazy;
 use std::sync::{Arc};
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use crate::helpers::timed_rwlock::TimedRwLock;
 use walkdir::WalkDir;
 
@@ -226,19 +226,9 @@ impl Helpers {
         false
     }
 
-    pub fn parse_partition_field(message: &Value) -> String {
+    pub fn parse_partition_field(message: &Value, clean_allowed_values: HashSet<String>) -> String {
         let mut clean_partition: String = "".to_string();
 
-        // optional: enforce allowed partition values
-        let allowed_values = Config::get_partition_allowed_values();
-
-        let clean_allowed_values = allowed_values.split(',').filter_map(|val| {
-            match val {
-                "" => None,
-                _ => Some(Helpers::clean_field_name(val.to_string()))
-            }
-        }).collect::<Vec<String>>();
-        
         // optional: partition by composite key
         if !Config::get_transform_batch_partition_fields().is_empty() {
             let mut partitions = vec![];
@@ -789,7 +779,7 @@ mod parse_partition_tests {
     fn test_parse_partition_field_no_config() {
         let message = json!({"foo": "bar", "abc1": "def"});
         Config::setenv("TRANSFORM_BATCH_PARTITION_FIELDS", "");
-        let partition = Helpers::parse_partition_field(&message);
+        let partition = Helpers::parse_partition_field(&message, HashSet::new());
         assert_eq!(partition, "");
     }
 
@@ -798,7 +788,7 @@ mod parse_partition_tests {
     fn test_parse_partition_field_empty_field() {
         let message = json!({"foo": "", "abc1": "def"});
         Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo");
-        let partition = Helpers::parse_partition_field(&message);
+        let partition = Helpers::parse_partition_field(&message, HashSet::new());
         assert_eq!(partition, "p_foo=");
     }
 
@@ -816,7 +806,7 @@ mod parse_partition_tests {
     fn test_parse_partition_field_composite_key() {
         let message = json!({"foo": {"bar": "baz"}, "abc1": "def"});
         Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo.bar");
-        let partition = Helpers::parse_partition_field(&message);
+        let partition = Helpers::parse_partition_field(&message, HashSet::new());
         assert_eq!(partition, "p_bar=baz");
     }
 
@@ -825,7 +815,7 @@ mod parse_partition_tests {
     fn test_parse_partition_field_several_composite_keys() {
         let message = json!({"foo": {"bar": "baz"}, "abc1": "def"});
         Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo.bar,abc1");
-        let partition = Helpers::parse_partition_field(&message);
+        let partition = Helpers::parse_partition_field(&message, HashSet::new());
         assert_eq!(partition, "p_bar=baz/p_abc1=def");
     }
 
@@ -834,7 +824,7 @@ mod parse_partition_tests {
     fn test_parse_partition_field_several_composite_keys_with_spaces() {
         let message = json!({"foo": {"bar": "baz"}, "abc1": "def"});
         Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", " foo.bar  , abc1  ");
-        let partition = Helpers::parse_partition_field(&message);
+        let partition = Helpers::parse_partition_field(&message, HashSet::new());
         assert_eq!(partition, "p_bar=baz/p_abc1=def");
     }
 }
@@ -844,6 +834,7 @@ mod parse_partition_allowed_values_tests {
     use super::*;
     use serde_json::json;
     use serial_test::serial;
+    use crate::ingest_work::PARTITION_ALLOWED_VALUES_CACHE;
 
     #[test]
     #[serial]
@@ -851,7 +842,11 @@ mod parse_partition_allowed_values_tests {
         let message = json!({"foo": "bar", "abc1": "def"});
         Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "");
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "bar");
-        let partition = Helpers::parse_partition_field(&message);
+
+        let allowed_values = Config::get_partition_allowed_values();
+        let allowed_values_vec: HashSet<String> = allowed_values.split(',').map(|s| s.to_string()).collect();
+
+        let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
         assert_eq!(partition, "");
     }
 
@@ -861,7 +856,11 @@ mod parse_partition_allowed_values_tests {
         let message = json!({"foo": "", "abc1": "def"});
         Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo");
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "baz,def");
-        let partition = Helpers::parse_partition_field(&message);
+
+        let allowed_values = Config::get_partition_allowed_values();
+        let allowed_values_vec: HashSet<String> = allowed_values.split(',').map(|s| s.to_string()).collect();
+
+        let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
         assert_eq!(partition, "p_foo=");
     }
 
@@ -871,7 +870,11 @@ mod parse_partition_allowed_values_tests {
         let message = json!({"foo": "bar", "abc1": "def"});
         Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo");
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "bar,def");
-        let partition = Helpers::parse_partition_field(&message);
+
+        let allowed_values = Config::get_partition_allowed_values();
+        let allowed_values_vec: HashSet<String> = allowed_values.split(',').map(|s| s.to_string()).collect();
+
+        let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
         assert_eq!(partition, "p_foo=bar");
     }
 
@@ -881,7 +884,11 @@ mod parse_partition_allowed_values_tests {
         let message = json!({"foo": {"bar": "baz"}, "abc1": "def"});
         Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo.bar");
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "baz,def");
-        let partition = Helpers::parse_partition_field(&message);
+
+        let allowed_values = Config::get_partition_allowed_values();
+        let allowed_values_vec: HashSet<String> = allowed_values.split(',').map(|s| s.to_string()).collect();
+        
+        let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
         assert_eq!(partition, "p_bar=baz");
     }
 
@@ -891,7 +898,11 @@ mod parse_partition_allowed_values_tests {
         let message = json!({"foo": {"bar": "baz"}, "abc1": "def"});
         Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo.bar,abc1");
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "baz,def");
-        let partition = Helpers::parse_partition_field(&message);
+
+        let allowed_values = Config::get_partition_allowed_values();
+        let allowed_values_vec: HashSet<String> = allowed_values.split(',').map(|s| s.to_string()).collect();
+
+        let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
         assert_eq!(partition, "p_bar=baz/p_abc1=def");
     }
 
@@ -901,7 +912,13 @@ mod parse_partition_allowed_values_tests {
         let message = json!({"foo": {"bar": "baz"}, "abc1": "def"});
         Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", " foo.bar  , abc1  ");
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "baz  , def  ");
-        let partition = Helpers::parse_partition_field(&message);
+
+        let allowed_values = Config::get_partition_allowed_values();
+        let allowed_values_vec: HashSet<String> = allowed_values.split(',').map(|s| {
+            Helpers::clean_field_name(s.to_string())
+        }).collect();
+
+        let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
         assert_eq!(partition, "p_bar=baz/p_abc1=def");
     }
 }
@@ -918,7 +935,11 @@ mod parse_partition_not_allowed_values_tests {
         let message = json!({"foo": "bar", "abc1": "def"});
         Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "");
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "nah");
-        let partition = Helpers::parse_partition_field(&message);
+
+        let allowed_values = Config::get_partition_allowed_values();
+        let allowed_values_vec: HashSet<String> = allowed_values.split(',').map(|s| s.to_string()).collect();
+
+        let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
         assert_eq!(partition, "");
     }
 
@@ -928,7 +949,11 @@ mod parse_partition_not_allowed_values_tests {
         let message = json!({"foo": "", "abc1": "def"});
         Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo");
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "baz,def");
-        let partition = Helpers::parse_partition_field(&message);
+
+        let allowed_values = Config::get_partition_allowed_values();
+        let allowed_values_vec: HashSet<String> = allowed_values.split(',').map(|s| s.to_string()).collect();
+
+        let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
         assert_eq!(partition, "p_foo=");
     }
 
@@ -938,7 +963,11 @@ mod parse_partition_not_allowed_values_tests {
         let message = json!({"foo": "bar", "abc1": "def"});
         Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo");
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "nah,def");
-        let partition = Helpers::parse_partition_field(&message);
+
+        let allowed_values = Config::get_partition_allowed_values();
+        let allowed_values_vec: HashSet<String> = allowed_values.split(',').map(|s| s.to_string()).collect();
+
+        let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
         assert_eq!(partition, "p_foo=");
     }
 
@@ -948,7 +977,11 @@ mod parse_partition_not_allowed_values_tests {
         let message = json!({"foo": {"bar": "baz"}, "abc1": "def"});
         Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo.bar");
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "nah,def");
-        let partition = Helpers::parse_partition_field(&message);
+
+        let allowed_values = Config::get_partition_allowed_values();
+        let allowed_values_vec: HashSet<String> = allowed_values.split(',').map(|s| s.to_string()).collect();
+
+        let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
         assert_eq!(partition, "p_bar=");
     }
 
@@ -958,7 +991,11 @@ mod parse_partition_not_allowed_values_tests {
         let message = json!({"foo": {"bar": "baz"}, "abc1": "def"});
         Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo.bar,abc1");
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "nah,nope");
-        let partition = Helpers::parse_partition_field(&message);
+
+        let allowed_values = Config::get_partition_allowed_values();
+        let allowed_values_vec: HashSet<String> = allowed_values.split(',').map(|s| s.to_string()).collect();
+
+        let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
         assert_eq!(partition, "p_bar=/p_abc1=");
     }
 
@@ -968,7 +1005,11 @@ mod parse_partition_not_allowed_values_tests {
         let message = json!({"foo": {"bar": "baz"}, "abc1": "def"});
         Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", " foo.bar  , abc1  ");
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "nah  , nope  ");
-        let partition = Helpers::parse_partition_field(&message);
+
+        let allowed_values = Config::get_partition_allowed_values();
+        let allowed_values_vec: HashSet<String> = allowed_values.split(',').map(|s| s.to_string()).collect();
+
+        let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
         assert_eq!(partition, "p_bar=/p_abc1=");
     }
 }
