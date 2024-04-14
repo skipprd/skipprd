@@ -185,11 +185,11 @@ impl Buffers {
                 offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
             });
 
-            offsets_db.flush();
-
             partition_entry.push(wal_file);
 
         }
+
+        offsets_db.flush();
 
         // println!("Ingested {} rows of {} bytes to WAL", stats.1, stats.0);
 
