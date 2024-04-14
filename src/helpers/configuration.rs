@@ -1420,7 +1420,7 @@ impl Config {
     }
 
     pub async fn set_metadata(pipeline_metadata: &PipelineMetadata, evolved: bool) {
-        
+
         if !*HAS_LICENSE.read() {
             return;
         }
@@ -1463,26 +1463,30 @@ impl Config {
             "metadata": pipeline_metadata,
             "status": schema_status
         });
-        
+
         let response = client
             .put(&format!("{}/{}", uri, path))
             .json(&data)
             .send()
             .await;
 
+        // must succeed, else we exit to avoid writing data with schema inconsistency
         match response {
             Ok(resp) => {
                 match resp.status() {
                     StatusCode::OK => {
-                        // println!("Metadata HTTP resp: {:?}", resp);
                         println!("Updated pipeline metadata in Skippr SaaS");
                     }
-                    err => println!("Metadata HTTP Error: {:?}", err),
+                    err => unsafe {
+                        println!("Metadata HTTP Error: {:?}", err);
+                        exit(1);
+                    },
                 };
             }
-            Err(err) => {
+            Err(err) =>  unsafe {
                 println!("Metadata HTTP Error: {:?}", err);
-            } 
+                exit(1);
+            },
         }
 
         if evolved {

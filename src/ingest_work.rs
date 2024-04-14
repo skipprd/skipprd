@@ -515,6 +515,18 @@ impl Ingest {
                             if Config::get_auto_approve() {
 
                                 if updated_schema.as_str() == "yes" {
+
+                                    updated_schema = "no".to_string();
+
+                                    handle.block_on(async {
+                                        // update metadata at control pane, this may or may not be automatically approved
+                                        let metadata: PipelineMetadata;
+                                        {
+                                            metadata = METADATA.read().clone();
+                                        }
+                                        Config::set_metadata(&metadata, true).await;
+                                    });
+                                    
                                     let mut default_message = Value::Null;
                                     {
                                         let metadata = METADATA.read();
@@ -649,20 +661,7 @@ impl Ingest {
         handle.block_on(async {
             buffers.flush(offset_db_clone, shared_output_clone).await.expect("Failed to flush buffers")
         });
-
-        if updated_schema.as_str() == "yes" {
-            updated_schema = "no".to_string();
-            
-            handle.block_on(async {
-                // update metadata at control pane, this may or may not be automatically approved
-                let metadata: PipelineMetadata;
-                {
-                    metadata = METADATA.read().clone();
-                }
-                Config::set_metadata(&metadata, true).await;
-            });
-        }
-
+        
         let mut counter_lock = METRICS.write();
         counter_lock.deadletters_total += d;
         counter_lock.ingeted_slow_total += x;
