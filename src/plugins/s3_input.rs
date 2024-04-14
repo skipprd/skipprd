@@ -285,13 +285,13 @@ impl DataSourceS3Plugin {
                                 if chunk_size_current >= chunk_size {
                                     // println!("Proccessing {} Objects, totalling {} bytes (batch size config {} bytes)", i, chunk_size_current, chunk_size);
 
-                                    // self.download_and_ingest(
-                                    //     &s3_bucket,
-                                    //     &outputs,
-                                    //     &offsets_clone,
-                                    //     shared_output.clone()
-                                    // )
-                                    // .await;
+                                    self.download_and_ingest(
+                                        &s3_bucket,
+                                        &outputs,
+                                        &offsets_clone,
+                                        shared_output.clone()
+                                    )
+                                    .await;
 
                                     outputs = Vec::new();
                                     i = 0;
@@ -353,13 +353,13 @@ impl DataSourceS3Plugin {
                         println!("Reached end of S3 pagination");
 
                         if !outputs.is_empty() {
-                            // self.download_and_ingest(
-                            //     &s3_bucket,
-                            //     &outputs,
-                            //     &offsets_clone,
-                            //     shared_output.clone()
-                            // )
-                            //     .await;
+                            self.download_and_ingest(
+                                &s3_bucket,
+                                &outputs,
+                                &offsets_clone,
+                                shared_output.clone()
+                            )
+                                .await;
                         }
 
                         break;
