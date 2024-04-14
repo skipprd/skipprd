@@ -175,21 +175,21 @@ impl Buffers {
             
             // println!("Committing {} offsets", ingest_buffer_batch.offsets.len());
 
-            ingest_buffer_batch.offsets.iter().for_each(|(offset, position)| {
-                let offset_key = OffsetKey {
-                    namespace: offset.namespace.clone(),
-                    partition: offset.partition.clone(),
-                };
-
-                offsets_db.insert(&offset_key, OffsetTypes::Position, *position);
-                offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
-            });
+            // ingest_buffer_batch.offsets.iter().for_each(|(offset, position)| {
+            //     let offset_key = OffsetKey {
+            //         namespace: offset.namespace.clone(),
+            //         partition: offset.partition.clone(),
+            //     };
+            // 
+            //     offsets_db.insert(&offset_key, OffsetTypes::Position, *position);
+            //     offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
+            // });
 
             partition_entry.push(wal_file);
 
         }
 
-        offsets_db.flush();
+        // offsets_db.flush();
 
         // println!("Ingested {} rows of {} bytes to WAL", stats.1, stats.0);
 
