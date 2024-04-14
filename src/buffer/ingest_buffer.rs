@@ -247,10 +247,12 @@ impl Buffers {
 
 
         let shared_output_clone = shared_output.clone();
+        
         // Compact the partitions (now the index is unlocked, WAL flushed and offset committed)
         for partition in compact_index_partitions.values_mut() {
+            let offsets_db_clone = offsets_db.clone();
             let shared_output_clone2 = shared_output_clone.clone();
-            partition.compact_batches_to_parquet(shared_output_clone2).await;
+            partition.compact_batches_to_parquet(offsets_db_clone, shared_output_clone2).await;
         }
 
         // println!("Wrote {} rows to WAL", rows);
@@ -263,16 +265,18 @@ impl Buffers {
 
         wal_index.index.clear(); // avoid duplicates
 
-        wal_index.recover(offsets_db).expect("Failed to recover WAL index");
+        wal_index.recover(offsets_db.clone()).expect("Failed to recover WAL index");
 
         let mut compacted_index_partitions = Vec::new();
-
+        
         let cloned_shared_output = shared_output.clone();
         for (_key, wal_partition) in wal_index.index.iter_mut() {
-
+            
+            let offsets_db_clone = offsets_db.clone();
             let shared_output2 = cloned_shared_output.clone();
+            
             if force {
-                wal_partition.compact_batches_to_parquet(shared_output2).await;
+                wal_partition.compact_batches_to_parquet(offsets_db_clone, shared_output2).await;
                 compacted_index_partitions.push((wal_partition.namespace.clone(), wal_partition.partition.clone(), wal_partition.time.clone(), wal_partition.shard.clone()));
 
             } else {
@@ -409,7 +413,7 @@ impl WalPartitionIndex {
 
         for (namespace, partition_key) in namespace_partitions {
             let human_bytes = Helpers::human_readable_size(namespace_partition_bytes.iter().filter(|(k, _v)| k.0 == namespace).map(|(_k, v)| v).sum::<u64>());
-           println!("Namespace {} contains {} partitions and {} files of {} bytes", namespace, partition_key.len(), namespace_partition_files.iter().filter(|(k, _v)| k.0 == namespace).map(|(_k, v)| v).sum::<u64>(), human_bytes);
+            println!("Namespace {} contains {} partitions and {} files of {} bytes", namespace, partition_key.len(), namespace_partition_files.iter().filter(|(k, _v)| k.0 == namespace).map(|(_k, v)| v).sum::<u64>(), human_bytes);
 
             wal_index_metrics.metrics.push(WalIndexMetric {
                 namespace: namespace.clone(),
@@ -553,7 +557,7 @@ impl WalPartition {
         false
     }
 
-    async fn compact_batches_to_parquet(&mut self, shared_output: Arc<TimedRwLock<Box<dyn DataOutputPlugin + Send + Sync>>>) {
+    async fn compact_batches_to_parquet(&mut self, offsets_db: Arc<Offsets>, shared_output: Arc<TimedRwLock<Box<dyn DataOutputPlugin + Send + Sync>>>) {
         let data_dir = Config::get_data_dir();
         let mut output_file_name = BufferChunker::encode_chunk_name(
             "output",
@@ -563,6 +567,21 @@ impl WalPartition {
             Some(&self.shard)
         );
 
+        // commit offsets
+        self.files.iter().for_each(|wal_file| {
+            wal_file.offsets.iter().for_each(|(offset, position)| {
+                let offset_key = OffsetKey {
+                    namespace: offset.namespace.clone(),
+                    partition: offset.partition.clone(),
+                };
+
+                offsets_db.insert(&offset_key, OffsetTypes::Position, *position);
+                offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
+            });
+        });
+        
+        offsets_db.flush();
+        
         // @todo - replace random_str with a sequence/segment number for imdepotent object uploads.
         // Suspect that will be required to handle retries and failures, while still avoiding overwriting existing data.
         output_file_name = format!("{}-{}", output_file_name, Helpers::random_str(32));
