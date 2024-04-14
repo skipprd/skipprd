@@ -1420,27 +1420,8 @@ impl Config {
     }
 
     pub async fn set_metadata(pipeline_metadata: &PipelineMetadata, evolved: bool) {
-
-        // let data_dir = Config::get_data_dir();
-        // let metadata_file = format!("{}/metadata-{}.json", data_dir, Helpers::random_str(10));
-        //
-        // let file = OpenOptions::new()
-        //     .create(true)
-        //     .write(true)
-        //     .truncate(true)
-        //     .open(metadata_file)
-        //     .unwrap();
-        //
-        // let writer = BufWriter::new(file);
-        //
-        // serde_json::to_writer(writer, &metadata).unwrap();
-        //
-        // println!("saved metadata file");
-
-        ///////////
-
+        
         if !*HAS_LICENSE.read() {
-            // println!("ERROR: No license found, please set the 'LICENSE' environment variable.");
             return;
         }
 
@@ -1482,9 +1463,7 @@ impl Config {
             "metadata": pipeline_metadata,
             "status": schema_status
         });
-
-        // println!("Posting data: {:?}", data);
-
+        
         let response = client
             .put(&format!("{}/{}", uri, path))
             .json(&data)
@@ -1503,12 +1482,7 @@ impl Config {
             }
             Err(err) => {
                 println!("Metadata HTTP Error: {:?}", err);
-            } // Ok(resp) => {
-              //     println!("Metadata HTTP Success: {:?}", resp);
-              // }
-              // Err(err) => {
-              //     println!("Metadata HTTP Error: {:?}", err);
-              // }
+            } 
         }
 
         if evolved {
