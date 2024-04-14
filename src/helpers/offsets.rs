@@ -177,6 +177,10 @@ impl Offsets {
         // Rename database file to a temporary file
         let db_path = format!("{}/{}", Config::get_data_dir(), SLED_NAME);
         let temp_db_path = format!("{}/{}.tmp", Config::get_data_dir(), SLED_NAME);
+
+        if std::fs::metadata(&db_path).is_err() {
+            return Ok(0);
+        }
         std::fs::rename(&db_path, &temp_db_path).unwrap();
 
         // open old db
