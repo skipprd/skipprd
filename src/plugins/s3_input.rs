@@ -148,6 +148,8 @@ impl DataSourceS3Plugin {
             s3_prefix = "".to_string();
         }
 
+        let mut log_rollup = true;
+
         let max_list_objects = 1000;
 
         let mut continuation_token: Option<String> = self.continuation_tokens.front().cloned();
@@ -186,44 +188,44 @@ impl DataSourceS3Plugin {
 
                             // If current continuation token has been previously saved, it means we've skipped
                             // this page before. So we can delete the offsets for the objects in the Sled offsets DB
-                            if continuation_token.is_some() &&
-                                self.continuation_tokens.contains(&continuation_token.clone().unwrap()) {
-
-                                println!("Rolling up offsets database, will vacuum to recover for disk space");
-
-                                let mut count = 0;
-
-                                for object in objects {
-                                    let offset_key = OffsetKey {
-                                        namespace: s3_bucket.clone(),
-                                        partition: object.key().unwrap().to_string(),
-                                    };
-                                    match offsets_clone.remove(&offset_key) {
-                                        Ok(old_val) => {
-                                            if old_val.is_some() {
-                                                count += 1;
-                                            }
-                                        },
-                                        Err(err) => {
-                                            println!("Failed to rollup offset database, Error: {:?}", err);
-                                            return;
-                                        }
-                                    }
-                                }
-
-                                sleep(1);
-                                // Not, sled doesn't delete the keys, just nulls the values.
-                                // So we vacuum the db on startup
-                                println!("Rolled up {} offsets", count);
-                                offsets_clone.flush().unwrap();
-
-                                // remove the token. @todo - should be able to pop front?
-                                self.continuation_tokens.iter().position(|x| x == &continuation_token.clone().unwrap()).map(|i| {
-                                    self.continuation_tokens.remove(i);
-                                });
-
-                                continue;
-                            }
+                            // if continuation_token.is_some() &&
+                            //     self.continuation_tokens.contains(&continuation_token.clone().unwrap()) {
+                            //
+                            //     println!("Rolling up offsets database, will vacuum to recover for disk space");
+                            //
+                            //     let mut count = 0;
+                            //
+                            //     for object in objects {
+                            //         let offset_key = OffsetKey {
+                            //             namespace: s3_bucket.clone(),
+                            //             partition: object.key().unwrap().to_string(),
+                            //         };
+                            //         match offsets_clone.remove(&offset_key) {
+                            //             Ok(old_val) => {
+                            //                 if old_val.is_some() {
+                            //                     count += 1;
+                            //                 }
+                            //             },
+                            //             Err(err) => {
+                            //                 println!("Failed to rollup offset database, Error: {:?}", err);
+                            //                 return;
+                            //             }
+                            //         }
+                            //     }
+                            //
+                            //     sleep(1);
+                            //     // Not, sled doesn't delete the keys, just nulls the values.
+                            //     // So we vacuum the db on startup
+                            //     println!("Rolled up {} offsets", count);
+                            //     offsets_clone.flush().unwrap();
+                            //
+                            //     // remove the token. @todo - should be able to pop front?
+                            //     self.continuation_tokens.iter().position(|x| x == &continuation_token.clone().unwrap()).map(|i| {
+                            //         self.continuation_tokens.remove(i);
+                            //     });
+                            //
+                            //     continue;
+                            // }
 
                             objects
                         },
@@ -303,40 +305,54 @@ impl DataSourceS3Plugin {
                             }
                         }
 
-                        if skipped_objects > 0 {
-                            if skipped_objects >= max_list_objects {
-                                // println!("Skipped {} objects... already processed.", skipped_objects);
+                        // println!("Skipped {} objects... already processed.", skipped_objects);
 
-                                // Save continuation token if it's not the last page
-                                // and the token hasn't been saved before
-                                if let Some(new_token) = &output.next_continuation_token {
+                        if skipped_objects >= max_list_objects {
 
-                                    if continuation_token.is_some() &&
-                                        !self.continuation_tokens.contains(&continuation_token.clone().unwrap()) {
+                            // If we've skipped all objects in the list request, we can save the continuation token
+                            if continuation_token.is_some() {
 
-                                        // println!("Saving continuation token: {}", &continuation_token.clone().unwrap());
+                                self.continuation_tokens.clear();
+                                // println!("Saving continuation token: {}", &continuation_token.clone().unwrap());
 
-                                        self.continuation_tokens.push_back(continuation_token.unwrap().clone());
-                                        Self::save_continuation_token(&Some(self.continuation_tokens.clone())).unwrap();
-                                    }
-
-                                }
-
-                                skipped_objects = 0;
-
-                                // continuation tokens aren't consistent hashes, however a token will
-                                // imdempotently return the same results if the list of objects hasn't changed
-                                // If the list request returns a token, indicating there is more data, first use
-                                // our next saved token for the next page so we can rollup the offsets database
-                                // If we don't have a saved token, use the token returned by the list request
-                                if self.continuation_tokens.len() > 0 {
-                                    continuation_token = self.continuation_tokens.front().cloned();
-                                    // println!("Continuation token: {:?}", &continuation_token.clone().unwrap());
-                                    list_obj_req = list_obj_req.set_continuation_token(Some(continuation_token.clone().unwrap()));
-                                    continue;
-                                }
-
+                                self.continuation_tokens.push_back(continuation_token.unwrap().clone());
+                                Self::save_continuation_token(&Some(self.continuation_tokens.clone())).unwrap();
                             }
+
+                            // rollup the offsets database
+                            if log_rollup {
+                                println!("Rolling up offsets database to recover disk space");
+                                log_rollup = false;
+                            }
+
+                            let mut count = 0;
+
+                            for object in objects {
+                                let offset_key = OffsetKey {
+                                    namespace: s3_bucket.clone(),
+                                    partition: object.key().unwrap().to_string(),
+                                };
+                                match offsets_clone.remove(&offset_key) {
+                                    Ok(old_val) => {
+                                        if old_val.is_some() {
+                                            count += 1;
+                                        }
+                                    },
+                                    Err(err) => {
+                                        println!("Failed to rollup offset database, Error: {:?}", err);
+                                        return;
+                                    }
+                                }
+                            }
+
+                            sleep(1);
+                            // Not, sled doesn't delete the keys, just nulls the values.
+                            // So we may need to vacuum the db on startup. A shot sleep gives as chace for sled GC to run
+                            // println!("Rolled up {} offsets", count);
+                            offsets_clone.flush().unwrap();
+
+                            // skipped_objects = 0;
+
                         }
                     }
 
