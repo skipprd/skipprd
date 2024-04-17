@@ -467,8 +467,14 @@ async fn sync() {
     Config::sync_schema(&pipeline_metadata.metadata).await;
 
     // let output = DataOutputAwsAthenaPlugin::new("output".to_string()).await;
-    let output = sync_output_plugin(Config::get_pipeline_output_plugin_name().as_str(), "output".to_string()).await.unwrap();
+    let output_plugin_name = Config::get_pipeline_output_plugin_name();
+    let output = sync_output_plugin(&output_plugin_name, "output".to_string()).await.unwrap();
     let shared_output = Arc::new(TimedRwLock::new("output_plugin".to_string(), output));
+
+    // sync schema if output plugin configured
+    if output_plugin_name != "" {
+        Config::sync_schema(&pipeline_metadata.metadata).await;
+    }
 
     let now = Arc::new(TimedRwLock::new("now".to_string(), Instant::now()));
 
