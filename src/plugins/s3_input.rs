@@ -331,7 +331,7 @@ impl DataSourceS3Plugin {
                                 // If we don't have a saved token, use the token returned by the list request
                                 if self.continuation_tokens.len() > 0 {
                                     continuation_token = self.continuation_tokens.front().cloned();
-                                    println!("Continuation token: {:?}", &continuation_token.clone().unwrap());
+                                    // println!("Continuation token: {:?}", &continuation_token.clone().unwrap());
                                     list_obj_req = list_obj_req.set_continuation_token(Some(continuation_token.clone().unwrap()));
                                     continue;
                                 }
@@ -344,7 +344,7 @@ impl DataSourceS3Plugin {
 
                         continuation_token = Some(token.to_string().clone());
 
-                        println!("Continuation token: {:?}", continuation_token.clone());
+                        // println!("Continuation token: {:?}", continuation_token.clone());
 
                         list_obj_req = list_obj_req.set_continuation_token(Some(token.to_string().clone()));
 

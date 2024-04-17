@@ -101,7 +101,7 @@ impl Offsets {
             0
         });
         
-        println!("Offset DB size: {} bytes", Helpers::human_readable_size(total_size_bytes));
+        println!("Offset DB size: {}", Helpers::human_readable_size(total_size_bytes));
         
         let mut metrics_lock = METRICS.write();
         metrics_lock.offset_db_size = total_size_bytes;

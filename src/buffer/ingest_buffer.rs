@@ -567,7 +567,7 @@ impl WalPartition {
             Some(&self.shard)
         );
 
-        // commit offsets
+        // commit offsets         
         self.files.iter().for_each(|wal_file| {
             wal_file.offsets.iter().for_each(|(offset, position)| {
                 let offset_key = OffsetKey {
