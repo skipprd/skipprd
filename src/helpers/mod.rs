@@ -887,7 +887,7 @@ mod parse_partition_allowed_values_tests {
 
         let allowed_values = Config::get_partition_allowed_values();
         let allowed_values_vec: HashSet<String> = allowed_values.split(',').map(|s| s.to_string()).collect();
-        
+
         let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
         assert_eq!(partition, "p_bar=baz");
     }

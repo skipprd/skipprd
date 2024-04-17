@@ -76,6 +76,7 @@ pub const WRITE_BUF_SIZE: usize = if cfg!(target_os = "espidf") {
 
 thread_local! {
     pub static PARSE_NAMESPACE_CACHE: Lazy<RwLock<HashMap<String, String>>> = Lazy::new(|| RwLock::new(HashMap::new()));
+
     pub static PARTITION_ALLOWED_VALUES_CACHE: Lazy<RwLock<HashSet<String>>> = Lazy::new(|| RwLock::new(HashSet::new()));
 }
 
@@ -140,17 +141,6 @@ impl Ingest {
             }
         });
 
-
-        // optional: enforce allowed partition values
-        let allowed_values = Config::get_partition_allowed_values();
-
-        PARTITION_ALLOWED_VALUES_CACHE.with(|cache| {
-            cache.write().unwrap().extend(allowed_values.split(",").map(|v| {
-                Helpers::clean_field_name(v.to_string())
-            }).collect::<HashSet<String>>());
-        });
-
-        
         // Schema hashes
         let mut schema_hashes = DashMap::new();
 
@@ -295,7 +285,18 @@ impl Ingest {
         handle: runtime::Handle,
         shared_output: Arc<TimedRwLock<Box<dyn DataOutputPlugin + Send + Sync>>>,
     ) {
-        
+
+        // optional: enforce allowed partition values
+        // This is thread local, a micro-optimization would be to move this to a global variable since it's not going to change and therefore no locking is required
+        let allowed_values = Config::get_partition_allowed_values();
+
+        PARTITION_ALLOWED_VALUES_CACHE.with(|cache| {
+            cache.write().unwrap().extend(allowed_values.split(",").map(|v| {
+                Helpers::clean_field_name(v.to_string())
+            }).collect::<HashSet<String>>());
+        });
+
+
         let default_schema_hash = format!("{:?}", md5::compute(Helpers::random_str(10)));
         
         let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.or(Some("no".to_string())).unwrap());
