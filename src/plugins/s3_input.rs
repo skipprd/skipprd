@@ -34,7 +34,7 @@ use crate::plugins::DataOutputPlugin;
 
 // in data_dir
 const CONTINUATION_TOKEN_FILE: Lazy<String> = Lazy::new(|| {
-    format!("{}/s3_continuation_token", Config::get_data_dir())
+    format!("{}/s3_input_continuation_token", Config::get_data_dir())
 });
 
 #[derive(Deserialize, Debug, Clone)]
@@ -64,7 +64,7 @@ pub struct DataSourceS3Plugin {
     ingest: Ingest,
     config: DataSourceS3PluginConfig,
     temp_dir: String,
-    continuation_tokens: VecDeque<String>,
+    continuation_tokens: String,
 }
 
 impl DataSourceS3Plugin {
@@ -152,7 +152,11 @@ impl DataSourceS3Plugin {
 
         let max_list_objects = 1000;
 
-        let mut continuation_token: Option<String> = self.continuation_tokens.front().cloned();
+        let mut continuation_token: Option<String> = if self.continuation_tokens.is_empty() {
+            None
+        } else {
+            Some(self.continuation_tokens.clone())
+        };
 
         let mut list_obj_req = self
             .s3_client
@@ -312,10 +316,15 @@ impl DataSourceS3Plugin {
                             // If we've skipped all objects in the list request, we can save the continuation token
                             if continuation_token.is_some() {
 
-                                self.continuation_tokens.clear();
                                 // println!("Saving continuation token: {}", &continuation_token.clone().unwrap());
 
-                                self.continuation_tokens.push_back(continuation_token.unwrap().clone());
+                                // self.continuation_tokens.push_back(continuation_token.unwrap().clone());
+                                self.continuation_tokens = if continuation_token.is_some() {
+                                    continuation_token.clone().unwrap()
+                                } else {
+                                    "".to_string()
+                                };
+                                
                                 Self::save_continuation_token(&Some(self.continuation_tokens.clone())).unwrap();
                             }
 
@@ -547,7 +556,7 @@ impl DataSourceS3Plugin {
         self.ingest.ingest_file(&Arc::new(batch), &offsets_clone, shared_output_clone);
     }
 
-    fn save_continuation_token(token: &Option<VecDeque<String>>) -> io::Result<()> {
+    fn save_continuation_token(token: &Option<String>) -> io::Result<()> {
         match token {
             Some(t) => {
                 let mut file = File::create(CONTINUATION_TOKEN_FILE.to_string())?;
@@ -559,13 +568,13 @@ impl DataSourceS3Plugin {
         }
     }
 
-    fn read_continuation_token() -> io::Result<VecDeque<String>> {
+    fn read_continuation_token() -> io::Result<String> {
         match OpenOptions::new().read(true).write(true).create(true).open(CONTINUATION_TOKEN_FILE.to_string()) {
             Ok(mut file) => {
                 let mut buf = String::new();
                 file.read_to_string(&mut buf)?;
                 println!("Found previous S3 List continuation tokens: {}", buf);
-                let token: VecDeque<String> = serde_json::from_str(&buf).unwrap_or(VecDeque::new());
+                let token: String = serde_json::from_str(&buf).unwrap_or_default();
                 Ok(token)
             },
             Err(_) => Err(io::Error::new(io::ErrorKind::NotFound, "No token found")),
