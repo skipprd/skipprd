@@ -162,6 +162,18 @@ impl Offsets {
     // periodically to save space.
     fn vacuum() -> Result<u64, OffsetsError> {
 
+        let db_path = format!("{}/{}", Config::get_data_dir(), SLED_NAME);
+        // Ensure database isn't already open before we start operating on its file system
+        let db = match sled::Config::default()
+            .path(&db_path)
+            .mode(Mode::LowSpace)// open in low space mode to encourage GC
+            .open() {
+            Ok(db) => {db}
+            Err(_) => {
+                return Err(OffsetsError::AlreadyOpenError(db_path));
+            }
+        };
+
         // rollback any previous vacuum that was interrupted
         match Self::rollback_vacuum() {
             Ok(true) => {
@@ -175,7 +187,6 @@ impl Offsets {
         }
 
         // Rename database file to a temporary file
-        let db_path = format!("{}/{}", Config::get_data_dir(), SLED_NAME);
         let temp_db_path = format!("{}/{}.tmp", Config::get_data_dir(), SLED_NAME);
 
         if std::fs::metadata(&db_path).is_err() {
@@ -198,15 +209,7 @@ impl Offsets {
         println!("Vacuuming offsets database of size: {}", Helpers::human_readable_size(old_db.size_on_disk().unwrap()));
 
         // write all keys with values to a new database
-        let db = match sled::Config::default()
-            .path(&db_path)
-            .mode(Mode::LowSpace)
-            .open() {
-            Ok(db) => {db}
-            Err(err) => {
-                return Err(OffsetsError::AlreadyOpenError(db_path));
-            }
-        };
+
         let tree = db.open_tree("offsets").expect("Could not open offset tree");
 
         let key_count = old_tree.len();
@@ -269,7 +272,7 @@ impl Offsets {
         drop(old_db);
 
         std::fs::remove_dir_all(&temp_db_path).unwrap();
-        
+
         Ok(new_size)
     }
 
@@ -281,7 +284,7 @@ impl Offsets {
         if std::fs::metadata(&temp_db_path).is_ok() {
             match std::fs::remove_dir_all(&db_path) {
                 Ok(_) => {},
-                Err(err) => {}
+                Err(_) => {}
             }
             match std::fs::rename(&temp_db_path, &db_path) {
                 Ok(_) => {},
