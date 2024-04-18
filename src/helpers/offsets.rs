@@ -166,7 +166,7 @@ impl Offsets {
         // Ensure database isn't already open before we start operating on its file system
         let db = match sled::Config::default()
             .path(&db_path)
-            .mode(Mode::LowSpace)// open in low space mode to encourage GC
+            .mode(Mode::LowSpace)
             .open() {
             Ok(db) => {db}
             Err(_) => {
@@ -186,6 +186,8 @@ impl Offsets {
             }
         }
 
+        drop(db);
+        
         // Rename database file to a temporary file
         let temp_db_path = format!("{}/{}.tmp", Config::get_data_dir(), SLED_NAME);
 
@@ -209,7 +211,15 @@ impl Offsets {
         println!("Vacuuming offsets database of size: {}", Helpers::human_readable_size(old_db.size_on_disk().unwrap()));
 
         // write all keys with values to a new database
-
+        let db = match sled::Config::default()
+            .path(&db_path)
+            .mode(Mode::LowSpace)// open in low space mode to encourage GC
+            .open() {
+            Ok(db) => {db}
+            Err(_) => {
+                return Err(OffsetsError::AlreadyOpenError(db_path));
+            }
+        };
         let tree = db.open_tree("offsets").expect("Could not open offset tree");
 
         let key_count = old_tree.len();
