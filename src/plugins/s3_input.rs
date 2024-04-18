@@ -64,7 +64,7 @@ pub struct DataSourceS3Plugin {
     ingest: Ingest,
     config: DataSourceS3PluginConfig,
     temp_dir: String,
-    continuation_tokens: String,
+    continuation_token: Option<String>,
 }
 
 impl DataSourceS3Plugin {
@@ -99,7 +99,7 @@ impl DataSourceS3Plugin {
             ingest: Ingest::new(),
             config,
             temp_dir: temp_dir.to_string(),
-            continuation_tokens
+            continuation_token: continuation_tokens
         }
     }
 
@@ -152,12 +152,6 @@ impl DataSourceS3Plugin {
 
         let max_list_objects = 1000;
 
-        let mut continuation_token: Option<String> = if self.continuation_tokens.is_empty() {
-            None
-        } else {
-            Some(self.continuation_tokens.clone())
-        };
-
         let mut list_obj_req = self
             .s3_client
             .list_objects_v2()
@@ -166,7 +160,7 @@ impl DataSourceS3Plugin {
             .max_keys(max_list_objects);
 
 
-        if let Some(token) = &continuation_token {
+        if let Some(token) = &self.continuation_token {
             // println!("Continuing from token: {:?}", token);
             list_obj_req = list_obj_req.set_continuation_token(Some(token.clone()));
         }
@@ -186,53 +180,7 @@ impl DataSourceS3Plugin {
                 Ok(output) => {
 
                     let objects = match output.contents() {
-                        Some(objects) => {
-
-                            // println!("Current continuation token: {:?}", continuation_token.clone());
-
-                            // If current continuation token has been previously saved, it means we've skipped
-                            // this page before. So we can delete the offsets for the objects in the Sled offsets DB
-                            // if continuation_token.is_some() &&
-                            //     self.continuation_tokens.contains(&continuation_token.clone().unwrap()) {
-                            //
-                            //     println!("Rolling up offsets database, will vacuum to recover for disk space");
-                            //
-                            //     let mut count = 0;
-                            //
-                            //     for object in objects {
-                            //         let offset_key = OffsetKey {
-                            //             namespace: s3_bucket.clone(),
-                            //             partition: object.key().unwrap().to_string(),
-                            //         };
-                            //         match offsets_clone.remove(&offset_key) {
-                            //             Ok(old_val) => {
-                            //                 if old_val.is_some() {
-                            //                     count += 1;
-                            //                 }
-                            //             },
-                            //             Err(err) => {
-                            //                 println!("Failed to rollup offset database, Error: {:?}", err);
-                            //                 return;
-                            //             }
-                            //         }
-                            //     }
-                            //
-                            //     sleep(1);
-                            //     // Not, sled doesn't delete the keys, just nulls the values.
-                            //     // So we vacuum the db on startup
-                            //     println!("Rolled up {} offsets", count);
-                            //     offsets_clone.flush().unwrap();
-                            //
-                            //     // remove the token. @todo - should be able to pop front?
-                            //     self.continuation_tokens.iter().position(|x| x == &continuation_token.clone().unwrap()).map(|i| {
-                            //         self.continuation_tokens.remove(i);
-                            //     });
-                            //
-                            //     continue;
-                            // }
-
-                            objects
-                        },
+                        Some(objects) => objects,
                         None => {
                             if empty_objects >= max_empty_objects {
                                 println!("No more objects found in S3, skipping Bucket: {} Prefix: {}", s3_bucket, s3_prefix);
@@ -313,19 +261,12 @@ impl DataSourceS3Plugin {
 
                         if skipped_objects >= max_list_objects {
 
-                            // If we've skipped all objects in the list request, and theres another page of data
-                            // Then we can save the continuation token
-                            if continuation_token.is_some() {
+                            // If we've skipped all objects in the list request then we can save the continuation token
+                            if self.continuation_token.is_some() {
 
                                 // println!("Saving continuation token: {}", &continuation_token.clone().unwrap());
 
-                                self.continuation_tokens = if continuation_token.is_some() {
-                                    continuation_token.clone().unwrap()
-                                } else {
-                                    "".to_string()
-                                };
-
-                                Self::save_continuation_token(&Some(self.continuation_tokens.clone())).unwrap();
+                                Self::save_continuation_token(&self.continuation_token).unwrap();
 
                                 // Do rollup of offsets
                                 let mut count = 0;
@@ -366,11 +307,11 @@ impl DataSourceS3Plugin {
 
                     if let Some(token) = &output.next_continuation_token {
 
-                        continuation_token = Some(token.to_string().clone());
+                        self.continuation_token = Some(token.to_string().clone());
 
                         // println!("Continuation token: {:?}", continuation_token.clone());
 
-                        list_obj_req = list_obj_req.set_continuation_token(Some(token.to_string().clone()));
+                        list_obj_req = list_obj_req.set_continuation_token(self.continuation_token.clone());
 
 
                     } else {
@@ -567,14 +508,18 @@ impl DataSourceS3Plugin {
         }
     }
 
-    fn read_continuation_token() -> io::Result<String> {
+    fn read_continuation_token() -> io::Result<Option<String>> {
         match OpenOptions::new().read(true).write(true).create(true).open(CONTINUATION_TOKEN_FILE.to_string()) {
             Ok(mut file) => {
                 let mut buf = String::new();
                 file.read_to_string(&mut buf)?;
                 println!("Found previous S3 List continuation tokens: {}", buf);
                 let token: String = serde_json::from_str(&buf).unwrap_or_default();
-                Ok(token)
+                if token.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(token))
+                }
             },
             Err(_) => Err(io::Error::new(io::ErrorKind::NotFound, "No token found")),
         }
