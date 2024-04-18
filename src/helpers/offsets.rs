@@ -279,8 +279,16 @@ impl Offsets {
         let temp_db_path = format!("{}/{}.tmp", Config::get_data_dir(), SLED_NAME);
 
         if std::fs::metadata(&temp_db_path).is_ok() {
-            std::fs::remove_dir_all( & db_path).unwrap();
-            std::fs::rename(& temp_db_path, & db_path).unwrap();
+            match std::fs::remove_dir_all(&db_path) {
+                Ok(_) => {},
+                Err(err) => {}
+            }
+            match std::fs::rename(&temp_db_path, &db_path) {
+                Ok(_) => {},
+                Err(err) => {
+                    return Err(VacuumError(sled::Error::ReportableBug(format!("Failed renaming offsets db, Error: {:?}", err))));
+                }
+            }
             return Ok(true);
         }
         
