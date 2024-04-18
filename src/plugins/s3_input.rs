@@ -313,19 +313,46 @@ impl DataSourceS3Plugin {
 
                         if skipped_objects >= max_list_objects {
 
-                            // If we've skipped all objects in the list request, we can save the continuation token
+                            // If we've skipped all objects in the list request, and theres another page of data
+                            // Then we can save the continuation token
                             if continuation_token.is_some() {
 
                                 // println!("Saving continuation token: {}", &continuation_token.clone().unwrap());
 
-                                // self.continuation_tokens.push_back(continuation_token.unwrap().clone());
                                 self.continuation_tokens = if continuation_token.is_some() {
                                     continuation_token.clone().unwrap()
                                 } else {
                                     "".to_string()
                                 };
-                                
+
                                 Self::save_continuation_token(&Some(self.continuation_tokens.clone())).unwrap();
+
+                                // Do rollup of offsets
+                                let mut count = 0;
+
+                                for object in objects {
+                                    let offset_key = OffsetKey {
+                                        namespace: s3_bucket.clone(),
+                                        partition: object.key().unwrap().to_string(),
+                                    };
+                                    match offsets_clone.remove(&offset_key) {
+                                        Ok(old_val) => {
+                                            if old_val.is_some() {
+                                                count += 1;
+                                            }
+                                        },
+                                        Err(err) => {
+                                            println!("Failed to rollup offset database, Error: {:?}", err);
+                                            return;
+                                        }
+                                    }
+                                }
+
+                                sleep(1);
+                                // Not, sled doesn't delete the keys, just nulls the values.
+                                // So we may need to vacuum the db on startup. A shot sleep gives as chace for sled GC to run
+                                // println!("Rolled up {} offsets", count);
+                                offsets_clone.flush().unwrap();
                             }
 
                             // rollup the offsets database
@@ -333,34 +360,6 @@ impl DataSourceS3Plugin {
                                 println!("Rolling up offsets database to recover disk space");
                                 log_rollup = false;
                             }
-
-                            let mut count = 0;
-
-                            for object in objects {
-                                let offset_key = OffsetKey {
-                                    namespace: s3_bucket.clone(),
-                                    partition: object.key().unwrap().to_string(),
-                                };
-                                match offsets_clone.remove(&offset_key) {
-                                    Ok(old_val) => {
-                                        if old_val.is_some() {
-                                            count += 1;
-                                        }
-                                    },
-                                    Err(err) => {
-                                        println!("Failed to rollup offset database, Error: {:?}", err);
-                                        return;
-                                    }
-                                }
-                            }
-
-                            sleep(1);
-                            // Not, sled doesn't delete the keys, just nulls the values.
-                            // So we may need to vacuum the db on startup. A shot sleep gives as chace for sled GC to run
-                            // println!("Rolled up {} offsets", count);
-                            offsets_clone.flush().unwrap();
-
-                            // skipped_objects = 0;
 
                         }
                     }
