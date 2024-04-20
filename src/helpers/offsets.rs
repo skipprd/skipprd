@@ -235,11 +235,12 @@ impl Offsets {
             let key = kv.unwrap().0;
             let op = match db.get(&key) {
                 Ok(val) => match val {
-                    Some(val) => Ok(Some(val)),
-                        // match tree.insert(&key, &val) {
-                        //     Ok(val) => Ok(val),
-                        //     Err(err) => Err(sled::Error::ReportableBug(format!("Failed inserting key into new tree, Error: {:?}", err)))
-                        // },
+                    Some(val) => 
+                        // Ok(Some(val)),
+                        match tree.insert(&key, &val) {
+                            Ok(val) => Ok(val),
+                            Err(err) => Err(sled::Error::ReportableBug(format!("Failed inserting key into new tree, Error: {:?}", err)))
+                        },
                     None => {
                         // println!("Removing key: {:?}", key);
                         count += 1;
