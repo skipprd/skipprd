@@ -262,7 +262,9 @@ impl DataSourceS3Plugin {
                         if skipped_objects >= max_list_objects {
 
                             // If we've skipped all objects in the list request then we can save the continuation token
-                            if self.continuation_token.is_some() {
+                            if self.continuation_token.is_some() 
+                            && output.next_continuation_token.is_some() // If there is a next token, we can save the current one. 
+                            {
 
                                 // println!("Saving continuation token: {}", &continuation_token.clone().unwrap());
 
