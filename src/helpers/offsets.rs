@@ -79,13 +79,13 @@ pub enum OffsetsError {
 impl Offsets {
     pub fn init() -> Result<Offsets, OffsetsError> {
 
-        // match Self::vacuum() {
-        //     Ok(size) => {}
-        //     Err(err) => {
-        //         println!("Failed vacuuming offsets database, Error: {:?}", err);
-        //         unsafe { exit(1); }
-        //     }
-        // }
+        match Self::vacuum() {
+            Ok(size) => {}
+            Err(err) => {
+                println!("Failed vacuuming offsets database, Error: {:?}", err);
+                unsafe { exit(1); }
+            }
+        }
 
         let db_path = format!("{}/{}", Config::get_data_dir(), SLED_NAME);
         let db = match sled::open(&db_path) { // open in high-throughput mode
@@ -163,52 +163,52 @@ impl Offsets {
     fn vacuum() -> Result<u64, OffsetsError> {
 
         let db_path = format!("{}/{}", Config::get_data_dir(), SLED_NAME);
-        // Ensure database isn't already open before we start operating on its file system
-        let db = match sled::Config::default()
-            .path(&db_path)
-            .mode(Mode::LowSpace)
-            .open() {
-            Ok(db) => {db}
-            Err(_) => {
-                return Err(OffsetsError::AlreadyOpenError(db_path));
-            }
-        };
+        // // Ensure database isn't already open before we start operating 
+        // let db = match sled::Config::default()
+        //     .path(&db_path)
+        //     .mode(Mode::LowSpace)// open in low space mode to encourage GC
+        //     .open() {
+        //     Ok(db) => {db}
+        //     Err(_) => {
+        //         return Err(OffsetsError::AlreadyOpenError(db_path));
+        //     }
+        // };
 
-        // rollback any previous vacuum that was interrupted
-        match Self::rollback_vacuum() {
-            Ok(true) => {
-                println!("Rolled back previous interrupted offsets db vacuum");
-            },
-            Ok(false) => {},
-            Err(err) => {
-                println!("Failed rolling back previous interrupted offsets db vacuum, Error: {:?}", err);
-                unsafe { exit(1) }
-            }
-        }
+        // // rollback any previous vacuum that was interrupted
+        // match Self::rollback_vacuum() {
+        //     Ok(true) => {
+        //         println!("Rolled back previous interrupted offsets db vacuum");
+        //     },
+        //     Ok(false) => {},
+        //     Err(err) => {
+        //         println!("Failed rolling back previous interrupted offsets db vacuum, Error: {:?}", err);
+        //         unsafe { exit(1) }
+        //     }
+        // }
 
-        drop(db);
+        // drop(db);
         
         // Rename database file to a temporary file
-        let temp_db_path = format!("{}/{}.tmp", Config::get_data_dir(), SLED_NAME);
-
-        if std::fs::metadata(&db_path).is_err() {
-            return Ok(0);
-        }
-        std::fs::rename(&db_path, &temp_db_path).unwrap();
-
-        // open old db
-        let old_db = match sled::Config::default()
-            .path(&temp_db_path)
-            .mode(Mode::LowSpace)
-            .open() {
-            Ok(db) => {db}
-            Err(err) => {
-                return Err(OffsetsError::AlreadyOpenError(temp_db_path));
-            }
-        };
-        let old_tree = old_db.open_tree("offsets").expect("Could not open offset tree");
-
-        println!("Vacuuming offsets database of size: {}", Helpers::human_readable_size(old_db.size_on_disk().unwrap()));
+        // let temp_db_path = format!("{}/{}.tmp", Config::get_data_dir(), SLED_NAME);
+        // 
+        // if std::fs::metadata(&db_path).is_err() {
+        //     return Ok(0);
+        // }
+        // std::fs::rename(&db_path, &temp_db_path).unwrap();
+        // 
+        // // open old db
+        // let old_db = match sled::Config::default()
+        //     .path(&temp_db_path)
+        //     .mode(Mode::LowSpace)
+        //     .open() {
+        //     Ok(db) => {db}
+        //     Err(err) => {
+        //         return Err(OffsetsError::AlreadyOpenError(temp_db_path));
+        //     }
+        // };
+        // let old_tree = old_db.open_tree("offsets").expect("Could not open offset tree");
+        // 
+        // println!("Vacuuming offsets database of size: {}", Helpers::human_readable_size(old_db.size_on_disk().unwrap()));
 
         // write all keys with values to a new database
         let db = match sled::Config::default()
@@ -222,7 +222,8 @@ impl Offsets {
         };
         let tree = db.open_tree("offsets").expect("Could not open offset tree");
 
-        let key_count = old_tree.len();
+        println!("Vacuuming offsets database of size: {}", Helpers::human_readable_size(db.size_on_disk().unwrap()));
+        let key_count = db.len();
 
         let mut i = 0;
         let mut count = 0;
@@ -230,9 +231,9 @@ impl Offsets {
         let mut pause_modus = key_count / 60; // 60 sec total pause for sled gc (plus marginal amount of insert time)
         let pause_modus = pause_modus.max(1000);
         
-        for kv in old_tree.iter() {
+        for kv in db.iter() {
             let key = kv.unwrap().0;
-            let op = match old_tree.get(&key) {
+            let op = match db.get(&key) {
                 Ok(val) => match val {
                     Some(val) => match tree.insert(&key, &val) {
                         Ok(val) => Ok(val),
@@ -261,10 +262,10 @@ impl Offsets {
                 // rollback
                 drop(tree);
                 drop(db);
-                drop(old_tree);
-                drop(old_db);
-                std::fs::remove_dir_all(&db_path).unwrap();
-                std::fs::rename(&temp_db_path, &db_path).unwrap();
+                // drop(old_tree);
+                // drop(old_db);
+                // std::fs::remove_dir_all(&db_path).unwrap();
+                // std::fs::rename(&temp_db_path, &db_path).unwrap();
 
                 return Err(VacuumError( err));
             }
@@ -276,12 +277,12 @@ impl Offsets {
         });
 
         // delete old file
-        drop(tree);
-        drop(db);
-        drop(old_tree);
-        drop(old_db);
+        // drop(tree);
+        // drop(db);
+        // drop(old_tree);
+        // drop(old_db);
 
-        std::fs::remove_dir_all(&temp_db_path).unwrap();
+        // std::fs::remove_dir_all(&temp_db_path).unwrap();
 
         Ok(new_size)
     }

@@ -289,7 +289,7 @@ impl DataSourceS3Plugin {
                                     }
                                 }
 
-                                sleep(1);
+                                // sleep(1);
                                 // Not, sled doesn't delete the keys, just nulls the values.
                                 // So we may need to vacuum the db on startup. A shot sleep gives as chace for sled GC to run
                                 // println!("Rolled up {} offsets", count);
