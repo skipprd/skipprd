@@ -921,6 +921,12 @@ async fn sync() {
 
     }
 
+    {
+        let mut counter_lock = METRICS.write();
+        
+        println!("Ingested Total: {}", counter_lock.messages_total);
+    }
+
     match Metrics::send_metrics(Some(0)).await {
         Ok(_g) => {}
         Err(_err) => {}

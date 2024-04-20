@@ -268,7 +268,7 @@ impl DataSourceS3Plugin {
 
                                 // println!("Saving continuation token: {}", &continuation_token.clone().unwrap());
 
-                                Self::save_continuation_token(&self.continuation_token).unwrap();
+                                Self::save_continuation_token(&output.next_continuation_token).unwrap();
 
                                 // Do rollup of offsets
                                 let mut count = 0;
