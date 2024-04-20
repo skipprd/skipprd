@@ -22,12 +22,22 @@ runs:
         
         ls -la ./
         
+        echo "Running Skippr Discover\n"
         AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-${{ inputs.architecture_name }}/skippr discover --pipeline offsets_db_rollup
         
+        echo "Running Skippr, Run: 1\n"
         AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-${{ inputs.architecture_name }}/skippr sync
         
+        echo "Running Skippr, Run: 2\n"
         AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-${{ inputs.architecture_name }}/skippr sync
         
+        echo "Running Skippr, Run: 3\n"
+        AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-${{ inputs.architecture_name }}/skippr sync
+        
+        echo "Running Skippr, Run: 4\n"
+        AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-${{ inputs.architecture_name }}/skippr sync
+
+        echo "Running Skippr, Run: 4\n"
         AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-${{ inputs.architecture_name }}/skippr sync
 
 
