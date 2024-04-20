@@ -202,7 +202,7 @@ impl Ingest {
                 Mode::Sync(_) => {},
                 _ => {
 
-                    let max_records = 210000;
+                    let max_records = 1000;
 
                     let mut pipeline_metadata= METADATA.read().clone();
 

@@ -228,18 +228,20 @@ impl Offsets {
         let mut i = 0;
         let mut count = 0;
         
-        let mut pause_modus = key_count / 60; // 60 sec total pause for sled gc (plus marginal amount of insert time)
+        let mut pause_modus = key_count / 60; // 60 sec total pause for sled gc (plus insert time)
         let pause_modus = pause_modus.max(1000);
         
         for kv in db.iter() {
             let key = kv.unwrap().0;
             let op = match db.get(&key) {
                 Ok(val) => match val {
-                    Some(val) => match tree.insert(&key, &val) {
-                        Ok(val) => Ok(val),
-                        Err(err) => Err(sled::Error::ReportableBug(format!("Failed inserting key into new tree, Error: {:?}", err)))
-                    },
+                    Some(val) => Ok(Some(val)),
+                        // match tree.insert(&key, &val) {
+                        //     Ok(val) => Ok(val),
+                        //     Err(err) => Err(sled::Error::ReportableBug(format!("Failed inserting key into new tree, Error: {:?}", err)))
+                        // },
                     None => {
+                        // println!("Removing key: {:?}", key);
                         count += 1;
                         Ok(None)
                     }
