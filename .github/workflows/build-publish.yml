@@ -118,20 +118,20 @@ jobs:
 ##          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
 
 
-  macos_arm64:
-#    needs: smoke_test
-    name: cargo build (mac arm64)
-    runs-on:
-      - macOS
-      - self-hosted
-      - ARM64 #MacBook-Pro-3
-    steps:
-      - uses: actions/checkout@v3
-      - name: Build macOS arm64 release
-        uses: ./.github/actions/rust-build-release
-        with:
-          rust-version: stable
-          architecture_name: macos_arm64
+#  macos_arm64:
+##    needs: smoke_test
+#    name: cargo build (mac arm64)
+#    runs-on:
+#      - macOS
+#      - self-hosted
+#      - ARM64 #MacBook-Pro-3
+#    steps:
+#      - uses: actions/checkout@v3
+#      - name: Build macOS arm64 release
+#        uses: ./.github/actions/rust-build-release
+#        with:
+#          rust-version: stable
+#          architecture_name: macos_arm64
 
 #  macos_arm64_test:
 #    needs:
@@ -284,7 +284,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test')
     needs:
       - linux_x86_test
-      - macos_arm64
+#      - macos_arm64
 #      - macos_x86
 #      - macos_arm64_test
     runs-on: ubuntu-latest
@@ -299,7 +299,7 @@ jobs:
         run: |
           ls -la .
           tar -czvf skippr-linux_x86.tar.gz skippr-linux_x86/
-          tar -czvf skippr-macos_arm64.tar.gz skippr-macos_arm64/
+#          tar -czvf skippr-macos_arm64.tar.gz skippr-macos_arm64/
 #          tar -czvf skippr-macos_x86.tar.gz skippr-macos_x86/
       - name: Release builds to GitHub
         uses: softprops/action-gh-release@v1
@@ -307,7 +307,7 @@ jobs:
           files: |
             install.sh
             ./skippr-linux_x86.tar.gz
-            ./skippr-macos_arm64.tar.gz
+#            ./skippr-macos_arm64.tar.gz
 #            ./skippr-macos_x86.tar.gz
           tag_name: ${{ github.ref_name }}
           body: ${{ github.event.head_commit.message }}
