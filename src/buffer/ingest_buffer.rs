@@ -124,17 +124,6 @@ impl Buffers {
             // println!("Writing {} rows to WAL {} {} {} {}", ingest_buffer_batch.records.len(), namespace, partition, time.unwrap_or(0), shard);
 
             let partition_entry = partitions.entry((namespace.clone(), partition.clone(), time.clone(), shard.clone())).or_insert_with(|| Vec::new());
-
-            let mut wal_file = WalFile::new(
-                namespace,
-                partition,
-                *time,
-                shard,
-                ingest_buffer_batch.offsets.clone(),
-            ).unwrap();
-
-
-            // println!("WAL File {} offset: {:?}", wal_file.path.to_str().unwrap(), ingest_buffer_batch.offset);
             
             let arrow_schema = ingest_buffer_batch.schema.clone();
 
@@ -162,6 +151,21 @@ impl Buffers {
                 }
             }
             
+            if record_batches.is_empty() {
+                continue;
+            }
+
+            let mut wal_file = WalFile::new(
+                namespace,
+                partition,
+                *time,
+                shard,
+                ingest_buffer_batch.offsets.clone(),
+            ).unwrap();
+
+
+            // println!("WAL File {} offset: {:?}", wal_file.path.to_str().unwrap(), ingest_buffer_batch.offset);
+            
             let stat = wal_file.write_to_stream(&record_batches)?;
 
             bytes += stat.0;
@@ -172,18 +176,6 @@ impl Buffers {
             wal_file.flush()?;
 
             wal_file.finish()?;
-            
-            // println!("Committing {} offsets", ingest_buffer_batch.offsets.len());
-
-            // ingest_buffer_batch.offsets.iter().for_each(|(offset, position)| {
-            //     let offset_key = OffsetKey {
-            //         namespace: offset.namespace.clone(),
-            //         partition: offset.partition.clone(),
-            //     };
-            // 
-            //     offsets_db.insert(&offset_key, OffsetTypes::Position, *position);
-            //     offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
-            // });
 
             partition_entry.push(wal_file);
 
@@ -413,7 +405,7 @@ impl WalPartitionIndex {
 
         for (namespace, partition_key) in namespace_partitions {
             let human_bytes = Helpers::human_readable_size(namespace_partition_bytes.iter().filter(|(k, _v)| k.0 == namespace).map(|(_k, v)| v).sum::<u64>());
-            println!("Namespace {} contains {} partitions and {} files of {} bytes", namespace, partition_key.len(), namespace_partition_files.iter().filter(|(k, _v)| k.0 == namespace).map(|(_k, v)| v).sum::<u64>(), human_bytes);
+            println!("Namespace {} contains {} partitions and {} files of {}", namespace, partition_key.len(), namespace_partition_files.iter().filter(|(k, _v)| k.0 == namespace).map(|(_k, v)| v).sum::<u64>(), human_bytes);
 
             wal_index_metrics.metrics.push(WalIndexMetric {
                 namespace: namespace.clone(),
