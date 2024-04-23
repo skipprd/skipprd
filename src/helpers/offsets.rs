@@ -243,6 +243,7 @@ impl Offsets {
                         },
                     None => {
                         // println!("Removing key: {:?}", key);
+                        tree.remove(&key).unwrap_or_default();
                         count += 1;
                         Ok(None)
                     }
@@ -274,10 +275,14 @@ impl Offsets {
             }
         }
 
+        unsafe { sleep(5); }
+        
         let new_size = db.size_on_disk().unwrap_or_else(|err| {
             println!("Failed getting size of new offsets DB, Error: {:?}", err);
             0
         });
+
+        println!("Vacuumed offsets database, size: {}", Helpers::human_readable_size(new_size));
 
         // delete old file
         // drop(tree);
