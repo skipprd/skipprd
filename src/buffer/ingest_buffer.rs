@@ -584,11 +584,19 @@ impl WalPartition {
         let mut wal_compacted_rows_total = 0;
         let mut wal_compacted_files_total = 0;
        
-        let schema = match self.files.first_mut().unwrap().read_schema_from_stream() {
+        let first_file = match self.files.first_mut() {
+            Some(file) => file,
+            None => {
+                println!("No WAL files to compact for partition: {} {}", self.namespace, self.partition);
+                return;
+            }
+        };
+        
+        let schema = match first_file.read_schema_from_stream() {
             Ok(schema) => schema,
             Err(e) => {
-                let file = self.files.first().unwrap();
-                println!("Failed to read schema from WAL file: {} of bytes: {}, Error {}. Skipping to next WAL partition.", file.path.to_str().unwrap(), file.bytes, e);
+                // let file = first_file;
+                println!("Failed to read schema from WAL file: {} of bytes: {}, Error {}. Skipping to next WAL partition.", first_file.path.to_str().unwrap(), first_file.bytes, e);
                 return;
             }
         };
