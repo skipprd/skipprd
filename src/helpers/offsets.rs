@@ -256,9 +256,17 @@ impl Offsets {
             i += 1;
            
             if i % pause_modus == 0 {
-                println!("Vacuumed {} offsets from db, evaluated {}/{} keys", count, i, key_count);
+                tree.flush().unwrap();
                 // after experimentation, sled does better job of GC with smaller writes. So we'll do it more often with shorter sleep
                 unsafe { sleep(1); }
+
+                let new_size = db.size_on_disk().unwrap_or_else(|err| {
+                    println!("Failed getting size of new offsets DB, Error: {:?}", err);
+                    0
+                });
+
+                println!("Vacuumed {} offsets from db, evaluated {}/{} keys, size {}", count, i, key_count, Helpers::human_readable_size(new_size));
+
                 count = 0;
             }
             
@@ -276,7 +284,7 @@ impl Offsets {
         }
 
         unsafe { sleep(5); }
-        
+
         let new_size = db.size_on_disk().unwrap_or_else(|err| {
             println!("Failed getting size of new offsets DB, Error: {:?}", err);
             0
@@ -285,8 +293,8 @@ impl Offsets {
         println!("Vacuumed offsets database, size: {}", Helpers::human_readable_size(new_size));
 
         // delete old file
-        // drop(tree);
-        // drop(db);
+        drop(tree);
+        drop(db);
         // drop(old_tree);
         // drop(old_db);
 
