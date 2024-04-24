@@ -395,7 +395,7 @@ impl Ingest {
                                 };
 
                                 Self::deadletter(line_str);
-                                // offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, batch_line);
+                                offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Position, batch_line);
 
                                 d += 1;
 
@@ -425,7 +425,7 @@ impl Ingest {
 
 
                     Self::deadletter(line_str);
-                    // offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, batch_line);
+                    offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Position, batch_line);
 
                     d += 1;
 
@@ -434,8 +434,8 @@ impl Ingest {
 
                 if has_offsets.is_none()
                     || current_line_offset.is_none()
-                    // || Some(true) == offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Line, batch_line)
-                    || Some(true) == has_offsets
+                    || (Some(true) == has_offsets
+                        && Some(true) == offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Position, batch_line))
                 {
 
                     i += 1;
@@ -516,7 +516,7 @@ impl Ingest {
                                     };
 
                                     Self::deadletter(line_str);
-                                    // offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, batch_line);
+                                    offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Position, batch_line);
 
                                     d += 1;
 
@@ -581,7 +581,8 @@ impl Ingest {
                                 };
 
                                 Self::deadletter(line_str);
-                                // offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Line, batch_line);
+                                offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Position, batch_line);
+                                
                                 d += 1;
 
                                 continue;
