@@ -335,10 +335,10 @@ impl Metrics {
 
         let data = json!({
             "metrics": {
-                "ingeted_total": metrics.messages_total,
+                "ingested_total": metrics.messages_total,
                 "fixed_total": metrics.ingeted_slow_total,
                 "deadletters_total": metrics.deadletters_total,
-                "ingeted_current": ingested_current,
+                "ingested_current": ingested_current,
                 "fixed_current": fixed_current,
                 "deadletters_current": deadletters_current,
                 "latest_timestamp": metrics.latest_timestamp,
