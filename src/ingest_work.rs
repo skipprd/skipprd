@@ -530,6 +530,8 @@ impl Ingest {
 
                                 if updated_schema.as_str() == "yes" {
 
+                                    println!("Updated schema for namespace: {}", skpr_namespace);
+
                                     updated_schema = "no".to_string();
 
                                     handle.block_on(async {

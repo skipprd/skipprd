@@ -14,7 +14,6 @@ use yaml_rust::YamlLoader;
 use nix::libc::exit;
 
 use std::time::{Duration};
-use aws_config::profile::profile_file::ProfileFileKind::Config;
 use dashmap::DashMap;
 use ini::configparser::ini::Ini;
 use lazy_static::lazy_static;
