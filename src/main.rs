@@ -465,9 +465,7 @@ async fn sync() {
         let mut wal_index = WAL_PARTITION_INDEX.write();
         wal_index.recover(offset_buffer_clone).expect("Failed to recover WAL index");
     }
-
-    Config::sync_schema(&pipeline_metadata.metadata).await;
-
+    
     // let output = DataOutputAwsAthenaPlugin::new("output".to_string()).await;
     let output_plugin_name = Config::get_pipeline_output_plugin_name();
     let output = sync_output_plugin(&output_plugin_name, "output".to_string()).await.unwrap();
