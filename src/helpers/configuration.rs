@@ -14,6 +14,7 @@ use yaml_rust::YamlLoader;
 use nix::libc::exit;
 
 use std::time::{Duration};
+use aws_config::profile::profile_file::ProfileFileKind::Config;
 use dashmap::DashMap;
 use ini::configparser::ini::Ini;
 use lazy_static::lazy_static;
@@ -923,6 +924,8 @@ impl Config {
             let default_auto_approve = Config::getenv("SCHEMA_AUTO_APPROVE", "true");
             let auto_approve = pipeline.auto_approve.as_ref().unwrap_or(&default_auto_approve);
 
+            Config::set_evncache("SCHEMA_AUTO_APPROVE", &auto_approve.clone());
+            
             Config::truth_value(auto_approve)
         }
     }
@@ -936,6 +939,8 @@ impl Config {
             let default_auto_approve = &Config::getenv("RESET_OFFSETS", "false");
             let auto_approve = pipeline.reset_offsets.as_ref().unwrap_or(&default_auto_approve);
 
+            Config::set_evncache("RESET_OFFSETS", &auto_approve.clone());
+            
             Config::truth_value(auto_approve)
         }
     }
@@ -949,6 +954,8 @@ impl Config {
             let default = &Config::getenv("RESET_METADATA", "false");
             let value = pipeline.reset_metadata.as_ref().unwrap_or(&default);
 
+            Config::set_evncache("RESET_METADATA", &value.clone());
+            
             Config::truth_value(value)
         }
     }
