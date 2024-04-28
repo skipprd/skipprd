@@ -8,6 +8,7 @@ use datafusion::sql::sqlparser::dialect::Dialect;
 use datafusion::sql::sqlparser::keywords::Keyword;
 use datafusion::sql::sqlparser::parser::{Parser, ParserError};
 use datafusion::sql::sqlparser::tokenizer::{Token, Tokenizer};
+use icu::properties::sets::print;
 use indexmap::Equivalent;
 use sqlparser::ast::{ArrayElemTypeDef, DataType, Ident};
 use sqlparser::tokenizer::Token::EOF;
@@ -24,6 +25,7 @@ enum SkipprKeyword {
     ENABLE,
     DISABLE,
     PIPELINE,
+    DATABASE,
     DROP,
     RESET,
 }
@@ -34,6 +36,7 @@ impl SkipprKeyword {
         match s.to_uppercase().as_str() {
             "DUMP" => Some(SkipprKeyword::DUMP),
             "LOAD" => Some(SkipprKeyword::LOAD),
+            "DATABASE" => Some(SkipprKeyword::DATABASE),
             "SCHEMA" => Some(SkipprKeyword::SCHEMA),
             "ENABLE" => Some(SkipprKeyword::ENABLE),
             "DISABLE" => Some(SkipprKeyword::DISABLE),
@@ -135,6 +138,12 @@ pub(crate) struct SchemaDropStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DatabaseDropStatement {
+    pub(crate) database: ObjectName,
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PipelineDropStatement {
     pub(crate) pipeline: ObjectName,
 }
@@ -212,6 +221,7 @@ pub enum Statement {
     // Statement(Box<Statement>),
     /// Extension: `SCHEMA DUMP`
     SchemaDump(SchemaDumpStatement),
+    DatabaseDrop(DatabaseDropStatement),
     SchemaDrop(SchemaDropStatement),
     PipelineDrop(PipelineDropStatement),
     PipelineReset(PipelineResetStatement),
@@ -406,6 +416,7 @@ impl<'a> SParser<'a> {
                 },
                 Keyword::ALTER => {
                     self.parser.expect_keyword(Keyword::COLUMN)?;
+                    
                     let column_name = self.parser.parse_object_name()?;
 
                     self.parser.expect_keyword(Keyword::TYPE)?;
@@ -564,7 +575,12 @@ impl<'a> SParser<'a> {
                         
                         self.parser.expect_keyword(Keyword::TO)?;
 
-                        let target = self.parser.parse_literal_string()?;
+                        let target = match self.parser.parse_literal_string() {
+                            Ok(s) => s,
+                            Err(e) => {
+                                return Err(e);
+                            }
+                        };
                         
                         Ok(Statement::SchemaDump(SchemaDumpStatement {
                             // pipeline: SchemaDumpSource::Relation(pipeline),
@@ -652,9 +668,19 @@ impl<'a> SParser<'a> {
                         }))
 
                     }
+                    Some(SkipprKeyword::DATABASE) => {
+
+                        self.parser.next_token(); // DATABASE
+
+                        let database = self.parser.parse_object_name()?;
+                        
+                        Ok(Statement::DatabaseDrop(DatabaseDropStatement {
+                            database
+                        }))
+                    }
                     _ => {
                         Err(ParserError::ParserError("Not implemented".to_string()))
-                    }
+                    },
                 }
             },
             _ => {

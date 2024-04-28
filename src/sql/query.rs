@@ -7,6 +7,7 @@ use crate::cli::{CLI_MODE, Mode};
 use crate::discover::{Metadata, PipelineMetadata};
 use crate::helpers::configuration::{Config, PIPELINE_NAME};
 use crate::METADATA;
+use crate::plugins::athena::{AwsAthena, DataOutputAwsAthenaPlugin};
 use crate::sql::operators::alter_column::alter_column_type;
 use crate::sql::operators::drop_column::alter_column_drop;
 use crate::sql::operators::dump_schema::dump_schema;
@@ -17,6 +18,18 @@ pub async fn query(sql_str: &str) {
     let mut parser = SParser::new(sql_str).unwrap();
 
     match parser.parse_statement() {
+        Ok(Statement::DatabaseDrop(stmt)) => {
+            let db_name = stmt.database.clone();
+
+            match AwsAthena::delete_glue_database(&db_name.to_string()).await {
+                Ok(_) => {
+                    println!("Dropped Database: {}", db_name);
+                },
+                Err(e) => {
+                    println!("Failed to drop database: {}", e);
+                }
+            }
+        }
         Ok(Statement::PipelineDrop(stmt)) => {
 
             PIPELINE_NAME.write().clear();
@@ -284,72 +297,72 @@ pub async fn query(sql_str: &str) {
                 METADATA.write().clone_from(&skippr_metadata);
             }
 
-            Config::set_metadata(&skippr_metadata, true).await;
+            Config::set_metadata(&skippr_metadata, false).await;
 
             println!("Alter schema: {} column: '{}' type to {}", schema, stmt.column_name, stmt.new_type);
         },
-        // Err(e) => {
+        Err(e) => {
+
+            println!("Unknown SQL Dialect. {}", e);
+        },
+        // _ => {
         //
-        //     println!("Unknown SQL Dialect: {}", sql);
-        // },
-        _ => {
-
-            let mut table_name = "".to_string();
-
-            if sql_str.to_lowercase().split("from").collect::<Vec<&str>>().len() > 1 {
-                // println!("Invalid query, must be in the format: SELECT * FROM <table_name>");
-                // process::exit(1);
-
-                table_name = sql_str.to_lowercase().split("from").collect::<Vec<&str>>()[1].split(" ").collect::<Vec<&str>>()[1].trim().replace(";", "");
-
-            }
-            // else {
-            //     table_name = "bike_hire".to_string();
-            // }
-
-
-            PIPELINE_NAME.write().clear();
-            PIPELINE_NAME.write().push_str(&table_name);
-            Config::init().await;
-            let workspace = Config::get_workspace_name();
-
-            let data_dir = Config::get_data_dir();
-            let output_dir = format!("{}/output_buffer", data_dir);
-
-            println!("Querying data dir: {}", output_dir);
-
-            let mut session_config = SessionConfig::new();
-            session_config = session_config.set("datafusion.catalog.information_schema", "true".into());
-            session_config = session_config.set("datafusion.catalog.default_catalog", "skippr".into());
-            session_config = session_config.set("datafusion.execution.collect_statistics", "true".into());
-
-            let ctx = SessionContext::with_config(session_config);
-
-            match ctx.register_parquet(&table_name, &output_dir, ParquetReadOptions::default()).await {
-                Ok(_) => {}
-                Err(e) => {
-                    println!("Can't find data for table: {} in dir: {}. Error: {:?}", table_name, output_dir, e);
-                    process::exit(1);
-                }
-            }
-
-            let df = match ctx.sql(sql_str).await {
-                Ok(df) => df,
-                Err(e) => {
-                    println!("Error: {}", e);
-                    process::exit(1);
-                }
-            };
-
-            match df.show().await {
-                Ok(res) => {
-                    res
-                }
-                Err(e) => {
-                    println!("Error: {}", e);
-                    process::exit(1);
-                }
-            }
-        }
+        //     let mut table_name = "".to_string();
+        //
+        //     if sql_str.to_lowercase().split("from").collect::<Vec<&str>>().len() > 1 {
+        //         // println!("Invalid query, must be in the format: SELECT * FROM <table_name>");
+        //         // process::exit(1);
+        //
+        //         table_name = sql_str.to_lowercase().split("from").collect::<Vec<&str>>()[1].split(" ").collect::<Vec<&str>>()[1].trim().replace(";", "");
+        //
+        //     }
+        //     // else {
+        //     //     table_name = "bike_hire".to_string();
+        //     // }
+        //
+        //
+        //     PIPELINE_NAME.write().clear();
+        //     PIPELINE_NAME.write().push_str(&table_name);
+        //     Config::init().await;
+        //     let workspace = Config::get_workspace_name();
+        //
+        //     let data_dir = Config::get_data_dir();
+        //     let output_dir = format!("{}/output_buffer", data_dir);
+        //
+        //     println!("Querying data dir: {}", output_dir);
+        //
+        //     let mut session_config = SessionConfig::new();
+        //     session_config = session_config.set("datafusion.catalog.information_schema", "true".into());
+        //     session_config = session_config.set("datafusion.catalog.default_catalog", "skippr".into());
+        //     session_config = session_config.set("datafusion.execution.collect_statistics", "true".into());
+        //
+        //     let ctx = SessionContext::with_config(session_config);
+        //
+        //     match ctx.register_parquet(&table_name, &output_dir, ParquetReadOptions::default()).await {
+        //         Ok(_) => {}
+        //         Err(e) => {
+        //             println!("Can't find data for table: {} in dir: {}. Error: {:?}", table_name, output_dir, e);
+        //             process::exit(1);
+        //         }
+        //     }
+        //
+        //     let df = match ctx.sql(sql_str).await {
+        //         Ok(df) => df,
+        //         Err(e) => {
+        //             println!("Error: {}", e);
+        //             process::exit(1);
+        //         }
+        //     };
+        //
+        //     match df.show().await {
+        //         Ok(res) => {
+        //             res
+        //         }
+        //         Err(e) => {
+        //             println!("Error: {}", e);
+        //             process::exit(1);
+        //         }
+        //     }
+        // }
     }
 }

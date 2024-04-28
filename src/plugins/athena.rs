@@ -6,7 +6,7 @@ use crate::helpers::Helpers;
 use crate::{discover, flatten_metadata, METADATA, METRICS};
 use aws_sdk_athena::types::{EncryptionConfiguration, EncryptionOption, ResultConfiguration, ResultConfigurationUpdates, Tag, WorkGroupConfiguration, WorkGroupConfigurationUpdates};
 use aws_sdk_athena::Client as AthenaClient;
-use aws_sdk_glue::types::{Column, DatabaseInput, PartitionIndex, PartitionInput, SerDeInfo, StorageDescriptor, Table, TableInput};
+use aws_sdk_glue::types::{Column, DatabaseInput, PartitionIndex, PartitionInput, PartitionValueList, SerDeInfo, StorageDescriptor, Table, TableInput};
 use aws_sdk_glue::Client as GlueClient;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::{Client as S3Client, Error};
@@ -20,6 +20,7 @@ use std::path::Path;
 use std::sync::Arc;
 use async_trait::async_trait;
 use aws_sdk_glue::operation::get_table::{GetTableError, GetTableOutput};
+use aws_sdk_s3::types::{Delete, Object, ObjectIdentifier};
 use aws_smithy_http::result::SdkError;
 use bytes::Bytes;
 use datafusion::physical_plan::SendableRecordBatchStream;
@@ -389,7 +390,7 @@ impl AwsAthena {
         match AwsAthena::glue_get_database().await {
             Ok(true) => {}
             Ok(false) => {}
-            Err(_err) => match AwsAthena::glue_create_database(namespace).await {
+            Err(_err) => match AwsAthena::glue_create_database().await {
                 Ok(_) => {}
                 Err(err) => {
                     println!("ERROR creating Glue database: {}", err);
@@ -585,7 +586,7 @@ impl AwsAthena {
         }
     }
 
-    pub async fn glue_create_database(_namespace: &str) -> Result<bool, String> {
+    pub async fn glue_create_database() -> Result<bool, String> {
         let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
 
         let database = config.glue_database_name;
@@ -618,6 +619,236 @@ impl AwsAthena {
             Ok(_output) => Ok(true),
             Err(err) => Err(err.into_service_error().to_string()),
         }
+    }
+
+    pub async fn delete_glue_database(database_name: &str) -> Result<bool, String> {
+
+        loop {
+            println!("Are you sure you want to drop the database? To confirm, please type the database name ('{}'). Type 'exit' or ctrl+c to cancel:", database_name);
+
+            let mut input = String::new();
+            io::stdin().read_line(&mut input).unwrap_or_default();
+
+            if input.trim() == database_name {
+                println!("Dropping database '{}'", database_name);
+
+                let mut timeout = 10;
+
+                println!("Waiting {} seconds before dropping database '{}', ctrl+c to cancel", timeout, database_name);
+
+                loop {
+                    if timeout > 0 {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(timeout)).await;
+                        timeout -= 1;
+                    }  else {
+                        break;
+                    }
+                }
+                
+                break;
+
+            } else if input.trim().eq_ignore_ascii_case("exit") {
+                // println!("Drop canceled. Exiting without dropping database.");
+                return Err(format!("Drop canceled. Exiting without dropping database '{}'.", database_name));
+            } else {
+                // println!("Incorrect database name. Please try again, or type 'exit' to cancel.");
+                return Err(format!("Incorrect database name entered: '{}'.", input.trim()));
+                // The loop will continue, prompting the user again
+            }
+        }
+
+        let aws_config = aws_config::from_env().load().await;
+
+        let glue_client = GlueClient::new(&aws_config);
+
+        // cascade delete
+
+        // recursively list tables and their partitions, deleting the partitions in batches of 25 and then the tables in batches of 25
+        let output = match glue_client
+            .get_tables()
+            .database_name(database_name)
+            .send()
+            .await
+        {
+            Ok(output) => output,
+            Err(err) => return Err(err.into_service_error().to_string()),
+        };
+
+        if let Some(tables) = output.table_list {
+            for table in tables {
+                let table_name = table.name.unwrap();
+
+                let mut next_token = "".to_string();
+
+                // delete partitions in batches of 25, recursing through pages via next_token
+                while let Ok(partitions) = glue_client
+                    .get_partitions()
+                    .database_name(database_name)
+                    .table_name(&table_name)
+                    .max_results(25)
+                    .next_token(next_token)
+                    .send()
+                    .await
+                {
+                    if let Some(partitions) = partitions.partitions {
+                        println!("Deleting {} partitions", partitions.len());
+
+                        for partition in partitions {
+                            glue_client
+                                .delete_partition()
+                                .database_name(database_name)
+                                .table_name(&table_name)
+                                .set_partition_values(partition.values)
+                                .send()
+                                .await
+                                .unwrap();
+                        }
+                    }
+                    if partitions.next_token.is_none() {
+                        break;
+                    }
+                    next_token = partitions.next_token.unwrap()
+                }
+
+                let mut next_token = "".to_string();
+
+                // Delete table versions
+                while let Ok(table_versions) = glue_client
+                    .get_table_versions()
+                    .database_name(database_name)
+                    .table_name(&table_name)
+                    .max_results(25)
+                    .next_token(next_token)
+                    .send()
+                    .await
+                {
+                    if let Some(table_versions) = table_versions.table_versions {
+                        println!("Deleting {} table versions", table_versions.len());
+
+                        for version in table_versions {
+                            let version_id = version.version_id;
+                            match glue_client
+                                .delete_table_version()
+                                .database_name(database_name)
+                                .table_name(&table_name)
+                                .set_version_id(version_id)
+                                .send()
+                                .await
+                            {
+                                Ok(_output) => {}
+                                Err(err) => return Err(err.into_service_error().to_string()),
+                            }
+                        }
+                    }
+                    if table_versions.next_token.is_none() {
+                        break;
+                    }
+                    next_token = table_versions.next_token.unwrap()
+                }
+
+                // delete the table
+
+                println!("Deleting table {}", table_name);
+                glue_client
+                    .delete_table()
+                    .database_name(database_name)
+                    .name(&table_name)
+                    .send()
+                    .await
+                    .unwrap();
+            }
+        }
+
+        // get database s3 bucket and path
+        let location_uri= glue_client
+            .get_database()
+            .name(database_name)
+            .send()
+            .await
+            .unwrap()
+            .database
+            .unwrap()
+            .location_uri
+            .unwrap();
+
+        let bucket = location_uri.split('/').nth(2).unwrap();
+        let path = location_uri.split('/').skip(3).collect::<Vec<&str>>().join("/");
+
+        match glue_client
+            .delete_database()
+            .name(database_name)
+            .send()
+            .await
+        {
+            Ok(_output) => println!("Deleted database {}", database_name),
+            Err(err) => (),
+        }
+
+        // delete contents from the s3 bucket
+        let s3_client = S3Client::new(&aws_config);
+
+        // let bucket = config.s3_bucket;
+        // let path = config.s3_prefix;
+        // let path = path.trim_matches('/');
+        // let path = std::path::Path::new(&bucket)
+        //     .join(&path)
+        //     .to_str()
+        //     .unwrap()
+        //     .to_string();
+
+        let mut next_token = None;
+
+        println!("Deleting all objects from {}/{}", bucket, path);
+
+        while let Ok(resp) = s3_client
+            .list_objects_v2()
+            .bucket(bucket)
+            .prefix(&path)
+            .max_keys(1000)
+            .set_continuation_token(next_token.clone())
+            .send()
+            .await {
+
+            let mut delete_objects: Vec<ObjectIdentifier> = vec![];
+
+            let objects = match resp.contents() {
+                Some(objects) => objects,
+                None => {
+                    continue;
+                }
+            };
+
+            for obj in objects {
+
+                let obj_id = ObjectIdentifier::builder()
+                    .set_key(obj.key.clone())
+                    .build();
+                delete_objects.push(obj_id);
+            }
+
+            if !delete_objects.is_empty() {
+
+                println!("Deleting {} S3 objects from bucket {}", delete_objects.len(), bucket);
+
+                s3_client
+                    .delete_objects()
+                    .bucket(bucket)
+                    .delete(
+                        Delete::builder()
+                            .set_objects(Some(delete_objects))
+                            .build(),
+                    )
+                    .send()
+                    .await.unwrap();
+            }
+
+            if resp.next_continuation_token.is_none() {
+                break;
+            }
+            next_token = resp.next_continuation_token;
+        }
+
+        Ok(true)
     }
 
     fn get_partition_by_fields(partitions: &mut Vec<Column>) {
