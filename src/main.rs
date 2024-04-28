@@ -362,6 +362,8 @@ async fn discover() {
             .unwrap();
 
         rt.block_on(async {
+            pipeline_metadata.enabled = false;
+            
             Config::set_metadata(&pipeline_metadata, false).await;
         });
 
