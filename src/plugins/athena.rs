@@ -675,6 +675,13 @@ impl AwsAthena {
         };
 
         if let Some(tables) = output.table_list {
+            
+            if tables.is_empty() {
+                println!("No tables found in database '{}'", database_name);
+            }
+            
+            println!("Deleting tables in database '{}'", database_name);
+            
             for table in tables {
                 let table_name = table.name.unwrap();
 
@@ -691,6 +698,12 @@ impl AwsAthena {
                     .await
                 {
                     if let Some(partitions) = partitions.partitions {
+                        
+                        if partitions.is_empty() {
+                            println!("No partitions found for table '{}'", table_name);
+                            break;
+                        }
+                        
                         println!("Deleting {} partitions", partitions.len());
 
                         for partition in partitions {
@@ -723,6 +736,12 @@ impl AwsAthena {
                     .await
                 {
                     if let Some(table_versions) = table_versions.table_versions {
+                        
+                        if table_versions.is_empty() {
+                            println!("No table versions found for table '{}'", table_name);
+                            break;
+                        }
+                        
                         println!("Deleting {} table versions", table_versions.len());
 
                         for version in table_versions {
@@ -747,8 +766,6 @@ impl AwsAthena {
                 }
 
                 // delete the table
-
-                println!("Deleting table {}", table_name);
                 glue_client
                     .delete_table()
                     .database_name(database_name)
@@ -756,6 +773,8 @@ impl AwsAthena {
                     .send()
                     .await
                     .unwrap();
+
+                println!("Deleted table '{}'", table_name);
             }
         }
 
@@ -798,7 +817,7 @@ impl AwsAthena {
 
         let mut next_token = None;
 
-        println!("Deleting all objects from {}/{}", bucket, path);
+        println!("Deleting table data objects from {}/{}", bucket, path);
 
         while let Ok(resp) = s3_client
             .list_objects_v2()
