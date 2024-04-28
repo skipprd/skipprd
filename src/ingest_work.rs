@@ -492,19 +492,28 @@ impl Ingest {
                         },
                         Err(_err) => {
 
-                            // println!("Falling back to slow path due to: {}", err);
+                            // println!("Falling back to slow path due to: {}", _err);
+
+                            // we're not going to update the metadata here, if the message is ingested we'll update the metadata
+                            let mut metadata = METADATA.read().clone();
+
                             let msg = match ingest(
                                 &record,
                                 // we do want to write lock here to prevent simultaneous updates to this namespace
                                 // @todo - would be better to lock on the nested structure allowing other namespaces to conitnue
-                                &mut METADATA.write().metadata.get_mut(&skpr_namespace).unwrap().fields,
+                                // &mut METADATA.write().metadata.get_mut(&skpr_namespace).unwrap().fields,
+                                &mut metadata.metadata.get_mut(&skpr_namespace).unwrap().fields,
                                 &skpr_namespace,
                                 &mut updated_schema,
                                 flatten,
                             ) {
                                 Ok(msg) => msg,
                                 Err(_err) => {
-                                    // println!("Deadlettring - Could not ingest record: {}, Error: {:?}", record, err);
+                                    // println!("Deadlettring - Could not ingest record: {}, Error: {:?}", record, _err);
+
+                                    if d == 0 {
+                                        println!("Deadlettring - Could not ingest record, discovered schema will be ignored: {:?}", _err);
+                                    }
 
                                     // deadletter record
                                     let line_str = match ingest_batch.data.lines().nth(batch_line as usize - 1) {
@@ -529,8 +538,9 @@ impl Ingest {
                             if Config::get_auto_approve() {
 
                                 if updated_schema.as_str() == "yes" {
-
-                                    println!("Updated schema for namespace: {}", skpr_namespace);
+                                    {
+                                        METADATA.write().metadata = metadata.metadata.clone();
+                                    }
 
                                     updated_schema = "no".to_string();
 
@@ -542,6 +552,9 @@ impl Ingest {
                                         }
                                         Config::set_metadata(&metadata, true).await;
                                     });
+
+                                    println!("Updated schema for namespace: {}", skpr_namespace);
+
 
                                     let mut default_message = Value::Null;
                                     {
