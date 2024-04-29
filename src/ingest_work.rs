@@ -509,10 +509,9 @@ impl Ingest {
                             ) {
                                 Ok(msg) => msg,
                                 Err(_err) => {
-                                    // println!("Deadlettring - Could not ingest record: {}, Error: {:?}", record, _err);
 
-                                    if d == 0 {
-                                        println!("Deadlettring - Could not ingest record, discovered schema will be ignored: {:?}", _err);
+                                    if METRICS.read().deadletters_total == 0 {
+                                        println!("Deadlettring - Could not ingest record, schema evolution for deadletters will be ignored: {:?}", _err);
                                     }
 
                                     // deadletter record
