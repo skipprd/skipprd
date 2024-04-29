@@ -684,6 +684,8 @@ impl AwsAthena {
 
             for table in tables {
                 let table_name = table.name.unwrap();
+                
+                println!("Deleting table '{}'", table_name);
 
                 let mut next_token = "".to_string();
 
@@ -703,7 +705,7 @@ impl AwsAthena {
                             break;
                         }
 
-                        println!("Deleting {} partitions", partitions.len());
+                        println!("Deleting {} partitions in table '{}'", partitions.len(), table_name);
 
                         for partition in partitions {
                             glue_client
