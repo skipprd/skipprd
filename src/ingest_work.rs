@@ -623,9 +623,13 @@ impl Ingest {
                             if schemas.get(&skpr_namespace).is_none() {
                                 let start_time = Instant::now();
                                 
+                                let mut i = 0;
                                 while ARROW_SCHEMA.read().get(&skpr_namespace).is_none() {
-                                    println!("Waiting for schema to be prepared for namespace: {}", skpr_namespace);
+                                    if i == 0 || i % 100 == 0 { // inital and every 10 seconds
+                                        println!("Waiting for schema to be prepared for namespace: {}", skpr_namespace);
+                                    }
                                     std::thread::sleep(std::time::Duration::from_millis(100));
+                                    i += 1;
                                 }
                                 schemas = ARROW_SCHEMA.read().clone();
 
