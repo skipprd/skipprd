@@ -511,7 +511,7 @@ impl Ingest {
                                 Err(_err) => {
 
                                     if METRICS.read().deadletters_total == 0 {
-                                        println!("Deadlettring - Could not ingest record, schema evolution for deadletters will be ignored: {:?}", _err);
+                                        println!("Record deadlettered, schema evolution for deadletters will be ignored");
                                     }
 
                                     // deadletter record
@@ -537,6 +537,7 @@ impl Ingest {
                             if Config::get_auto_approve() {
 
                                 if updated_schema.as_str() == "yes" {
+                                    
                                     {
                                         METADATA.write().metadata = metadata.metadata.clone();
                                     }
@@ -544,20 +545,13 @@ impl Ingest {
                                     updated_schema = "no".to_string();
 
                                     handle.block_on(async {
-                                        // update metadata at control pane, this may or may not be automatically approved
-                                        let metadata: PipelineMetadata;
-                                        {
-                                            metadata = METADATA.read().clone();
-                                        }
                                         Config::set_metadata(&metadata, true).await;
                                     });
 
                                     println!("Updated schema for namespace: {}", skpr_namespace);
-
-
+                                    
                                     let mut default_message = Value::Null;
                                     {
-                                        let metadata = METADATA.read();
                                         default_message = create_default_nested_message(&metadata.metadata.get(&skpr_namespace).unwrap().fields);
                                     }
 
@@ -621,7 +615,7 @@ impl Ingest {
                             }
                             if schemas.get(&skpr_namespace).is_none() {
                                 let start_time = Instant::now();
-                                
+
                                 let mut i = 0;
                                 while ARROW_SCHEMA.read().get(&skpr_namespace).is_none() {
                                     if i == 0 || i % 100 == 0 { // inital and every 10 seconds
