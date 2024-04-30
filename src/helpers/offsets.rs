@@ -61,7 +61,7 @@ pub struct Offsets {
     /// Resources can be found using their Subject.
     /// Try not to use this directly, but use the Trees.
     db: sled::Db,
-    tree: sled::Tree,
+    pub(crate) tree: sled::Tree,
 }
 
 // #[derive(Debug, Error)]
@@ -79,13 +79,13 @@ pub enum OffsetsError {
 impl Offsets {
     pub fn init() -> Result<Offsets, OffsetsError> {
 
-        match Self::vacuum() {
-            Ok(size) => {}
-            Err(err) => {
-                println!("Failed vacuuming offsets database, Error: {:?}", err);
-                unsafe { exit(1); }
-            }
-        }
+        // match Self::vacuum() { // requires a full scan of table which is expensive on EFS since we're opting to keep all offsets to support replays
+        //     Ok(size) => {}
+        //     Err(err) => {
+        //         println!("Failed vacuuming offsets database, Error: {:?}", err);
+        //         unsafe { exit(1); }
+        //     }
+        // }
 
         let db_path = format!("{}/{}", Config::get_data_dir(), SLED_NAME);
         let db = match sled::open(&db_path) { // open in high-throughput mode

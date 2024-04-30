@@ -510,9 +510,10 @@ impl Ingest {
                                 Ok(msg) => msg,
                                 Err(_err) => {
 
-                                    if METRICS.read().deadletters_total == 0 {
-                                        println!("Record deadlettered, schema evolution for deadletters will be ignored");
-                                    }
+                                    // @todo - if we're going to log this, we should only do it when the schema was evovled for the deadlettered record
+                                    // if METRICS.read().deadletters_total == 0 {
+                                        // println!("Record deadlettered, schema evolution for deadletters will be ignored");
+                                    // }
 
                                     // deadletter record
                                     let line_str = match ingest_batch.data.lines().nth(batch_line as usize - 1) {
