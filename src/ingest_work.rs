@@ -129,7 +129,7 @@ impl Drop for Ingest {
 impl Ingest {
     pub fn new() -> Ingest {
         let num_cpus = num_cpus::get().max(2);
-        println!("Ingesting with {} threads", num_cpus);
+        println!("Starting with {} threads", num_cpus);
         let (tx, rx) = channel();
         let active_count = Arc::new(AtomicUsize::new(0));
         let active_count_clone = active_count.clone();
@@ -192,7 +192,7 @@ impl Ingest {
     ) {
         // If we're not running, exit after current threads finish.
         if !RUNNING.read().load(Ordering::SeqCst) {
-            println!("Not running, shutting down ingest threads");
+            println!("Waiting for remaining threads to complete");
             self.wait_for_completion();
             exit(0);
 

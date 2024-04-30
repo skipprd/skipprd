@@ -342,10 +342,10 @@ async fn discover() {
         let mut pipeline_metadata= METADATA.read().clone();
 
         if pipeline_metadata.metadata.len() == 0 {
-            println!("No data found in source buffer, skipping schema discovery");
+            println!("No data found in data source, skipping schema discovery");
             return;
         } else {
-            println!("Sampled source data, analysing schema");
+            // println!("Sampled source data, analysing schema");
         }
 
         let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.unwrap_or("false".to_string()));
