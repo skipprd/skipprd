@@ -922,10 +922,8 @@ pub fn discover_ingest(
     // discoverd_data_type = metadata.get(field).unwrap().determined_type;
 
     println!(
-        "Discovered new field: {} of type: {}{}{} with value: {}",
-        field, metadata.get(field).unwrap().determined_type, 
-        if parent_field.is_some() { " of parent field: " } else { "" }, if parent_field.is_some() { parent_field.unwrap() } else { "" },
-        value
+        "Discovered new field: {} of type: {}{}{}",
+        field, metadata.get(field).unwrap().determined_type, if parent_field.is_some() { " of parent field: " } else { "" }, if parent_field.is_some() { parent_field.unwrap() } else { "" }
     );
 
     // let handle = tokio::runtime::Handle::current();
