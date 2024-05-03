@@ -343,7 +343,7 @@ async fn discover() {
 
         if pipeline_metadata.metadata.len() == 0 {
             println!("No data found in data source, skipping schema discovery");
-            return;
+            std::process::exit(0);
         } else {
             // println!("Sampled source data, analysing schema");
         }
