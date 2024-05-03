@@ -1,6 +1,12 @@
 use std::{fs, process};
 use std::fs::OpenOptions;
 use std::io::{BufReader, BufWriter};
+use std::path::PathBuf;
+use std::sync::Arc;
+use arrow_schema::DataType;
+use datafusion::datasource::file_format::parquet::ParquetFormat;
+use datafusion::datasource::listing::ListingOptions;
+use datafusion::logical_expr::Partitioning;
 use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
 use sqlparser::ast::{Ident, ObjectName};
 use crate::cli::{CLI_MODE, Mode};
@@ -301,68 +307,118 @@ pub async fn query(sql_str: &str) {
 
             println!("Alter schema: {} column: '{}' type to {}", schema, stmt.column_name, stmt.new_type);
         },
-        Err(e) => {
+        // Err(e) => {
+        //
+        //     println!("Unknown SQL Dialect. {}", e);
+        // },
+        _ => {
 
-            println!("Unknown SQL Dialect. {}", e);
-        },
-        // _ => {
-        //
-        //     let mut table_name = "".to_string();
-        //
-        //     if sql_str.to_lowercase().split("from").collect::<Vec<&str>>().len() > 1 {
-        //         // println!("Invalid query, must be in the format: SELECT * FROM <table_name>");
-        //         // process::exit(1);
-        //
-        //         table_name = sql_str.to_lowercase().split("from").collect::<Vec<&str>>()[1].split(" ").collect::<Vec<&str>>()[1].trim().replace(";", "");
-        //
-        //     }
-        //     // else {
-        //     //     table_name = "bike_hire".to_string();
-        //     // }
-        //
-        //
-        //     PIPELINE_NAME.write().clear();
-        //     PIPELINE_NAME.write().push_str(&table_name);
-        //     Config::init().await;
-        //     let workspace = Config::get_workspace_name();
-        //
-        //     let data_dir = Config::get_data_dir();
-        //     let output_dir = format!("{}/output_buffer", data_dir);
-        //
-        //     println!("Querying data dir: {}", output_dir);
-        //
-        //     let mut session_config = SessionConfig::new();
-        //     session_config = session_config.set("datafusion.catalog.information_schema", "true".into());
-        //     session_config = session_config.set("datafusion.catalog.default_catalog", "skippr".into());
-        //     session_config = session_config.set("datafusion.execution.collect_statistics", "true".into());
-        //
-        //     let ctx = SessionContext::with_config(session_config);
-        //
-        //     match ctx.register_parquet(&table_name, &output_dir, ParquetReadOptions::default()).await {
-        //         Ok(_) => {}
-        //         Err(e) => {
-        //             println!("Can't find data for table: {} in dir: {}. Error: {:?}", table_name, output_dir, e);
-        //             process::exit(1);
-        //         }
-        //     }
-        //
-        //     let df = match ctx.sql(sql_str).await {
-        //         Ok(df) => df,
-        //         Err(e) => {
-        //             println!("Error: {}", e);
-        //             process::exit(1);
-        //         }
-        //     };
-        //
-        //     match df.show().await {
-        //         Ok(res) => {
-        //             res
-        //         }
-        //         Err(e) => {
-        //             println!("Error: {}", e);
-        //             process::exit(1);
-        //         }
-        //     }
-        // }
+            let mut table_name = "".to_string();
+
+            if sql_str.to_lowercase().split("from").collect::<Vec<&str>>().len() > 1 {
+                // println!("Invalid query, must be in the format: SELECT * FROM <table_name>");
+                // process::exit(1);
+
+                table_name = sql_str.to_lowercase().split("from").collect::<Vec<&str>>()[1].split(" ").collect::<Vec<&str>>()[1].trim().replace(";", "");
+
+            }
+            // else {
+            //     table_name = "bike_hire".to_string();
+            // }
+
+
+            PIPELINE_NAME.write().clear();
+            PIPELINE_NAME.write().push_str(&table_name);
+            Config::init().await;
+            let workspace = Config::get_workspace_name();
+
+            let data_dir = Config::get_data_dir();
+            let output_dir = format!("{}/output_buffer", data_dir);
+            // let output_dir = format!("{}/output_buffer/*/*/*/p_year=2023", data_dir);
+
+            let mut session_config = SessionConfig::new();
+            session_config = session_config.set("datafusion.catalog.information_schema", "true".into());
+            session_config = session_config.set("datafusion.catalog.default_catalog", "skippr".into());
+            session_config = session_config.set("datafusion.execution.collect_statistics", "true".into());
+
+            let ctx = SessionContext::with_config(session_config);
+
+            // let mut paths = Vec::new();
+
+            // recurse_paths(&output_dir, &table_name, &ctx, &mut paths);
+            // println!("Found paths: {:?}", paths);
+
+            // for path in paths {
+            //     match ctx.register_parquet(&table_name, &path.to_str().unwrap(), ParquetReadOptions::default()).await {
+            //         Ok(_) => {}
+            //         Err(e) => {
+            //             println!("Can't find data for table: {} in dir: {}. Error: {:?}", table_name, path.to_str().unwrap(), e);
+            //             process::exit(1);
+            //         }
+            //     }
+            // }
+
+
+
+            let table_partition_cols = vec![
+                ("p_tenant_id".to_string(), DataType::Utf8),
+                ("p_source_type".to_string(), DataType::Utf8),
+                ("p_year".to_string(), DataType::Utf8),
+
+            ];
+
+            let listing_options = ListingOptions::new(Arc::new(
+                ParquetFormat::default()
+            ))
+                .with_table_partition_cols(table_partition_cols);
+
+            let table_dir = format!("{}/{}/", output_dir, table_name);
+
+            println!("Querying data dir: {}", table_dir);
+
+            ctx.register_listing_table(&table_name, table_dir, listing_options, None, None).await.unwrap();
+
+            // let local_fs = Arc::new(object_store::local::LocalFileSystem::default());
+
+            // let u = url::Url::parse("file://./")?;
+            // ctx.runtime_env().register_object_store(&u, local_fs);
+
+
+            let df = match ctx.sql(sql_str).await {
+                Ok(df) => df,
+                Err(e) => {
+                    println!("Error: {}", e);
+                    process::exit(1);
+                }
+            };
+
+            match df.show().await {
+                Ok(res) => {
+                    res
+                }
+                Err(e) => {
+                    println!("Error: {}", e);
+                    process::exit(1);
+                }
+            }
+        }
+    }
+}
+
+fn recurse_paths(output_dir: &str, table_name: &str, ctx: &SessionContext, paths: &mut Vec<PathBuf>) {
+    // itterate over output_dir and fine any dir paths that include p_year=2023
+    for entry in fs::read_dir(&output_dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.is_dir() {
+            let path_str = path.to_str().unwrap();
+            if path_str.contains("p_year=2023") {
+                println!("Found data for table: {} in dir: {}", table_name, path_str);
+                paths.push(path);
+
+            } else {
+                recurse_paths(&path_str, table_name, ctx, paths);
+            }
+        }
     }
 }
