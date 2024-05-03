@@ -115,8 +115,6 @@ impl DataSourceS3Plugin {
 
         let _s3_client = self.s3_client.clone();
 
-        let mut outputs: Vec<String> = Vec::new();
-
         let s3_bucket = self.config.s3_bucket.clone();
         
         let max_depth = self.config.s3_prefix_ordered_depth.clone().unwrap_or(0);
@@ -126,8 +124,10 @@ impl DataSourceS3Plugin {
         
         self.prefixes.push((self.config.s3_prefix.clone(), 0));
 
+        let mut total_objects = 0;
 
         while !self.prefixes.is_empty() {
+
             let (inventory_prefix, prefix_depth) = self.prefixes.pop().unwrap();
 
             let mut continuation_token = Self::read_continuation_token(offsets.clone(), s3_bucket.clone(), inventory_prefix.clone()).unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::NotFound, "Failed to get S3 Input continuation token from Offset DB")).unwrap());
@@ -138,21 +138,14 @@ impl DataSourceS3Plugin {
                 inventory_prefix
             );
 
-            let mut skipped_objects = 0;
-
             let chunk_size = self.config.batch_size_bytes.clone().unwrap_or(10000000);
-
-            let mut i = 0;
-            let mut chunk_size_current = 0;
 
             let mut s3_prefix = inventory_prefix.trim_start_matches('/').to_string();
 
             if s3_prefix == delimiter || s3_prefix == format!(".{}", delimiter) {
                 s3_prefix = "".to_string();
             }
-
-            let mut log_rollup = true;
-
+            
             let max_list_objects = 1000;
 
             let mut list_obj_req = self
@@ -163,7 +156,6 @@ impl DataSourceS3Plugin {
                 .max_keys(max_list_objects);
 
             if prefix_depth < max_depth {
-
                 list_obj_req = list_obj_req.delimiter(&delimiter);
             }
             
@@ -176,9 +168,16 @@ impl DataSourceS3Plugin {
             let max_empty_objects = 2;
             let mut empty_objects = 0;
 
-            loop {
-                i += 1;
+            let mut outputs: Vec<String> = Vec::new();
 
+
+            loop {
+
+                let mut i = 0;
+                let mut chunk_size_current = 0;
+
+                let mut skipped_objects = 0;
+                
                 match list_obj_req.clone().send().await {
                     Err(err) => {
                         println!("S3 Error: {:?}", err);
@@ -190,6 +189,7 @@ impl DataSourceS3Plugin {
                         for prefix in common_prefixes.iter().filter_map(|p| p.prefix()) {
                             let depth = prefix.matches(&delimiter).count();
                             if depth <= max_depth && seen.insert(prefix.to_string()) {
+                                // println!("Adding prefix: {} at depth: {}", prefix, depth);
                                 self.prefixes.push((prefix.to_string(), depth));
                             }
                         }
@@ -206,13 +206,21 @@ impl DataSourceS3Plugin {
                             }
                         };
 
+                        // println!("Sub-Syncing bucket: {}, prefix: {}", s3_bucket, s3_prefix);
+                        // println!("Found {} objects in S3", objects.len());
+                        // println!("Continuation token: {:?}", output.next_continuation_token);
+
                         if !objects.is_empty() {
                             skipped_objects = 0;
+
+                            total_objects += objects.len();
 
                             for object in objects {
 
                                 let object_key = object.key().unwrap();
                                 let _timestamp = object.last_modified().unwrap().secs();
+
+                                // println!("Processing object: {}", object_key);
 
                                 let offset_key = OffsetKey {
                                     namespace: s3_bucket.clone(),
@@ -247,9 +255,14 @@ impl DataSourceS3Plugin {
                                     skipped_objects += 1;
                                 }
                             }
-
+                            
+                            // println!("Skipped objects: {}", skipped_objects);
+                            
                             if skipped_objects >= max_list_objects {
 
+                                
+                                // println!("Next continuation token: {:?}", output.next_continuation_token);
+                                
                                 // If we've skipped all objects in the list request then we can save the continuation token
                                 if continuation_token.is_some()
                                     && output.next_continuation_token.is_some() // If there is a next token, we can save the current one. 
@@ -314,6 +327,8 @@ impl DataSourceS3Plugin {
         }
 
         println!("Reached end of S3 pagination");
+
+        // println!("Total objects: {}", total_objects);
 
     }
 
@@ -484,6 +499,9 @@ impl DataSourceS3Plugin {
         s3_bucket: String,
         s3_prefix: String,
     ) -> io::Result<()> {
+        
+        // println!("Saving continuation token: {} for bucket: {}, prefix: {}", token.clone().unwrap(), s3_bucket, s3_prefix);
+        
         match token {
             Some(t) => {
 
@@ -496,7 +514,10 @@ impl DataSourceS3Plugin {
                 let key_bytes: &[u8] = &key.as_bytes();
 
                 match offsets_clone.tree.insert(key_bytes, sled::IVec::from(&t.as_bytes()[..])) {
-                    Ok(_) => Ok(()),
+                    Ok(_) => {
+                        // println!("Saved continuation token: {} for bucket: {}, prefix: {}", t, s3_bucket, s3_prefix);
+                        Ok(())
+                    },
                     Err(err) => {
                         Err(io::Error::new(io::ErrorKind::Other, "Failed to save continuation token"))
                     }
@@ -534,11 +555,15 @@ impl DataSourceS3Plugin {
             Err(_) => (),
         };
 
-        let offset = offsets_clone.get(&OffsetKey {
+        let offset_key = OffsetKey {
             namespace: s3_bucket,
             partition: s3_prefix,
-        });
-
+        };
+        let key = offsets_clone.build_key(&offset_key);
+        let key_bytes: &[u8] = &key.as_bytes();
+        
+        let offset = offsets_clone.tree.get(&key_bytes).unwrap();
+        
         let continuation_token: String = match offset {
             Some(t) => {
                 String::from_utf8(t.to_vec()).unwrap()
