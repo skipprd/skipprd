@@ -166,7 +166,7 @@ impl DataSourceS3Plugin {
 
             // important to check few times, else slowly arriving drip of objects will result in us never proceeding to the next pipeline
             let max_empty_objects = 2;
-            let mut empty_objects = 0;
+            let mut empty_objects_trys = 0;
 
             let mut outputs: Vec<String> = Vec::new();
 
@@ -197,11 +197,11 @@ impl DataSourceS3Plugin {
                         let objects = match output.contents() {
                             Some(objects) => objects,
                             None => {
-                                if empty_objects >= max_empty_objects {
+                                if empty_objects_trys >= max_empty_objects {
                                     // println!("No more objects found in S3, skipping Bucket: {} Prefix: {}", s3_bucket, s3_prefix);
                                     break;
                                 }
-                                empty_objects += 1;
+                                empty_objects_trys += 1;
                                 continue;
                             }
                         };
