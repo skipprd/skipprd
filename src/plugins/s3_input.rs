@@ -125,6 +125,7 @@ impl DataSourceS3Plugin {
         self.prefixes.push((self.config.s3_prefix.clone(), 0));
 
         let mut total_objects = 0;
+        let mut chunk_size_current = 0;
 
         while !self.prefixes.is_empty() {
 
@@ -174,7 +175,7 @@ impl DataSourceS3Plugin {
             loop {
 
                 let mut i = 0;
-                let mut chunk_size_current = 0;
+
 
                 let mut skipped_objects = 0;
                 
