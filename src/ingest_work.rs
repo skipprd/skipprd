@@ -494,14 +494,16 @@ impl Ingest {
 
                             // println!("Falling back to slow path due to: {}", _err);
 
-                            // we're not going to update the metadata here, if the message is ingested we'll update the metadata
-                            let mut metadata = METADATA.read().clone();
+                            // hurrendous allocation, but we're handling an error case.
+                            // It's important to not update METADATA mutex for other threads till we know the discovered schema is valid
+                            // This may be called very often making troublesome data even worse
+                            let mut metadata: PipelineMetadata;
+                            {
+                                metadata = METADATA.read().clone();
+                            }
 
                             let msg = match ingest(
                                 &record,
-                                // we do want to write lock here to prevent simultaneous updates to this namespace
-                                // @todo - would be better to lock on the nested structure allowing other namespaces to conitnue
-                                // &mut METADATA.write().metadata.get_mut(&skpr_namespace).unwrap().fields,
                                 &mut metadata.metadata.get_mut(&skpr_namespace).unwrap().fields,
                                 &skpr_namespace,
                                 &mut updated_schema,
@@ -510,10 +512,14 @@ impl Ingest {
                                 Ok(msg) => msg,
                                 Err(_err) => {
 
+                                    updated_schema = "no".to_string();
+
+                                    drop(metadata); // drop discovered schema to ensure we can accedentally use it
+
                                     // @todo - if we're going to log this, we should only do it when the schema was evovled for the deadlettered record
-                                    // if METRICS.read().deadletters_total == 0 {
-                                        // println!("Record deadlettered, schema evolution for deadletters will be ignored");
-                                    // }
+                                    if METRICS.read().deadletters_total == 0 {
+                                        println!("Record deadlettered, schema evolution for deadletters will be ignored");
+                                    }
 
                                     // deadletter record
                                     let line_str = match ingest_batch.data.lines().nth(batch_line as usize - 1) {
