@@ -936,6 +936,8 @@ async fn sync() {
     {
         let mut counter_lock = METRICS.write();
         
+        println!("Messages Fixed: {}", counter_lock.ingeted_slow_total);
+        println!("Deadletter Total: {}", counter_lock.deadletters_total);
         println!("Ingested Total: {}", counter_lock.messages_total);
     }
 

@@ -53,12 +53,22 @@ use arrow::datatypes::Schema;
 use arrow::error::ArrowError;
 use arrow::datatypes;
 use arrow_schema::SchemaRef;
+use serde_derive::{Deserialize, Serialize};
 use tokio::runtime;
 use crate::cli::{Cli, CLI_MODE, Mode};
 use crate::converters::skippr_arrow::convert_skippr_to_arrow;
 use crate::plugins::athena::DataOutputAwsAthenaPlugin;
 use crate::plugins::DataOutputPlugin;
 
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Deadletter {
+    pub(crate) namespace: String,
+    pub(crate) partition: String,
+    pub(crate) time: u64,
+    pub(crate) error: String,
+    pub(crate) records: String,
+}
 
 #[derive(Clone, Debug)]
 pub struct IngestBatch {
@@ -267,15 +277,17 @@ impl Ingest {
 
     }
 
-    pub(crate) fn deadletter(lines: &str) {
+    pub(crate) fn deadletter(dl: Deadletter) {
 
         let mut deadletter_file = DEADLETTER_FILE.write();
 
+        let lines = serde_json::to_string(&dl).or(Err("Could not serialize deadletter")).unwrap();
+        
         deadletter_file.write(lines.as_bytes()).or(Err("Could not write to deadletter file")).unwrap();
         deadletter_file.write("\n".as_bytes()).or(Err("Could not write to deadletter file")).unwrap();
 
         deadletter_file.flush().or(Err("Could not flush deadletter file")).unwrap();
-
+        
     }
 
     fn process_batch(
@@ -393,8 +405,16 @@ impl Ingest {
                                     Some(line) => line,
                                     None => ""
                                 };
+                                
+                                let dl = Deadletter {
+                                    namespace: ingest_batch.offset_key.namespace.clone(),
+                                    partition: ingest_batch.offset_key.partition.clone(),
+                                    time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(),
+                                    error: "Source data is not an object or array".to_string(),
+                                    records: line_str.to_string(),
+                                };
 
-                                Self::deadletter(line_str);
+                                Self::deadletter(dl);
                                 offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Position, batch_line);
 
                                 d += 1;
@@ -423,8 +443,15 @@ impl Ingest {
                         }
                     };
 
+                    let dl = Deadletter {
+                        namespace: ingest_batch.offset_key.namespace.clone(),
+                        partition: ingest_batch.offset_key.partition.clone(),
+                        time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(),
+                        error: "Source data is empty".to_string(),
+                        records: line_str.to_string(),
+                    };
 
-                    Self::deadletter(line_str);
+                    Self::deadletter(dl);
                     offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Position, batch_line);
 
                     d += 1;
@@ -518,7 +545,7 @@ impl Ingest {
 
                                     // @todo - if we're going to log this, we should only do it when the schema was evovled for the deadlettered record
                                     if METRICS.read().deadletters_total == 0 {
-                                        println!("Record deadlettered, schema evolution for deadletters will be ignored");
+                                        println!("Record deadlettered, schema evolution for deadletters will be ignored: {}", _err);
                                     }
 
                                     // deadletter record
@@ -529,12 +556,21 @@ impl Ingest {
                                             ""
                                         }
                                     };
+                                    
+                                    let dl = Deadletter {
+                                        namespace: ingest_batch.offset_key.namespace.clone(),
+                                        partition: ingest_batch.offset_key.partition.clone(),
+                                        time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(),
+                                        error: _err.to_string(),
+                                        records: line_str.to_string(),
+                                    };
 
-                                    Self::deadletter(line_str);
+                                    Self::deadletter(dl);
                                     offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Position, batch_line);
 
-                                    d += 1;
-
+                                    let mut counter_lock = METRICS.write();
+                                    counter_lock.deadletters_total += 1;
+                                    
                                     continue
                                 }
                             };
@@ -595,7 +631,15 @@ impl Ingest {
                                     }
                                 };
 
-                                Self::deadletter(line_str);
+                                let dl = Deadletter {
+                                    namespace: ingest_batch.offset_key.namespace.clone(),
+                                    partition: ingest_batch.offset_key.partition.clone(),
+                                    time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(),
+                                    error: "Schema evolution is disabled".to_string(),
+                                    records: line_str.to_string(),
+                                };
+                                
+                                Self::deadletter(dl);
                                 offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Position, batch_line);
                                 
                                 d += 1;

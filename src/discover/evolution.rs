@@ -243,6 +243,8 @@ impl Evolution {
             return resolved_value;
         }
 
+        let mut errors = vec![];
+        
         // iterate through the evolutions and try the existing ones
         match metadata.get(field) {
             Some(field_metadata) => {
@@ -260,6 +262,7 @@ impl Evolution {
                             return Ok(ResolvedFieldValue::new(evolution.new_field.clone(), v.value));
                         },
                         Err(_err) => {
+                            errors.push(_err);
                             // println!("Evolution failed for field: '{}' to evolution: '{}' => '{}', Error: {}", field, &evolution.new_field, evolution_key, _err)
                         }
                     }
@@ -267,11 +270,13 @@ impl Evolution {
 
                 // throw Err() if no evolutions are Ok()
                 // println!("No evolutions succeeded for field: '{}'", field);
-                Err(Box::new(ArrowError::ParseError("Unable to parse value".to_string())))
+                Err(Box::new(ArrowError::ParseError(format!("No schema evolutions succeeded for field: '{}', Errors: {}", field, 
+                                                            errors.iter().map(|e| e.to_string()).collect::<Vec<String>>().join(", ")
+                ))))
             },
             None => {
                 // println!("No metadata for evolution field: '{}'", field);
-                return Err(Box::new(ArrowError::ParseError("### No metadata for evolution field".to_string())));
+                return Err(Box::new(ArrowError::ParseError(format!("No metadata for evolution field: '{}'", field))));
             }
         }
     }

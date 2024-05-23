@@ -52,7 +52,7 @@ use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
 use crate::helpers::offsets::{Offset, OffsetKey, Offsets, OffsetTypes, OffsetValue};
 use crate::helpers::timed_rwlock::TimedRwLock;
-use crate::ingest_work::Ingest;
+use crate::ingest_work::{Deadletter, Ingest};
 use crate::metrics::Metrics;
 use crate::plugins::athena::DataOutputAwsAthenaPlugin;
 use crate::plugins::DataOutputPlugin;
@@ -145,7 +145,16 @@ impl Buffers {
                     println!("Error decoding record batch: {}. Deadlettering", e);
                     
                     let deadletters: String = ingest_buffer_batch.records.iter().map(|record| record.record.to_string()).collect::<Vec<String>>().join("\n");
-                    Ingest::deadletter(&deadletters);
+
+                    let dl = Deadletter {
+                        namespace: namespace.clone(),
+                        partition: partition.clone(),
+                        time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(),
+                        error: format!("Error decoding record batch: {}. Deadlettering", e),
+                        records: deadletters,
+                    };
+
+                    Ingest::deadletter(dl);
                     
                     continue;
                 }
