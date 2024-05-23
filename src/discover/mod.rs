@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::{File};
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, AtomicI64};
+use std::time::SystemTime;
 
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
@@ -35,7 +36,9 @@ use crate::serdes::json::SerdeJson;
 
 
 use crate::discover::evolution::Evolution;
+use crate::helpers::offsets::OffsetTypes;
 use crate::helpers::timed_rwlock::TimedRwLock;
+use crate::ingest_work::Deadletter;
 
 pub static NUM_ANALYSED_RECORDS: Lazy<TimedRwLock<AtomicI64>> = Lazy::new(|| TimedRwLock::new("num_analyised_records".to_string(), AtomicI64::new(0)));
 
@@ -465,9 +468,10 @@ impl AnalyseSchema {
         str: &mut String,
         max_read_records: Option<i64>,
         metadata: &mut HashMap<std::string::String, Metadata>,
-    ) {
+    ) -> i64 {
         // self.infer_json_schema_from_iterator(ValueIter::new(reader, max_read_records))
-        self.infer_json_schema_from_iterator(str, metadata, max_read_records);
+        let counts = self.infer_json_schema_from_iterator(str, metadata, max_read_records);
+        counts
     }
 
     // pub fn infer_json_schema_from_iterator<I>(&mut self, value_iter: I) -> Result<HashMap<std::string::String, Metadata>, ArrowError>
@@ -479,69 +483,73 @@ impl AnalyseSchema {
         str: &mut String,
         metadata: &mut HashMap<std::string::String, Metadata>,
         max_read_records: Option<i64>,
-    ) {
+    ) -> i64 {
         let mut parse_namespace_cache: HashMap<String, String> = HashMap::new();
+
+        let mut counts = 0;
 
         let mut skpr_namespace: String = "".to_string();
         let pipeline_name = Config::get_pipeline_name();
 
-        let _faltten_events = &Config::get_transform_flatten_events();
-
-        // let mut newMeta: &mut HashMap<String, Metadata>;
-        // let defaultMetadata = Metadata::new().unwrap();
-        // let mut metadata = HashMap::new();
-        // newMeta = &mut metadata;
-
-        // let mut foo: AnalyseSchema = AnalyseSchema { i: 0 };
-
-        // let str: &mut String = &mut "".to_string();
-        // input_file.read_to_string(str).unwrap();
-
-        let records: Vec<Value> = SerdeJson::deserialize(str);
-
-        // self.i += 1;
-        // let mut i = 0;
-
-        for v in records {
+        let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.or(Some("no".to_string())).unwrap());
+        
+        let mut records: Vec<Value> = SerdeJson::deserialize(str);
+        
+        let entity_field_dot = match Config::get_transform_config().record_field_path {
+            Some(ref field) => field.clone(),
+            None => "".to_string()
+        };
+        
+        if !entity_field_dot.is_empty() {
+            records = match Helpers::process_values(&records, &entity_field_dot) {
+                Some(records) => records,
+                None => Vec::new()
+            };
+        }
+        
+        let mut unwrapped_records: Vec<Value> = Vec::new();
+        
+        for record in records {
+        
+            match record.as_object() {
+                Some(_v) => unwrapped_records.push(record),
+                None => {
+                    match record.as_array() {
+                        Some(v) => {
+                            for item in v {
+                                // println!("Item: {}", item);
+                                unwrapped_records.push(item.clone());
+                            }
+                        },
+                        None => {
+                           return counts;
+                        }
+                    }
+                }
+            };
+        }
+        
+        // println!("Unwrapped records: {:?}", unwrapped_records.len());
+        
+        for v in unwrapped_records {
             skpr_namespace = Helpers::parse_namespace_field(
                 &v,
                 pipeline_name.clone(),
                 &mut parse_namespace_cache,
             );
-
+        
             if !metadata.contains_key(&skpr_namespace) {
                 metadata.insert(skpr_namespace.clone(), Metadata::new().unwrap());
-                // newMeta = &mut metadata.clone();
             }
-
-            // if Config::truth_value(faltten_events) {
-            //     v = Helpers::flatten(&v);
-            // }
-
-
-            if NUM_ANALYSED_RECORDS.read().load(std::sync::atomic::Ordering::SeqCst) >= max_read_records.unwrap_or(1000) {
-                return;
+            
+            if counts >= max_read_records.unwrap_or(1000) {
+                return counts;
             }
-
-            // i += 1;
-
-            // let string = record.unwrap().to_string();
-
-            // println!("record: {:?}", v);
-
+            
             if v.is_null() {
                 continue;
             }
-
-            // let mut vs: Vec<Value> = serde_json::from_str(&line.unwrap()).unwrap();
-
-            // let b = InternalFields;
-            //
-            // InternalFields::parse_namespace_field(vs, "example");
-
-            // for mut v in vs {
-            // println!("Discovering schema for {}", v);
-
+            
             match v.type_id() {
                 _Value => {
                     let mut ingest_record = IngestRecord {
@@ -552,7 +560,12 @@ impl AnalyseSchema {
                         skpr_partition: "".to_string(),
                         record: v,
                     };
-
+        
+                    counts += 1;
+                    
+                    // println!("Analyzing count: {}, record: {}", counts, ingest_record.record);
+                    // println!("Analyzing count: {}", counts);
+        
                     self.analyse_payload(
                         &mut ingest_record.record,
                         &mut metadata
@@ -563,23 +576,17 @@ impl AnalyseSchema {
                 }
                 value => {
                     panic!("Could not infer type. Expected serde Value, found {:?}", value);
-                    // return Err(ArrowError::ParseError(format!(
-                    //     "Expected serde Value, found {:?}",
-                    //     value
-                    // )));
                 }
             };
-            // }
         }
+        
+        counts
 
-        // let metadata = newMeta.clone();
-
-        // Ok(newMeta.clone())
+      
     }
 
     // pub fn analyse_payload(&mut self, message: &HashMap<String, String>, metadata: &mut HashMap<String, Metadata>) {
     pub fn analyse_payload(&self, message: &Value, metadata: &mut HashMap<String, Metadata>) {
-        NUM_ANALYSED_RECORDS.write().fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
         // let mut helpers = Helpers { clean_field_cache: Default::default() };
 

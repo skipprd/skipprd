@@ -214,31 +214,38 @@ impl Ingest {
 
                     let max_records = 1000;
 
-                    let mut pipeline_metadata= METADATA.read().clone();
+                    let mut pipeline_metadata: PipelineMetadata;
+                    {
+                        pipeline_metadata = METADATA.read().clone();
+                    }
 
-                    let mut i = 0;
+                    let mut count = 0;
 
                     for data in datas.iter() {
 
-                        i += 1;
-
-                        self.analyse_schema.infer_json_schema(
+                        count += self.analyse_schema.infer_json_schema(
                             &mut data.data.clone(),
                             Some(max_records),
                             &mut pipeline_metadata.metadata,
                         );
 
+                        println!("Analysed schema for {}/{} records", count, max_records);
+
+                        if count >= max_records {
+                            break;
+                        }
                     }
+
 
                     {
                         METADATA.write().metadata = pipeline_metadata.metadata.clone();
                     }
 
-                    println!("Analysed schema for {}/{} records", NUM_ANALYSED_RECORDS.read().load(Ordering::SeqCst), max_records);
+                    {
+                        NUM_ANALYSED_RECORDS.write().fetch_add(count, Ordering::SeqCst);
+                    }
 
-                    // println!("Completed schema analysis for batch");
-
-                    if NUM_ANALYSED_RECORDS.read().load(Ordering::SeqCst) >= max_records {
+                    if count >= max_records {
                         let mut pipeline = METADATA.write();
                         *pipeline = pipeline_metadata;
 
@@ -282,12 +289,12 @@ impl Ingest {
         let mut deadletter_file = DEADLETTER_FILE.write();
 
         let lines = serde_json::to_string(&dl).or(Err("Could not serialize deadletter")).unwrap();
-        
+
         deadletter_file.write(lines.as_bytes()).or(Err("Could not write to deadletter file")).unwrap();
         deadletter_file.write("\n".as_bytes()).or(Err("Could not write to deadletter file")).unwrap();
 
         deadletter_file.flush().or(Err("Could not flush deadletter file")).unwrap();
-        
+
     }
 
     fn process_batch(
@@ -405,7 +412,7 @@ impl Ingest {
                                     Some(line) => line,
                                     None => ""
                                 };
-                                
+
                                 let dl = Deadletter {
                                     namespace: ingest_batch.offset_key.namespace.clone(),
                                     partition: ingest_batch.offset_key.partition.clone(),
@@ -556,7 +563,7 @@ impl Ingest {
                                             ""
                                         }
                                     };
-                                    
+
                                     let dl = Deadletter {
                                         namespace: ingest_batch.offset_key.namespace.clone(),
                                         partition: ingest_batch.offset_key.partition.clone(),
@@ -570,7 +577,7 @@ impl Ingest {
 
                                     let mut counter_lock = METRICS.write();
                                     counter_lock.deadletters_total += 1;
-                                    
+
                                     continue
                                 }
                             };
@@ -638,7 +645,7 @@ impl Ingest {
                                     error: "Schema evolution is disabled".to_string(),
                                     records: line_str.to_string(),
                                 };
-                                
+
                                 Self::deadletter(dl);
                                 offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Position, batch_line);
                                 
