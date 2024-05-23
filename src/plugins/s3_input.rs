@@ -534,6 +534,8 @@ impl DataSourceS3Plugin {
         s3_bucket: String,
         s3_prefix: String,
     ) -> io::Result<Option<String>> {
+        
+        return Ok(None);
 
         // migrate from old continuation token file
         match OpenOptions::new().read(true).open(CONTINUATION_TOKEN_FILE.to_string()) {
