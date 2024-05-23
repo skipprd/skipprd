@@ -219,7 +219,7 @@ impl Ingest {
                         pipeline_metadata = METADATA.read().clone();
                     }
 
-                    let mut count = 0;
+                    let mut count = NUM_ANALYSED_RECORDS.read().load(Ordering::SeqCst);
 
                     for data in datas.iter() {
 
