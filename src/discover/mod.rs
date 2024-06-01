@@ -4,7 +4,7 @@ use std::any::Any;
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{File};
 use std::io::Read;
-use std::sync::atomic::{AtomicBool, AtomicI64};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64};
 use std::time::SystemTime;
 
 
@@ -40,7 +40,7 @@ use crate::helpers::offsets::OffsetTypes;
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::ingest_work::Deadletter;
 
-pub static NUM_ANALYSED_RECORDS: Lazy<TimedRwLock<AtomicI64>> = Lazy::new(|| TimedRwLock::new("num_analyised_records".to_string(), AtomicI64::new(0)));
+pub static NUM_ANALYSED_RECORDS: Lazy<TimedRwLock<u64>> = Lazy::new(|| TimedRwLock::new("num_analyised_records".to_string(), 0));
 
 thread_local! {
     static LAST_SUCCESSFUL_EVOLUTION: std::cell::RefCell<HashMap<String, String>> = std::cell::RefCell::new(HashMap::new());
@@ -466,9 +466,9 @@ impl AnalyseSchema {
     pub fn infer_json_schema(
         &self,
         str: &mut String,
-        max_read_records: Option<i64>,
+        max_read_records: Option<u64>,
         metadata: &mut HashMap<std::string::String, Metadata>,
-    ) -> i64 {
+    ) -> u64 {
         // self.infer_json_schema_from_iterator(ValueIter::new(reader, max_read_records))
         let counts = self.infer_json_schema_from_iterator(str, metadata, max_read_records);
         counts
@@ -482,8 +482,8 @@ impl AnalyseSchema {
         &self,
         str: &mut String,
         metadata: &mut HashMap<std::string::String, Metadata>,
-        max_read_records: Option<i64>,
-    ) -> i64 {
+        max_read_records: Option<u64>,
+    ) -> u64 {
         let mut parse_namespace_cache: HashMap<String, String> = HashMap::new();
 
         let mut counts = 0;
@@ -522,7 +522,7 @@ impl AnalyseSchema {
                             }
                         },
                         None => {
-                           return counts;
+                          continue;
                         }
                     }
                 }

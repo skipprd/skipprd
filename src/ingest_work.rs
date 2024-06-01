@@ -23,13 +23,14 @@ use std::path::PathBuf;
 use std::process::exit;
 use std::string::ToString;
 use std::sync::{Arc, RwLock};
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use threadpool::ThreadPool;
 use std::sync::mpsc::channel;
 extern crate num_cpus;
 use std::sync::mpsc::Sender;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::atomic::Ordering::AcqRel;
+use std::thread::sleep;
 use arrow::json::ReaderBuilder;
 use arrow::record_batch::RecordBatch;
 use dashmap::{DashMap, DashSet};
@@ -219,7 +220,7 @@ impl Ingest {
                         pipeline_metadata = METADATA.read().clone();
                     }
 
-                    let mut count = NUM_ANALYSED_RECORDS.read().load(Ordering::SeqCst);
+                    let mut count: u64 = 0;
 
                     for data in datas.iter() {
 
@@ -229,7 +230,7 @@ impl Ingest {
                             &mut pipeline_metadata.metadata,
                         );
 
-                        println!("Analysed schema for {}/{} records", count, max_records);
+                        // println!("Analysed schema for {}/{} records", count, max_records);
 
                         if count >= max_records {
                             break;
@@ -242,15 +243,26 @@ impl Ingest {
                     }
 
                     {
-                        NUM_ANALYSED_RECORDS.write().fetch_add(count, Ordering::SeqCst);
+                        *NUM_ANALYSED_RECORDS.write() += count;
                     }
-
+                    
                     if count >= max_records {
-                        let mut pipeline = METADATA.write();
-                        *pipeline = pipeline_metadata;
+
+                        {
+                            let mut pipeline = METADATA.write();
+                            *pipeline = pipeline_metadata;
+                        }
 
                         DISCOVER_RUNNING.write().store(false, Ordering::SeqCst);
+
+                        // sleep while main thread shuts down
+                        while RUNNING.read().load(Ordering::SeqCst) {
+                            sleep(Duration::from_secs(1));
+                        }
+                        return;
                     }
+
+                    println!("Analysed schema for {} -> {}/{} records", count, *NUM_ANALYSED_RECORDS.read(), max_records);
 
                     return;
                 }

@@ -99,6 +99,7 @@ use crate::plugins::file_input::DataSourceLocalFilePlugin;
 // use crate::plugins::stdout_output::DataOutputStdoutPlugin;
 
 use datafusion::prelude::*;
+use icu::properties::sets::print;
 use sqlparser::test_utils::alter_table_op_with_name;
 use tokio::fs::metadata;
 use crate::buffer::ingest_buffer::{Buffers, TOTAL_ROWS, WAL_PARTITION_INDEX};
@@ -327,7 +328,7 @@ async fn discover() {
 
     let offsets = Arc::new(offsets);
 
-    let output = sync_output_plugin(Config::get_pipeline_output_plugin_name().as_str(), "output".to_string()).await.unwrap();
+    let output = sync_output_plugin("file", "output".to_string()).await.unwrap();
     let shared_output = Arc::new(TimedRwLock::new("output_plugin".to_string(), output));
 
     let offsets_clone = offsets.clone();
@@ -373,6 +374,7 @@ async fn discover() {
 
     sync_input_plugin(offsets_clone, shared_output_clone).await;
 
+    println!("Reached end of source data");
     // if we hit end of data, wait for schema discovery to complete
     DISCOVER_RUNNING.write().store(false, Ordering::SeqCst);
 
