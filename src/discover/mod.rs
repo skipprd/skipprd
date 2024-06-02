@@ -551,7 +551,7 @@ impl AnalyseSchema {
             }
             
             match v.type_id() {
-                _Value => {
+                _value => {
                     let mut ingest_record = IngestRecord {
                         source_namespace: "".to_string(),
                         source_partition: "".to_string(),
