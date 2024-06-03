@@ -1,0 +1,79 @@
+pipelines:
+#  cloud_trail:
+#    auto_approve: yes
+#    env: dev
+#    buffer_threshold_bytes: 2000000
+#    buffer_threshold_seconds: 600
+#    transform:
+#      batch_time_fields: eventTime
+#      batch_time_unit: day
+#      record_field_path: Records
+#      batch_partition_fields: eventSource
+#    input: data_inputs.cloud_trail
+
+  bike_hire:
+    auto_approve: yes
+    env: dev
+    buffer_threshold_bytes: 10000000
+    buffer_threshold_seconds: 60
+    transform:
+      batch_time_fields: event_date
+      batch_time_unit: day
+      time_partition_prefix: date_
+      batch_partition_fields: event_type
+    input: data_inputs.s3_bike_hire
+
+  very_small_files:
+    env: dev
+#    sync_frequency_seconds: 10
+    buffer_threshold_bytes: 100000000
+    buffer_threshold_seconds: 300
+    input: data_inputs.very_small_files
+
+  metrics:
+    env: dev
+    auto_approve: yes
+    buffer_threshold_bytes: 20000000
+    buffer_threshold_seconds: 60
+    transform:
+      batch_time_fields: datetime
+      batch_time_unit: day
+      namespace_fields: type
+    input: data_inputs.metrics
+
+
+
+data_inputs:
+  cloud_trail:
+    s3:
+      batch_size_bytes: 10000000
+      s3_bucket: aws-cloudtrail-logs-201015722121-1d5e4776
+      s3_prefix: AWSLogs/201015722121/CloudTrail/eu-west-1/
+  s3_bike_hire:
+    s3:
+      batch_size_bytes: 2048000
+      s3_bucket: skippr-e2e-sample-data
+      s3_prefix: bike-hire/
+  very_small_files:
+    s3:
+      batch_size_bytes: 2048000
+#      s3_bucket: skippr-dev-sample-data
+      s3_bucket: skippr-e2e-sample-data
+      s3_prefix: very-small-files/
+  metrics:
+    s3:
+      batch_size_bytes: 2048000
+      s3_bucket: skippr-metric-test
+      s3_prefix: compacted/metric
+      s3_prefix_ordered_depth: 5
+      s3_delimiter: /
+
+
+data_outputs:
+
+
+data_deadletters:
+  sample:
+    s3:
+      s3_bucket: skippr-e2e-sample-data-output
+      s3_prefix: /deadletters

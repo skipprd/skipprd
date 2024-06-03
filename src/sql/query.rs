@@ -364,6 +364,8 @@ pub async fn query(sql_str: &str) {
                 ("p_tenant_id".to_string(), DataType::Utf8),
                 ("p_source_type".to_string(), DataType::Utf8),
                 ("p_year".to_string(), DataType::Utf8),
+                ("p_month".to_string(), DataType::Utf8),
+                ("p_day".to_string(), DataType::Utf8),
 
             ];
 
