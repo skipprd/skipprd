@@ -182,20 +182,22 @@ async fn main() {
                 } else {
                     println!("No pipeline name provided, syncing all pipelines");
                     let pipelines = Config::get_pipelines();
-                    for pipeline in pipelines {
-                        println!("Syncing pipeline: {}", pipeline);
-                        Config::reset_envcache();
-                        PIPELINE_NAME.write().clear();
-                        PIPELINE_NAME.write().push_str(&pipeline);
-                        Config::init().await;
+                    loop {
+                        for pipeline in &pipelines {
+                            Config::reset_envcache();
+                            PIPELINE_NAME.write().clear();
+                            PIPELINE_NAME.write().push_str(&pipeline);
+                            Config::init().await;
 
-                        {
-                            let mut counter_lock = METRICS.write();
-                            counter_lock.reset();
+                            {
+                                let mut counter_lock = METRICS.write();
+                                counter_lock.reset();
+                            }
+
+                            sync().await;
                         }
 
-                        sync().await;
-
+                        sleep(Duration::from_secs(5));
                     }
                 }
                 // PIPELINE_NAME.write().unwrap().clear();
@@ -385,10 +387,58 @@ async fn discover() {
 
 }
 
+struct PipelineCache {
+    offsets: Offsets,
+    last_ran: Instant
+}
+
+static PIPELINE_CACHE: Lazy<TimedRwLock<HashMap<String, PipelineCache>>> = Lazy::new(|| TimedRwLock::new("pipeline_cache".to_string(), HashMap::new()));
+
+// pipeline metadata
+// offsets
+// index
+// sync schema
+
 
 async fn sync() {
+
+
+
+    let pipeline_name = Config::get_pipeline_name();
+
+    let mut pipeline_metadata: PipelineMetadata;
+    let mut offsets: Offsets;
+
+
+    let cache = PIPELINE_CACHE.read();
+    let pipeline_cache = cache.get(&Config::get_pipeline_name());
+
+    if pipeline_cache.is_some() {
+        let last_ran = pipeline_cache.unwrap().last_ran;
+        let now = Instant::now();
+        let elapsed = now.duration_since(last_ran);
+
+        offsets = pipeline_cache.unwrap().offsets.clone();
+
+        if elapsed.as_secs() < Config::get_sync_frequency() {
+            // println!("Pipeline '{}' throttled, last ran {} seconds ago, skipping.", pipeline_name, elapsed.as_secs());
+            return;
+        }
+
+    } else {
+        offsets = match Offsets::init() {
+            Ok(offsets) => offsets,
+            Err(e) => {
+                println!("Skipping: {}", e);
+                return;
+            }
+        };
+    }
+    
+    drop(pipeline_cache);
+    drop(cache);
+    
     {
-        let pipeline_name = Config::get_pipeline_name();
         LOGGER.write()
             .await
             .log(LogLevel::Info, format!("Starting Skippr ingest pipeline: {}", pipeline_name))
@@ -410,15 +460,15 @@ async fn sync() {
         }
     }
 
-    let pipeline_name = Config::get_pipeline_name();
 
-    let pipeline_metadata = match Config::get_metadata().await {
+    // @todo - we don't cache Pipeline metatdata, as currently SQL statements are not stored in metadata.
+    //         Refactor to accept SQL directly via database connection
+    pipeline_metadata = match Config::get_metadata().await {
         Ok(mut pipeline_metadata) => {
             println!("Found existing Skippr metadata");
 
             match pipeline_metadata.sql {
                 Some(sql) => {
-
                     for stmt in sql {
                         println!("Recieved SQL statement: '{}'", stmt);
 
@@ -427,7 +477,6 @@ async fn sync() {
                     }
 
                     return;
-
                 },
                 None => {}
             }
@@ -447,17 +496,20 @@ async fn sync() {
         }
     };
 
+
+
+    PIPELINE_CACHE.write().insert(pipeline_name.clone(), PipelineCache {
+        offsets: offsets.clone(),
+        last_ran: Instant::now()
+    });
+
+
+    println!("Syncing pipeline: {}", pipeline_name);
+
     {
         METADATA.write().clone_from(&pipeline_metadata);
     }
 
-    let offsets = match Offsets::init() {
-        Ok(offsets) => offsets,
-        Err(e) => {
-            println!("Skipping: {}", e);
-            return;
-        }
-    };
     
     let offsets = Arc::new(offsets);
 
@@ -950,7 +1002,8 @@ async fn sync() {
 
     LOGGER.write().await.flush().await.unwrap();
 
-    println!("Complete. Shutting Down... bye");
+    println!("Pipeline '{}' sync complete", pipeline_name);
+
 }
 
 pub fn flatten_metadata(metadata: &Metadata, flattened: &mut HashMap<String, Metadata>) {

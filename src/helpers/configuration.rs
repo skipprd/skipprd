@@ -125,6 +125,7 @@ pub struct Pipeline {
     pub buffer_threshold_bytes: Option<u64>,
     pub buffer_threshold_seconds: Option<u64>,
     pub chaos_mode: Option<String>,
+    pub sync_frequency_seconds: Option<u64>,
     pub data_dir: Option<String>,
     pub transform: Option<Transform>,
     pub input: Option<String>,
@@ -596,6 +597,7 @@ impl Config {
                     buffer_threshold_bytes: None,
                     buffer_threshold_seconds: None,
                     chaos_mode: None,
+                    sync_frequency_seconds: None,
                     data_dir: None,
                     transform: None,
                     input: None,
@@ -851,6 +853,35 @@ impl Config {
         }
     }
 
+    pub fn get_sync_frequency() -> u64 {
+        
+        const DEFAULT: u64 = 900;
+        
+        if Config::get_envcache("SYNC_FREQUENCY") != "" {
+            if Config::get_envcache("SYNC_FREQUENCY") == DEFAULT_CONFIG {
+                return DEFAULT;
+            }
+            return Config::get_envcache("SYNC_FREQUENCY").parse::<u64>().unwrap();
+        } else {
+            let _config = Config::get();
+
+            let pipline = Config::get_pipeline_config();
+
+            let default_sync_frequency = &Config::getenv("SYNC_FREQUENCY", &DEFAULT.to_string()).parse::<u64>().unwrap();
+
+            let sync_frequency = match pipline.sync_frequency_seconds.as_ref() {
+                Some(sync_frequency) => {
+                    sync_frequency
+                }
+                None => {
+                    default_sync_frequency
+                }
+            };
+            Config::set_evncache("TRANSFORM_BATCH_TIME_FIELDS", &sync_frequency.to_string());
+            sync_frequency.clone()
+        }
+    }
+    
     pub fn get_pipeline_chaos_mode() -> bool {
         if Config::get_envcache("SKIPPR_CHAOS_MODE") != "" {
             if Config::get_envcache("SKIPPR_CHAOS_MODE") == DEFAULT_CONFIG {

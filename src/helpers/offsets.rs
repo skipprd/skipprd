@@ -56,6 +56,7 @@ pub struct Offset {
     pub(crate) key: OffsetKey,
 }
 
+#[derive(Clone)]
 pub struct Offsets {
     /// The Key-Value store that contains all offset data.
     /// Resources can be found using their Subject.
