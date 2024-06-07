@@ -8,7 +8,10 @@ use std::hash::{Hash, Hasher};
 use crate::helpers::license::{HAS_LICENSE, TENANT_ID};
 use serde_derive::Serialize;
 use std::fmt;
+use std::fmt::Debug;
 use std::sync::Arc;
+use std::time::SystemTime;
+use chrono::{DateTime, Utc};
 use tokio::sync::{RwLock};
 use crate::METRICS;
 
@@ -28,13 +31,13 @@ impl fmt::Display for LogLevel {
 
 #[derive(Debug, Clone, Serialize, Hash, PartialEq, Eq)]
 pub struct Log {
-    time: chrono::DateTime<chrono::Utc>,
+    time: SystemTime,
     level: LogLevel,
     message: String,
 }
 
 pub struct Logger {
-    logs: BTreeMap<chrono::DateTime<chrono::Utc>, Log>,
+    pub(crate) logs: BTreeMap<SystemTime, Log>,
     buffer_limit: usize,
 }
 
@@ -48,7 +51,7 @@ impl Logger {
 
     pub async fn log(&mut self, level: LogLevel, message: String) {
         let log = Log {
-            time: chrono::Utc::now(),
+            time: SystemTime::now(),
             level,
             message
         };
@@ -81,7 +84,7 @@ impl Logger {
 
     pub(crate) async fn log_api<'a>(
         &mut self,
-        logs: BTreeMap<chrono::DateTime<chrono::Utc>, Log>,
+        logs: BTreeMap<SystemTime, Log>,
         exit_code: Option<i8>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let workspace = Config::get_workspace_name();
@@ -127,13 +130,14 @@ impl Logger {
         {
             run_id = METRICS.read().run_id.clone();
         }
-
+        
+        
         let data = json!({
             "logs": logs.iter().map(|(_time, log)| {
                 json!({
                     "level": log.level.to_string(),
                     "message": log.message,
-                    "time": log.time.to_string()
+                    "time": log.time
                 })
             }).collect::<Vec<_>>(),
             "type": "log",

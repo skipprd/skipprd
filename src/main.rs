@@ -439,11 +439,6 @@ async fn sync() {
     drop(cache);
     
     {
-        LOGGER.write()
-            .await
-            .log(LogLevel::Info, format!("Starting Skippr ingest pipeline: {}", pipeline_name))
-            .await;
-
         let mut counter_lock = METRICS.write();
         counter_lock.status = MetricsStatus::Running;
     }
@@ -624,12 +619,6 @@ async fn sync() {
                     .unwrap();
 
                 rt.block_on(async {
-                    LOGGER
-                        .write()
-                        .await
-                        .log(LogLevel::Info, format!("Received SIG: {} - Gracefully shutting down", sig.to_string()))
-                        .await;
-                    LOGGER.write().await.flush().await.unwrap();
                 });
             }).join().unwrap();
 
@@ -817,9 +806,6 @@ async fn sync() {
                             Ok(_g) => {}
                             Err(_err) => {}
                         }
-
-                        LOGGER.write().await.flush().await.unwrap();
-
                     });
 
             }
@@ -915,14 +901,8 @@ async fn sync() {
     println!("Ingest completed, flushing remaining buffers to output plugin {}", Config::get_pipeline_config().output.or(Some("".to_string())).unwrap());
 
     {
-        LOGGER.write()
-            .await
-            .log(LogLevel::Info, format!("Ingest completed, flushing remaining buffers to output plugin {}", Config::get_pipeline_config().output.or(Some("".to_string())).unwrap()))
-            .await;
-
         let mut counter_lock = METRICS.write();
         counter_lock.status = MetricsStatus::Finishing;
-
     }
 
     // RUNNING.write().unwrap().store(false, Ordering::SeqCst); // the prevents metrics from printing while shutting down, BUT also prevents output serialisatin
@@ -977,11 +957,6 @@ async fn sync() {
     // }
 
     {
-        LOGGER.write()
-            .await
-            .log(LogLevel::Info, "Complete, shutting down".to_string())
-            .await;
-
         let mut counter_lock = METRICS.write();
         counter_lock.status = MetricsStatus::Completed;
 
@@ -1000,8 +975,10 @@ async fn sync() {
         Err(_err) => {}
     }
 
-    LOGGER.write().await.flush().await.unwrap();
-
+    if !LOGGER.read().await.logs.is_empty() {
+        LOGGER.write().await.flush().await.unwrap();
+    }
+    
     println!("Pipeline '{}' sync complete", pipeline_name);
 
 }
