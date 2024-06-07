@@ -1,10 +1,10 @@
+use std::string::ToString;
 use std::sync::Arc;
 use clap::Parser;
 use once_cell::sync::Lazy;
-use parking_lot::RwLock;
 use crate::helpers::timed_rwlock::TimedRwLock;
 
-pub static CLI_MODE: Lazy<RwLock<Mode>> = Lazy::new(|| RwLock::new(Mode::Sync(SyncOptions {
+pub static CLI_MODE: Lazy<TimedRwLock<Mode>> = Lazy::new(|| TimedRwLock::new("cli_mode".to_string(), Mode::Sync(SyncOptions {
     pipeline: None,
 })));
 
