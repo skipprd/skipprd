@@ -185,7 +185,7 @@ impl DataSourceS3Plugin {
                     },
                     Ok(output) => {
 
-                        let common_prefixes = output.common_prefixes().unwrap_or_default();
+                        let common_prefixes = output.common_prefixes();
 
                         for prefix in common_prefixes.iter().filter_map(|p| p.prefix()) {
                             let depth = prefix.matches(&delimiter).count();
@@ -194,18 +194,16 @@ impl DataSourceS3Plugin {
                                 self.prefixes.push((prefix.to_string(), depth));
                             }
                         }
-                        
-                        let objects = match output.contents() {
-                            Some(objects) => objects,
-                            None => {
-                                if empty_objects_trys >= max_empty_objects {
-                                    // println!("No more objects found in S3, skipping Bucket: {} Prefix: {}", s3_bucket, s3_prefix);
-                                    break;
-                                }
-                                empty_objects_trys += 1;
-                                continue;
+                        if output.contents.is_none() {
+                            if empty_objects_trys >= max_empty_objects {
+                                // println!("No more objects found in S3, skipping Bucket: {} Prefix: {}", s3_bucket, s3_prefix);
+                                break;
                             }
+                            empty_objects_trys += 1;
+                            continue;
                         };
+                        
+                        let objects = output.contents();
 
                         // println!("Sub-Syncing bucket: {}, prefix: {}", s3_bucket, s3_prefix);
                         // println!("Found {} objects in S3", objects.len());
@@ -234,7 +232,7 @@ impl DataSourceS3Plugin {
 
                                     outputs.push(object_key.to_string());
 
-                                    chunk_size_current += object.size();
+                                    chunk_size_current += object.size().unwrap_or_default();
 
                                     i += 1;
 

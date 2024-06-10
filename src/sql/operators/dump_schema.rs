@@ -40,7 +40,7 @@ pub fn dump_schema(metadata: &Metadata, stmt: &SchemaDumpStatement) -> Result<()
     let hive_schema = SkipprHive::convert_skippr_to_hive(output_metadata.get("root").unwrap()).unwrap();
     
     for col in hive_schema.iter() {
-        let col_str = format!("{} {}\n", col.name().unwrap(), col.r#type().unwrap());
+        let col_str = format!("{} {}\n", col.name(), col.r#type().unwrap());
         writer.write(col_str.as_bytes()).expect("Failed to write schema to file");
     };
     

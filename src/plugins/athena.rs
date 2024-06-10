@@ -19,9 +19,9 @@ use std::io::{BufReader, Read};
 use std::path::Path;
 use std::sync::Arc;
 use async_trait::async_trait;
+use aws_sdk_glue::error::SdkError;
 use aws_sdk_glue::operation::get_table::{GetTableError, GetTableOutput};
 use aws_sdk_s3::types::{Delete, Object, ObjectIdentifier};
-use aws_smithy_http::result::SdkError;
 use bytes::Bytes;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use futures::{Stream, StreamExt};
@@ -435,7 +435,7 @@ impl AwsAthena {
             Ok(result) => match result.work_group {
                 Some(work_group) => {
                     // println!("Found workgroup: {}", workgroup);
-                    Ok(work_group.name.unwrap_or_default() == workgroup)
+                    Ok(work_group.name == workgroup)
                 }
                 None => {
                     // println!("Did not find workgroup: {}", workgroup);
@@ -461,7 +461,7 @@ impl AwsAthena {
         match glue_client.get_database().name(&database_name).send().await {
             Ok(output) => {
                 if let Some(database) = output.database {
-                    Ok(database.name.unwrap() == database_name)
+                    Ok(database.name == database_name)
                 } else {
                     Ok(false)
                 }
@@ -523,7 +523,8 @@ impl AwsAthena {
                             .encryption_configuration(
                                 EncryptionConfiguration::builder()
                                     .encryption_option(EncryptionOption::SseS3)
-                                    .build(),
+                                    .build()
+                                    .unwrap(),
                             )
                             .output_location(format!("s3://{}", path))
                             .build(),
@@ -571,7 +572,8 @@ impl AwsAthena {
                             .encryption_configuration(
                                 EncryptionConfiguration::builder()
                                     .encryption_option(EncryptionOption::SseS3)
-                                    .build(),
+                                    .build()
+                                    .unwrap(),
                             )
                             .output_location(format!("s3://{}", path))
                             .build(),
@@ -611,7 +613,8 @@ impl AwsAthena {
                     .name(&database)
                     .description(format!("{} managed by skippr.io", database))
                     .location_uri(format!("s3://{}", path))
-                    .build(),
+                    .build()
+                    .unwrap(),
             )
             .send()
             .await
@@ -683,7 +686,7 @@ impl AwsAthena {
             println!("Deleting tables in database '{}'", database_name);
 
             for table in tables {
-                let table_name = table.name.unwrap();
+                let table_name = table.name;
                 
                 println!("Deleting table '{}'", table_name);
 
@@ -828,23 +831,30 @@ impl AwsAthena {
             .set_continuation_token(next_token.clone())
             .send()
             .await {
-
             let mut delete_objects: Vec<ObjectIdentifier> = vec![];
 
-            let objects = match resp.contents() {
-                Some(objects) => objects,
-                None => {
-                    continue;
-                }
+            if resp.contents.is_none() {
+                continue
             };
 
-            for obj in objects {
+            let objects = resp.contents();
 
+            for obj in objects {
+                
                 let obj_id = ObjectIdentifier::builder()
                     .set_key(obj.key.clone())
                     .build();
-                delete_objects.push(obj_id);
+                
+                match obj_id {
+                    Ok(obj_id) => {
+                        delete_objects.push(obj_id);
+                    }
+                    Err(_) => {
+                        // println!("Failed to create object identifier for key: {}", obj.key.unwrap_or_default());
+                    }
+                }
             }
+            
 
             if !delete_objects.is_empty() {
 
@@ -856,7 +866,8 @@ impl AwsAthena {
                     .delete(
                         Delete::builder()
                             .set_objects(Some(delete_objects))
-                            .build(),
+                            .build()
+                            .unwrap(),
                     )
                     .send()
                     .await.unwrap();
@@ -889,7 +900,8 @@ impl AwsAthena {
                     Column::builder()
                         .name(clean_field_name.to_string())
                         .r#type("string")
-                        .build(),
+                        .build()
+                        .unwrap(),
                 );
             }
         }
@@ -927,7 +939,8 @@ impl AwsAthena {
                     Column::builder()
                         .name(granularity.to_string())
                         .r#type("int")
-                        .build(),
+                        .build()
+                        .unwrap(),
                 );
 
                 if partition_index_keys.len() < 3 {
@@ -937,7 +950,8 @@ impl AwsAthena {
                         PartitionIndex::builder()
                             .index_name(granularity.to_string())
                             .set_keys(Some(partition_index_keys.clone()))
-                            .build(),
+                            .build()
+                            .unwrap(),
                     );
                 }
 
@@ -985,7 +999,7 @@ impl AwsAthena {
         let mut create_table_cmd = glue_client
             .create_table()
             .database_name(&database)
-            .table_input(table_input.build());
+            .table_input(table_input.build().unwrap());
 
         if !partition_indexes.is_empty() {
             create_table_cmd = create_table_cmd.set_partition_indexes(Some(partition_indexes));
@@ -1064,7 +1078,7 @@ impl AwsAthena {
             .update_table()
             .database_name(&database)
             .skip_archive(true)
-            .table_input(table_input.build())
+            .table_input(table_input.build().unwrap())
             .send()
             .await
         {

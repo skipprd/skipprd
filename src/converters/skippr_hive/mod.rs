@@ -53,7 +53,7 @@ impl SkipprHive {
 
                     let mut types: Vec<String> = vec![];
                     for col in stuct_cols.into_iter() {
-                        types.push(format!("{}:{}", col.name().unwrap(), col.r#type().unwrap()));
+                        types.push(format!("{}:{}", col.name, col.r#type().unwrap()));
                         // types.push(format!("{}", col.r#type().unwrap()));
                     }
                     type_str = format!("{}{}>", type_str, types.join(","));
@@ -62,7 +62,8 @@ impl SkipprHive {
                         Column::builder()
                             .name(v.out_field_name.to_string())
                             .r#type(type_str)
-                            .build(),
+                            .build()
+                            .unwrap(),
                     )
                 }
                 "map" => {
@@ -83,7 +84,8 @@ impl SkipprHive {
                             Column::builder()
                                 .name(v.out_field_name.to_string())
                                 .r#type(type_str)
-                                .build(),
+                                .build()
+                                .unwrap(),
                         )
                     }
                 }
@@ -110,7 +112,8 @@ impl SkipprHive {
                                 Column::builder()
                                     .name(v.out_field_name.to_string())
                                     .r#type(type_str)
-                                    .build(),
+                                    .build()
+                                    .unwrap(),
                             )
                         } else {
                             let value_type: String = match MAPPINGS.get(&v.determined_type_values) {
@@ -124,7 +127,8 @@ impl SkipprHive {
                                 Column::builder()
                                     .name(v.out_field_name.to_string())
                                     .r#type(type_str)
-                                    .build(),
+                                    .build()
+                                    .unwrap(),
                             )
                         }
                     }
@@ -135,7 +139,8 @@ impl SkipprHive {
                             Column::builder()
                                 .name(&v.out_field_name.to_string())
                                 .r#type(mapped_type.to_string())
-                                .build(),
+                                .build()
+                                .unwrap(),
                         ),
                         None => {
                             println!(
@@ -155,6 +160,6 @@ impl SkipprHive {
 
     fn sort_fields(vec: &mut Vec<Column>) {
         // Sort the map by the count of each Metadata in descending order
-        vec.sort_by(|col1, col2| col1.name.as_ref().unwrap().cmp(col2.name.as_ref().unwrap()));
+        vec.sort_by(|col1, col2| col1.name.cmp(&col2.name));
     }
 }
