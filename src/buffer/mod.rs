@@ -39,7 +39,6 @@ use crate::helpers::Helpers;
 use crate::helpers::timed_rwlock::TimedRwLock;
 // use crate::ingest_work::OutputFile;
 
-use crate::serdes::parquet::SerdeParquet;
 use once_cell::sync::Lazy;
 use crate::buffer::ingest_buffer::WalFile;
 
