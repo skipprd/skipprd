@@ -618,7 +618,7 @@ mod tests_fast_set_date {
         let field = "test_field";
 
         let date_str = "2023-05-21 12:34:56";
-        let format_name = foo.is_valid_date(date_str).unwrap();
+        let format_name = AnalyseSchema::is_valid_date(date_str).unwrap();
         let format = DateFormats::from_str(format_name).unwrap().as_str();
 
         let mut meta = generate_metadata(field, format_name);
@@ -647,7 +647,7 @@ mod tests_fast_set_date {
         // let date_str = "2023-07-11T12:56:44.000Z";
         // let date_str = "2023-07-11T14:56:44+02:00";
         let date_str = "2023-07-11T14:56:44";
-        let format_name = foo.is_valid_date(date_str).unwrap();
+        let format_name = AnalyseSchema::is_valid_date(date_str).unwrap();
         let format = DateFormats::from_str(format_name).unwrap().as_str();
 
         let mut meta = generate_metadata(field, format_name);
@@ -677,7 +677,7 @@ mod tests_fast_set_date {
         let field = "test_field";
 
         let date_str = "2023-12-11T15:49:31+01:00";
-        let format_name = foo.is_valid_date(date_str).unwrap();
+        let format_name = AnalyseSchema::is_valid_date(date_str).unwrap();
         let format = DateFormats::from_str(format_name).unwrap().as_str();
 
         let mut meta = generate_metadata(field, format_name);

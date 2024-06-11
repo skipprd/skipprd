@@ -873,7 +873,7 @@ impl AnalyseSchema {
 
                 let value_str = json_value.as_str().unwrap_or("");
 
-                if let Some(format) = self.is_valid_date(value_str) {
+                if let Some(format) = AnalyseSchema::is_valid_date(value_str) {
                     data_type = "date".to_string();
                     // self.set_date_field_candidate(field, metadata, &format);
                     self.increment_date_field_candidate_count(field, metadata, &format.to_string());
@@ -1099,7 +1099,7 @@ impl AnalyseSchema {
         }
     }
 
-    pub(crate) fn is_valid_date(&self, value: &str) -> Option<&str> {
+    pub(crate) fn is_valid_date(value: &str) -> Option<&str> {
         for format in DateFormats::iterator() {
             let found_format = match Helpers::parse_date_from_string(value, format.as_str()) {
                 Ok(_) => {
@@ -1702,50 +1702,50 @@ mod is_valid_date_tests {
         let json_value: Value = date_str.into();
         let value = json_value.as_str().unwrap();
 
-        assert_eq!(Some("Iso8601"), foo.is_valid_date(value));
+        assert_eq!(Some("Iso8601"), AnalyseSchema::is_valid_date(value));
 
         let date_str = "2022-01-05T08:30:12.000Z";
-        assert_eq!(Some("Iso8601"), foo.is_valid_date(date_str));
+        assert_eq!(Some("Iso8601"), AnalyseSchema::is_valid_date(date_str));
 
         let fmt = DateFormats::from_str("Iso8601").unwrap();
         assert_eq!("%Y-%m-%dT%H:%M:%S.%fZ", fmt.as_str());
         Helpers::parse_date_from_string(date_str, fmt.as_str()).unwrap();
 
         let date_str = "2022-01-07T08:28:07Z";
-        assert_eq!(Some("Iso8601_2"), foo.is_valid_date(date_str));
+        assert_eq!(Some("Iso8601_2"), AnalyseSchema::is_valid_date(date_str));
 
         let date_str = "2022-02-22T22:22:22";
-        assert_eq!(Some("Atom"), foo.is_valid_date(date_str));
+        assert_eq!(Some("Atom"), AnalyseSchema::is_valid_date(date_str));
 
         let mut date_str = "2021-01-03 02:30:00";
-        assert_eq!(Some("Mysql"), foo.is_valid_date(date_str));
+        assert_eq!(Some("Mysql"), AnalyseSchema::is_valid_date(date_str));
 
         date_str = "Tue, 22 Feb 2022 22:22:22 GMT";
-        assert_eq!(Some("Rfc850"), foo.is_valid_date(date_str));
+        assert_eq!(Some("Rfc850"), AnalyseSchema::is_valid_date(date_str));
 
         date_str = "2022-02-22";
-        assert_eq!(Some("DateOnly"), foo.is_valid_date(date_str));
+        assert_eq!(Some("DateOnly"), AnalyseSchema::is_valid_date(date_str));
     }
 
     #[test]
     fn test_invalid_date_format() {
         let foo: AnalyseSchema = AnalyseSchema { i: 0 };
         let date_str = "2022-22-22";
-        assert_eq!(None, foo.is_valid_date(date_str));
+        assert_eq!(None, AnalyseSchema::is_valid_date(date_str));
     }
 
     #[test]
     fn test_empty_date_string() {
         let foo: AnalyseSchema = AnalyseSchema { i: 0 };
         let date_str = "";
-        assert_eq!(None, foo.is_valid_date(date_str));
+        assert_eq!(None, AnalyseSchema::is_valid_date(date_str));
     }
 
     #[test]
     fn test_non_date_string() {
         let foo: AnalyseSchema = AnalyseSchema { i: 0 };
         let date_str = "not a date";
-        assert_eq!(None, foo.is_valid_date(date_str));
+        assert_eq!(None, AnalyseSchema::is_valid_date(date_str));
     }
 
     #[test]
@@ -1753,7 +1753,7 @@ mod is_valid_date_tests {
         let foo: AnalyseSchema = AnalyseSchema { i: 0 };
         let date_str = "2022-02-22T22:22:22Z";
         let _dt = DateTime::parse_from_rfc3339(date_str).unwrap();
-        assert_eq!(Some("Iso8601_2"), foo.is_valid_date(date_str));
+        assert_eq!(Some("Iso8601_2"), AnalyseSchema::is_valid_date(date_str));
     }
 
     #[test]
@@ -1761,7 +1761,7 @@ mod is_valid_date_tests {
         let foo: AnalyseSchema = AnalyseSchema { i: 0 };
         let date_str = "2022-02-22";
         let _nd = Helpers::parse_date_from_string(date_str, "%Y-%m-%d").unwrap();
-        assert_eq!(Some("DateOnly"), foo.is_valid_date(date_str));
+        assert_eq!(Some("DateOnly"), AnalyseSchema::is_valid_date(date_str));
     }
 }
 
@@ -1778,26 +1778,26 @@ mod discover_date_formats_tests {
         let foo: AnalyseSchema = AnalyseSchema { i: 0 };
 
         let date_str = "2022-01-05T08:30:12.000Z";
-        assert_eq!(Some("Iso8601"), foo.is_valid_date(date_str));
+        assert_eq!(Some("Iso8601"), AnalyseSchema::is_valid_date(date_str));
 
         let fmt = DateFormats::from_str("Iso8601").unwrap();
         assert_eq!("%Y-%m-%dT%H:%M:%S.%fZ", fmt.as_str());
         Helpers::parse_date_from_string(date_str, fmt.as_str()).unwrap();
 
         let date_str = "2022-01-07T08:28:07Z";
-        assert_eq!(Some("Iso8601_2"), foo.is_valid_date(date_str));
+        assert_eq!(Some("Iso8601_2"), AnalyseSchema::is_valid_date(date_str));
 
         let date_str = "2022-02-22T22:22:22";
-        assert_eq!(Some("Atom"), foo.is_valid_date(date_str));
+        assert_eq!(Some("Atom"), AnalyseSchema::is_valid_date(date_str));
 
         let mut date_str = "2021-01-03 02:30:00";
-        assert_eq!(Some("Mysql"), foo.is_valid_date(date_str));
+        assert_eq!(Some("Mysql"), AnalyseSchema::is_valid_date(date_str));
 
         date_str = "Tue, 22 Feb 2022 22:22:22 GMT";
-        assert_eq!(Some("Rfc850"), foo.is_valid_date(date_str));
+        assert_eq!(Some("Rfc850"), AnalyseSchema::is_valid_date(date_str));
 
         date_str = "2022-02-22";
-        assert_eq!(Some("DateOnly"), foo.is_valid_date(date_str));
+        assert_eq!(Some("DateOnly"), AnalyseSchema::is_valid_date(date_str));
     }
 }
 
