@@ -3,21 +3,87 @@ use std::fs::OpenOptions;
 use std::io::{BufReader, BufWriter};
 use std::path::PathBuf;
 use std::sync::Arc;
+use arrow::array::{Array, ArrayRef, Date32Array, Int32Array, StringArray};
 use arrow_schema::DataType;
+use aws_config::meta::region::RegionProviderChain;
+use aws_config::profile::ProfileFileCredentialsProvider;
 use datafusion::datasource::file_format::parquet::ParquetFormat;
-use datafusion::datasource::listing::ListingOptions;
-use datafusion::logical_expr::Partitioning;
+use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl};
+use datafusion::logical_expr::{ColumnarValue, create_udf, Partitioning, ScalarUDF, Signature, Volatility};
 use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
 use sqlparser::ast::{Ident, ObjectName};
 use crate::cli::{CLI_MODE, Mode};
-use crate::discover::{Metadata, PipelineMetadata};
+use crate::discover::{AnalyseSchema, Metadata, PipelineMetadata};
 use crate::helpers::configuration::{Config, PIPELINE_NAME};
-use crate::METADATA;
+use crate::{ARROW_SCHEMA, METADATA};
 use crate::plugins::athena::{AwsAthena, DataOutputAwsAthenaPlugin};
 use crate::sql::operators::alter_column::alter_column_type;
 use crate::sql::operators::drop_column::alter_column_drop;
 use crate::sql::operators::dump_schema::dump_schema;
 use crate::sql::parser::{PipelineToggle, SParser, Statement};
+
+use chrono::{DateTime, NaiveDate};
+use datafusion::common::cast::as_date32_array;
+use datafusion::datasource::object_store::DefaultObjectStoreRegistry;
+use datafusion::error::DataFusionError;
+use datafusion::physical_plan::functions::make_scalar_function;
+use object_store::aws::{AmazonS3, AmazonS3Builder, AmazonS3ConfigKey};
+use object_store::{ObjectStore, parse_url};
+use url::Url;
+use crate::helpers::Helpers;
+use crate::ingest_work::Ingest;
+
+
+fn datediff(args: &[ArrayRef]) -> Result<ArrayRef, DataFusionError> {
+    let start = as_string_array(&args[0])?;
+    let end = as_string_array(&args[1])?;
+
+    // println!("Start: {:?}", start);
+    // println!("End: {:?}", end);
+    //
+    // let start_format = AnalyseSchema::is_valid_date(&start.value(0));
+    // let end_format = AnalyseSchema::is_valid_date(&end.value(0));
+
+    let result: Int32Array = (0..start.len())
+        .map(|i| {
+            if start.is_null(i) || end.is_null(i) {
+                None
+            } else {
+                // let start_date = Helpers::parse_date_from_string(&start.value(i), start_format.unwrap());
+                let start_date = DateTime::parse_from_rfc3339(start.value(i))
+                    .ok()
+                    .map(|dt| dt.naive_utc().date());
+
+                // let end_date = Helpers::parse_date_from_string(&end.value(i), end_format.unwrap());
+                let end_date = DateTime::parse_from_rfc3339(end.value(i))
+                    .ok()
+                    .map(|dt| dt.naive_utc().date());
+
+                let diff = end_date.clone().unwrap() - start_date.clone().unwrap();
+                // println!("Diff: {:?}", diff);
+
+                match (start_date, end_date) {
+                    (Some(start_date), Some(end_date)) => Some((end_date - start_date).num_days() as i32),
+                    // (Ok(start_date), Ok(end_date)) => Some(diff.num_days() as i32),
+                    _ => None,
+                }
+            }
+        })
+        .collect();
+
+    // println!("Result: {:?}", result);
+
+    Ok(Arc::new(result) as ArrayRef)
+}
+
+fn as_string_array(array: &ArrayRef) -> Result<&StringArray, DataFusionError> {
+    if let DataType::Utf8 = array.data_type() {
+        Ok(array.as_any().downcast_ref::<StringArray>().unwrap())
+    } else {
+        Err(DataFusionError::Internal("Expected StringArray".to_string()))
+    }
+}
+
 
 pub async fn query(sql_str: &str) {
 
@@ -321,6 +387,12 @@ pub async fn query(sql_str: &str) {
 
                 table_name = sql_str.to_lowercase().split("from").collect::<Vec<&str>>()[1].split(" ").collect::<Vec<&str>>()[1].trim().replace(";", "");
 
+                if table_name.contains(".") {
+                    println!("Table name: {}", table_name);
+                    table_name = table_name.split(".").collect::<Vec<&str>>()[1].to_string();
+                    println!("Table name: {}", table_name);
+                }
+
             }
             // else {
             //     table_name = "bike_hire".to_string();
@@ -328,9 +400,34 @@ pub async fn query(sql_str: &str) {
 
 
             PIPELINE_NAME.write().clear();
-            PIPELINE_NAME.write().push_str(&table_name);
+            PIPELINE_NAME.write().push_str("metrics");
             Config::init().await;
             let workspace = Config::get_workspace_name();
+
+            let pipeline_metadata = match Config::get_metadata().await {
+                Ok(mut pipeline_metadata) => {
+                    println!("Found existing Skippr metadata");
+                    pipeline_metadata
+                }
+                Err(_e) => {
+                    println!("No existing Skippr metadata.");
+                    return;
+                }
+            };
+
+            METADATA.write().clone_from(&pipeline_metadata);
+
+            let flatten = Config::get_transform_flatten_events();
+
+            for (namespace, _metadata) in pipeline_metadata.metadata.iter() {
+                match Ingest::prepare_arrow_schema(&namespace, flatten) {
+                    Ok(_t) => {}
+                    Err(e) => {
+                        println!("Failed to prepare arrow schema: {}", e);
+                        return;
+                    }
+                }
+            }
 
             let data_dir = Config::get_data_dir();
             let output_dir = format!("{}/output_buffer", data_dir);
@@ -341,7 +438,7 @@ pub async fn query(sql_str: &str) {
             session_config = session_config.set("datafusion.catalog.default_catalog", "skippr".into());
             session_config = session_config.set("datafusion.execution.collect_statistics", "true".into());
 
-            let ctx = SessionContext::with_config(session_config);
+            let ctx = SessionContext::new_with_config(session_config);
 
             // let mut paths = Vec::new();
 
@@ -359,32 +456,136 @@ pub async fn query(sql_str: &str) {
             // }
 
 
+            // custom function
+            let datediff = make_scalar_function(datediff);
+            let datediff_udf = create_udf(
+                "datediff",
+                vec![DataType::Utf8, DataType::Utf8],
+                Arc::new(DataType::Int32),
+                // vec![DataType::Date32, DataType::Date32],
+                // Arc::new(DataType::Date32),
+                Volatility::Immutable,
+                datediff,
+            );
+            ctx.register_udf(datediff_udf.clone());
+
 
             let table_partition_cols = vec![
-                ("p_tenant_id".to_string(), DataType::Utf8),
-                ("p_source_type".to_string(), DataType::Utf8),
-                ("p_year".to_string(), DataType::Utf8),
-                ("p_month".to_string(), DataType::Utf8),
-                ("p_day".to_string(), DataType::Utf8),
+                // ("p_tenant_id".to_string(), DataType::Utf8),
+                // ("p_source_type".to_string(), DataType::Utf8),
+                ("year".to_string(), DataType::Utf8),
+                ("month".to_string(), DataType::Utf8),
+                ("day".to_string(), DataType::Utf8),
 
             ];
+            //
+            // let listing_options = ListingOptions::new(Arc::new(
+            //     ParquetFormat::default()
+            // ))
+            //     .with_table_partition_cols(table_partition_cols);
 
-            let listing_options = ListingOptions::new(Arc::new(
-                ParquetFormat::default()
-            ))
-                .with_table_partition_cols(table_partition_cols);
+            /**
+             * Register local data
+             */
+            // let table_dir = format!("{}/{}/", output_dir, &table_name);
+            //
+            // println!("Querying data dir: {}", table_dir);
+            //
+            // // ctx.register_listing_table(&table_name, table_dir, listing_options, None, None).await.unwrap();
+            //
+            // match ctx.register_parquet(&table_name, &table_dir, ParquetReadOptions::default()).await {
+            //     Ok(_) => {}
+            //     Err(_e) => {
+            //         println!("Can't find data for table: {} in dir: {}", &table_name, table_dir);
+            //         process::exit(1);
+            //     }
+            // }
+            
+            
+            /**
+            * Register Glue Catalog
+            */
+            // Get table metadata from AWS Glue Catalog
+            // let aws_config = aws_config::from_env().load().await;
 
-            let table_dir = format!("{}/{}/", output_dir, table_name);
+            let aws_config = aws_config::from_env().load().await;
+            // let athena_client = AthenaClient::new(&aws_config);
 
-            println!("Querying data dir: {}", table_dir);
+            // use aws_config::default_provider::credentials::De
+            // faultCredentialsChain;
+            // let credentials_provider = DefaultCredentialsChain::builder().build();
+            //
+            // use aws_config::BehaviorVersion;
+            // let aws_config = aws_config::defaults(BehaviorVersion::v2024_03_28())
+            //     .region("us-east-1")
+            //     .profile_name("skippr-prod")
+            //     .credentials_provider(credentials_provider.await)
+            //     .load()
+            //     .await;
 
-            ctx.register_listing_table(&table_name, table_dir, listing_options, None, None).await.unwrap();
 
-            // let local_fs = Arc::new(object_store::local::LocalFileSystem::default());
+            let glue_client = aws_sdk_glue::Client::new(&aws_config);
 
-            // let u = url::Url::parse("file://./")?;
-            // ctx.runtime_env().register_object_store(&u, local_fs);
+            let db_name = "datalake";
+            let table_name = "metric";
+            let table = glue_client.get_table()
+                .database_name(db_name)
+                .name(table_name)
+                .send()
+                .await
+                .expect("Failed to get table from Glue Catalog")
+                .table
+                .expect("Table not found");
 
+            // Get table location from Glue Catalog
+            let location = table
+                .storage_descriptor
+                .expect("Storage descriptor not found")
+                .location
+                .expect("Table location not found");
+
+            // Register the table with DataFusion
+            let format = ParquetFormat::default();
+            // let file_schema = Arc::new(format.infer_schema(&mut ctx.state().runtime_env(), &location, None).await?);
+            let schema = ARROW_SCHEMA.read().clone();
+            
+            let options = ListingOptions {
+                format: Arc::new(format),
+                table_partition_cols: table_partition_cols,
+                collect_stat: true,
+                file_extension: "".to_string(),
+                target_partitions: 8,
+                file_sort_order: vec![],
+            };
+            // let table_uri = ListingTableUrl::parse(&location).unwrap();
+            // let config = ListingTableConfig::new(table_uri).with_listing_options(options).with_schema(schema.get(&table_name.to_string()).unwrap().clone());
+            // let table = ListingTable::try_new(config).unwrap();
+
+
+            let store: AmazonS3 = AmazonS3Builder::new()
+                .with_bucket_name("skippr-prod-datalake")
+                .with_config("aws_access_key_id".parse().unwrap(), "AKIAR5UHZSQHNETZJLHH")
+                .with_config("aws_secret_access_key".parse().unwrap(), "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")
+                .with_config(AmazonS3ConfigKey::DefaultRegion, "us-east-1")
+                .build()
+                .unwrap();
+            // Alternatively can create an ObjectStore from an S3 URL
+            // println!("Location: {}", location);
+            let url = Url::parse(&location).unwrap();
+            // let (store, path) = parse_url(&url).unwrap();
+
+
+            let store: Arc<dyn ObjectStore> = Arc::new(store);
+
+            ctx.runtime_env().register_object_store(&url, store);
+            
+            ctx.register_listing_table(
+                table_name,
+                &location,
+                options,
+                Some(schema.get(&table_name.to_string()).unwrap().clone()),
+                None
+            ).await.unwrap();
 
             let df = match ctx.sql(sql_str).await {
                 Ok(df) => df,

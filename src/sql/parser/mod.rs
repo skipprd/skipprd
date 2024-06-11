@@ -407,7 +407,7 @@ impl<'a> SParser<'a> {
                 },
                 Keyword::DROP => {
                     self.parser.expect_keyword(Keyword::COLUMN)?;
-                    let column_name = self.parser.parse_object_name()?;
+                    let column_name = self.parser.parse_object_name(false)?;
                     Ok(Statement::AlterSchemaDropColumn(AlterSchemaDropColumn {
                         pipeline: ObjectName(vec![Ident::new(pipeline)]),
                         schema,
@@ -417,7 +417,7 @@ impl<'a> SParser<'a> {
                 Keyword::ALTER => {
                     self.parser.expect_keyword(Keyword::COLUMN)?;
                     
-                    let column_name = self.parser.parse_object_name()?;
+                    let column_name = self.parser.parse_object_name(false)?;
 
                     self.parser.expect_keyword(Keyword::TYPE)?;
 
@@ -467,7 +467,7 @@ impl<'a> SParser<'a> {
                     Some(SkipprKeyword::PIPELINE) => {
                         self.parser.next_token(); // PIPELINE
 
-                        let pipeline = self.parser.parse_object_name()?;
+                        let pipeline = self.parser.parse_object_name(true)?;
 
                         Ok(Statement::PipelineToggle(PipelineToggleStatement {
                             pipeline,
@@ -494,7 +494,7 @@ impl<'a> SParser<'a> {
                     Some(SkipprKeyword::PIPELINE) => {
                         self.parser.next_token(); // PIPELINE
 
-                        let pipeline = self.parser.parse_object_name()?;
+                        let pipeline = self.parser.parse_object_name(true)?;
 
                         Ok(Statement::PipelineToggle(PipelineToggleStatement {
                             pipeline,
@@ -610,7 +610,7 @@ impl<'a> SParser<'a> {
 
                         self.parser.next_token(); // PIPELINE
 
-                        let table_name = self.parser.parse_object_name()?;
+                        let table_name = self.parser.parse_object_name(true)?;
 
                         Ok(Statement::PipelineReset(PipelineResetStatement {
                             pipeline: table_name
@@ -661,7 +661,7 @@ impl<'a> SParser<'a> {
 
                         self.parser.next_token(); // PIPELINE
 
-                        let table_name = self.parser.parse_object_name()?;
+                        let table_name = self.parser.parse_object_name(true)?;
 
                         Ok(Statement::PipelineDrop(PipelineDropStatement {
                             pipeline: table_name
@@ -672,7 +672,7 @@ impl<'a> SParser<'a> {
 
                         self.parser.next_token(); // DATABASE
 
-                        let database = self.parser.parse_object_name()?;
+                        let database = self.parser.parse_object_name(false)?;
                         
                         Ok(Statement::DatabaseDrop(DatabaseDropStatement {
                             database
