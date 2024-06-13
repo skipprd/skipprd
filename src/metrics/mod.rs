@@ -1,20 +1,22 @@
 use std::fmt::Debug;
 use std::ops::Sub;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime};
+use std::time::{Instant, SystemTime};
 use chrono::{DateTime};
 use core::time::Duration;
 use std::collections::HashMap;
+use std::sync::Arc;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_derive::{Deserialize, Serialize};
 use serde_json::json;
+use tokio::runtime;
 use crate::buffer::ingest_buffer::WalIndexMetrics;
 
 use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
 use crate::helpers::license::{HAS_LICENSE, TENANT_ID};
 use crate::helpers::timed_rwlock::TimedRwLock;
-use crate::METRICS;
+use crate::{METRICS, RUNNING};
 
 pub static LAST_MESSAGES_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static LAST_FIXED_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -501,4 +503,64 @@ impl Metrics {
 
         Ok(())
     }
+
+    pub(crate) fn init_send_loop() {
+
+        let now = Arc::new(TimedRwLock::new("now".to_string(), Instant::now()));
+
+        let now_clone = now.clone();
+
+        // get curent tokio runtime
+        let handle = runtime::Handle::current();
+        let handle_clone = handle.clone();
+
+        let mut planner = periodic::Planner::new();
+
+        planner.add(
+            move || {
+                if RUNNING.read().load(Ordering::SeqCst) {
+                    
+                    let metrics: Metrics;
+                    {
+                        metrics = METRICS.read().clone();
+                    }
+
+                    let now_lock = now_clone.read();
+
+                    let last_messages_total_val = LAST_MESSAGES_TOTAL.load(Ordering::SeqCst);
+                    let ingested_current = metrics.messages_total - last_messages_total_val;
+
+                    if ingested_current > 0 {
+                        println!("Messages per Min: {}", ingested_current);
+                        println!("Messages Fixed: {}", metrics.ingeted_slow_total);
+                        // println!("Bytes per Min: {}", metrics.bytes_current);
+
+                        let human_bytes = Helpers::human_readable_size(metrics.source_bytes_total);
+
+                        println!("Bytes Total: {}", human_bytes);
+                        println!("Messages Total: {}", metrics.messages_total);
+                        println!("Deadletter Total: {}", metrics.deadletters_total);
+                        println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
+
+                        // let total_times: Vec<(String, Duration)> = TimedRwLock::<()>::get_total_wait_times();
+                        // for (key, value) in total_times.iter() {
+                        //     println!("{}: {}ms", key, value.as_millis());
+                        // }
+                    }
+                    
+                    drop(metrics);
+                    
+                    handle_clone.spawn(async move {
+                        match Metrics::send_metrics(None).await {
+                            Ok(_g) => {}
+                            Err(_err) => {}
+                        }
+                    });
+
+                }
+            },
+            periodic::Every::new(Duration::from_secs(60)),
+        );
+        planner.start();
+    } 
 }

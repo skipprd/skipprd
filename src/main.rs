@@ -160,6 +160,8 @@ async fn main() {
         Mode::Sync(options) => {
 
             Config::build_config();
+            
+            Metrics::init_send_loop();
 
             if options.pipeline.is_some() {
                 // println!("Syncing pipeline: {}", options.pipeline.unwrap().clone());
@@ -421,7 +423,7 @@ async fn sync() {
         offsets = pipeline_cache.unwrap().offsets.clone();
 
         if elapsed.as_secs() < Config::get_sync_frequency() {
-            // println!("Pipeline '{}' throttled, last ran {} seconds ago, skipping.", pipeline_name, elapsed.as_secs());
+            println!("Pipeline '{}' throttled, last ran {} seconds ago, skipping.", pipeline_name, elapsed.as_secs());
             return;
         }
 
@@ -740,79 +742,7 @@ async fn sync() {
             });
         }
     });
-
-
-    let mut planner = periodic::Planner::new();
-
-    let now_clone = now.clone();
-
-    // let last_messages_total = Arc::new(TimedRwLock::new("last_messages_total".to_string(), 0));
-
-    // get curent tokio runtime
-    let handle = runtime::Handle::current();
-    let handle_clone = handle.clone();
-
-    planner.add(
-        move || {
-            if RUNNING.read().load(Ordering::SeqCst) {
-
-                let metrics: Metrics;
-                {
-                    metrics = METRICS.read().clone();
-                }
-
-                let now_lock = now_clone.read();
-
-                // metrics_lock.bytes_total += metrics_lock.bytes_current;
-
-                // metrics_lock.run_time_seconds = now_lock.elapsed().as_secs();
-
-                let mut last_messages_total_val = LAST_MESSAGES_TOTAL.load(Ordering::SeqCst);
-                let ingested_current = metrics.messages_total - last_messages_total_val;
-
-                // if DISPLAY_METRICS.read().unwrap().load(Ordering::SeqCst) {
-                if ingested_current > 0 {
-                    println!("Messages per Min: {}", ingested_current);
-                    println!("Messages Fixed: {}", metrics.ingeted_slow_total);
-                    // println!("Bytes per Min: {}", metrics.bytes_current);
-
-                    let human_bytes = Helpers::human_readable_size(metrics.source_bytes_total);
-
-                    println!("Bytes Total: {}", human_bytes);
-                    println!("Messages Total: {}", metrics.messages_total);
-                    println!("Deadletter Total: {}", metrics.deadletters_total);
-                    println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
-                    
-                    // let total_times: Vec<(String, Duration)> = TimedRwLock::<()>::get_total_wait_times();
-                    // for (key, value) in total_times.iter() {
-                    //     println!("{}: {}ms", key, value.as_millis());
-                    // }
-                }
-
-              
-
-                // }
-                // metrics.bytes_current = 0;
-
-                drop(metrics);
-
-                // tokio::runtime::Builder::new_multi_thread()
-                //     .enable_all()
-                //     .build()
-                //     .unwrap()
-                //     .block_on(async {
-                handle_clone.spawn(async move {
-                        match Metrics::send_metrics(None).await {
-                            Ok(_g) => {}
-                            Err(_err) => {}
-                        }
-                    });
-
-            }
-        },
-        periodic::Every::new(Duration::from_secs(60)),
-    );
-    planner.start();
+    
 
     let mut out_pnanner = periodic::Planner::new();
 
