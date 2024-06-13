@@ -49,6 +49,14 @@ impl LicenseChecker {
     }
 
     pub async fn get_license(&mut self) -> Result<(), Box<dyn Error>> {
+
+        if HAS_LICENSE.read().clone() {
+            self.license_is_valid = true;
+            return Ok(());
+        }
+
+        self.license_is_valid = false;
+
         let env = Config::get_pipeline_env();
         let base_url = if env != DEFAULT_ENV {
             format!("https://license.{}.api.skippr.io", env)
@@ -86,7 +94,7 @@ impl LicenseChecker {
             let mut has_license = HAS_LICENSE.write();
 
             *has_license = self.license_is_valid;
-
+            
         } else {
             self.license_is_valid = false;
         }
