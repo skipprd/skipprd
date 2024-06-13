@@ -3,6 +3,7 @@ use std::fs::OpenOptions;
 use std::io::{BufReader, BufWriter};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use arrow::array::{Array, ArrayRef, Date32Array, Int32Array, StringArray};
 use arrow_schema::DataType;
 use aws_config::meta::region::RegionProviderChain;
@@ -154,7 +155,28 @@ pub async fn query(sql_str: &str) {
             
             match CLI_MODE.read().clone() {
                 Mode::Sync(options) => {
-                    let _ = fs::remove_dir_all(&data_dir).expect(format!("Failed to remove dir: {}", data_dir).as_str());
+                    let mut tries = 15;
+                    let mut delete = true;
+                    while delete {
+                        // retries as workaround for https://github.com/rust-lang/rust/issues/29497
+                        match fs::remove_dir_all(&data_dir) {
+                            Ok(_) => {
+                                delete = false;
+                            },
+                            Err(e) => {
+                                println!("Failed to remove dir: {}.", e);
+                                if tries == 0 {
+                                    delete = false;
+                                    panic!("Failed to remove dir: {}", data_dir);
+                                } else {
+                                    tries -= 1;
+                                    println!("Retrying in 5 seconds...");
+                                    tokio::time::sleep(Duration::from_secs(5)).await;
+                                }
+                            }
+                        }
+                            // .expect(format!("Failed to remove dir: {}", data_dir).as_str());
+                    }
                     println!("Pipeline reset, on next sync run all data will be re-ingested");
                     
                     // remove the SQL stmt from metadata
