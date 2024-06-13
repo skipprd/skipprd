@@ -19,6 +19,7 @@ use std::fs::{ OpenOptions};
 
 use futures::future::join_all;
 use futures::{StreamExt};
+use libc::sleep;
 
 use serde_derive::Deserialize;
 use once_cell::sync::Lazy;
@@ -175,16 +176,23 @@ impl DataSourceS3Plugin {
             loop {
 
                 let mut i = 0;
-
-
+                let mut list_retries = 0;
                 let mut skipped_objects = 0;
                 
                 match list_obj_req.clone().send().await {
                     Err(err) => {
                         println!("S3 Error: {:?}", err);
+                        if list_retries >= 5 {
+                            println!("Max retries reached for S3 ListObjectsV2");
+                            break;
+                        }
+                        list_retries += 1;
+                        tokio::time::sleep(Duration::from_secs(5 * list_retries)).await;
                     },
                     Ok(output) => {
 
+                        list_retries = 0;
+                        
                         let common_prefixes = output.common_prefixes();
 
                         for prefix in common_prefixes.iter().filter_map(|p| p.prefix()) {
