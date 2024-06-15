@@ -201,7 +201,7 @@ impl Config {
         let profile_name = Config::getenv("SKIPPR_PROFILE", "default");
 
         // Parse credentials file
-        let credentials_file_path = format!("{}/.skippr/credentials", std::env::var("HOME").unwrap());
+        let credentials_file_path = format!("{}/.skippr/credentials", std::env::var("HOME").unwrap_or("~".to_string()));
         let credentials_file_contents = fs::read_to_string(&credentials_file_path).unwrap_or(String::new());
 
         if credentials_file_contents.is_empty() {
