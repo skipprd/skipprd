@@ -496,6 +496,27 @@ impl Metrics {
                 // println!("Notified Metrics API");
             }
             Err(err) => {
+                match err.status() {
+                    Some(status) => {
+                       match status.as_u16() {
+                           404 => {
+                               println!("Metrics API Not Found: {:?}", err);
+                           },
+                           403 => {
+                               println!("Metrics API Forbidden: Did you set the Skippr API Key?");
+                           },
+                            500 => {
+                                 println!("Metrics API Internal Server Error: {:?}", err);
+                            },
+                           _ => {
+                               println!("Metrics HTTP Error: {:?}", err);
+                           }
+                       }
+                    }
+                    None => {
+                        println!("Metrics HTTP Error: {:?}", err);
+                    }
+                }
                 println!("Metrics HTTP Error: {:?}", err);
             }
         }
@@ -519,7 +540,7 @@ impl Metrics {
         planner.add(
             move || {
                 if RUNNING.read().load(Ordering::SeqCst) {
-                    
+
                     let metrics: Metrics;
                     {
                         metrics = METRICS.read().clone();
@@ -547,9 +568,9 @@ impl Metrics {
                         //     println!("{}: {}ms", key, value.as_millis());
                         // }
                     }
-                    
+
                     drop(metrics);
-                    
+
                     handle_clone.spawn(async move {
                         match Metrics::send_metrics(None).await {
                             Ok(_g) => {}
@@ -562,5 +583,5 @@ impl Metrics {
             periodic::Every::new(Duration::from_secs(60)),
         );
         planner.start();
-    } 
+    }
 }
