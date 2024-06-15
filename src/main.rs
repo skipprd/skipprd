@@ -160,7 +160,7 @@ async fn main() {
         Mode::Sync(options) => {
 
             Config::build_config();
-            
+
             Metrics::init_send_loop();
 
             if options.pipeline.is_some() {
@@ -304,7 +304,7 @@ async fn discover() {
     {
         DISCOVER_RUNNING.write().store(true, Ordering::SeqCst);
     }
-    
+
     let data_dir = Config::get_data_dir();
 
     let pipeline_metadata = match Config::get_metadata().await {
@@ -386,7 +386,7 @@ async fn discover() {
     {
         DISCOVER_RUNNING.write().store(false, Ordering::SeqCst);
     }
-    
+
     while RUNNING.read().load(Ordering::SeqCst) {
         sleep(Duration::from_secs(1));
     }
@@ -492,6 +492,11 @@ async fn sync() {
         }
         Err(_e) => {
             println!("No existing Skippr metadata, skipping pipeline '{}'. Init the pipeline with 'skippr discover' to create metadata.", pipeline_name);
+
+            PIPELINE_CACHE.write().insert(pipeline_name.clone(), PipelineCache {
+                offsets: offsets.clone(),
+                last_ran: Instant::now()
+            });
 
             return;
             // PipelineMetadata::new()
@@ -747,7 +752,7 @@ async fn sync() {
             });
         }
     });
-    
+
 
     let mut out_pnanner = periodic::Planner::new();
 
