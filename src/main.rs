@@ -301,8 +301,10 @@ async fn discover() {
 
     println!("Analysing data and generating Skippr metadata for pipeline: {}", pipeline_name);
 
-    DISCOVER_RUNNING.write().store(true, Ordering::SeqCst);
-
+    {
+        DISCOVER_RUNNING.write().store(true, Ordering::SeqCst);
+    }
+    
     let data_dir = Config::get_data_dir();
 
     let pipeline_metadata = match Config::get_metadata().await {
@@ -372,16 +374,19 @@ async fn discover() {
             Config::set_metadata(&pipeline_metadata, false).await;
         });
 
-        RUNNING.write().store(false, Ordering::SeqCst);
-
+        {
+            RUNNING.write().store(false, Ordering::SeqCst);
+        }
     });
 
     sync_input_plugin(offsets_clone, shared_output_clone).await;
 
     println!("Reached end of source data");
     // if we hit end of data, wait for schema discovery to complete
-    DISCOVER_RUNNING.write().store(false, Ordering::SeqCst);
-
+    {
+        DISCOVER_RUNNING.write().store(false, Ordering::SeqCst);
+    }
+    
     while RUNNING.read().load(Ordering::SeqCst) {
         sleep(Duration::from_secs(1));
     }

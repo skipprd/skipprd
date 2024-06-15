@@ -253,8 +253,10 @@ impl Ingest {
                             *pipeline = pipeline_metadata;
                         }
 
-                        DISCOVER_RUNNING.write().store(false, Ordering::SeqCst);
-
+                        {
+                            DISCOVER_RUNNING.write().store(false, Ordering::SeqCst);
+                        }
+                        
                         // sleep while main thread shuts down
                         while RUNNING.read().load(Ordering::SeqCst) {
                             sleep(Duration::from_secs(1));
