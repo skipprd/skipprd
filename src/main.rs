@@ -428,7 +428,8 @@ async fn sync() {
         offsets = pipeline_cache.unwrap().offsets.clone();
 
         if elapsed.as_secs() < Config::get_sync_frequency() {
-            println!("Pipeline '{}' throttled, last ran {} seconds ago, skipping.", pipeline_name, elapsed.as_secs());
+            let remaining = Config::get_sync_frequency() - elapsed.as_secs();
+            println!("Pipeline '{}' last ran {} seconds ago, skipping for {} seconds.", pipeline_name, elapsed.as_secs(), remaining);
             return;
         }
 
@@ -502,8 +503,6 @@ async fn sync() {
             // PipelineMetadata::new()
         }
     };
-
-
 
     PIPELINE_CACHE.write().insert(pipeline_name.clone(), PipelineCache {
         offsets: offsets.clone(),
