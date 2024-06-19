@@ -170,7 +170,7 @@ impl Buffers {
                 *time,
                 shard,
                 ingest_buffer_batch.offsets.clone(),
-            ).unwrap();
+            )?;
 
 
             // println!("WAL File {} offset: {:?}", wal_file.path.to_str().unwrap(), ingest_buffer_batch.offset);
