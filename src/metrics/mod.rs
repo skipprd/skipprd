@@ -408,7 +408,27 @@ impl Metrics {
                 // println!("Notified Metrics API");
             }
             Err(err) => {
-                println!("Metrics HTTP Error: {:?}", err);
+                match err.status() {
+                    Some(status) => {
+                        match status.as_u16() {
+                            404 => {
+                                println!("Metrics API Not Found: {:?}", err);
+                            },
+                            403 => {
+                                println!("Metrics API Forbidden: Did you set the Skippr API Key?");
+                            },
+                            500 => {
+                                println!("Metrics API Internal Server Error: {:?}", err);
+                            },
+                            _ => {
+                                println!("Metrics HTTP Error: {:?}", err);
+                            }
+                        }
+                    },
+                    None => {
+                        println!("Config HTTP Error: {:?}", err);
+                    }
+                }
             }
         }
 
@@ -500,24 +520,23 @@ impl Metrics {
                     Some(status) => {
                        match status.as_u16() {
                            404 => {
-                               println!("Metrics API Not Found: {:?}", err);
+                               println!("Config API Not Found: {:?}", err);
                            },
                            403 => {
-                               println!("Metrics API Forbidden: Did you set the Skippr API Key?");
+                               println!("Config API Forbidden: Did you set the Skippr API Key?");
                            },
-                            500 => {
-                                 println!("Metrics API Internal Server Error: {:?}", err);
-                            },
+                           500 => {
+                               println!("Config API Internal Server Error: {:?}", err);
+                           },
                            _ => {
-                               println!("Metrics HTTP Error: {:?}", err);
+                               println!("Config HTTP Error: {:?}", err);
                            }
                        }
                     }
                     None => {
-                        println!("Metrics HTTP Error: {:?}", err);
+                        println!("Config HTTP Error: {:?}", err);
                     }
                 }
-                println!("Metrics HTTP Error: {:?}", err);
             }
         }
 
