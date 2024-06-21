@@ -1,0 +1,100 @@
+skippr:
+  api_token: B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg
+  workspace: test
+
+pipelines:
+
+  bike_hire_many:
+    auto_approve: yes
+    env: test
+    buffer_threshold_bytes: 20000000
+    buffer_threshold_seconds: 600
+    input: data_inputs.s3_bike_hire
+    output: data_outputs.test_datalake
+
+  bike_hire_many2:
+    auto_approve: yes
+    env: test
+    buffer_threshold_bytes: 20000000
+    buffer_threshold_seconds: 600
+    input: data_inputs.s3_bike_hire
+    output: data_outputs.test_datalake
+
+  bike_hire_many3:
+    auto_approve: yes
+    env: test
+    buffer_threshold_bytes: 20000000
+    buffer_threshold_seconds: 600
+    input: data_inputs.s3_bike_hire
+    output: data_outputs.test_datalake
+
+  bike_hire_many4:
+    auto_approve: yes
+    env: test
+    buffer_threshold_bytes: 20000000
+    buffer_threshold_seconds: 600
+    input: data_inputs.s3_bike_hire
+    output: data_outputs.test_datalake
+
+  bike_hire_many5:
+    auto_approve: yes
+    env: test
+    buffer_threshold_bytes: 20000000
+    buffer_threshold_seconds: 600
+    input: data_inputs.s3_bike_hire
+    output: data_outputs.test_datalake
+
+  bike_hire_many6:
+    auto_approve: yes
+    env: test
+    buffer_threshold_bytes: 20000000
+    buffer_threshold_seconds: 600
+    input: data_inputs.s3_bike_hire
+    output: data_outputs.test_datalake
+
+  bike_hire_many7:
+    auto_approve: yes
+    env: test
+    buffer_threshold_bytes: 20000000
+    buffer_threshold_seconds: 600
+    input: data_inputs.s3_bike_hire
+    output: data_outputs.test_datalake
+
+  bike_hire_many8:
+    auto_approve: yes
+    env: test
+    buffer_threshold_bytes: 20000000
+    buffer_threshold_seconds: 600
+    input: data_inputs.s3_bike_hire
+    output: data_outputs.test_datalake
+
+#  bike_hire_many9:
+#    auto_approve: yes
+#    env: test
+#    buffer_threshold_bytes: 20000000
+#    buffer_threshold_seconds: 600
+#    input: data_inputs.s3_bike_hire
+#    output: data_outputs.test_datalake
+#
+#  bike_hire_many10:
+#    auto_approve: yes
+#    env: test
+#    buffer_threshold_bytes: 20000000
+#    buffer_threshold_seconds: 600
+#    input: data_inputs.s3_bike_hire
+#    output: data_outputs.test_datalake
+
+data_inputs:
+  s3_bike_hire:
+    s3:
+      batch_size_bytes: 2048000
+      s3_bucket: skippr-e2e-sample-data
+      s3_prefix: many/bike-hire-many
+
+data_outputs:
+  test_datalake:
+    athena:
+      athena_workgroup_name: bikehire
+      glue_database_name: bikehire
+      s3_bucket: skippr-e2e-sample-data-output
+      s3_prefix: bikehire_many
