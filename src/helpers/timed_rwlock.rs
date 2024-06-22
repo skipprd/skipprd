@@ -26,10 +26,17 @@ impl<T> TimedRwLock<T> {
 
     pub fn read(&self) -> RwLockReadGuard<'_, T> {
         let start_time = if *PROFILE_PERFORMANCE {
+            // println!("{} is waiting on a read lock", self.name);
             Some(Instant::now())
         } else {
             None
         };
+        
+        {
+            if self.lock.try_read().is_err() {
+              println!("{} is waiting on a read lock", self.name);     
+            }
+        }
 
         let result = self.lock.read().unwrap();
 
@@ -53,6 +60,12 @@ impl<T> TimedRwLock<T> {
             None
         };
 
+        {
+            if self.lock.try_write().is_err() {
+              println!("{} is waiting on a write lock", self.name);     
+            }
+        }
+        
         let result = self.lock.write().unwrap();
 
         if let Some(start_time) = start_time {
