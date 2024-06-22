@@ -189,9 +189,7 @@ jobs:
 
   linux_x86_heaptrack:
     needs:
-      - cleanup
-      - purge_dynamodb
-      - linux_x86
+      - release
     name: Test Heaptrack (linux x86)
     runs-on:
       - ubuntu-latest
