@@ -270,9 +270,7 @@ impl Ingest {
                             Config::set_metadata(&pipeline_metadata, false).await;
                             std::process::exit(0);
                         });
-
-                        std::process::exit(0);
-
+                        
                     }
 
                     println!("Analysed schema for {} -> {}/{} records", count, *NUM_ANALYSED_RECORDS.read(), max_records);
