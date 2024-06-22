@@ -121,8 +121,6 @@ use crate::sql::query::query;
 
 pub static RUNNING: Lazy<TimedRwLock<AtomicBool>> = Lazy::new(|| TimedRwLock::new("running".to_string(),AtomicBool::new(true)));
 
-pub static DISCOVER_RUNNING: Lazy<TimedRwLock<AtomicBool>> =
-    Lazy::new(|| TimedRwLock::new("discover_running".to_string(), AtomicBool::new(false)));
 pub static OUTPUT_RUNNING: Lazy<TimedRwLock<AtomicBool>> =
     Lazy::new(|| TimedRwLock::new("output_running".to_string(), AtomicBool::new(false)));
 
@@ -301,10 +299,6 @@ async fn discover() {
 
     println!("Analysing data and generating Skippr metadata for pipeline: {}", pipeline_name);
 
-    {
-        DISCOVER_RUNNING.write().store(true, Ordering::SeqCst);
-    }
-
     let data_dir = Config::get_data_dir();
 
     let pipeline_metadata = match Config::get_metadata().await {
@@ -340,58 +334,28 @@ async fn discover() {
     let offsets_clone = offsets.clone();
 
     let shared_output_clone = shared_output.clone();
-    
-    thread::spawn(move || {
-        while DISCOVER_RUNNING.read().load(Ordering::SeqCst) {
-            sleep(Duration::from_secs(1));
-        }
-
-        let mut pipeline_metadata= METADATA.read().clone();
-
-        if pipeline_metadata.metadata.len() == 0 {
-            println!("No data found in data source, skipping schema discovery");
-            std::process::exit(0);
-        } else {
-            // println!("Sampled source data, analysing schema");
-        }
-
-        let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.unwrap_or("false".to_string()));
-
-        for (namespace, metadata) in pipeline_metadata.metadata.iter_mut() {
-            AnalyseSchema::determine_field_types(&mut metadata.fields, None, None, flatten);
-        }
-
-        println!("Schema discovery complete, writing metadata to Skippr");
-
-        let rt = runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-
-        rt.block_on(async {
-            pipeline_metadata.enabled = false;
-            
-            Config::set_metadata(&pipeline_metadata, false).await;
-        });
-
-        {
-            RUNNING.write().store(false, Ordering::SeqCst);
-        }
-    });
 
     sync_input_plugin(offsets_clone, shared_output_clone).await;
 
     println!("Reached end of source data");
-    // if we hit end of data, wait for schema discovery to complete
-    {
-        DISCOVER_RUNNING.write().store(false, Ordering::SeqCst);
+
+    let mut pipeline_metadata= METADATA.read().clone();
+
+    if pipeline_metadata.metadata.len() == 0 {
+        println!("No data found in data source, skipping schema discovery");
+        std::process::exit(0);
+    } else {
+        // println!("Sampled source data, analysing schema");
     }
 
-    while RUNNING.read().load(Ordering::SeqCst) {
-        sleep(Duration::from_secs(1));
+    let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.unwrap_or("false".to_string()));
+
+    for (namespace, metadata) in pipeline_metadata.metadata.iter_mut() {
+        AnalyseSchema::determine_field_types(&mut metadata.fields, None, None, flatten);
     }
 
-
+    Config::set_metadata(&pipeline_metadata, false).await;
+    
 }
 
 struct PipelineCache {

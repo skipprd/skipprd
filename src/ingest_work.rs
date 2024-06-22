@@ -5,7 +5,7 @@ use crate::helpers::offsets::{OffsetKey, Offsets, OffsetTypes};
 use crate::helpers::Helpers;
 use crate::ingest::ingest::ingest;
 use crate::serdes::json::SerdeJson;
-use crate::{ARROW_SCHEMA, DISCOVER_RUNNING, helpers, METADATA, METRICS, RUNNING};
+use crate::{ARROW_SCHEMA, helpers, METADATA, METRICS, RUNNING};
 
 
 use once_cell::sync::Lazy;
@@ -139,7 +139,10 @@ impl Drop for Ingest {
 
 impl Ingest {
     pub fn new() -> Ingest {
-        let num_cpus = num_cpus::get().max(2);
+        let num_cpus = match CLI_MODE.read().clone() {
+            Mode::Sync(_) => num_cpus::get().max(2),
+            _ => 1
+        };
         println!("Starting with {} threads", num_cpus);
         let (tx, rx) = channel();
         let active_count = Arc::new(AtomicUsize::new(0));
@@ -219,7 +222,7 @@ impl Ingest {
                     {
                         pipeline_metadata = METADATA.read().clone();
                     }
-
+                    
                     let mut count: u64 = 0;
 
                     for data in datas.iter() {
@@ -230,38 +233,46 @@ impl Ingest {
                             &mut pipeline_metadata.metadata,
                         );
 
-                        // println!("Analysed schema for {}/{} records", count, max_records);
-
-                        if count >= max_records {
+                        {
+                            *NUM_ANALYSED_RECORDS.write() += count;
+                        }
+                        
+                        if *NUM_ANALYSED_RECORDS.read() >= max_records {
                             break;
                         }
                     }
-
-
+                    
                     {
                         METADATA.write().metadata = pipeline_metadata.metadata.clone();
                     }
-
-                    {
-                        *NUM_ANALYSED_RECORDS.write() += count;
-                    }
                     
-                    if count >= max_records {
+                    if *NUM_ANALYSED_RECORDS.read() >= max_records {
 
-                        {
-                            let mut pipeline = METADATA.write();
-                            *pipeline = pipeline_metadata;
+                        let mut pipeline_metadata= METADATA.read().clone();
+
+                        if pipeline_metadata.metadata.len() == 0 {
+                            println!("No data found in data source, skipping schema discovery");
+                            std::process::exit(0);
+                        } else {
+                            // println!("Sampled source data, analysing schema");
                         }
 
-                        {
-                            DISCOVER_RUNNING.write().store(false, Ordering::SeqCst);
+                        let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.unwrap_or("false".to_string()));
+
+                        for (namespace, metadata) in pipeline_metadata.metadata.iter_mut() {
+                            AnalyseSchema::determine_field_types(&mut metadata.fields, None, None, flatten);
                         }
+
+                        println!("Schema discovery complete, writing metadata to Skippr");
                         
-                        // sleep while main thread shuts down
-                        while RUNNING.read().load(Ordering::SeqCst) {
-                            sleep(Duration::from_secs(1));
-                        }
-                        return;
+                        tokio::spawn(async move {
+                            pipeline_metadata.enabled = false;
+                            Config::set_metadata(&pipeline_metadata, false).await;
+                            std::process::exit(0);
+                        });
+
+                        std::process::exit(0);
+
                     }
 
                     println!("Analysed schema for {} -> {}/{} records", count, *NUM_ANALYSED_RECORDS.read(), max_records);
