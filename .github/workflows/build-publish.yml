@@ -211,8 +211,7 @@ jobs:
     needs:
       - cleanup
       - purge_dynamodb
-      - linux_x86_heaptrack
-#      - linux_x86
+      - linux_x86
     name: test build (linux x86)
     runs-on:
       - ubuntu-latest
@@ -258,8 +257,7 @@ jobs:
     needs:
       - cleanup
       - purge_dynamodb
-      - linux_x86_heaptrack
-#      - linux_x86
+      - linux_x86
     name: Test Offsets DB Rollup (linux x86)
     runs-on:
       - ubuntu-latest
