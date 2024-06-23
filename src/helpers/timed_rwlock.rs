@@ -2,6 +2,7 @@
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Instant, Duration};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread::sleep;
 use dashmap::DashMap;
 use lazy_static::lazy_static;
 
@@ -32,13 +33,28 @@ impl<T> TimedRwLock<T> {
             None
         };
         
-        {
-            if self.lock.try_read().is_err() {
-              println!("{} is waiting on a read lock", self.name);     
+      
+        // try_read() in loop till success and then return result
+        let mut result: RwLockReadGuard<'_, T>;
+        
+        let mut i = 0;
+        loop {
+            match self.lock.try_read() {
+                Ok(r) => {
+                    result = r;
+                    break;
+                }
+                Err(_) => {
+                    if i == 0 {
+                        println!("waiting on a read lock {}", self.name);
+                    } else { 
+                        i += 1
+                    }
+                    sleep(Duration::from_millis(100));
+                }
             }
         }
-
-        let result = self.lock.read().unwrap();
+        
 
         if let Some(start_time) = start_time {
             let elapsed = start_time.elapsed();
@@ -60,13 +76,26 @@ impl<T> TimedRwLock<T> {
             None
         };
 
-        {
-            if self.lock.try_write().is_err() {
-              println!("{} is waiting on a write lock", self.name);     
+        // try_read() in loop till success and then return result
+        let mut result: RwLockWriteGuard<'_, T>;
+
+        let mut i = 0;
+        loop {
+            match self.lock.try_write() {
+                Ok(r) => {
+                    result = r;
+                    break;
+                }
+                Err(_) => {
+                    if i == 0 {
+                        println!("waiting on a write lock {}", self.name);
+                    } else {
+                        i += 1
+                    }
+                    sleep(Duration::from_millis(100));
+                }
             }
         }
-        
-        let result = self.lock.write().unwrap();
 
         if let Some(start_time) = start_time {
             let elapsed = start_time.elapsed();

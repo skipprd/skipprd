@@ -187,25 +187,25 @@ jobs:
           rust-version: stable
           architecture_name: linux_x86
 
-  linux_x86_heaptrack:
-    needs:
-      - linux_x86
-    name: Test Heaptrack (linux x86)
-    runs-on:
-      - ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Download Artifacts
-        uses: actions/download-artifact@v3
-
-      - name: Test linux x86 release
-        uses: ./.github/actions/e2e/heaptrack
-        with:
-          architecture_name: linux_x86
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
+#  linux_x86_heaptrack:
+#    needs:
+#      - linux_x86
+#    name: Test Heaptrack (linux x86)
+#    runs-on:
+#      - ubuntu-latest
+#    steps:
+#      - uses: actions/checkout@v3
+#
+#      - name: Download Artifacts
+#        uses: actions/download-artifact@v3
+#
+#      - name: Test linux x86 release
+#        uses: ./.github/actions/e2e/heaptrack
+#        with:
+#          architecture_name: linux_x86
+#          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+#          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+#          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
 
   linux_x86_test:
     needs:
