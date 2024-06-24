@@ -1,5 +1,5 @@
 mod arr;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use arrow::datatypes::Schema;
 use arrow::error::ArrowError;
@@ -180,14 +180,38 @@ async fn main() {
                     sync().await;
 
                 } else {
-                    println!("No pipeline name provided, syncing all pipelines");
+                    println!("Syncing all pipelines");
                     let pipelines = Config::get_pipelines();
-                    loop {
-                        for pipeline in &pipelines {
+                    // loop {
+                        for pipeline_name in &pipelines {
+                            
                             Config::reset_envcache();
                             PIPELINE_NAME.write().clear();
-                            PIPELINE_NAME.write().push_str(&pipeline);
+                            PIPELINE_NAME.write().push_str(&pipeline_name);
                             Config::init().await;
+
+                            let mut cache = PIPELINE_CACHE.write();
+                            let pipeline_cache = match cache.get(pipeline_name) {
+                                Some(pipeline_cache) => pipeline_cache,
+                                None => {
+                                    cache.insert(pipeline_name.clone(), PipelineCache::new());
+                                    cache.get(pipeline_name).unwrap()
+                                }
+                            };
+                            
+                            if pipeline_cache.last_ran_is_elapsed() {
+                                let remaining = Config::get_sync_frequency() - pipeline_cache.get_last_ran_elapsed();
+                                println!("Pipeline '{}' last ran {} seconds ago, skipping for {} seconds.", pipeline_name, pipeline_cache.get_last_ran_elapsed(), remaining);
+                                continue;
+                            } else {
+                                println!("Pipeline '{}' last ran {} seconds ago, syncing now.", pipeline_name, pipeline_cache.get_last_ran_elapsed());
+                                pipeline_cache.set_last_ran();
+                            }
+
+                            {
+                                let mut counter_lock = METRICS.write();
+                                counter_lock.reset();
+                            }
 
                             {
                                 let mut counter_lock = METRICS.write();
@@ -197,8 +221,8 @@ async fn main() {
                             sync().await;
                         }
 
-                        sleep(Duration::from_secs(5));
-                    }
+                        // sleep(Duration::from_secs(10));
+                    // }
                 }
                 // PIPELINE_NAME.write().unwrap().clear();
                 // PIPELINE_NAME.write().unwrap().push_str(&options.pipeline.unwrap().clone());
@@ -358,57 +382,55 @@ async fn discover() {
     
 }
 
+#[derive(Clone, Debug)]
 struct PipelineCache {
-    offsets: Offsets,
-    last_ran: Instant
+}
+
+// @todo, last_ran should be the updated_at timestamp for the file DATA_DIR/LASTRAN
+impl PipelineCache {
+    fn new() -> Self {
+
+        let last_ran_file = format!("{}/LASTRAN", Config::get_data_dir());
+
+        let last_ran = match fs::metadata(&last_ran_file) {
+            Ok(metadata) => {
+                metadata.modified().unwrap()
+            },
+            Err(_e) => {
+                fs::write(&last_ran_file, "").expect("Failed to write LASTRAN file");
+                SystemTime::now()
+            }
+        };
+
+        Self {}
+    }
+
+    fn last_ran(&self) -> SystemTime {
+        fs::metadata(&format!("{}/LASTRAN", Config::get_data_dir())).unwrap().modified().unwrap()
+    }
+
+    fn set_last_ran(&self) {
+        fs::write(&format!("{}/LASTRAN", Config::get_data_dir()), "").expect("Failed to write LASTRAN file");
+    }
+
+    fn get_last_ran_elapsed(&self) -> u64 {
+        SystemTime::now().duration_since(self.last_ran()).unwrap().as_secs()
+    }
+
+    fn last_ran_is_elapsed(&self) -> bool {
+
+        let duration = SystemTime::now().duration_since(self.last_ran()).unwrap();
+
+        duration.as_secs() < Config::get_sync_frequency()
+    }
 }
 
 static PIPELINE_CACHE: Lazy<TimedRwLock<HashMap<String, PipelineCache>>> = Lazy::new(|| TimedRwLock::new("pipeline_cache".to_string(), HashMap::new()));
 
-// pipeline metadata
-// offsets
-// index
-// sync schema
-
 
 async fn sync() {
 
-
-
     let pipeline_name = Config::get_pipeline_name();
-
-    let mut pipeline_metadata: PipelineMetadata;
-    let mut offsets: Offsets;
-
-
-    let cache = PIPELINE_CACHE.read();
-    let pipeline_cache = cache.get(&Config::get_pipeline_name());
-
-    if pipeline_cache.is_some() {
-        let last_ran = pipeline_cache.unwrap().last_ran;
-        let now = Instant::now();
-        let elapsed = now.duration_since(last_ran);
-
-        offsets = pipeline_cache.unwrap().offsets.clone();
-
-        if elapsed.as_secs() < Config::get_sync_frequency() {
-            let remaining = Config::get_sync_frequency() - elapsed.as_secs();
-            println!("Pipeline '{}' last ran {} seconds ago, skipping for {} seconds.", pipeline_name, elapsed.as_secs(), remaining);
-            return;
-        }
-
-    } else {
-        offsets = match Offsets::init() {
-            Ok(offsets) => offsets,
-            Err(e) => {
-                println!("Skipping: {}", e);
-                return;
-            }
-        };
-    }
-    
-    drop(pipeline_cache);
-    drop(cache);
     
     {
         let mut counter_lock = METRICS.write();
@@ -427,6 +449,7 @@ async fn sync() {
         }
     }
 
+    let mut pipeline_metadata: PipelineMetadata;
 
     // @todo - we don't cache Pipeline metatdata, as currently SQL statements are not stored in metadata.
     //         Refactor to accept SQL directly via database connection
@@ -458,20 +481,10 @@ async fn sync() {
         Err(_e) => {
             println!("No existing Skippr metadata, skipping pipeline '{}'. Init the pipeline with 'skippr discover' to create metadata.", pipeline_name);
 
-            PIPELINE_CACHE.write().insert(pipeline_name.clone(), PipelineCache {
-                offsets: offsets.clone(),
-                last_ran: Instant::now()
-            });
-
             return;
             // PipelineMetadata::new()
         }
     };
-
-    PIPELINE_CACHE.write().insert(pipeline_name.clone(), PipelineCache {
-        offsets: offsets.clone(),
-        last_ran: Instant::now()
-    });
 
 
     println!("Syncing pipeline: {}", pipeline_name);
@@ -480,8 +493,15 @@ async fn sync() {
         METADATA.write().clone_from(&pipeline_metadata);
     }
 
-    
-    let offsets = Arc::new(offsets);
+
+    let offsets_db = match Offsets::init() {
+        Ok(offsets) => offsets,
+        Err(e) => {
+            println!("Skipping: {}", e);
+            return;
+        }
+    };
+    let offsets = Arc::new(offsets_db);
 
     let offset_buffer_clone = offsets.clone();
 
