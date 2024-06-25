@@ -877,7 +877,7 @@ impl Config {
                     default_sync_frequency
                 }
             };
-            Config::set_evncache("TRANSFORM_BATCH_TIME_FIELDS", &sync_frequency.to_string());
+            Config::set_evncache("SYNC_FREQUENCY", &sync_frequency.clone().to_string());
             sync_frequency.clone()
         }
     }
