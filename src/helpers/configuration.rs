@@ -575,7 +575,7 @@ impl Config {
         let mut pipelines = vec![];
 
         for (key, _value) in config.pipelines.iter() {
-            pipelines.push(key.to_string());
+            pipelines.push(key.clone());
         }
 
         pipelines
@@ -583,7 +583,7 @@ impl Config {
 
     pub fn get_pipeline_config() -> Pipeline {
         let config = Config::get();
-
+        
         let pipeline = match config.pipelines.get(PIPELINE_NAME.read().as_str()) {
             Some(pipeline) => {
                 pipeline
@@ -612,7 +612,6 @@ impl Config {
     }
 
     pub fn get_transform_config() -> Transform {
-        let _config = Config::get();
 
         let pipline = Config::get_pipeline_config();
 
@@ -744,7 +743,6 @@ impl Config {
             }
             return Config::get_envcache("TRANSFORM_RECORD_FIELD_PATH")
         } else {
-            let _config = Config::get();
 
             let pipline = Config::get_pipeline_config();
 
@@ -771,7 +769,6 @@ impl Config {
             }
             return Config::get_envcache("TRANSFORM_BATCH_TIME_FIELDS")
         } else {
-            let _config = Config::get();
 
             let pipline = Config::get_pipeline_config();
 
@@ -797,7 +794,6 @@ impl Config {
             }
             return Config::get_envcache("TRANSFORM_BATCH_TIME_UNIT")
         } else {
-            let _config = Config::get();
 
             let pipline = Config::get_pipeline_config();
 
@@ -824,7 +820,6 @@ impl Config {
             }
             return Some(Config::get_envcache("TRANSFORM_TIME_PARTITION_PREFIX"))
         } else {
-            let _config = Config::get();
 
             let pipline = Config::get_pipeline_config();
 
@@ -863,20 +858,13 @@ impl Config {
             }
             return Config::get_envcache("SYNC_FREQUENCY").parse::<u64>().unwrap();
         } else {
-            let _config = Config::get();
 
             let pipline = Config::get_pipeline_config();
 
             let default_sync_frequency = &Config::getenv("SYNC_FREQUENCY", &DEFAULT.to_string()).parse::<u64>().unwrap();
 
-            let sync_frequency = match pipline.sync_frequency_seconds.as_ref() {
-                Some(sync_frequency) => {
-                    sync_frequency
-                }
-                None => {
-                    default_sync_frequency
-                }
-            };
+            let sync_frequency = pipline.sync_frequency_seconds.as_ref().unwrap_or(default_sync_frequency);
+            
             Config::set_evncache("SYNC_FREQUENCY", &sync_frequency.clone().to_string());
             sync_frequency.clone()
         }
@@ -928,6 +916,7 @@ impl Config {
         if Config::get_envcache("SKIPPR_ENV") != "" {
             return Config::get_envcache("SKIPPR_ENV")
         } else {
+            
             let config = Config::get();
 
             let default_env = Config::getenv("SKIPPR_ENV", "prod");
@@ -1014,7 +1003,6 @@ impl Config {
         if Config::get_envcache("BUFFER_THRESHOLD_BYTES") != "" {
             return Config::get_envcache("BUFFER_THRESHOLD_BYTES").parse::<u64>().unwrap()
         } else {
-            let _config = Config::get();
 
             let pipline = Config::get_pipeline_config();
 
@@ -1038,7 +1026,6 @@ impl Config {
         if Config::get_envcache("BUFFER_THRESHOLD_SECONDS") != "" {
             return Config::get_envcache("BUFFER_THRESHOLD_SECONDS").parse::<u64>().unwrap()
         } else {
-            let _config = Config::get();
 
             let pipline = Config::get_pipeline_config();
 

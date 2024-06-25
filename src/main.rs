@@ -138,6 +138,54 @@ pub static METADATA: Lazy<Arc<TimedRwLock<PipelineMetadata>>> = Lazy::new(|| Arc
 //Arc<Schema>
 pub static  ARROW_SCHEMA: Lazy<Arc<TimedRwLock<HashMap<String, Arc<Schema>>>>> = Lazy::new(|| Arc::new(TimedRwLock::new("arrow_schema".to_string(), HashMap::new())));
 
+#[derive(Clone, Debug)]
+struct PipelineCache {
+}
+
+// @todo, last_ran should be the updated_at timestamp for the file DATA_DIR/LASTRAN
+impl PipelineCache {
+    fn get_metadata() -> fs::Metadata {
+
+        let last_ran_file = format!("{}/LASTRAN", Config::get_data_dir());
+
+        match fs::metadata(&last_ran_file) {
+            Ok(metadata) => {
+                metadata
+            },
+            Err(_e) => {
+                PipelineCache::set_last_ran()
+            }
+        }
+
+    }
+
+    fn last_ran() -> SystemTime {
+        PipelineCache::get_metadata().modified().unwrap()
+    }
+
+    fn set_last_ran() -> fs::Metadata {
+        let last_ran_file = format!("{}/LASTRAN", Config::get_data_dir());
+
+        fs::write(&last_ran_file, "").expect("Failed to write LASTRAN file");
+        fs::metadata(&last_ran_file).expect("Failed to create LASTRAN file")
+    }
+
+    fn get_last_ran_elapsed() -> u64 {
+        SystemTime::now().duration_since(PipelineCache::last_ran()).unwrap().as_secs()
+    }
+
+    fn last_ran_is_elapsed() -> bool {
+
+        let duration = match SystemTime::now().duration_since(PipelineCache::last_ran()) {
+            Ok(duration) => duration,
+            Err(_e) => Duration::from_secs(0) // probably microsecond difference
+        };
+        
+        duration.as_secs() > Config::get_sync_frequency()
+            || duration.as_secs() == 0 // just created on first run
+    }
+}
+
 #[tokio::main]
 async fn main() {
 
@@ -183,35 +231,23 @@ async fn main() {
                     println!("Syncing all pipelines");
                     let pipelines = Config::get_pipelines();
                     // loop {
-                        for pipeline_name in &pipelines {
-                            
+                        for pipeline_name in pipelines {
+
                             Config::reset_envcache();
-                            PIPELINE_NAME.write().clear();
-                            PIPELINE_NAME.write().push_str(&pipeline_name);
-                            Config::init().await;
-
-                            let mut cache = PIPELINE_CACHE.write();
-                            let pipeline_cache = match cache.get(pipeline_name) {
-                                Some(pipeline_cache) => pipeline_cache,
-                                None => {
-                                    cache.insert(pipeline_name.clone(), PipelineCache::new());
-                                    cache.get(pipeline_name).unwrap()
-                                }
-                            };
-                            
-                            if pipeline_cache.last_ran_is_elapsed() {
-                                let remaining = Config::get_sync_frequency() - pipeline_cache.get_last_ran_elapsed();
-                                println!("Pipeline '{}' last ran {} seconds ago, skipping for {} seconds.", pipeline_name, pipeline_cache.get_last_ran_elapsed(), remaining);
-                                continue;
-                            } else {
-                                println!("Pipeline '{}' last ran {} seconds ago, syncing now.", pipeline_name, pipeline_cache.get_last_ran_elapsed());
-                                pipeline_cache.set_last_ran();
-                            }
-
                             {
-                                let mut counter_lock = METRICS.write();
-                                counter_lock.reset();
+                                PIPELINE_NAME.write().clear();
+                                PIPELINE_NAME.write().push_str(&pipeline_name.clone());
                             }
+                            Config::init().await;
+                            
+
+                            if !PipelineCache::last_ran_is_elapsed() {
+                                let remaining = Config::get_sync_frequency() - PipelineCache::get_last_ran_elapsed();
+                                println!("Pipeline '{}' last ran {} seconds ago, skipping for {} seconds.", &pipeline_name, PipelineCache::get_last_ran_elapsed(), remaining);
+                                continue;
+                            }
+
+                            PipelineCache::set_last_ran();
 
                             {
                                 let mut counter_lock = METRICS.write();
@@ -382,50 +418,6 @@ async fn discover() {
     
 }
 
-#[derive(Clone, Debug)]
-struct PipelineCache {
-}
-
-// @todo, last_ran should be the updated_at timestamp for the file DATA_DIR/LASTRAN
-impl PipelineCache {
-    fn new() -> Self {
-
-        let last_ran_file = format!("{}/LASTRAN", Config::get_data_dir());
-
-        let last_ran = match fs::metadata(&last_ran_file) {
-            Ok(metadata) => {
-                metadata.modified().unwrap()
-            },
-            Err(_e) => {
-                fs::write(&last_ran_file, "").expect("Failed to write LASTRAN file");
-                SystemTime::now()
-            }
-        };
-
-        Self {}
-    }
-
-    fn last_ran(&self) -> SystemTime {
-        fs::metadata(&format!("{}/LASTRAN", Config::get_data_dir())).unwrap().modified().unwrap()
-    }
-
-    fn set_last_ran(&self) {
-        fs::write(&format!("{}/LASTRAN", Config::get_data_dir()), "").expect("Failed to write LASTRAN file");
-    }
-
-    fn get_last_ran_elapsed(&self) -> u64 {
-        SystemTime::now().duration_since(self.last_ran()).unwrap().as_secs()
-    }
-
-    fn last_ran_is_elapsed(&self) -> bool {
-
-        let duration = SystemTime::now().duration_since(self.last_ran()).unwrap();
-
-        duration.as_secs() < Config::get_sync_frequency()
-    }
-}
-
-static PIPELINE_CACHE: Lazy<TimedRwLock<HashMap<String, PipelineCache>>> = Lazy::new(|| TimedRwLock::new("pipeline_cache".to_string(), HashMap::new()));
 
 
 async fn sync() {
