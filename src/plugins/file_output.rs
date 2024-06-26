@@ -29,7 +29,7 @@ pub struct DataOutputFilePlugin {
 
 #[async_trait]
 impl DataOutputPlugin for DataOutputFilePlugin {
-    async fn sync(&mut self, stream: SendableRecordBatchStream, filename: String) -> Result<(), std::io::Error> {
+    async fn sync(&self, stream: SendableRecordBatchStream, filename: String) -> Result<(), std::io::Error> {
         self.inner_sync(stream, filename).await
     }
 }

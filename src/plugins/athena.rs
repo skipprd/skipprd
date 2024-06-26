@@ -70,7 +70,8 @@ impl From<PluginConfig> for DataOutputAwsAthenaPluginConfig {
 
 #[async_trait]
 impl DataOutputPlugin for DataOutputAwsAthenaPlugin {
-    async fn sync(&mut self, stream: SendableRecordBatchStream, filename: String) -> Result<(), std::io::Error> {
+    async fn sync(&self, stream: SendableRecordBatchStream, filename: String) -> Result<(), std::io::Error> {
+    // async fn sync(&mut self, stream: SendableRecordBatchStream, filename: String) -> Result<(), std::io::Error> {
         self.inner_sync(stream, filename).await
     }
 }

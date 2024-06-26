@@ -86,7 +86,7 @@ impl DataSourceLocalFilePlugin {
     pub async fn sync(
         &mut self,
         offsets: Arc<Offsets>,
-        shared_output: Arc<TimedRwLock<Box<dyn DataOutputPlugin + Send + Sync>>>,
+        shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
     ) {
         let offsets_clone = offsets.clone();
 

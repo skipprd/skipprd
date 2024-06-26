@@ -108,7 +108,7 @@ impl DataSourceS3Plugin {
     pub async fn sync(
         &mut self,
         offsets: Arc<Offsets>,
-        shared_output: Arc<TimedRwLock<Box<dyn DataOutputPlugin + Send + Sync>>>,
+        shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
     ) {
 
 
@@ -394,7 +394,7 @@ impl DataSourceS3Plugin {
         bucket_name: &String,
         object_keys: &Vec<String>,
         offsets_clone: &Arc<Offsets>,
-        shared_output: Arc<TimedRwLock<Box<dyn DataOutputPlugin + Send + Sync>>>,
+        shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
     ) {
         let s3_client = self.s3_client.clone();
 

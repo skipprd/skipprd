@@ -389,7 +389,7 @@ async fn discover() {
     let offsets = Arc::new(offsets);
 
     let output = sync_output_plugin("file", "output".to_string()).await.unwrap();
-    let shared_output = Arc::new(TimedRwLock::new("output_plugin".to_string(), output));
+    let shared_output = Arc::new(output);
 
     let offsets_clone = offsets.clone();
 
@@ -503,10 +503,13 @@ async fn sync() {
     }
     
     // let output = DataOutputAwsAthenaPlugin::new("output".to_string()).await;
+    // let output_plugin_name = Config::get_pipeline_output_plugin_name();
+    // let output = sync_output_plugin(&output_plugin_name, "output".to_string()).await.unwrap();
+    // let shared_output = Arc::new(TimedRwLock::new("output_plugin".to_string(), output));
     let output_plugin_name = Config::get_pipeline_output_plugin_name();
     let output = sync_output_plugin(&output_plugin_name, "output".to_string()).await.unwrap();
-    let shared_output = Arc::new(TimedRwLock::new("output_plugin".to_string(), output));
-
+    let shared_output = Arc::new(output);
+    
     // sync schema if output plugin configured
     if output_plugin_name != "" {
         Config::sync_schema(&pipeline_metadata.metadata).await;
@@ -953,7 +956,7 @@ pub async fn sync_output_plugin(plugin_name: &str, buffer_name: String) -> Resul
     }
 }
 
-pub async fn sync_input_plugin(offsets_clone: Arc<Offsets>, shared_output: Arc<TimedRwLock<Box<dyn DataOutputPlugin + Send + Sync>>>) {
+pub async fn sync_input_plugin(offsets_clone: Arc<Offsets>, shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>) {
     match Config::get_pipeline_input_plugin_name().as_str() {
         // "pcap" => {
         //     panic!("PCAP input plugin not installed, please contact support")

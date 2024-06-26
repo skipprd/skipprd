@@ -52,5 +52,5 @@ pub(crate) trait DataInputPlugin {
 
 #[async_trait]
 pub(crate) trait DataOutputPlugin: Send + Sync {
-    async fn sync(&mut self, stream: SendableRecordBatchStream, filename: String) -> Result<(), std::io::Error>;
+    async fn sync(&self, stream: SendableRecordBatchStream, filename: String) -> Result<(), std::io::Error>;
 }

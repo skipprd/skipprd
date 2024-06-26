@@ -202,7 +202,7 @@ impl Ingest {
         &self,
         datas: &Arc<Vec<IngestBatch>>,
         offset_db: &Arc<Offsets>,
-        shared_output: Arc<TimedRwLock<Box<dyn DataOutputPlugin + Send + Sync>>>,
+        shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
     ) {
         // If we're not running, exit after current threads finish.
         if !RUNNING.read().load(Ordering::SeqCst) {
@@ -222,7 +222,7 @@ impl Ingest {
                     {
                         pipeline_metadata = METADATA.read().clone();
                     }
-                    
+
                     let mut count: u64 = 0;
 
                     for data in datas.iter() {
@@ -236,16 +236,16 @@ impl Ingest {
                         {
                             *NUM_ANALYSED_RECORDS.write() += count;
                         }
-                        
+
                         if *NUM_ANALYSED_RECORDS.read() >= max_records {
                             break;
                         }
                     }
-                    
+
                     {
                         METADATA.write().metadata = pipeline_metadata.metadata.clone();
                     }
-                    
+
                     if *NUM_ANALYSED_RECORDS.read() >= max_records {
 
                         let mut pipeline_metadata= METADATA.read().clone();
@@ -264,13 +264,13 @@ impl Ingest {
                         }
 
                         println!("Schema discovery complete, writing metadata to Skippr");
-                        
+
                         tokio::spawn(async move {
                             pipeline_metadata.enabled = false;
                             Config::set_metadata(&pipeline_metadata, false).await;
                             std::process::exit(0);
                         });
-                        
+
                     }
 
                     println!("Analysed schema for {} -> {}/{} records", count, *NUM_ANALYSED_RECORDS.read(), max_records);
@@ -325,7 +325,7 @@ impl Ingest {
         offset_db_clone: &Arc<Offsets>,
         schema_hashes: &mut DashMap<String, SchemaHash>,
         handle: runtime::Handle,
-        shared_output: Arc<TimedRwLock<Box<dyn DataOutputPlugin + Send + Sync>>>,
+        shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
     ) {
 
         // optional: enforce allowed partition values
