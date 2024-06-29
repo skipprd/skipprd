@@ -11,12 +11,11 @@ use std::sync::{Arc};
 use aws_sdk_s3::operation::get_object::{GetObjectError, GetObjectOutput};
 
 
-
 use std::time::Duration;
 use std::{fs, io};
 use std::collections::{HashSet};
 use std::fs::{ OpenOptions};
-
+use aws_sdk_s3::types::Object;
 use futures::future::join_all;
 use futures::{StreamExt};
 use libc::sleep;
@@ -28,6 +27,7 @@ use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::ingest_work::{Ingest, IngestBatch};
 
 use tokio::sync::Semaphore;
+use tokio::task;
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::plugins::DataOutputPlugin;
 
@@ -111,6 +111,7 @@ impl DataSourceS3Plugin {
         shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
     ) {
 
+        // let mut futures = Vec::new();
 
         let offsets_clone = offsets.clone();
 
@@ -118,220 +119,154 @@ impl DataSourceS3Plugin {
 
         let s3_bucket = self.config.s3_bucket.clone();
         
-        let max_depth = self.config.s3_prefix_ordered_depth.clone().unwrap_or(0);
-        let delimiter = self.config.s3_delimiter.clone().unwrap_or("/".to_string());
-        
-        let mut seen: HashSet<String> = HashSet::new();
-        
-        self.prefixes.push((self.config.s3_prefix.clone(), 0));
+        let delimiter = "/".to_string();
+
+        let inventory_prefix = self.config.s3_prefix.clone();
+
+        let max_list_objects = 1000;
 
         let mut total_objects = 0;
         let mut chunk_size_current = 0;
 
-        while !self.prefixes.is_empty() {
+        let mut outputs: Vec<String> = Vec::with_capacity(max_list_objects as usize);
 
-            let (inventory_prefix, prefix_depth) = self.prefixes.pop().unwrap();
+        // create 'objects' outside of loop to avoid re-allocation, and of a fixed size (max_list_objects)
+        let mut objects: Vec<Object> = Vec::with_capacity(max_list_objects as usize);
 
-            let mut continuation_token = Self::read_continuation_token(offsets.clone(), s3_bucket.clone(), inventory_prefix.clone()).unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::NotFound, "Failed to get S3 Input continuation token from Offset DB")).unwrap());
+        let mut continuation_token = None;
 
-            println!(
-                "Syncing bucket: {}, prefix: {}",
-                s3_bucket.clone(),
-                inventory_prefix
-            );
+        println!(
+            "Syncing bucket: {}, prefix: {}",
+            s3_bucket.clone(),
+            inventory_prefix
+        );
 
-            let chunk_size = self.config.batch_size_bytes.clone().unwrap_or(10000000);
+        let chunk_size = self.config.batch_size_bytes.clone().unwrap_or(10000000);
 
-            let mut s3_prefix = inventory_prefix.trim_start_matches('/').to_string();
+        let mut s3_prefix = inventory_prefix.trim_start_matches(&delimiter).to_string();
 
-            if s3_prefix == delimiter || s3_prefix == format!(".{}", delimiter) {
-                s3_prefix = "".to_string();
-            }
-            
-            let max_list_objects = 1000;
+        if s3_prefix == delimiter || s3_prefix == format!(".{}", delimiter) {
+            s3_prefix = "".to_string();
+        }
 
-            let mut list_obj_req = self
-                .s3_client
-                .list_objects_v2()
-                .bucket(s3_bucket.clone())
-                .prefix(s3_prefix.clone())
-                .max_keys(max_list_objects);
+        let mut list_obj_req = self
+            .s3_client
+            .list_objects_v2()
+            .bucket(s3_bucket.clone())
+            .prefix(s3_prefix.clone())
+            .max_keys(max_list_objects);
 
-            if prefix_depth < max_depth {
-                list_obj_req = list_obj_req.delimiter(&delimiter);
-            }
-            
-            if let Some(token) = &continuation_token {
-                // println!("Continuing from token: {:?}", token);
-                list_obj_req = list_obj_req.set_continuation_token(Some(token.clone()));
-            }
+        // important to check few times, else slowly arriving drip of objects will result in us never proceeding to the next pipeline
+        let max_empty_objects = 2;
+        let mut empty_objects_trys = 0;
 
-            // important to check few times, else slowly arriving drip of objects will result in us never proceeding to the next pipeline
-            let max_empty_objects = 2;
-            let mut empty_objects_trys = 0;
+        // let num_cpus = num_cpus::get();
+        // let num_threads = num_cpus / 4;
 
-            let mut outputs: Vec<String> = Vec::new();
+        loop {
+            let mut i = 0;
+            let mut list_retries = 0;
+            let mut skipped_objects = 0;
 
+            match list_obj_req.clone().send().await {
+                Err(err) => {
+                    println!("S3 Error: {:?}", err);
+                    if list_retries >= 5 {
+                        println!("Max retries reached for S3 ListObjectsV2");
+                        // break;
+                        return;
+                    }
+                    list_retries += 1;
+                    tokio::time::sleep(Duration::from_secs(5 * list_retries)).await;
+                },
+                Ok(output) => {
+                    list_retries = 0;
 
-            loop {
-
-                let mut i = 0;
-                let mut list_retries = 0;
-                let mut skipped_objects = 0;
-                
-                match list_obj_req.clone().send().await {
-                    Err(err) => {
-                        println!("S3 Error: {:?}", err);
-                        if list_retries >= 5 {
-                            println!("Max retries reached for S3 ListObjectsV2");
-                            break;
-                        }
-                        list_retries += 1;
-                        tokio::time::sleep(Duration::from_secs(5 * list_retries)).await;
-                    },
-                    Ok(output) => {
-
-                        list_retries = 0;
-                        
-                        let common_prefixes = output.common_prefixes();
-
-                        for prefix in common_prefixes.iter().filter_map(|p| p.prefix()) {
-                            let depth = prefix.matches(&delimiter).count();
-                            if depth <= max_depth && seen.insert(prefix.to_string()) {
-                                // println!("Adding prefix: {} at depth: {}", prefix, depth);
-                                self.prefixes.push((prefix.to_string(), depth));
-                            }
-                        }
-                        if output.contents.is_none() {
+                    objects = match output.contents {
+                        Some(o) => o,
+                        None => {
                             if empty_objects_trys >= max_empty_objects {
                                 // println!("No more objects found in S3, skipping Bucket: {} Prefix: {}", s3_bucket, s3_prefix);
-                                break;
+                                // break;
+                                return;
                             }
                             empty_objects_trys += 1;
-                            continue;
-                        };
-                        
-                        let objects = output.contents();
+                            // continue;
+                            return;
+                        }
+                    };
 
-                        // println!("Sub-Syncing bucket: {}, prefix: {}", s3_bucket, s3_prefix);
-                        // println!("Found {} objects in S3", objects.len());
-                        // println!("Continuation token: {:?}", output.next_continuation_token);
+                    if !objects.is_empty() {
+                        skipped_objects = 0;
 
-                        if !objects.is_empty() {
-                            skipped_objects = 0;
+                        total_objects += objects.len();
 
-                            total_objects += objects.len();
+                        for object in objects {
+                            let object_key = object.key().unwrap();
+                            let _timestamp = object.last_modified().unwrap().secs();
 
-                            for object in objects {
+                            // println!("Processing object: {}", object_key);
 
-                                let object_key = object.key().unwrap();
-                                let _timestamp = object.last_modified().unwrap().secs();
+                            let offset_key = OffsetKey {
+                                namespace: s3_bucket.clone(),
+                                partition: object_key.to_string(),
+                            };
 
-                                // println!("Processing object: {}", object_key);
+                            // Check offset is not already processed
+                            let has_offsets = offsets_clone.validate(&offset_key, OffsetTypes::Closed, 1);
 
-                                let offset_key = OffsetKey {
-                                    namespace: s3_bucket.clone(),
-                                    partition: object_key.to_string(),
-                                };
-                                // Check offset is not already processed
-                                let has_offsets = offsets_clone.validate(&offset_key, OffsetTypes::Closed, 1);
+                            if Some(true) != has_offsets {
+                                outputs.push(object_key.to_string());
 
-                                if Some(true) != has_offsets {
+                                chunk_size_current += object.size().unwrap_or_default();
 
-                                    outputs.push(object_key.to_string());
+                                i += 1;
 
-                                    chunk_size_current += object.size().unwrap_or_default();
+                                if chunk_size_current >= chunk_size {
 
-                                    i += 1;
+                                    self.download_and_ingest(
+                                        &s3_bucket,
+                                        &outputs,
+                                        &offsets_clone,
+                                        shared_output.clone()
+                                    ).await;
 
-                                    if chunk_size_current >= chunk_size {
 
-                                        self.download_and_ingest(
-                                            &s3_bucket,
-                                            &outputs,
-                                            &offsets_clone,
-                                            shared_output.clone()
-                                        )
-                                            .await;
-
-                                        outputs = Vec::new();
-                                        i = 0;
-                                        chunk_size_current = 0;
-                                    }
-                                } else {
-                                    skipped_objects += 1;
+                                    outputs.clear();
+                                    i = 0;
+                                    chunk_size_current = 0;
                                 }
-                            }
-                            
-                            // println!("Skipped objects: {}", skipped_objects);
-                            
-                            if skipped_objects >= max_list_objects {
-
-                                
-                                // println!("Next continuation token: {:?}", output.next_continuation_token);
-                                
-                                // If we've skipped all objects in the list request then we can save the continuation token
-                                if continuation_token.is_some()
-                                    && output.next_continuation_token.is_some() // If there is a next token, we can save the current one. 
-                                {
-
-                                    Self::save_continuation_token(
-                                        &output.next_continuation_token,
-                                        offsets_clone.clone(),
-                                        s3_bucket.clone(),
-                                        inventory_prefix.clone()
-                                    ).unwrap();
-
-                                    // // rollup the offsets database
-                                    // if log_rollup {
-                                    //     println!("Rolling up offsets database to recover disk space");
-                                    //     log_rollup = false;
-                                    // }
-                                    //
-                                    // for object in objects {
-                                    //     let offset_key = OffsetKey {
-                                    //         namespace: s3_bucket.clone(),
-                                    //         partition: object.key().unwrap().to_string(),
-                                    //     };
-                                    //     match offsets_clone.remove(&offset_key) {
-                                    //         Ok(old_val) => {},
-                                    //         Err(err) => {
-                                    //             println!("Failed to rollup offset database, Error: {:?}", err);
-                                    //             break;
-                                    //         }
-                                    //     }
-                                    // }
-                                    //
-                                    // // Not, sled doesn't delete the keys, just nulls the values.
-                                    // // So we  need to vacuum the db on startup to give as chance for sled GC to run
-                                    // offsets_clone.flush().unwrap();
-                                }
-
+                            } else {
+                                skipped_objects += 1;
                             }
                         }
 
-                        if let Some(token) = &output.next_continuation_token {
-                            continuation_token = Some(token.to_string().clone());
+                        // println!("Skipped objects: {}", skipped_objects);
+                    }
 
-                            list_obj_req = list_obj_req.set_continuation_token(continuation_token.clone());
-                        } else {
+                    if let Some(token) = &output.next_continuation_token {
+                        continuation_token = Some(token.to_string().clone());
 
-                            if !outputs.is_empty() {
-                                self.download_and_ingest(
-                                    &s3_bucket,
-                                    &outputs,
-                                    &offsets_clone,
-                                    shared_output.clone()
-                                )
-                                    .await;
-                            }
-                            
-                            break
+                        list_obj_req = list_obj_req.set_continuation_token(continuation_token.clone());
+                    } else {
+                        if !outputs.is_empty() {
+                            self.download_and_ingest(
+                                &s3_bucket,
+                                &outputs,
+                                &offsets_clone,
+                                shared_output.clone()
+                            )
+                                .await;
                         }
+
+                        // break
+                        return;
                     }
                 }
             }
+
         }
+
 
         println!("Reached end of S3 pagination");
 
@@ -433,6 +368,8 @@ impl DataSourceS3Plugin {
 
         let future_result = join_all(futures).await;
 
+        // println!("Downloaded {} objects", future_result.len());
+
         let bucket_name = bucket_name.clone();
         let datas_clone = datas.clone();
 
@@ -494,99 +431,17 @@ impl DataSourceS3Plugin {
             };
         }
 
-        // @todo - pass datas to ingest_file without cloning
+
+        // println!("Extracted {} objects", datas.read().len());
+
+
         let batch = datas.read().clone();
         let shared_output_clone = shared_output.clone();
         self.ingest.ingest_file(&Arc::new(batch), &offsets_clone, shared_output_clone);
+
+        // println!("Ingested {} objects", datas.read().len());
     }
 
-    fn save_continuation_token(
-        token: &Option<String>,
-        offsets_clone: Arc<Offsets>,
-        s3_bucket: String,
-        s3_prefix: String,
-    ) -> io::Result<()> {
-        
-        // println!("Saving continuation token: {} for bucket: {}, prefix: {}", token.clone().unwrap(), s3_bucket, s3_prefix);
-        
-        match token {
-            Some(t) => {
-
-                let offset_key = OffsetKey {
-                    namespace: s3_bucket.clone(),
-                    partition: s3_prefix.clone(),
-                };
-
-                let key = offsets_clone.build_key(&offset_key);
-                let key_bytes: &[u8] = &key.as_bytes();
-
-                match offsets_clone.tree.insert(key_bytes, sled::IVec::from(&t.as_bytes()[..])) {
-                    Ok(_) => {
-                        // println!("Saved continuation token: {} for bucket: {}, prefix: {}", t, s3_bucket, s3_prefix);
-                        Ok(())
-                    },
-                    Err(err) => {
-                        Err(io::Error::new(io::ErrorKind::Other, "Failed to save continuation token"))
-                    }
-                }
-
-            },
-            None => Err(io::Error::new(io::ErrorKind::NotFound, "No token to save")),
-        }
-    }
-
-    fn read_continuation_token(
-        offsets_clone: Arc<Offsets>,
-        s3_bucket: String,
-        s3_prefix: String,
-    ) -> io::Result<Option<String>> {
-        
-        return Ok(None);
-
-        // migrate from old continuation token file
-        match OpenOptions::new().read(true).open(CONTINUATION_TOKEN_FILE.to_string()) {
-            Ok(mut file) => {
-                let mut buf = String::new();
-                file.read_to_string(&mut buf)?;
-                println!("Found previous S3 List continuation tokens: {}", buf);
-                let token: String = serde_json::from_str(&buf).unwrap_or_default();
-
-                // Remove the file, we use offset DB now
-                fs::remove_file(CONTINUATION_TOKEN_FILE.to_string()).unwrap();
-
-                if token.is_empty() {
-                    return Ok(None);
-                } else {
-                    return Ok(Some(token));
-                }
-
-            },
-            Err(_) => (),
-        };
-
-        let offset_key = OffsetKey {
-            namespace: s3_bucket,
-            partition: s3_prefix,
-        };
-        let key = offsets_clone.build_key(&offset_key);
-        let key_bytes: &[u8] = &key.as_bytes();
-        
-        let offset = offsets_clone.tree.get(&key_bytes).unwrap();
-        
-        let continuation_token: String = match offset {
-            Some(t) => {
-                String::from_utf8(t.to_vec()).unwrap()
-            },
-            _ => {
-                return Ok(None);
-            }
-        };
-        
-        // println!("Found continuation token: {}", continuation_token);
-
-        Ok(Some(continuation_token))
-
-    }
 }
 
 struct Download {
