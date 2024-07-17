@@ -22,3 +22,4 @@ test-data/ieu_trip
 /test-data/
 skippr.yml
 s3_input_last_continuation_token.txt
+/schema/
