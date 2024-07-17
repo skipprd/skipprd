@@ -180,7 +180,7 @@ impl PipelineCache {
             Ok(duration) => duration,
             Err(_e) => Duration::from_secs(0) // probably microsecond difference
         };
-        
+
         duration.as_secs() > Config::get_sync_frequency()
             || duration.as_secs() == 0 // just created on first run
     }
@@ -231,31 +231,31 @@ async fn main() {
                     println!("Syncing all pipelines");
                     let pipelines = Config::get_pipelines();
                     // loop {
-                        for pipeline_name in pipelines {
+                    for pipeline_name in pipelines {
 
-                            Config::reset_envcache();
-                            {
-                                PIPELINE_NAME.write().clear();
-                                PIPELINE_NAME.write().push_str(&pipeline_name.clone());
-                            }
-                            Config::init().await;
-                            
-
-                            if !PipelineCache::last_ran_is_elapsed() {
-                                let remaining = Config::get_sync_frequency() - PipelineCache::get_last_ran_elapsed();
-                                println!("Pipeline '{}' last ran {} seconds ago, skipping for {} seconds.", &pipeline_name, PipelineCache::get_last_ran_elapsed(), remaining);
-                                continue;
-                            }
-
-                            PipelineCache::set_last_ran();
-
-                            {
-                                let mut counter_lock = METRICS.write();
-                                counter_lock.reset();
-                            }
-
-                            sync().await;
+                        Config::reset_envcache();
+                        {
+                            PIPELINE_NAME.write().clear();
+                            PIPELINE_NAME.write().push_str(&pipeline_name.clone());
                         }
+                        Config::init().await;
+
+
+                        if !PipelineCache::last_ran_is_elapsed() {
+                            let remaining = Config::get_sync_frequency() - PipelineCache::get_last_ran_elapsed();
+                            println!("Pipeline '{}' last ran {} seconds ago, skipping for {} seconds.", &pipeline_name, PipelineCache::get_last_ran_elapsed(), remaining);
+                            continue;
+                        }
+
+                        PipelineCache::set_last_ran();
+
+                        {
+                            let mut counter_lock = METRICS.write();
+                            counter_lock.reset();
+                        }
+
+                        sync().await;
+                    }
 
                         // sleep(Duration::from_secs(10));
                     // }
@@ -509,7 +509,7 @@ async fn sync() {
     let output_plugin_name = Config::get_pipeline_output_plugin_name();
     let output = sync_output_plugin(&output_plugin_name, "output".to_string()).await.unwrap();
     let shared_output = Arc::new(output);
-    
+
     // sync schema if output plugin configured
     if output_plugin_name != "" {
         Config::sync_schema(&pipeline_metadata.metadata).await;
