@@ -124,6 +124,7 @@ pub struct Pipeline {
     pub env: Option<String>,
     pub buffer_threshold_bytes: Option<u64>,
     pub buffer_threshold_seconds: Option<u64>,
+    buffer_disk_threshold_bytes: Option<u64>,
     pub chaos_mode: Option<String>,
     pub sync_frequency_seconds: Option<u64>,
     pub data_dir: Option<String>,
@@ -596,6 +597,7 @@ impl Config {
                     env: None,
                     buffer_threshold_bytes: None,
                     buffer_threshold_seconds: None,
+                    buffer_disk_threshold_bytes: None,
                     chaos_mode: None,
                     sync_frequency_seconds: None,
                     data_dir: None,
@@ -1019,6 +1021,32 @@ impl Config {
 
             Config::set_evncache("BUFFER_THRESHOLD_BYTES", &buffer_threshold_bytes.to_string());
             buffer_threshold_bytes.clone()
+        }
+    }
+
+    pub fn get_pipeline_buffer_disk_threshold_bytes() -> u64 {
+        if Config::get_envcache("BUFFER_DISK_THRESHOLD_BYTES") != "" {
+            return Config::get_envcache("BUFFER_DISK_THRESHOLD_BYTES").parse::<u64>().unwrap()
+        } else {
+
+            let pipline = Config::get_pipeline_config();
+
+            // Low default to support AWS Lambda by default
+            let four_gb = "4294967296";
+
+            let default = Config::getenv("BUFFER_DISK_THRESHOLD_BYTES", four_gb).parse::<u64>().unwrap();
+
+            let buffer_disk_threshold_bytes = match pipline.buffer_disk_threshold_bytes.as_ref() {
+                Some(buffer_disk_threshold_bytes) => {
+                    buffer_disk_threshold_bytes
+                }
+                None => {
+                    &default
+                }
+            };
+
+            Config::set_evncache("BUFFER_DISK_THRESHOLD_BYTES", &buffer_disk_threshold_bytes.to_string());
+            buffer_disk_threshold_bytes.clone()
         }
     }
 

@@ -30,6 +30,7 @@ use datafusion::parquet::data_type::AsBytes;
 use datafusion::physical_plan::memory::MemoryStream;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
+use futures::FutureExt;
 use icu::properties::sets::print;
 use indexmap::IndexMap;
 use lazy_static::lazy_static;
@@ -116,6 +117,17 @@ impl Buffers {
         let mut bytes: u64 = 0;
         let mut rows: u64 = 0;
 
+        let mut force_compact = false;
+        {
+            let index = WAL_PARTITION_INDEX.read();
+            
+            if index.is_disk_bytes_exceeded() {
+                println!("Disk bytes {} of {} bytes, compacting all partitions", index.bytes, index.max_bytes);
+                // Buffers::compact_all_partitions(true, offsets_db.clone(), shared_output.clone()).await;
+                force_compact = true;
+            }
+        }
+
         // println!("Flushing {} WAL files", self.buf.len());
 
         let mut partitions: HashMap<(String, String, Option<i64>, String), Vec<WalFile>> = HashMap::new();
@@ -191,22 +203,23 @@ impl Buffers {
 
         }
 
-        // offsets_db.flush();
-
-        // println!("Ingested {} rows of {} bytes to WAL", stats.1, stats.0);
-
-        self.buf.clear();
-
         {
             let mut counter_lock = METRICS.write();
             counter_lock.wal_write_bytes_total += bytes;
             counter_lock.wal_write_rows_total += rows;
         }
 
+        // offsets_db.flush();
+
+        // println!("Ingested {} rows of {} bytes to WAL", stats.1, stats.0);
+
+        self.buf.clear();
+
         let mut compact_index_partitions: HashMap<(String, String, Option<i64>, String), WalPartition> = HashMap::new();
 
         {
             let mut index = WAL_PARTITION_INDEX.write();
+            index.bytes += bytes;
 
             for ((namespace, partition, time, shard), wal_files) in partitions.iter_mut() {
                 let mut wal_partition = index.index.entry((namespace.clone(), partition.clone(), time.clone(), shard.clone()))
@@ -234,7 +247,7 @@ impl Buffers {
             // Evaluate candidates for compaction
             for (key, wal_partition) in index.index.iter() {
 
-                if wal_partition.check_wal_rotate() {
+                if wal_partition.check_wal_rotate(force_compact) {
                     compact_index_partitions.insert(key.clone(), wal_partition.clone());
                 }
             }
@@ -250,19 +263,34 @@ impl Buffers {
 
         let shared_output_clone = shared_output.clone();
         
+        let mut compact_promises = vec![];
+        
+        let mut compacted_bytes = 0;
+        
         // Compact the partitions (now the index is unlocked, WAL flushed and offset committed)
         for partition in compact_index_partitions.values_mut() {
             let offsets_db_clone = offsets_db.clone();
             let shared_output_clone2 = shared_output_clone.clone();
-            partition.compact_batches_to_parquet(offsets_db_clone, shared_output_clone2).await;
+            compact_promises.push(partition.compact_batches_to_parquet(offsets_db_clone, shared_output_clone2));
         }
 
+        // await all compact_promises
+        for promise in compact_promises {
+            compacted_bytes += promise.await;
+        }
+
+        {
+            let mut index = WAL_PARTITION_INDEX.write();
+            index.bytes -= compacted_bytes;
+        }
+        
         // println!("Wrote {} rows to WAL", rows);
 
         Ok(())
     }
 
     pub async fn compact_all_partitions(force: bool, offsets_db: Arc<Offsets>, shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>) {
+
         let mut wal_index = WAL_PARTITION_INDEX.write();
 
         wal_index.index.clear(); // avoid duplicates
@@ -270,7 +298,9 @@ impl Buffers {
         wal_index.recover(offsets_db.clone()).expect("Failed to recover WAL index");
 
         let mut compacted_index_partitions = Vec::new();
-        
+
+        let mut wal_index_clone = wal_index.clone();
+
         let cloned_shared_output = shared_output.clone();
         for (_key, wal_partition) in wal_index.index.iter_mut() {
             
@@ -278,11 +308,14 @@ impl Buffers {
             let shared_output2 = cloned_shared_output.clone();
             
             if force {
-                wal_partition.compact_batches_to_parquet(offsets_db_clone, shared_output2).await;
+                let wal_compacted_bytes_total  = wal_partition.compact_batches_to_parquet(offsets_db_clone, shared_output2).await;
+
+                wal_index_clone.bytes -= wal_compacted_bytes_total;
+
                 compacted_index_partitions.push((wal_partition.namespace.clone(), wal_partition.partition.clone(), wal_partition.time.clone(), wal_partition.shard.clone()));
 
             } else {
-                let rotated = wal_partition.check_wal_rotate();
+                let rotated = wal_partition.check_wal_rotate(false);
 
                 if rotated {
                    compacted_index_partitions.push((wal_partition.namespace.clone(), wal_partition.partition.clone(), wal_partition.time.clone(), wal_partition.shard.clone()));
@@ -328,13 +361,21 @@ impl WalIndexMetrics {
 pub struct WalPartitionIndex {
     // Maps namespace, partition, and time to WAL file information
     index: HashMap<(String, String, Option<i64>, String), WalPartition>,
+    bytes: u64,
+    max_bytes: u64, // max bytes to store on disk, useful when in serverless runtime
 }
 
 impl WalPartitionIndex {
     fn new() -> Self {
         WalPartitionIndex {
             index: HashMap::new(),
+            bytes: 0,
+            max_bytes: Config::get_pipeline_buffer_threshold_bytes(),
         }
+    }
+
+    fn is_disk_bytes_exceeded(&self) -> bool {
+        self.bytes > (self.max_bytes - (self.max_bytes as f64 * 0.1) as u64) // ensure 10% headroom
     }
 
     pub fn recover(&mut self, offsets_db: Arc<Offsets>) -> io::Result<()> {
@@ -399,6 +440,8 @@ impl WalPartitionIndex {
                 wal_file_partition.updated_at = wal_file.updated_at;
             }
             wal_file_partition.bytes += wal_file.bytes;
+
+            self.bytes += wal_file.bytes; // track total bytes of whole index
 
             wal_file_partition.files.push(wal_file);
 
@@ -522,7 +565,7 @@ struct WalPartition {
     pub(crate) time: Option<i64>,
     pub(crate) shard: String,
     updated_at: SystemTime,
-    bytes: u64,
+    bytes: u64
 }
 
 impl WalPartition {
@@ -531,7 +574,7 @@ impl WalPartition {
         let data_dir = Config::get_data_dir();
         let wal_dir = PathBuf::from(format!("{}/ingest_buffer/done", data_dir));
         fs::remove_dir_all(&wal_dir).unwrap_or_default();
-        fs::create_dir_all(&wal_dir).unwrap();
+        fs::create_dir_all(&wal_dir).unwrap_or_default()
     }
 
     fn is_file_size_exceeded(&self) -> bool {
@@ -548,8 +591,8 @@ impl WalPartition {
             > ttl as u64
     }
 
-    pub fn check_wal_rotate(&self) -> bool {
-        if self.is_file_size_exceeded() || self.is_file_time_exceeded() {
+    pub fn check_wal_rotate(&self, force_compact: bool) -> bool {
+        if force_compact || self.is_file_size_exceeded() || self.is_file_time_exceeded() {
             // println!("Compacting WAL: {} Bytes: {}, Segment Files: {}", self.namespace, self.bytes, self.files.len());
             let elapsed = SystemTime::now().duration_since(self.updated_at).unwrap().as_secs();
             println!("Compacting WAL partition Namespace: {}, Partition: {}, Time: {}, of Bytes: {}, Elapsed Secs: {}, Segment Files: {}", self.namespace, self.partition, self.time.unwrap_or(0), self.bytes, elapsed, self.files.len());
@@ -559,7 +602,7 @@ impl WalPartition {
         false
     }
 
-    async fn compact_batches_to_parquet(&mut self, offsets_db: Arc<Offsets>, shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>) {
+    async fn compact_batches_to_parquet(&mut self, offsets_db: Arc<Offsets>, shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>) -> u64 {
     // async fn compact_batches_to_parquet(&mut self, offsets_db: Arc<Offsets>, shared_output: Arc<TimedRwLock<Box<dyn DataOutputPlugin + Send + Sync>>>) {
         let data_dir = Config::get_data_dir();
         let mut output_file_name = BufferChunker::encode_chunk_name(
@@ -599,7 +642,7 @@ impl WalPartition {
             Some(file) => file,
             None => {
                 println!("No WAL files to compact for partition: {} {}", self.namespace, self.partition);
-                return;
+                return wal_compacted_bytes_total;
             }
         };
         
@@ -608,7 +651,7 @@ impl WalPartition {
             Err(e) => {
                 // let file = first_file;
                 println!("Failed to read schema from WAL file: {} of bytes: {}, Error {}. Skipping to next WAL partition.", first_file.path.to_str().unwrap(), first_file.bytes, e);
-                return;
+                return wal_compacted_bytes_total;
             }
         };
 
@@ -638,9 +681,8 @@ impl WalPartition {
                     counter_lock.wal_compacted_bytes_total += wal_compacted_bytes_total;
                     counter_lock.wal_compacted_rows_total += wal_compacted_rows_total;
                     counter_lock.wal_compacted_files_total += wal_compacted_files_total;
-        
                 }
-        
+
                 // Rename the processed WAL file to a tombstone file
                 for wal_file in self.files.iter() {
                     let tombstone_path = format!("{}/ingest_buffer/done/{}.tombstone", data_dir, Helpers::random_str(32));
@@ -663,6 +705,8 @@ impl WalPartition {
                 println!("Failed to sync WAL partition to output plugin: {}, Namespace {}, Partition {}, Error {}", output_plugin_name, self.namespace, self.partition, e);
             }
         }
+
+        wal_compacted_bytes_total
 
     }
 
