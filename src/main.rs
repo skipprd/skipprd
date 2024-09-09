@@ -511,9 +511,9 @@ async fn sync() {
     let shared_output = Arc::new(output);
 
     // sync schema if output plugin configured
-    if output_plugin_name != "" {
-        Config::sync_schema(&pipeline_metadata.metadata).await;
-    } else {
+    // if output_plugin_name != "" {
+    //     Config::sync_schema(&pipeline_metadata.metadata).await;
+    // } else {
         // Just build the arrow schemas internally
         let flatten = Config::get_transform_flatten_events();
         for (namespace, _metadata) in pipeline_metadata.metadata.iter() {
@@ -525,7 +525,7 @@ async fn sync() {
                 }
             }
         }
-    }
+    // }
 
     let now = Arc::new(TimedRwLock::new("now".to_string(), Instant::now()));
 
