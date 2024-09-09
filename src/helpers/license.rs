@@ -49,66 +49,64 @@ impl LicenseChecker {
     }
 
     pub async fn get_license(&mut self) -> Result<(), Box<dyn Error>> {
-
-        return Ok(());
         
-        // if HAS_LICENSE.read().clone() {
-        //     self.license_is_valid = true;
-        //     return Ok(());
-        // }
-        // 
-        // self.license_is_valid = false;
-        // 
-        // let env = Config::get_pipeline_env();
-        // let base_url = if env != DEFAULT_ENV {
-        //     format!("https://license.{}.api.skippr.io", env)
-        // } else {
-        //     String::from("https://license.api.skippr.io")
-        // };
-        // 
-        // // let url = Url::parse(&base_url)?.join(&format!("license-api/check/{}", self.api_key))?;
-        // 
-        // let auth_header = HeaderName::from_static("x-api-key");
-        // 
-        // let req = self
-        //     .client
-        //     .get(base_url)
-        //     .header(auth_header, self.api_key.clone());
-        // 
-        // let response = req.send().await?;
-        // 
-        // if response.status().is_success() {
-        //     let body = response.json::<LicenseRecord>().await?;
-        //     self.license = Some(body);
-        // 
-        //     TENANT_ID
-        //         .write()
-        //         .clear();
-        //     TENANT_ID
-        //         .write()
-        //         .push_str(&self.license.as_ref().unwrap().tenant);
-        // 
-        //     self.license_is_valid = self
-        //         .license
-        //         .as_ref()
-        //         .map_or(false, |l| &self.api_key == &l.api_key);
-        // 
-        //     let mut has_license = HAS_LICENSE.write();
-        // 
-        //     *has_license = self.license_is_valid;
-        //     
-        // } else {
-        //     self.license_is_valid = false;
-        // }
-        // 
-        // match self.license_is_valid {
-        //     true => {
-        //         println!("By using this software, you agree to the terms of the End User License Agreement (EULA) available at https://skippr.io/terms/eula");
-        //         Ok(())
-        //     }
-        //     _false => {
-        //        Err(NoLicenseError(self.api_key.clone()).into())
-        //     }
-        // }
+        if HAS_LICENSE.read().clone() {
+            self.license_is_valid = true;
+            return Ok(());
+        }
+        
+        self.license_is_valid = false;
+        
+        let env = Config::get_pipeline_env();
+        let base_url = if env != DEFAULT_ENV {
+            format!("https://license.{}.api.skippr.io", env)
+        } else {
+            String::from("https://license.api.skippr.io")
+        };
+        
+        // let url = Url::parse(&base_url)?.join(&format!("license-api/check/{}", self.api_key))?;
+        
+        let auth_header = HeaderName::from_static("x-api-key");
+        
+        let req = self
+            .client
+            .get(base_url)
+            .header(auth_header, self.api_key.clone());
+        
+        let response = req.send().await?;
+        
+        if response.status().is_success() {
+            let body = response.json::<LicenseRecord>().await?;
+            self.license = Some(body);
+        
+            TENANT_ID
+                .write()
+                .clear();
+            TENANT_ID
+                .write()
+                .push_str(&self.license.as_ref().unwrap().tenant);
+        
+            self.license_is_valid = self
+                .license
+                .as_ref()
+                .map_or(false, |l| &self.api_key == &l.api_key);
+        
+            let mut has_license = HAS_LICENSE.write();
+        
+            *has_license = self.license_is_valid;
+            
+        } else {
+            self.license_is_valid = false;
+        }
+        
+        match self.license_is_valid {
+            true => {
+                println!("By using this software, you agree to the terms of the End User License Agreement (EULA) available at https://skippr.io/terms/eula");
+                Ok(())
+            }
+            _false => {
+               Err(NoLicenseError(self.api_key.clone()).into())
+            }
+        }
     }
 }
