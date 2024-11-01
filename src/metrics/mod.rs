@@ -383,54 +383,42 @@ impl Metrics {
             "exit_code": exit_code
         });
 
-        // metrics.wal_write_bytes_total = 0;
-        // metrics.wal_write_rows_total = 0;
-        // metrics.wal_compacted_bytes_total = 0;
-        // metrics.wal_compacted_files_total = 0;
-        // metrics.parquet_persisted_bytes_total = 0;
-        // metrics.parquet_persisted_objects_total = 0;
 
-        // println!("Posting data: {:?}", data);
-
-        // "bytes_current": source_bytes_current,
-        // "bytes_total": metrics.source_bytes_total,
-        // println!("Bytes Current: {}, Bytes Total: {}", source_bytes_current, metrics.source_bytes_total);
-
-        let response = client
-            .put(format!("{}/{}", uri, path))
-            .json(&data)
-            .send()
-            .await?;
-
-        match response.error_for_status() {
-            Ok(_resp) => {
-                // println!("Status HTTP Success: {:?}", resp);
-                // println!("Notified Metrics API");
-            }
-            Err(err) => {
-                match err.status() {
-                    Some(status) => {
-                        match status.as_u16() {
-                            404 => {
-                                println!("Metrics API Not Found: {:?}", err);
-                            },
-                            403 => {
-                                println!("Metrics API Forbidden: Did you set the Skippr API Key?");
-                            },
-                            500 => {
-                                println!("Metrics API Internal Server Error: {:?}", err);
-                            },
-                            _ => {
-                                println!("Metrics HTTP Error: {:?}", err);
-                            }
-                        }
-                    },
-                    None => {
-                        println!("Config HTTP Error: {:?}", err);
-                    }
-                }
-            }
-        }
+        // let response = client
+        //     .put(format!("{}/{}", uri, path))
+        //     .json(&data)
+        //     .send()
+        //     .await?;
+        //
+        // match response.error_for_status() {
+        //     Ok(_resp) => {
+        //         // println!("Status HTTP Success: {:?}", resp);
+        //         // println!("Notified Metrics API");
+        //     }
+        //     Err(err) => {
+        //         match err.status() {
+        //             Some(status) => {
+        //                 match status.as_u16() {
+        //                     404 => {
+        //                         println!("Metrics API Not Found: {:?}", err);
+        //                     },
+        //                     403 => {
+        //                         println!("Metrics API Forbidden: Did you set the Skippr API Key?");
+        //                     },
+        //                     500 => {
+        //                         println!("Metrics API Internal Server Error: {:?}", err);
+        //                     },
+        //                     _ => {
+        //                         println!("Metrics HTTP Error: {:?}", err);
+        //                     }
+        //                 }
+        //             },
+        //             None => {
+        //                 println!("Metrics HTTP Error: {:?}", err);
+        //             }
+        //         }
+        //     }
+        // }
 
 
         Ok(())
@@ -504,41 +492,41 @@ impl Metrics {
 
         // println!("Posting data: {:?}", data);
 
-        let response = client
-            .put(format!("{}/{}", uri, path))
-            .json(&data)
-            .send()
-            .await?;
-
-        match response.error_for_status() {
-            Ok(_resp) => {
-                // println!("Status HTTP Success: {:?}", _resp);
-                // println!("Notified Metrics API");
-            }
-            Err(err) => {
-                match err.status() {
-                    Some(status) => {
-                       match status.as_u16() {
-                           404 => {
-                               println!("Config API Not Found: {:?}", err);
-                           },
-                           403 => {
-                               println!("Config API Forbidden: Did you set the Skippr API Key?");
-                           },
-                           500 => {
-                               println!("Config API Internal Server Error: {:?}", err);
-                           },
-                           _ => {
-                               println!("Config HTTP Error: {:?}", err);
-                           }
-                       }
-                    }
-                    None => {
-                        println!("Config HTTP Error: {:?}", err);
-                    }
-                }
-            }
-        }
+        // let response = client
+        //     .put(format!("{}/{}", uri, path))
+        //     .json(&data)
+        //     .send()
+        //     .await?;
+        //
+        // match response.error_for_status() {
+        //     Ok(_resp) => {
+        //         // println!("Status HTTP Success: {:?}", _resp);
+        //         // println!("Notified Metrics API");
+        //     }
+        //     Err(err) => {
+        //         match err.status() {
+        //             Some(status) => {
+        //                match status.as_u16() {
+        //                    404 => {
+        //                        println!("Config API Not Found: {:?}", err);
+        //                    },
+        //                    403 => {
+        //                        println!("Config API Forbidden: Did you set the Skippr API Key?");
+        //                    },
+        //                    500 => {
+        //                        println!("Config API Internal Server Error: {:?}", err);
+        //                    },
+        //                    _ => {
+        //                        println!("Config HTTP Error: {:?}", err);
+        //                    }
+        //                }
+        //             }
+        //             None => {
+        //                 println!("Config HTTP Error: {:?}", err);
+        //             }
+        //         }
+        //     }
+        // }
 
 
         Ok(())
