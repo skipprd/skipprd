@@ -2,8 +2,8 @@
 use std::collections::HashMap;
 use std::fmt::{Debug};
 use std::fs;
-use std::fs::{File};
-use std::io::{Read};
+use std::fs::{File, OpenOptions};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::ops::Deref;
 
 use std::path::Path;
@@ -1327,97 +1327,135 @@ impl Config {
             println!("ERROR: Config: 'TRANSFORM_BATCH_TIME_FIELDS' must be since you've set: 'TRANSFORM_BATCH_TIME_UNIT'.");
         }
 
-        let _data_dir = Config::get_data_dir();
-
+        let data_dir = Config::get_data_dir();
 
         let workspace = Self::get_workspace_name();
         let pipeline = Self::get_pipeline_name();
-
         let env = Config::get_pipeline_env();
-        let uri = if env != "prod" {
-            format!("https://metadata.{}.api.skippr.io", env)
-        } else {
-            String::from("https://metadata.api.skippr.io")
-        };
-        let token = Config::get_skippr_api_token();
 
-        let mut headers = HeaderMap::new();
-        let auth_header = HeaderName::from_static("x-api-key");
-        headers.insert(auth_header, HeaderValue::from_str(&token).unwrap());
+        let metadata_dir = format!("{}/metadata/skippr_{}/workspace_{}/pipeline_{}", data_dir, env, workspace, pipeline);
+        let metadata_path = format!("{}/metadata.json", metadata_dir);
 
-        let client = Client::builder().default_headers(headers).build().unwrap();
+        let mut pipeline_metadata: Result<PipelineMetadata, bool> = match fs::metadata(&metadata_path) {
+            Ok(metadata) => {
+                if metadata.is_file() {
+                    let file = File::open(&metadata_path).unwrap();
+                    let reader = BufReader::new(file);
+                    let metadata: PipelineMetadata = serde_json::from_reader(reader).unwrap();
+                    Ok(metadata)
+                } else {
+                    Err(false)
+                }
+            },
+            Err(_e) => {
 
-        let path = format!(
-            "workspace/{}/pipeline/{}/status/{}",
-            workspace, pipeline, "approved"
-        );
+                println!("Metadata cache file not foun locally, fetching from Skippr SaaS");
 
-        let response = client
-            .get(&format!("{}/{}", uri, path))
-            .timeout(Duration::from_secs(15))
-            .send()
-            .await;
+                let uri = if env != "prod" {
+                    format!("https://metadata.{}.api.skippr.io", env)
+                } else {
+                    String::from("https://metadata.api.skippr.io")
+                };
+                let token = Config::get_skippr_api_token();
 
-        let pipeline_metadata: Result<PipelineMetadata, bool> = match response {
-            Ok(resp) => match resp.status() {
-                StatusCode::OK => {
-                    let json_result = resp.json::<PipelineMetadata>().await;
-                    match json_result {
-                        Ok(mut pipeline_metadata) => {
-                            // bit of a hack to store the pipeline config that we need to maintain.
-                            // useful when running SQL DDL commands locally, where the pipeline yml config is not present.
-                            // For example, SCHEMA DUMP needs to know whether to output the flattened or nested schema.
-                            match &Config::get_transform_config().flatten_events {
-                                Some(val) => pipeline_metadata.flattened = Config::truth_value(val),
-                                None => {},
-                            };
-                            Ok(pipeline_metadata)
-                        },
-                        Err(_) => {
-                            // Re-fetch the response as it's already moved
-                            let resp = client
-                                .get(&format!("{}/{}", uri, path))
-                                .timeout(Duration::from_secs(15))
-                                .send()
-                                .await;
+                let mut headers = HeaderMap::new();
+                let auth_header = HeaderName::from_static("x-api-key");
+                headers.insert(auth_header, HeaderValue::from_str(&token).unwrap());
 
-                            match resp {
-                                Ok(resp) => {
-                                    // migrate to new PipelineMetadata format
-                                    let metadata_result = resp.json::<HashMap<String, crate::discover::Metadata>>().await;
-                                    match metadata_result {
-                                        Ok(metadata) => {
-                                            println!("Migrating Skippr metadata format from v4 to v5");
-                                            let pipeline_metadata = PipelineMetadata::from_metadata(metadata)?;
-                                            // set metadata
-                                            Config::set_metadata(&pipeline_metadata, false).await;
-                                            Ok(pipeline_metadata)
+                let client = Client::builder().default_headers(headers).build().unwrap();
+
+                let path = format!(
+                    "workspace/{}/pipeline/{}/status/{}",
+                    workspace, pipeline, "approved"
+                );
+
+                let response = client
+                    .get(&format!("{}/{}", uri, path))
+                    .timeout(Duration::from_secs(15))
+                    .send()
+                    .await;
+
+                let mut pipeline_metadata: Result<PipelineMetadata, bool> = match response {
+                    Ok(resp) => match resp.status() {
+                        StatusCode::OK => {
+                            let json_result = resp.json::<PipelineMetadata>().await;
+                            match json_result {
+                                Ok(pipeline_metadata) => {
+                                    // Cache to local file
+                                    Config::set_metadata(&pipeline_metadata, false).await;
+                                    Ok(pipeline_metadata)
+                                },
+                                Err(_) => {
+                                    // Re-fetch the response as it's already moved
+                                    let resp = client
+                                        .get(&format!("{}/{}", uri, path))
+                                        .timeout(Duration::from_secs(15))
+                                        .send()
+                                        .await;
+
+                                    match resp {
+                                        Ok(resp) => {
+                                            // migrate to new PipelineMetadata format
+                                            let metadata_result = resp.json::<HashMap<String, crate::discover::Metadata>>().await;
+                                            match metadata_result {
+                                                Ok(metadata) => {
+                                                    println!("Migrating Skippr metadata format from v4 to v5");
+                                                    let pipeline_metadata = PipelineMetadata::from_metadata(metadata)?;
+                                                    // set metadata
+                                                    Config::set_metadata(&pipeline_metadata, false).await;
+                                                    Ok(pipeline_metadata)
+                                                },
+                                                Err(_) => Err(false),
+                                            }
                                         },
                                         Err(_) => Err(false),
                                     }
                                 },
-                                Err(_) => Err(false),
                             }
+                        }
+                        StatusCode::NOT_FOUND => {
+                            Err(false)
+                        }
+                        err => unsafe {
+                            println!(
+                                "Metadata HTTP Error: {} - {:?}",
+                                err,
+                                resp.error_for_status()
+                            );
+                            // RUNNING.write().unwrap().store(false, Ordering::SeqCst);
+                            // Err(false)
+                            exit(1);
                         },
+                    },
+                    Err(err) => {
+                        println!("Metadata HTTP Error, shutting down to prevent metadata consistency issues: {:?}", err);
+                        panic!("Metadata HTTP Error: {:?}", err);
                     }
+                };
+
+                pipeline_metadata
+            }
+        };
+
+        let mut pipeline_metadata: Result<PipelineMetadata, bool> = match pipeline_metadata {
+            Ok(mut metadata) => {
+
+                // bit of a hack to store the pipeline config that we need to maintain.
+                // useful when running SQL DDL commands locally, where the pipeline yml config is not present.
+                // For example, SCHEMA DUMP needs to know whether to output the flattened or nested schema.
+                match &Config::get_transform_config().flatten_events {
+                    Some(val) => {
+                        metadata.flattened = Config::truth_value(val);
+                        Ok(metadata)
+                    },
+                    None => {
+                        metadata.flattened = false;
+                        Ok(metadata)
+                    },
                 }
-                StatusCode::NOT_FOUND => {
-                    Err(false)
-                }
-                err => unsafe {
-                    println!(
-                        "Metadata HTTP Error: {} - {:?}",
-                        err,
-                        resp.error_for_status()
-                    );
-                    // RUNNING.write().unwrap().store(false, Ordering::SeqCst);
-                    // Err(false)
-                    exit(1);
-                },
             },
-            Err(err) => {
-                println!("Metadata HTTP Error, shutting down to prevent metadata consistency issues: {:?}", err);
-                panic!("Metadata HTTP Error: {:?}", err);
+            Err(_) => {
+                Ok(PipelineMetadata::new())
             }
         };
 
@@ -1480,8 +1518,34 @@ impl Config {
         let workspace = Self::get_workspace_name();
         let pipeline = Self::get_pipeline_name();
 
+        let data_dir = Config::get_data_dir();
+
         // let uri = Config::getenv("SKIPPR_API_ENDPOINT", "");
         let env = Config::get_pipeline_env();
+
+        let metadata_dir = format!("{}/metadata/skippr_{}/workspace_{}/pipeline_{}", data_dir, env, workspace, pipeline);
+        let metadata_path = format!("{}/metadata.json", metadata_dir);
+        
+        // ensure directory exists
+        match fs::create_dir_all(&metadata_dir) {
+            Ok(_g) => {}
+            Err(err) => panic!(
+                "Error creating metadata dir {}, does the host path exist? {:?}",
+                metadata_dir, err
+            ),
+        }
+
+        // Clobber file
+        let file = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .create(true)
+            .open(&metadata_path)
+            .unwrap();
+        
+        let mut writer = BufWriter::new(file);
+        writer.write_all(serde_json::to_string(&pipeline_metadata).unwrap().as_bytes()).unwrap();
+        
         let uri = if env != "prod" {
             format!("https://metadata.{}.api.skippr.io", env)
         } else {
