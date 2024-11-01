@@ -104,8 +104,8 @@ impl SerdeJson {
                     let lines = error_lines
                         .into_iter()
                         .map(|line| {
-                            let mut cleaned_line = line
-                                .replace('\\', "");
+                            let mut cleaned_line = line;
+                                // .replace('\\', "");
                             // .replace("u'", "\'"); // single quote will be cleaned below
                             // .replace('\'', "\"");
 
