@@ -3122,103 +3122,11 @@
               "determined_type": "string",
               "determined_type_values": "",
               "enabled": true,
-              "evolution": {
-                "array": {
-                  "new_field": "docket_liquid_on_site_array_record",
-                  "sovled": true,
-                  "type_string": "array"
-                }
-              },
+              "evolution": {},
               "fields": {},
               "out_field_name": "detail_docket_liquid_on_site",
               "parent_type": "record",
               "types": {}
-            },
-            "docket_liquid_on_site_array_record": {
-              "count": 0,
-              "date_candidate": null,
-              "determined_type": "array",
-              "determined_type_values": "record",
-              "enabled": true,
-              "evolution": {},
-              "fields": {
-                "0": {
-                  "count": 0,
-                  "date_candidate": null,
-                  "determined_type": "record",
-                  "determined_type_values": "",
-                  "enabled": true,
-                  "evolution": {},
-                  "fields": {
-                    "added": {
-                      "count": 0,
-                      "date_candidate": null,
-                      "determined_type": "integer",
-                      "determined_type_values": "",
-                      "enabled": true,
-                      "evolution": {},
-                      "fields": {},
-                      "out_field_name": "detail_docket_liquid_on_site_unknown_item_0_added",
-                      "parent_type": "record",
-                      "types": {
-                        "integer": 1
-                      }
-                    },
-                    "added_uom": {
-                      "count": 0,
-                      "date_candidate": null,
-                      "determined_type": "string",
-                      "determined_type_values": "",
-                      "enabled": true,
-                      "evolution": {},
-                      "fields": {},
-                      "out_field_name": "detail_docket_liquid_on_site_unknown_item_0_added_uom",
-                      "parent_type": "record",
-                      "types": {
-                        "string": 1
-                      }
-                    },
-                    "concrete_to_pour": {
-                      "count": 0,
-                      "date_candidate": null,
-                      "determined_type": "string",
-                      "determined_type_values": "",
-                      "enabled": true,
-                      "evolution": {},
-                      "fields": {},
-                      "out_field_name": "detail_docket_liquid_on_site_unknown_item_0_concrete_to_pour",
-                      "parent_type": "record",
-                      "types": {
-                        "string": 1
-                      }
-                    },
-                    "concrete_to_pour_uom": {
-                      "count": 0,
-                      "date_candidate": null,
-                      "determined_type": "string",
-                      "determined_type_values": "",
-                      "enabled": true,
-                      "evolution": {},
-                      "fields": {},
-                      "out_field_name": "detail_docket_liquid_on_site_unknown_item_0_concrete_to_pour_uom",
-                      "parent_type": "record",
-                      "types": {
-                        "string": 1
-                      }
-                    }
-                  },
-                  "out_field_name": "detail_docket_liquid_on_site_unknown_item_0",
-                  "parent_type": "array",
-                  "types": {
-                    "record": 2
-                  }
-                }
-              },
-              "out_field_name": "detail_docket_liquid_on_site_unknown",
-              "parent_type": "record",
-              "types": {
-                "array": 1
-              }
             },
             "docket_loading_point": {
               "count": 0,
