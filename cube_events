@@ -10983,18 +10983,6 @@
                 "double": 1
               }
             },
-            "docket_liquid_on_site": {
-              "count": 0,
-              "date_candidate": null,
-              "determined_type": "string",
-              "determined_type_values": "",
-              "enabled": true,
-              "evolution": {},
-              "fields": {},
-              "out_field_name": "detail_docket_liquid_on_site",
-              "parent_type": "record",
-              "types": {}
-            },
             "docket_loading_point": {
               "count": 0,
               "date_candidate": null,
