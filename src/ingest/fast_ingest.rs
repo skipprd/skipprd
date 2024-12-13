@@ -186,8 +186,35 @@ fn process_record_field(
     flatten: bool,
 ) -> Result<ResolvedFieldValue, Box<dyn Error>> {
     let mut m = Map::new();
-    if value.is_object() {
+    
+    let mut resolved_value: Result<ResolvedFieldValue, Box<dyn Error>> = Ok(ResolvedFieldValue::new(field.to_string(), Value::Null));
+
+    if value.is_array() {
+        let values = value.as_array().ok_or("Value is not an array")?;
+        for (idx, val) in values.iter().enumerate() {
+            let sub_field = idx.to_string();
+            let meta_field = metadata.get(field).ok_or(format!("Array field '{}' not found in metadata or it's disabled", idx))?;
+            
+            // println!("field: {}: value {}\n", sub_field, val);
+            
+            if meta_field.enabled {
+                let new_val = fast_set_value(
+                    &meta_field.determined_type,
+                    &sub_field,
+                    val,
+                    &metadata.get(field).unwrap().fields,
+                    None,
+                    flatten
+                )?;
+                m.insert(new_val.field, new_val.value);
+            }
+        }
+        resolved_value = Ok(ResolvedFieldValue::new(field.to_string(),Value::Object(m)));
+    } 
+    
+    else if value.is_object() {
         for (sub_field, sub_value) in value.as_object().ok_or("Value is not an object")? {
+
             let meta_field = metadata.get(field).ok_or(format!("Field '{}' not found in metadata", sub_field))?.fields.get(sub_field).ok_or(format!("Subfield '{}' not found in fields", sub_field))?;
             if meta_field.enabled {
                 let newval = fast_set_value(
@@ -201,8 +228,10 @@ fn process_record_field(
                 m.insert(newval.field, newval.value);
             }
         }
+        resolved_value = Ok(ResolvedFieldValue::new(field.to_string(),Value::Object(m)));
     }
-    Ok(ResolvedFieldValue::new(field.to_string(),Value::Object(m)))
+
+    resolved_value
 }
 
 fn process_map_field(
