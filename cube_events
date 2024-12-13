@@ -20186,6 +20186,330 @@
                   "types": {
                     "record": 1
                   }
+                },
+                "12": {
+                  "count": 0,
+                  "date_candidate": null,
+                  "determined_type": "record",
+                  "determined_type_values": "",
+                  "enabled": true,
+                  "evolution": {},
+                  "fields": {
+                    "end_datetime_utc_str": {
+                      "count": 0,
+                      "date_candidate": {
+                        "check_count": 1,
+                        "field": "end_datetime_utc_str",
+                        "format": "Iso8601",
+                        "valid_count": 0
+                      },
+                      "determined_type": "date",
+                      "determined_type_values": "",
+                      "enabled": true,
+                      "evolution": {},
+                      "fields": {},
+                      "out_field_name": "pours_item_12_end_datetime_utc_str",
+                      "parent_type": "record",
+                      "types": {
+                        "date": 1
+                      }
+                    },
+                    "end_posix_utc_seconds": {
+                      "count": 0,
+                      "date_candidate": {
+                        "check_count": 1,
+                        "field": "end_posix_utc_seconds",
+                        "format": "",
+                        "valid_count": 0
+                      },
+                      "determined_type": "timestamp",
+                      "determined_type_values": "",
+                      "enabled": true,
+                      "evolution": {},
+                      "fields": {},
+                      "out_field_name": "pours_item_12_end_posix_utc_seconds",
+                      "parent_type": "record",
+                      "types": {
+                        "timestamp": 1
+                      }
+                    },
+                    "location": {
+                      "count": 0,
+                      "date_candidate": null,
+                      "determined_type": "record",
+                      "determined_type_values": "",
+                      "enabled": true,
+                      "evolution": {},
+                      "fields": {
+                        "latitude": {
+                          "count": 0,
+                          "date_candidate": null,
+                          "determined_type": "double",
+                          "determined_type_values": "",
+                          "enabled": true,
+                          "evolution": {},
+                          "fields": {},
+                          "out_field_name": "pours_item_12_location_latitude",
+                          "parent_type": "record",
+                          "types": {
+                            "double": 1
+                          }
+                        },
+                        "longitude": {
+                          "count": 0,
+                          "date_candidate": null,
+                          "determined_type": "double",
+                          "determined_type_values": "",
+                          "enabled": true,
+                          "evolution": {},
+                          "fields": {},
+                          "out_field_name": "pours_item_12_location_longitude",
+                          "parent_type": "record",
+                          "types": {
+                            "double": 1
+                          }
+                        }
+                      },
+                      "out_field_name": "pours_item_12_location",
+                      "parent_type": "record",
+                      "types": {
+                        "record": 1
+                      }
+                    },
+                    "start_datetime_utc_str": {
+                      "count": 0,
+                      "date_candidate": {
+                        "check_count": 1,
+                        "field": "start_datetime_utc_str",
+                        "format": "Iso8601",
+                        "valid_count": 0
+                      },
+                      "determined_type": "date",
+                      "determined_type_values": "",
+                      "enabled": true,
+                      "evolution": {},
+                      "fields": {},
+                      "out_field_name": "pours_item_12_start_datetime_utc_str",
+                      "parent_type": "record",
+                      "types": {
+                        "date": 1
+                      }
+                    },
+                    "start_posix_utc_seconds": {
+                      "count": 0,
+                      "date_candidate": {
+                        "check_count": 1,
+                        "field": "start_posix_utc_seconds",
+                        "format": "",
+                        "valid_count": 0
+                      },
+                      "determined_type": "timestamp",
+                      "determined_type_values": "",
+                      "enabled": true,
+                      "evolution": {},
+                      "fields": {},
+                      "out_field_name": "pours_item_12_start_posix_utc_seconds",
+                      "parent_type": "record",
+                      "types": {
+                        "timestamp": 1
+                      }
+                    },
+                    "type": {
+                      "count": 0,
+                      "date_candidate": null,
+                      "determined_type": "string",
+                      "determined_type_values": "",
+                      "enabled": true,
+                      "evolution": {},
+                      "fields": {},
+                      "out_field_name": "pours_item_12_type",
+                      "parent_type": "record",
+                      "types": {
+                        "string": 1
+                      }
+                    },
+                    "volume": {
+                      "count": 0,
+                      "date_candidate": null,
+                      "determined_type": "double",
+                      "determined_type_values": "",
+                      "enabled": true,
+                      "evolution": {},
+                      "fields": {},
+                      "out_field_name": "pours_item_12_volume",
+                      "parent_type": "record",
+                      "types": {
+                        "double": 1
+                      }
+                    }
+                  },
+                  "out_field_name": "pours_item_12",
+                  "parent_type": "record",
+                  "types": {
+                    "record": 1
+                  }
+                },
+                "13": {
+                  "count": 0,
+                  "date_candidate": null,
+                  "determined_type": "record",
+                  "determined_type_values": "",
+                  "enabled": true,
+                  "evolution": {},
+                  "fields": {
+                    "end_datetime_utc_str": {
+                      "count": 0,
+                      "date_candidate": {
+                        "check_count": 1,
+                        "field": "end_datetime_utc_str",
+                        "format": "Iso8601",
+                        "valid_count": 0
+                      },
+                      "determined_type": "date",
+                      "determined_type_values": "",
+                      "enabled": true,
+                      "evolution": {},
+                      "fields": {},
+                      "out_field_name": "pours_item_13_end_datetime_utc_str",
+                      "parent_type": "record",
+                      "types": {
+                        "date": 1
+                      }
+                    },
+                    "end_posix_utc_seconds": {
+                      "count": 0,
+                      "date_candidate": {
+                        "check_count": 1,
+                        "field": "end_posix_utc_seconds",
+                        "format": "",
+                        "valid_count": 0
+                      },
+                      "determined_type": "timestamp",
+                      "determined_type_values": "",
+                      "enabled": true,
+                      "evolution": {},
+                      "fields": {},
+                      "out_field_name": "pours_item_13_end_posix_utc_seconds",
+                      "parent_type": "record",
+                      "types": {
+                        "timestamp": 1
+                      }
+                    },
+                    "location": {
+                      "count": 0,
+                      "date_candidate": null,
+                      "determined_type": "record",
+                      "determined_type_values": "",
+                      "enabled": true,
+                      "evolution": {},
+                      "fields": {
+                        "latitude": {
+                          "count": 0,
+                          "date_candidate": null,
+                          "determined_type": "double",
+                          "determined_type_values": "",
+                          "enabled": true,
+                          "evolution": {},
+                          "fields": {},
+                          "out_field_name": "pours_item_13_location_latitude",
+                          "parent_type": "record",
+                          "types": {
+                            "double": 1
+                          }
+                        },
+                        "longitude": {
+                          "count": 0,
+                          "date_candidate": null,
+                          "determined_type": "double",
+                          "determined_type_values": "",
+                          "enabled": true,
+                          "evolution": {},
+                          "fields": {},
+                          "out_field_name": "pours_item_13_location_longitude",
+                          "parent_type": "record",
+                          "types": {
+                            "double": 1
+                          }
+                        }
+                      },
+                      "out_field_name": "pours_item_13_location",
+                      "parent_type": "record",
+                      "types": {
+                        "record": 1
+                      }
+                    },
+                    "start_datetime_utc_str": {
+                      "count": 0,
+                      "date_candidate": {
+                        "check_count": 1,
+                        "field": "start_datetime_utc_str",
+                        "format": "Iso8601",
+                        "valid_count": 0
+                      },
+                      "determined_type": "date",
+                      "determined_type_values": "",
+                      "enabled": true,
+                      "evolution": {},
+                      "fields": {},
+                      "out_field_name": "pours_item_13_start_datetime_utc_str",
+                      "parent_type": "record",
+                      "types": {
+                        "date": 1
+                      }
+                    },
+                    "start_posix_utc_seconds": {
+                      "count": 0,
+                      "date_candidate": {
+                        "check_count": 1,
+                        "field": "start_posix_utc_seconds",
+                        "format": "",
+                        "valid_count": 0
+                      },
+                      "determined_type": "timestamp",
+                      "determined_type_values": "",
+                      "enabled": true,
+                      "evolution": {},
+                      "fields": {},
+                      "out_field_name": "pours_item_13_start_posix_utc_seconds",
+                      "parent_type": "record",
+                      "types": {
+                        "timestamp": 1
+                      }
+                    },
+                    "type": {
+                      "count": 0,
+                      "date_candidate": null,
+                      "determined_type": "string",
+                      "determined_type_values": "",
+                      "enabled": true,
+                      "evolution": {},
+                      "fields": {},
+                      "out_field_name": "pours_item_13_type",
+                      "parent_type": "record",
+                      "types": {
+                        "string": 1
+                      }
+                    },
+                    "volume": {
+                      "count": 0,
+                      "date_candidate": null,
+                      "determined_type": "double",
+                      "determined_type_values": "",
+                      "enabled": true,
+                      "evolution": {},
+                      "fields": {},
+                      "out_field_name": "pours_item_13_volume",
+                      "parent_type": "record",
+                      "types": {
+                        "double": 1
+                      }
+                    }
+                  },
+                  "out_field_name": "pours_item_13",
+                  "parent_type": "record",
+                  "types": {
+                    "record": 1
+                  }
                 }
               },
               "out_field_name": "detail_pours",
