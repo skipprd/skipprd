@@ -1160,11 +1160,26 @@ mod flattern_tests {
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
                 out_field_name: "field".into(),
-                determined_type: "".into(),
+                determined_type: "string".into(),
                 determined_type_values: "".into(),
             },
         );
         metadata.insert(
+            "contact".into(),
+            Metadata {
+                count: 1,
+                types: HashMap::new(),
+                parent_type: "".into(),
+                fields: Box::new(HashMap::new()),
+                date_candidate: None,
+                evolution: Box::new(HashMap::new()),
+                enabled: true,
+                out_field_name: "contact".into(),
+                determined_type: "record".into(),
+                determined_type_values: "".into(),
+            },
+        );
+        metadata.get_mut("contact").unwrap().fields.insert(
             "name".into(),
             Metadata {
                 count: 1,
@@ -1175,11 +1190,11 @@ mod flattern_tests {
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
                 out_field_name: "contact_name".into(),
-                determined_type: "".into(),
+                determined_type: "string".into(),
                 determined_type_values: "".into(),
             },
         );
-        metadata.insert(
+        metadata.get_mut("contact").unwrap().fields.insert(
             "tel".into(),
             Metadata {
                 count: 1,
@@ -1190,7 +1205,7 @@ mod flattern_tests {
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
                 out_field_name: "contact_tel".into(),
-                determined_type: "".into(),
+                determined_type: "int".into(),
                 determined_type_values: "".into(),
             },
         );

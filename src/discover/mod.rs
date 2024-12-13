@@ -1996,7 +1996,7 @@ mod tests {
                 .get("default")
                 .unwrap()
                 .fields
-                .get("boolean")
+                .get("boolean") // I recall we stopped infering bool ints as boolean, it was too error prone and probably trying to be too smart
                 .unwrap()
                 .determined_type_values,
             "boolean"

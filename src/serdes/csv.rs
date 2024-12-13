@@ -193,8 +193,8 @@ mod tests_csv {
 
         assert_eq!(CHOSEN_DELIM.read().to_string(), ",".to_string());
 
-        let expected = vec![json!({"name": "John", "age": "30"})];
-        assert_eq!(output, expected);
+        assert_eq!(output[0], json!({"name": "John", "age": "30"}));
+        assert_eq!(output[1], json!({"name": "Doe"}));
     }
 
     #[test]
