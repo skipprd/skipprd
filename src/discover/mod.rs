@@ -2350,7 +2350,7 @@ mod tests {
                 .get("tags")
                 .unwrap()
                 .determined_type,
-            "record"
+            "array"
         );
         assert_eq!(
             metadata
@@ -2366,7 +2366,7 @@ mod tests {
                 .get("0")
                 .unwrap()
                 .determined_type,
-            "map"
+            "record"
         );
 
         // // assert_eq!(newMeta.get("").unwrap().fields.get("date").unwrap().determined_type, "array");
