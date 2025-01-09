@@ -1,3 +1,15 @@
+# Skippr
+
+### What is Skippr?
+
+Skippr is a tool for data ingestion and transformation. It is designed to ingest data from a source and transform it into a destination datalake/warehouse.
+
+### Project Structure
+
+- `src/` - Source code for the Skippr CLI and library.
+- `data/` - Data directory for the Skippr CLI.
+- `target/` - Build output for the Skippr CLI.
+
 
 # Run Local Build
 
