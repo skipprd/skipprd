@@ -1,4 +1,3 @@
-
 use std::collections::HashMap;
 use std::fmt::{Debug};
 use std::fs;
@@ -1196,17 +1195,18 @@ impl Config {
 
         let res = res.unwrap_or_else(|| {
             match std::env::var(name.to_uppercase()) {
-                Ok(val) => match val {
-                    v if v.is_empty() => default.to_string(),
-                    _ => return val,
+                Ok(val) => {
+                    // Return default if the value is empty
+                    if val.is_empty() {
+                        default.to_string()
+                    } else {
+                        val
+                    }
                 },
                 Err(_e) => default.to_string(),
             }
         });
 
-        // println!("Missed cache: {}", name);
-
-        // Set the cache after releasing the read lock.
         Config::set_evncache(name, &res);
         res
     }
@@ -1711,7 +1711,6 @@ mod tests {
     }
 
     #[test]
-
     fn test_getenv_empty_string() {
         Config::setenv("TEST", "");
         assert_eq!(Config::getenv("TEST", "default"), "default");
