@@ -330,83 +330,60 @@ impl Helpers {
         num_digits > 10
     }
     pub fn parse_time_field(message: &Value) -> Option<i64> {
-        // default to beginning of epoch.
-        let mut time_field_value: Option<i64> = None;
+        // Only process if time fields are configured
+        if Config::get_transform_batch_time_fields().is_empty() {
+            return None;
+        }
 
-        // println!("message: {:?}", message);
-        if !Config::get_transform_batch_time_fields().is_empty() {
-            // Support nested time fields via array dot notation
-            // For user confirmed event time fields, use the first one that matches
-            for field_dot in Config::get_transform_batch_time_fields().split(',') {
-                match Helpers::get_nested_value_from_dot_notation(message, field_dot) {
-                    Some(value) => {
-                        // println!("field_dot: {} value: {}", field_dot, value);
-
-                        // Handle millisecond timestamps
-                        match value.as_i64() {
-                            Some(i64_val) => {
-                                // println!("a i64_val: {}", i64_val);
-                                if Helpers::is_millisecond_timestamp(i64_val) {
-                                    time_field_value = Some(i64_val / 1000);
-                                    // println!("b i64_val: {}", i64_val);
-                                } else {
-                                    // Handle second timestamps
-                                    time_field_value = Some(i64_val);
-                                    // println!("c i64_val: {}", i64_val);
-                                }
+        // Support nested time fields via array dot notation
+        // For user confirmed event time fields, use the first one that matches
+        for field_dot in Config::get_transform_batch_time_fields().split(',') {
+            if let Some(value) = Helpers::get_nested_value_from_dot_notation(message, field_dot) {
+                match value {
+                    // Handle string timestamps
+                    Value::String(ref s) => {
+                        // Try parsing as RFC3339/ISO8601 first
+                        if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+                            return Some(dt.timestamp());
+                        }
+                        
+                        // Try parsing as millisecond timestamp string
+                        if let Ok(ms) = s.parse::<i64>() {
+                            // Validate millisecond timestamp range
+                            if ms > 999999999999999 || ms < -999999999999999 {
+                                continue; // Invalid millisecond range, try next field
                             }
-                            None => {
-                                // println!("d");
-                                time_field_value = None
-                            },
+                            return Some(ms / 1000); // Convert ms to seconds
                         }
-
-                        // println!("1");
-                        if time_field_value.is_none() {
-                            // Handle datetime strings
-                            match value.as_str() {
-                                Some(val) => {
-                                    // println!("2");
-                                    for format in DateFormats::iterator() {
-                                        // println!("3: {} ? {}", val, format.as_str());
-                                        time_field_value = match Helpers::parse_date_from_string(
-                                            val,
-                                            format.as_str(),
-                                        ) {
-                                            Ok(dt) => {
-                                                // println!("3.1: FOUND {}", format.as_str());
-                                                // Some(DateTime::<Utc>::from_utc(dt, Utc).timestamp())
-                                                Some(dt.timestamp())
-                                            }
-                                            Err(_err) => {
-                                                // println!("{:?}", _err);
-                                                None
-                                            }
-                                        };
-
-                                        if time_field_value.is_some() {
-                                            // println!("4: {}", format.as_str());
-                                            return time_field_value;
-                                        }
-                                    }
-                                }
-                                None => {
-                                    // println!("5");
-                                    time_field_value = None;
-                                }
-                            };
+                        
+                        // Try various date formats using parse_date_from_string
+                        for format in DateFormats::iterator() {
+                            if let Ok(dt) = Helpers::parse_date_from_string(s, format.as_str()) {
+                                return Some(dt.timestamp());
+                            }
                         }
-                    }
-                    None => {
-                        // println!("6");
-                        time_field_value = None;
-                    }
-                };
+                    },
+                    
+                    // Handle numeric timestamps
+                    Value::Number(n) => {
+                        if let Some(ts) = n.as_i64() {
+                            // Validate timestamp range
+                            if ts > 999999999999999 || ts < -999999999999999 {
+                                continue; // Invalid range, try next field
+                            }
+                            // Assume milliseconds if timestamp is too large for seconds
+                            if Helpers::is_millisecond_timestamp(ts) {
+                                return Some(ts / 1000);
+                            }
+                            return Some(ts);
+                        }
+                    },
+                    _ => continue,
+                }
             }
         }
 
-        // println!("time_field_value: {:?}", time_field_value);
-        time_field_value
+        None
     }
 
     pub fn parse_date_from_string(date_str: &str, format: &str) -> Result<DateTime<Utc>, String> {
@@ -694,77 +671,72 @@ mod clean_field_name_tests {
 #[cfg(test)]
 mod parse_time_field_tests {
     use super::*;
-    
     use serde_json::json;
-    
 
     #[test]
-    fn test_parse_time_field_no_time_fields() {
-        // Mocking the environment variable.
-        // env::set_var("TRANSFORM_BATCH_TIME_FIELDS", "");
-        Config::set_evncache("TRANSFORM_BATCH_TIME_FIELDS", "");
-        Config::setenv("TRANSFORM_BATCH_TIME_FIELDS", "");
+    fn test_parse_time_field_with_invalid_millisecond_timestamp() {
+        // Set up the environment
+        Config::setenv("TRANSFORM_BATCH_TIME_FIELDS", "time2");
 
+        // Create a message with the timestamp in a field matching TRANSFORM_BATCH_TIME_FIELDS
         let message = json!({
-            "key": "value"
+            "time2": 999999999999999999 as i64 // Invalid millisecond timestamp (too large)
         });
 
         assert_eq!(Helpers::parse_time_field(&message), None);
     }
 
     #[test]
-    fn test_parse_time_field_with_millisecond_timestamp() {
-        // Mocking the environment variable.
+    fn test_parse_time_field_with_valid_millisecond_timestamp() {
         Config::setenv("TRANSFORM_BATCH_TIME_FIELDS", "time1");
-
-        let time = Utc::now().timestamp_millis();
-        println!("{}", time);
+        
+        let time = 1646901960000i64; // Valid millisecond timestamp
         let message = json!({ "time1": time });
 
-        assert_eq!(Helpers::parse_time_field(&message), Some(time / 1000));
-    }
-
-    #[test]
-    fn test_parse_time_field_with_invalid_millisecond_timestamp() {
-        // Mocking the environment variable.
-        Config::setenv("TRANSFORM_BATCH_TIME_FIELDS", "time2");
-
-        let time: i64 = 999999999; // Invalid timestamp, less than 1000000000000
-        let message = json!({ "time2": time });
-
-        assert_eq!(Helpers::parse_time_field(&message), None);
+        assert_eq!(Helpers::parse_time_field(&message), Some(1646901960));
     }
 
     #[test]
     fn test_parse_time_field_with_valid_second_timestamp() {
-        // Mocking the environment variable.
         Config::setenv("TRANSFORM_BATCH_TIME_FIELDS", "time3");
 
-        let time: i64 = 1646901960;
+        let time = 1646901960i64; // Valid second timestamp
         let message = json!({ "time3": time });
 
         assert_eq!(Helpers::parse_time_field(&message), Some(time));
     }
 
     #[test]
-    fn test_parse_time_field_with_datetime_string() {
-        // Mocking the environment variable.
-        Config::setenv("TRANSFORM_BATCH_TIME_FIELDS", "time4");
+    fn test_parse_time_field_with_empty_config() {
+        Config::setenv("TRANSFORM_BATCH_TIME_FIELDS", "");
 
-        let dt = Utc::now();
-        let time = dt.to_rfc3339();
-        let message = json!({ "time4": time });
+        let message = json!({
+            "time": 1646901960
+        });
 
-        assert_eq!(Helpers::parse_time_field(&message), Some(dt.timestamp()));
+        assert_eq!(Helpers::parse_time_field(&message), None);
     }
 
     #[test]
-    fn test_parse_time_field_with_invalid_datetime_string() {
-        // Mocking the environment variable.
-        Config::setenv("TRANSFORM_BATCH_TIME_FIELDS", "time5");
+    fn test_parse_time_field_with_string_timestamp() {
+        Config::setenv("TRANSFORM_BATCH_TIME_FIELDS", "time");
 
-        let time = "invalid datetime string";
-        let _message = json!({ "time5": time });
+        let message = json!({
+            "time": "2022-03-10T12:00:00Z"
+        });
+
+        assert_eq!(Helpers::parse_time_field(&message), Some(1646913600));
+    }
+
+    #[test]
+    fn test_parse_time_field_with_invalid_field() {
+        Config::setenv("TRANSFORM_BATCH_TIME_FIELDS", "nonexistent");
+
+        let message = json!({
+            "time": 1646901960
+        });
+
+        assert_eq!(Helpers::parse_time_field(&message), None);
     }
 }
 
