@@ -2322,24 +2322,8 @@ mod tests {
                 .unwrap()
                 .fields
                 .get("1")
-                .unwrap()
-                .determined_type,
-            "array"
-        );
-        assert_eq!(
-            metadata
-                .get("default")
-                .unwrap()
-                .fields
-                .get("crank_torques")
-                .unwrap()
-                .fields
-                .get("1")
-                .unwrap()
-                .determined_type_values,
-            "integer"
-        );
-
+                .is_none(),
+            true);
         assert_eq!(
             metadata
                 .get("default")
