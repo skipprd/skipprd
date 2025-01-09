@@ -1075,6 +1075,21 @@ impl AnalyseSchema {
         result
     }
 
+    pub fn is_valid_timestamp_milli(&self, timestamp: &mut String) -> bool {
+        match timestamp.parse::<i64>() {
+            Ok(_) => {
+                let date = Utc.timestamp_millis_opt(timestamp.parse::<i64>().unwrap()).unwrap();
+                let min_date = Utc.ymd(1970, 1, 1).and_hms(0, 0, 0);
+                let max_date = Utc.ymd(2040, 1, 1).and_hms(0, 0, 0);
+                if date >= min_date && date <= max_date {
+                    return true;
+                }
+                false
+            }
+            Err(_) => false,
+        }
+    }
+    
     pub fn is_valid_timestamp(&self, timestamp: &mut String) -> bool {
         match timestamp.parse::<i64>() {
             Ok(seconds) => {
@@ -1222,7 +1237,7 @@ impl AnalyseSchema {
                     self.set_discovered_occurrence(metadata, field, &"timestamp".to_string(), value);
                 }
             } else if data_type == "long" {
-                let valid_timestamp = self.is_valid_timestamp(value);
+                let valid_timestamp = self.is_valid_timestamp_milli(value);
                 if valid_timestamp {
                     self.set_discovered_occurrence(metadata, field, &"timestamp_milli".to_string(), value);
                 }
@@ -2041,7 +2056,7 @@ mod tests {
                 .get("timestamp")
                 .unwrap()
                 .determined_type_values,
-            "integer"
+            "timestamp"
         );
         assert_eq!(
             metadata
@@ -2053,7 +2068,7 @@ mod tests {
                 .determined_type,
             "array"
         );
-        // assert_eq!(newMeta.get("").unwrap().fields.get("timestamp_milli").unwrap().determined_type_values, "timestamp_milli");
+        assert_eq!(metadata.get("default").unwrap().fields.get("timestamp_milli").unwrap().determined_type_values, "timestamp_milli");
         assert_eq!(
             metadata
                 .get("default")
