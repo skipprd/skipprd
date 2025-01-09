@@ -276,8 +276,10 @@ fn process_array_field(
         for (idx, val) in values.iter().enumerate() {
 
             let mut sub_field = idx.to_string();
-            if metadata.get(field).unwrap().determined_type_values == "record" {
-                sub_field = 0.to_string().clone();
+            if let Some(meta) = metadata.get(field) {
+                if meta.determined_type_values == "record" {
+                    sub_field = 0.to_string().clone();
+                }
             }
 
             let meta_field = metadata.get(field).ok_or(format!("Array field '{}' not found in metadata or it's disabled", idx))?;
@@ -298,10 +300,6 @@ fn process_array_field(
                         array.push(Value::Null);
                     }
                 };
-
-                // println!("new_val: {:?}", new_val);
-
-
             }
         }
     }
