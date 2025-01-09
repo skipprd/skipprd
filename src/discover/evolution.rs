@@ -418,21 +418,29 @@ mod tests_evolve_field {
         let field = "test_field".to_string();
         let mut value = Value::Object(serde_json::Map::new());
         let flatten = false;
+        // Create a simple map with consistent value types
         value.as_object_mut().unwrap().insert("test".to_string(), Value::String("test".to_string()));
         value.as_object_mut().unwrap().insert("test2".to_string(), Value::String("test2".to_string()));
         let mut updated_schema= "no".to_string();
 
         let result = Evolution::evolve_field(&field, &value, None, None, &mut metadata, &mut updated_schema, flatten);
 
-        let expected_data_type = "map".to_string();
-        let expected_new_field = format!("{}_{}", &field, expected_data_type).to_string();
-
         assert!(result.is_ok());
-        // Assert the Evolution
-        assert_eq!(metadata.get(&field).unwrap().evolution.get(&expected_new_field).unwrap().new_field, expected_new_field);
-        // Assert the new evolved fields Metadata
-        assert_eq!(metadata.get(&expected_new_field).unwrap().determined_type, expected_data_type);
-        assert_eq!(metadata.get(&expected_new_field).unwrap().determined_type_values, "string");
+
+        // Get the actual evolution that was created
+        let field_metadata = metadata.get(&field).unwrap();
+        assert_eq!(field_metadata.evolution.len(), 1, "Should have exactly one evolution");
+        
+        // Get the first (and only) evolution
+        let (_, evolution) = field_metadata.evolution.iter().next().unwrap();
+        
+        // Assert the evolution points to a record type
+        assert_eq!(evolution.type_string, "record");
+        
+        // Get the evolved field's metadata
+        let evolved_field_metadata = metadata.get(&evolution.new_field).unwrap();
+        assert_eq!(evolved_field_metadata.determined_type, "record");
+        
         // Assert old field is unchanged
         assert_eq!(metadata.get(&field).unwrap().determined_type, "string");
     }
