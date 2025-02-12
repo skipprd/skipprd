@@ -106,9 +106,9 @@ impl SerdeJson {
                         .map(|line| {
                             let mut cleaned_line = line
                                 // .replace('\\', "") // double escape
-                            .replace("u'", "\'") // unicode
-                            .replace('\'', "\""); // single quote
-
+                            .replace("u'", "\'"); // unicode
+                            // .replace('\'', "\""); // single quote # @todo - make this a config. we ended up dropping messages with single quotes in valid values
+                            
                             let re = Regex::new(r#"u'([^']*)'"#).unwrap();
                             cleaned_line = re.replace_all(&cleaned_line, "\"$1\"").to_string();
 
