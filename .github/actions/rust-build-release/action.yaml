@@ -51,7 +51,7 @@ runs:
 #        target/release/skippr query 'SELECT COUNT(*) FROM bikehire' | tail -n 1
 #        if [ $(target/release/skippr query 'SELECT COUNT(*) FROM bikehire' | tail -n 1) -ne 5100000 ]; then echo "Query did not return 5100000 rows"; exit 1; fi
     - name: Upload Artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: skippr-${{ inputs.architecture_name }}
         path: skippr-${{ inputs.architecture_name }}
