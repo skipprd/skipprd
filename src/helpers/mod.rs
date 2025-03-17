@@ -160,50 +160,48 @@ impl Helpers {
         pass
     }
 
-    // fn flatten_internal(json: &Value, result: &mut Map<String, Value>, metadata: &Metadata) {
-    fn flatten_internal(field: &str, json: &Value, result: &mut Map<String, Value>) {
+    fn flatten_internal(field: &str, json: &Value, result: &mut Map<String, Value>, metadata: &Metadata) {
         match json {
             Value::Object(map) => {
                 if map.is_empty() {
-                    // result.insert(metadata.get(), json.clone());
+                    result.insert(metadata.out_field_name.clone(), Value::Null);
                 } else {
                     for (key, value) in map {
-                        // let new_key = if prefix.is_empty() {
-                        //     key.clone()
-                        // } else {
-                        //     format!("{}_{}", prefix, key)
-                        // };
-                        // Helpers::flatten_internal(value, result, metadata.fields.get(&key.clone()).unwrap());
-                        Helpers::flatten_internal(key, value, result);
+                        let new_key = format!("{}_{}", field, key);
+                        if let Some(child_metadata) = metadata.fields.get(key) {
+                            Helpers::flatten_internal(&new_key, value, result, child_metadata);
+                        } else {
+                            Helpers::flatten_internal(&new_key, value, result, metadata);
+                        }
                     }
                 }
             }
             Value::Array(arr) => {
                 if arr.is_empty() {
-                    // result.insert(prefix.to_string(), json.clone());
+                    result.insert(metadata.out_field_name.clone(), Value::Array(vec![]));
                 } else {
-                    // for (index, value) in arr.iter().enumerate() {
-                    //     // let new_key = format!("{}_{}", prefix, index);
-                    //     // Helpers::flatten_internal(value, result, metadata.fields.get(&index.to_string()).unwrap());
-                    //     Helpers::flatten_internal(&index.to_string(), value, result);
-                    // }
-                    result.insert(field.to_string(), json.clone());
+                    for (index, value) in arr.iter().enumerate() {
+                        // Ensure field name is correctly indexed
+                        let indexed_field_name = format!("{}_{}", metadata.out_field_name, index);
+                        Helpers::flatten_internal(&indexed_field_name, value, result, metadata);
+                    }
                 }
             }
             _ => {
-                // if metadata.determined_type != "record" {
-                //     result.insert(metadata.out_field_name.clone(), json.clone());
-                result.insert(field.to_string(), json.clone());
-                // }
+                // Ensure correct naming for flattened fields
+                let field_name = field.to_string(); // Preserve full key path
+                result.insert(field_name, json.clone());
             }
         }
     }
+
+
 
     // deprecated - we now use the metadata to determine the field names
     pub fn flatten(json: &Value, _metadata: &HashMap<String, Metadata>) -> Result<Value, Box<dyn Error>> {
         let mut result = Map::new();
         for (key, value) in json.as_object().ok_or(format!("Invalid JSON object: {}", json))? {
-            Helpers::flatten_internal(key, value, &mut result);
+            Helpers::flatten_internal(key, value, &mut result, _metadata.get(key).unwrap());
         }
         // Helpers::flatten_internal(json, &mut result, metadata);
         Ok(Value::Object(result))
@@ -1185,6 +1183,97 @@ mod flattern_tests {
         assert_eq!(
             flattened.unwrap(),
             json!({ "field": "value", "contact_name": "Dave", "contact_tel": "123" })
+        );
+    }
+
+    #[test]
+    fn test_flatten_array() {
+        let json = json!(
+            {
+                "field": "value",
+                "contacts": [
+                    {
+                        "name": "Dave",
+                        "tel": "123"
+                    },
+                    {
+                        "name": "John",
+                        "tel": "456"
+                    }
+                ]
+            }
+        );
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "field".into(),
+            Metadata {
+                count: 1,
+                types: HashMap::new(),
+                parent_type: "".into(),
+                fields: Box::new(HashMap::new()),
+                date_candidate: None,
+                evolution: Box::new(HashMap::new()),
+                enabled: true,
+                out_field_name: "field".into(),
+                determined_type: "string".into(),
+                determined_type_values: "".into(),
+            },
+        );
+        metadata.insert(
+            "contacts".into(),
+            Metadata {
+                count: 2,
+                types: HashMap::new(),
+                parent_type: "".into(),
+                fields: Box::new(HashMap::new()),
+                date_candidate: None,
+                evolution: Box::new(HashMap::new()),
+                enabled: true,
+                out_field_name: "contacts".into(),
+                determined_type: "array".into(),
+                determined_type_values: "".into(),
+            },
+        );
+        metadata.get_mut("contacts").unwrap().fields.insert(
+            "name".into(),
+            Metadata {
+                count: 2,
+                types: HashMap::new(),
+                parent_type: "".into(),
+                fields: Box::new(HashMap::new()),
+                date_candidate: None,
+                evolution: Box::new(HashMap::new()),
+                enabled: true,
+                out_field_name: "contacts_name".into(),
+                determined_type: "string".into(),
+                determined_type_values: "".into(),
+            },
+        );
+        metadata.get_mut("contacts").unwrap().fields.insert(
+            "tel".into(),
+            Metadata {
+                count: 2,
+                types: HashMap::new(),
+                parent_type: "".into(),
+                fields: Box::new(HashMap::new()),
+                date_candidate: None,
+                evolution: Box::new(HashMap::new()),
+                enabled: true,
+                out_field_name: "contacts_tel".into(),
+                determined_type: "int".into(),
+                determined_type_values: "".into(),
+            },
+        );
+        let flattened = Helpers::flatten(&json, &metadata);
+        assert_eq!(
+            flattened.unwrap(),
+            json!({
+                "field": "value",
+                "contacts_0_name": "Dave",
+                "contacts_1_name": "John",
+                "contacts_0_tel": "123",
+                "contacts_1_tel": "456"
+            })
         );
     }
 
