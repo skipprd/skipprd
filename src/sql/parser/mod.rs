@@ -28,6 +28,7 @@ enum SkipprKeyword {
     DATABASE,
     DROP,
     RESET,
+    TABLE,
 }
 
 impl SkipprKeyword {
@@ -43,6 +44,7 @@ impl SkipprKeyword {
             "PIPELINE" => Some(SkipprKeyword::PIPELINE),
             "DROP" => Some(SkipprKeyword::DROP),
             "RESET" => Some(SkipprKeyword::RESET),
+            "TABLE" => Some(SkipprKeyword::TABLE),
             _ => None
         }
     }
@@ -210,6 +212,12 @@ pub(crate) struct AlterSchemaAlterColumnType {
 
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TableDropStatement {
+    pub(crate) schema: Option<ObjectName>,
+    pub(crate) table: ObjectName,
+}
+
 /// Skippr SQL Statement.
 ///
 /// This can either be a [`Statement`] from [`DFParser`] or [`sqlparser`] from a
@@ -231,6 +239,7 @@ pub enum Statement {
     // AlterTableAddColumn(AlterTableAddColumn),
     AlterSchemaDropColumn(AlterSchemaDropColumn),
     AlterSchemaAlterColumnType(AlterSchemaAlterColumnType),
+    TableDrop(TableDropStatement),
 }
 
 
@@ -324,6 +333,10 @@ impl<'a> SParser<'a> {
                     Some(SkipprKeyword::DISABLE) => {
                         self.parser.next_token(); // DISABLE
                         self.parse_disable()
+                    }
+                    Some(SkipprKeyword::TABLE) => {
+                        self.parser.next_token(); // TABLE
+                        self.parse_drop()
                     }
                     None => {
                         match self.parser.peek_token().token {
@@ -677,6 +690,29 @@ impl<'a> SParser<'a> {
                         Ok(Statement::DatabaseDrop(DatabaseDropStatement {
                             database
                         }))
+                    }
+                    Some(SkipprKeyword::TABLE) => {
+                        self.parser.next_token(); // TABLE
+
+                        // Parse table name which might be in the format schema.table
+                        let object_name = self.parser.parse_object_name(false)?;
+                        
+                        // If the object name has multiple parts, it's in the format schema.table
+                        if object_name.0.len() > 1 {
+                            let schema = ObjectName(vec![object_name.0[0].clone()]);
+                            let table = ObjectName(vec![object_name.0[1].clone()]);
+                            
+                            Ok(Statement::TableDrop(TableDropStatement {
+                                schema: Some(schema),
+                                table
+                            }))
+                        } else {
+                            // No schema specified
+                            Ok(Statement::TableDrop(TableDropStatement {
+                                schema: None,
+                                table: object_name
+                            }))
+                        }
                     }
                     _ => {
                         Err(ParserError::ParserError("Not implemented".to_string()))

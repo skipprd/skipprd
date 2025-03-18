@@ -908,6 +908,33 @@ impl AwsAthena {
         }
     }
 
+    
+    pub async fn glue_delete_table(
+        namespace: &str,
+    ) -> Result<bool, String> {
+        let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
+
+        let database = config.glue_database_name;
+
+        let aws_config = aws_config::from_env().load().await;
+
+        let glue_client = GlueClient::new(&aws_config);
+
+        match glue_client
+            .delete_table()
+            .database_name(&database)
+            .name(namespace)
+            .send()
+            .await
+        {
+            Ok(_output) => Ok(true),
+            Err(err) => {
+                println!("{:?}", err);
+                Err(err.into_service_error().to_string())
+            }
+        }
+    }
+    
     pub async fn glue_create_table(
         namespace: &str,
         metadata: &Metadata,

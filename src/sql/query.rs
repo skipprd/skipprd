@@ -21,6 +21,7 @@ use crate::plugins::athena::{AwsAthena, DataOutputAwsAthenaPlugin};
 use crate::sql::operators::alter_column::alter_column_type;
 use crate::sql::operators::drop_column::alter_column_drop;
 use crate::sql::operators::dump_schema::dump_schema;
+use crate::sql::operators::drop_table::drop_table;
 use crate::sql::parser::{PipelineToggle, SParser, Statement};
 
 use chrono::{DateTime, NaiveDate};
@@ -394,6 +395,69 @@ pub async fn query(sql_str: &str) {
             Config::set_metadata(&skippr_metadata, false).await;
 
             println!("Alter schema: {} column: '{}' type to {}", schema, stmt.column_name, stmt.new_type);
+        },
+        Ok(Statement::TableDrop(stmt)) => {
+            // Get the schema and table names
+            let table_str = format!("{}", stmt.table);
+            let schema_str = match &stmt.schema {
+                Some(schema) => format!("{}", schema),
+                None => "".to_string(), // No schema specified
+            };
+
+            // Set the pipeline name based on the table or schema
+            PIPELINE_NAME.write().clear();
+            if schema_str.is_empty() {
+                // If no schema specified, use the table name as the pipeline
+                PIPELINE_NAME.write().push_str(&table_str);
+            } else {
+                // Otherwise use the schema name as the pipeline
+                PIPELINE_NAME.write().push_str(&schema_str);
+            }
+            Config::init().await;
+
+            // Get the current metadata
+            let mut skippr_metadata = match Config::get_metadata().await {
+                Ok(metadata) => metadata,
+                Err(_) => {
+                    println!("No existing metadata for pipeline");
+                    return;
+                }
+            };
+
+            // Use the drop_table operator to remove the table from metadata
+            match drop_table(&mut skippr_metadata, &stmt) {
+                Ok(_) => {
+                    let metadata_key = if schema_str.is_empty() {
+                        table_str.clone()
+                    } else {
+                        format!("{}.{}", schema_str, table_str)
+                    };
+                    
+                    println!("Dropping table: '{}'", metadata_key);
+                    
+                    // Update the global metadata
+                    {
+                        METADATA.write().clone_from(&skippr_metadata);
+                    }
+                    
+                    // Save the updated metadata
+                    Config::set_metadata(&skippr_metadata, false).await; // we don't need to sync the schemas as we are dropping the table below
+
+                    // Delete Glue table
+                    match AwsAthena::glue_delete_table(&table_str).await {
+                        Ok(_) => {
+                            println!("Dropped table: {}", table_str);
+                        },
+                        Err(e) => {
+                            println!("{}", e);
+                        }
+                    }
+                    
+                },
+                Err(e) => {
+                    println!("{}", e);
+                }
+            }
         },
         // Err(e) => {
         //
