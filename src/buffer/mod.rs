@@ -1129,7 +1129,7 @@ mod encode_chunk_name_tests {
     #[test]
     fn test_encode_chunk_name_no_options() {
         let buffer_name = "test_buffer";
-        let expected_chunk_name = "buffer=test_buffer&namespace=&partition=&time=";
+        let expected_chunk_name = "buffer=test_buffer&namespace=&partition=&time=&shard=";
         let actual_chunk_name = BufferChunker::encode_chunk_name(buffer_name, None, None, None, None);
         assert_eq!(expected_chunk_name, actual_chunk_name);
     }
@@ -1138,7 +1138,7 @@ mod encode_chunk_name_tests {
     fn test_encode_chunk_name_with_namespace() {
         let buffer_name = "test_buffer";
         let namespace = Some("test_namespace");
-        let expected_chunk_name = "buffer=test_buffer&namespace=test_namespace&partition=&time=";
+        let expected_chunk_name = "buffer=test_buffer&namespace=test_namespace&partition=&time=&shard=";
         let actual_chunk_name =
             BufferChunker::encode_chunk_name(buffer_name, namespace, None, None, None);
         assert_eq!(expected_chunk_name, actual_chunk_name);
@@ -1148,7 +1148,7 @@ mod encode_chunk_name_tests {
     fn test_encode_chunk_name_with_partition() {
         let buffer_name = "test_buffer";
         let partition = Some("test_partition");
-        let expected_chunk_name = "buffer=test_buffer&namespace=&partition=test_partition&time=";
+        let expected_chunk_name = "buffer=test_buffer&namespace=&partition=test_partition&time=&shard=";
         let actual_chunk_name =
             BufferChunker::encode_chunk_name(buffer_name, None, partition, None, None);
         assert_eq!(expected_chunk_name, actual_chunk_name);
@@ -1158,7 +1158,7 @@ mod encode_chunk_name_tests {
     fn test_encode_chunk_name_with_time_bucket() {
         let buffer_name = "test_buffer";
         let time_bucket = Some(123);
-        let expected_chunk_name = "buffer=test_buffer&namespace=&partition=&time=123";
+        let expected_chunk_name = "buffer=test_buffer&namespace=&partition=&time=123&shard=";
         let actual_chunk_name =
             BufferChunker::encode_chunk_name(buffer_name, None, None, time_bucket, None);
         assert_eq!(expected_chunk_name, actual_chunk_name);
@@ -1171,7 +1171,7 @@ mod encode_chunk_name_tests {
         let partition = Some("test_partition");
         let time_bucket = Some(456);
         let expected_chunk_name =
-            "buffer=test_buffer&namespace=test_namespace&partition=test_partition&time=456";
+            "buffer=test_buffer&namespace=test_namespace&partition=test_partition&time=456&shard=";
         let actual_chunk_name =
             BufferChunker::encode_chunk_name(buffer_name, namespace, partition, time_bucket, None);
         assert_eq!(expected_chunk_name, actual_chunk_name);
