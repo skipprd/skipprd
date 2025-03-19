@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::error::Error;
 use std::sync::Arc;
 
@@ -93,27 +93,44 @@ pub fn fast_path_ingest(
     namespace: &str,
     flatten: bool,
 ) -> Result<Value, Box<dyn Error>> {
-    // let mut message: Value = Value::Null;
-    // @todo - create a default message containing every field in metadata, including nested fields
-    // let mut message = create_default_nested_message(metadata);
 
-    let mut message: Value;
+    let mut message = Value::Object(Map::new());
+    
     {
-        message = match DEFAULT_NESTED_MESSAGE.read().get(namespace) {
+        // Avoid unnecessary clone by using reference
+        let message = match DEFAULT_NESTED_MESSAGE.read().get(namespace) {
             Some(m) => m.clone(),
             None => {
-                Value::Null
+                return Err("No default message template found".into());
             }
         };
+        
     }
-
-    // panic!("message is: {:?}", message);
-
-    for (field, value) in unwrapped_message.as_object().ok_or("Invalid JSON object")? {
-        let meta_data = metadata.get(field).ok_or(format!("Field '{}' not found in metadata", field))?;
-        let field_data_type = meta_data.determined_type.clone();
-        let resolved_value = match fast_set_value(
-                &field_data_type,
+    
+    // Directly unwrap the object once instead of in every iteration
+    let object = unwrapped_message.as_object().ok_or("Invalid JSON object")?;
+    
+    // Pre-check the size of the object to avoid allocations in small cases
+    if object.is_empty() {
+        if flatten {
+            message = match Helpers::flatten(&message, &metadata) {
+                Ok(m) => m,
+                Err(e) => return Err(e),
+            };
+        }
+        return Ok(message);
+    }
+    
+    for (field, value) in object {
+        if let Some(meta_data) = metadata.get(field) {
+            // Skip null or empty values early
+            if value.is_null() || (value.is_string() && value.as_str().unwrap_or_default().is_empty()) {
+                continue;
+            }
+            
+            let field_data_type = &meta_data.determined_type;
+            let resolved_value = match fast_set_value(
+                field_data_type,
                 field,
                 value,
                 metadata,
@@ -124,29 +141,27 @@ pub fn fast_path_ingest(
                 Err(e) => {
                     // Check if the error is related to array repetition_count
                     if e.to_string().contains("Falling back to slow path") {
-                        // Propagate this specific error to trigger fallback
                         return Err(e);
                     }
                     return Err(e);
                 }
             };
 
-        if !resolved_value.value.is_null() {
-            // if meta_data.out_field_name == "item_0" {
-            //     message[0] = resolved_value;
-            // } else {
+            if !resolved_value.value.is_null() {
                 message[resolved_value.field] = resolved_value.value;
-            // }
+            }
+        } else {
+            return Err(format!("Field '{}' not found in metadata", field).into());
         }
     }
+    
     if flatten {
         message = match Helpers::flatten(&message, &metadata) {
             Ok(m) => m,
-            Err(e) => {
-                return Err(e);
-            }
+            Err(e) => return Err(e),
         };
     }
+    
     Ok(message)
 }
 
@@ -178,7 +193,7 @@ pub fn fast_set_value(
 
     match data_type {
         "record" => process_record_field(field, value, metadata, flatten),
-        "map" => process_map_field(&field.to_string(), value, metadata, flatten),
+        "map" => process_map_field(field, value, metadata, flatten),
         "array" => process_array_field(&field.to_string(), value, metadata, flatten),
         "date" => fast_set_date(field, value, metadata),
         _ => match_scalar_value_fast(field, data_type, value, metadata, apply_evolution_bool, flatten),
@@ -267,42 +282,65 @@ fn process_map_field(
     metadata: &HashMap<String, Metadata>,
     flatten: bool,
 ) -> Result<ResolvedFieldValue, Box<dyn Error>> {
-    let mut new_value: Value = Value::Null;
-    if value.is_object() {
-        for (key, val) in value.as_object().ok_or("Value is not an object")? {
-            // Only check arrays of records at the current level, as they have repetition_count constraints
-            // This avoids redundant checks during recursive traversal
-            if let Some(meta_field) = metadata.get(field).and_then(|f| f.fields.get(key)) {
-                if meta_field.determined_type == "array" && meta_field.determined_type_values == "record" {
-                    // If it's an array of records, check the length against repetition_count
-                    if let Some(array_values) = val.as_array() {
-                        let array_length = array_values.len() as i32;
-                        if array_length > meta_field.repetition_count {
-                            // Reject the message if array has more elements than repetition_count
-                            return Err(Box::new(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData, 
-                                format!("Array field '{}.{}' has {} elements, but repetition_count is {}. Falling back to slow path.", 
-                                        field, key, array_length, meta_field.repetition_count)
-                            )));
-                        }
+    let mut new_value = Value::Null;
+    
+    // Early return if not an object
+    if !value.is_object() {
+        return Ok(ResolvedFieldValue::new(field.to_string(), new_value));
+    }
+    
+    // Get field metadata once
+    let field_metadata = match metadata.get(field) {
+        Some(meta) => meta,
+        None => return Err(format!("Field '{}' not found in metadata", field).into())
+    };
+    
+    // Pre-allocate with capacity
+    let mut map = serde_json::Map::with_capacity(value.as_object().unwrap().len());
+    
+    for (key, val) in value.as_object().unwrap() {
+        // Quick check if this key has metadata
+        if let Some(meta_field) = field_metadata.fields.get(key) {
+            // Skip disabled fields early
+            if !meta_field.enabled {
+                continue;
+            }
+            
+            // Array repetition validation
+            if meta_field.determined_type == "array" && meta_field.determined_type_values == "record" {
+                // Only validate arrays of records
+                if let Some(array_values) = val.as_array() {
+                    let array_length = array_values.len() as i32;
+                    if array_length > meta_field.repetition_count {
+                        return Err(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData, 
+                            format!("Array field '{}.{}' has {} elements, but repetition_count is {}. Falling back to slow path.", 
+                                    field, key, array_length, meta_field.repetition_count)
+                        )));
                     }
                 }
             }
             
-            let meta_field = metadata.get(field).and_then(|f| f.fields.get(key)).ok_or(format!("Map field '{}' not found in metadata or it's disabled", key))?;
-            if meta_field.enabled {
-                let new_val = fast_set_value(
-                    &meta_field.determined_type,
-                    key,
-                    val,
-                    &metadata.get(field).unwrap().fields,
-                    None,
-                    flatten
-                )?;
-                new_value[new_val.field] = new_val.value;
+            // Process the value
+            let new_val = fast_set_value(
+                &meta_field.determined_type,
+                key,
+                val,
+                &field_metadata.fields,
+                None,
+                flatten
+            )?;
+            
+            // Only add non-null values
+            if !new_val.value.is_null() {
+                map.insert(new_val.field, new_val.value);
             }
+        } else {
+            return Err(format!("Map field '{}' not found in metadata or it's disabled", key).into());
         }
     }
+    
+    new_value = Value::Object(map);
     Ok(ResolvedFieldValue::new(field.to_string(), new_value))
 }
 

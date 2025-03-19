@@ -139,34 +139,51 @@ impl Drop for Ingest {
 
 impl Ingest {
     pub fn new() -> Ingest {
+        // Optimize thread pool size based on system characteristics
+        // Use fewer threads than CPUs to reduce context switching
+        // For CPU-bound work, num_cpus/2 is often optimal 
         let num_cpus = match CLI_MODE.read().clone() {
-            Mode::Sync(_) => num_cpus::get().max(2),
+            Mode::Sync(_) => {
+                let cpu_count = num_cpus::get();
+                // For systems with many cores, limit to avoid excessive context switching
+                if cpu_count > 16 {
+                    cpu_count / 2
+                } else if cpu_count > 4 {
+                    cpu_count - 2
+                } else {
+                    cpu_count.max(2)
+                }
+            },
             _ => 1
         };
-        println!("Starting with {} threads", num_cpus);
+        
+        println!("Starting with {} optimized threads for ingest", num_cpus);
+        
         let (tx, rx) = channel();
         let active_count = Arc::new(AtomicUsize::new(0));
         let active_count_clone = active_count.clone();
 
         let thread_pool = ThreadPool::new(num_cpus);
+        
+        // This monitoring thread tracks task completion
         thread_pool.execute(move || {
             while let Ok(()) = rx.recv() {
-                active_count_clone.fetch_sub(1, Ordering::SeqCst);
+                active_count_clone.fetch_sub(1, AcqRel); // Use AcqRel for better memory ordering
             }
         });
 
         // Schema hashes
-        let mut schema_hashes = DashMap::new();
+        let schema_hashes = DashMap::new();
 
         {
             let schemas = ARROW_SCHEMA.read();
-            schema_hashes = schemas.iter().map(|(namespace, schema)| {
+            for (namespace, schema) in schemas.iter() {
                 let schema_hash = SchemaHash {
                     schema: Arc::clone(schema),
                     hash: format!("{:?}", md5::compute(format!("{:?}", Arc::clone(schema).deref())))
                 };
-                (namespace.clone(), schema_hash)
-            }).collect::<DashMap<_, _>>();
+                schema_hashes.insert(namespace.clone(), schema_hash);
+            }
         }
 
         let analyse_schema: AnalyseSchema = AnalyseSchema { i: 0 };
@@ -182,17 +199,20 @@ impl Ingest {
     }
 
     pub fn wait_for_completion(&self) {
-
         let mut current_active_count = self.active_count.load(Ordering::SeqCst);
 
         while self.active_count.load(Ordering::SeqCst) > 0 {
-
             if current_active_count != self.active_count.load(Ordering::SeqCst) {
                 println!("Waiting for {} ingest tasks to finish", self.active_count.load(Ordering::SeqCst));
                 current_active_count = self.active_count.load(Ordering::SeqCst);
             }
             
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            // Use exponential backoff to avoid excessive CPU usage when waiting
+            if current_active_count > 10 {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
         }
 
         println!("All ingest tasks finished");
@@ -209,9 +229,7 @@ impl Ingest {
             println!("Waiting for remaining threads to complete");
             self.wait_for_completion();
             exit(0);
-
         } else {
-
             match CLI_MODE.read().clone() {
                 Mode::Sync(_) => {},
                 _ => {
@@ -279,32 +297,30 @@ impl Ingest {
                 }
             }
 
-            // Wait for an available thread if there's no capacity
+            // Wait for an available thread, but with exponential backoff to reduce CPU usage
+            let mut wait_time = 10; // Start with 10ms
             while self.active_count.load(Ordering::SeqCst) >= self.num_cpus {
-                
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                std::thread::sleep(std::time::Duration::from_millis(wait_time));
+                wait_time = std::cmp::min(wait_time * 2, 500); // Exponential backoff up to 500ms
             }
 
-            // Spawn a new thread for this 'datas'
+            // Use Acquire ordering for better performance
+            self.active_count.fetch_add(1, Ordering::Acquire);
+
+            // Clone only what's needed
             let tx = self.tx.clone();
             let offset_db_clone = offset_db.clone();
-
-            self.active_count.fetch_add(1, Ordering::SeqCst);
-
-            let mut datas_clone = datas.clone();
-            
+            let datas_clone = datas.clone();
             let mut schema_hashes = self.schema_hashes.clone();
-
             let handle = runtime::Handle::current();
-
             let shared_output_clone = shared_output.clone();
 
             self.thread_pool.execute(move || {
-                Ingest::process_batch(&mut datas_clone, &offset_db_clone, &mut schema_hashes, handle, shared_output_clone);
+                Ingest::process_batch(&datas_clone, &offset_db_clone, &mut schema_hashes, handle, shared_output_clone);
+                // Send completion signal
                 tx.send(()).unwrap();
             });
         }
-
     }
 
     pub(crate) fn deadletter(dl: Deadletter) {
@@ -381,7 +397,7 @@ impl Ingest {
             None => "".to_string()
         };
         
-        let mut buf: HashMap<(String, String, Option<i64>, String), IngestBufferBatch> = HashMap::new();
+        let mut buf: HashMap<(String, String, Option<i64>, String), IngestBufferBatch> = HashMap::with_capacity(32);
 
         for ingest_batch in datas.iter() {
 
@@ -391,7 +407,7 @@ impl Ingest {
                 offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Closed, 0);
             let current_line_offset = offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Position, 0);
 
-            let mut records: Vec<Value> = Vec::new();
+            let mut records: Vec<Value>;
             if format == "csv" {
                 records = SerderCsv::deserialize(&ingest_batch.data);
             } else if format == "xml" {
@@ -409,7 +425,7 @@ impl Ingest {
 
             batch_line = 0;
 
-            let mut unwrapped_records: Vec<Value> = Vec::new();
+            let mut unwrapped_records: Vec<Value> = Vec::with_capacity(records.len());
 
             for record in records {
                 

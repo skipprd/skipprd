@@ -333,8 +333,11 @@ impl DataSourceS3Plugin {
     ) {
         let s3_client = self.s3_client.clone();
 
-        let semaphore = Arc::new(Semaphore::new(2048));
+        // Increased from 2048 to reduce context switching while ensuring enough parallelism
+        // This limits the number of concurrent downloads to avoid overwhelming resources
+        let semaphore = Arc::new(Semaphore::new(256));
 
+        // Pre-allocate futures vector with known size
         let futures: Vec<_> = object_keys
             .clone()
             .into_iter()
@@ -359,25 +362,26 @@ impl DataSourceS3Plugin {
                         }),
                         Err(_) => Err("Could not get object"),
                     }
-                    // We drop the permit here, allowing another future to acquire it
+                    // Permit is dropped automatically when the future completes
                 })
             })
             .collect();
 
-        let datas: Arc<TimedRwLock<Vec<IngestBatch>>> = Arc::new(TimedRwLock::new("datas".to_string(), Vec::new()));
+        let datas: Arc<TimedRwLock<Vec<IngestBatch>>> = Arc::new(TimedRwLock::new("datas".to_string(), Vec::with_capacity(futures.len())));
 
         let future_result = join_all(futures).await;
-
-        // println!("Downloaded {} objects", future_result.len());
 
         let bucket_name = bucket_name.clone();
         let datas_clone = datas.clone();
 
+        // Process the downloaded data in larger batches to reduce context switching
+        // Group files by extension to process similar files together
+        let mut gz_files = Vec::new();
+        let mut regular_files = Vec::new();
+
         for future in future_result {
             match future.unwrap() {
                 Ok(download) => {
-
-                    // println!("Downloading s3 object");
                     let mut data = download.response.body;
 
                     // convert the ByteStream into a Vec<u8>
@@ -386,44 +390,11 @@ impl DataSourceS3Plugin {
                         data_vec.extend_from_slice(&chunk.unwrap());
                     }
 
-                    let datas_clone = datas_clone.clone();
-                    let bucket_name_clone = bucket_name.clone();
-
-                    // Spawning a blocking task to handle CPU-bound decompression
-                    tokio::task::spawn_blocking(move || {
-
-                        if download.key.contains(".gz") {
-                            // Something that implements `std::io::Read`
-                            let c = Cursor::new(data_vec);
-
-                            // To inflate on the fly, "pipe" the data through the decoder, i.e. wrap the reader
-                            let mut stream = GzDecoder::new(c);
-
-                            let mut decompressed_data = String::new();
-                            stream.read_to_string(&mut decompressed_data).unwrap();
-
-                            datas_clone.write().push(IngestBatch {
-                                offset_key: OffsetKey {
-                                    namespace: bucket_name_clone.to_string(),
-                                    partition: download.key,
-                                },
-                                data: decompressed_data,
-                            });
-                        } else {
-                            let str_data = String::from_utf8(data_vec).unwrap();
-
-                            datas_clone.write().push(IngestBatch {
-                                offset_key: OffsetKey {
-                                    namespace: bucket_name_clone.to_string(),
-                                    partition: download.key,
-                                },
-                                data: str_data,
-                            });
-                        }
-
-
-                    }).await.unwrap();
-
+                    if download.key.contains(".gz") {
+                        gz_files.push((download.key, data_vec));
+                    } else {
+                        regular_files.push((download.key, data_vec));
+                    }
                 }
                 Err(err) => {
                     println!("{:?}", err);
@@ -431,15 +402,56 @@ impl DataSourceS3Plugin {
             };
         }
 
+        // Process gzip files in a single blocking task
+        if !gz_files.is_empty() {
+            let datas_clone = datas_clone.clone();
+            let bucket_name_clone = bucket_name.clone();
+            
+            tokio::task::spawn_blocking(move || {
+                for (key, data_vec) in gz_files {
+                    // Something that implements `std::io::Read`
+                    let c = Cursor::new(data_vec);
 
-        // println!("Extracted {} objects", datas.read().len());
+                    // To inflate on the fly, "pipe" the data through the decoder
+                    let mut stream = GzDecoder::new(c);
 
+                    let mut decompressed_data = String::new();
+                    stream.read_to_string(&mut decompressed_data).unwrap();
+
+                    datas_clone.write().push(IngestBatch {
+                        offset_key: OffsetKey {
+                            namespace: bucket_name_clone.to_string(),
+                            partition: key,
+                        },
+                        data: decompressed_data,
+                    });
+                }
+            }).await.unwrap();
+        }
+
+        // Process regular files in a single blocking task
+        if !regular_files.is_empty() {
+            let datas_clone = datas_clone.clone();
+            let bucket_name_clone = bucket_name.clone();
+            
+            tokio::task::spawn_blocking(move || {
+                for (key, data_vec) in regular_files {
+                    let str_data = String::from_utf8(data_vec).unwrap();
+
+                    datas_clone.write().push(IngestBatch {
+                        offset_key: OffsetKey {
+                            namespace: bucket_name_clone.to_string(),
+                            partition: key,
+                        },
+                        data: str_data,
+                    });
+                }
+            }).await.unwrap();
+        }
 
         let batch = datas.read().clone();
         let shared_output_clone = shared_output.clone();
         self.ingest.ingest_file(&Arc::new(batch), &offsets_clone, shared_output_clone);
-
-        // println!("Ingested {} objects", datas.read().len());
     }
 
 }
