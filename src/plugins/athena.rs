@@ -1,9 +1,9 @@
 use crate::buffer::BufferChunker;
 use crate::converters::skippr_hive::SkipprHive;
-use crate::discover::{Metadata, PipelineMetadata};
+use crate::discover::{Metadata, OutputMetadata, PipelineMetadata};
 use crate::helpers::configuration::{Config, PluginConfig};
 use crate::helpers::Helpers;
-use crate::{discover, flatten_metadata, METADATA, METRICS};
+use crate::{METADATA, METRICS};
 use aws_sdk_athena::types::{EncryptionConfiguration, EncryptionOption, ResultConfiguration, ResultConfigurationUpdates, Tag, WorkGroupConfiguration, WorkGroupConfigurationUpdates};
 use aws_sdk_athena::Client as AthenaClient;
 use aws_sdk_glue::types::{Column, DatabaseInput, PartitionIndex, PartitionInput, PartitionValueList, SerDeInfo, StorageDescriptor, Table, TableInput};
@@ -194,57 +194,31 @@ impl DataOutputAwsAthenaPlugin {
         }
 
         if !partition_values.is_empty() {
-            let flatten =
-                Config::get_transform_flatten_events();
-
-            let mut out_meta: HashMap<String, Metadata> = HashMap::new();
-
-            // for (namespace, _schema) in &metadata {
-            out_meta.insert(namespace.to_string(), Metadata::new().unwrap());
-
+            let flatten = Config::get_transform_flatten_events();
+            
             let metadata: PipelineMetadata;
             {
                 metadata = METADATA.read().clone();
             }
-
+       
             let partition_metadata = if flatten {
-                flatten_metadata(
-                    match metadata.metadata.get(&namespace) {
-                        Some(meta) => meta,
-                        None => {
-                            println!("Failed to find metadata for namespace: {}", namespace);
-                            // continue;
-                            return Err(io::Error::new(io::ErrorKind::Other, "Failed to find metadata for namespace"));
-                        }
-                    },
-                    match out_meta.get_mut(&namespace) {
-                        Some(meta) => meta.fields.as_mut(),
-                        None => {
-                            println!("Failed to find metadata for namespace: {}", namespace);
-                            // continue;
-                            return Err(io::Error::new(io::ErrorKind::Other, "Failed to find metadata for namespace"));
-                        }
-                    }
-                );
-                out_meta.get(&namespace)
+                OutputMetadata::from_flatterened_metadata(metadata.metadata.get(&namespace).unwrap())
             } else {
-                metadata.metadata.get(&namespace)
+                OutputMetadata::from_metadata(metadata.metadata.get(&namespace).unwrap())
             };
 
-            if partition_metadata.is_some() {
-                if let Err(_err) = AwsAthena::glue_create_partition(
-                    &namespace,
-                    partition_values.clone(),
-                    &full_key,
-                    &mut partition_cache,
-                    partition_metadata.unwrap(),
-                )
-                .await
-                {
-                    // Handle the error
-                }
+            if let Err(_err) = AwsAthena::glue_create_partition(
+                &namespace,
+                partition_values.clone(),
+                &full_key,
+                &mut partition_cache,
+                &partition_metadata,
+            ).await
+            {
+                // Handle the error
             }
-            // }
+            
+            
         }
 
         // consistent md5 hash of the filename
@@ -367,7 +341,7 @@ impl DataOutputAwsAthenaPlugin {
 pub struct AwsAthena {}
 
 impl AwsAthena {
-    pub async fn create_or_update_schema(namespace: &str, schema: &Metadata) {
+    pub async fn create_or_update_schema(namespace: &str, schema: &OutputMetadata) {
         match AwsAthena::get_work_group().await {
             Ok(true) => {}
             Ok(false) => {}
@@ -908,7 +882,7 @@ impl AwsAthena {
         }
     }
 
-    
+
     pub async fn glue_delete_table(
         namespace: &str,
     ) -> Result<bool, String> {
@@ -934,10 +908,10 @@ impl AwsAthena {
             }
         }
     }
-    
+
     pub async fn glue_create_table(
         namespace: &str,
-        metadata: &Metadata,
+        metadata: &OutputMetadata,
     ) -> Result<bool, String> {
         let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
 
@@ -1044,7 +1018,7 @@ impl AwsAthena {
 
     pub async fn glue_update_table(
         namespace: &str,
-        metadata: &Metadata,
+        metadata: &OutputMetadata,
         existing_table: GetTableOutput
     ) -> Result<bool, String> {
         let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
@@ -1120,7 +1094,7 @@ impl AwsAthena {
         partition_values: Vec<String>,
         key: &str,
         partition_cache: &mut Vec<String>,
-        metadata: &Metadata,
+        metadata: &OutputMetadata,
     ) -> Result<bool, Error> {
         let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
 

@@ -1,5 +1,5 @@
 use crate::buffer::{BufferChunker};
-use crate::discover::{AnalyseSchema, Metadata, NUM_ANALYSED_RECORDS, PipelineMetadata};
+use crate::discover::{AnalyseSchema, Metadata, NUM_ANALYSED_RECORDS, OutputMetadata, PipelineMetadata};
 use crate::helpers::configuration::Config;
 use crate::helpers::offsets::{OffsetKey, Offsets, OffsetTypes};
 use crate::helpers::Helpers;
@@ -260,7 +260,7 @@ impl Ingest {
                         let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.unwrap_or("false".to_string()));
 
                         for (namespace, metadata) in pipeline_metadata.metadata.iter_mut() {
-                            AnalyseSchema::determine_field_types(&mut metadata.fields, None, None, flatten);
+                            AnalyseSchema::determine_field_types(&mut metadata.fields, None, flatten);
                         }
 
                         println!("Schema discovery complete, writing metadata to Skippr");
@@ -633,7 +633,7 @@ impl Ingest {
                                         lock.insert(skpr_namespace.clone(), default_message);
                                     }
 
-                                    Ingest::prepare_arrow_schema(&skpr_namespace, flatten).unwrap();
+                                    Ingest::prepare_arrow_schema_with_metadata(&skpr_namespace, &metadata.metadata, flatten).unwrap();
 
                                     {
                                         let schemas = ARROW_SCHEMA.read();
@@ -782,42 +782,35 @@ impl Ingest {
 
     }
 
-    pub(crate) fn prepare_arrow_schema(skpr_namespace: &str, flatten: bool) -> Result<Arc<Schema>, ArrowError> {
-        
+    pub(crate) fn prepare_arrow_schema_with_metadata(
+        skpr_namespace: &str,
+        metadata: &HashMap<String, Metadata>,
+        flatten: bool,
+    ) -> Result<(), ArrowError> {
         let mut arrow_schema: Result<datatypes::Schema, ArrowError> = Ok(datatypes::Schema::empty());
         let mut schema_ref = Arc::new(datatypes::Schema::empty());
 
-        let metadata: PipelineMetadata;
-        {
-            metadata = METADATA.read().clone();
+        let skpr_metadata = metadata.get(skpr_namespace);
+
+        let mut output_metadata: OutputMetadata = OutputMetadata::new();
+
+        if let Some(metadata_for_namespace) = skpr_metadata {
+            if flatten {
+                output_metadata = OutputMetadata::from_flatterened_metadata(metadata_for_namespace);
+            } else {
+                output_metadata = OutputMetadata::from_metadata(metadata_for_namespace);
+            }
         }
-
-        if metadata.metadata.get(skpr_namespace).is_none() {
-            return Err(ArrowError::SchemaError(format!("Failed to find metadata for namespace: {}", skpr_namespace)));
-        }
-
-        let mut output_metadata: HashMap<String, Metadata> = HashMap::new();
-        if flatten {
-            let mut meta: HashMap<String, Metadata> = HashMap::new();
-
-            crate::flatten_metadata(metadata.metadata.get(skpr_namespace).unwrap(), &mut meta);
-
-            let mut flat: Metadata = Metadata::new().unwrap();
-            flat.fields = Box::new(meta);
-            output_metadata.insert(skpr_namespace.to_string(), flat);
-        } else {
-            output_metadata = metadata.metadata.clone();
-        }
-
+        
         arrow_schema = convert_skippr_to_arrow(
-            output_metadata.get(skpr_namespace).unwrap().fields.clone(),
+            output_metadata.fields,
         );
 
         schema_ref = Arc::new(arrow_schema.unwrap());
 
         ARROW_SCHEMA.write().insert(skpr_namespace.to_string(), schema_ref.clone());
 
-        Ok(schema_ref)
+        Ok(())
     }
     
 }

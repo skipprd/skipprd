@@ -3,11 +3,11 @@ use avro_rs::{SerError, Schema};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use avro_rs::schema::{Name, RecordField, RecordFieldOrder};
-use crate::discover::Metadata;
+use crate::discover::OutputMetadata;
 
 pub fn convert_skippr_to_avro(
     namespace: &str,
-    metadata: &HashMap<String, Metadata>,
+    metadata: &HashMap<String, OutputMetadata>,
 ) -> Result<Schema, SerError> {
 
     let field_types = convert_skippr_to_avro_field_types(namespace, metadata)?;
@@ -22,7 +22,7 @@ pub fn convert_skippr_to_avro(
 
 pub fn convert_skippr_to_avro_field_types(
     field_name: &str,
-    metadata: &HashMap<String, Metadata>,
+    metadata: &HashMap<String, OutputMetadata>,
 ) -> Result<Schema, SerError> {
     let mut field_types: Vec<(String, Schema)> = Vec::new();
 
@@ -92,7 +92,7 @@ pub fn convert_skippr_to_avro_field_types(
 }
 
 fn convert_skippr_to_avro_record_fields(
-    metadata: &HashMap<String, Metadata>,
+    metadata: &HashMap<String, OutputMetadata>,
 ) -> Result<Vec<RecordField>, SerError> {
     let mut field_types: Vec<RecordField> = Vec::new();
 

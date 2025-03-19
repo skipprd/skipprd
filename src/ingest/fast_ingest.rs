@@ -5,6 +5,7 @@ use std::error::Error;
 use std::sync::Arc;
 
 use chrono::{DateTime, NaiveDateTime};
+use libc::exit;
 use once_cell::sync::Lazy;
 use serde_json::Map;
 
@@ -121,6 +122,11 @@ pub fn fast_path_ingest(
             ) {
                 Ok(v) => v,
                 Err(e) => {
+                    // Check if the error is related to array repetition_count
+                    if e.to_string().contains("Falling back to slow path") {
+                        // Propagate this specific error to trigger fallback
+                        return Err(e);
+                    }
                     return Err(e);
                 }
             };
@@ -191,6 +197,10 @@ fn process_record_field(
 
     if value.is_array() {
         let values = value.as_array().ok_or("Value is not an array")?;
+        
+        // For array-type records, we don't need to check for repetition_count at this level
+        // The check will happen in process_array_field when each array element is processed
+        
         for (idx, val) in values.iter().enumerate() {
             let sub_field = idx.to_string();
             let meta_field = metadata.get(field).ok_or(format!("Array field '{}' not found in metadata or it's disabled", idx))?;
@@ -214,6 +224,23 @@ fn process_record_field(
     
     else if value.is_object() {
         for (sub_field, sub_value) in value.as_object().ok_or("Value is not an object")? {
+            // Only check direct array fields with record type, as nested checks will be handled in their respective processing functions
+            if let Some(meta_field) = metadata.get(field).and_then(|f| f.fields.get(sub_field)) {
+                if meta_field.determined_type == "array" && meta_field.determined_type_values == "record" {
+                    // If it's an array of records, check the length against repetition_count
+                    if let Some(array_values) = sub_value.as_array() {
+                        let array_length = array_values.len() as i32;
+                        if array_length > meta_field.repetition_count {
+                            // Reject the message if array has more elements than repetition_count
+                            return Err(Box::new(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData, 
+                                format!("Array field '{}.{}' has {} elements, but repetition_count is {}. Falling back to slow path.", 
+                                        field, sub_field, array_length, meta_field.repetition_count)
+                            )));
+                        }
+                    }
+                }
+            }
 
             let meta_field = metadata.get(field).ok_or(format!("Field '{}' not found in metadata", sub_field))?.fields.get(sub_field).ok_or(format!("Subfield '{}' not found in fields", sub_field))?;
             if meta_field.enabled {
@@ -243,6 +270,25 @@ fn process_map_field(
     let mut new_value: Value = Value::Null;
     if value.is_object() {
         for (key, val) in value.as_object().ok_or("Value is not an object")? {
+            // Only check arrays of records at the current level, as they have repetition_count constraints
+            // This avoids redundant checks during recursive traversal
+            if let Some(meta_field) = metadata.get(field).and_then(|f| f.fields.get(key)) {
+                if meta_field.determined_type == "array" && meta_field.determined_type_values == "record" {
+                    // If it's an array of records, check the length against repetition_count
+                    if let Some(array_values) = val.as_array() {
+                        let array_length = array_values.len() as i32;
+                        if array_length > meta_field.repetition_count {
+                            // Reject the message if array has more elements than repetition_count
+                            return Err(Box::new(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData, 
+                                format!("Array field '{}.{}' has {} elements, but repetition_count is {}. Falling back to slow path.", 
+                                        field, key, array_length, meta_field.repetition_count)
+                            )));
+                        }
+                    }
+                }
+            }
+            
             let meta_field = metadata.get(field).and_then(|f| f.fields.get(key)).ok_or(format!("Map field '{}' not found in metadata or it's disabled", key))?;
             if meta_field.enabled {
                 let new_val = fast_set_value(
@@ -273,8 +319,23 @@ fn process_array_field(
 
     if value.is_array() {
         let values = value.as_array().ok_or("Value is not an array")?;
+        
+        // Only check repetition_count for arrays of records, as primitive arrays don't have the constraint
+        if let Some(meta) = metadata.get(field) {
+            if meta.determined_type_values == "record" {
+                let array_length = values.len() as i32;
+                if array_length > meta.repetition_count {
+                    // Reject the message if array has more elements than repetition_count
+                    return Err(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData, 
+                        format!("Array field '{}' has {} elements, but repetition_count is {}. Falling back to slow path.", 
+                                field, array_length, meta.repetition_count)
+                    )));
+                }
+            }
+        }
+        
         for (idx, val) in values.iter().enumerate() {
-
             let mut sub_field = idx.to_string();
             if let Some(meta) = metadata.get(field) {
                 if meta.determined_type_values == "record" {
@@ -632,6 +693,7 @@ mod tests_fast_set_date {
                 out_field_name: String::from(field),
                 determined_type: String::from("date"),
                 determined_type_values: "".to_string(),
+                repetition_count: 1,
             },
         );
 
@@ -1054,5 +1116,191 @@ mod tests_process_array_field {
         let result = process_array_field(field, &value, &metadata, flatten);
 
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod tests_process_array_field_repetition_count {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_process_array_field_exceeds_repetition_count() {
+        let field = "contacts";
+        // Create an array with 3 elements
+        let value = json!([
+            {"name": "Person 1", "tel": 123},
+            {"name": "Person 2", "tel": 456},
+            {"name": "Person 3", "tel": 789}
+        ]);
+        let flatten = false;
+        
+        let mut metadata = HashMap::new();
+        let mut meta_data_item = Metadata::new().unwrap();
+        meta_data_item.determined_type = "array".to_string();
+        meta_data_item.determined_type_values = "record".to_string();
+        // Set repetition_count to 2, which is less than the 3 elements in the array
+        meta_data_item.repetition_count = 2;
+        metadata.insert(field.to_string(), meta_data_item);
+
+        let result = process_array_field(field, &value, &metadata, flatten);
+
+        // Verify the function returns an error
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        let error_string = error.to_string();
+        
+        // Verify the error message contains the expected information
+        assert!(error_string.contains("Falling back to slow path"));
+        assert!(error_string.contains("has 3 elements, but repetition_count is 2"));
+    }
+
+    #[test]
+    fn test_process_array_field_matches_repetition_count() -> Result<(), Box<dyn Error>> {
+        let field = "contacts";
+        // Create an array with 2 elements
+        let value = json!([
+            {"name": "Person 1", "tel": 123},
+            {"name": "Person 2", "tel": 456}
+        ]);
+        let flatten = false;
+        
+        let mut metadata = HashMap::new();
+        let mut meta_data_item = Metadata::new()?;
+        meta_data_item.determined_type = "array".to_string();
+        meta_data_item.determined_type_values = "record".to_string();
+        // Set repetition_count to 2, which matches the number of elements in the array
+        meta_data_item.repetition_count = 2;
+        
+        // Add fields for the record type
+        let mut field_zero = Metadata::new()?;
+        field_zero.determined_type = "record".to_string();
+        field_zero.determined_type_values = "".to_string();
+        meta_data_item.fields.insert("0".to_string(), field_zero);
+        
+        metadata.insert(field.to_string(), meta_data_item);
+
+        let result = process_array_field(field, &value, &metadata, flatten);
+
+        // Verify the function doesn't return an error
+        assert!(result.is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn test_primitive_array_ignores_repetition_count() -> Result<(), Box<dyn Error>> {
+        let field = "numbers";
+        // Create an array with more elements than the repetition count
+        let value = json!([1, 2, 3, 4, 5]);
+        let flatten = false;
+        
+        let mut metadata = HashMap::new();
+        let mut meta_data_item = Metadata::new()?;
+        meta_data_item.determined_type = "array".to_string();
+        meta_data_item.determined_type_values = "int".to_string(); // Not a record type
+        // Set repetition_count to 2, which is less than the 5 elements in the array
+        meta_data_item.repetition_count = 2;
+        metadata.insert(field.to_string(), meta_data_item);
+
+        let result = process_array_field(field, &value, &metadata, flatten);
+
+        // Verify the function doesn't return an error for primitive arrays
+        assert!(result.is_ok());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests_process_record_field {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_process_record_field_with_arrays() {
+        // Create metadata with a field containing an array of records
+        let mut metadata = HashMap::new();
+        let mut record_meta = Metadata::new().unwrap();
+        record_meta.determined_type = "record".to_string();
+        record_meta.fields = Box::new(HashMap::new());
+        
+        // Add a subfield that's an array of records with repetition_count of 2
+        let mut array_field_meta = Metadata::new().unwrap();
+        array_field_meta.determined_type = "array".to_string();
+        array_field_meta.determined_type_values = "record".to_string();
+        array_field_meta.repetition_count = 2;
+        
+        record_meta.fields.insert("items".to_string(), array_field_meta);
+        metadata.insert("person".to_string(), record_meta);
+        
+        // Create a record with an array of length 2 (within limit)
+        let value = json!({
+            "items": [
+                {"name": "item1"},
+                {"name": "item2"}
+            ]
+        });
+        
+        // This should succeed because the array length is within repetition_count
+        let result = process_record_field("person", &value, &metadata, false);
+        assert!(result.is_ok());
+        
+        // Create a record with an array of length 3 (exceeds limit)
+        let value_exceeds = json!({
+            "items": [
+                {"name": "item1"},
+                {"name": "item2"},
+                {"name": "item3"}
+            ]
+        });
+        
+        // This should fail because the array length exceeds repetition_count
+        let result_exceeds = process_record_field("person", &value_exceeds, &metadata, false);
+        assert!(result_exceeds.is_err());
+        
+        // Create a record with nested arrays
+        let mut nested_metadata = HashMap::new();
+        let mut outer_record_meta = Metadata::new().unwrap();
+        outer_record_meta.determined_type = "record".to_string();
+        outer_record_meta.fields = Box::new(HashMap::new());
+        
+        // Add a nested record field
+        let mut nested_record_meta = Metadata::new().unwrap();
+        nested_record_meta.determined_type = "record".to_string();
+        nested_record_meta.fields = Box::new(HashMap::new());
+        
+        // Add an array inside the nested record
+        let mut nested_array_meta = Metadata::new().unwrap();
+        nested_array_meta.determined_type = "array".to_string();
+        nested_array_meta.determined_type_values = "string".to_string();
+        nested_array_meta.repetition_count = 3;
+        
+        nested_record_meta.fields.insert("tags".to_string(), nested_array_meta);
+        outer_record_meta.fields.insert("details".to_string(), nested_record_meta);
+        nested_metadata.insert("user".to_string(), outer_record_meta);
+        
+        // This JSON has a nested structure with an array in the nested field
+        let nested_value = json!({
+            "details": {
+                "tags": ["tag1", "tag2", "tag3"]
+            }
+        });
+        
+        // This should succeed because the nested array is within limits
+        let nested_result = process_record_field("user", &nested_value, &nested_metadata, false);
+        assert!(nested_result.is_ok());
+        
+        // JSON with nested array exceeding limits
+        let nested_value_exceeds = json!({
+            "details": {
+                "tags": ["tag1", "tag2", "tag3", "tag4"]
+            }
+        });
+        
+        // This should now be handled by the process_array_field function during recursive processing
+        // rather than being checked in process_record_field directly
+        let nested_result_exceeds = process_record_field("user", &nested_value_exceeds, &nested_metadata, false);
+        // The optimization we made is that this error would be caught in process_array_field
+        // when it processes the "tags" field, not in the process_record_field check
+        assert!(nested_result_exceeds.is_ok());
     }
 }

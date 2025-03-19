@@ -1,4 +1,4 @@
-use crate::discover::Metadata;
+use crate::discover::{OutputMetadata};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::error::ArrowError;
 use std::collections::{HashMap, HashSet};
@@ -125,7 +125,7 @@ fn convert_skippr_type_to_arrow_data_type(skippr_type: &str) -> Result<DataType,
 }
 
 pub fn convert_skippr_to_arrow(
-    metadata: Box<HashMap<String, Metadata>>,
+    metadata: Box<HashMap<String, OutputMetadata>>,
 ) -> Result<Schema, ArrowError> {
     let field_types: HashMap<String, InferredType> =
         convert_skippr_to_arrow_field_types(&metadata).unwrap();
@@ -134,7 +134,7 @@ pub fn convert_skippr_to_arrow(
 }
 
 fn convert_skippr_to_arrow_field_types(
-    metadata: &HashMap<String, Metadata>,
+    metadata: &HashMap<String, OutputMetadata>,
 ) -> Result<HashMap<String, InferredType>, ArrowError> {
     let mut field_types: HashMap<String, InferredType> = HashMap::new();
 
@@ -159,21 +159,31 @@ fn convert_skippr_to_arrow_field_types(
                     let mut fields: HashMap<String, InferredType> = HashMap::new();
                     for (_k, v) in v.fields.iter() {
                         for (sk, sv) in v.fields.iter() {
-                            let mut field = HashSet::new();
-                            let data_type =
-                                convert_skippr_type_to_arrow_data_type(&sv.determined_type).unwrap();
-                            field.insert(data_type);
+                            // Check if this is an array field within the record
+                            if sv.determined_type == "array" {
+                                // Handle array field within a record
+                                let mut inner_field = HashSet::new();
+                                let inner_data_type = 
+                                    convert_skippr_type_to_arrow_data_type(&sv.determined_type_values).unwrap();
+                                inner_field.insert(inner_data_type);
+                                
+                                // Create the array field
+                                fields.insert(
+                                    sk.to_string(),
+                                    InferredType::Array(Box::new(InferredType::Scalar(inner_field))),
+                                );
+                            } else {
+                                // Regular field (not an array)
+                                let mut field = HashSet::new();
+                                let data_type =
+                                    convert_skippr_type_to_arrow_data_type(&sv.determined_type).unwrap();
+                                field.insert(data_type);
 
-                            // fields.insert(
-                            //     sk.to_string(),
-                            //     InferredType::Array(Box::new(InferredType::Scalar(field))),
-                            // );]
-
-                            fields.insert(
-                                sk.to_string(),
-                                InferredType::Scalar(field),
-                            );
-
+                                fields.insert(
+                                    sk.to_string(),
+                                    InferredType::Scalar(field),
+                                );
+                            }
                         }
                         // object_fields.insert(InferredType::Object(convert_skippr_to_arrow_field_types(&v.fields).unwrap()));
                         // fields.insert(v.out_field_name.to_string(), InferredType::Object(convert_skippr_to_arrow_field_types(&v.fields).unwrap()));
@@ -190,6 +200,23 @@ fn convert_skippr_to_arrow_field_types(
                     //     InferredType::Array(Box::new(InferredType::Object(fields))),
                     // );
 
+                } else if v.determined_type_values == "array" {
+                    // Handle array of arrays
+                    if let Some(inner_array) = v.fields.get("0") {
+                        let mut inner_field = HashSet::new();
+                        let inner_data_type = 
+                            convert_skippr_type_to_arrow_data_type(&inner_array.determined_type_values).unwrap();
+                        inner_field.insert(inner_data_type);
+                        
+                        // Create the inner array
+                        let inner_array_type = InferredType::Array(Box::new(InferredType::Scalar(inner_field)));
+                        
+                        // Wrap in the outer array
+                        field_types.insert(
+                            v.out_field_name.to_string(),
+                            InferredType::Array(Box::new(inner_array_type)),
+                        );
+                    }
                 } else {
                     let mut field = HashSet::new();
                     let dataType =
@@ -254,4 +281,226 @@ fn convert_skippr_to_arrow_field_types(
     }
 
     Ok(field_types)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::datatypes::{DataType, Field};
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_convert_skippr_to_arrow_simple_array() {
+        // Create a simple array of integers test metadata
+        let mut metadata = OutputMetadata::new();
+        metadata.out_field_name = "numbers".to_string();
+        metadata.determined_type = "array".to_string();
+        metadata.determined_type_values = "integer".to_string();
+        
+        let mut meta_map = HashMap::new();
+        meta_map.insert("numbers".to_string(), metadata);
+        
+        // Convert to Arrow schema
+        let schema = convert_skippr_to_arrow(Box::new(meta_map)).unwrap();
+        
+        // Check the schema
+        assert_eq!(schema.fields().len(), 1);
+        let field = &schema.fields()[0];
+        assert_eq!(field.name(), "numbers");
+        
+        // Check that the field is a List type
+        match field.data_type() {
+            DataType::List(item_field) => {
+                // Check that item type is Int32
+                assert_eq!(*item_field.data_type(), DataType::Int32);
+            },
+            _ => panic!("Expected List type, got {:?}", field.data_type()),
+        }
+    }
+    
+    #[test]
+    fn test_convert_skippr_to_arrow_array_of_records() {
+        // Create an array of records test metadata
+        let mut root_metadata = OutputMetadata::new();
+        root_metadata.out_field_name = "contacts".to_string();
+        root_metadata.determined_type = "array".to_string();
+        root_metadata.determined_type_values = "record".to_string();
+        
+        // Create a record field for the array elements
+        let mut record_field = OutputMetadata::new();
+        record_field.out_field_name = "0".to_string();
+        record_field.determined_type = "record".to_string();
+        
+        // Add fields to the record
+        let mut name_field = OutputMetadata::new();
+        name_field.out_field_name = "name".to_string();
+        name_field.determined_type = "string".to_string();
+        
+        let mut age_field = OutputMetadata::new();
+        age_field.out_field_name = "age".to_string();
+        age_field.determined_type = "integer".to_string();
+        
+        record_field.fields.insert("name".to_string(), name_field);
+        record_field.fields.insert("age".to_string(), age_field);
+        
+        // Add the record field to the array field
+        root_metadata.fields.insert("0".to_string(), record_field);
+        
+        let mut meta_map = HashMap::new();
+        meta_map.insert("contacts".to_string(), root_metadata);
+        
+        // Convert to Arrow schema
+        let schema = convert_skippr_to_arrow(Box::new(meta_map)).unwrap();
+        
+        // Check the schema
+        assert_eq!(schema.fields().len(), 1);
+        let field = &schema.fields()[0];
+        assert_eq!(field.name(), "contacts");
+        
+        // Check that the field is a List type
+        match field.data_type() {
+            DataType::List(item_field) => {
+                // Check that item type is a Struct
+                match item_field.data_type() {
+                    DataType::Struct(struct_fields) => {
+                        assert_eq!(struct_fields.len(), 2);
+                        
+                        // Check name field
+                        let name_field = struct_fields.iter().find(|f| f.name() == "name").unwrap();
+                        assert_eq!(*name_field.data_type(), DataType::Utf8);
+                        
+                        // Check age field
+                        let age_field = struct_fields.iter().find(|f| f.name() == "age").unwrap();
+                        assert_eq!(*age_field.data_type(), DataType::Int32);
+                    },
+                    _ => panic!("Expected Struct type, got {:?}", item_field.data_type()),
+                }
+            },
+            _ => panic!("Expected List type, got {:?}", field.data_type()),
+        }
+    }
+
+    #[test]
+    fn test_convert_skippr_to_arrow_array_of_arrays() {
+        // Create an array of arrays test metadata
+        let mut root_metadata = OutputMetadata::new();
+        root_metadata.out_field_name = "matrix".to_string();
+        root_metadata.determined_type = "array".to_string();
+        root_metadata.determined_type_values = "array".to_string();
+        
+        // Create an inner array field
+        let mut inner_array_field = OutputMetadata::new();
+        inner_array_field.out_field_name = "0".to_string();
+        inner_array_field.determined_type = "array".to_string();
+        inner_array_field.determined_type_values = "integer".to_string();
+        
+        // Add the inner array field to the outer array field
+        root_metadata.fields.insert("0".to_string(), inner_array_field);
+        
+        let mut meta_map = HashMap::new();
+        meta_map.insert("matrix".to_string(), root_metadata);
+        
+        // Convert to Arrow schema
+        let schema = convert_skippr_to_arrow(Box::new(meta_map)).unwrap();
+        
+        // Check the schema
+        assert_eq!(schema.fields().len(), 1);
+        let field = &schema.fields()[0];
+        assert_eq!(field.name(), "matrix");
+        
+        // Check that the field is a List type for outer array
+        match field.data_type() {
+            DataType::List(outer_item) => {
+                // Check that the item type is also a List for inner array
+                match outer_item.data_type() {
+                    DataType::List(inner_item) => {
+                        // Check that inner array elements are Int32
+                        assert_eq!(*inner_item.data_type(), DataType::Int32);
+                    },
+                    _ => panic!("Expected List type for inner array, got {:?}", outer_item.data_type()),
+                }
+            },
+            _ => panic!("Expected List type for outer array, got {:?}", field.data_type()),
+        }
+    }
+
+    #[test]
+    fn test_convert_skippr_to_arrow_complex_nested_structure() {
+        // Create a complex nested structure with arrays, records, and primitive types
+        let mut metadata_map = HashMap::new();
+        
+        // Add a simple field
+        let mut name_field = OutputMetadata::new();
+        name_field.out_field_name = "name".to_string();
+        name_field.determined_type = "string".to_string();
+        metadata_map.insert("name".to_string(), name_field);
+        
+        // Create an array of records with a nested array
+        let mut array_of_records = OutputMetadata::new();
+        array_of_records.out_field_name = "contacts".to_string();
+        array_of_records.determined_type = "array".to_string();
+        array_of_records.determined_type_values = "record".to_string();
+        
+        // Create a record field for the array elements
+        let mut record_field = OutputMetadata::new();
+        record_field.out_field_name = "0".to_string();
+        record_field.determined_type = "record".to_string();
+        
+        // Add fields to the record
+        let mut contact_name_field = OutputMetadata::new();
+        contact_name_field.out_field_name = "name".to_string();
+        contact_name_field.determined_type = "string".to_string();
+        
+        let mut contact_age_field = OutputMetadata::new();
+        contact_age_field.out_field_name = "age".to_string();
+        contact_age_field.determined_type = "integer".to_string();
+        
+        // A nested array of strings for each contact's emails
+        let mut emails_field = OutputMetadata::new();
+        emails_field.out_field_name = "emails".to_string();
+        emails_field.determined_type = "array".to_string();
+        emails_field.determined_type_values = "string".to_string();
+        
+        record_field.fields.insert("name".to_string(), contact_name_field);
+        record_field.fields.insert("age".to_string(), contact_age_field);
+        record_field.fields.insert("emails".to_string(), emails_field);
+        
+        // Add the record field to the array field
+        array_of_records.fields.insert("0".to_string(), record_field);
+        
+        // Add the array field to the metadata map
+        metadata_map.insert("contacts".to_string(), array_of_records);
+        
+        // Convert to Arrow schema
+        let schema = convert_skippr_to_arrow(Box::new(metadata_map)).unwrap();
+        
+        // Check the schema
+        assert_eq!(schema.fields().len(), 2); // name and contacts fields
+        
+        // Find the contacts field
+        let contacts_field = schema.fields().iter().find(|f| f.name() == "contacts").unwrap();
+        
+        // Check that the contacts field is a List type
+        match contacts_field.data_type() {
+            DataType::List(item_field) => {
+                // Check that the list items are structs
+                match item_field.data_type() {
+                    DataType::Struct(struct_fields) => {
+                        assert_eq!(struct_fields.len(), 3); // name, age, emails
+                        
+                        // Check emails field is an array of strings
+                        let emails_field = struct_fields.iter().find(|f| f.name() == "emails").unwrap();
+                        match emails_field.data_type() {
+                            DataType::List(email_item) => {
+                                assert_eq!(*email_item.data_type(), DataType::Utf8);
+                            },
+                            _ => panic!("Expected List type for emails, got {:?}", emails_field.data_type()),
+                        }
+                    },
+                    _ => panic!("Expected Struct type for contacts, got {:?}", item_field.data_type()),
+                }
+            },
+            _ => panic!("Expected List type for contacts, got {:?}", contacts_field.data_type()),
+        }
+    }
 }

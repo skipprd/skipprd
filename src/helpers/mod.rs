@@ -21,7 +21,7 @@ pub mod timed_rwlock;
 // let CLEAN_FIELD_CACHE = Arc::new(Mutex::new(HashMap<String, bool> = HashMap::new()));
 
 use crate::discover::date_formats::DateFormats;
-use crate::discover::Metadata;
+use crate::discover::{Metadata, OutputMetadata};
 use crate::helpers::configuration::Config;
 use once_cell::sync::Lazy;
 use std::sync::{Arc};
@@ -84,7 +84,12 @@ impl Helpers {
 
         let mut clean = field.clone();
         if field.parse::<i32>().is_ok() {
-            clean = "item_".to_string() + &field;
+            
+            if Config::get_transform_flatten_events() {
+                clean = "".to_string() + &field;
+            } else {
+                clean = "item_".to_string() + &field;
+            }
         }
 
         clean = clean.to_lowercase();
@@ -160,51 +165,48 @@ impl Helpers {
         pass
     }
 
-    fn flatten_internal(field: &str, json: &Value, result: &mut Map<String, Value>, metadata: &Metadata) {
+    pub fn flatten(json: &Value, metadata: &HashMap<String, Metadata>) -> Result<Value, Box<dyn Error>> {
+        let mut result = Map::new();
+        Helpers::flatten_internal(json, metadata, &mut result, "".to_string())?;
+        Ok(Value::Object(result))
+    }
+
+    fn flatten_internal(
+        json: &Value,
+        metadata: &HashMap<String, Metadata>,
+        result: &mut Map<String, Value>,
+        field_path: String,
+    ) -> Result<(), Box<dyn Error>> {
         match json {
             Value::Object(map) => {
-                if map.is_empty() {
-                    result.insert(metadata.out_field_name.clone(), Value::Null);
-                } else {
-                    for (key, value) in map {
-                        let new_key = format!("{}_{}", field, key);
-                        if let Some(child_metadata) = metadata.fields.get(key) {
-                            Helpers::flatten_internal(&new_key, value, result, child_metadata);
+                for (key, value) in map {
+                    if let Some(child_metadata) = metadata.get(key) {
+                        let new_key = if field_path.is_empty() {
+                            child_metadata.out_field_name.clone()
                         } else {
-                            Helpers::flatten_internal(&new_key, value, result, metadata);
-                        }
+                            format!("{}_{}", field_path, child_metadata.out_field_name)
+                        };
+
+                        Helpers::flatten_internal(value, &child_metadata.fields, result, new_key)?;
                     }
                 }
             }
             Value::Array(arr) => {
-                if arr.is_empty() {
-                    result.insert(metadata.out_field_name.clone(), Value::Array(vec![]));
-                } else {
-                    for (index, value) in arr.iter().enumerate() {
-                        // Ensure field name is correctly indexed
-                        let indexed_field_name = format!("{}_{}", metadata.out_field_name, index);
-                        Helpers::flatten_internal(&indexed_field_name, value, result, metadata);
+                for (index, value) in arr.iter().enumerate() {
+                    
+                    if let Some(child_metadata) = metadata.get("0") { // We store the schema of arrays in the metadata with key "0"
+                        let new_key = format!("{}_{}", field_path, index);
+
+                        Helpers::flatten_internal(value, &child_metadata.fields, result, new_key)?;
                     }
                 }
             }
             _ => {
-                // Ensure correct naming for flattened fields
-                let field_name = field.to_string(); // Preserve full key path
-                result.insert(field_name, json.clone());
+                
+                result.insert(field_path, json.clone());
             }
         }
-    }
-
-
-
-    // deprecated - we now use the metadata to determine the field names
-    pub fn flatten(json: &Value, _metadata: &HashMap<String, Metadata>) -> Result<Value, Box<dyn Error>> {
-        let mut result = Map::new();
-        for (key, value) in json.as_object().ok_or(format!("Invalid JSON object: {}", json))? {
-            Helpers::flatten_internal(key, value, &mut result, _metadata.get(key).unwrap());
-        }
-        // Helpers::flatten_internal(json, &mut result, metadata);
-        Ok(Value::Object(result))
+        Ok(())
     }
 
     pub fn mem_limit_reached() -> bool {
@@ -439,23 +441,6 @@ impl Helpers {
                 _ => current_value.clone(),
             }
         }).collect()
-    }
-
-    pub fn get_nested_metadata_with_flat_name<'a>(metadata: &'a mut Metadata, field_str: &str) -> Option<&'a mut Metadata> {
-        // Check if the current metadata's out_field_name matches the field_str
-        if metadata.out_field_name == field_str {
-            return Some(metadata);
-        }
-
-        // Recursively search in nested fields
-        for (_, nested_metadata) in metadata.fields.iter_mut() {
-            if let Some(found_metadata) = Helpers::get_nested_metadata_with_flat_name(nested_metadata, field_str) {
-                return Some(found_metadata);
-            }
-        }
-
-        // If no matching Metadata is found in this branch, return None
-        None
     }
 
     fn list_dir_recursively_with_size(start_dir: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
@@ -1102,8 +1087,12 @@ mod flattern_tests {
     #[test]
     fn test_flatten_empty_object() {
         let json = json!({});
-        let metadata = HashMap::new();
-        let flattened = Helpers::flatten(&json, &metadata);
+        
+        let metadata = Metadata::new().unwrap();
+        let mut metadata_hashmap = HashMap::new();
+        metadata_hashmap.insert("field".to_string(), metadata);
+
+        let flattened = Helpers::flatten(&json, &metadata_hashmap);
         assert_eq!(flattened.unwrap(), json!({}));
     }
 
@@ -1118,7 +1107,7 @@ mod flattern_tests {
                 }
             }
         );
-        let mut metadata = HashMap::new();
+        let mut metadata: HashMap<String, Metadata> = HashMap::new();
         metadata.insert(
             "field".into(),
             Metadata {
@@ -1132,6 +1121,7 @@ mod flattern_tests {
                 out_field_name: "field".into(),
                 determined_type: "string".into(),
                 determined_type_values: "".into(),
+                repetition_count: 1,
             },
         );
         metadata.insert(
@@ -1147,6 +1137,7 @@ mod flattern_tests {
                 out_field_name: "contact".into(),
                 determined_type: "record".into(),
                 determined_type_values: "".into(),
+                repetition_count: 1,
             },
         );
         metadata.get_mut("contact").unwrap().fields.insert(
@@ -1159,9 +1150,10 @@ mod flattern_tests {
                 date_candidate: None,
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
-                out_field_name: "contact_name".into(),
+                out_field_name: "name".into(),
                 determined_type: "string".into(),
                 determined_type_values: "".into(),
+                repetition_count: 1,
             },
         );
         metadata.get_mut("contact").unwrap().fields.insert(
@@ -1174,9 +1166,10 @@ mod flattern_tests {
                 date_candidate: None,
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
-                out_field_name: "contact_tel".into(),
+                out_field_name: "tel".into(),
                 determined_type: "int".into(),
                 determined_type_values: "".into(),
+                repetition_count: 1,
             },
         );
         let flattened = Helpers::flatten(&json, &metadata);
@@ -1203,7 +1196,7 @@ mod flattern_tests {
                 ]
             }
         );
-        let mut metadata = HashMap::new();
+        let mut metadata: HashMap<String, Metadata> = HashMap::new();
         metadata.insert(
             "field".into(),
             Metadata {
@@ -1217,6 +1210,7 @@ mod flattern_tests {
                 out_field_name: "field".into(),
                 determined_type: "string".into(),
                 determined_type_values: "".into(),
+                repetition_count: 1,
             },
         );
         metadata.insert(
@@ -1232,9 +1226,26 @@ mod flattern_tests {
                 out_field_name: "contacts".into(),
                 determined_type: "array".into(),
                 determined_type_values: "".into(),
+                repetition_count: 1,
             },
         );
         metadata.get_mut("contacts").unwrap().fields.insert(
+            "0".into(),
+            Metadata {
+                count: 2,
+                types: HashMap::new(),
+                parent_type: "".into(),
+                fields: Box::new(HashMap::new()),
+                date_candidate: None,
+                evolution: Box::new(HashMap::new()),
+                enabled: true,
+                out_field_name: "0".into(),
+                determined_type: "string".into(),
+                determined_type_values: "".into(),
+                repetition_count: 1,
+            },
+        );
+        metadata.get_mut("contacts").unwrap().fields.get_mut("0").unwrap().fields.insert(
             "name".into(),
             Metadata {
                 count: 2,
@@ -1244,12 +1255,13 @@ mod flattern_tests {
                 date_candidate: None,
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
-                out_field_name: "contacts_name".into(),
+                out_field_name: "name".into(),
                 determined_type: "string".into(),
                 determined_type_values: "".into(),
+                repetition_count: 1,
             },
         );
-        metadata.get_mut("contacts").unwrap().fields.insert(
+        metadata.get_mut("contacts").unwrap().fields.get_mut("0").unwrap().fields.insert(
             "tel".into(),
             Metadata {
                 count: 2,
@@ -1259,9 +1271,10 @@ mod flattern_tests {
                 date_candidate: None,
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
-                out_field_name: "contacts_tel".into(),
+                out_field_name: "tel".into(),
                 determined_type: "int".into(),
                 determined_type_values: "".into(),
+                repetition_count: 1,
             },
         );
         let flattened = Helpers::flatten(&json, &metadata);

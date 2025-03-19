@@ -46,7 +46,7 @@ mod metrics;
 mod internalfields;
 
 mod discover;
-use crate::discover::{AnalyseSchema, PipelineMetadata};
+use crate::discover::{AnalyseSchema, OutputMetadata, PipelineMetadata};
 use crate::discover::Metadata;
 mod converters;
 // use self::converters::avro_parquet::AvroSchema;
@@ -133,10 +133,7 @@ pub static OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE: Lazy<TimedRwLock<AtomicBool>> =
 pub static LOGGER: Lazy<Arc<tokio::sync::RwLock<Logger>>> = Lazy::new(|| Logger::new(100));
 pub static METRICS: Lazy<Arc<TimedRwLock<Metrics>>> = Lazy::new(|| Arc::new(TimedRwLock::new("metrics".to_string(), Metrics::new())));
 pub static METADATA: Lazy<Arc<TimedRwLock<PipelineMetadata>>> = Lazy::new(|| Arc::new(TimedRwLock::new("metadata".to_string(), PipelineMetadata::new())));
-// pub static NEW_METADATA: Lazy<Arc<TimedRwLock<HashMap<String, Metadata>>>> = Lazy::new(|| Arc::new(TimedRwLock::new("new_metadata".to_string(), HashMap::new())));
-
-//Arc<Schema>
-pub static  ARROW_SCHEMA: Lazy<Arc<TimedRwLock<HashMap<String, Arc<Schema>>>>> = Lazy::new(|| Arc::new(TimedRwLock::new("arrow_schema".to_string(), HashMap::new())));
+pub static ARROW_SCHEMA: Lazy<Arc<TimedRwLock<HashMap<String, Arc<Schema>>>>> = Lazy::new(|| Arc::new(TimedRwLock::new("arrow_schema".to_string(), HashMap::new())));
 
 #[derive(Clone, Debug)]
 struct PipelineCache {
@@ -411,7 +408,7 @@ async fn discover() {
     let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.unwrap_or("false".to_string()));
 
     for (namespace, metadata) in pipeline_metadata.metadata.iter_mut() {
-        AnalyseSchema::determine_field_types(&mut metadata.fields, None, None, flatten);
+        AnalyseSchema::determine_field_types(&mut metadata.fields, None, flatten);
     }
 
     Config::set_metadata(&pipeline_metadata, false).await;
@@ -517,7 +514,7 @@ async fn sync() {
         // Just build the arrow schemas internally
         let flatten = Config::get_transform_flatten_events();
         for (namespace, _metadata) in pipeline_metadata.metadata.iter() {
-            match Ingest::prepare_arrow_schema(&namespace, flatten) {
+            match Ingest::prepare_arrow_schema_with_metadata(&namespace, &pipeline_metadata.metadata, flatten) {
                 Ok(_t) => {}
                 Err(e) => {
                     println!("Failed to prepare arrow schema: {}", e);
@@ -901,15 +898,6 @@ async fn sync() {
 
 }
 
-pub fn flatten_metadata(metadata: &Metadata, flattened: &mut HashMap<String, Metadata>) {
-    for (_key, val) in metadata.fields.iter() {
-        if val.determined_type == "record" || val.determined_type == "map" {
-            flatten_metadata(val, flattened);
-        } else {
-            flattened.insert(val.out_field_name.clone(), val.clone());
-        }
-    }
-}
 
 pub async fn sync_output_plugin(plugin_name: &str, buffer_name: String) -> Result<Box<dyn DataOutputPlugin + Send + Sync>, io::Error> {
     match plugin_name {
@@ -1005,122 +993,4 @@ pub async fn sync_input_plugin(offsets_clone: Arc<Offsets>, shared_output: Arc<B
             println!("Data Source Plugin {} not supported", unknown);
         }
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashMap;
-
-    #[test]
-    fn test_flatten_metadata() {
-        let mut fields: Box<HashMap<String, Metadata>> = Box::new(HashMap::new());
-
-        let metadata_child = Metadata {
-            count: 1,
-            types: HashMap::new(),
-            parent_type: "record".to_string(),
-            fields: Box::new(HashMap::new()),
-            date_candidate: None,
-            evolution: Box::new(HashMap::new()),
-            enabled: true,
-            out_field_name: "parent_child".to_string(),
-            determined_type: "string".to_string(),
-            determined_type_values: "".to_string(),
-        };
-
-        fields.insert("child".to_string(), metadata_child.clone());
-
-        let metadata = Metadata {
-            count: 1,
-            types: HashMap::new(),
-            parent_type: "".to_string(),
-            fields: fields,
-            date_candidate: None,
-            evolution: Box::new(HashMap::new()),
-            enabled: true,
-            out_field_name: "parent".to_string(),
-            determined_type: "record".to_string(),
-            determined_type_values: "".to_string(),
-        };
-
-        let mut flattened: HashMap<String, Metadata> = HashMap::new();
-
-        flatten_metadata(&metadata, &mut flattened);
-
-        println!("{:?}", flattened);
-
-        assert_eq!(flattened.len(), 1);
-        assert!(flattened.contains_key("parent_child"));
-        assert_eq!(
-            flattened.get("parent_child").unwrap().count,
-            metadata_child.count
-        );
-    }
-
-    // @todo - support flattening of arrays of structs?
-    // #[test]
-    // fn test_flatten_array_of_structsmetadata() {
-    //     let mut fields: Box<HashMap<String, Metadata>> = Box::new(HashMap::new());
-    //
-    //     let metadata_child = Metadata {
-    //         count: 1,
-    //         types: HashMap::new(),
-    //         parent_type: "record".to_string(),
-    //         fields: Box::new(HashMap::new()),
-    //         date_candidate: None,
-    //         evolution: Box::new(HashMap::new()),
-    //         enabled: true,
-    //         out_field_name: "parent_record_child".to_string(),
-    //         determined_type: "string".to_string(),
-    //         determined_type_values: "".to_string(),
-    //     };
-    //
-    //     fields.insert("child".to_string(), metadata_child.clone());
-    //
-    //     let mut record_fields: Box<HashMap<String, Metadata>> = Box::new(HashMap::new());
-    //
-    //     let metadata_record = Metadata {
-    //         count: 1,
-    //         types: HashMap::new(),
-    //         parent_type: "array".to_string(),
-    //         fields: fields,
-    //         date_candidate: None,
-    //         evolution: Box::new(HashMap::new()),
-    //         enabled: true,
-    //         out_field_name: "record".to_string(),
-    //         determined_type: "record".to_string(),
-    //         determined_type_values: "".to_string(),
-    //     };
-    //
-    //     record_fields.insert("record".to_string(), metadata_record.clone());
-    //
-    //     let metadata = Metadata {
-    //         count: 1,
-    //         types: HashMap::new(),
-    //         parent_type: "".to_string(),
-    //         fields: record_fields,
-    //         date_candidate: None,
-    //         evolution: Box::new(HashMap::new()),
-    //         enabled: true,
-    //         out_field_name: "parent".to_string(),
-    //         determined_type: "array".to_string(),
-    //         determined_type_values: "".to_string(),
-    //     };
-    //
-    //
-    //     let mut flattened: HashMap<String, Metadata> = HashMap::new();
-    //
-    //     flatten_metadata(&metadata, &mut flattened);
-    //
-    //     println!("{:?}", flattened);
-    //
-    //     assert_eq!(flattened.len(), 1);
-    //     assert!(flattened.contains_key("parent_record_child"));
-    //     assert_eq!(
-    //         flattened.get("parent_record_child").unwrap().count,
-    //         metadata_child.count
-    //     );
-    // }
-
 }

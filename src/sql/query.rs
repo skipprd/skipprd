@@ -506,7 +506,7 @@ pub async fn query(sql_str: &str) {
             let flatten = Config::get_transform_flatten_events();
 
             for (namespace, _metadata) in pipeline_metadata.metadata.iter() {
-                match Ingest::prepare_arrow_schema(&namespace, flatten) {
+                match Ingest::prepare_arrow_schema_with_metadata(&namespace, &pipeline_metadata.metadata, flatten) {
                     Ok(_t) => {}
                     Err(e) => {
                         println!("Failed to prepare arrow schema: {}", e);

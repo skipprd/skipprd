@@ -364,6 +364,7 @@ mod tests {
             determined_type: "Int32".to_string(),
             determined_type_values: "".to_string(),
             evolution: Box::new(Default::default()),
+            repetition_count: 1,
         };
 
         let mut index = IndexBuilder::new(metadata);

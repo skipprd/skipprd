@@ -6,12 +6,14 @@ use chrono::{DateTime, NaiveDateTime};
 use serde_json::{Map, Value};
 use std::borrow::BorrowMut;
 use std::collections::HashMap;
+use std::fmt::Debug;
 
 
 use crate::discover::evolution::Evolution;
 use crate::ingest::fast_ingest::DEFAULT_NESTED_MESSAGE;
 
 
+#[derive(Debug)]
 pub struct ResolvedFieldValue {
     pub(crate) field: String,
     pub(crate) value: Value,
@@ -473,6 +475,8 @@ pub fn set_value(
                 // }
             } else if data_type == "array" {
 
+                let flatten = Config::get_transform_flatten_events();
+                
                 if metadata.get(field).unwrap().determined_type_values == "record"
                     && value.is_array() {
 
@@ -480,18 +484,24 @@ pub fn set_value(
 
                     for (i, sub_value) in value.as_array().unwrap().iter().enumerate() {
 
+                        // let index = flatten ? &i.to_string() : &0.to_string();
+                        let index = match flatten {
+                            true => &i.to_string(),
+                            false => &0.to_string()
+                        };
+                        
                         match metadata
                             .get(&field.to_string())
                             .unwrap()
                             .fields
-                            .get(&0.to_string())
+                            .get(index)
                         {
                             Some(_t) => (),
                             None => {
                                 // println!("({}.array) no metadata for {} => {} with value: {}", data_type, &field.to_string(), i.to_string(), sub_value);
                                 // discover_ingest(&field.to_string(), value, metadata, updatedSchema, flatten);
                                 discover_ingest(
-                                    &0.to_string(),
+                                    index,
                                     sub_value,
                                     Some(field),
                                     Some(data_type),
@@ -501,12 +511,17 @@ pub fn set_value(
                             }
                         }
 
+                        let parent_type = match flatten {
+                            true => Some("record"),
+                            false => Some("array")
+                        };
+                        
                         let foo = set_value(
                             "record",
-                            &0.to_string(),
+                            index,
                             sub_value,
                             Some(field),
-                            Some("array"),
+                            parent_type,
                             &mut metadata.get_mut(field).unwrap().fields,
                             updated_schema,
                             true,
@@ -913,11 +928,7 @@ pub fn discover_ingest(
 
     let flatten = Config::get_transform_flatten_events();
 
-    if parent_field.is_some() && parent_data_type != Some("array")  {
-        AnalyseSchema::determine_field_types(metadata, parent_data_type, parent_field, flatten);
-    } else {
-        AnalyseSchema::determine_field_types(metadata, None, None, flatten);
-    }
+    AnalyseSchema::determine_field_types(metadata, parent_data_type, flatten);
 
     // discoverd_data_type = metadata.get(field).unwrap().determined_type;
 
@@ -1014,6 +1025,7 @@ mod tests_set_date {
                 out_field_name: String::from(field),
                 determined_type: String::from("date"),
                 determined_type_values: "".to_string(),
+                repetition_count: 1,
             },
         );
 

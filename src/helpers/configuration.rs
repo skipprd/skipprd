@@ -29,8 +29,8 @@ use reqwest::header::HeaderValue;
 use reqwest::header::{HeaderMap, HeaderName};
 use reqwest::{Client, StatusCode};
 
-use crate::discover::{Metadata, PipelineMetadata};
-use crate::{flatten_metadata, METADATA};
+use crate::discover::{Metadata, OutputMetadata, PipelineMetadata};
+use crate::{METADATA};
 
 
 use crate::helpers::license::{HAS_LICENSE, LicenseChecker};
@@ -1629,28 +1629,19 @@ impl Config {
                     lock.insert(namespace.clone(), default_message);
                 }
 
-                Ingest::prepare_arrow_schema(&namespace, flatten).unwrap();
+                Ingest::prepare_arrow_schema_with_metadata(&namespace, metadata, flatten).unwrap();
 
                 if Config::get_pipeline_output_plugin_name() != ""
                     && Config::get_pipeline_output_plugin_name() == "athena"
                 {
+                    let mut output_metadata: OutputMetadata = OutputMetadata::new();
                     if flatten {
-                        let mut out_meta: HashMap<String, Metadata> = HashMap::new();
-                        flatten_metadata(metadata.get(namespace).unwrap(), &mut out_meta);
-
-                        let mut output_metadata: HashMap<String, Metadata> = HashMap::new();
-                        let mut flat: Metadata = Metadata::new().unwrap();
-                        flat.fields = Box::new(out_meta);
-                        output_metadata.insert(namespace.clone(), flat);
-
-                        AwsAthena::create_or_update_schema(
-                            &namespace,
-                            &output_metadata.get(namespace).unwrap(),
-                        )
-                            .await;
+                        output_metadata = OutputMetadata::from_flatterened_metadata(metadata.get(namespace).unwrap());
                     } else {
-                        AwsAthena::create_or_update_schema(&namespace, &schema).await;
+                        output_metadata = OutputMetadata::from_metadata(metadata.get(namespace).unwrap());
                     }
+
+                    AwsAthena::create_or_update_schema(&namespace, &output_metadata).await;
                 }
             }
         } else {
