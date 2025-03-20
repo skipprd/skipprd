@@ -1,4 +1,4 @@
-use chrono::{DateTime, FixedOffset, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use memory_stats::memory_stats;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
@@ -501,21 +501,39 @@ impl Helpers {
     }
 
     pub fn parse_date_from_string(date_str: &str, format: &str) -> Result<DateTime<Utc>, String> {
-
-        return match DateTime::parse_from_str(date_str, format) {
+        // First try RFC3339 parsing if this looks like an ISO8601 format
+        if date_str.contains('T') && (date_str.contains('Z') || date_str.contains('+')) {
+            if let Ok(date) = DateTime::parse_from_rfc3339(date_str) {
+                return Ok(DateTime::<Utc>::from(date));
+            }
+        }
+        
+        // Try direct DateTime parsing with timezone
+        match DateTime::parse_from_str(date_str, format) {
             Ok(date) => {
-                Ok(DateTime::<Utc>::from(date))
+                return Ok(DateTime::<Utc>::from(date));
             },
             Err(_) => {
+                // Try as NaiveDateTime (for formats without timezone)
                 match NaiveDateTime::parse_from_str(date_str, format) {
-                    Ok(date) => Ok(DateTime::<Utc>::from_naive_utc_and_offset(date, Utc)),
+                    Ok(date) => return Ok(DateTime::<Utc>::from_naive_utc_and_offset(date, Utc)),
                     Err(_) => {
-                        Err(format!("Could not parse date {} with format {}", date_str, format))
+                        // Try as NaiveDate (for date-only formats)
+                        if format.contains("%Y") && format.contains("%m") && format.contains("%d") && 
+                           !format.contains("%H") {
+                            match NaiveDate::parse_from_str(date_str, format) {
+                                Ok(date) => return Ok(DateTime::<Utc>::from_naive_utc_and_offset(
+                                    date.and_hms(0, 0, 0), Utc)),
+                                Err(_) => {}
+                            }
+                        }
                     }
                 }
             }
         };
 
+        // If all parsing attempts fail
+        Err(format!("Could not parse date {} with format {}", date_str, format))
     }
 
     pub fn get_nested_value_from_dot_notation(
