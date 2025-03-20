@@ -113,6 +113,8 @@ use crate::sql::operators::alter_column::alter_column_type;
 use crate::sql::operators::drop_column::alter_column_drop;
 use crate::sql::parser::{PipelineToggle, SParser, Statement};
 use crate::sql::query::query;
+use crate::sql::docs::{DocFormat, get_docs_in_format};
+use crate::sql::doc_parser::SqlDocParser;
 
 // use crate::plugins::pcap_input::DataSourcePcapPlugin;
 
@@ -293,7 +295,123 @@ async fn main() {
             // Config::init().await;
             schema(&options.pipeline).await;
         }
-
+        Mode::SqlHelp(options) => {
+            // Handle SQL help and documentation
+            if options.output.is_some() {
+                // Generate documentation and save to file
+                let output_path = options.output.unwrap();
+                let format = match options.format.as_deref() {
+                    Some("html") => DocFormat::Html,
+                    Some("json") => DocFormat::Json,
+                    _ => DocFormat::Markdown,
+                };
+                
+                let content = get_docs_in_format(format);
+                
+                match std::fs::File::create(&output_path) {
+                    Ok(mut file) => {
+                        match std::io::Write::write_all(&mut file, content.as_bytes()) {
+                            Ok(_) => {
+                                println!("SQL documentation generated and saved to: {}", output_path);
+                            },
+                            Err(e) => {
+                                println!("Error: Failed to write to file: {}", e);
+                                process::exit(1);
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        println!("Error: Failed to create file: {}", e);
+                        process::exit(1);
+                    }
+                }
+            } else if options.command.is_some() {
+                // Explain specific SQL command
+                let command = options.command.unwrap();
+                match SqlDocParser::parse_and_document(&command) {
+                    Ok(Some(doc)) => {
+                        println!("SQL Command: {}", doc.name);
+                        println!();
+                        println!("Description: {}", doc.description);
+                        println!();
+                        println!("Syntax: {}", doc.syntax);
+                        println!();
+                        println!("Example: {}", doc.example);
+                    },
+                    Ok(None) => {
+                        println!("Unknown SQL command or standard SQL query.");
+                        println!("If this is a standard SQL query, it may be supported by the system but not specifically documented.");
+                    },
+                    Err(e) => {
+                        println!("Error: {}", e);
+                    }
+                }
+            } else {
+                // Show all SQL commands
+                println!("Supported SQL Commands:");
+                println!();
+                
+                // Group by category for better readability
+                let mut schema_cmds = Vec::new();
+                let mut pipeline_cmds = Vec::new();
+                let mut data_cmds = Vec::new();
+                let mut query_cmds = Vec::new();
+                
+                for doc in SqlDocParser::list_all_statements() {
+                    if doc.name.contains("SCHEMA") {
+                        schema_cmds.push(doc);
+                    } else if doc.name.contains("PIPELINE") {
+                        pipeline_cmds.push(doc);
+                    } else if doc.name.contains("TABLE") || doc.name.contains("DATABASE") {
+                        data_cmds.push(doc);
+                    } else {
+                        query_cmds.push(doc);
+                    }
+                }
+                
+                if !schema_cmds.is_empty() {
+                    println!("Schema Operations:");
+                    println!("-----------------");
+                    for doc in schema_cmds {
+                        println!("  {} - {}", doc.name, doc.description);
+                    }
+                    println!();
+                }
+                
+                if !pipeline_cmds.is_empty() {
+                    println!("Pipeline Operations:");
+                    println!("-------------------");
+                    for doc in pipeline_cmds {
+                        println!("  {} - {}", doc.name, doc.description);
+                    }
+                    println!();
+                }
+                
+                if !data_cmds.is_empty() {
+                    println!("Data Operations:");
+                    println!("---------------");
+                    for doc in data_cmds {
+                        println!("  {} - {}", doc.name, doc.description);
+                    }
+                    println!();
+                }
+                
+                if !query_cmds.is_empty() {
+                    println!("Query Operations:");
+                    println!("----------------");
+                    for doc in query_cmds {
+                        println!("  {} - {}", doc.name, doc.description);
+                    }
+                    println!();
+                }
+                
+                println!("For more details on a specific command, use:");
+                println!("  skippr sql-help --command \"<SQL COMMAND>\"");
+                println!();
+                println!("To generate documentation, use:");
+                println!("  skippr sql-help --output <FILE_PATH> [--format md|html|json]");
+            }
+        }
     }
 }
 

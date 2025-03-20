@@ -50,6 +50,20 @@ impl SkipprKeyword {
     }
 }
 
+// After the SkipprKeyword enum, add another enum
+enum SkipprShowCommand {
+    DOCS,
+}
+
+impl SkipprShowCommand {
+    fn from_str(s: &str) -> Option<SkipprShowCommand> {
+        match s.to_uppercase().as_str() {
+            "DOCS" => Some(SkipprShowCommand::DOCS),
+            _ => None
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SchemaDumpSource {
     // `SCHEMA DUMP <object_name> TO <schema file>`
@@ -240,6 +254,8 @@ pub enum Statement {
     AlterSchemaDropColumn(AlterSchemaDropColumn),
     AlterSchemaAlterColumnType(AlterSchemaAlterColumnType),
     TableDrop(TableDropStatement),
+    /// Extension: `SHOW DOCS`
+    ShowDocs,
 }
 
 
@@ -309,6 +325,25 @@ impl<'a> SParser<'a> {
         //             Keyword::DESCRIBE => {
         return match self.parser.peek_token().token {
             Token::Word(w) => {
+                if w.value.to_uppercase() == "SHOW" {
+                    self.parser.next_token(); // SHOW
+                    
+                    // Parse the next token to see if it's a recognized show command
+                    if let Token::Word(w) = self.parser.peek_token().token {
+                        match SkipprShowCommand::from_str(&w.value) {
+                            Some(SkipprShowCommand::DOCS) => {
+                                self.parser.next_token(); // DOCS
+                                return Ok(Statement::ShowDocs);
+                            },
+                            _ => {
+                                return Err(ParserError::ParserError("Unrecognized SHOW command".to_string()));
+                            }
+                        }
+                    } else {
+                        return Err(ParserError::ParserError("Expected command after SHOW".to_string()));
+                    }
+                }
+                
                 match SkipprKeyword::from_str(&w.value) {
                     Some(SkipprKeyword::DUMP) => {
                         self.parser.next_token(); // DUMP

@@ -21,6 +21,7 @@ pub enum Mode {
     Sync(SyncOptions),
     Query(QueryOptions),
     Schema(SchemaOptions),
+    SqlHelp(SqlHelpOptions),
     // ... other modes
 }
 
@@ -50,4 +51,19 @@ pub struct SchemaOptions {
     /// The schema to use
     #[arg(short, long)]
     pub(crate) pipeline: String,
+}
+
+#[derive(Parser, Clone, PartialEq)]
+pub struct SqlHelpOptions {
+    /// The SQL command to get help for. If not provided, shows all commands.
+    #[arg(short, long)]
+    pub(crate) command: Option<String>,
+    
+    /// Generate documentation and save to file
+    #[arg(short, long)]
+    pub(crate) output: Option<String>,
+    
+    /// Format for documentation output (md, html, json)
+    #[arg(short, long, default_value = "md")]
+    pub(crate) format: Option<String>,
 }

@@ -34,6 +34,7 @@ use object_store::{ObjectStore, parse_url};
 use url::Url;
 use crate::helpers::Helpers;
 use crate::ingest_work::Ingest;
+use crate::sql::{SqlDocParser, SqlStatementDoc};
 
 
 fn datediff(args: &[ArrayRef]) -> Result<ArrayRef, DataFusionError> {
@@ -86,12 +87,103 @@ fn as_string_array(array: &ArrayRef) -> Result<&StringArray, DataFusionError> {
     }
 }
 
+/// Documents a SQL query, returning information about what it does
+pub async fn document_query(sql_str: &str) -> Result<Option<SqlStatementDoc>, String> {
+    SqlDocParser::parse_and_document(sql_str)
+}
+
+/// Function to explain a SQL query in plain English before executing it
+pub async fn explain_query(sql_str: &str) -> String {
+    match document_query(sql_str).await {
+        Ok(Some(doc)) => {
+            format!(
+                "This query is a {} statement.\n\n\
+                 What it does: {}\n\n\
+                 The correct syntax is: {}\n\n\
+                 Example usage: {}", 
+                doc.name, doc.description, doc.syntax, doc.example
+            )
+        },
+        Ok(None) => {
+            "I couldn't identify this type of SQL query. It might be a standard SQL query that's not specifically documented.".to_string()
+        },
+        Err(e) => {
+            format!("Error analyzing query: {}", e)
+        }
+    }
+}
 
 pub async fn query(sql_str: &str) {
 
     let mut parser = SParser::new(sql_str).unwrap();
 
     match parser.parse_statement() {
+        Ok(Statement::ShowDocs) => {
+            // Print SQL documentation
+            println!("SQL Documentation:");
+            println!("=================\n");
+            
+            // Group by category for better readability
+            let mut schema_cmds = Vec::new();
+            let mut pipeline_cmds = Vec::new();
+            let mut data_cmds = Vec::new();
+            let mut query_cmds = Vec::new();
+            
+            for doc in SqlDocParser::list_all_statements() {
+                if doc.name.contains("SCHEMA") {
+                    schema_cmds.push(doc);
+                } else if doc.name.contains("PIPELINE") {
+                    pipeline_cmds.push(doc);
+                } else if doc.name.contains("TABLE") || doc.name.contains("DATABASE") {
+                    data_cmds.push(doc);
+                } else {
+                    query_cmds.push(doc);
+                }
+            }
+            
+            if !schema_cmds.is_empty() {
+                println!("Schema Operations:");
+                println!("-----------------");
+                for doc in schema_cmds {
+                    println!("  {} - {}", doc.name, doc.description);
+                    println!("  Syntax: {}", doc.syntax);
+                    println!("  Example: {}\n", doc.example);
+                }
+            }
+            
+            if !pipeline_cmds.is_empty() {
+                println!("Pipeline Operations:");
+                println!("-------------------");
+                for doc in pipeline_cmds {
+                    println!("  {} - {}", doc.name, doc.description);
+                    println!("  Syntax: {}", doc.syntax);
+                    println!("  Example: {}\n", doc.example);
+                }
+            }
+            
+            if !data_cmds.is_empty() {
+                println!("Data Operations:");
+                println!("---------------");
+                for doc in data_cmds {
+                    println!("  {} - {}", doc.name, doc.description);
+                    println!("  Syntax: {}", doc.syntax);
+                    println!("  Example: {}\n", doc.example);
+                }
+            }
+            
+            if !query_cmds.is_empty() {
+                println!("Query Operations:");
+                println!("----------------");
+                for doc in query_cmds {
+                    println!("  {} - {}", doc.name, doc.description);
+                    println!("  Syntax: {}", doc.syntax);
+                    println!("  Example: {}\n", doc.example);
+                }
+            }
+            
+            println!("For more detailed documentation, run:");
+            println!("  skippr sql-help");
+        },
         Ok(Statement::DatabaseDrop(stmt)) => {
             let db_name = stmt.database.clone();
 
@@ -464,6 +556,10 @@ pub async fn query(sql_str: &str) {
         //     println!("Unknown SQL Dialect. {}", e);
         // },
         _ => {
+
+            // Print the sql parser.parse_statement() and exit
+            println!("SQL syntax not found: {:?}", parser.parse_statement());
+            process::exit(1);
 
             let mut table_name = "".to_string();
 
