@@ -1,43 +1,33 @@
 use crate::buffer::BufferChunker;
 use crate::converters::skippr_hive::SkipprHive;
-use crate::discover::{Metadata, OutputMetadata, PipelineMetadata};
+use crate::discover::{OutputMetadata, PipelineMetadata};
 use crate::helpers::configuration::{Config, PluginConfig};
 use crate::helpers::Helpers;
 use crate::{METADATA, METRICS};
 use aws_sdk_athena::types::{EncryptionConfiguration, EncryptionOption, ResultConfiguration, ResultConfigurationUpdates, Tag, WorkGroupConfiguration, WorkGroupConfigurationUpdates};
 use aws_sdk_athena::Client as AthenaClient;
-use aws_sdk_glue::types::{Column, DatabaseInput, PartitionIndex, PartitionInput, PartitionValueList, SerDeInfo, StorageDescriptor, Table, TableInput};
+use aws_sdk_glue::types::{Column, DatabaseInput, PartitionIndex, PartitionInput, SerDeInfo, StorageDescriptor, TableInput};
 use aws_sdk_glue::Client as GlueClient;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::{Client as S3Client, Error};
-use chrono::prelude::*;
 
 use std::collections::HashMap;
-use std::{fs, io};
-use std::fs::File;
-use std::io::{BufReader, Read};
-use std::path::Path;
-use std::sync::Arc;
+use std::{io};
+use std::io::{Read};
 use async_trait::async_trait;
 use aws_sdk_glue::error::SdkError;
 use aws_sdk_glue::operation::get_table::{GetTableError, GetTableOutput};
-use aws_sdk_s3::types::{Delete, Object, ObjectIdentifier};
+use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use bytes::Bytes;
 use datafusion::physical_plan::SendableRecordBatchStream;
-use futures::{Stream, StreamExt};
-use parquet::arrow::arrow_reader::ArrowReaderBuilder;
+use futures::{StreamExt};
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 
 use serde_derive::Deserialize;
-use tokio::join;
-use crate::helpers::offsets::Offsets;
-use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::ingest::partition_time::TimePartitioner;
-use crate::metrics::MetricsStatus;
 use crate::plugins::DataOutputPlugin;
-use crate::plugins::file_input::DataSourceLocalFilePluginConfig;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataOutputAwsAthenaPluginConfig {

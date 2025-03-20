@@ -12,29 +12,22 @@ use once_cell::sync::Lazy;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::{fs, io};
 
 
 use std::io::{BufWriter, Write};
 use std::ops::Deref;
-use std::os::fd::AsRawFd;
 
-use std::path::PathBuf;
 use std::process::exit;
 use std::string::ToString;
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Instant, SystemTime};
 use threadpool::ThreadPool;
 use std::sync::mpsc::channel;
 extern crate num_cpus;
 use std::sync::mpsc::Sender;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::atomic::Ordering::AcqRel;
-use std::thread::sleep;
-use arrow::json::ReaderBuilder;
-use arrow::record_batch::RecordBatch;
-use dashmap::{DashMap, DashSet};
-use nix::libc;
+use dashmap::{DashMap};
 
 use parquet::data_type::AsBytes;
 use crate::ingest::fast_ingest::{create_default_nested_message, DEFAULT_NESTED_MESSAGE, fast_path_ingest};
@@ -44,21 +37,19 @@ use crate::ingest::fast_ingest::{create_default_nested_message, DEFAULT_NESTED_M
 
 use tokio::io::AsyncWriteExt;
 use helpers::timed_rwlock::TimedRwLock;
-use crate::buffer::ingest_buffer::{Buffers, IngestBufferBatch, IngestRecord, OffsetKeySerialize, WalFile};
+use crate::buffer::ingest_buffer::{Buffers, IngestBufferBatch, IngestRecord};
 use crate::serdes::csv::SerderCsv;
 
 use crate::serdes::xml::SerdeXml;
 // use crate::converters::skippr_avro::convert_skippr_to_avro_field_types;
 
-use arrow::datatypes::Schema;
 use arrow::error::ArrowError;
 use arrow::datatypes;
 use arrow_schema::SchemaRef;
 use serde_derive::{Deserialize, Serialize};
 use tokio::runtime;
-use crate::cli::{Cli, CLI_MODE, Mode};
+use crate::cli::{CLI_MODE, Mode};
 use crate::converters::skippr_arrow::convert_skippr_to_arrow;
-use crate::plugins::athena::DataOutputAwsAthenaPlugin;
 use crate::plugins::DataOutputPlugin;
 
 

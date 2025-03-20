@@ -35,7 +35,7 @@ impl<T> TimedRwLock<T> {
         
       
         // try_read() in loop till success and then return result
-        let mut result: RwLockReadGuard<'_, T>;
+        let result: RwLockReadGuard<'_, T>;
         
         let mut i = 0;
         loop {
@@ -77,7 +77,7 @@ impl<T> TimedRwLock<T> {
         };
 
         // try_read() in loop till success and then return result
-        let mut result: RwLockWriteGuard<'_, T>;
+        let result: RwLockWriteGuard<'_, T>;
 
         let mut i = 0;
         loop {

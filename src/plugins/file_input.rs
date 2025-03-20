@@ -4,7 +4,6 @@ use std::io::prelude::*;
 
 use std::{fs};
 use std::io::BufReader;
-use std::ops::{Deref, DerefMut};
 use std::path::Path;
 
 
@@ -27,8 +26,6 @@ use glob::{glob_with};
 use futures::stream::StreamExt;
 
 use serde_derive::Deserialize;
-use crate::helpers::timed_rwlock::TimedRwLock;
-use crate::plugins::athena::DataOutputAwsAthenaPlugin;
 use crate::plugins::DataOutputPlugin;
 
 #[derive(Debug, Deserialize, Clone)]

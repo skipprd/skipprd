@@ -1,6 +1,6 @@
 use sled;
 use Result;
-use libc::{exit, sleep};
+use libc::{sleep};
 
 use crate::helpers::configuration::Config;
 use serde::__private::de::IdentifierDeserializer;
@@ -229,7 +229,7 @@ impl Offsets {
         let mut i = 0;
         let mut count = 0;
         
-        let mut pause_modus = key_count / 60; // 60 sec total pause for sled gc (plus insert time)
+        let pause_modus = key_count / 60; // 60 sec total pause for sled gc (plus insert time)
         let pause_modus = pause_modus.max(1000);
         
         for kv in db.iter() {

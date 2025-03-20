@@ -4,7 +4,7 @@ extern crate serde_json;
 use std::error::Error;
 use crate::helpers::configuration::Config;
 use once_cell::sync::Lazy;
-use reqwest::{header::HeaderName, Client, Url};
+use reqwest::{header::HeaderName, Client};
 use serde_derive::{Deserialize, Serialize};
 
 use thiserror::Error;

@@ -1,13 +1,10 @@
 use std::any::Any;
 
 use std::collections::{BTreeMap, HashMap};
-use std::fs::{File};
 use std::io::Read;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64};
-use std::time::SystemTime;
 
 
-use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
+use chrono::{NaiveDateTime, TimeZone, Utc};
 use once_cell::sync::Lazy;
 
 use serde_derive::{Deserialize, Serialize};
@@ -36,9 +33,7 @@ use crate::serdes::json::SerdeJson;
 
 use crate::discover::evolution::Evolution;
 // use crate::discover::{Metadata, OutputMetadata};
-use crate::helpers::offsets::OffsetTypes;
 use crate::helpers::timed_rwlock::TimedRwLock;
-use crate::ingest_work::Deadletter;
 
 pub static NUM_ANALYSED_RECORDS: Lazy<TimedRwLock<u64>> = Lazy::new(|| TimedRwLock::new("num_analyised_records".to_string(), 0));
 
@@ -204,7 +199,7 @@ impl crate::discover::PipelineMetadata {
     pub(crate) fn append_sql(&mut self, sql_str: String) {
         let sql = self.sql.as_mut();
         match sql {
-            Some(mut pipeline_sql) => {
+            Some(pipeline_sql) => {
                 pipeline_sql.push(sql_str);
             },
             None => {
@@ -451,7 +446,7 @@ impl Metadata {
 
         if current_metadata.fields.get_mut(field).is_some() {
             if fields.len() == 0 {
-                let mut last = current_metadata.fields.remove(field);
+                let last = current_metadata.fields.remove(field);
                 return None;
             } else {
                 let next_metadata = current_metadata.fields.get_mut(field).unwrap();

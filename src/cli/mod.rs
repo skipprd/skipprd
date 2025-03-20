@@ -1,5 +1,4 @@
 use std::string::ToString;
-use std::sync::Arc;
 use clap::Parser;
 use once_cell::sync::Lazy;
 use crate::helpers::timed_rwlock::TimedRwLock;

@@ -3,22 +3,16 @@ use crate::helpers::configuration::Config;
 
 
 
-use std::{fs, io};
+use std::{fs};
 use std::io::Write;
 
 
 use std::path::Path;
-use std::sync::Arc;
 use async_trait::async_trait;
-use chrono::{Datelike, DateTime, Timelike};
 use datafusion::execution::SendableRecordBatchStream;
-use parquet::arrow::ArrowWriter;
-use crate::helpers::offsets::Offsets;
-use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::ingest::partition_time::TimePartitioner;
 use crate::plugins::athena::DataOutputAwsAthenaPlugin;
 use crate::plugins::DataOutputPlugin;
-use crate::plugins::file_input::DataSourceLocalFilePlugin;
 
 
 pub struct DataOutputFilePlugin {

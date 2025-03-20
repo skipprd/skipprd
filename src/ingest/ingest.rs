@@ -2,7 +2,6 @@ use crate::discover::date_formats::DateFormats;
 use crate::discover::{AnalyseSchema, Metadata};
 use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
-use chrono::{DateTime, NaiveDateTime};
 use serde_json::{Map, Value};
 use std::borrow::BorrowMut;
 use std::collections::HashMap;

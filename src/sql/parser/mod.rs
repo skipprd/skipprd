@@ -1,17 +1,13 @@
 use core::fmt;
 use sqlparser::dialect::GenericDialect;
 use std::collections::VecDeque;
-use datafusion::sql::parser::{DFParser};
 use datafusion::sql::{sqlparser};
-use datafusion::sql::sqlparser::ast::{JsonOperator, ObjectName};
+use datafusion::sql::sqlparser::ast::{ObjectName};
 use datafusion::sql::sqlparser::dialect::Dialect;
 use datafusion::sql::sqlparser::keywords::Keyword;
 use datafusion::sql::sqlparser::parser::{Parser, ParserError};
 use datafusion::sql::sqlparser::tokenizer::{Token, Tokenizer};
-use icu::properties::sets::print;
-use indexmap::Equivalent;
 use sqlparser::ast::{ArrayElemTypeDef, DataType, Ident};
-use sqlparser::tokenizer::Token::EOF;
 
 // Keywords used in Skippr SQL
 // Defined as a separate enum to avoid conflicts with `sqlparser::ast::Keyword`

@@ -11,7 +11,6 @@ use std::fmt;
 use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::SystemTime;
-use chrono::{DateTime, Utc};
 use tokio::sync::{RwLock};
 use crate::METRICS;
 

@@ -1,5 +1,5 @@
-use crate::discover::{Metadata, SkipprTypes};
-use crate::sql::parser::{AlterSchemaAlterColumnType, AlterSchemaDropColumn};
+use crate::discover::{Metadata};
+use crate::sql::parser::{AlterSchemaDropColumn};
 
 pub fn alter_column_drop(metadata: &mut Metadata, stmt: &AlterSchemaDropColumn) -> Result<Metadata, String> {
 

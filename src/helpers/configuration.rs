@@ -3,7 +3,6 @@ use std::fmt::{Debug};
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
-use std::ops::Deref;
 
 use std::path::Path;
 
@@ -1336,7 +1335,7 @@ impl Config {
         let metadata_dir = format!("{}/metadata/skippr_{}/workspace_{}/pipeline_{}", data_dir, env, workspace, pipeline);
         let metadata_path = format!("{}/metadata.json", metadata_dir);
 
-        let mut pipeline_metadata: Result<PipelineMetadata, bool> = match fs::metadata(&metadata_path) {
+        let pipeline_metadata: Result<PipelineMetadata, bool> = match fs::metadata(&metadata_path) {
             Ok(metadata) => {
                 if metadata.is_file() {
                     let file = File::open(&metadata_path).unwrap();
@@ -1375,7 +1374,7 @@ impl Config {
                     .send()
                     .await;
 
-                let mut pipeline_metadata: Result<PipelineMetadata, bool> = match response {
+                let pipeline_metadata: Result<PipelineMetadata, bool> = match response {
                     Ok(resp) => match resp.status() {
                         StatusCode::OK => {
                             let json_result = resp.json::<PipelineMetadata>().await;
@@ -1437,7 +1436,7 @@ impl Config {
             }
         };
 
-        let mut pipeline_metadata: Result<PipelineMetadata, bool> = match pipeline_metadata {
+        let pipeline_metadata: Result<PipelineMetadata, bool> = match pipeline_metadata {
             Ok(mut metadata) => {
 
                 // bit of a hack to store the pipeline config that we need to maintain.

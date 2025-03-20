@@ -1,4 +1,4 @@
-use crate::discover::{Metadata, PipelineMetadata};
+use crate::discover::{PipelineMetadata};
 use crate::sql::parser::TableDropStatement;
 
 /// Removes a table from the metadata

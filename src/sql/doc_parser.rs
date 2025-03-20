@@ -1,8 +1,3 @@
-use std::collections::HashMap;
-use sqlparser::ast::{ObjectName, Ident};
-use sqlparser::dialect::GenericDialect;
-use sqlparser::parser::{Parser, ParserError};
-use sqlparser::tokenizer::Tokenizer;
 
 use crate::sql::docs::{SqlStatementDoc, get_sql_docs};
 use crate::sql::parser::{SParser, Statement, PipelineToggle};

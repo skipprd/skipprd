@@ -1,13 +1,11 @@
 mod arr;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use arrow::datatypes::Schema;
-use arrow::error::ArrowError;
 
 // mod thread_pool;
 // use thread_pool::ThreadPool;
 mod ingest_work;
-use sql::parser;
 
 extern crate nix;
 
@@ -17,9 +15,7 @@ use std::{io, process};
 
 use std::collections::HashMap;
 
-use std::fs::{File, OpenOptions};
 
-use std::io::{BufReader, BufWriter};
 use std::ops::{Add};
 
 use std::sync::{Arc};
@@ -27,10 +23,9 @@ use std::thread;
 
 
 use std::fs;
-use std::os::fd::AsRawFd;
 
 
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::sleep;
 use std::time::Instant;
 
@@ -46,8 +41,7 @@ mod metrics;
 mod internalfields;
 
 mod discover;
-use crate::discover::{AnalyseSchema, OutputMetadata, PipelineMetadata};
-use crate::discover::Metadata;
+use crate::discover::{AnalyseSchema, PipelineMetadata};
 mod converters;
 // use self::converters::avro_parquet::AvroSchema;
 mod cli;
@@ -62,11 +56,8 @@ use clap::Parser;
 use signal_hook::iterator::Signals;
 
 use std::panic;
-use std::path::{Path, PathBuf};
 use std::string::ToString;
 use datafusion::common::ExprSchema;
-use datafusion::physical_plan::memory::MemoryStream;
-use datafusion::physical_plan::SendableRecordBatchStream;
 
 
 use once_cell::sync::Lazy;
@@ -91,7 +82,7 @@ use crate::plugins::s3_input::DataSourceS3Plugin;
 // use crate::plugins::s3_inventory::DataSourceS3InventoryPlugin;
 
 
-use crate::metrics::{LAST_MESSAGES_TOTAL, Metrics, MetricsStatus};
+use crate::metrics::{Metrics, MetricsStatus};
 use crate::plugins::file_input::DataSourceLocalFilePlugin;
 // use crate::plugins::file_output::DataOutputFilePlugin;
 // use crate::plugins::s3_output::DataOutputS3Plugin;
@@ -99,19 +90,12 @@ use crate::plugins::file_input::DataSourceLocalFilePlugin;
 // use crate::plugins::stdout_output::DataOutputStdoutPlugin;
 
 use datafusion::prelude::*;
-use icu::properties::sets::print;
-use sqlparser::test_utils::alter_table_op_with_name;
-use tokio::fs::metadata;
-use crate::buffer::ingest_buffer::{Buffers, TOTAL_ROWS, WAL_PARTITION_INDEX};
-use crate::helpers::Helpers;
+use crate::buffer::ingest_buffer::{Buffers, WAL_PARTITION_INDEX};
 // use crate::buffer::BufferChunker;
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::ingest_work::Ingest;
 use crate::plugins::DataOutputPlugin;
 use crate::plugins::file_output::DataOutputFilePlugin;
-use crate::sql::operators::alter_column::alter_column_type;
-use crate::sql::operators::drop_column::alter_column_drop;
-use crate::sql::parser::{PipelineToggle, SParser, Statement};
 use crate::sql::query::query;
 use crate::sql::docs::{DocFormat, get_docs_in_format};
 use crate::sql::doc_parser::SqlDocParser;
@@ -556,12 +540,12 @@ async fn sync() {
         }
     }
 
-    let mut pipeline_metadata: PipelineMetadata;
+    let pipeline_metadata: PipelineMetadata;
 
     // @todo - we don't cache Pipeline metatdata, as currently SQL statements are not stored in metadata.
     //         Refactor to accept SQL directly via database connection
     pipeline_metadata = match Config::get_metadata().await {
-        Ok(mut pipeline_metadata) => {
+        Ok(pipeline_metadata) => {
             println!("Found existing Skippr metadata");
 
             match pipeline_metadata.sql {
@@ -996,7 +980,7 @@ async fn sync() {
     }
 
     {
-        let mut counter_lock = METRICS.write();
+        let counter_lock = METRICS.write();
         
         println!("Messages Fixed: {}", counter_lock.ingeted_slow_total);
         println!("Deadletter Total: {}", counter_lock.deadletters_total);

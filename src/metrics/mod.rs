@@ -238,7 +238,7 @@ impl Metrics {
         exit_code: Option<i8>,
     ) -> Result<(), Box<dyn std::error::Error>> {
 
-        let mut metrics: Metrics;
+        let metrics: Metrics;
         {
             metrics = METRICS.read().clone();
         }

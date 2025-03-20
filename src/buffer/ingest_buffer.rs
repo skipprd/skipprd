@@ -1,61 +1,37 @@
 use std::fs::{File, OpenOptions};
 use std::{fs, io,};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
-use std::io::{BufRead, BufReader, Cursor, Read, Seek, Write};
-use std::ops::{Deref, Index};
+use std::io::{BufReader, Read, Seek, Write};
+use std::ops::{Index};
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::{Arc};
-use std::time::{Instant, SystemTime};
-use arrow::array::{Array, ArrayRef, RecordBatch};
+use std::time::{SystemTime};
+use arrow::array::{Array, RecordBatch};
 use arrow::json::ReaderBuilder;
-use arrow_schema::{ArrowError, DataType, Field, SchemaRef, Schema};
-use dashmap::{DashMap, Map};
+use arrow_schema::{ArrowError, SchemaRef};
 use glob::{glob_with, MatchOptions};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use arrow::compute::concat;
+use std::sync::atomic::{AtomicU64};
 use arrow::ipc::{CompressionType};
 use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
-use arrow::json::reader::Decoder;
-use arrow::json::writer::record_batches_to_json_rows;
-use arrow::record_batch::RecordBatchOptions;
 use bincode;
-use serde_cbor;
-use byteorder::LittleEndian;
-use datafusion::datasource::MemTable;
-use datafusion::execution::options::ArrowReadOptions;
-use datafusion::parquet::data_type::AsBytes;
 use datafusion::physical_plan::memory::MemoryStream;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
 use futures::FutureExt;
-use icu::properties::sets::print;
 use indexmap::IndexMap;
-use lazy_static::lazy_static;
-use libc::exit;
 use once_cell::sync::Lazy;
-use parquet::arrow::{arrow_to_parquet_schema, ArrowWriter};
-use parquet::arrow::arrow_writer::{ArrowLeafColumn, compute_leaves, get_column_writers};
-use parquet::basic::Compression;
-use parquet::file::properties::{ReaderProperties, WriterProperties};
-use parquet::file::reader::SerializedFileReader;
-use parquet::file::writer::SerializedFileWriter;
 use serde_derive::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use tokio::runtime::Runtime;
-use yaml_rust::Yaml::Hash;
-use zerocopy::U64;
-use crate::{ARROW_SCHEMA, METRICS, RUNNING, sync_output_plugin};
+use serde_json::{Value};
+use crate::{METRICS};
 use crate::buffer::BufferChunker;
 use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
-use crate::helpers::offsets::{Offset, OffsetKey, Offsets, OffsetTypes, OffsetValue};
+use crate::helpers::offsets::{OffsetKey, Offsets, OffsetTypes};
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::ingest_work::{Deadletter, Ingest};
-use crate::metrics::Metrics;
-use crate::plugins::athena::DataOutputAwsAthenaPlugin;
 use crate::plugins::DataOutputPlugin;
 
 pub static TOTAL_ROWS: Lazy<TimedRwLock<AtomicU64>> =
@@ -222,7 +198,7 @@ impl Buffers {
             index.bytes += bytes;
 
             for ((namespace, partition, time, shard), wal_files) in partitions.iter_mut() {
-                let mut wal_partition = index.index.entry((namespace.clone(), partition.clone(), time.clone(), shard.clone()))
+                let wal_partition = index.index.entry((namespace.clone(), partition.clone(), time.clone(), shard.clone()))
                     .or_insert_with(|| WalPartition {
                         files: Vec::new(),
                         namespace: namespace.clone(),
@@ -779,7 +755,7 @@ impl WalPartition {
 
     async fn apply_sql_on_ipc_record_batches(record_batches: Vec<RecordBatch>, sql: &str, schema_ref: SchemaRef) -> Result<Vec<arrow::array::RecordBatch>, Box<dyn std::error::Error>> {
 
-        let mut session_config = SessionConfig::new();
+        let session_config = SessionConfig::new();
         // session_config = session_config.set("datafusion.catalog.information_schema", "true".into());
         // session_config = session_config.set("datafusion.catalog.default_catalog", "skippr".into());
         // session_config = session_config.set("datafusion.execution.collect_statistics", "true".into());
@@ -933,7 +909,7 @@ impl WalFile {
 
         Self::seek_offset(&mut reader)?;
 
-        let mut stream_reader = StreamReader::try_new(reader, None)?;
+        let stream_reader = StreamReader::try_new(reader, None)?;
 
         let schema = stream_reader.schema();
 

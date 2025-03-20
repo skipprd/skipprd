@@ -6,7 +6,6 @@ use crate::ingest::fast_ingest::fast_set_value;
 use std::str::FromStr;
 use std::borrow::BorrowMut;
 use serde_derive::{Deserialize, Serialize};
-use url::form_urlencoded::Target;
 use crate::ingest::ingest::{discover_ingest, ResolvedFieldValue};
 
 
@@ -106,7 +105,7 @@ impl Evolution {
         parent_field: Option<&str>,
         parent_data_type: Option<&str>,
         metadata: &mut HashMap<String, Metadata>,
-        mut updated_schema: &mut String,
+        updated_schema: &mut String,
         flatten: bool
     ) -> Result<ResolvedFieldValue, Box<dyn std::error::Error>> {
 

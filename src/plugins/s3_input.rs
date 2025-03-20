@@ -12,13 +12,10 @@ use aws_sdk_s3::operation::get_object::{GetObjectError, GetObjectOutput};
 
 
 use std::time::Duration;
-use std::{fs, io};
-use std::collections::{HashSet};
-use std::fs::{ OpenOptions};
+use std::{fs};
 use aws_sdk_s3::types::Object;
 use futures::future::join_all;
 use futures::{StreamExt};
-use libc::sleep;
 
 use serde_derive::Deserialize;
 use once_cell::sync::Lazy;
@@ -27,7 +24,6 @@ use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::ingest_work::{Ingest, IngestBatch};
 
 use tokio::sync::Semaphore;
-use tokio::task;
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::plugins::DataOutputPlugin;
 

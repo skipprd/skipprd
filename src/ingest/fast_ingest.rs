@@ -1,11 +1,9 @@
 use std::collections::HashMap;
 
-use serde_json::{Value, json};
+use serde_json::{Value};
 use std::error::Error;
 use std::sync::Arc;
 
-use chrono::{DateTime, NaiveDateTime};
-use libc::exit;
 use once_cell::sync::Lazy;
 use serde_json::Map;
 

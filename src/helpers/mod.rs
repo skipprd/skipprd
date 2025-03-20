@@ -1,4 +1,4 @@
-use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use memory_stats::memory_stats;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
@@ -22,12 +22,11 @@ pub mod timed_rwlock;
 // let CLEAN_FIELD_CACHE = Arc::new(Mutex::new(HashMap<String, bool> = HashMap::new()));
 
 use crate::discover::date_formats::DateFormats;
-use crate::discover::{Metadata, OutputMetadata};
+use crate::discover::{Metadata};
 use crate::helpers::configuration::Config;
 use once_cell::sync::Lazy;
 use std::sync::{Arc};
-use dashmap::{DashMap, DashSet};
-use crate::helpers::timed_rwlock::TimedRwLock;
+use dashmap::{DashMap};
 use walkdir::WalkDir;
 
 // static CLEAN_FIELD_CACHE: Lazy<Mutex<i64>> = Lazy::new(|| Mutex::new(1));
