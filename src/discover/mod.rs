@@ -293,6 +293,26 @@ impl Metadata {
                         }
                     }
                 }
+            } else if val.determined_type == "array" && val.fields.is_empty() {
+                // Handle primitive arrays that don't have a '0' field
+                // These are arrays of primitive types like double, int, etc.
+                let new_field_path = if field_path.is_empty() {
+                    if metadata.out_field_name.is_empty() {
+                        val.out_field_name.clone()
+                    } else {
+                        format!("{}_{}", metadata.out_field_name, val.out_field_name)
+                    }
+                } else {
+                    format!("{}_{}", field_path, val.out_field_name)
+                };
+                
+                // Add the primitive array to the flattened fields
+                let mut el = OutputMetadata::new();
+                el.out_field_name = new_field_path.clone();
+                el.determined_type = val.determined_type.clone();
+                el.determined_type_values = val.determined_type_values.clone();
+                
+                flattened.fields.insert(new_field_path.clone(), el);
             } else {
                 // Standard path for non-array fields
                 let new_field_path = if field_path.is_empty() {
@@ -2773,4 +2793,44 @@ mod tests_flatten_metadata {
         // assert!(flattened.contains_key("parent_record_child"));
     }
 
+    #[test]
+    fn test_flatten_primitive_array_field() {
+        // Create a record with a primitive array field
+        let mut fields: Box<HashMap<String, Metadata>> = Box::new(HashMap::new());
+        
+        // Create a primitive array field
+        let mut array_field = Metadata::new().unwrap();
+        array_field.out_field_name = "x_axis_linear_mean".to_string();
+        array_field.determined_type = "array".to_string();
+        array_field.determined_type_values = "double".to_string();
+        array_field.enabled = true;
+        
+        fields.insert("x_axis_linear_mean".to_string(), array_field.clone());
+        
+        // Create the parent record
+        let mut metadata = Metadata::new().unwrap();
+        metadata.out_field_name = "imu".to_string();
+        metadata.determined_type = "record".to_string();
+        metadata.enabled = true;
+        metadata.fields = fields;
+        
+        let mut flattened: OutputMetadata = OutputMetadata::new();
+        
+        // Flatten the metadata
+        Metadata::flatten_metadata(&metadata, &mut flattened);
+        
+        // The flattened metadata should contain the primitive array field
+        println!("Flattened: {:?}", flattened);
+        
+        // Check if the array field exists with the correct path
+        let expected_field_name = "imu_x_axis_linear_mean";
+        assert!(flattened.fields.contains_key(expected_field_name), 
+                "Flattened metadata does not contain the primitive array field");
+                
+        // Verify the field properties
+        let field = flattened.fields.get(expected_field_name).unwrap();
+        assert_eq!(field.out_field_name, expected_field_name);
+        assert_eq!(field.determined_type, "array");
+        assert_eq!(field.determined_type_values, "double");
+    }
 }

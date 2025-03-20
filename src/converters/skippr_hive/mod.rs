@@ -373,4 +373,43 @@ mod tests {
         assert!(type_str.contains("tel:int"));
         assert!(type_str.contains("emails:array<string>"));
     }
+    
+    #[test]
+    fn test_convert_skippr_to_hive_primitive_array_in_record() {
+        // Create a record with a primitive array
+        let mut metadata = OutputMetadata::new();
+        metadata.out_field_name = "root".to_string();
+        metadata.determined_type = "record".to_string();
+        
+        // Create the primitive array field
+        let mut array_field = OutputMetadata::new();
+        array_field.out_field_name = "x_axis_linear_mean".to_string();
+        array_field.determined_type = "array".to_string();
+        array_field.determined_type_values = "double".to_string();
+        
+        // Create the parent record
+        let mut record_field = OutputMetadata::new();
+        record_field.out_field_name = "imu".to_string();
+        record_field.determined_type = "record".to_string();
+        record_field.fields.insert("x_axis_linear_mean".to_string(), array_field);
+        
+        metadata.fields.insert("imu".to_string(), record_field);
+        
+        // Convert to Hive schema
+        let columns = SkipprHive::convert_skippr_to_hive(&metadata).unwrap();
+        
+        // Check the result
+        assert_eq!(columns.len(), 1);
+        
+        // Find the imu column
+        let column = &columns[0];
+        assert_eq!(column.name, "imu");
+        
+        // Extract the struct definition
+        let type_str = column.r#type().unwrap();
+        
+        // Check that the struct contains the array field
+        assert!(type_str.starts_with("struct<"));
+        assert!(type_str.contains("x_axis_linear_mean:array<double>"));
+    }
 }

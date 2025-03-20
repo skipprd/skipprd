@@ -503,4 +503,54 @@ mod tests {
             _ => panic!("Expected List type for contacts, got {:?}", contacts_field.data_type()),
         }
     }
+    
+    #[test]
+    fn test_convert_skippr_to_arrow_primitive_array_in_record() {
+        // Create a record with a primitive array
+        let mut metadata_map = HashMap::new();
+        
+        // Create the parent record
+        let mut record_field = OutputMetadata::new();
+        record_field.out_field_name = "imu".to_string();
+        record_field.determined_type = "record".to_string();
+        
+        // Create the primitive array field
+        let mut array_field = OutputMetadata::new();
+        array_field.out_field_name = "x_axis_linear_mean".to_string();
+        array_field.determined_type = "array".to_string();
+        array_field.determined_type_values = "double".to_string();
+        
+        // Add the array field to the record field
+        record_field.fields.insert("x_axis_linear_mean".to_string(), array_field);
+        
+        // Add the record field to the metadata map
+        metadata_map.insert("imu".to_string(), record_field);
+        
+        // Convert to Arrow schema
+        let schema = convert_skippr_to_arrow(Box::new(metadata_map)).unwrap();
+        
+        // Check the schema
+        assert_eq!(schema.fields().len(), 1);
+        let imu_field = &schema.fields()[0];
+        assert_eq!(imu_field.name(), "imu");
+        
+        // Check that imu field is a Struct
+        match imu_field.data_type() {
+            DataType::Struct(struct_fields) => {
+                assert_eq!(struct_fields.len(), 1);
+                
+                // Check the array field inside the struct
+                let array_field = struct_fields.iter().find(|f| f.name() == "x_axis_linear_mean").unwrap();
+                
+                // Check that it's a list of doubles
+                match array_field.data_type() {
+                    DataType::List(item_field) => {
+                        assert_eq!(*item_field.data_type(), DataType::Float64);
+                    },
+                    _ => panic!("Expected List type for x_axis_linear_mean, got {:?}", array_field.data_type()),
+                }
+            },
+            _ => panic!("Expected Struct type for imu, got {:?}", imu_field.data_type()),
+        }
+    }
 }
