@@ -3,6 +3,7 @@ use memory_stats::memory_stats;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::{env, fs};
+use std::cell::RefCell;
 
 use std::str;
 
@@ -167,7 +168,7 @@ impl Helpers {
 
     pub fn flatten(json: &Value, metadata: &HashMap<String, Metadata>) -> Result<Value, Box<dyn Error>> {
         let mut result = Map::new();
-        Helpers::flatten_internal(json, metadata, &mut result, "".to_string())?;
+        Self::flatten_internal(json, metadata, &mut result, "".to_string())?;
         Ok(Value::Object(result))
     }
 
@@ -177,36 +178,149 @@ impl Helpers {
         result: &mut Map<String, Value>,
         field_path: String,
     ) -> Result<(), Box<dyn Error>> {
+        thread_local! {
+            static FIELD_CACHE: RefCell<HashMap<String, (String, String)>> = RefCell::new(HashMap::new());
+        }
+
+        // Main flattening logic for different JSON value types
         match json {
             Value::Object(map) => {
                 for (key, value) in map {
-                    if let Some(child_metadata) = metadata.get(key) {
-                        let new_key = if field_path.is_empty() {
-                            child_metadata.out_field_name.clone()
-                        } else {
-                            format!("{}_{}", field_path, child_metadata.out_field_name)
-                        };
+                    // Skip null values
+                    if value.is_null() {
+                        continue;
+                    }
 
-                        Helpers::flatten_internal(value, &child_metadata.fields, result, new_key)?;
+                    // Construct the field path and cache key - use underscores consistently
+                    let path = if field_path.is_empty() {
+                        key.clone()
+                    } else {
+                        // Change from dot notation to underscore notation
+                        format!("{}_{}", field_path, key)
+                    };
+                    let cache_key = format!("{}:{}", field_path, key);
+
+                    // Look up the field metadata
+                    let field_metadata = Self::lookup_metadata_with_caching(metadata, key, &cache_key);
+
+                    // Get the output field name for this field
+                    let output_field_name = match &field_metadata {
+                        Some((_, meta)) => {
+                            // Use the metadata's out_field_name
+                            if field_path.is_empty() {
+                                meta.out_field_name.clone()
+                            } else {
+                                // For nested fields, combine the path with the output field name
+                                format!("{}_{}", field_path, meta.out_field_name)
+                            }
+                        },
+                        None => {
+                            // No metadata found, use the original path
+                            path.clone()
+                        }
+                    };
+
+                    match field_metadata {
+                        Some((_, meta)) => {
+                            // Handle scalar values directly (optimization)
+                            if Self::is_scalar_value(value) {
+                                result.insert(
+                                    output_field_name,
+                                    value.clone(),
+                                );
+                            } else {
+                                // Recursively flatten complex types
+                                Self::flatten_internal(value, &meta.fields, result, output_field_name)?;
+                            }
+                        }
+                        None => {
+                            // Field not found in metadata - still include it
+                            if Self::is_scalar_value(value) {
+                                result.insert(
+                                    output_field_name,
+                                    value.clone(),
+                                );
+                            } else {
+                                Self::flatten_internal(value, &HashMap::new(), result, output_field_name)?;
+                            }
+                        }
                     }
                 }
             }
-            Value::Array(arr) => {
-                for (index, value) in arr.iter().enumerate() {
-                    
-                    if let Some(child_metadata) = metadata.get("0") { // We store the schema of arrays in the metadata with key "0"
-                        let new_key = format!("{}_{}", field_path, index);
-
-                        Helpers::flatten_internal(value, &child_metadata.fields, result, new_key)?;
+            Value::Array(array) => {
+                // Only flatten arrays of scalar values
+                if array.iter().all(Self::is_scalar_value) {
+                    result.insert(field_path.clone(), json.clone());
+                } else {
+                    // For arrays of complex types, process each element
+                    for (i, item) in array.iter().enumerate() {
+                        // Use underscore notation
+                        let path = format!("{}_{}", field_path, i);
+                        Self::flatten_internal(item, metadata, result, path)?;
                     }
                 }
             }
+            // Handle scalar values
             _ => {
-                
-                result.insert(field_path, json.clone());
+                if !field_path.is_empty() {
+                    result.insert(field_path.clone(), json.clone());
+                }
             }
         }
         Ok(())
+    }
+
+    // Helper function to lookup metadata with caching
+    fn lookup_metadata_with_caching<'a>(
+        metadata: &'a HashMap<String, Metadata>,
+        key: &str,
+        cache_key: &str,
+    ) -> Option<(String, &'a Metadata)> {
+        thread_local! {
+            static FIELD_CACHE: RefCell<HashMap<String, (String, String)>> = RefCell::new(HashMap::new());
+        }
+
+        // Check if we have a cached lookup for this field
+        let cached_result = FIELD_CACHE.with(|cache| {
+            cache.borrow().get(cache_key).cloned()
+        });
+
+        if let Some((metadata_key, _)) = cached_result {
+            // Try direct lookup with cached metadata key
+            if let Some(meta) = metadata.get(&metadata_key) {
+                return Some((metadata_key, meta));
+            }
+        }
+
+        // First try direct lookup with the original key (Strategy 1)
+        if let Some(meta) = metadata.get(key) {
+            let owned_key = key.to_string();
+            FIELD_CACHE.with(|cache| {
+                let mut cache_ref = cache.borrow_mut();
+                cache_ref.insert(cache_key.to_string(), (owned_key.clone(), key.to_string()));
+            });
+            return Some((owned_key, meta));
+        }
+
+        // Fallback: try to find by output field name (Strategy 3)
+        let result = Metadata::get_metadata_by_out_field_name(metadata, key);
+            
+        // If we found a match, cache it for future lookups
+        if let Some((found_key, found_meta)) = &result {
+            let owned_key = found_key.to_string();
+            FIELD_CACHE.with(|cache| {
+                let mut cache_ref = cache.borrow_mut();
+                cache_ref.insert(cache_key.to_string(), (owned_key.clone(), key.to_string()));
+            });
+            Some((owned_key, *found_meta))
+        } else {
+            None
+        }
+    }
+
+    // Helper function to check if a value is a scalar (not an object or array)
+    fn is_scalar_value(value: &Value) -> bool {
+        !value.is_object() && !value.is_array()
     }
 
     pub fn mem_limit_reached() -> bool {
@@ -1350,4 +1464,124 @@ mod flattern_tests {
     // }
 
     // Additional tests can be written similarly...
+}
+
+#[cfg(test)]
+mod tests_flatten_special_cases {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_flatten_special_chars_and_case() {
+        // Setup metadata for test
+        let mut metadata = HashMap::new();
+        
+        // Case for uppercase field (IMEI)
+        let mut imei_metadata = Metadata::new().unwrap();
+        imei_metadata.out_field_name = "imei".to_string();
+        imei_metadata.determined_type = "long".to_string();
+        metadata.insert("IMEI".to_string(), imei_metadata);
+        
+        // Case for special characters (preasure\bar)
+        let mut pressure_metadata = Metadata::new().unwrap();
+        pressure_metadata.out_field_name = "preasure_bar".to_string();
+        pressure_metadata.determined_type = "double".to_string();
+        metadata.insert("preasure\\bar".to_string(), pressure_metadata);
+        
+        // Create test JSON with both cases - using both original and transformed field names
+        // to test both code paths
+        let json_value = json!({
+            "IMEI": 12345678901i64,             // Original case (using i64 for large numbers)
+            "preasure_bar": 98.6                 // Already transformed name
+        });
+        
+        // Test flattening
+        let result = Helpers::flatten(&json_value, &metadata).unwrap();
+        
+        // Verify results - we should find both fields with their transformed names
+        assert!(result.as_object().unwrap().contains_key("imei"), "Field 'imei' missing from flattened result");
+        assert!(result.as_object().unwrap().contains_key("preasure_bar"), "Field 'preasure_bar' missing from flattened result");
+        
+        // Verify the values
+        assert_eq!(result["imei"], json!(12345678901i64));
+        assert_eq!(result["preasure_bar"], json!(98.6));
+        
+        // Test with lowercase field names to test case-insensitive matching
+        let json_value2 = json!({
+            "imei": 12345678901i64,             // Lowercase (using i64 for large numbers)
+            "preasure\\bar": 98.6                // Original with backslash
+        });
+        
+        let result2 = Helpers::flatten(&json_value2, &metadata).unwrap();
+        
+        // Verify both fields exist with correct values
+        assert!(result2.as_object().unwrap().contains_key("imei"), "Field 'imei' missing from flattened result (lowercase test)");
+        assert!(result2.as_object().unwrap().contains_key("preasure_bar"), "Field 'preasure_bar' missing from flattened result (original name test)");
+        
+        assert_eq!(result2["imei"], json!(12345678901i64));
+        assert_eq!(result2["preasure_bar"], json!(98.6));
+    }
+}
+
+#[cfg(test)]
+mod tests_flatten_performance {
+    use super::*;
+    use std::collections::HashMap;
+    use std::time::Instant;
+    use serde_json::json;
+
+    #[test]
+    fn test_flatten_performance_with_cache() {
+        // Create metadata with test fields
+        let mut metadata = HashMap::new();
+        let mut field1 = Metadata::new().unwrap();
+        field1.out_field_name = "imei".to_string();
+        metadata.insert("IMEI".to_string(), field1);
+        
+        let mut field2 = Metadata::new().unwrap();
+        field2.out_field_name = "pressure_bar".to_string();
+        metadata.insert("preasure\\bar".to_string(), field2);
+
+        // Create a complex test object that will be flattened
+        let json = json!({
+            "IMEI": 12345678901i64,
+            "preasure\\bar": 32.5,
+            "normal_field": "value",
+            "nested": {
+                "IMEI": 12345678901i64,
+                "preasure\\bar": 45.2,
+                "other_field": "other_value"
+            }
+        });
+
+        // First flattening - should have cache misses
+        let start = Instant::now();
+        let flattened1 = Helpers::flatten(&json, &metadata).unwrap();
+        let first_duration = start.elapsed();
+
+        // Second flattening with the same data - should use cache
+        let start = Instant::now();
+        let flattened2 = Helpers::flatten(&json, &metadata).unwrap();
+        let second_duration = start.elapsed();
+
+        // Verify results are the same
+        assert_eq!(flattened1, flattened2);
+
+        // Print timing information for debugging
+        println!("First flatten duration: {:?}", first_duration);
+        println!("Second flatten duration: {:?}", second_duration);
+        println!("Flattened result: {:#?}", flattened1);
+        
+        // Check for expected output field names
+        // The original test was looking for "imei" and "pressure_bar"
+        assert!(flattened1.as_object().unwrap().contains_key("imei"), "Field 'imei' missing from result");
+        assert!(flattened1.as_object().unwrap().contains_key("pressure_bar"), "Field 'pressure_bar' missing from result");
+        
+        // We don't check for nested fields since metadata for them isn't provided
+        // and they'll be flattened with default field paths
+
+        // The second run should be faster due to caching, but don't make a hard assertion
+        // since timing can vary based on system load, but typically it would be faster
+        println!("Speedup factor: {:.2}x", first_duration.as_nanos() as f64 / second_duration.as_nanos() as f64);
+    }
 }

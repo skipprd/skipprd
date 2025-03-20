@@ -754,16 +754,23 @@ fn match_scalar_value(
     allow_evolve: bool,
     flatten: bool,
 ) -> Result<ResolvedFieldValue, Box<dyn std::error::Error>> {
+    // Return early for null values
+    if value.is_null() {
+        return Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), Value::Null));
+    }
+
+    // Use cached field name lookups to reduce repetitive transformations
+    let output_field_name = Metadata::get_field_out_field_name(metadata, field);
+
     match data_type {
         "string" => match value.as_str().map(Value::from) {
-            Some(v) => Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), v)),
+            Some(v) => Ok(ResolvedFieldValue::new(output_field_name, v)),
             None => match value.as_i64().map(|v| v.to_string()).map(Value::from) {
-                Some(v) => Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), v)),
+                Some(v) => Ok(ResolvedFieldValue::new(output_field_name, v)),
                 None => match value.as_f64().map(|v| v.to_string()).map(Value::from) {
-                    Some(v) => Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), v)),
+                    Some(v) => Ok(ResolvedFieldValue::new(output_field_name, v)),
                     None => match value.as_bool().map(|v| v.to_string()).map(Value::from) {
-                        Some(v) => Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), v)),
-                        // None => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a string", value)))),
+                        Some(v) => Ok(ResolvedFieldValue::new(output_field_name, v)),
                         None => {
                             if !allow_evolve {
                                 return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Field: {} => {} value: {} is not a string", parent_field.unwrap_or("root"), field, value))));
@@ -776,14 +783,13 @@ fn match_scalar_value(
             }
         }
         "int" | "integer"  => match value.as_i64().map(|v| v as i32).map(Value::from) {
-            Some(v) => Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), v)),
+            Some(v) => Ok(ResolvedFieldValue::new(output_field_name, v)),
             None => match value.as_str().and_then(|v| v.parse::<i32>().ok()).map(Value::from) {
-                Some(v) => Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), v)),
+                Some(v) => Ok(ResolvedFieldValue::new(output_field_name, v)),
                 None => match value.as_f64().and_then(|v| v.to_string().parse::<i32>().ok()).map(Value::from) {
-                    Some(v) => Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), v)),
+                    Some(v) => Ok(ResolvedFieldValue::new(output_field_name, v)),
                     None => match value.as_bool().and_then(|v| v.to_string().parse::<i32>().ok()).map(Value::from) {
-                        Some(v) => Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), v)),
-                        // None => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not an integer", value)))),
+                        Some(v) => Ok(ResolvedFieldValue::new(output_field_name, v)),
                         None => {
                             if !allow_evolve {
                                 return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Field: {} => {} value: {} is not an integer", parent_field.unwrap_or("root"), field, value))));
@@ -797,51 +803,47 @@ fn match_scalar_value(
         }
         "timestamp" | "timestamp_milli" | "long" => match value.as_i64().map(Value::from) {
             Some(v) =>  if data_type == "timestamp_milli" || data_type == "timestamp" {
-                Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), AnalyseSchema::coerce_to_milli_seconds(v)))
+                Ok(ResolvedFieldValue::new(output_field_name, AnalyseSchema::coerce_to_milli_seconds(v)))
             } else {
-                Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), v))
+                Ok(ResolvedFieldValue::new(output_field_name, v))
             },
             None => match value.as_str().and_then(|v| v.parse::<i64>().ok()).map(Value::from) {
                 Some(v) => if data_type == "timestamp_milli" || data_type == "timestamp" {
-                    Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), AnalyseSchema::coerce_to_milli_seconds(v)))
+                    Ok(ResolvedFieldValue::new(output_field_name, AnalyseSchema::coerce_to_milli_seconds(v)))
                 } else {
-                    Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), v))
+                    Ok(ResolvedFieldValue::new(output_field_name, v))
                 },
                 None => match value.as_f64().and_then(|v| v.to_string().parse::<i64>().ok()).map(Value::from) {
                     Some(v) => if data_type == "timestamp_milli" || data_type == "timestamp" {
-                        Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), AnalyseSchema::coerce_to_milli_seconds(v)))
+                        Ok(ResolvedFieldValue::new(output_field_name, AnalyseSchema::coerce_to_milli_seconds(v)))
                     } else {
-                        Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), v))
+                        Ok(ResolvedFieldValue::new(output_field_name, v))
                     },
                     None => match value.as_bool().and_then(|v| v.to_string().parse::<i64>().ok()).map(Value::from) {
                         Some(v) => if data_type == "timestamp_milli" || data_type == "timestamp" {
-                            Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), AnalyseSchema::coerce_to_milli_seconds(v)))
+                            Ok(ResolvedFieldValue::new(output_field_name, AnalyseSchema::coerce_to_milli_seconds(v)))
                         } else {
-                            Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), v))
+                            Ok(ResolvedFieldValue::new(output_field_name, v))
                         },
-                        // None => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not an integer", value)))),
                         None => {
                             if !allow_evolve {
                                 return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Field: {} => {} value: {} is not an integer", parent_field.unwrap_or("root"), field, value))));
                             }
-                            // println!("Field {} Value {} is not an integer", field, value);
                             // Handle the value error applying the Evolution Strategy
                             Evolution::evolve_field(&field.to_string(), value, parent_field, parent_data_type, metadata, updated_schema, flatten)
                         }
                     }
                 }
             }
-            // Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not an integer", value)))),
         }
         "double" => match value.as_f64().map(Value::from) {
-            Some(v) => Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), v)),
+            Some(v) => Ok(ResolvedFieldValue::new(output_field_name, v)),
             None => match value.as_str().and_then(|v| v.parse::<f64>().ok()).map(Value::from) {
-                Some(v) => Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), v)),
+                Some(v) => Ok(ResolvedFieldValue::new(output_field_name, v)),
                 None => match value.as_i64().and_then(|v| v.to_string().parse::<f64>().ok()).map(Value::from) {
-                    Some(v) => Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), v)),
+                    Some(v) => Ok(ResolvedFieldValue::new(output_field_name, v)),
                     None => match value.as_bool().and_then(|v| v.to_string().parse::<f64>().ok()).map(Value::from) {
-                        Some(v) => Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), v)),
-                        // None => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a double", value)))),
+                        Some(v) => Ok(ResolvedFieldValue::new(output_field_name, v)),
                         None => {
                             if !allow_evolve {
                                 return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Field: {} => {} value: {} is not a double", parent_field.unwrap_or("root"), field, value))));
@@ -852,14 +854,13 @@ fn match_scalar_value(
                     }
                 }
             }
-            // Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData,  format!("Value {} is not a double", value)))),
         }
         "boolean" => match value.as_bool().map(Value::from) {
-            Some(v) => Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), v)),
+            Some(v) => Ok(ResolvedFieldValue::new(output_field_name, v)),
             None => match value.as_str().and_then(|v| v.parse::<bool>().ok()).map(Value::from) {
-                Some(v) => Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), v)),
+                Some(v) => Ok(ResolvedFieldValue::new(output_field_name, v)),
                 None => match value.as_i64().and_then(|v| v.to_string().parse::<bool>().ok()).map(Value::from) {
-                    Some(v) => Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), v)),
+                    Some(v) => Ok(ResolvedFieldValue::new(output_field_name, v)),
                     None => match value.as_i64().and_then(|v| {
                         if v == 0 || v == 1 {
                             Some((v == 1).to_string().parse::<bool>().ok()).map(Value::from)
@@ -867,13 +868,11 @@ fn match_scalar_value(
                             None
                         }
                     }) {
-                        Some(v) => Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), v)),
-                        // None => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a boolean", value)))),
+                        Some(v) => Ok(ResolvedFieldValue::new(output_field_name, v)),
                         None => {
                             if !allow_evolve {
                                 return Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Field: {} => {} value: {} is not a boolean", parent_field.unwrap_or("root"), field, value))));
                             }
-                            // println!("Value {} is not a boolean", value);
                             // Handle the value error applying the Evolution Strategy
                             Evolution::evolve_field(&field.to_string(), value, parent_field, parent_data_type, metadata, updated_schema, flatten)
                         }
@@ -883,7 +882,6 @@ fn match_scalar_value(
         }
         _ => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Unknown data type '{}'", data_type)))),
     }
-
 }
 
 pub fn discover_ingest(
@@ -960,6 +958,9 @@ pub fn set_date(
     updated_schema: &mut String,
     flatten: bool,
 ) -> Result<ResolvedFieldValue, Box<dyn std::error::Error>> {
+    // Use cached field name lookups to reduce repetitive transformations
+    let output_field_name = Metadata::get_field_out_field_name(metadata, field);
+    
     // Hive Timestamp doesn't support string dates
     match value.clone().as_str() {
         Some(val) => {
@@ -974,21 +975,19 @@ pub fn set_date(
                 Ok(f) => match Helpers::parse_date_from_string(val, f.as_str()) {
                     Ok(date) => {
                         let millis = date.timestamp() * 1000;
-                        Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), millis.into()))
+                        Ok(ResolvedFieldValue::new(output_field_name, millis.into()))
                     }
-                    Err(_) => Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), Value::Null)),
+                    Err(_) => Ok(ResolvedFieldValue::new(output_field_name, Value::Null)),
                 },
                 Err(err) => {
                     println!("Error date: {}", err);
-                    Ok(ResolvedFieldValue::new(Metadata::get_field_out_field_name(metadata, field), Value::Null))
+                    Ok(ResolvedFieldValue::new(output_field_name, Value::Null))
                 }
             }
         }
         None => {
-            // println!("Could not format date {} to int using format {} for field {}", value, metadata.get(field).unwrap().date_candidate.as_ref().unwrap().format, field);
             // Handle the value error applying the Evolution Strategy
             Evolution::evolve_field(&field.to_string(), value, parent_field, parent_data_type, metadata, updated_schema, flatten)
-            // Value::Null
         }
     }
 }

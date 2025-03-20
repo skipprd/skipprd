@@ -326,18 +326,42 @@ impl Metadata {
     * @param {string} field
     * @returns {string}
     */
-    pub fn get_field_out_field_name(meatdata: &HashMap<String, Metadata>, field: &str) -> String {
-        let mut out_field_name = field.to_string();
-
-        match meatdata.get(field) {
+    pub fn get_field_out_field_name(metadata: &HashMap<String, Metadata>, field: &str) -> String {
+        use std::cell::RefCell;
+        use std::collections::HashMap;
+        
+        // Thread-local cache for field name transformations
+        thread_local! {
+            static FIELD_NAME_CACHE: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+        }
+        
+        // Check cache first
+        let cached_name = FIELD_NAME_CACHE.with(|cache| {
+            cache.borrow().get(field).cloned()
+        });
+        
+        if let Some(cached) = cached_name {
+            return cached;
+        }
+        
+        // Cache miss, perform the lookup
+        let out_field_name = match metadata.get(field) {
             Some(metadata) => {
                 if !metadata.out_field_name.is_empty() {
-                    out_field_name = metadata.out_field_name.clone();
+                    metadata.out_field_name.clone()
+                } else {
+                    field.to_string()
                 }
             }
-            None => {}
-        }
-
+            None => field.to_string()
+        };
+        
+        // Store result in cache
+        FIELD_NAME_CACHE.with(|cache| {
+            let mut cache_ref = cache.borrow_mut();
+            cache_ref.insert(field.to_string(), out_field_name.clone());
+        });
+        
         out_field_name
     }
 
@@ -424,6 +448,23 @@ impl Metadata {
 
     }
 
+    /**
+    * Look up a metadata entry by its output field name
+    * This is useful when we need to find the original metadata for a transformed field name
+    * @param {HashMap<String, Metadata>} metadata
+    * @param {String} out_field_name
+    * @returns {Option<&Metadata>}
+    */
+    pub fn get_metadata_by_out_field_name<'a>(metadata: &'a HashMap<String, Metadata>, out_field_name: &str) -> Option<(&'a String, &'a Metadata)> {
+        // First try a direct match with the output field name
+        for (key, meta) in metadata.iter() {
+            if meta.out_field_name == out_field_name {
+                return Some((key, meta));
+            }
+        }
+        
+        None
+    }
 }
 
 #[derive(Debug, Copy, Clone)]

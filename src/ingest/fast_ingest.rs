@@ -418,7 +418,7 @@ pub fn match_scalar_value_fast(
     apply_evolution: bool,
     flatten: bool
 ) -> Result<ResolvedFieldValue, Box<dyn Error>> {
-
+    // Return early for null values
     if value.is_null() {
         return Ok(ResolvedFieldValue {
             field: Metadata::get_field_out_field_name(metadata, field),
@@ -426,32 +426,35 @@ pub fn match_scalar_value_fast(
         });
     }
 
+    // Use cached field name lookups to reduce repetitive transformations
+    let output_field_name = Metadata::get_field_out_field_name(metadata, field);
+
     match data_type {
         "string" => match value.as_str().map(Value::from) {
             Some(v) => Ok(ResolvedFieldValue {
-                field: Metadata::get_field_out_field_name(metadata, field),
+                field: output_field_name,
                 value: v,
             }),
             None => match value.as_i64().map(|v| v.to_string()).map(Value::from) {
                 Some(v) => Ok(ResolvedFieldValue {
-                    field: Metadata::get_field_out_field_name(metadata, field),
+                    field: output_field_name,
                     value: v,
                 }),
                 None => match value.as_f64().map(|v| v.to_string()).map(Value::from) {
                     Some(v) => Ok(ResolvedFieldValue {
-                        field: Metadata::get_field_out_field_name(metadata, field),
+                        field: output_field_name,
                         value: v,
                     }),
                     None => match value.as_bool().map(|v| v.to_string()).map(Value::from) {
                         Some(v) => Ok(ResolvedFieldValue {
-                            field: Metadata::get_field_out_field_name(metadata, field),
+                            field: output_field_name,
                             value: v,
                         }),
                         None => {
                             if apply_evolution {
                                 match Evolution::apply_evolution_factory(field, value, metadata, flatten) {
                                     Ok(v) => Ok(v),
-                                    Err(_e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type)))),
+                                    Err(_e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type))))
                                 }
                             } else {
                                 Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type))))
@@ -463,19 +466,19 @@ pub fn match_scalar_value_fast(
         }
         "long" => match value.as_i64().map(Value::from) {
             Some(v) => Ok(ResolvedFieldValue {
-                field: Metadata::get_field_out_field_name(metadata, field),
+                field: output_field_name,
                 value: v,
             }),
             None => match value.as_str().and_then(|v| v.parse::<i64>().ok()).map(Value::from) {
                 Some(v) => Ok(ResolvedFieldValue {
-                    field: Metadata::get_field_out_field_name(metadata, field),
+                    field: output_field_name,
                     value: v,
                 }),
                 None => {
                     if apply_evolution {
                         match Evolution::apply_evolution_factory(field, value, metadata, flatten) {
                             Ok(v) => Ok(v),
-                            Err(_e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type)))),
+                            Err(_e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type))))
                         }
                     } else {
                         Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type))))
@@ -486,12 +489,12 @@ pub fn match_scalar_value_fast(
         // ensure 32bit int
         "int" | "integer" => match value.as_i64().map(|v| v as i32).map(Value::from) {
             Some(v) => Ok(ResolvedFieldValue {
-                field: Metadata::get_field_out_field_name(metadata, field),
+                field: output_field_name,
                 value: v,
             }),
             None => match value.as_str().and_then(|v| v.parse::<i32>().ok()).map(Value::from) {
                 Some(v) => Ok(ResolvedFieldValue {
-                    field: Metadata::get_field_out_field_name(metadata, field),
+                    field: output_field_name,
                     value: v,
                 }),
                 None => {
@@ -503,7 +506,7 @@ pub fn match_scalar_value_fast(
                         }
                     }).map(|v| v as i32).map(Value::from) {
                         Some(v) => Ok(ResolvedFieldValue {
-                            field: Metadata::get_field_out_field_name(metadata, field),
+                            field: output_field_name,
                             value: v,
                         }),
                         None => {
@@ -516,14 +519,14 @@ pub fn match_scalar_value_fast(
                                 }
                             }) {
                                 Some(v) => Ok(ResolvedFieldValue {
-                                    field: Metadata::get_field_out_field_name(metadata, field),
+                                    field: output_field_name,
                                     value: Value::from(v),
                                 }),
                                 None => {
                                     if apply_evolution {
                                         match Evolution::apply_evolution_factory(field, value, metadata, flatten) {
                                             Ok(v) => Ok(v),
-                                            Err(_e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type)))),
+                                            Err(_e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type))))
                                         }
                                     } else {
                                         Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type))))
@@ -537,13 +540,13 @@ pub fn match_scalar_value_fast(
         }
         "timestamp_milli" | "timestamp" => match value.as_i64().map(Value::from) {
             Some(v) => Ok(ResolvedFieldValue {
-                    field: Metadata::get_field_out_field_name(metadata, field),
+                    field: output_field_name,
                     value: AnalyseSchema::coerce_to_milli_seconds(v),
                 }),
             None => match value.as_str().and_then(|v| v.parse::<i64>().ok()).map(Value::from) {
                 Some(v) =>
                     Ok(ResolvedFieldValue {
-                        field: Metadata::get_field_out_field_name(metadata, field),
+                        field: output_field_name,
                         value: AnalyseSchema::coerce_to_milli_seconds(v),
                     }),
                 None => {
@@ -556,16 +559,14 @@ pub fn match_scalar_value_fast(
                         }
                     }).map(Value::from) {
                         Some(v) => Ok(ResolvedFieldValue {
-                            field: Metadata::get_field_out_field_name(metadata, field),
+                            field: output_field_name,
                             value: v,
                         }),
                         None => {
                             if apply_evolution {
-                                // println!("### Applying Evolution: {}", field);
                                 match Evolution::apply_evolution_factory(field, value, metadata, flatten) {
                                     Ok(v) => Ok(v),
                                     Err(_e) => {
-                                        // println!("### Fast evolutino Error: {}", e);
                                         Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Field {} value {} is not an {}", field, value, data_type))))
                                     },
                                 }
@@ -579,35 +580,34 @@ pub fn match_scalar_value_fast(
         }
         "double" => match value.as_f64().map(Value::from) {
             Some(v) => Ok(ResolvedFieldValue {
-                field: Metadata::get_field_out_field_name(metadata, field),
+                field: output_field_name,
                 value: v,
             }),
             None => match value.as_str().and_then(|v| v.parse::<f64>().ok()).map(Value::from) {
                 Some(v) => Ok(ResolvedFieldValue {
-                    field: Metadata::get_field_out_field_name(metadata, field),
+                    field: output_field_name,
                     value: v,
                 }),
                 None => {
                     if apply_evolution {
                         match Evolution::apply_evolution_factory(field, value, metadata, flatten) {
                             Ok(v) => Ok(v),
-                            Err(_e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type)))),
+                            Err(_e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type))))
                         }
                     } else {
                         Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type))))
                     }
                 }
             }
-            // Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData,  format!("Value {} is not a double", value)))),
         }
         "boolean" => match value.as_bool().map(Value::from) {
             Some(v) => Ok(ResolvedFieldValue {
-                field: Metadata::get_field_out_field_name(metadata, field),
+                field: output_field_name,
                 value: v,
             }),
             None => match value.as_str().and_then(|v| v.parse::<bool>().ok()).map(Value::from) {
                 Some(v) => Ok(ResolvedFieldValue {
-                    field: Metadata::get_field_out_field_name(metadata, field),
+                    field: output_field_name,
                     value: v,
                 }),
                 None => {
@@ -619,7 +619,7 @@ pub fn match_scalar_value_fast(
                         }
                     }) {
                         Some(v) => Ok(ResolvedFieldValue {
-                            field: Metadata::get_field_out_field_name(metadata, field),
+                            field: output_field_name,
                             value: v,
                         }),
                         None => {
@@ -632,14 +632,14 @@ pub fn match_scalar_value_fast(
                                 }
                             }) {
                                 Some(v) => Ok(ResolvedFieldValue {
-                                    field: Metadata::get_field_out_field_name(metadata, field),
+                                    field: output_field_name,
                                     value: v,
                                 }),
                                 None => {
                                     if apply_evolution {
                                         match Evolution::apply_evolution_factory(field, value, metadata, flatten) {
                                             Ok(v) => Ok(v),
-                                            Err(_e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type)))),
+                                            Err(_e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type))))
                                         }
                                     } else {
                                         Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {}", value, data_type))))
@@ -653,10 +653,12 @@ pub fn match_scalar_value_fast(
         }
         _ => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Unknown data type '{}'", data_type)))),
     }
-
 }
 
 pub fn fast_set_date(field: &str, value: &Value, metadata: &HashMap<String, Metadata>) -> Result<ResolvedFieldValue, Box<dyn Error>> {
+    // Use cached field name lookups to reduce repetitive transformations
+    let output_field_name = Metadata::get_field_out_field_name(metadata, field);
+    
     // Hive Timestamp doesn't support string dates
     match value.as_str() {
         Some(val) => {
@@ -679,7 +681,7 @@ pub fn fast_set_date(field: &str, value: &Value, metadata: &HashMap<String, Meta
                     Ok(date) => {
                         let millis = date.timestamp() * 1000;
                         Ok(ResolvedFieldValue {
-                            field: Metadata::get_field_out_field_name(metadata, field),
+                            field: output_field_name,
                             value: millis.into(),
                         })
                     }
