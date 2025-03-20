@@ -98,7 +98,7 @@ pub fn fast_path_ingest(
     
     {
         // Avoid unnecessary clone by using reference
-        let message = match DEFAULT_NESTED_MESSAGE.read().get(namespace) {
+        message = match DEFAULT_NESTED_MESSAGE.read().get(namespace) {
             Some(m) => m.clone(),
             None => {
                 return Err("No default message template found".into());
@@ -109,17 +109,6 @@ pub fn fast_path_ingest(
     
     // Directly unwrap the object once instead of in every iteration
     let object = unwrapped_message.as_object().ok_or("Invalid JSON object")?;
-    
-    // Pre-check the size of the object to avoid allocations in small cases
-    if object.is_empty() {
-        if flatten {
-            message = match Helpers::flatten(&message, &metadata) {
-                Ok(m) => m,
-                Err(e) => return Err(e),
-            };
-        }
-        return Ok(message);
-    }
     
     for (field, value) in object {
         if let Some(meta_data) = metadata.get(field) {
