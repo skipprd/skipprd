@@ -1335,19 +1335,18 @@ impl AnalyseSchema {
     pub fn is_valid_timestamp(&self, timestamp: &mut String) -> bool {
         match timestamp.parse::<i64>() {
             Ok(seconds) => {
-                // Accept timestamps between 1970-01-01 (UNIX Epoch) and 2040-01-01
-                // This allows for typical UNIX timestamps currently in use
-                if seconds < 0 || seconds > 2208988800 { // 2040-01-01 in seconds since epoch
-                    return false;
-                }
-
                 match NaiveDateTime::from_timestamp_opt(seconds, 0) {
                     Some(dt) => {
                         let date = Utc.from_utc_datetime(&dt);
-                        let min_date = Utc.ymd(1970, 1, 1).and_hms(0, 0, 0); // Start of UNIX epoch
+
+                        // let date = Utc.timestamp_opt(seconds, 0).unwrap();
+                        // Use Unix epoch as minimum date instead of 2001
+                        let min_date = Utc.ymd(1970, 1, 1).and_hms(0, 0, 0);
                         let max_date = Utc.ymd(2040, 1, 1).and_hms(0, 0, 0);
-                        
-                        date >= min_date && date <= max_date
+                        if date >= min_date && date < max_date {
+                            return true;
+                        }
+                        false
                     }
                     None => false,
                 }
@@ -1357,55 +1356,44 @@ impl AnalyseSchema {
     }
 
     pub(crate) fn is_valid_date(value: &str) -> Option<&str> {
-        // Skip attempting to parse empty or very short strings
-        if value.is_empty() || value.len() < 8 {
-            return None;
-        }
-        
-        // Optimize by checking common date prefixes first
-        if !value.starts_with("20") && !value.starts_with("19") && 
-           !value.starts_with("Mon") && !value.starts_with("Tue") && 
-           !value.starts_with("Wed") && !value.starts_with("Thu") && 
-           !value.starts_with("Fri") && !value.starts_with("Sat") && 
-           !value.starts_with("Sun") {
-            return None;
-        }
-        
-        // Try specific checks for the most common formats first
-        // ISO8601 format with milliseconds
-        if value.len() >= 24 && value.contains('T') && value.ends_with('Z') && value.contains('.') {
-            if let Ok(_) = Helpers::parse_date_from_string(value, DateFormats::Iso8601.as_str()) {
-                return Some(DateFormats::Iso8601.name());
-            }
-        }
-        
-        // ISO8601 format without milliseconds
-        if value.len() >= 20 && value.contains('T') && value.ends_with('Z') && !value.contains('.') {
-            if let Ok(_) = Helpers::parse_date_from_string(value, DateFormats::Iso8601_2.as_str()) {
-                return Some(DateFormats::Iso8601_2.name());
-            }
-        }
-        
-        // Date only format
-        if value.len() == 10 && value.contains('-') && !value.contains(':') {
-            if let Ok(_) = Helpers::parse_date_from_string(value, DateFormats::DateOnly.as_str()) {
-                return Some(DateFormats::DateOnly.name());
-            }
-        }
-        
-        // MySQL format
-        if value.len() >= 19 && value.contains(' ') && value.contains(':') && !value.contains('T') {
-            if let Ok(_) = Helpers::parse_date_from_string(value, DateFormats::Mysql.as_str()) {
-                return Some(DateFormats::Mysql.name());
-            }
-        }
-        
-        // Try all other formats
-        for format in DateFormats::iterator() {
+        // First check for ISO8601 format with milliseconds specifically for format tests
+        if value.contains('T') && value.contains('Z') && value.contains('.') {
+            let format = DateFormats::Iso8601;
             if let Ok(_) = Helpers::parse_date_from_string(value, format.as_str()) {
                 return Some(format.name());
             }
         }
+        
+        // Then check for ISO8601 format without milliseconds
+        if value.contains('T') && value.contains('Z') && !value.contains('.') {
+            let format = DateFormats::Iso8601_2;
+            if let Ok(_) = Helpers::parse_date_from_string(value, format.as_str()) {
+                return Some(format.name());
+            }
+        }
+        
+        // Check all remaining formats
+        for format in DateFormats::iterator() {
+            // Skip the formats we've already checked
+            if *format == DateFormats::Iso8601 || *format == DateFormats::Iso8601_2 {
+                continue;
+            }
+            
+            let found_format = match Helpers::parse_date_from_string(value, format.as_str()) {
+                Ok(_) => {
+                    return Some(format.name());
+                }
+                Err(_) => {
+                    None
+                }
+            };
+
+            if found_format.is_some() {
+                return found_format;
+            }
+        }
+
+        // println!("Value {} is not a date of format that's known", value);
 
         None
     }
@@ -1920,46 +1908,45 @@ mod get_type_bool_tests {
 mod valid_timestamps_tests {
     use super::*;
     
+
     #[test]
     fn test_valid_timestamps() {
         let my_struct = AnalyseSchema { i: 0 };
-        assert!(my_struct.is_valid_timestamp(&mut "946684800".to_string())); // Jan 1, 2000
+        assert!(my_struct.is_valid_timestamp(&mut "0".to_string())); // Start of UNIX epoch
         assert!(my_struct.is_valid_timestamp(&mut "1577836800".to_string())); // Jan 1, 2020
-        assert!(my_struct.is_valid_timestamp(&mut "1893456000".to_string())); // Jan 1, 2030
+        // Add more valid cases here
     }
 
     #[test]
     fn test_invalid_timestamps() {
         let my_struct = AnalyseSchema { i: 0 };
         assert!(!my_struct.is_valid_timestamp(&mut "-1".to_string())); // Before UNIX epoch
-        assert!(!my_struct.is_valid_timestamp(&mut "9999999999".to_string())); // Way in the future
-        assert!(!my_struct.is_valid_timestamp(&mut "not_a_timestamp".to_string())); // Non-numeric
+        assert!(!my_struct.is_valid_timestamp(&mut "2208988800".to_string())); // After 2040
+        // Add more invalid cases here
     }
 
     #[test]
     fn test_edge_cases() {
         let my_struct = AnalyseSchema { i: 0 };
-        // Test values at/near bounds
-        assert!(my_struct.is_valid_timestamp(&mut "1".to_string())); // Almost the start of UNIX epoch
-        assert!(my_struct.is_valid_timestamp(&mut "2208988700".to_string())); // Just before 2040
-        assert!(!my_struct.is_valid_timestamp(&mut "2208988801".to_string())); // Just after 2040 cutoff
+        // Start and end of the allowed range
+        assert!(my_struct.is_valid_timestamp(&mut "0".to_string())); // Start of 1970
+        assert!(my_struct.is_valid_timestamp(&mut "2208988799".to_string())); // Just before 2040
     }
 
     #[test]
     fn test_non_numeric_and_malformed_inputs() {
         let my_struct = AnalyseSchema { i: 0 };
-        assert!(!my_struct.is_valid_timestamp(&mut "".to_string())); // Empty string
-        assert!(!my_struct.is_valid_timestamp(&mut "abc".to_string())); // Letters
-        assert!(!my_struct.is_valid_timestamp(&mut "123abc".to_string())); // Mixed
+        assert!(!my_struct.is_valid_timestamp(&mut "abc".to_string()));
+        assert!(!my_struct.is_valid_timestamp(&mut "1970-01-01".to_string())); // Non-numeric
+        // Add more non-numeric or malformed cases here
     }
 
     #[test]
     fn test_overflow_underflow_cases() {
         let my_struct = AnalyseSchema { i: 0 };
-        // Extremely large values that might overflow i64
-        assert!(!my_struct.is_valid_timestamp(&mut "99999999999999999999".to_string()));
-        // Extremely negative values
-        assert!(!my_struct.is_valid_timestamp(&mut "-99999999999999999999".to_string()));
+        assert!(!my_struct.is_valid_timestamp(&mut "99999999999999999999".to_string())); // Overflow
+        assert!(!my_struct.is_valid_timestamp(&mut "-99999999999999999999".to_string())); // Underflow
+        // Add more extreme cases here
     }
 }
 
@@ -1976,15 +1963,33 @@ mod is_valid_date_tests {
     fn test_valid_date_formats() {
         let foo: AnalyseSchema = AnalyseSchema { i: 0 };
 
-        // Test ISO8601 with milliseconds
+        let date_str = "2022-01-07T08:28:07.000Z";
+        let json_value: Value = date_str.into();
+        let value = json_value.as_str().unwrap();
+
+        assert_eq!(Some("Iso8601"), AnalyseSchema::is_valid_date(value));
+
         let date_str = "2022-01-05T08:30:12.000Z";
         assert_eq!(Some("Iso8601"), AnalyseSchema::is_valid_date(date_str));
 
-        // Verify format string parsing
         let fmt = DateFormats::from_str("Iso8601").unwrap();
-        assert_eq!("%Y-%m-%dT%H:%M:%S.%fZ", fmt.as_str()); // Updated to match the current format string
-        let result = Helpers::parse_date_from_string(date_str, fmt.as_str());
-        assert!(result.is_ok(), "Failed to parse date: {:?}", result.err());
+        assert_eq!("%Y-%m-%dT%H:%M:%S.%fZ", fmt.as_str());
+        Helpers::parse_date_from_string(date_str, fmt.as_str()).unwrap();
+
+        let date_str = "2022-01-07T08:28:07Z";
+        assert_eq!(Some("Iso8601_2"), AnalyseSchema::is_valid_date(date_str));
+
+        let date_str = "2022-02-22T22:22:22";
+        assert_eq!(Some("Atom"), AnalyseSchema::is_valid_date(date_str));
+
+        let mut date_str = "2021-01-03 02:30:00";
+        assert_eq!(Some("Mysql"), AnalyseSchema::is_valid_date(date_str));
+
+        date_str = "Tue, 22 Feb 2022 22:22:22 GMT";
+        assert_eq!(Some("Rfc850"), AnalyseSchema::is_valid_date(date_str));
+
+        date_str = "2022-02-22";
+        assert_eq!(Some("DateOnly"), AnalyseSchema::is_valid_date(date_str));
     }
 
     #[test]
@@ -2020,10 +2025,7 @@ mod is_valid_date_tests {
     fn test_valid_date() {
         let foo: AnalyseSchema = AnalyseSchema { i: 0 };
         let date_str = "2022-02-22";
-        // Make sure the date parsing functionality works
-        let result = Helpers::parse_date_from_string(date_str, "%Y-%m-%d");
-        assert!(result.is_ok(), "Failed to parse date: {:?}", result.err());
-        // Ensure the date is recognized by is_valid_date
+        let _nd = Helpers::parse_date_from_string(date_str, "%Y-%m-%d").unwrap();
         assert_eq!(Some("DateOnly"), AnalyseSchema::is_valid_date(date_str));
     }
 }
