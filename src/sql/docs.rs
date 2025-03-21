@@ -236,6 +236,7 @@ fn add_doc_to_result(result: &mut String, doc: &SqlStatementDoc) {
 }
 
 /// Returns a list of supported SQL statements with their syntax
+#[allow(dead_code)]
 pub fn list_supported_sql_statements() -> Vec<String> {
     get_sql_docs().into_iter().map(|(_, doc)| format!("{}: {}", doc.name, doc.syntax)).collect()
 }

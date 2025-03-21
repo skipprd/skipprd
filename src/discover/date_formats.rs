@@ -157,7 +157,7 @@ mod tests {
                                 println!("Parse error for date-only: {:?}", e);
                                 panic!("Failed to parse date {} with format {}", date_str, format_str);
                             });
-                        naive_date.and_hms(0, 0, 0) // Set time to midnight
+                        naive_date.and_hms_opt(0, 0, 0).unwrap_or_default() // Set time to midnight
                     } else {
                         println!("Parse error: {:?}", e);
                         panic!("Failed to parse date {} with format {}", date_str, format_str);
@@ -179,12 +179,12 @@ mod tests {
         // Parse the expected date
         let expected_date = match DateTime::parse_from_rfc3339(expected_utc) {
             Ok(dt) => dt.with_timezone(&Utc),
-            Err(e) => {
+            Err(_e) => {
                 // Fall back to format string parsing if RFC3339 fails
                 match NaiveDateTime::parse_from_str(expected_utc, "%Y-%m-%dT%H:%M:%S%.3f") {
                     Ok(dt) => Utc.from_utc_datetime(&dt),
-                    Err(e) => {
-                        println!("Parse error for expected date: {:?}", e);
+                    Err(_e) => {
+                        println!("Parse error for expected date: {:?}", _e);
                         panic!("Failed to parse expected date {} with format", expected_utc);
                     }
                 }

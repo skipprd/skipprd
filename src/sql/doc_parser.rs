@@ -1,4 +1,3 @@
-
 use crate::sql::docs::{SqlStatementDoc, get_sql_docs};
 use crate::sql::parser::{SParser, Statement, PipelineToggle};
 
@@ -16,15 +15,15 @@ impl SqlDocParser {
                     Ok(statement) => {
                         return Ok(Some(SqlDocParser::get_doc_for_statement(statement)));
                     }
-                    Err(e) => {
+                    Err(_e) => {
                         // If our parser fails, try to identify the statement type
                         // by looking at the first few tokens
                         return Ok(SqlDocParser::identify_statement_type(sql));
                     }
                 }
             }
-            Err(e) => {
-                return Err(format!("Failed to parse SQL: {}", e));
+            Err(_e) => {
+                return Err(format!("Failed to parse SQL: {}", _e));
             }
         }
     }
@@ -75,6 +74,7 @@ impl SqlDocParser {
     }
     
     /// Validates if a SQL statement is supported
+    #[allow(dead_code)]
     pub fn is_supported(sql: &str) -> bool {
         match SqlDocParser::parse_and_document(sql) {
             Ok(Some(_)) => true,
@@ -83,11 +83,13 @@ impl SqlDocParser {
     }
     
     /// Returns documentation in Markdown format for all supported SQL statements
+    #[allow(dead_code)]
     pub fn generate_markdown_docs() -> String {
         crate::sql::docs::get_sql_docs_formatted()
     }
     
     /// Exports the documentation to a file
+    #[allow(dead_code)]
     pub fn export_docs_to_file(file_path: &str) -> Result<(), std::io::Error> {
         use std::fs::File;
         use std::io::Write;

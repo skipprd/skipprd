@@ -46,11 +46,12 @@ pub mod file_output;
 // }
 
 #[async_trait]
+#[allow(dead_code)]
 pub(crate) trait DataInputPlugin {
     async fn sync(&mut self, offsets: Arc<Offsets>, shared_output: Arc<TimedRwLock<DataOutputAwsAthenaPlugin>>);
 }
 
 #[async_trait]
-pub(crate) trait DataOutputPlugin: Send + Sync {
+pub trait DataOutputPlugin: Send + Sync {
     async fn sync(&self, stream: SendableRecordBatchStream, filename: String) -> Result<(), std::io::Error>;
 }

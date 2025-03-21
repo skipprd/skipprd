@@ -247,7 +247,7 @@ impl Metrics {
         let pipeline = Config::get_pipeline_name();
 
         let env = Config::get_pipeline_env();
-        let uri = if env != "prod" {
+        let _uri = if env != "prod" {
             format!("https://metrics.{}.api.skippr.io", env)
         } else {
             String::from("https://metrics.api.skippr.io")
@@ -270,12 +270,12 @@ impl Metrics {
         let auth_header = HeaderName::from_static("x-api-key");
         headers.insert(auth_header, HeaderValue::from_str(&token).unwrap());
 
-        let client = reqwest::Client::builder()
+        let _client = reqwest::Client::builder()
             .default_headers(headers)
             // .timeout(Duration::from_secs(10))
             .build()?;
 
-        let path = "";
+        let _path = "";
 
         let tenant_id;
         {
@@ -335,7 +335,7 @@ impl Metrics {
         let total_times: Vec<(String, Duration)> = TimedRwLock::<()>::get_total_wait_times();
         let wait_times: HashMap<String, Duration> = total_times.iter().cloned().collect();
 
-        let data = json!({
+        let _data = json!({
             "metrics": {
                 "ingested_total": metrics.messages_total,
                 "fixed_total": metrics.ingeted_slow_total,
@@ -435,7 +435,7 @@ impl Metrics {
         let pipeline = Config::get_pipeline_name();
 
         let env = Config::get_pipeline_env();
-        let uri = if env != "prod" {
+        let _uri = if env != "prod" {
             format!("https://metrics.{}.api.skippr.io", env)
         } else {
             String::from("https://metrics.api.skippr.io")
@@ -456,12 +456,12 @@ impl Metrics {
         let auth_header = HeaderName::from_static("x-api-key");
         headers.insert(auth_header, HeaderValue::from_str(&token).unwrap());
 
-        let client = reqwest::Client::builder()
+        let _client = reqwest::Client::builder()
             .default_headers(headers)
             // .timeout(Duration::from_secs(10))
             .build()?;
 
-        let path = "";
+        let _path = "";
 
         let tenant_id;
         {
@@ -477,7 +477,7 @@ impl Metrics {
 
         let metrics_env_config = MetricsEnvConfig::new();
 
-        let data = json!({
+        let _data = json!({
             "config": metrics_env_config,
             "type": "config",
             "run_id": metrics.run_id,

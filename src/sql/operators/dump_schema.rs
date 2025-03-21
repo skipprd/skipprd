@@ -20,9 +20,7 @@ pub fn dump_schema(metadata: &Metadata, stmt: &SchemaDumpStatement) -> Result<()
 
     let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.or(Some("no".to_string())).unwrap());
 
-    let mut output_metadata: OutputMetadata = OutputMetadata::new();
-
-    if flatten {
+    let output_metadata = if flatten {
         // let mut meta: HashMap<String, OutputMetadata> = HashMap::new();
         // 
         // Metadata::flatten_metadata(metadata, &mut meta);
@@ -30,13 +28,13 @@ pub fn dump_schema(metadata: &Metadata, stmt: &SchemaDumpStatement) -> Result<()
         // let mut flat: OutputMetadata = OutputMetadata::new();
         // flat.fields = Box::new(meta);
         // output_metadata = flat;
-        output_metadata = OutputMetadata::from_flatterened_metadata(metadata)
+        OutputMetadata::from_flatterened_metadata(metadata)
         
     } else {
         // output_metadata = HashMap::new();
         // output_metadata.insert("root".to_string(), metadata.clone());
-        output_metadata = OutputMetadata::from_metadata(metadata);
-    }
+        OutputMetadata::from_metadata(metadata)
+    };
     
     let hive_schema = SkipprHive::convert_skippr_to_hive(&output_metadata).unwrap();
     

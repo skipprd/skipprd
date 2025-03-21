@@ -5,7 +5,7 @@ use crate::helpers::offsets::{OffsetKey, Offsets, OffsetTypes};
 use crate::helpers::Helpers;
 use crate::ingest::ingest::ingest;
 use crate::serdes::json::SerdeJson;
-use crate::{ARROW_SCHEMA, helpers, METADATA, METRICS, RUNNING};
+use crate::{ARROW_SCHEMA, METADATA, METRICS, RUNNING};
 
 
 use once_cell::sync::Lazy;
@@ -29,14 +29,9 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::atomic::Ordering::AcqRel;
 use dashmap::{DashMap};
 
-use parquet::data_type::AsBytes;
 use crate::ingest::fast_ingest::{create_default_nested_message, DEFAULT_NESTED_MESSAGE, fast_path_ingest};
 
-
-
-
-use tokio::io::AsyncWriteExt;
-use helpers::timed_rwlock::TimedRwLock;
+use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::buffer::ingest_buffer::{Buffers, IngestBufferBatch, IngestRecord};
 use crate::serdes::csv::SerderCsv;
 
@@ -70,7 +65,7 @@ pub struct IngestBatch {
 
 // Bare metal platforms usually have very small amounts of RAM
 // (in the order of hundreds of KB)
-pub const WRITE_BUF_SIZE: usize = if cfg!(target_os = "espidf") {
+pub const _WRITE_BUF_SIZE: usize = if cfg!(target_os = "espidf") {
     512
 } else {
     512 * 1024
@@ -268,7 +263,7 @@ impl Ingest {
 
                         let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.unwrap_or("false".to_string()));
 
-                        for (namespace, metadata) in pipeline_metadata.metadata.iter_mut() {
+                        for (_namespace, metadata) in pipeline_metadata.metadata.iter_mut() {
                             AnalyseSchema::determine_field_types(&mut metadata.fields, None, flatten);
                         }
 
@@ -346,12 +341,12 @@ impl Ingest {
         });
 
 
-        let default_schema_hash = format!("{:?}", md5::compute(Helpers::random_str(10)));
+        let _default_schema_hash = format!("{:?}", md5::compute(Helpers::random_str(10)));
         
         let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.or(Some("no".to_string())).unwrap());
 
         let data_dir = Config::get_data_dir();
-        let output_dir = format!("{}/ingest_buffer", data_dir);
+        let _output_dir = format!("{}/ingest_buffer", data_dir);
         let _deadletter_dir = format!("{}/deadletter_buffer", data_dir);
 
         let _aprox_now = SystemTime::now();
@@ -363,10 +358,10 @@ impl Ingest {
         let mut bytes: u64 = 0;
         let mut latest_timestamp: i64 = 0;
         let mut i: u64 = 0;
-        let mut j = 0;
+        let mut _j = 0;
         let mut d = 0;
         let mut x = 0;
-        let mut batch_line: u64 = 0;
+        let mut _batch_line: u64 = 0;
 
         let format = match Config::get_pipline_plugin_config("input") {
             Ok(plugin) => plugin.format(),
@@ -414,7 +409,7 @@ impl Ingest {
                 };
             }
 
-            batch_line = 0;
+            _batch_line = 0;
 
             let mut unwrapped_records: Vec<Value> = Vec::with_capacity(records.len());
 
@@ -431,10 +426,10 @@ impl Ingest {
                                 }
                             },
                             None => {
-                                let line_no = if batch_line == 0 || batch_line > ingest_batch.data.lines().count() as u64 {
+                                let line_no = if _batch_line == 0 || _batch_line > ingest_batch.data.lines().count() as u64 {
                                     1
                                 } else {
-                                    batch_line - 1
+                                    _batch_line - 1
                                 };
 
                                 // deadletter
@@ -452,7 +447,7 @@ impl Ingest {
                                 };
 
                                 Self::deadletter(dl);
-                                offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Position, batch_line);
+                                offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Position, _batch_line);
 
                                 d += 1;
 
@@ -466,14 +461,14 @@ impl Ingest {
 
             for record in unwrapped_records {
 
-                batch_line += 1;
+                _batch_line += 1;
 
                 if record.is_null()
                     || (record.is_object() && record.as_object().unwrap().is_empty())
                     || (record.is_array() && record.as_array().unwrap().is_empty())
                 {
 
-                    let line_str = match ingest_batch.data.lines().nth(batch_line as usize - 1) {
+                    let line_str = match ingest_batch.data.lines().nth(_batch_line as usize - 1) {
                         Some(line) => line,
                         None => {
                             ""
@@ -489,7 +484,7 @@ impl Ingest {
                     };
 
                     Self::deadletter(dl);
-                    offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Position, batch_line);
+                    offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Position, _batch_line);
 
                     d += 1;
 
@@ -499,7 +494,7 @@ impl Ingest {
                 if has_offsets.is_none()
                     || current_line_offset.is_none()
                     || (Some(true) == has_offsets
-                        && Some(true) == offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Position, batch_line))
+                        && Some(true) == offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Position, _batch_line))
                 {
 
                     i += 1;
@@ -586,10 +581,10 @@ impl Ingest {
                                     }
 
                                     // deadletter record
-                                    let line_str = match ingest_batch.data.lines().nth(batch_line as usize - 1) {
+                                    let line_str = match ingest_batch.data.lines().nth(_batch_line as usize - 1) {
                                         Some(line) => line,
                                         None => {
-                                            // println!("Could not find line {} in batch", batch_line);
+                                            // println!("Could not find line {} in batch", _batch_line);
                                             ""
                                         }
                                     };
@@ -603,7 +598,7 @@ impl Ingest {
                                     };
 
                                     Self::deadletter(dl);
-                                    offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Position, batch_line);
+                                    offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Position, _batch_line);
 
                                     let mut counter_lock = METRICS.write();
                                     counter_lock.deadletters_total += 1;
@@ -630,14 +625,14 @@ impl Ingest {
 
                                     println!("Updated schema for namespace: {}", skpr_namespace);
                                     
-                                    let mut default_message = Value::Null;
+                                    let mut _default_message = Value::Null;
                                     {
-                                        default_message = create_default_nested_message(&metadata.metadata.get(&skpr_namespace).unwrap().fields);
+                                        _default_message = create_default_nested_message(&metadata.metadata.get(&skpr_namespace).unwrap().fields);
                                     }
 
                                     {
                                         let mut lock = DEFAULT_NESTED_MESSAGE.write();
-                                        lock.insert(skpr_namespace.clone(), default_message);
+                                        lock.insert(skpr_namespace.clone(), _default_message);
                                     }
 
                                     Ingest::prepare_arrow_schema_with_metadata(&skpr_namespace, &metadata.metadata, flatten).unwrap();
@@ -660,10 +655,10 @@ impl Ingest {
                                 msg
 
                             } else { // or just deadletter message for later approval
-                                let line_str = match ingest_batch.data.lines().nth(batch_line as usize - 1) {
+                                let line_str = match ingest_batch.data.lines().nth(_batch_line as usize - 1) {
                                     Some(line) => line,
                                     None => {
-                                        // println!("Could not find line {} in batch", batch_line);
+                                        // println!("Could not find line {} in batch", _batch_line);
                                         ""
                                     }
                                 };
@@ -677,7 +672,7 @@ impl Ingest {
                                 };
 
                                 Self::deadletter(dl);
-                                offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Position, batch_line);
+                                offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Position, _batch_line);
                                 
                                 d += 1;
 
@@ -687,21 +682,21 @@ impl Ingest {
                     };
 
                     let ingest_record = IngestRecord {
-                        namespace: skpr_namespace.clone(),
-                        partition: skpr_partition.clone(),
-                        time: skpr_time_bucket.clone(),
                         record: record_value,
+                        _namespace: skpr_namespace.clone(),
+                        _partition: skpr_partition.clone(),
+                        _time: skpr_time_bucket.clone(),
                     };
 
                     let schema_hash = match schema_hashes.get(&skpr_namespace) {
                         Some(hash) => hash.clone(),
                         None => {
 
-                            let mut schemas: HashMap<String, SchemaRef> = HashMap::new();
+                            let mut _schemas: HashMap<String, SchemaRef> = HashMap::new();
                             {
-                                schemas = ARROW_SCHEMA.read().clone()
+                                _schemas = ARROW_SCHEMA.read().clone()
                             }
-                            if schemas.get(&skpr_namespace).is_none() {
+                            if _schemas.get(&skpr_namespace).is_none() {
                                 let start_time = Instant::now();
 
                                 let mut i = 0;
@@ -712,7 +707,7 @@ impl Ingest {
                                     std::thread::sleep(std::time::Duration::from_millis(100));
                                     i += 1;
                                 }
-                                schemas = ARROW_SCHEMA.read().clone();
+                                _schemas = ARROW_SCHEMA.read().clone();
 
                                 let elapsed = start_time.elapsed();
                                 let nanos = elapsed.as_nanos() as u64;
@@ -722,7 +717,7 @@ impl Ingest {
                                     .fetch_add(nanos, Ordering::Relaxed);
                             }
 
-                            let schema = Arc::clone(schemas.get(&skpr_namespace).unwrap());
+                            let schema = Arc::clone(_schemas.get(&skpr_namespace).unwrap());
                             let hash = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
 
                             let schema_hash = SchemaHash {
@@ -745,21 +740,21 @@ impl Ingest {
 
                         IngestBufferBatch {
                             offsets: HashMap::new(),
-                            namespace: skpr_namespace.clone(),
-                            partition: skpr_partition.clone(),
-                            time: skpr_time_bucket,
-                            shard: "".to_string(),
-                            records: Vec::new(),
+                            _namespace: skpr_namespace.clone(),
+                            _partition: skpr_partition.clone(),
+                            _time: skpr_time_bucket,
+                            _shard: "".to_string(),
+                            records: vec![ingest_record.clone()],
                             schema: schema_hash.schema,
                         }
                     });
                     
                     // an ingest batch consist of many small files/queue messages, etc. Each will need its offset committed in the WAL.
-                    buf_entry.offsets.insert(ingest_batch.offset_key.clone(), batch_line);
+                    buf_entry.offsets.insert(ingest_batch.offset_key.clone(), _batch_line);
                     
                     buf_entry.records.push(ingest_record);
 
-                    j += 1;
+                    _j += 1;
                     
                 }
             }
@@ -794,8 +789,8 @@ impl Ingest {
         metadata: &HashMap<String, Metadata>,
         flatten: bool,
     ) -> Result<(), ArrowError> {
-        let mut arrow_schema: Result<datatypes::Schema, ArrowError> = Ok(datatypes::Schema::empty());
-        let mut schema_ref = Arc::new(datatypes::Schema::empty());
+        let mut _arrow_schema: Result<datatypes::Schema, ArrowError> = Ok(datatypes::Schema::empty());
+        let mut _schema_ref = Arc::new(datatypes::Schema::empty());
 
         let skpr_metadata = metadata.get(skpr_namespace);
 
@@ -809,13 +804,13 @@ impl Ingest {
             }
         }
         
-        arrow_schema = convert_skippr_to_arrow(
+        _arrow_schema = convert_skippr_to_arrow(
             output_metadata.fields,
         );
 
-        schema_ref = Arc::new(arrow_schema.unwrap());
+        _schema_ref = Arc::new(_arrow_schema.unwrap());
 
-        ARROW_SCHEMA.write().insert(skpr_namespace.to_string(), schema_ref.clone());
+        ARROW_SCHEMA.write().insert(skpr_namespace.to_string(), _schema_ref.clone());
 
         Ok(())
     }

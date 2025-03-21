@@ -3,7 +3,7 @@ use crate::helpers::configuration::Config;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::json;
 
-use std::hash::{Hash, Hasher};
+use std::hash::{Hash};
 
 use crate::helpers::license::{HAS_LICENSE, TENANT_ID};
 use serde_derive::Serialize;
@@ -120,14 +120,14 @@ impl Logger {
 
         let path = "";
 
-        let mut tenant_id = "".to_string();
+        let mut _tenant_id = "".to_string();
         {
-            tenant_id = TENANT_ID.read().clone();
+            _tenant_id = TENANT_ID.read().clone();
         }
 
-        let mut run_id = "".to_string();
+        let mut _run_id = "".to_string();
         {
-            run_id = METRICS.read().run_id.clone();
+            _run_id = METRICS.read().run_id.clone();
         }
         
         
@@ -140,10 +140,10 @@ impl Logger {
                 })
             }).collect::<Vec<_>>(),
             "type": "log",
-            "tenant_id": tenant_id,
+            "tenant_id": _tenant_id,
             "workspace_name": workspace,
             "pipeline_name": pipeline,
-            "run_id": run_id,
+            "run_id": _run_id,
             "datetime": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             "exit_code": exit_code
         });

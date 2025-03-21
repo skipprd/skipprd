@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+// use serde::{Deserialize, Serialize};
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Lines, Read, Result, Write};
@@ -6,25 +6,29 @@ use std::path::Path;
 
 use serde_value::Value;
 
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(rename_all = "PascalCase")]
+#[derive(Debug, Clone)]
 pub struct SerdeXml {
-    pub SupportedCompressionTypes: Vec<String>,
-    pub CompressionType: String,
-    pub Fh: String,
-    pub Records: Vec<String>,
+    #[allow(dead_code)]
+    pub supported_compression_types: Vec<String>,
+    #[allow(dead_code)]
+    pub compression_type: String,
+    #[allow(dead_code)]
+    pub fh: String,
+    #[allow(dead_code)]
+    pub records: Vec<String>,
 }
 
 impl SerdeXml {
+    #[allow(dead_code)]
     pub fn new() -> SerdeXml {
         SerdeXml {
-            SupportedCompressionTypes: vec![
+            supported_compression_types: vec![
                 String::from("VALUE_COMPRESSION"),
                 String::from("NO_COMPRESSION"),
             ],
-            CompressionType: String::from("NO_COMPRESSION"),
-            Fh: String::from(""),
-            Records: vec![],
+            compression_type: String::from("NO_COMPRESSION"),
+            fh: String::from(""),
+            records: vec![],
         }
     }
 
@@ -79,23 +83,26 @@ impl SerdeXml {
     //
     // }
 
+    #[allow(dead_code)]
     pub fn open_writer(&mut self, filename: String) {
-        self.Fh = filename;
+        self.fh = filename;
     }
 
+    #[allow(dead_code)]
     pub fn close_writer(&mut self) {
-        let file = File::create(&self.Fh).unwrap();
+        let file = File::create(&self.fh).unwrap();
         let mut writer = BufWriter::new(file);
 
-        for data in &self.Records {
-            if self.CompressionType == "VALUE_COMPRESSION" {
+        for data in &self.records {
+            if self.compression_type == "VALUE_COMPRESSION" {
                 // Implement VALUE_COMPRESSION logic here
-            } else if self.CompressionType == "NO_COMPRESSION" {
+            } else if self.compression_type == "NO_COMPRESSION" {
                 writeln!(writer, "{}", data).unwrap();
             }
         }
     }
 
+    #[allow(dead_code)]
     pub fn serialize(&mut self, record: Vec<String>) {
         let serialized = format!(
             "<SerdeXml>{}</SerdeXml>",
@@ -105,11 +112,12 @@ impl SerdeXml {
                 .collect::<Vec<String>>()
                 .join("")
         );
-        self.Records.push(serialized);
+        self.records.push(serialized);
     }
 
     // The output is wrapped in a Result to allow matching on errors
     // Returns an Iterator to the Reader of the lines of the file.
+    #[allow(dead_code)]
     pub fn read_lines<P>(filename: P) -> Result<Lines<BufReader<File>>>
         where
             P: AsRef<Path>,

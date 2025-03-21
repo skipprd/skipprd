@@ -11,6 +11,7 @@ enum InferredType {
     Scalar(HashSet<DataType>),
     Array(Box<InferredType>),
     Object(HashMap<String, InferredType>),
+    #[allow(dead_code)]
     Any,
 }
 
@@ -95,7 +96,7 @@ fn set_object_scalar_field_type(
                 "Only Scalar possible found Object instead of Scalar".to_string(),
             ));
         }
-        _Any => {
+        _any => {
             return Err(ArrowError::JsonError(
                 "Only Scalar possible found Any instead of Scalar".to_string(),
             ));
@@ -219,9 +220,9 @@ fn convert_skippr_to_arrow_field_types(
                     }
                 } else {
                     let mut field = HashSet::new();
-                    let dataType =
+                    let data_type =
                         convert_skippr_type_to_arrow_data_type(&v.determined_type_values).unwrap();
-                    field.insert(dataType);
+                    field.insert(data_type);
 
                     field_types.insert(
                         v.out_field_name.to_string(),
@@ -271,7 +272,7 @@ fn convert_skippr_to_arrow_field_types(
                 set_object_scalar_field_type(&mut field_types, &v.out_field_name, DataType::Timestamp(Millisecond, None)).expect("Error setting object scalar field date type")
             }
             "" => {}
-            _Any => {
+            _any => {
                 return Err(ArrowError::JsonError(format!(
                     "Only Scalar possible found Any instead of determined_type string: {}",
                     v.determined_type
@@ -286,6 +287,7 @@ fn convert_skippr_to_arrow_field_types(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
     use arrow::datatypes::{DataType, Field};
     use std::collections::HashMap;
 

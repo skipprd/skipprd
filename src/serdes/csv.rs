@@ -1,8 +1,5 @@
 extern crate csv;
 
-
-use std::io::{BufRead};
-
 use std::string::ToString;
 use once_cell::sync::Lazy;
 
@@ -15,6 +12,7 @@ pub static CHOSEN_DELIM: Lazy<TimedRwLock<String>> = Lazy::new(|| TimedRwLock::n
 pub struct SerderCsv;
 
 impl SerderCsv {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         SerderCsv
     }

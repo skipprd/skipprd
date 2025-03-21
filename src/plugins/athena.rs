@@ -10,14 +10,13 @@ use aws_sdk_glue::types::{Column, DatabaseInput, PartitionIndex, PartitionInput,
 use aws_sdk_glue::Client as GlueClient;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::{Client as S3Client, Error};
+use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 
 use std::collections::HashMap;
-use std::{io};
-use std::io::{Read};
+use std::io;
 use async_trait::async_trait;
 use aws_sdk_glue::error::SdkError;
 use aws_sdk_glue::operation::get_table::{GetTableError, GetTableOutput};
-use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use bytes::Bytes;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use futures::{StreamExt};
@@ -52,7 +51,7 @@ pub struct ParquetBytes {
 impl From<PluginConfig> for DataOutputAwsAthenaPluginConfig {
     fn from(plugin_config: PluginConfig) -> Self {
         match plugin_config {
-            PluginConfig::athena(athena_config) => athena_config,
+            PluginConfig::Athena(athena_config) => athena_config,
             _ => panic!("Invalid plugin type"),
         }
     }
@@ -68,12 +67,15 @@ impl DataOutputPlugin for DataOutputAwsAthenaPlugin {
 
 pub struct DataOutputAwsAthenaPlugin {
     s3_client: S3Client,
+    #[allow(dead_code)]
     athena_client: AthenaClient,
+    #[allow(dead_code)]
     buffer_name: String,
     config: DataOutputAwsAthenaPluginConfig,
     // s3_bucket: String,
     // s3_prefix: String,
     // time_bucket: String,
+    #[allow(dead_code)]
     max_async_uploads: i64,
 }
 
@@ -94,7 +96,7 @@ impl DataOutputAwsAthenaPlugin {
     }
 
     pub async fn new(buffer_name: String) -> DataOutputAwsAthenaPlugin {
-        let aws_config = aws_config::from_env().load().await;
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
 
         let s3_client = S3Client::new(&aws_config);
         let athena_client = AthenaClient::new(&aws_config);
@@ -387,7 +389,7 @@ impl AwsAthena {
     pub async fn get_work_group() -> Result<bool, String> {
         let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
         let workgroup = config.athena_workgroup_name;
-        let aws_config = aws_config::from_env().load().await;
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
 
         let athena_client = AthenaClient::new(&aws_config);
 
@@ -419,7 +421,7 @@ impl AwsAthena {
 
         let database_name = config.glue_database_name;
 
-        let aws_config = aws_config::from_env().load().await;
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
 
         let glue_client = GlueClient::new(&aws_config);
 
@@ -440,7 +442,7 @@ impl AwsAthena {
 
         let database_name = config.glue_database_name;
 
-        let aws_config = aws_config::from_env().load().await;
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
 
         let glue_client = GlueClient::new(&aws_config);
 
@@ -467,7 +469,7 @@ impl AwsAthena {
             .unwrap()
             .to_string();
 
-        let aws_config = aws_config::from_env().load().await;
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
 
         let glue_client = AthenaClient::new(&aws_config);
 
@@ -519,7 +521,7 @@ impl AwsAthena {
             .unwrap()
             .to_string();
 
-        let aws_config = aws_config::from_env().load().await;
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
 
         let glue_client = AthenaClient::new(&aws_config);
 
@@ -567,7 +569,7 @@ impl AwsAthena {
             .unwrap()
             .to_string();
 
-        let aws_config = aws_config::from_env().load().await;
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
 
         let glue_client = GlueClient::new(&aws_config);
 
@@ -625,7 +627,7 @@ impl AwsAthena {
             }
         }
 
-        let aws_config = aws_config::from_env().load().await;
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
 
         let glue_client = GlueClient::new(&aws_config);
 
@@ -769,7 +771,7 @@ impl AwsAthena {
             .await
         {
             Ok(_output) => println!("Deleted database {}", database_name),
-            Err(err) => (),
+            Err(_err) => (),
         }
 
         // delete contents from the s3 bucket
@@ -880,7 +882,7 @@ impl AwsAthena {
 
         let database = config.glue_database_name;
 
-        let aws_config = aws_config::from_env().load().await;
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
 
         let glue_client = GlueClient::new(&aws_config);
 
@@ -955,7 +957,7 @@ impl AwsAthena {
 
         let columns = SkipprHive::convert_skippr_to_hive(metadata).unwrap();
 
-        let aws_config = aws_config::from_env().load().await;
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
 
         let glue_client = GlueClient::new(&aws_config);
 
@@ -1027,7 +1029,7 @@ impl AwsAthena {
 
         let columns = SkipprHive::convert_skippr_to_hive(metadata).unwrap();
 
-        let aws_config = aws_config::from_env().load().await;
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
 
         let glue_client = GlueClient::new(&aws_config);
 
@@ -1118,7 +1120,7 @@ impl AwsAthena {
 
         let columns = SkipprHive::convert_skippr_to_hive(metadata).unwrap();
 
-        let aws_config = aws_config::from_env().load().await;
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
 
         let glue_client = GlueClient::new(&aws_config);
 

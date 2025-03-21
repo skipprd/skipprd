@@ -15,13 +15,24 @@ use crate::helpers::Helpers;
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::ingest::ingest::{ResolvedFieldValue};
 
+#[allow(unused_imports)]
+use crate::discover::DateCandidate;
+#[allow(unused_imports)]
+use chrono::{FixedOffset, NaiveDateTime, Utc};
+
 #[derive(Default)]
 pub struct IngestRecord {
+    #[allow(dead_code)]
     pub(crate) source_namespace: String,
+    #[allow(dead_code)]
     pub(crate) source_partition: String,
+    #[allow(dead_code)]
     pub(crate) skpr_event_ts: i64,
+    #[allow(dead_code)]
     pub(crate) skpr_namespace: String,
+    #[allow(dead_code)]
     pub(crate) skpr_partition: String,
+    #[allow(dead_code)]
     pub(crate) record: Value,
 }
 
@@ -92,11 +103,11 @@ pub fn fast_path_ingest(
     flatten: bool,
 ) -> Result<Value, Box<dyn Error>> {
 
-    let mut message = Value::Object(Map::new());
+    let mut _message = Value::Object(Map::new());
     
     {
         // Avoid unnecessary clone by using reference
-        message = match DEFAULT_NESTED_MESSAGE.read().get(namespace) {
+        _message = match DEFAULT_NESTED_MESSAGE.read().get(namespace) {
             Some(m) => m.clone(),
             None => {
                 return Err("No default message template found".into());
@@ -135,7 +146,7 @@ pub fn fast_path_ingest(
             };
 
             if !resolved_value.value.is_null() {
-                message[resolved_value.field] = resolved_value.value;
+                _message[resolved_value.field] = resolved_value.value;
             }
         } else {
             return Err(format!("Field '{}' not found in metadata", field).into());
@@ -143,13 +154,13 @@ pub fn fast_path_ingest(
     }
     
     if flatten {
-        message = match Helpers::flatten(&message, &metadata) {
+        _message = match Helpers::flatten(&_message, &metadata) {
             Ok(m) => m,
             Err(e) => return Err(e),
         };
     }
     
-    Ok(message)
+    Ok(_message)
 }
 
 pub fn fast_set_value(
@@ -689,13 +700,13 @@ pub fn fast_set_date(field: &str, value: &Value, metadata: &HashMap<String, Meta
 }
 
 #[cfg(test)]
-mod tests_fast_set_date {
+mod tests {
     use super::*;
     use crate::discover::DateCandidate;
+    #[allow(unused_imports)]
     use chrono::{FixedOffset, NaiveDateTime, Utc};
 
     use std::collections::HashMap;
-
 
     fn generate_metadata(field: &str, format_name: &str) -> HashMap<String, Metadata> {
         let date_candidate = DateCandidate {
@@ -729,7 +740,8 @@ mod tests_fast_set_date {
 
     #[test]
     fn test_fast_set_date_with_valid_date() {
-        let foo: AnalyseSchema = AnalyseSchema { i: 0 };
+        let _foo: AnalyseSchema = AnalyseSchema { i: 0 };
+        let _updated_schema = "no".to_string();
 
         let field = "test_field";
 
@@ -740,8 +752,6 @@ mod tests_fast_set_date {
         let mut meta = generate_metadata(field, format_name);
 
         let value = Value::String(String::from(date_str));
-
-        let mut updated_schema = "no".to_string();
 
         let result = fast_set_date(field, &value, &mut meta);
 
@@ -755,7 +765,8 @@ mod tests_fast_set_date {
 
     #[test]
     fn test_fast_set_date_with_valid_iso_date() {
-        let foo: AnalyseSchema = AnalyseSchema { i: 0 };
+        let _foo: AnalyseSchema = AnalyseSchema { i: 0 };
+        let _updated_schema = "no".to_string();
 
         let field = "test_field";
 
@@ -769,8 +780,6 @@ mod tests_fast_set_date {
         let mut meta = generate_metadata(field, format_name);
 
         let value = Value::String(String::from(date_str));
-
-        let mut updated_schema = "no".to_string();
 
         let result = fast_set_date(field, &value, &mut meta);
 
@@ -788,7 +797,8 @@ mod tests_fast_set_date {
 
     #[test]
     fn test_fast_set_date_with_valid_iso_timezone_date() {
-        let foo: AnalyseSchema = AnalyseSchema { i: 0 };
+        let _foo: AnalyseSchema = AnalyseSchema { i: 0 };
+        let _updated_schema = "no".to_string();
 
         let field = "test_field";
 
@@ -799,8 +809,6 @@ mod tests_fast_set_date {
         let mut meta = generate_metadata(field, format_name);
 
         let value = Value::String(String::from(date_str));
-
-        let mut updated_schema = "no".to_string();
 
         let result = fast_set_date(field, &value, &mut meta);
 

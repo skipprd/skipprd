@@ -76,7 +76,7 @@ pub struct DataSourceS3InventoryPlugin {
 impl DataSourceS3InventoryPlugin {
     // pub async fn new(config: HashMap<String, String>, buffer: Sender<String>) -> DataSourceS3InventoryPlugin {
     pub async fn new() -> DataSourceS3InventoryPlugin {
-        let s3_config = aws_config::from_env().load().await;
+        let s3_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
 
         let data_dir = Config::get_data_dir();
         let temp_dir = &format!("{}/source_buffer", data_dir);

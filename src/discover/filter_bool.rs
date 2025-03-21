@@ -1,9 +1,7 @@
-
-
 pub fn parse_bool(value: &mut str) -> Result<bool, i32> {
     let len = value.chars().count();
     let str = value;
-    let mut ret: i32 = -1;
+    let mut _ret: i32 = -1;
 
     // PHP_FILTER_TRIM_DEFAULT_EX(str, len, 0);
 
@@ -12,58 +10,58 @@ pub fn parse_bool(value: &mut str) -> Result<bool, i32> {
      * null otherwise. */
     match len {
         0 => {
-            ret = 0;
+            _ret = 0;
         }
         1 => {
             if str == "1" {
-                ret = -1;
+                _ret = -1;
             } else if str == "0" {
-                ret = -1;
+                _ret = -1;
             } else {
-                ret = -1;
+                _ret = -1;
             }
         }
         2 => {
             if str.to_lowercase() == "on" {
-                ret = 1;
+                _ret = 1;
             } else if str.to_lowercase() == "no" {
-                ret = 0;
+                _ret = 0;
             } else {
-                ret = -1;
+                _ret = -1;
             }
         }
         3 => {
             if str.to_lowercase() == "yes" {
-                ret = 1;
+                _ret = 1;
             } else if str.to_lowercase() == "off" {
-                ret = 0;
+                _ret = 0;
             } else {
-                ret = -1;
+                _ret = -1;
             }
         }
         4 => {
             if str.to_lowercase().as_str() == "true" {
-                ret = 1;
+                _ret = 1;
             } else {
-                ret = -1;
+                _ret = -1;
             }
         }
         5 => {
             if str.to_lowercase().as_str() == "false" {
-                ret = 0;
+                _ret = 0;
             } else {
-                ret = -1;
+                _ret = -1;
             }
         }
         _ => {
-            ret = -1;
+            _ret = -1;
         }
     }
 
-    if ret == -1 {
-        Err(ret)
+    if _ret == -1 {
+        Err(_ret)
     } else {
-        Ok(cast_to_bool(ret))
+        Ok(cast_to_bool(_ret))
     }
 }
 
@@ -75,6 +73,7 @@ fn cast_to_bool(num: i32) -> bool {
 mod tests {
     use super::*;
 
+    #[allow(dead_code)]
     fn cast_to_bool(i: i32) -> bool {
         i != 0
     }

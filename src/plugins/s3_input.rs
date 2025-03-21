@@ -4,7 +4,7 @@ use aws_sdk_s3::Client;
 
 use flate2::read::GzDecoder;
 
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Read};
 
 use std::sync::{Arc};
 
@@ -15,7 +15,6 @@ use std::time::Duration;
 use std::{fs};
 use aws_sdk_s3::types::Object;
 use futures::future::join_all;
-use futures::{StreamExt};
 
 use serde_derive::Deserialize;
 use once_cell::sync::Lazy;
@@ -28,7 +27,7 @@ use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::plugins::DataOutputPlugin;
 
 // in data_dir
-const CONTINUATION_TOKEN_FILE: Lazy<String> = Lazy::new(|| {
+const _CONTINUATION_TOKEN_FILE: Lazy<String> = Lazy::new(|| {
     format!("{}/s3_input_continuation_token", Config::get_data_dir())
 });
 
@@ -40,14 +39,16 @@ pub struct DataSourceS3PluginConfig {
 
     pub s3_bucket: String,
     pub s3_prefix: String,
+    #[allow(dead_code)]
     pub s3_prefix_ordered_depth: Option<usize>,
+    #[allow(dead_code)]
     pub s3_delimiter: Option<String>,
 }
 
 impl From<PluginConfig> for DataSourceS3PluginConfig {
     fn from(plugin_config: PluginConfig) -> Self {
         match plugin_config {
-            PluginConfig::s3(s3_config) => s3_config,
+            PluginConfig::S3(s3_config) => s3_config,
             _ => panic!("Invalid plugin type"),
         }
     }
@@ -60,13 +61,15 @@ pub struct DataSourceS3Plugin {
     // s3_client_rusoto: S3Client,
     ingest: Ingest,
     config: DataSourceS3PluginConfig,
+    #[allow(dead_code)]
     temp_dir: String,
+    #[allow(dead_code)]
     prefixes: Vec<(String, usize)>,
 }
 
 impl DataSourceS3Plugin {
     pub async fn new() -> DataSourceS3Plugin {
-        let s3_config = aws_config::from_env().load().await;
+        let s3_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
 
         let data_dir = Config::get_data_dir();
         let temp_dir = &format!("{}/source_buffer", data_dir);
@@ -121,15 +124,15 @@ impl DataSourceS3Plugin {
 
         let max_list_objects = 1000;
 
-        let mut total_objects = 0;
+        let mut _total_objects = 0;
         let mut chunk_size_current = 0;
 
         let mut outputs: Vec<String> = Vec::with_capacity(max_list_objects as usize);
 
         // create 'objects' outside of loop to avoid re-allocation, and of a fixed size (max_list_objects)
-        let mut objects: Vec<Object> = Vec::with_capacity(max_list_objects as usize);
+        let mut _objects: Vec<Object> = Vec::with_capacity(max_list_objects as usize);
 
-        let mut continuation_token = None;
+        let mut _continuation_token = None;
 
         println!(
             "Syncing bucket: {}, prefix: {}",
@@ -159,45 +162,42 @@ impl DataSourceS3Plugin {
         // let num_cpus = num_cpus::get();
         // let num_threads = num_cpus / 4;
 
-        loop {
-            let mut i = 0;
-            let mut list_retries = 0;
-            let mut skipped_objects = 0;
+        'outer: loop {
+            let mut _i = 0;
+            let mut _list_retries = 0;
+            let mut _skipped_objects = 0;
 
             match list_obj_req.clone().send().await {
                 Err(err) => {
                     println!("S3 Error: {:?}", err);
-                    if list_retries >= 5 {
+                    if _list_retries >= 5 {
                         println!("Max retries reached for S3 ListObjectsV2");
-                        // break;
-                        return;
+                        break 'outer;
                     }
-                    list_retries += 1;
-                    tokio::time::sleep(Duration::from_secs(5 * list_retries)).await;
+                    _list_retries += 1;
+                    tokio::time::sleep(Duration::from_secs(5 * _list_retries)).await;
                 },
                 Ok(output) => {
-                    list_retries = 0;
+                    _list_retries = 0;
 
-                    objects = match output.contents {
+                    _objects = match output.contents {
                         Some(o) => o,
                         None => {
                             if empty_objects_trys >= max_empty_objects {
-                                // println!("No more objects found in S3, skipping Bucket: {} Prefix: {}", s3_bucket, s3_prefix);
-                                // break;
-                                return;
+                                println!("No more objects found in S3, skipping Bucket: {} Prefix: {}", s3_bucket, s3_prefix);
+                                break 'outer;
                             }
                             empty_objects_trys += 1;
-                            // continue;
-                            return;
+                            continue;
                         }
                     };
 
-                    if !objects.is_empty() {
-                        skipped_objects = 0;
+                    if !_objects.is_empty() {
+                        _skipped_objects = 0;
 
-                        total_objects += objects.len();
+                        _total_objects += _objects.len();
 
-                        for object in objects {
+                        for object in _objects {
                             let object_key = object.key().unwrap();
                             let _timestamp = object.last_modified().unwrap().secs();
 
@@ -216,7 +216,7 @@ impl DataSourceS3Plugin {
 
                                 chunk_size_current += object.size().unwrap_or_default();
 
-                                i += 1;
+                                _i += 1;
 
                                 if chunk_size_current >= chunk_size {
 
@@ -229,21 +229,21 @@ impl DataSourceS3Plugin {
 
 
                                     outputs.clear();
-                                    i = 0;
+                                    _i = 0;
                                     chunk_size_current = 0;
                                 }
                             } else {
-                                skipped_objects += 1;
+                                _skipped_objects += 1;
                             }
                         }
 
-                        // println!("Skipped objects: {}", skipped_objects);
+                        // println!("Skipped objects: {}", _skipped_objects);
                     }
 
                     if let Some(token) = &output.next_continuation_token {
-                        continuation_token = Some(token.to_string().clone());
+                        _continuation_token = Some(token.to_string().clone());
 
-                        list_obj_req = list_obj_req.set_continuation_token(continuation_token.clone());
+                        list_obj_req = list_obj_req.set_continuation_token(_continuation_token.clone());
                     } else {
                         if !outputs.is_empty() {
                             self.download_and_ingest(
@@ -255,14 +255,11 @@ impl DataSourceS3Plugin {
                                 .await;
                         }
 
-                        // break
-                        return;
+                        break 'outer;
                     }
                 }
             }
-
         }
-
 
         println!("Reached end of S3 pagination");
 

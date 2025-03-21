@@ -3,7 +3,7 @@ use crate::sql::parser::{AlterSchemaDropColumn};
 
 pub fn alter_column_drop(metadata: &mut Metadata, stmt: &AlterSchemaDropColumn) -> Result<Metadata, String> {
 
-    let column_metadata = Metadata::get_nested_metadata_from_field_notation(metadata, &stmt.column_name.to_string())
+    let _column_metadata = Metadata::get_nested_metadata_from_field_notation(metadata, &stmt.column_name.to_string())
         .ok_or_else(|| format!("Column '{}' not found", stmt.column_name))?;
 
     // remove the column from the metadata

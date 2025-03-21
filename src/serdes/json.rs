@@ -17,6 +17,7 @@ pub struct SerdeJson {
 }
 
 impl SerdeJson {
+    #[allow(dead_code)]
     pub fn new() -> SerdeJson {
         SerdeJson {
             supported_compression_types: vec![
@@ -48,10 +49,12 @@ impl SerdeJson {
         messages
     }
 
+    #[allow(dead_code)]
     pub fn open_writer(&mut self, filename: String, _schema: Vec<Value>) {
         self.fh = filename;
     }
 
+    #[allow(dead_code)]
     pub fn close_writer(&mut self) {
         for _data in self.records.iter() {
             if self.compression_type == "VALUE_COMPRESSION" {
@@ -60,6 +63,7 @@ impl SerdeJson {
         }
     }
 
+    #[allow(dead_code)]
     pub fn serialize(&mut self, record: Vec<Value>, _schema: Vec<Value>) {
         self.records
             .push(serde_json::to_string(&record).unwrap_or_default());
@@ -67,6 +71,7 @@ impl SerdeJson {
 
     // The output is wrapped in a Result to allow matching on errors
     // Returns an Iterator to the Reader of the lines of the file.
+    #[allow(dead_code)]
     pub fn read_lines<P>(filename: P) -> Result<Lines<BufReader<File>>>
         where
             P: AsRef<Path>,
@@ -85,7 +90,7 @@ impl SerdeJson {
             Ok(line) => {
                 message.push(line);
             }
-            Err(err) => {
+            Err(_err) => {
 
                 let mut error_lines: Vec<String> = Vec::new();
 
@@ -94,7 +99,7 @@ impl SerdeJson {
                         Ok(decoded_line) => {
                             message.push(decoded_line);
                         }
-                        Err(err) => {
+                        Err(_err) => {
                             error_lines.push(line.to_string());
                         }
                     };

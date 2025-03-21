@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 const FILTER_FLAG_ALLOW_THOUSAND: bool = false;
 
 #[cfg(test)]
@@ -69,7 +70,7 @@ mod tests {
         assert_eq!(get_type(&mut subject.to_string()), expected_type);
     }
 
-    // #[test]
+    #[allow(dead_code)]
     fn test_get_type_float_3() {
         let expected_type = "double".to_string();
 
@@ -120,124 +121,94 @@ mod tests {
     // }
 }
 
+#[allow(dead_code)]
 pub fn parse_float(value: &mut String) -> Option<f64> {
     let len = value.len();
-    // let mut len = value.chars().count();
-    // let mut str = value.as_ptr() as usize;
     let mut str = 0;
-
-    // let mut len = "ds".len();
-    // let mut str = "ds".as_ptr() as usize;
-
     let end = str + len;
 
-    // let mut decimal: *const c_char = ptr::null();
     let _decimal_set = 0;
     let _decimal_len = 0;
-    // let mut dec_sep = '.' as c_char;
-
-    // let mut thousand: *const c_char = ptr::null();
     let _thousand_set = 0;
     let _thousand_len = 0;
-    // let mut tsd_sep: *const c_char = ptr::null();
-
-    // let mut lval: zend_long = 0;
-    // let mut dval: c_double = 0.0;
-    // let mut min_range: c_double = 0.0;
-    // let mut max_range: c_double = 0.0;
-    // let mut min_range_set = 0;
-    // let mut max_range_set = 0;
-
-    let mut first = 0;
+    let mut _first = 0;
     let _n = 0;
 
     let mut num = String::new();
     let _p = 0;
+    
+    // Handle sign
     if str < end && (value.chars().nth(str) == Some('+') || value.chars().nth(str) == Some('-')) {
         num.push(value.chars().nth(str).unwrap());
         str += 1;
     }
-    first = 1;
-    loop {
-        let mut n = 0;
-        while str < end {
-            let thischar = value.chars().nth(str);
-            if thischar >= Some('0') && thischar <= Some('9') {
-                n += 1;
-                num.push(value.chars().nth(str).unwrap());
-            }
-            str += 1;
-
-            if str == end
-                || value.chars().nth(str) == Some('.')
-                || value.chars().nth(str) == Some('e')
-                || value.chars().nth(str) == Some('E')
-            {
-                if first == end {
-                    return None;
-                }
-                if value.chars().nth(str) == Some('.') {
-                    num.push('.');
-                    str += 1;
-                    while str < end
-                        && value.chars().nth(str) >= Some('0')
-                        && value.chars().nth(str) <= Some('9')
-                    {
-                        num.push(value.chars().nth(str).unwrap());
-                        str += 1;
-                    }
-                }
-                if value.chars().nth(str) == Some('e') || value.chars().nth(str) == Some('E') {
-                    num.push(value.chars().nth(str).unwrap());
-                    str += 1;
-                    if str < end
-                        && (value.chars().nth(str) == Some('+')
-                            || value.chars().nth(str) == Some('-'))
-                    {
-                        num.push(value.chars().nth(str).unwrap());
-                        str += 1;
-                    }
-                    while str < end
-                        && value.chars().nth(str) >= Some('0')
-                        && value.chars().nth(str) <= Some('9')
-                    {
-                        num.push(value.chars().nth(str).unwrap());
-                        str += 1;
-                    }
-                }
-                break;
-            // }
-            // if (FILTER_FLAG_ALLOW_THOUSAND) && ",".contains(value.chars().nth(str).unwrap()) {
-            //     if first == 1 && (n < 1 || n > 3) || first != 1 && n != 3 {
-            //         return None;
-            //     }
-            //     first = 0;
-            //     str += 1;
-            } else {
-                return None;
-            }
+    
+    _first = 1;
+    let mut _n = 0;
+    
+    // Process digits before decimal point
+    while str < end {
+        let thischar = value.chars().nth(str);
+        if thischar >= Some('0') && thischar <= Some('9') {
+            _n += 1;
+            num.push(value.chars().nth(str).unwrap());
+        } else if thischar == Some('.') || thischar == Some('e') || thischar == Some('E') {
+            break;
+        } else {
+            return None;
         }
-
-        if str == end {
-            return Some(cast_to_float(num));
-            // return Some(num)
-        }
+        str += 1;
     }
-    if str != end {
+
+    // Handle early exit case
+    if _first == end {
         return None;
     }
-
-    if !num.is_empty() {
+    
+    // Process decimal point and decimal digits
+    if str < end && value.chars().nth(str) == Some('.') {
+        num.push('.');
+        str += 1;
+        while str < end && value.chars().nth(str) >= Some('0') && value.chars().nth(str) <= Some('9') {
+            num.push(value.chars().nth(str).unwrap());
+            str += 1;
+        }
+    }
+    
+    // Process exponent
+    if str < end && (value.chars().nth(str) == Some('e') || value.chars().nth(str) == Some('E')) {
+        num.push(value.chars().nth(str).unwrap());
+        str += 1;
+        
+        // Handle exponent sign
+        if str < end && (value.chars().nth(str) == Some('+') || value.chars().nth(str) == Some('-')) {
+            num.push(value.chars().nth(str).unwrap());
+            str += 1;
+        }
+        
+        // Process exponent digits
+        let mut has_exp_digits = false;
+        while str < end && value.chars().nth(str) >= Some('0') && value.chars().nth(str) <= Some('9') {
+            num.push(value.chars().nth(str).unwrap());
+            has_exp_digits = true;
+            str += 1;
+        }
+        
+        // Exponent must have at least one digit
+        if !has_exp_digits {
+            return None;
+        }
+    }
+    
+    // Make sure we consumed all input, otherwise it's not a valid float
+    if str == end {
         return Some(cast_to_float(num));
     }
-
+    
     None
-
-    // } else {
-    //     return None;
-    // }
 }
 
+#[allow(dead_code)]
 fn cast_to_float(num: String) -> f64 {
     num.parse::<f64>().unwrap()
 }

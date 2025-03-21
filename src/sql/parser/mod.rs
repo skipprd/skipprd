@@ -63,6 +63,7 @@ impl SkipprShowCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SchemaDumpSource {
     // `SCHEMA DUMP <object_name> TO <schema file>`
+    #[allow(dead_code)]
     Relation(ObjectName),
 }
 
@@ -77,6 +78,7 @@ impl std::fmt::Display for SchemaDumpSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SchemaLoadDest {
      // `SCHEMA LOAD <schema file> INTO <object_name>`
+    #[allow(dead_code)]
     Relation(ObjectName),
 }
 
@@ -196,6 +198,7 @@ pub(crate) struct PipelineToggleStatement {
     pub(crate)  toggle: PipelineToggle,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AlterTableAddColumn {
     pub(crate) table_name: ObjectName,
@@ -244,6 +247,7 @@ pub enum Statement {
     PipelineDrop(PipelineDropStatement),
     PipelineReset(PipelineResetStatement),
     /// Extension: `SCHEMA LOAD`
+    #[allow(dead_code)]
     SchemaLoad(SchemaLoadStatement),
     PipelineToggle(PipelineToggleStatement),
     // AlterTableAddColumn(AlterTableAddColumn),
@@ -282,11 +286,13 @@ impl<'a> SParser<'a> {
         })
     }
 
+    #[allow(dead_code)]
     fn parse_sql(sql: &str) -> Result<VecDeque<Statement>, ParserError> {
         let dialect = &GenericDialect {};
         SParser::parse_sql_with_dialect(sql, dialect)
     }
 
+    #[allow(dead_code)]
     pub fn parse_sql_with_dialect(
         sql: &str,
         dialect: &dyn Dialect,

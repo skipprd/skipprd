@@ -27,7 +27,7 @@ const GRANULARITIES: [&str; 5] = ["year", "month", "day", "hour", "minute"];
 
 impl DataOutputS3Plugin {
     pub async fn new(buffer_name: String) -> DataOutputS3Plugin {
-        let aws_config = aws_config::from_env().load().await;
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
 
         let s3_client = S3Client::new(&aws_config);
 

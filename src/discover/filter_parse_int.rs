@@ -1,9 +1,11 @@
+#[allow(dead_code)]
 pub const MAX_LENGTH_OF_LONG: u32 = 20;
 
+#[allow(dead_code)]
 pub fn php_filter_parse_int(str: String, ret: &mut i64) -> bool {
-    let mut ctx_value: i64 = 0;
+    let mut _ctx_value: i64 = 0;
     let mut sign: bool = false;
-    let mut digit: i32 = 0;
+    let mut _digit: i32 = 0;
 
     let str_len = str.len();
     let mut n = 0;
@@ -36,7 +38,7 @@ pub fn php_filter_parse_int(str: String, ret: &mut i64) -> bool {
         } else {
             signed_unsigned_int = 1;
         }
-        ctx_value = signed_unsigned_int * cast_char_to_int(str.chars().nth(n).unwrap());
+        _ctx_value = signed_unsigned_int * cast_char_to_int(str.chars().nth(n).unwrap());
 
         n += 1;
     } else {
@@ -53,12 +55,12 @@ pub fn php_filter_parse_int(str: String, ret: &mut i64) -> bool {
 
     while n < end {
         if str.chars().nth(n) >= Some('0') && str.chars().nth(n) <= Some('9') {
-            digit = cast_char_to_int(str.chars().nth(n).unwrap()) as i32;
+            _digit = cast_char_to_int(str.chars().nth(n).unwrap()) as i32;
             n += 1;
-            if (!sign) && ctx_value <= (std::i64::MAX - digit as i64) / 10 {
-                ctx_value = (ctx_value * 10) + digit as i64;
-            } else if sign && ctx_value >= (std::i64::MIN + digit as i64) / 10 {
-                ctx_value = (ctx_value * 10) - digit as i64;
+            if (!sign) && _ctx_value <= (std::i64::MAX - _digit as i64) / 10 {
+                _ctx_value = (_ctx_value * 10) + _digit as i64;
+            } else if sign && _ctx_value >= (std::i64::MIN + _digit as i64) / 10 {
+                _ctx_value = (_ctx_value * 10) - _digit as i64;
             } else {
                 return false;
             }
@@ -67,14 +69,16 @@ pub fn php_filter_parse_int(str: String, ret: &mut i64) -> bool {
         }
     }
 
-    *ret = ctx_value;
+    *ret = _ctx_value;
     true
 }
 
+#[allow(dead_code)]
 fn cast_char_to_int(num: char) -> i64 {
     num.to_string().parse::<i64>().unwrap()
 }
 
+#[allow(dead_code)]
 fn cast_string_to_int(num: String) -> i64 {
     num.parse::<i64>().unwrap()
 }

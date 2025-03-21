@@ -49,7 +49,7 @@ impl SkipprHive {
                     let stuct_cols = SkipprHive::convert_skippr_to_hive_field_types(v).unwrap();
 
                     let mut type_str =
-                        format!("{}<", MAPPINGS.get(&v.determined_type).unwrap().clone());
+                        format!("{}<", MAPPINGS.get(&v.determined_type).unwrap().to_string());
 
                     let mut types: Vec<String> = vec![];
                     for col in stuct_cols.into_iter() {
@@ -192,7 +192,7 @@ impl SkipprHive {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::discover::OutputMetadata;
+    #[allow(unused_imports)]
     use std::collections::HashMap;
 
     #[test]

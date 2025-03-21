@@ -15,22 +15,14 @@ use std::{io, process};
 
 use std::collections::HashMap;
 
-
-use std::ops::{Add};
-
 use std::sync::{Arc};
 use std::thread;
 
-
 use std::fs;
-
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::sleep;
 use std::time::Instant;
-
-use glob::glob_with;
-use glob::MatchOptions;
 
 mod buffer;
 
@@ -41,7 +33,7 @@ mod metrics;
 mod internalfields;
 
 mod discover;
-use crate::discover::{AnalyseSchema, PipelineMetadata};
+use crate::discover::{PipelineMetadata};
 mod converters;
 // use self::converters::avro_parquet::AvroSchema;
 mod cli;
@@ -52,13 +44,11 @@ extern crate core;
 
 use clap::Parser;
 
-
 use signal_hook::iterator::Signals;
 
 use std::panic;
 use std::string::ToString;
-use datafusion::common::ExprSchema;
-
+// use datafusion::common::ExprSchema;
 
 use once_cell::sync::Lazy;
 use signal_hook::consts::{SIGABRT, SIGINT, SIGQUIT, SIGTERM};
@@ -80,7 +70,6 @@ use crate::plugins::athena::DataOutputAwsAthenaPlugin;
 
 use crate::plugins::s3_input::DataSourceS3Plugin;
 // use crate::plugins::s3_inventory::DataSourceS3InventoryPlugin;
-
 
 use crate::metrics::{Metrics, MetricsStatus};
 use crate::plugins::file_input::DataSourceLocalFilePlugin;
@@ -409,7 +398,7 @@ async fn schema(pipeline: &str) {
     session_config = session_config.set("datafusion.catalog.default_catalog", "skippr".into());
     session_config = session_config.set("datafusion.execution.collect_statistics", "true".into());
 
-    let ctx = SessionContext::with_config(session_config);
+    let ctx = SessionContext::new_with_config(session_config);
 
 
     PIPELINE_NAME.write().clear();
@@ -458,7 +447,7 @@ async fn discover() {
 
     println!("Analysing data and generating Skippr metadata for pipeline: {}", pipeline_name);
 
-    let data_dir = Config::get_data_dir();
+    let _data_dir = Config::get_data_dir();
 
     let pipeline_metadata = match Config::get_metadata().await {
         Ok(pipeline_metadata) => {
@@ -485,39 +474,227 @@ async fn discover() {
         }
     };
 
-    let offsets = Arc::new(offsets);
+    let offsets_db = Arc::new(offsets);
 
-    let output = sync_output_plugin("file", "output".to_string()).await.unwrap();
+    let _offsets_clone = offsets_db.clone();
+
+    {
+        let mut wal_index = WAL_PARTITION_INDEX.write();
+        wal_index.recover(offsets_db.clone()).expect("Failed to recover WAL index");
+    }
+    
+    // let output = DataOutputAwsAthenaPlugin::new("output".to_string()).await;
+    // let output_plugin_name = Config::get_pipeline_output_plugin_name();
+    // let output = sync_output_plugin(&output_plugin_name, "output".to_string()).await.unwrap();
+    // let shared_output = Arc::new(TimedRwLock::new("output_plugin".to_string(), output));
+    let output_plugin_name = Config::get_pipeline_output_plugin_name();
+    let output = sync_output_plugin(&output_plugin_name, "output".to_string()).await.unwrap();
     let shared_output = Arc::new(output);
 
-    let offsets_clone = offsets.clone();
+    // sync schema if output plugin configured
+    if output_plugin_name != "" {
+        Config::sync_schema(&pipeline_metadata.metadata).await;
+    } else {
+        // Just build the arrow schemas internally
+        let flatten = Config::get_transform_flatten_events();
+        for (namespace, _metadata) in pipeline_metadata.metadata.iter() {
+            match Ingest::prepare_arrow_schema_with_metadata(&namespace, &pipeline_metadata.metadata, flatten) {
+                Ok(_t) => {}
+                Err(e) => {
+                    println!("Failed to prepare arrow schema: {}", e);
+                    return;
+                }
+            }
+        }
+    }
+
+    let _now = Arc::new(TimedRwLock::new("now".to_string(), Instant::now()));
+
+    /* 
+     * Handle PANICS in threads
+     */
+    // take_hook() returns the default hook in case when a custom one is not set
+    let orig_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |panic_info| {
+        // invoke the default handler and exit the process
+        orig_hook(panic_info);
+        let panic_str = format!("{:?}", panic_info);
+
+        let panic_info_clone = panic_str.clone();
+
+        {
+            let mut counter_lock = METRICS.write();
+            counter_lock.status = MetricsStatus::Error;
+        }
+
+        thread::spawn(move || {
+            let rt = runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+
+            rt.block_on(async {
+                LOGGER
+                    .write()
+                    .await
+                    .log(LogLevel::Error, panic_info_clone)
+                    .await;
+                LOGGER.write().await.flush().await.unwrap();
+            });
+        }).join().unwrap();
+
+        if !RUNNING.read().load(Ordering::SeqCst) {
+            println!("Received another panic - already gracefully shutting down");
+        } else {
+
+            let pid = process::id() as i32; // or replace with the PID of the target process
+
+            kill(Pid::from_raw(pid), Signal::SIGTERM).unwrap();
+        }
+
+    }));
+
+    /* 
+     * Handle SIGNALS
+     */
+    let mut signals = Signals::new(&[SIGINT, SIGTERM, SIGQUIT, SIGABRT]).unwrap();
+
+    let _offsets_clone = offsets_db.clone();
+
+    thread::spawn(move || {
+        for sig in signals.forever() {
+
+            {
+                let mut counter_lock = METRICS.write();
+                counter_lock.status = MetricsStatus::Stopped;
+            }
+
+            thread::spawn(move || {
+                let rt = runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+
+                rt.block_on(async {
+                });
+            }).join().unwrap();
+
+            if !RUNNING.read().load(Ordering::SeqCst) {
+                println!("Received another Ctrl+C signal - terminating immediately, this may result in data loss...");
+                _offsets_clone.flush();
+                std::process::exit(0);
+            }
+
+            {
+                RUNNING.write().store(false, Ordering::SeqCst);
+            }
+
+            let _offsets_clone = _offsets_clone.clone();
+
+            thread::spawn(move || {
+                println!("Received SIG: {} - Gracefully shutting down", sig.to_string());
+
+                while
+                    OUTPUT_RUNNING
+                        .read()
+                        .load(Ordering::SeqCst) &&
+                    !OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE
+                        .read()
+                        .load(Ordering::SeqCst)
+                {
+                    sleep(Duration::from_secs(1));
+                }
+
+                _offsets_clone.flush();
+
+                println!("Graceful shutdown complete... bye");
+                std::process::exit(0);
+            });
+        }
+    });
+
+
+    let mut out_pnanner = periodic::Planner::new();
+
+    use rand::Rng; // 0.8.5
+
+    let _offsets_clone = offsets_db.clone();
+
+    if Config::get_pipeline_chaos_mode() {
+        out_pnanner.add(
+            move || {
+                if RUNNING.read().load(Ordering::SeqCst) {
+
+                    println!("Chaos mode throwing a random exit. You can disable this test mode buy removing CHAOS_MODE flag or setting to 'no'");
+
+                    std::process::exit(0);
+                }
+
+            }, periodic::Every::new(Duration::from_secs(rand::thread_rng().gen_range(60..90))),
+        );
+    }
+
+    let _offsets_clone = offsets_db.clone();
 
     let shared_output_clone = shared_output.clone();
-
-    sync_input_plugin(offsets_clone, shared_output_clone).await;
+    sync_input_plugin(offsets_db.clone(), shared_output_clone).await;
 
     println!("Reached end of source data");
+    println!("Ingest completed, flushing remaining buffers to output plugin {}", Config::get_pipeline_config().output.or(Some("".to_string())).unwrap());
 
-    let mut pipeline_metadata= METADATA.read().clone();
-
-    if pipeline_metadata.metadata.len() == 0 {
-        println!("No data found in data source, skipping schema discovery");
-        std::process::exit(0);
-    } else {
-        // println!("Sampled source data, analysing schema");
+    {
+        let mut counter_lock = METRICS.write();
+        counter_lock.status = MetricsStatus::Finishing;
     }
 
-    let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.unwrap_or("false".to_string()));
-
-    for (namespace, metadata) in pipeline_metadata.metadata.iter_mut() {
-        AnalyseSchema::determine_field_types(&mut metadata.fields, None, flatten);
+    while OUTPUT_RUNNING.read().load(Ordering::SeqCst) {
+        sleep(Duration::from_secs(1));
     }
 
-    Config::set_metadata(&pipeline_metadata, false).await;
+    {
+        OUTPUT_RUNNING.write().store(true, Ordering::SeqCst);
+    }
+
+    let shared_output_clone = shared_output.clone();
+    Buffers::compact_all_partitions(true, offsets_db.clone(), shared_output_clone).await;
+
+    {
+        OUTPUT_RUNNING
+            .write()
+            .store(false, Ordering::SeqCst);
+    }
+
+    {
+        let mut counter_lock = METRICS.write();
+        counter_lock.status = MetricsStatus::Completed;
+
+    }
+
+    {
+        let counter_lock = METRICS.write();
+        
+        println!("Messages Fixed: {}", counter_lock.ingeted_slow_total);
+        println!("Deadletter Total: {}", counter_lock.deadletters_total);
+        println!("Ingested Total: {}", counter_lock.messages_total);
+    }
+
+    match Metrics::send_metrics(Some(0)).await {
+        Ok(_res) => (),
+        Err(e) => {
+            LOGGER.write()
+                .await
+                .log(LogLevel::Error, format!("Failed to send metrics to Skippr API: {}", e))
+                .await;
+        }
+    }
+
+    if !LOGGER.read().await.logs.is_empty() {
+        LOGGER.write().await.flush().await.unwrap();
+    }
     
+    println!("Pipeline '{}' sync complete", pipeline_name);
+
 }
-
-
 
 async fn sync() {
 
@@ -592,414 +769,65 @@ async fn sync() {
             return;
         }
     };
-    let offsets = Arc::new(offsets_db);
 
-    let offset_buffer_clone = offsets.clone();
+    let offsets_db = Arc::new(offsets_db);
+
+    let _offsets_clone = offsets_db.clone();
 
     {
         let mut wal_index = WAL_PARTITION_INDEX.write();
-        wal_index.recover(offset_buffer_clone).expect("Failed to recover WAL index");
+        wal_index.recover(offsets_db.clone()).expect("Failed to recover WAL index");
     }
     
-    // let output = DataOutputAwsAthenaPlugin::new("output".to_string()).await;
-    // let output_plugin_name = Config::get_pipeline_output_plugin_name();
-    // let output = sync_output_plugin(&output_plugin_name, "output".to_string()).await.unwrap();
-    // let shared_output = Arc::new(TimedRwLock::new("output_plugin".to_string(), output));
-    let output_plugin_name = Config::get_pipeline_output_plugin_name();
-    let output = sync_output_plugin(&output_plugin_name, "output".to_string()).await.unwrap();
+    {
+        METRICS.write().status = MetricsStatus::Running;
+    }
+
+    let output = sync_output_plugin("file", "output".to_string()).await.unwrap();
     let shared_output = Arc::new(output);
 
-    // sync schema if output plugin configured
-    if output_plugin_name != "" {
-        Config::sync_schema(&pipeline_metadata.metadata).await;
-    } else {
-        // Just build the arrow schemas internally
-        let flatten = Config::get_transform_flatten_events();
-        for (namespace, _metadata) in pipeline_metadata.metadata.iter() {
-            match Ingest::prepare_arrow_schema_with_metadata(&namespace, &pipeline_metadata.metadata, flatten) {
-                Ok(_t) => {}
-                Err(e) => {
-                    println!("Failed to prepare arrow schema: {}", e);
-                    return;
-                }
-            }
-        }
-    }
-
-    let now = Arc::new(TimedRwLock::new("now".to_string(), Instant::now()));
-
-    // let logger_clone = Arc::clone(&logger);
-
-    /**
-     * Handle PANICS in threads
-     */
-    // take_hook() returns the default hook in case when a custom one is not set
-    let orig_hook = panic::take_hook();
-    panic::set_hook(Box::new(move |panic_info| {
-        // invoke the default handler and exit the process
-        orig_hook(panic_info);
-        // println!("{:?}", panic_info);
-        let panic_str = format!("{:?}", panic_info);
-
-        let panic_info_clone = panic_str.clone();
-
-        {
-            let mut counter_lock = METRICS.write();
-            counter_lock.status = MetricsStatus::Error;
-        }
-
-        thread::spawn(move || {
-            let rt = runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-
-            rt.block_on(async {
-                LOGGER
-                    .write()
-                    .await
-                    .log(LogLevel::Error, panic_info_clone)
-                    .await;
-                LOGGER.write().await.flush().await.unwrap();
-            });
-        }).join().unwrap();
-
-        if !RUNNING.read().load(Ordering::SeqCst) {
-            println!("Received another panic - already gracefully shutting down");
-        } else {
-
-            let pid = process::id() as i32; // or replace with the PID of the target process
-
-            unsafe {
-                kill(Pid::from_raw(pid), Signal::SIGTERM).unwrap();
-            }
-        }
-
-    }));
-
-    // thread::spawn(move || {
-    //     panic!("something bad happened");
-    // }).join();
-
-    // this line won't ever be invoked because of process::exit()
-    // println!("Won't be printed");
-
-    /**
-     * Handle SIGNALS
-     */
-    let mut signals = Signals::new(&[SIGINT, SIGTERM, SIGQUIT, SIGABRT]).unwrap();
-
-    // let logger_clone = Arc::clone(&logger);
-
-    let offsets_clone = offsets.clone();
-
-    thread::spawn(move || {
-        for sig in signals.forever() {
-
-            {
-                let mut counter_lock = METRICS.write();
-                counter_lock.status = MetricsStatus::Stopped;
-            }
-
-            thread::spawn(move || {
-                let rt = runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap();
-
-                rt.block_on(async {
-                });
-            }).join().unwrap();
-
-            if !RUNNING.read().load(Ordering::SeqCst) {
-                println!("Received another Ctrl+C signal - terminating immediately, this may result in data loss...");
-                offsets_clone.flush();
-                std::process::exit(0);
-            }
-
-            {
-                RUNNING.write().store(false, Ordering::SeqCst);
-            }
-
-            let offsets_clone = offsets_clone.clone();
-            // let logger_clone = Arc::clone(&logger_clone);
-
-            thread::spawn(move || {
-                println!("Received SIG: {} - Gracefully shutting down", sig.to_string());
-                // println!("Flushing ingest buffers");
-                // let mut output_files = OUTPUT_FILES_STATIC.lock().unwrap();
-                // Ingest::flush_buffers(true, &mut output_files);
-                // sleep(Duration::from_secs(30)); // wait for threads to flush
-
-                // RUNNING.write().unwrap().store(false, Ordering::SeqCst);
-
-                while
-                    OUTPUT_RUNNING
-                        .read()
-                        .load(Ordering::SeqCst) &&
-                    !OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE
-                        .read()
-                        .load(Ordering::SeqCst)
-                {
-                    sleep(Duration::from_secs(1));
-                }
-
-                // let mut output_files = OUTPUT_FILES_STATIC.write();
-                // Ingest::rotate_buffers(true, &mut output_files);
-
-                // while BUFFER_FINALISE_RUNNING.read().load(Ordering::SeqCst) {
-                //     sleep(Duration::from_secs(1));
-                // }
-
-                // Buffers::force_flush();
-
-                offsets_clone.flush();
-                // println!("Flushed offsets");
-
-                // let _metrics_lock = match METRICS.read() {
-                //     Ok(m) => {
-                //         println!("Messages Total: {}", m.messages_total);
-                //     },
-                //     Err(_e) => {
-                //         println!("Could not lock metrics, skipping flush");
-                //         return;
-                //     }
-                // };
-                // let metrics_lock = METRICS.read();
-                //
-                // println!("Messages Fixed: {}", metrics_lock.ingeted_slow_total);
-                // println!("Messages Total: {}", metrics_lock.messages_total);
-                // println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
-                // // println!("Bytes per Min: {}", metrics_lock.bytes_current);
-                // println!("Bytes: {}", metrics_lock.bytes_total);
-
-                // let total_times: Vec<(String, Duration)> = TimedRwLock::<()>::get_total_wait_times();
-                // for (key, value) in total_times.iter() {
-                //     println!("{}: {}ms", key, value.as_millis());
-                // }
-
-
-                ////////////// Cleanup part written parquet files START ////////
-
-                let options = MatchOptions {
-                    case_sensitive: false,
-                    require_literal_separator: false,
-                    require_literal_leading_dot: false,
-                };
-
-                let data_dir = Config::get_data_dir();
-
-                // println!("Looking for temp files in {}", &format!("{}/output_buffer/*parquet.temp", data_dir));
-
-                for entry in glob_with(&format!("{}/output_buffer/*.tmp", data_dir), options)
-                    .expect("Failed to read glob 'finalised' pattern")
-                {
-                    match entry {
-                        Ok(path) => {
-                            // println!("Removing file {}", path.display().to_string());
-
-                            match std::fs::remove_file(path) {
-                                Ok(_t) => {}
-                                Err(err) => println!("{:?}", err),
-                            }
-                        }
-                        Err(e) => println!("{:?}", e),
-                    }
-                }
-                ////////////// Cleanup part written parquet files END ////////
-
-                // tokio::runtime::Builder::new_multi_thread()
-                //     .enable_all()
-                //     .build()
-                //     .unwrap()
-                //     .block_on(async {
-                //         match LOGGER.write().await.flush().await {
-                //             Ok(_t) => {}
-                //             Err(_err) => {
-                //                 // println!("Graceful shutdown complete... bye");
-                //             }
-                //         }
-                //     });
-
-
-                // sleep(Duration::from_secs(15)); // wait for threads to flush
-
-                println!("Graceful shutdown complete... bye");
-                std::process::exit(0);
-            });
-        }
-    });
-
-
-    let mut out_pnanner = periodic::Planner::new();
-
-    use rand::Rng; // 0.8.5
-
-    // let metrics_clone = metrics.clone();
-
-    let offsets_clone = offsets.clone();
-
-    if Config::get_pipeline_chaos_mode() {
-        out_pnanner.add(
-            move || {
-                if RUNNING.read().load(Ordering::SeqCst) {
-
-                    println!("Chaos mode throwing a random exit. You can disable this test mode buy removing CHAOS_MODE flag or setting to 'no'");
-
-                    // let metrics_lock = METRICS.read();
-                    // println!("Messages Total: {}", metrics_lock.messages_total);
-
-                    // let pid = process::id() as i32; // or replace with the PID of the target process
-                    //
-                    // unsafe {
-                    //     kill(Pid::from_raw(pid), Signal::SIGKILL).unwrap();
-                    // }
-                    std::process::exit(0);
-                }
-
-                // exit(0);
-            }, periodic::Every::new(Duration::from_secs(rand::thread_rng().gen_range(60..90))),
-        );
-    }
-    // out_pnanner.add(
-    //     move || {
-    //         if RUNNING.read().load(Ordering::SeqCst) {
-    //             tokio::runtime::Builder::new_multi_thread()
-    //                 .enable_all()
-    //                 .build()
-    //                 .unwrap()
-    //                 .block_on(async {
-    //
-    //                     // BufferChunker::rotate_buffers(false);
-    //
-    //                     while OUTPUT_RUNNING.read().load(Ordering::SeqCst) {
-    //                         // sleep(Duration::from_secs(1));
-    //                         return;
-    //                     }
-    //
-    //                     // BufferChunker::rotate_buffers(false);
-    //
-    //                     {
-    //                         OUTPUT_RUNNING.write().store(true, Ordering::SeqCst);
-    //                     }
-    //
-    //                     // Buffers::compact_all_partitions(false, offsets_clone).await;
-    //
-    //                     if Config::get_pipeline_config().output.is_some() {
-    //
-    //                         sync_output_plugin(Config::get_pipeline_output_plugin_name().as_str(), "output".to_string()).await;
-    //                     }
-    //
-    //                     OUTPUT_RUNNING
-    //                         .write()
-    //                         .store(false, Ordering::SeqCst);
-    //                 });
-    //         }
-    //     },
-    //     periodic::Every::new(Duration::from_secs(10)),
-    // );
-    // out_pnanner.start();
-
-    // @todo - share across s3 ingests
-    // let _parse_namespace_cache: HashMap<String, String> = HashMap::new();
-    // let _output_files: HashMap<String, File> = HashMap::new();
-    // let _options = MatchOptions {
-    //     case_sensitive: false,
-    //     require_literal_separator: false,
-    //     require_literal_leading_dot: false,
-    // };
-
-
-    let offsets_clone = offsets.clone();
-
     let shared_output_clone = shared_output.clone();
-    sync_input_plugin(offsets_clone, shared_output_clone).await;
 
+    sync_input_plugin(offsets_db.clone(), shared_output_clone).await;
+
+    println!("Reached end of source data");
     println!("Ingest completed, flushing remaining buffers to output plugin {}", Config::get_pipeline_config().output.or(Some("".to_string())).unwrap());
 
     {
-        let mut counter_lock = METRICS.write();
-        counter_lock.status = MetricsStatus::Finishing;
-    }
-
-    // RUNNING.write().unwrap().store(false, Ordering::SeqCst); // the prevents metrics from printing while shutting down, BUT also prevents output serialisatin
-
-    while OUTPUT_RUNNING.read().load(Ordering::SeqCst) {
-        sleep(Duration::from_secs(1));
-    }
-
-    {
-        OUTPUT_RUNNING.write().store(true, Ordering::SeqCst);
+        METRICS.write().status = MetricsStatus::Finishing;
     }
 
     let shared_output_clone = shared_output.clone();
-    Buffers::compact_all_partitions(true, offsets, shared_output_clone).await;
+    Buffers::compact_all_partitions(true, offsets_db.clone(), shared_output_clone).await;
 
-    // while BUFFER_FINALISE_RUNNING.read().load(Ordering::SeqCst) {
-    //     sleep(Duration::from_secs(1));
-    // }
-
-    // if Config::get_pipeline_config().output.is_some() {
-    //     sync_output_plugin(Config::get_pipeline_output_plugin_name().as_str(), "output".to_string()).await;
-    // }
-    //
-    // if Config::get_pipeline_config().deadletter.is_some() {
-    //     sync_output_plugin(&Config::get_pipeline_deadletter_plugin_name(), "deadletter".to_string()).await;
-    // }
+    println!("All buffers flushed to output plugin");
 
     {
-        OUTPUT_RUNNING
-            .write()
-            .store(false, Ordering::SeqCst);
-    }
-
-    // let metrics_lock = METRICS.read();
-    //
-    // let now_lock = now.lock().unwrap();
-    //
-    // // metrics_lock.bytes_total += metrics_lock.bytes_current;
-    //
-    // // metrics_lock.run_time_seconds = now_lock.elapsed().as_secs();
-    //
-    // println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
-    // println!("Messages Total: {}", metrics_lock.messages_total);
-    // println!("Deadletter Messages: {}", metrics_lock.deadletters_total);
-    // println!("Bytes: {}", metrics_lock.bytes_total);
-    //
-    // drop(metrics_lock);
-
-    // let total_times: Vec<(String, Duration)> = TimedRwLock::<()>::get_total_wait_times();
-    // for (key, value) in total_times.iter() {
-    //     println!("{}: {}ms", key, value.as_millis());
-    // }
-
-    {
-        let mut counter_lock = METRICS.write();
-        counter_lock.status = MetricsStatus::Completed;
-
-    }
-
-    {
-        let counter_lock = METRICS.write();
-        
-        println!("Messages Fixed: {}", counter_lock.ingeted_slow_total);
-        println!("Deadletter Total: {}", counter_lock.deadletters_total);
-        println!("Ingested Total: {}", counter_lock.messages_total);
+        METRICS.write().status = MetricsStatus::Completed;
     }
 
     match Metrics::send_metrics(Some(0)).await {
-        Ok(_g) => {}
-        Err(_err) => {}
+        Ok(_res) => (),
+        Err(e) => {
+            LOGGER.write()
+                .await
+                .log(LogLevel::Error, format!("Failed to send metrics to Skippr API: {}", e))
+                .await;
+        }
     }
 
-    if !LOGGER.read().await.logs.is_empty() {
-        LOGGER.write().await.flush().await.unwrap();
-    }
-    
-    println!("Pipeline '{}' sync complete", pipeline_name);
+    // Note: sync_license is not implemented in the Config struct
+    // Commenting out the license sync call
+    // if let Err(err) = Config::sync_license().await {
+    //     LOGGER
+    //         .write()
+    //         .await
+    //         .log(LogLevel::Error, format!("Failed to sync license: {}", err))
+    //         .await;
+    // }
 
+    println!("Pipeline sync complete");
 }
-
 
 pub async fn sync_output_plugin(plugin_name: &str, buffer_name: String) -> Result<Box<dyn DataOutputPlugin + Send + Sync>, io::Error> {
     match plugin_name {

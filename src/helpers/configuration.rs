@@ -70,58 +70,61 @@ pub struct Transform {
 
 #[derive(Debug, Deserialize, Clone)]
 pub enum PluginConfig {
-    s3(DataSourceS3PluginConfig),
+    S3(DataSourceS3PluginConfig),
     // s3_inventory(DataSourceS3InventoryPluginConfig),
-    athena(DataOutputAwsAthenaPluginConfig),
-    file(DataSourceLocalFilePluginConfig),
+    Athena(DataOutputAwsAthenaPluginConfig),
+    File(DataSourceLocalFilePluginConfig),
 }
 
 impl PluginConfig {
     pub fn format(&self) -> String {
         match self {
-            PluginConfig::s3(s3_config) => s3_config.format.clone().or(Some("json".to_string())).as_ref().unwrap().clone(),
+            PluginConfig::S3(s3_config) => s3_config.format.clone().or(Some("json".to_string())).as_ref().unwrap().clone(),
             // PluginConfig::s3_inventory(s3_inventory_config) => s3_inventory_config.format.clone().or(Some("json".to_string())).as_ref().unwrap().clone(),
-            PluginConfig::athena(athena_config) => athena_config.format.clone().or(Some("json".to_string())).as_ref().unwrap().clone(),
-            PluginConfig::file(file_config) => file_config.format.clone().or(Some("json".to_string())).unwrap(),
+            PluginConfig::Athena(athena_config) => athena_config.format.clone().or(Some("json".to_string())).as_ref().unwrap().clone(),
+            PluginConfig::File(file_config) => file_config.format.clone().or(Some("json".to_string())).unwrap(),
         }
     }
 
     pub fn plugin_name(&self) -> Option<String> {
         match self {
-            PluginConfig::s3(_s3_config) => Some("s3".to_string()),
+            PluginConfig::S3(_s3_config) => Some("s3".to_string()),
             // PluginConfig::s3_inventory(_s3_inventory_config) => Some("s3_inventory".to_string()),
-            PluginConfig::athena(_athena_config) => Some("athena".to_string()),
-            PluginConfig::file(_file_config) => Some("file".to_string()),
+            PluginConfig::Athena(_athena_config) => Some("athena".to_string()),
+            PluginConfig::File(_file_config) => Some("file".to_string()),
         }
     }
 
     pub fn batch_size_bytes(&self) -> Option<i64> {
         match self {
-            PluginConfig::s3(s3_config) => s3_config.batch_size_bytes.clone(),
+            PluginConfig::S3(s3_config) => s3_config.batch_size_bytes.clone(),
             // PluginConfig::s3_inventory(s3_inventory_config) => s3_inventory_config.batch_size_bytes.clone(),
-            PluginConfig::athena(_athena_config) => None,
-            PluginConfig::file(file_config) => file_config.batch_size_bytes.clone(),
+            PluginConfig::Athena(_athena_config) => None,
+            PluginConfig::File(file_config) => file_config.batch_size_bytes.clone(),
         }
     }
 
     pub fn batch_size_seconds(&self) -> Option<i64> {
         match self {
-            PluginConfig::s3(s3_config) => s3_config.batch_size_seconds.clone(),
+            PluginConfig::S3(s3_config) => s3_config.batch_size_seconds.clone(),
             // PluginConfig::s3_inventory(s3_inventory_config) => s3_inventory_config.batch_size_seconds.clone(),
-            PluginConfig::athena(_athena_config) => None,
-            PluginConfig::file(file_config) => file_config.batch_size_seconds.clone(),
+            PluginConfig::Athena(_athena_config) => None,
+            PluginConfig::File(file_config) => file_config.batch_size_seconds.clone(),
         }
     }
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Pipeline {
+    #[allow(dead_code)]
     pub reset_offsets: Option<String>,
+    #[allow(dead_code)]
     pub reset_metadata: Option<String>,
     pub auto_approve: Option<String>,
     pub env: Option<String>,
     pub buffer_threshold_bytes: Option<u64>,
     pub buffer_threshold_seconds: Option<u64>,
+    #[allow(dead_code)]
     buffer_disk_threshold_bytes: Option<u64>,
     pub chaos_mode: Option<String>,
     pub sync_frequency_seconds: Option<u64>,
@@ -146,6 +149,7 @@ pub struct Config {
 pub static APP_CONFIG: Lazy<Arc<TimedRwLock<Option<Config>>>> = Lazy::new(|| Arc::new(TimedRwLock::new("config".to_string(),None)));
 pub static PIPELINE_NAME: Lazy<Arc<TimedRwLock<String>>> = Lazy::new(|| Arc::new(TimedRwLock::new("pipeline_name".to_string(),"default".to_string())));
 
+#[allow(dead_code)]
 impl Config {
 
     pub fn new() -> Config {
@@ -1187,27 +1191,19 @@ impl Config {
 
 
     pub fn getenv(name: &str, default: &str) -> String {
-        let res = {
-            let cache = ENV_CACHE.read();
-            cache.get(name).map(|val| val.clone())
-        };
-
-        let res = res.unwrap_or_else(|| {
-            match std::env::var(name.to_uppercase()) {
-                Ok(val) => {
-                    // Return default if the value is empty
-                    if val.is_empty() {
-                        default.to_string()
-                    } else {
-                        val
-                    }
-                },
-                Err(_e) => default.to_string(),
+        // Try to get from environment first
+        match std::env::var(name.to_uppercase()) {
+            Ok(val) if !val.is_empty() => {
+                // Store in cache
+                let cache = ENV_CACHE.write();
+                cache.insert(name.to_string(), val.clone());
+                val
+            },
+            _ => {
+                // Use default value
+                default.to_string()
             }
-        });
-
-        Config::set_evncache(name, &res);
-        res
+        }
     }
 
     pub fn list_dir_contents<P: AsRef<Path>>(path: P) -> std::io::Result<()> {
@@ -1633,14 +1629,13 @@ impl Config {
                 if Config::get_pipeline_output_plugin_name() != ""
                     && Config::get_pipeline_output_plugin_name() == "athena"
                 {
-                    let mut output_metadata: OutputMetadata = OutputMetadata::new();
-                    if flatten {
-                        output_metadata = OutputMetadata::from_flatterened_metadata(metadata.get(namespace).unwrap());
+                    let __output_metadata = if flatten {
+                        OutputMetadata::from_flatterened_metadata(metadata.get(namespace).unwrap())
                     } else {
-                        output_metadata = OutputMetadata::from_metadata(metadata.get(namespace).unwrap());
-                    }
+                        OutputMetadata::from_metadata(metadata.get(namespace).unwrap())
+                    };
 
-                    AwsAthena::create_or_update_schema(&namespace, &output_metadata).await;
+                    AwsAthena::create_or_update_schema(&namespace, &__output_metadata).await;
                 }
             }
         } else {
@@ -1651,9 +1646,9 @@ impl Config {
 
     pub async fn init() {
 
-        let mut license = LicenseChecker::new();
-        match license.get_license().await {
-            Ok(license) => {}
+        let mut _license = LicenseChecker::new();
+        match _license.get_license().await {
+            Ok(_license) => {}
             Err(err) => unsafe {
                 println!("Error: {}", err);
                 exit(1);

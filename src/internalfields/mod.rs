@@ -5,10 +5,16 @@ use std::sync::{Arc, Mutex};
 
 // mod helpers;
 
+#[allow(dead_code)]
 pub struct InternalFields {
     pub parse_namespace_cache: Arc<Mutex<HashMap<String, String>>>,
+    pub skip_fields: Vec<String>,
+    pub metadata_fields: Vec<String>,
+    pub data_fields: Vec<String>,
+    pub transforms: HashMap<String, String>,
 }
 
+#[allow(dead_code)]
 impl InternalFields {
     // pub fn parse_partition_field<'a>(message: &mut HashMap<String, String>, partition: &'a str) -> &'a str {
     //     let mut partition = partition.to_string();

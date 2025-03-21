@@ -3,12 +3,10 @@ use std::{fs, io,};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io::{BufReader, Read, Seek, Write};
-use std::ops::{Index};
-use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::{Arc};
 use std::time::{SystemTime};
-use arrow::array::{Array, RecordBatch};
+use arrow::array::{RecordBatch};
 use arrow::json::ReaderBuilder;
 use arrow_schema::{ArrowError, SchemaRef};
 use glob::{glob_with, MatchOptions};
@@ -20,7 +18,6 @@ use bincode;
 use datafusion::physical_plan::memory::MemoryStream;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
-use futures::FutureExt;
 use indexmap::IndexMap;
 use once_cell::sync::Lazy;
 use serde_derive::{Deserialize, Serialize};
@@ -33,7 +30,9 @@ use crate::helpers::offsets::{OffsetKey, Offsets, OffsetTypes};
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::ingest_work::{Deadletter, Ingest};
 use crate::plugins::DataOutputPlugin;
+use std::os::fd::AsRawFd;
 
+#[allow(dead_code)]
 pub static TOTAL_ROWS: Lazy<TimedRwLock<AtomicU64>> =
     Lazy::new(|| TimedRwLock::new("record_batch_total".to_string(), AtomicU64::new(0)));
 
@@ -52,18 +51,18 @@ pub struct OffsetKeySerialize {
 
 #[derive(Debug, Clone)]
 pub struct IngestRecord {
-    pub(crate) namespace: String,
-    pub(crate) partition: String,
-    pub(crate) time: Option<i64>,
+    pub(crate) _namespace: String,
+    pub(crate) _partition: String,
+    pub(crate) _time: Option<i64>,
     pub(crate) record: Value
 }
 
 pub struct IngestBufferBatch {
     pub(crate) offsets: HashMap<OffsetKey, u64>,
-    pub(crate) namespace: String,
-    pub(crate) partition: String,
-    pub(crate) time: Option<i64>,
-    pub(crate) shard: String,
+    pub(crate) _namespace: String,
+    pub(crate) _partition: String,
+    pub(crate) _time: Option<i64>,
+    pub(crate) _shard: String,
     pub(crate) records: Vec<IngestRecord>,
     pub(crate) schema: SchemaRef,
 }
@@ -686,14 +685,15 @@ impl WalPartition {
 
     }
 
-    async fn apply_sql_on_ipc_stream(temp_parquet_path: &str, sql: &str, schema_ref: SchemaRef) -> Result<Vec<arrow::array::RecordBatch>, Box<dyn std::error::Error>> {
+    #[allow(dead_code)]
+    async fn apply_sql_on_ipc_stream(temp_parquet_path: &str, _sql: &str, _schema_ref: SchemaRef) -> Result<Vec<RecordBatch>, ArrowError> {
 
         let mut session_config = SessionConfig::new();
         session_config = session_config.set("datafusion.catalog.information_schema", "true".into());
         session_config = session_config.set("datafusion.catalog.default_catalog", "skippr".into());
         session_config = session_config.set("datafusion.execution.collect_statistics", "true".into());
 
-        let ctx = SessionContext::with_config(session_config);
+        let ctx = SessionContext::new_with_config(session_config);
 
         // ctx.register_parquet("my_table", temp_parquet_path, ParquetReadOptions {
         //     schema: Some(schema_ref.as_ref()),
@@ -753,14 +753,15 @@ impl WalPartition {
 
     }
 
-    async fn apply_sql_on_ipc_record_batches(record_batches: Vec<RecordBatch>, sql: &str, schema_ref: SchemaRef) -> Result<Vec<arrow::array::RecordBatch>, Box<dyn std::error::Error>> {
+    #[allow(dead_code)]
+    async fn apply_sql_on_ipc_record_batches(record_batches: Vec<RecordBatch>, _sql: &str, _schema_ref: SchemaRef) -> Result<Vec<RecordBatch>, ArrowError> {
 
         let session_config = SessionConfig::new();
         // session_config = session_config.set("datafusion.catalog.information_schema", "true".into());
         // session_config = session_config.set("datafusion.catalog.default_catalog", "skippr".into());
         // session_config = session_config.set("datafusion.execution.collect_statistics", "true".into());
 
-        let ctx = SessionContext::with_config(session_config);
+        let ctx = SessionContext::new_with_config(session_config);
 
         // Read batches and register them as a table in the context
         // let schema_ref = record_batches[0].schema();
@@ -774,7 +775,7 @@ impl WalPartition {
         //
         //
 
-        let batch = arrow::compute::concat_batches(&schema_ref, &record_batches).unwrap();
+        let batch = arrow::compute::concat_batches(&_schema_ref, &record_batches).unwrap();
 
         let df = ctx.read_batch(batch).unwrap();
         let results = df.collect().await.unwrap();
@@ -793,8 +794,7 @@ pub struct WalFile {
     pub(crate) time: Option<i64>,
     pub(crate) shard: String,
     pub(crate) bytes: u64,
-    // We really only Arc File to support clone of the partition index to avoid future writes waiting on compaction reads
-    // Additionally, the file is optional with lazy opening of a handle to avoid "Too many open files error", there may be thousands of WAL file segments
+    #[allow(dead_code)]
     pub(crate) file: Arc<TimedRwLock<Option<File>>>,
     pub(crate) updated_at: SystemTime,
     pub(crate) offsets: HashMap<OffsetKey, u64>,
@@ -958,7 +958,7 @@ impl WalFile {
 
         writer.seek(io::SeekFrom::End(0))?;
 
-        let mut size: usize = 0;
+        let mut _size: usize = 0;
         let codec = Some(CompressionType::LZ4_FRAME);
         let options = IpcWriteOptions::default().try_with_compression(codec)?;
 
@@ -966,7 +966,7 @@ impl WalFile {
 
         let mut stream_writer = StreamWriter::try_new_with_options(writer, &record_batches[0].schema(), options)?;
         for batch in record_batches {
-            size += batch.get_array_memory_size(); // @todo - account for compression ratio, observed ~50% reduction
+            _size += batch.get_array_memory_size(); // @todo - account for compression ratio, observed ~50% reduction
             row_count += batch.num_rows();
             stream_writer.write(batch).expect("Failed to write record batch to stream writer");
         }
@@ -1002,7 +1002,7 @@ impl WalFile {
         Ok((self.bytes, row_count as u64))
     }
 
-    fn get_wal_partition_dir(namespace: &str, partition: &str, time: Option<i64>, shard: &str) -> String {
+    fn get_wal_partition_dir(_namespace: &str, _partition: &str, _time: Option<i64>, shard: &str) -> String {
         let data_dir = Config::get_data_dir();
 
         // let metrics_guard = METRICS.read();
@@ -1099,4 +1099,23 @@ impl Write for WalFile {
     fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
         self.get_or_open_file().unwrap().write_all(buf)
     }
+}
+
+pub fn _get_partition_dir(_namespace: &str, _partition: &str, _time: Option<i64>, shard: &str) -> String {
+    let data_dir = Config::get_data_dir();
+
+    // let metrics_guard = METRICS.read();
+    // let run_id = metrics_guard.run_id.clone();
+    let output_dir = &format!("{}/ingest_buffer", data_dir);
+
+    let shard = match shard {
+        "" => "none",
+        _ => shard
+    };
+
+    let wal_partition_dir = format!("{}/{}", output_dir, shard);
+
+    fs::create_dir_all(&wal_partition_dir).expect("Failed to create WAL partition directories");
+
+    wal_partition_dir
 }

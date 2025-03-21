@@ -16,8 +16,11 @@ use crate::plugins::DataOutputPlugin;
 
 
 pub struct DataOutputFilePlugin {
+    #[allow(dead_code)]
     output_dir: String,
+    #[allow(dead_code)]
     time_bucket: String,
+    #[allow(dead_code)]
     buffer_name: String,
 }
 
@@ -64,11 +67,11 @@ impl DataOutputFilePlugin {
             _ => format!("{}/{}", full_key, BufferChunker::decode_file_partition(&filename)),
         };
 
-        let key = match TimePartitioner::new(&filename).process() {
+        let _key = match TimePartitioner::new(&filename).process() {
             Ok(k) => {
                 full_key = format!("{}/{}", full_key, k);
             },
-            Err(e) => {}
+            Err(_e) => {}
         };
 
         let md5_digest = md5::compute(&filename);

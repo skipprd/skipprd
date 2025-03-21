@@ -3,7 +3,6 @@ use Result;
 use libc::{sleep};
 
 use crate::helpers::configuration::Config;
-use serde::__private::de::IdentifierDeserializer;
 use serde_derive::{Deserialize, Serialize};
 use sled::{IVec, Mode};
 use thiserror::Error;
@@ -51,6 +50,7 @@ pub struct OffsetValue {
     pub(crate) closed: U64<LittleEndian>, // we store bool here
 }
 
+#[allow(dead_code)]
 pub struct Offset {
     pub(crate) value: OffsetValue,
     pub(crate) key: OffsetKey,
@@ -61,6 +61,7 @@ pub struct Offsets {
     /// The Key-Value store that contains all offset data.
     /// Resources can be found using their Subject.
     /// Try not to use this directly, but use the Trees.
+    #[allow(dead_code)]
     db: sled::Db,
     pub(crate) tree: sled::Tree,
 }
@@ -91,7 +92,7 @@ impl Offsets {
         let db_path = format!("{}/{}", Config::get_data_dir(), SLED_NAME);
         let db = match sled::open(&db_path) { // open in high-throughput mode
             Ok(db) => {db}
-            Err(err) => {
+            Err(_err) => {
                 return Err(OffsetsError::AlreadyOpenError(db_path));
             }
         };
@@ -161,6 +162,7 @@ impl Offsets {
     // Sled remove() currently sets the value to None, and maintains the key in the tree.
     // Since the key is the largest part of the data, we need to purge keys with None values
     // periodically to save space.
+    #[allow(dead_code)]
     fn vacuum() -> Result<u64, OffsetsError> {
 
         let db_path = format!("{}/{}", Config::get_data_dir(), SLED_NAME);
@@ -304,6 +306,7 @@ impl Offsets {
         Ok(new_size)
     }
 
+    #[allow(dead_code)]
     fn rollback_vacuum() -> Result<bool, OffsetsError> {
 
         let db_path = format!("{}/{}", Config::get_data_dir(), SLED_NAME);
@@ -327,6 +330,7 @@ impl Offsets {
        
     }
 
+    #[allow(dead_code)]
     fn vec_8_to_u16(&self, bytes: &[u8]) -> Vec<U16<BigEndian>> {
         // Ensure that the number of bytes is divisible by 2 (because each U16 takes 2 bytes)
         assert_eq!(bytes.len() % 2, 0);
@@ -465,7 +469,7 @@ impl Offsets {
         let key = self.build_key(key);
         // let bytes: &[u8] = unsafe { self.any_as_u8_slice(&key) };
         let bytes: &[u8] = key.as_bytes();
-        self.tree.get(bytes).unwrap_or_else(|err| {
+        self.tree.get(bytes).unwrap_or_else(|_err| {
             // println!("Failed getting offset, Error: {:?}", err);
             None
         })
@@ -522,10 +526,12 @@ impl Offsets {
         }
     }
 
+    #[allow(dead_code)]
     unsafe fn any_as_u8_slice<T: Sized>(&self, p: &T) -> &[u8] {
         ::core::slice::from_raw_parts((p as *const T) as *const u8, ::core::mem::size_of::<T>())
     }
 
+    #[allow(dead_code)]
     fn u64_to_ivec(number: u64) -> IVec {
         IVec::from(number.to_be_bytes().to_vec())
     }

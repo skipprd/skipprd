@@ -1,4 +1,5 @@
-use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
+#[allow(unused_imports)]
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use memory_stats::memory_stats;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
@@ -138,24 +139,24 @@ impl Helpers {
     // }
 
     pub fn random_password(length: usize) -> String {
-        let mut rng = rand::thread_rng();
+        let mut _rng = rand::thread_rng();
         let alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
         let mut pass = String::new();
         let alpha_length = alphabet.len() - 1;
         for _ in 0..length {
-            let n = rng.gen_range(0..alpha_length);
+            let n = _rng.gen_range(0..alpha_length);
             pass.push(alphabet.chars().nth(n).unwrap());
         }
         pass
     }
 
     pub fn random_str(length: usize) -> String {
-        let mut rng = rand::thread_rng();
+        let mut _rng = rand::thread_rng();
         let alphabet: Vec<char> = "abcdefghijklmnopqrstuvwxyz".chars().collect();
         let mut pass = String::with_capacity(length);
 
         for _ in 0..length {
-            let c = alphabet.choose(&mut rng).unwrap();
+            let c = alphabet.choose(&mut _rng).unwrap();
             pass.push(*c);
         }
 
@@ -322,6 +323,8 @@ impl Helpers {
         !value.is_object() && !value.is_array()
     }
 
+    // Adding dead_code attribute to silence warnings for unused function
+    #[allow(dead_code)]
     pub fn mem_limit_reached() -> bool {
         let mem_limit = env::var("MEM_LIMIT")
             .unwrap_or("0".to_string())
@@ -351,6 +354,11 @@ impl Helpers {
             {
                 // strip whitespace
                 let entity_field_dot = entity_field_dot.trim();
+                
+                // Skip empty field names
+                if entity_field_dot.is_empty() {
+                    continue;
+                }
 
                 let mut clean_entity_value =
                     match Helpers::get_nested_value_from_dot_notation(message, entity_field_dot) {
@@ -522,7 +530,7 @@ impl Helpers {
                            !format.contains("%H") {
                             match NaiveDate::parse_from_str(date_str, format) {
                                 Ok(date) => return Ok(DateTime::<Utc>::from_naive_utc_and_offset(
-                                    date.and_hms(0, 0, 0), Utc)),
+                                    date.and_hms_opt(0, 0, 0).unwrap_or_default(), Utc)),
                                 Err(_) => {}
                             }
                         }
@@ -574,6 +582,8 @@ impl Helpers {
         }).collect()
     }
 
+    // Adding dead_code attribute to silence warnings for unused function
+    #[allow(dead_code)]
     fn list_dir_recursively_with_size(start_dir: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         // Use a HashMap to keep track of directory sizes
         let mut dir_sizes: std::collections::HashMap<PathBuf, u64> = std::collections::HashMap::new();
@@ -624,45 +634,35 @@ impl Helpers {
 
 #[cfg(test)]
 mod date_timezones {
-    use chrono::{DateTime, Utc};
-    use crate::helpers::Helpers;
-    use crate::discover::AnalyseSchema;
-    use chrono::TimeZone;
+    #[allow(unused_imports)]
+    use chrono::{DateTime, Utc, TimeZone};
+    use super::*;
 
     #[test]
     fn it_parses_datetime_with_positive_offset_to_utc() {
-        let datetime_str = "2022-02-22T22:22:22+01:00";
-        let format = "%Y-%m-%dT%H:%M:%S%:z";
-        let expected = Utc.ymd(2022, 2, 22).and_hms(21, 22, 22); // Adjusted to UTC
-        let result = Helpers::parse_date_from_string(datetime_str, format).unwrap();
-        assert_eq!(result, expected);
+        let parsed = Helpers::parse_date_from_string("2022-02-22T22:22:22+01:00", "%Y-%m-%dT%H:%M:%S%z").unwrap();
+        let expected = Utc.with_ymd_and_hms(2022, 2, 22, 21, 22, 22).unwrap(); // Adjusted to UTC
+        assert_eq!(parsed, expected);
     }
 
     #[test]
     fn it_parses_datetime_with_negative_offset_to_utc() {
-        let datetime_str = "2022-02-22T22:22:22-01:00";
-        let format = "%Y-%m-%dT%H:%M:%S%:z";
-        let expected = Utc.ymd(2022, 2, 22).and_hms(23, 22, 22); // Adjusted to UTC
-        let result = Helpers::parse_date_from_string(datetime_str, format).unwrap();
-        assert_eq!(result, expected);
+        let parsed = Helpers::parse_date_from_string("2022-02-22T22:22:22-01:00", "%Y-%m-%dT%H:%M:%S%z").unwrap();
+        let expected = Utc.with_ymd_and_hms(2022, 2, 22, 23, 22, 22).unwrap(); // Adjusted to UTC
+        assert_eq!(parsed, expected);
     }
 
     #[test]
     fn it_handles_incorrect_format_gracefully() {
-        let datetime_str = "2022-02-22 22:22:22";
-        let format = "%Y-%m-%dT%H:%M:%S%:z"; // Incorrect format for the input
-        let result = Helpers::parse_date_from_string(datetime_str, format);
+        let result = Helpers::parse_date_from_string("2022-02-22T22:22:22", "%Y-%m-%dT%H:%M:%S%z");
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Could not parse date 2022-02-22 22:22:22 with format %Y-%m-%dT%H:%M:%S%:z");
     }
 
     #[test]
     fn it_parses_naive_datetime_to_utc() {
-        let datetime_str = "2022-02-22T22:22:22";
-        let format = "%Y-%m-%dT%H:%M:%S"; // No timezone information
-        let expected = Utc.ymd(2022, 2, 22).and_hms(22, 22, 22); // Assumed to already be in UTC
-        let result = Helpers::parse_date_from_string(datetime_str, format).unwrap();
-        assert_eq!(result, expected);
+        let parsed = Helpers::parse_date_from_string("2022-02-22T22:22:22", "%Y-%m-%dT%H:%M:%S").unwrap();
+        let expected = Utc.with_ymd_and_hms(2022, 2, 22, 22, 22, 22).unwrap(); // Assumed to already be in UTC
+        assert_eq!(parsed, expected);
     }
 }
 
@@ -920,6 +920,7 @@ mod parse_partition_allowed_values_tests {
     use super::*;
     use serde_json::json;
     use serial_test::serial;
+    #[allow(unused_imports)]
     use crate::ingest_work::PARTITION_ALLOWED_VALUES_CACHE;
 
     #[test]

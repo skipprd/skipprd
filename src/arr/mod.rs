@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 
+// Adding dead_code attribute to silence warnings for unused code
+#[allow(dead_code)]
 pub struct Arr {}
 
+#[allow(dead_code)]
 impl Arr {
     pub fn get<'a, T>(
         array: &'a HashMap<String, T>,

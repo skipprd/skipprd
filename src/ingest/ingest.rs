@@ -26,10 +26,14 @@ impl ResolvedFieldValue {
 
 #[derive(Default)]
 pub struct IngestRecord {
+    #[allow(dead_code)]
     pub(crate) source_namespace: String,
+    #[allow(dead_code)]
     pub(crate) source_partition: String,
+    #[allow(dead_code)]
     pub(crate) skpr_event_ts: i64,
     pub(crate) skpr_namespace: String,
+    #[allow(dead_code)]
     pub(crate) skpr_partition: String,
     pub(crate) record: Value,
 }
@@ -891,7 +895,7 @@ pub fn discover_ingest(
     metadata: &mut HashMap<String, Metadata>,
     updated_schema: &mut String,
 ) -> String {
-    let foo: AnalyseSchema = AnalyseSchema { i: 0 };
+    let _foo: AnalyseSchema = AnalyseSchema { i: 0 };
 
     let discoverd_data_type = "string".to_string().clone();
 
@@ -909,7 +913,7 @@ pub fn discover_ingest(
         );
     } else {
         AnalyseSchema::analyse_field(
-            &foo,
+            &_foo,
             &field.to_string(),
             value.clone().borrow_mut(),
             metadata,
@@ -995,6 +999,7 @@ pub fn set_date(
 mod tests_set_date {
     use super::*;
     use crate::discover::DateCandidate;
+    #[allow(unused_imports)]
     use chrono::{FixedOffset, NaiveDateTime};
     
     use std::collections::HashMap;
@@ -1032,7 +1037,7 @@ mod tests_set_date {
 
     #[test]
     fn test_set_date_with_valid_date() {
-        let foo: AnalyseSchema = AnalyseSchema { i: 0 };
+        let _foo: AnalyseSchema = AnalyseSchema { i: 0 };
 
         let field = "test_field";
 
@@ -1059,7 +1064,7 @@ mod tests_set_date {
 
     #[test]
     fn test_set_date_with_valid_iso_date() {
-        let foo: AnalyseSchema = AnalyseSchema { i: 0 };
+        let _foo: AnalyseSchema = AnalyseSchema { i: 0 };
 
         let field = "test_field";
 
@@ -1087,7 +1092,7 @@ mod tests_set_date {
 
     #[test]
     fn test_set_date_with_valid_iso_timezone_date() {
-        let foo: AnalyseSchema = AnalyseSchema { i: 0 };
+        let _foo: AnalyseSchema = AnalyseSchema { i: 0 };
 
         let field = "test_field";
 
@@ -1117,12 +1122,16 @@ mod tests_set_date {
 mod test_smoke_tests {
     use serial_test::serial;
     use std::collections::HashMap;
+    #[allow(unused_imports)]
     use std::fs::{remove_file, File, OpenOptions};
+    #[allow(unused_imports)]
     use std::io::{Seek, Write};
     
 
+    #[allow(unused_imports)]
     use parquet::data_type::AsBytes;
     use rand::Rng;
+    #[allow(unused_imports)]
     use std::path::Path;
 
     use serde_json::{Number, Value};
@@ -1197,8 +1206,8 @@ mod test_smoke_tests {
 
         let mut record_line = serde_json::to_string(&json).unwrap();
 
-        let mut rng = rand::thread_rng();
-        let random_tmp_file_name = rng.gen::<i32>();
+        let mut _rng = rand::thread_rng();
+        let _random_tmp_file_name = _rng.gen::<u64>();
 
         // let mut test_file = OpenOptions::new()
         //     .write(true)
