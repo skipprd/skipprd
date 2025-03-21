@@ -1930,9 +1930,12 @@ mod valid_timestamps_tests {
     #[test]
     fn test_valid_timestamps() {
         let my_struct = AnalyseSchema { i: 0 };
-        assert!(my_struct.is_valid_timestamp(&mut "0".to_string())); // Start of UNIX epoch
-        assert!(my_struct.is_valid_timestamp(&mut "1577836800".to_string())); // Jan 1, 2020
-        // Add more valid cases here
+        // Update test cases to match new validation rules
+        // No longer validate "0" as timestamp since we have a minimum of January 1, 2010
+        assert!(!my_struct.is_valid_timestamp(&mut "0".to_string())); // Now treated as an invalid timestamp (too early)
+        assert!(my_struct.is_valid_timestamp(&mut "1577836800".to_string())); // Jan 1, 2020 (valid)
+        assert!(my_struct.is_valid_timestamp(&mut "1262304000".to_string())); // Jan 1, 2010 (minimum timestamp, valid)
+        assert!(my_struct.is_valid_timestamp(&mut "1609459200".to_string())); // Jan 1, 2021 (valid)
     }
 
     #[test]
@@ -1940,15 +1943,16 @@ mod valid_timestamps_tests {
         let my_struct = AnalyseSchema { i: 0 };
         assert!(!my_struct.is_valid_timestamp(&mut "-1".to_string())); // Before UNIX epoch
         assert!(!my_struct.is_valid_timestamp(&mut "2208988800".to_string())); // After 2040
-        // Add more invalid cases here
+        assert!(!my_struct.is_valid_timestamp(&mut "1262303999".to_string())); // One second before Jan 1, 2010 (invalid)
     }
 
     #[test]
     fn test_edge_cases() {
         let my_struct = AnalyseSchema { i: 0 };
         // Start and end of the allowed range
-        assert!(my_struct.is_valid_timestamp(&mut "0".to_string())); // Start of 1970
-        assert!(my_struct.is_valid_timestamp(&mut "2208988799".to_string())); // Just before 2040
+        assert!(!my_struct.is_valid_timestamp(&mut "0".to_string())); // Start of 1970 (now invalid)
+        assert!(my_struct.is_valid_timestamp(&mut "1262304000".to_string())); // Jan 1, 2010 (minimum timestamp, valid)
+        assert!(my_struct.is_valid_timestamp(&mut "2208988799".to_string())); // Just before 2040 (valid)
     }
 
     #[test]
@@ -1962,9 +1966,9 @@ mod valid_timestamps_tests {
     #[test]
     fn test_overflow_underflow_cases() {
         let my_struct = AnalyseSchema { i: 0 };
-        assert!(!my_struct.is_valid_timestamp(&mut "99999999999999999999".to_string())); // Overflow
-        assert!(!my_struct.is_valid_timestamp(&mut "-99999999999999999999".to_string())); // Underflow
-        // Add more extreme cases here
+        // Test cases for potential overflow or underflow conditions
+        assert!(!my_struct.is_valid_timestamp(&mut "99999999999999999999".to_string())); // Very large number
+        assert!(!my_struct.is_valid_timestamp(&mut "-99999999999999999999".to_string())); // Very negative number
     }
 }
 

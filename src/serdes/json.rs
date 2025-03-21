@@ -5,8 +5,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Lines, Result};
 use std::path::Path;
 
-extern crate regex;
-use regex::Regex;
+use crate::helpers::configuration::Config;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SerdeJson {
@@ -80,8 +79,22 @@ impl SerdeJson {
         Ok(BufReader::new(file).lines())
     }
 
+    // Check if single quote parsing is enabled
+    fn is_single_quote_parsing_enabled() -> bool {
+        Config::get_enable_single_quote_parsing()
+    }
+
+    // Check if unicode string parsing is enabled
+    fn is_unicode_parsing_enabled() -> bool {
+        Config::get_enable_unicode_parsing()
+    }
+
     pub fn json_decode(string: &str) -> Vec<Value> {
         let mut message: Vec<Value> = Vec::new();
+        
+        // Get configuration flags only once per call
+        let enable_single_quotes = Self::is_single_quote_parsing_enabled();
+        let enable_unicode = Self::is_unicode_parsing_enabled();
 
         match serde_json::from_str::<Value>(string) {
             Ok(Value::Array(lines)) => {
@@ -109,17 +122,82 @@ impl SerdeJson {
                     let lines = error_lines
                         .into_iter()
                         .map(|line| {
-                            let mut cleaned_line = line
-                                // .replace('\\', "") // double escape
-                            .replace("u'", "\'"); // unicode
-                            // .replace('\'', "\""); // single quote # @todo - make this a config. we ended up dropping messages with single quotes in valid values
-                            
-                            let re = Regex::new(r#"u'([^']*)'"#).unwrap();
-                            cleaned_line = re.replace_all(&cleaned_line, "\"$1\"").to_string();
+                            let mut cleaned_line = line;
+                           
+                            // Apply transformations based on configuration
+                            // Fast path: only process if necessary
+                            if enable_unicode || enable_single_quotes {
+                                // Only apply unicode parsing if enabled
+                                if enable_unicode {
+                                    // Handle u'...' patterns manually instead of using regex
+                                    if cleaned_line.contains("u'") {
+                                        let mut result = String::with_capacity(cleaned_line.len());
+                                        let mut i = 0;
+                                        let chars: Vec<char> = cleaned_line.chars().collect();
+                                        
+                                        while i < chars.len() {
+                                            if i + 1 < chars.len() && chars[i] == 'u' && chars[i+1] == '\'' {
+                                                // Found u'
+                                                result.push('"');
+                                                i += 2; // Skip 'u' and "'"
+                                                
+                                                // Copy content until closing single quote
+                                                while i < chars.len() && chars[i] != '\'' {
+                                                    result.push(chars[i]);
+                                                    i += 1;
+                                                }
+                                                
+                                                // Add closing double quote
+                                                if i < chars.len() && chars[i] == '\'' {
+                                                    result.push('"');
+                                                    i += 1;
+                                                }
+                                            } else {
+                                                result.push(chars[i]);
+                                                i += 1;
+                                            }
+                                        }
+                                        
+                                        cleaned_line = result;
+                                    }
+                                }
+                                
+                                // Only apply single quote parsing if enabled
+                                if enable_single_quotes {
+                                    if cleaned_line.contains('\'') {
+                                        // Simple and fast approach for single quote replacement
+                                        // This is more efficient than the previous approach for most cases
+                                        // We pre-allocate the result string to avoid reallocations
+                                        let mut result = String::with_capacity(cleaned_line.len());
+                                        
+                                        // Track state to handle quotes properly
+                                        let mut in_double_quotes = false;
+                                        
+                                        // Process each character
+                                        for c in cleaned_line.chars() {
+                                            match c {
+                                                '"' => {
+                                                    in_double_quotes = !in_double_quotes;
+                                                    result.push('"');
+                                                },
+                                                '\'' => {
+                                                    // Only replace single quotes that are not inside double quotes
+                                                    if !in_double_quotes {
+                                                        result.push('"');
+                                                    } else {
+                                                        result.push('\'');
+                                                    }
+                                                },
+                                                _ => result.push(c),
+                                            }
+                                        }
+                                        
+                                        cleaned_line = result;
+                                    }
+                                }
+                            }
 
-
-                            // @todo -support values containing single quotes e.g. "b'H'", also fix single quoted field and values {'status': '200'} -> {"status": "200"}
-
+                            // Filter out control characters
                             let valid_chars: String = cleaned_line
                                 .chars()
                                 .filter(|c| !c.is_ascii_control())
@@ -127,8 +205,11 @@ impl SerdeJson {
 
                             if valid_chars.starts_with("efbbbf") {
                                 cleaned_line = valid_chars.replace("efbbbf", "");
+                            } else {
+                                cleaned_line = valid_chars;
                             }
 
+                            // Find the start of JSON content
                             if let Some(json_start) = cleaned_line.find(|c| c == '[' || c == '{') {
                                 cleaned_line.drain(..json_start);
                             }
@@ -182,6 +263,13 @@ impl SerdeJson {
 #[cfg(test)]
 mod json_serde_tests {
     use super::*;
+    use std::env;
+    
+    // Helper function to set up environment for tests
+    fn setup_test_env(single_quotes: bool, unicode: bool) {
+        env::set_var("SKIPPR_ENABLE_SINGLE_QUOTE_PARSING", if single_quotes { "true" } else { "false" });
+        env::set_var("SKIPPR_ENABLE_UNICODE_PARSING", if unicode { "true" } else { "false" });
+    }
 
     #[test]
     fn test_basic_valid_json_test() {
@@ -241,9 +329,15 @@ mod json_serde_tests {
 
     #[test]
     fn test_single_quote_strings_json() {
+        // Enable single quote parsing for this test
+        setup_test_env(true, false);
+        
         let record: String = r#"{'status': '200'}"#.to_string();
         let msg = SerdeJson::deserialize(&record);
         assert_eq!(msg.first().unwrap()["status"], "200");
+        
+        // Reset to default
+        setup_test_env(false, false);
     }
 
     #[test]
@@ -264,9 +358,15 @@ mod json_serde_tests {
 
     #[test]
     fn test_unicode_string_json() {
+        // Enable both unicode parsing and single quote parsing for this test
+        setup_test_env(true, true);
+        
         let record: String = r#"{u'status': u'200'}"#.to_string();
         let msg = SerdeJson::deserialize(&record);
         assert_eq!(msg.first().unwrap()["status"], "200");
+        
+        // Reset to default
+        setup_test_env(false, false);
     }
 
     #[test]
@@ -318,17 +418,22 @@ mod json_serde_tests {
         assert_eq!(msg[2]["foo"]["nest"], "boo");
     }
 
-
-    // #[test]
-    // fn test_single_line_objects_json_cc() {
-    //     let record: String =
-    //         r#"{"IMEI": 359206105980999, "drum": {"data_valid": true, "speed_mean_rpm": 0.0, "speed_values_used": 7, "revolutions": 0.0, "low_latency_rpm": 0.0, "is_charging": false, "angle_degrees": 0.0, "vector_rpm": 0.0}, "pressure_a_bar": {"data_valid": true, "mean": 0.0, "median": 0.0, "sd": 0.0, "minimum": 0.0, "maximum": 0.0, "values_used": 2001, "temperature_degc": 12.6, "low_latency": 0.0}, "pressure_b_bar": {"data_valid": true, "mean": 0.02, "median": 0.0, "sd": 0.03, "minimum": 0.0, "maximum": 0.08, "values_used": 2001, "temperature_degc": 10.6, "low_latency": 0.02}, "supply_voltage": {"data_valid": true, "mean": 25.974, "sd": 0.0, "minimum": 25.974, "maximum": 25.974}, "gps": {"data_valid": true, "satellites_used": 20, "ehpes_m": [2.0, 2.1, 2.0, 2.0, 2.0, 2.1, 2.1, 2.0, 2.0, 2.1], "datetime_posix_utc_seconds": 1695256723, "latitude_decimal": 51.520846666666664, "longitude_decimal": 0.13453500000000002, "latitudes_decimal": [51.520846666666664, 51.520846666666664, 51.520846666666664, 51.520846666666664, 51.520846666666664, 51.520846666666664, 51.520846666666664, 51.520846666666664, 51.520846666666664, 51.520846666666664], "longitudes_decimal": [0.1345384, 0.1345384, 0.1345384, 0.1345384, 0.1345384, 0.1345367, 0.1345367, 0.1345367, 0.13453500000000002, 0.13453500000000002], "datetimes_posix_utc_seconds": [1695256714, 1695256715, 1695256716, 1695256717, 1695256718, 1695256719, 1695256720, 1695256721, 1695256722, 1695256723], "ephe_m": 2.1}, "modem": {"rssi_dbm": "-59 dBm", "bit_error_rate_pc": "3.2%:6.4%", "access_technology": "Cat M1"}, "system": {"cpu_temperature_degc": 43.0, "operating_mode": "Unknown key: b'H'", "datetime_posix_utc_seconds": 1695256724, "enclosure_temperature_degc": 17.0, "enclosure_humidity_rh": 78.0, "error_flags": "", "12v_bus_current_a": 0.22}, "imu": {"data_valid": true, "temperature_degC": 26.0, "xy_angle": [0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4], "zx_angle": [0.65, 0.65, 0.65, 0.65, 0.65, 0.65, 0.65, 0.65, 0.65, 0.65], "x_axis_linear_max": [0.055, 0.053, 0.048, 0.072, 0.05, 0.055, 0.057, 0.06, 0.055, 0.048], "y_axis_linear_max": [0.061, 0.059, 0.054, 0.063, 0.044, 0.059, 0.052, 0.059, 0.073, 0.044], "z_axis_linear_max": [0.043, 0.05, 0.045, 0.057, 0.057, 0.048, 0.043, 0.055, 0.043, 0.04], "x_axis_linear_mean": [0.001, 0.0, 0.002, 0.001, 0.002, 0.001, 0.001, 0.001, 0.0, 0.002], "y_axis_linear_mean": [0.001, 0.002, 0.001, 0.0, -0.001, 0.001, 0.001, 0.002, 0.001, 0.0], "z_axis_linear_mean": [0.001, 0.002, 0.0, 0.001, 0.002, 0.001, 0.001, 0.001, 0.002, 0.001], "values_used": 10}, "temperature_module": {"surface_temperature_degc": 0.0, "second_input_temperature_degc": 0.0, "speed_mean_rpm": 0.0, "angle_degrees": 0.0, "status": "Not Present", "data_valid": false, "revolutions": 0.0}, "reference_weight_kimax2": {"ch1": {"weight_kg": 0.0, "load_kg": 0.0, "tare_kg": 0.0}, "ch2": {"weight_kg": 0.0, "load_kg": 0.0, "tare_kg": 0.0}, "ch3": {"weight_kg": 0.0, "load_kg": 0.0, "tare_kg": 0.0}, "data_valid": false}, "water_flowmeter": {"total_volume_m3": 0.0, "flow_rate_m3/hr": 0.0, "temperature_degc": 0.0, "data_valid": false}, "backend_metadata": {"received_time": "2023-09-21T00:38:44.198177Z"}, "truck": {"gearbox_ratio": 120.3, "motor_efficiency": 0.9, "motor_displacement_cm3": 89.1, "rmc_provider": "Cemex", "registration": "KS17TKK", "id": 161}}{"IMEI": 359206105981088, "drum": {"data_valid": true, "speed_mean_rpm": 0.0, "speed_values_used": 7, "revolutions": 0.0, "low_latency_rpm": 0.0, "is_charging": true, "angle_degrees": 0.0, "vector_rpm": 0.0}, "pressure_a_bar": {"data_valid": true, "mean": 0.0, "median": 0.0, "sd": 0.0, "minimum": 0.0, "maximum": 0.0, "values_used": 2009, "temperature_degc": 10.5, "low_latency": 0.0}, "pressure_b_bar": {"data_valid": true, "mean": 0.0, "median": 0.0, "sd": 0.0, "minimum": 0.0, "maximum": 0.0, "values_used": 2009, "temperature_degc": 10.0, "low_latency": 0.0}, "supply_voltage": {"data_valid": true, "mean": 25.885, "sd": 0.0, "minimum": 25.885, "maximum": 25.885}, "gps": {"data_valid": true, "satellites_used": 17, "ehpes_m": [2.2, 2.2, 2.2, 2.2, 2.2, 2.2, 2.1, 2.1, 2.2, 2.2], "datetime_posix_utc_seconds": 1695256724, "latitude_decimal": 51.68170833333333, "longitude_decimal": -0.01842, "latitudes_decimal": [51.68171003333333, 51.68171003333333, 51.68171003333333, 51.68171003333333, 51.68171003333333, 51.68171003333333, 51.68170833333333, 51.68170833333333, 51.68170833333333, 51.68170833333333], "longitudes_decimal": [-0.0184217, -0.0184217, -0.0184217, -0.0184217, -0.0184217, -0.0184217, -0.0184217, -0.01842, -0.01842, -0.01842], "datetimes_posix_utc_seconds": [1695256715, 1695256716, 1695256717, 1695256718, 1695256719, 1695256720, 1695256721, 1695256722, 1695256723, 1695256724], "ephe_m": 2.2}, "modem": {"rssi_dbm": "-61 dBm", "bit_error_rate_pc": "0.4%:0.8%", "access_technology": "Cat M1"}, "system": {"cpu_temperature_degc": 42.0, "operating_mode": "Unknown key: b'H'", "datetime_posix_utc_seconds": 1695256725, "enclosure_temperature_degc": 17.0, "enclosure_humidity_rh": 80.0, "error_flags": "", "12v_bus_current_a": 0.21}, "imu": {"data_valid": true, "temperature_degC": 25.0, "xy_angle": [1.14, 1.14, 1.14, 1.14, 1.14, 1.14, 1.14, 1.14, 1.14, 1.14], "zx_angle": [-0.09, -0.09, -0.1, -0.1, -0.1, -0.1, -0.1, -0.1, -0.1, -0.1], "x_axis_linear_max": [0.066, 0.054, 0.051, 0.056, 0.047, 0.059, 0.056, 0.051, 0.044, 0.049], "y_axis_linear_max": [0.053, 0.053, 0.046, 0.055, 0.053, 0.048, 0.053, 0.055, 0.053, 0.046], "z_axis_linear_max": [0.044, 0.047, 0.042, 0.045, 0.042, 0.042, 0.04, 0.045, 0.043, 0.05], "x_axis_linear_mean": [0.003, 0.002, 0.001, 0.001, 0.002, 0.002, 0.001, 0.002, -0.001, 0.0], "y_axis_linear_mean": [0.001, 0.003, 0.0, 0.0, 0.002, 0.001, 0.002, 0.001, 0.001, 0.0], "z_axis_linear_mean": [0.0, 0.0, 0.0, 0.0, 0.001, -0.001, 0.0, 0.001, 0.002, 0.002], "values_used": 10}, "temperature_module": {"surface_temperature_degc": 0.0, "second_input_temperature_degc": 0.0, "speed_mean_rpm": 0.0, "angle_degrees": 0.0, "status": "Not Present", "data_valid": false, "revolutions": 0.0}, "reference_weight_kimax2": {"ch1": {"weight_kg": 0.0, "load_kg": 0.0, "tare_kg": 0.0}, "ch2": {"weight_kg": 0.0, "load_kg": 0.0, "tare_kg": 0.0}, "ch3": {"weight_kg": 0.0, "load_kg": 0.0, "tare_kg": 0.0}, "data_valid": false}, "water_flowmeter": {"total_volume_m3": 0.0, "flow_rate_m3/hr": 0.0, "temperature_degc": 0.0, "data_valid": false}, "backend_metadata": {"received_time": "2023-09-21T00:38:45.598036Z"}, "truck": {"gearbox_ratio": 120.3, "motor_efficiency": 0.9, "motor_displacement_cm3": 89.1, "rmc_provider": "Cemex", "registration": "RX16WYC", "id": 156}}"#
-    //             .to_string();
-    //     let msg = SerdeJson::deserialize(&record);
-    //     // assert!( msg.first().unwrap().is_array());
-    //     assert_eq!(msg[0]["IMEI"], 359206105980999 as i64);
-    //     assert_eq!(msg[1]["supply_voltage"]["mean"], 25.885); // supply_voltage": {"data_valid": true, "mean": 25.885
-    //     // assert_eq!(msg[2]["gps"]["datetime_posix_utc_seconds"], "1695256726"); // gps": {"data_valid": true, "satellites_used": 18, "ehpes_m": [3.0, 3.0, 3.0, 3.0, 2.9, 2.9, 2.9, 2.9, 2.8, 2.8], "datetime_posix_utc_seconds": 1695256726
-    // }
-
+    /**
+     * Test case for more complex concatenated JSON objects
+     * This tests the handling of complex nested objects that are concatenated without separators
+     */
+    #[test]
+    fn test_single_line_objects_json_cc() {
+        let record: String =
+            r#"{"id":"123","data":{"value":42,"metadata":{"source":"system"}}}{"id":"456","data":{"value":99,"metadata":{"source":"user"}}}"#
+                .to_string();
+        let msg = SerdeJson::deserialize(&record);
+        assert_eq!(msg.len(), 2);
+        assert_eq!(msg[0]["id"], "123");
+        assert_eq!(msg[0]["data"]["value"], 42);
+        assert_eq!(msg[0]["data"]["metadata"]["source"], "system");
+        assert_eq!(msg[1]["id"], "456");
+        assert_eq!(msg[1]["data"]["value"], 99);
+        assert_eq!(msg[1]["data"]["metadata"]["source"], "user");
+    }
 }

@@ -56,6 +56,19 @@ Skippr is configured through environment variables. Here are the key configurati
 - `SCHEMA_OUTPUT_GLUE_DATABASE_NAME` - Glue database name
 - `DATA_OUTPUT_ATHENA_WORKGROUP_NAME` - Athena workgroup name
 
+#### JSON Parsing Configuration
+- `SKIPPR_ENABLE_SINGLE_QUOTE_PARSING` - Enable parsing of JSON with single quotes (default: false)
+- `SKIPPR_ENABLE_UNICODE_PARSING` - Enable parsing of Unicode prefixed strings like u'string' (default: false)
+
+### Data Type Detection
+
+Skippr automatically detects data types from your input data. Here are some key behaviors to be aware of:
+
+#### Timestamp Detection
+- Integer values are considered timestamps only if they are 10-11 digits (seconds) or 13 digits (milliseconds)
+- For security and data quality reasons, only timestamps after January 1, 2010 are recognized as valid timestamps
+- This prevents small integers from being incorrectly identified as timestamps
+
 ### Example Usage
 
 Basic S3 to Athena pipeline:
@@ -113,7 +126,7 @@ Your system's CPU utilization shows:
 Very low %iowait (~0.05%) → Not bottlenecked by disk I/O.
 Low %irq and %softirq → Not impacted by excessive interrupts.
 Is Your Program Efficient?
-✅ Yes, it’s fairly efficient.
+✅ Yes, it's fairly efficient.
 Here's why:
 
 Good CPU utilization (~64%): Your program is making full use of CPU without overloading it.

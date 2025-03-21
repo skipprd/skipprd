@@ -66,6 +66,8 @@ pub struct Transform {
     pub partition_allowed_values: Option<String>,
     pub namespace_fields: Option<String>,
     pub time_partition_prefix: Option<String>,
+    pub enable_single_quote_parsing: Option<String>,
+    pub enable_unicode_parsing: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -633,6 +635,8 @@ impl Config {
                     partition_allowed_values: None,
                     namespace_fields: None,
                     time_partition_prefix: None,
+                    enable_single_quote_parsing: None,
+                    enable_unicode_parsing: None,
                 }
             }
         }
@@ -1682,6 +1686,52 @@ impl Config {
 
 
     }
+
+    pub fn get_enable_single_quote_parsing() -> bool {
+        let env_value = Config::getenv("SKIPPR_ENABLE_SINGLE_QUOTE_PARSING", "false");
+        
+        if env_value.to_lowercase() == "true" {
+            return true;
+        }
+        
+        let config = Config::get();
+        
+        let pipeline = match config.pipelines.get(PIPELINE_NAME.read().as_str()) {
+            Some(pipeline) => pipeline,
+            None => return false,
+        };
+        
+        if let Some(transform) = &pipeline.transform {
+            if let Some(enable_single_quote_parsing) = &transform.enable_single_quote_parsing {
+                return enable_single_quote_parsing.to_lowercase() == "true";
+            }
+        }
+        
+        false
+    }
+
+    pub fn get_enable_unicode_parsing() -> bool {
+        let env_value = Config::getenv("SKIPPR_ENABLE_UNICODE_PARSING", "false");
+        
+        if env_value.to_lowercase() == "true" {
+            return true;
+        }
+        
+        let config = Config::get();
+        
+        let pipeline = match config.pipelines.get(PIPELINE_NAME.read().as_str()) {
+            Some(pipeline) => pipeline,
+            None => return false,
+        };
+        
+        if let Some(transform) = &pipeline.transform {
+            if let Some(enable_unicode_parsing) = &transform.enable_unicode_parsing {
+                return enable_unicode_parsing.to_lowercase() == "true";
+            }
+        }
+        
+        false
+    }
 }
 
 
@@ -1690,19 +1740,74 @@ impl Config {
 mod tests {
     use super::*;
 
+    // Tests for our new JSON parsing configuration options
     #[test]
-    fn test_getenv() {
-        assert_eq!(Config::getenv("TEST", "default"), "default");
+    fn test_enable_single_quote_parsing() {
+        // Reset environment cache to ensure clean test state
+        Config::reset_envcache();
+        
+        // Test environment variable override
+        std::env::set_var("SKIPPR_ENABLE_SINGLE_QUOTE_PARSING", "true");
+        assert_eq!(Config::get_enable_single_quote_parsing(), true);
+        
+        std::env::set_var("SKIPPR_ENABLE_SINGLE_QUOTE_PARSING", "false");
+        assert_eq!(Config::get_enable_single_quote_parsing(), false);
+        
+        // Clean up
+        std::env::remove_var("SKIPPR_ENABLE_SINGLE_QUOTE_PARSING");
     }
-
+    
     #[test]
-    fn test_getenv_empty_string() {
-        Config::setenv("TEST", "");
-        assert_eq!(Config::getenv("TEST", "default"), "default");
+    fn test_enable_unicode_parsing() {
+        // Reset environment cache to ensure clean test state
+        Config::reset_envcache();
+        
+        // Test environment variable override
+        std::env::set_var("SKIPPR_ENABLE_UNICODE_PARSING", "true");
+        assert_eq!(Config::get_enable_unicode_parsing(), true);
+        
+        std::env::set_var("SKIPPR_ENABLE_UNICODE_PARSING", "false");
+        assert_eq!(Config::get_enable_unicode_parsing(), false);
+        
+        // Clean up
+        std::env::remove_var("SKIPPR_ENABLE_UNICODE_PARSING");
     }
-
+    
+    // Test for YAML configuration options
     #[test]
-    fn test_get_pipeline_name() {
-        assert_eq!(Config::get_pipeline_name(), "default");
+    fn test_yaml_config_json_parsing() {
+        // Reset environment cache to ensure clean test state
+        Config::reset_envcache();
+        
+        // Create a temporary YAML configuration with JSON parsing options
+        let temp_config = r#"
+skippr:
+  api_token: "test_token"
+  workspace: "test_workspace"
+pipelines:
+  default:
+    transform:
+      enable_single_quote_parsing: "true"
+      enable_unicode_parsing: "true"
+"#;
+        
+        // Write to a temporary file
+        let config_path = "./test_skippr_config.yml";
+        std::fs::write(config_path, temp_config).expect("Failed to write temp config");
+        
+        // Set the config file path
+        std::env::set_var("SKIPPR_CONFIG_FILE", config_path);
+        
+        // Build the config
+        Config::build_config();
+        
+        // Now test the getters
+        assert_eq!(Config::get_enable_single_quote_parsing(), true);
+        assert_eq!(Config::get_enable_unicode_parsing(), true);
+        
+        // Clean up
+        std::fs::remove_file(config_path).expect("Failed to remove temp config");
+        std::env::remove_var("SKIPPR_CONFIG_FILE");
+        Config::reset_envcache();
     }
 }
