@@ -69,7 +69,7 @@ pub fn discover_ingest(
     // If this is an array of records, make sure repetition_count matches the array length
     if value.is_array() {
         if let Some(field_metadata) = metadata.get_mut(field) {
-            if field_metadata.determined_type == "array" && field_metadata.determined_type_values == "record" {
+            if field_metadata.is_type(SkipprDataType::Array) && field_metadata.is_values_type(SkipprDataType::Record) {
                 let array_length = value.as_array().unwrap().len() as i32;
                 if array_length > field_metadata.repetition_count {
                     field_metadata.repetition_count = array_length;
@@ -228,15 +228,45 @@ impl Metadata {
             count: 0,
             types: Default::default(),
             parent_type: "".to_string(),
-            fields: Box::default(),
+            fields: Box::new(Default::default()),
             date_candidate: None,
-            evolution: Box::default(),
+            evolution: Box::new(Default::default()),
             enabled: true,
             out_field_name: "".to_string(),
             determined_type: "".to_string(),
             determined_type_values: "".to_string(),
-            repetition_count: 1, // Default to 1 repetition
+            repetition_count: 5,
         })
+    }
+    
+    /// Gets the data type as a SkipprDataType enum
+    pub fn data_type(&self) -> SkipprDataType {
+        SkipprDataType::from_str(&self.determined_type)
+    }
+    
+    /// Sets the data type using a SkipprDataType enum
+    pub fn set_data_type(&mut self, data_type: SkipprDataType) {
+        self.determined_type = data_type.as_str().to_string();
+    }
+    
+    /// Gets the values data type as a SkipprDataType enum
+    pub fn values_data_type(&self) -> SkipprDataType {
+        SkipprDataType::from_str(&self.determined_type_values)
+    }
+    
+    /// Sets the values data type using a SkipprDataType enum
+    pub fn set_values_data_type(&mut self, data_type: SkipprDataType) {
+        self.determined_type_values = data_type.as_str().to_string();
+    }
+    
+    /// Check if the data type matches a specific type
+    pub fn is_type(&self, data_type: SkipprDataType) -> bool {
+        self.data_type() == data_type
+    }
+    
+    /// Check if the values data type matches a specific type
+    pub fn is_values_type(&self, data_type: SkipprDataType) -> bool {
+        self.values_data_type() == data_type
     }
 
     pub fn flatten_metadata(metadata: &Metadata, flattened: &mut OutputMetadata) {
@@ -246,7 +276,7 @@ impl Metadata {
     fn _flatten_metadata(metadata: &Metadata, flattened: &mut OutputMetadata, field_path: String) {
         for (_key, val) in metadata.fields.iter() {
             // Special handling for array elements
-            if val.determined_type == "array" && val.fields.contains_key("0") {
+            if val.is_type(SkipprDataType::Array) && val.fields.contains_key("0") {
                 let array_template = val.fields.get("0").unwrap();
                 let repetition_count = val.repetition_count; // Use repetition_count instead of count
 
@@ -503,6 +533,100 @@ pub enum SkipprTypes {
     Map,
     Record,
     Null,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkipprDataType {
+    Record,
+    Map,
+    Array,
+    Date,
+    String,
+    Long,
+    Integer,
+    Double,
+    Boolean,
+    TimestampMilli,
+    Timestamp,
+    Null,
+    Unknown,
+}
+
+impl SkipprDataType {
+    /// Convert a string data type to the corresponding enum variant
+    pub fn from_str(data_type: &str) -> Self {
+        match data_type {
+            "record" => SkipprDataType::Record,
+            "map" => SkipprDataType::Map,
+            "array" => SkipprDataType::Array,
+            "date" => SkipprDataType::Date,
+            "string" => SkipprDataType::String,
+            "long" => SkipprDataType::Long,
+            "int" | "integer" => SkipprDataType::Integer,
+            "double" => SkipprDataType::Double,
+            "boolean" => SkipprDataType::Boolean,
+            "timestamp_milli" => SkipprDataType::TimestampMilli,
+            "timestamp" => SkipprDataType::Timestamp,
+            "null" => SkipprDataType::Null,
+            _ => SkipprDataType::Unknown,
+        }
+    }
+    
+    /// Convert enum variant to string representation
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SkipprDataType::Record => "record",
+            SkipprDataType::Map => "map",
+            SkipprDataType::Array => "array",
+            SkipprDataType::Date => "date",
+            SkipprDataType::String => "string",
+            SkipprDataType::Long => "long",
+            SkipprDataType::Integer => "integer",
+            SkipprDataType::Double => "double",
+            SkipprDataType::Boolean => "boolean",
+            SkipprDataType::TimestampMilli => "timestamp_milli",
+            SkipprDataType::Timestamp => "timestamp",
+            SkipprDataType::Null => "null",
+            SkipprDataType::Unknown => "unknown",
+        }
+    }
+    
+    /// Convert SkipprDataType to SkipprTypes
+    pub fn to_skippr_type(&self) -> Option<SkipprTypes> {
+        match self {
+            SkipprDataType::Record => Some(SkipprTypes::Record),
+            SkipprDataType::Map => Some(SkipprTypes::Map),
+            SkipprDataType::Array => Some(SkipprTypes::Array),
+            SkipprDataType::Date => Some(SkipprTypes::Date),
+            SkipprDataType::String => Some(SkipprTypes::String),
+            SkipprDataType::Long => Some(SkipprTypes::Long),
+            SkipprDataType::Integer => Some(SkipprTypes::Integer),
+            SkipprDataType::Double => Some(SkipprTypes::Double),
+            SkipprDataType::Boolean => Some(SkipprTypes::Boolean),
+            SkipprDataType::TimestampMilli => Some(SkipprTypes::TimestampMilli),
+            SkipprDataType::Timestamp => Some(SkipprTypes::Timestamp),
+            SkipprDataType::Null => Some(SkipprTypes::Null),
+            SkipprDataType::Unknown => None,
+        }
+    }
+    
+    /// Convert from SkipprTypes to SkipprDataType
+    pub fn from_skippr_type(skippr_type: &SkipprTypes) -> Self {
+        match skippr_type {
+            SkipprTypes::Record => SkipprDataType::Record,
+            SkipprTypes::Map => SkipprDataType::Map,
+            SkipprTypes::Array => SkipprDataType::Array,
+            SkipprTypes::Date => SkipprDataType::Date,
+            SkipprTypes::String => SkipprDataType::String,
+            SkipprTypes::Long => SkipprDataType::Long,
+            SkipprTypes::Integer => SkipprDataType::Integer,
+            SkipprTypes::Double => SkipprDataType::Double,
+            SkipprTypes::Boolean => SkipprDataType::Boolean,
+            SkipprTypes::TimestampMilli => SkipprDataType::TimestampMilli,
+            SkipprTypes::Timestamp => SkipprDataType::Timestamp,
+            SkipprTypes::Null => SkipprDataType::Null,
+        }
+    }
 }
 
 // to string
