@@ -60,6 +60,7 @@ mod serdes;
 
 mod plugins;
 mod sql;
+mod benchmark;
 
 use crate::helpers::configuration::{Config, PIPELINE_NAME};
 
@@ -88,6 +89,7 @@ use crate::plugins::file_output::DataOutputFilePlugin;
 use crate::sql::query::query;
 use crate::sql::docs::{DocFormat, get_docs_in_format};
 use crate::sql::doc_parser::SqlDocParser;
+use crate::benchmark::PerformanceBenchmark;
 
 // use crate::plugins::pcap_input::DataSourcePcapPlugin;
 
@@ -383,6 +385,53 @@ async fn main() {
                 println!();
                 println!("To generate documentation, use:");
                 println!("  skippr sql-help --output <FILE_PATH> [--format md|html|json]");
+            }
+        }
+        Mode::Benchmark(options) => {
+            Config::build_config();
+            // Setup default pipeline name for benchmarking
+            PIPELINE_NAME.write().clear();
+            PIPELINE_NAME.write().push_str("benchmark");
+            Config::init().await;
+            
+            // Initialize benchmark
+            let benchmark = PerformanceBenchmark::new(
+                options.num_files,
+                options.records_per_file,
+                options.record_size
+            );
+            
+            println!("Creating benchmark data...");
+            match benchmark.create_benchmark_data() {
+                Ok(total_bytes) => {
+                    println!("Generated {} files with {} records each ({} bytes total)",
+                        options.num_files, options.records_per_file, total_bytes);
+                    
+                    println!("Running benchmark '{}'...", options.name);
+                    
+                    // Get description or use a default
+                    let description = options.description.unwrap_or_else(|| {
+                        if options.name == "baseline" {
+                            "Baseline performance measurement".to_string()
+                        } else {
+                            format!("Performance test: {}", options.name)
+                        }
+                    });
+                    
+                    match benchmark.run_benchmark(&options.name, &description).await {
+                        Ok(_) => {
+                            println!("Benchmark completed successfully");
+                        },
+                        Err(e) => {
+                            println!("Benchmark failed: {}", e);
+                            process::exit(1);
+                        }
+                    }
+                },
+                Err(e) => {
+                    println!("Failed to create benchmark data: {}", e);
+                    process::exit(1);
+                }
             }
         }
     }

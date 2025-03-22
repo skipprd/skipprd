@@ -11,7 +11,7 @@ pub static CLI_MODE: Lazy<TimedRwLock<Mode>> = Lazy::new(|| TimedRwLock::new("cl
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
-    pub(crate) mode: Mode,
+    pub mode: Mode,
 }
 
 #[derive(Parser, Clone, PartialEq)]
@@ -21,48 +21,71 @@ pub enum Mode {
     Query(QueryOptions),
     Schema(SchemaOptions),
     SqlHelp(SqlHelpOptions),
-    // ... other modes
+    Benchmark(BenchmarkOptions),
 }
 
 #[derive(Parser, Clone, PartialEq)]
 pub struct SyncOptions {
     /// The pipeline to use
     #[arg(short, long)]
-    pub(crate) pipeline: Option<String>,
+    pub pipeline: Option<String>,
 }
 
 #[derive(Parser, Clone, PartialEq)]
 pub struct DisocverOptions {
     /// The pipeline to use
     #[arg(short, long)]
-    pub(crate) pipeline: Option<String>,
+    pub pipeline: Option<String>,
 }
 
 #[derive(Parser, Clone, PartialEq)]
 pub struct QueryOptions {
     /// The SQL query to run
     #[arg(short, long)]
-    pub(crate) sql: String,
+    pub sql: String,
 }
 
 #[derive(Parser, Clone, PartialEq)]
 pub struct SchemaOptions {
     /// The schema to use
     #[arg(short, long)]
-    pub(crate) pipeline: String,
+    pub pipeline: String,
 }
 
 #[derive(Parser, Clone, PartialEq)]
 pub struct SqlHelpOptions {
     /// The SQL command to get help for. If not provided, shows all commands.
     #[arg(short, long)]
-    pub(crate) command: Option<String>,
+    pub command: Option<String>,
     
     /// Generate documentation and save to file
     #[arg(short, long)]
-    pub(crate) output: Option<String>,
+    pub output: Option<String>,
     
     /// Format for documentation output (md, html, json)
     #[arg(short, long, default_value = "md")]
-    pub(crate) format: Option<String>,
+    pub format: Option<String>,
+}
+
+#[derive(Parser, Clone, PartialEq, Default)]
+pub struct BenchmarkOptions {
+    /// Number of files to generate for benchmark
+    #[arg(short = 'f', long)]
+    pub num_files: usize,
+    
+    /// Number of records per file
+    #[arg(short = 'r', long)]
+    pub records_per_file: usize,
+    
+    /// Average record size in bytes
+    #[arg(short = 's', long)]
+    pub record_size: usize,
+    
+    /// Benchmark name
+    #[arg(short, long, default_value = "baseline")]
+    pub name: String,
+    
+    /// Description of what's being benchmarked (e.g., specific optimization)
+    #[arg(short = 'd', long)]
+    pub description: Option<String>,
 }
