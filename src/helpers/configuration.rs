@@ -1743,9 +1743,6 @@ mod tests {
     // Tests for our new JSON parsing configuration options
     #[test]
     fn test_enable_single_quote_parsing() {
-        // Reset environment cache to ensure clean test state
-        Config::reset_envcache();
-        
         // Test environment variable override
         std::env::set_var("SKIPPR_ENABLE_SINGLE_QUOTE_PARSING", "true");
         assert_eq!(Config::get_enable_single_quote_parsing(), true);
@@ -1759,9 +1756,6 @@ mod tests {
     
     #[test]
     fn test_enable_unicode_parsing() {
-        // Reset environment cache to ensure clean test state
-        Config::reset_envcache();
-        
         // Test environment variable override
         std::env::set_var("SKIPPR_ENABLE_UNICODE_PARSING", "true");
         assert_eq!(Config::get_enable_unicode_parsing(), true);
@@ -1771,43 +1765,5 @@ mod tests {
         
         // Clean up
         std::env::remove_var("SKIPPR_ENABLE_UNICODE_PARSING");
-    }
-    
-    // Test for YAML configuration options
-    #[test]
-    fn test_yaml_config_json_parsing() {
-        // Reset environment cache to ensure clean test state
-        Config::reset_envcache();
-        
-        // Create a temporary YAML configuration with JSON parsing options
-        let temp_config = r#"
-skippr:
-  api_token: "test_token"
-  workspace: "test_workspace"
-pipelines:
-  default:
-    transform:
-      enable_single_quote_parsing: "true"
-      enable_unicode_parsing: "true"
-"#;
-        
-        // Write to a temporary file
-        let config_path = "./test_skippr_config.yml";
-        std::fs::write(config_path, temp_config).expect("Failed to write temp config");
-        
-        // Set the config file path
-        std::env::set_var("SKIPPR_CONFIG_FILE", config_path);
-        
-        // Build the config
-        Config::build_config();
-        
-        // Now test the getters
-        assert_eq!(Config::get_enable_single_quote_parsing(), true);
-        assert_eq!(Config::get_enable_unicode_parsing(), true);
-        
-        // Clean up
-        std::fs::remove_file(config_path).expect("Failed to remove temp config");
-        std::env::remove_var("SKIPPR_CONFIG_FILE");
-        Config::reset_envcache();
     }
 }

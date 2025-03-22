@@ -6,6 +6,7 @@ use std::io::{BufRead, BufReader, Lines, Result};
 use std::path::Path;
 
 use crate::helpers::configuration::Config;
+use crate::serdes::optimized_json::OptimizedJsonParser;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SerdeJson {
@@ -84,177 +85,19 @@ impl SerdeJson {
         Config::get_enable_single_quote_parsing()
     }
 
-    // Check if unicode string parsing is enabled
+    // Check if unicode parsing is enabled
     fn is_unicode_parsing_enabled() -> bool {
         Config::get_enable_unicode_parsing()
     }
 
     pub fn json_decode(string: &str) -> Vec<Value> {
-        let mut message: Vec<Value> = Vec::new();
-        
-        // Get configuration flags only once per call
-        let enable_single_quotes = Self::is_single_quote_parsing_enabled();
+        // Create an instance of the optimized parser
+        let enable_sq = Self::is_single_quote_parsing_enabled();
         let enable_unicode = Self::is_unicode_parsing_enabled();
-
-        match serde_json::from_str::<Value>(string) {
-            Ok(Value::Array(lines)) => {
-                message.extend(lines);
-            }
-            Ok(line) => {
-                message.push(line);
-            }
-            Err(_err) => {
-
-                let mut error_lines: Vec<String> = Vec::new();
-
-                string.lines().into_iter().for_each(|line| {
-                    match serde_json::from_str::<Value>(line) {
-                        Ok(decoded_line) => {
-                            message.push(decoded_line);
-                        }
-                        Err(_err) => {
-                            error_lines.push(line.to_string());
-                        }
-                    };
-                });
-
-                if !error_lines.is_empty() {
-                    let lines = error_lines
-                        .into_iter()
-                        .map(|line| {
-                            let mut cleaned_line = line;
-                           
-                            // Apply transformations based on configuration
-                            // Fast path: only process if necessary
-                            if enable_unicode || enable_single_quotes {
-                                // Only apply unicode parsing if enabled
-                                if enable_unicode {
-                                    // Handle u'...' patterns manually instead of using regex
-                                    if cleaned_line.contains("u'") {
-                                        let mut result = String::with_capacity(cleaned_line.len());
-                                        let mut i = 0;
-                                        let chars: Vec<char> = cleaned_line.chars().collect();
-                                        
-                                        while i < chars.len() {
-                                            if i + 1 < chars.len() && chars[i] == 'u' && chars[i+1] == '\'' {
-                                                // Found u'
-                                                result.push('"');
-                                                i += 2; // Skip 'u' and "'"
-                                                
-                                                // Copy content until closing single quote
-                                                while i < chars.len() && chars[i] != '\'' {
-                                                    result.push(chars[i]);
-                                                    i += 1;
-                                                }
-                                                
-                                                // Add closing double quote
-                                                if i < chars.len() && chars[i] == '\'' {
-                                                    result.push('"');
-                                                    i += 1;
-                                                }
-                                            } else {
-                                                result.push(chars[i]);
-                                                i += 1;
-                                            }
-                                        }
-                                        
-                                        cleaned_line = result;
-                                    }
-                                }
-                                
-                                // Only apply single quote parsing if enabled
-                                if enable_single_quotes {
-                                    if cleaned_line.contains('\'') {
-                                        // Simple and fast approach for single quote replacement
-                                        // This is more efficient than the previous approach for most cases
-                                        // We pre-allocate the result string to avoid reallocations
-                                        let mut result = String::with_capacity(cleaned_line.len());
-                                        
-                                        // Track state to handle quotes properly
-                                        let mut in_double_quotes = false;
-                                        
-                                        // Process each character
-                                        for c in cleaned_line.chars() {
-                                            match c {
-                                                '"' => {
-                                                    in_double_quotes = !in_double_quotes;
-                                                    result.push('"');
-                                                },
-                                                '\'' => {
-                                                    // Only replace single quotes that are not inside double quotes
-                                                    if !in_double_quotes {
-                                                        result.push('"');
-                                                    } else {
-                                                        result.push('\'');
-                                                    }
-                                                },
-                                                _ => result.push(c),
-                                            }
-                                        }
-                                        
-                                        cleaned_line = result;
-                                    }
-                                }
-                            }
-
-                            // Filter out control characters
-                            let valid_chars: String = cleaned_line
-                                .chars()
-                                .filter(|c| !c.is_ascii_control())
-                                .collect();
-
-                            if valid_chars.starts_with("efbbbf") {
-                                cleaned_line = valid_chars.replace("efbbbf", "");
-                            } else {
-                                cleaned_line = valid_chars;
-                            }
-
-                            // Find the start of JSON content
-                            if let Some(json_start) = cleaned_line.find(|c| c == '[' || c == '{') {
-                                cleaned_line.drain(..json_start);
-                            }
-
-                            cleaned_line
-                        })
-                        .collect::<Vec<_>>();
-
-
-                    let mut deserialized_lines: Vec<Value> = lines
-                        .iter()
-                        .map(|line| serde_json::from_str(line).unwrap_or_default())
-                        .collect();
-
-                    if deserialized_lines.is_empty()
-                        || deserialized_lines.first().unwrap() == &Value::Null
-                    {
-                        deserialized_lines.clear();
-
-                        for line in lines {
-                            let records: Vec<&str> = line.split("}{").collect();
-
-                            for (i, record) in records.iter().enumerate() {
-                                let mut record = record.to_string();
-
-                                if i != 0 {
-                                    record.insert(0, '{');
-                                }
-
-                                if i != records.len() - 1 {
-                                    record.push('}');
-                                }
-
-                                deserialized_lines
-                                    .push(serde_json::from_str(&record).unwrap_or_default());
-                            }
-                        }
-                    }
-
-                    message.extend(deserialized_lines);
-                }
-            }
-        }
-
-        message
+        let parser = OptimizedJsonParser::new(enable_sq, enable_unicode);
+        
+        // Use the optimized parser
+        parser.parse(string)
     }
 }
 

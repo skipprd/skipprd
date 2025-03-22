@@ -788,7 +788,7 @@ impl Ingest {
         skpr_namespace: &str,
         metadata: &HashMap<String, Metadata>,
         flatten: bool,
-    ) -> Result<(), ArrowError> {
+    ) -> Result<Arc<arrow::datatypes::Schema>, ArrowError> {
         let mut _arrow_schema: Result<datatypes::Schema, ArrowError> = Ok(datatypes::Schema::empty());
         let mut _schema_ref = Arc::new(datatypes::Schema::empty());
 
@@ -812,7 +812,7 @@ impl Ingest {
 
         ARROW_SCHEMA.write().insert(skpr_namespace.to_string(), _schema_ref.clone());
 
-        Ok(())
+        Ok(_schema_ref)
     }
     
 }
