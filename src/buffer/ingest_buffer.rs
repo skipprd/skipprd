@@ -134,7 +134,7 @@ impl Buffers {
                     // println!("No record batch");
                 },
                 Err(e) => {
-                    println!("Error decoding record batch: {}. Deadlettering", e);
+                    println!("Error decoding record batch for namespace: {}: {}. Deadlettering", namespace, e);
                     
                     let deadletters: String = ingest_buffer_batch.records.iter().map(|record| record.record.to_string()).collect::<Vec<String>>().join("\n");
 
