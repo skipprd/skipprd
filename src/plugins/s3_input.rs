@@ -326,9 +326,8 @@ impl DataSourceS3Plugin {
     ) {
         let s3_client = self.s3_client.clone();
 
-        // Increased from 2048 to reduce context switching while ensuring enough parallelism
-        // This limits the number of concurrent downloads to avoid overwhelming resources
-        let semaphore = Arc::new(Semaphore::new(256));
+        // Rip as many files as possible concurrently, we tend to deal with small files
+        let semaphore = Arc::new(Semaphore::new(2048));
 
         // Pre-allocate futures vector with known size
         let futures: Vec<_> = object_keys
