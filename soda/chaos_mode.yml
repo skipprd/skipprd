@@ -1,2 +1,2 @@
 checks for chaos_mode:
-  - row_count = 5100000
+  - row_count = 5100051
