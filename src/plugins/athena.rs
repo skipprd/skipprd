@@ -124,7 +124,6 @@ impl DataOutputAwsAthenaPlugin {
         let key = &self.config.s3_prefix;
 
         let namespace = BufferChunker::decode_file_namespace(&filename);
-        // let _time_partition = BufferChunker::decode_file_time(&filename);
 
         let trimmed_key = &key.trim_matches('/').to_string();
 
@@ -172,9 +171,7 @@ impl DataOutputAwsAthenaPlugin {
         let time_partition_str = BufferChunker::decode_file_time_to_datetime_string(&filename);
 
         if !time_partition_str.is_empty() {
-
-            let time_partition_values =  TimePartitioner::new(&filename).get_granularity_values().unwrap();
-
+            let time_partition_values = TimePartitioner::new(&filename).get_granularity_values().unwrap();
             let granularity_names = TimePartitioner::get_granularity_names();
 
             partition_values.extend(time_partition_values.iter().map(|v| v.to_string()));
@@ -182,7 +179,6 @@ impl DataOutputAwsAthenaPlugin {
             granularity_names.iter().enumerate().for_each(|(i, granularity)| {
                 full_key = format!("{}/{}={}", full_key, granularity, time_partition_values[i]);
             });
-
         }
 
         if !partition_values.is_empty() {
@@ -199,52 +195,44 @@ impl DataOutputAwsAthenaPlugin {
                 OutputMetadata::from_metadata(metadata.metadata.get(&namespace).unwrap())
             };
 
+            // Handle partition creation asynchronously
             if let Err(_err) = AwsAthena::glue_create_partition(
                 &namespace,
                 partition_values.clone(),
                 &full_key,
                 &mut partition_cache,
                 &partition_metadata,
-            ).await
-            {
-                // Handle the error
+            ).await {
+                // Log error but continue with upload
+                println!("Warning: Failed to create partition: {}", _err);
             }
-            
-            
         }
 
-        // consistent md5 hash of the filename
+        // Generate consistent md5 hash of the filename
         let md5_digest = md5::compute(&filename);
         let md5_string = hex::encode(&md5_digest.0);
 
         let final_key = format!("{}/{}", full_key, md5_string);
 
-        // let in_progress_filename = format!("{}.in-progress", filename);
-        // fs::rename(&filename, &in_progress_filename).unwrap();
-
-       DataOutputAwsAthenaPlugin::upload_object(
+        // Perform the upload asynchronously
+        DataOutputAwsAthenaPlugin::upload_object(
             self.s3_client.clone(),
             self.config.s3_bucket.clone(),
             final_key,
             stream,
             tags,
         ).await
-
     }
 
     pub(crate) async fn serialize_to_parquet(
         mut batches: SendableRecordBatchStream,
     ) -> Result<ParquetBytes, io::Error> {
-        // The ArrowWriter::write() call will return an error if any subsequent
-        // batch does not match this schema, enforcing schema uniformity.
+        // Get schema from the first batch
         let schema = batches.schema();
 
-        // let stream = batches;
         let mut bytes = Vec::new();
-        // pin_mut!(stream);
 
-        // Construct the arrow serializer with the metadata as part of the parquet
-        // file properties.
+        // Configure parquet writer properties
         let props = WriterProperties::builder()
             .set_dictionary_enabled(false)
             .set_encoding(parquet::basic::Encoding::PLAIN)
@@ -257,12 +245,13 @@ impl DataOutputAwsAthenaPlugin {
             Some(props),
         )?;
 
+        // Process batches asynchronously
         while let Some(batch) = batches.next().await {
             let batch = batch?;
             writer.write(&batch)?;
         }
-        // writer.write(&.unwrap()?)?;
 
+        // Close writer and get metadata
         let writer_meta = writer.close()?;
         if writer_meta.num_rows == 0 {
             return Err(io::Error::new(io::ErrorKind::Other, "No rows to write to parquet"));
@@ -285,30 +274,20 @@ impl DataOutputAwsAthenaPlugin {
         tag_hashmap: HashMap<String, String>
     ) -> Result<(), std::io::Error> {
 
-        // let in_progress_filename = format!("{}.in-progress", filename);
-        // match fs::rename(&filename, &in_progress_filename) {
-        //     Ok(_) => {}
-        //     Err(err) => {
-        //         return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to mark file as in-progress: {}. Will try again later. Error: {}", filename, err)));
-        //     }
-        // }
-
-        // let body = match ByteStream::from_path(Path::new(&in_progress_filename)).await {
-        //     Ok(b) => b,
-        //     Err(e) => {
-        //         return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to read file before uploading: {}, will retry later. Error {}", filename, e)));
-        //     }
-        // };
-
         let tags = tag_hashmap.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<String>>().join("&");
 
+        // Serialize to parquet asynchronously
         let parquet = Self::serialize_to_parquet(stream).await?;
 
+        // Create the upload body stream
+        let body = ByteStream::from(parquet.bytes);
+
+        // Perform the S3 upload asynchronously
         match client
             .put_object()
             .bucket(&bucket)
             .key(&key)
-            .body(ByteStream::from(parquet.bytes))
+            .body(body)
             .tagging(tags)
             .send()
             .await
@@ -319,14 +298,12 @@ impl DataOutputAwsAthenaPlugin {
                 counter_lock.parquet_persisted_bytes_total += parquet.size_bytes;
                 counter_lock.parquet_persisted_objects_total += 1;
                 counter_lock.parquet_persisted_rows_total += parquet.meta_data.num_rows as u64;
-                // counter_lock.status = MetricsStatus::Finishing;
                 Ok(())
             }
             Err(err) => {
                 Err(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to upload to bucket {}, will retry later. Error: {}", bucket, err.into_service_error())))
             }
         }
-
     }
 }
 
