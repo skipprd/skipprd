@@ -356,10 +356,10 @@ impl Ingest {
         let mut bytes: u64 = 0;
         let mut latest_timestamp: i64 = 0;
         let mut i: u64 = 0;
-        let mut _j = 0;
+        let mut j = 0;
         let mut d = 0;
         let mut x = 0;
-        let mut _batch_line: u64 = 0;
+        let mut batch_line: u64 = 0;
 
         let format = match Config::get_pipline_plugin_config("input") {
             Ok(plugin) => plugin.format(),
@@ -407,7 +407,7 @@ impl Ingest {
                 };
             }
 
-            _batch_line = 0;
+            batch_line = 0;
 
             let mut unwrapped_records: Vec<Value> = Vec::with_capacity(records.len());
 
@@ -424,10 +424,10 @@ impl Ingest {
                                 }
                             },
                             None => {
-                                let line_no = if _batch_line == 0 || _batch_line > ingest_batch.data.lines().count() as u64 {
+                                let line_no = if batch_line == 0 || batch_line > ingest_batch.data.lines().count() as u64 {
                                     1
                                 } else {
-                                    _batch_line - 1
+                                    batch_line - 1
                                 };
 
                                 // deadletter
@@ -445,7 +445,7 @@ impl Ingest {
                                 };
 
                                 Self::deadletter(dl);
-                                offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Position, _batch_line);
+                                offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Position, batch_line);
 
                                 d += 1;
 
@@ -459,14 +459,14 @@ impl Ingest {
 
             for record in unwrapped_records {
 
-                _batch_line += 1;
+                batch_line += 1;
 
                 if record.is_null()
                     || (record.is_object() && record.as_object().unwrap().is_empty())
                     || (record.is_array() && record.as_array().unwrap().is_empty())
                 {
 
-                    let line_str = match ingest_batch.data.lines().nth(_batch_line as usize - 1) {
+                    let line_str = match ingest_batch.data.lines().nth(batch_line as usize - 1) {
                         Some(line) => line,
                         None => {
                             ""
@@ -482,7 +482,7 @@ impl Ingest {
                     };
 
                     Self::deadletter(dl);
-                    offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Position, _batch_line);
+                    offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Position, batch_line);
 
                     d += 1;
 
@@ -492,7 +492,7 @@ impl Ingest {
                 if has_offsets.is_none()
                     || current_line_offset.is_none()
                     || (Some(true) == has_offsets
-                        && Some(true) == offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Position, _batch_line))
+                        && Some(true) == offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Position, batch_line))
                 {
 
                     i += 1;
@@ -579,10 +579,10 @@ impl Ingest {
                                     }
 
                                     // deadletter record
-                                    let line_str = match ingest_batch.data.lines().nth(_batch_line as usize - 1) {
+                                    let line_str = match ingest_batch.data.lines().nth(batch_line as usize - 1) {
                                         Some(line) => line,
                                         None => {
-                                            // println!("Could not find line {} in batch", _batch_line);
+                                            // println!("Could not find line {} in batch", batch_line);
                                             ""
                                         }
                                     };
@@ -596,7 +596,7 @@ impl Ingest {
                                     };
 
                                     Self::deadletter(dl);
-                                    offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Position, _batch_line);
+                                    offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Position, batch_line);
 
                                     let mut counter_lock = METRICS.write();
                                     counter_lock.deadletters_total += 1;
@@ -623,14 +623,14 @@ impl Ingest {
 
                                     println!("Updated schema for namespace: {}", skpr_namespace);
                                     
-                                    let mut _default_message = Value::Null;
+                                    let mut default_message = Value::Null;
                                     {
-                                        _default_message = create_default_nested_message(&metadata.metadata.get(&skpr_namespace).unwrap().fields);
+                                        default_message = create_default_nested_message(&metadata.metadata.get(&skpr_namespace).unwrap().fields);
                                     }
 
                                     {
                                         let mut lock = DEFAULT_NESTED_MESSAGE.write();
-                                        lock.insert(skpr_namespace.clone(), _default_message);
+                                        lock.insert(skpr_namespace.clone(), default_message);
                                     }
 
                                     Ingest::prepare_arrow_schema_with_metadata(&skpr_namespace, &metadata.metadata, flatten).unwrap();
@@ -653,10 +653,10 @@ impl Ingest {
                                 msg
 
                             } else { // or just deadletter message for later approval
-                                let line_str = match ingest_batch.data.lines().nth(_batch_line as usize - 1) {
+                                let line_str = match ingest_batch.data.lines().nth(batch_line as usize - 1) {
                                     Some(line) => line,
                                     None => {
-                                        // println!("Could not find line {} in batch", _batch_line);
+                                        // println!("Could not find line {} in batch", batch_line);
                                         ""
                                     }
                                 };
@@ -670,7 +670,7 @@ impl Ingest {
                                 };
 
                                 Self::deadletter(dl);
-                                offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Position, _batch_line);
+                                offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Position, batch_line);
                                 
                                 d += 1;
 
@@ -800,11 +800,11 @@ impl Ingest {
                     });
                     
                     // an ingest batch consist of many small files/queue messages, etc. Each will need its offset committed in the WAL.
-                    buf_entry.offsets.insert(ingest_batch.offset_key.clone(), _batch_line);
+                    buf_entry.offsets.insert(ingest_batch.offset_key.clone(), batch_line);
                     
                     buf_entry.records.push(ingest_record);
 
-                    _j += 1;
+                    j += 1;
                     
                 }
             }
