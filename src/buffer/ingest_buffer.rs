@@ -75,12 +75,14 @@ impl Buffers {
 
     pub fn new() -> Self {
         Buffers {
-            buf: IndexMap::new(),
+            buf: IndexMap::with_capacity(32), // Pre-allocate with a reasonable size
         }
     }
 
 
     pub fn write(&mut self, ingest_buffer_batch: HashMap<(String, String, Option<i64>, String), IngestBufferBatch>) {
+        // Reserve capacity to avoid reallocations
+        self.buf.reserve(ingest_buffer_batch.len());
         for batch in ingest_buffer_batch {
             self.buf.insert(batch.0, batch.1);
         }
@@ -105,19 +107,21 @@ impl Buffers {
 
         // println!("Flushing {} WAL files", self.buf.len());
 
-        let mut partitions: HashMap<(String, String, Option<i64>, String), Vec<WalFile>> = HashMap::new();
+        let mut partitions: HashMap<(String, String, Option<i64>, String), Vec<WalFile>> = HashMap::with_capacity(self.buf.len());
 
         for ((namespace, partition, time, shard), ingest_buffer_batch) in self.buf.iter_mut() {
 
             // println!("Writing {} rows to WAL {} {} {} {}", ingest_buffer_batch.records.len(), namespace, partition, time.unwrap_or(0), shard);
 
-            let partition_entry = partitions.entry((namespace.clone(), partition.clone(), time.clone(), shard.clone())).or_insert_with(|| Vec::new());
+            let partition_entry = partitions.entry((namespace.clone(), partition.clone(), time.clone(), shard.clone())).or_insert_with(|| Vec::with_capacity(1)); // Usually just one file per entry
             
             let arrow_schema = ingest_buffer_batch.schema.clone();
 
             let mut decoder = ReaderBuilder::new(arrow_schema).build_decoder().unwrap();
 
-            let mut record_batches = Vec::new();
+            let mut record_batches = Vec::with_capacity(
+                (ingest_buffer_batch.records.len() / 1000).max(1)
+            );
             
             let json_values = ingest_buffer_batch.records.iter().map(|record| &record.record).collect::<Vec<&Value>>();
             decoder.serialize(&json_values).unwrap();

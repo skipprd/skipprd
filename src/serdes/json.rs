@@ -31,21 +31,53 @@ impl SerdeJson {
     }
 
     pub fn deserialize(record: &str) -> Vec<Value> {
-        let mut messages: Vec<Value> = Vec::new();
+        // Pre-allocate with a reasonable capacity
+        let estimated_size = (record.lines().count() + 1).max(4);
+        let mut messages: Vec<Value> = Vec::with_capacity(estimated_size);
 
-        let line: Vec<Value> = SerdeJson::json_decode(record);
-
+        // Use the optimized parser
+        let enable_sq = Self::is_single_quote_parsing_enabled();
+        let enable_unicode = Self::is_unicode_parsing_enabled();
+        let parser = OptimizedJsonParser::new(enable_sq, enable_unicode);
+        
+        // Fast path: Try using the optimized parser first
+        let line = parser.parse(record);
+        
         for item in line {
             if item.is_string() {
-                match serde_json::from_str::<Value>(item.as_str().unwrap_or_default()) {
-                    Ok(message) => messages.push(message),
-                    Err(e) => println!("Couldn't deserialize message: {}", e),
+                // Only handle string items that need further parsing
+                if let Some(s) = item.as_str() {
+                    match serde_json::from_str::<Value>(s) {
+                        Ok(message) => messages.push(message),
+                        Err(_) => messages.push(item), // Keep the original string if parsing fails
+                    }
+                } else {
+                    messages.push(item);
                 }
             } else {
                 messages.push(item);
             }
         }
 
+        messages
+    }
+
+    // New method: Process multiple records in batch for better performance
+    pub fn deserialize_batch(records: &[&str]) -> Vec<Value> {
+        // Pre-allocate with a reasonable capacity
+        let estimated_size = records.len() * 2;
+        let mut messages: Vec<Value> = Vec::with_capacity(estimated_size);
+        
+        // Reuse parser for better performance
+        let enable_sq = Self::is_single_quote_parsing_enabled();
+        let enable_unicode = Self::is_unicode_parsing_enabled();
+        let parser = OptimizedJsonParser::new(enable_sq, enable_unicode);
+        
+        for record in records {
+            let line = parser.parse(record);
+            messages.extend(line);
+        }
+        
         messages
     }
 
