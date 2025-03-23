@@ -407,7 +407,7 @@ pub async fn query(sql_str: &str) {
                 }
             };
 
-            dump_schema(&metadata, &stmt).expect("Failed to drop column");
+            dump_schema(schema_name, &metadata, &stmt).expect("Failed to drop column");
             
             println!("Schema dumped to '{}'", stmt.target);
         },
