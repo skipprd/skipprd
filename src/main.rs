@@ -838,6 +838,23 @@ async fn sync() {
 
     let shared_output_clone = shared_output.clone();
 
+    // sync schema if output plugin configured
+    if output_plugin_name != "" {
+        Config::sync_schema(&pipeline_metadata.metadata).await;
+    } else {
+        // Just build the arrow schemas internally
+        let flatten = Config::get_transform_flatten_events();
+        for (namespace, _metadata) in pipeline_metadata.metadata.iter() {
+            match Ingest::prepare_arrow_schema_with_metadata(&namespace, &pipeline_metadata.metadata, flatten) {
+                Ok(_t) => {}
+                Err(e) => {
+                    println!("Failed to prepare arrow schema: {}", e);
+                    return;
+                }
+            }
+        }
+    }
+
     sync_input_plugin(offsets_db.clone(), shared_output_clone).await;
 
     println!("Reached end of source data");
