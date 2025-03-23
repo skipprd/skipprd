@@ -3,7 +3,6 @@ use std::io::{BufWriter, Write};
 use datafusion::sql::sqlparser::ast::{ObjectName};
 use crate::converters::skippr_hive::SkipprHive;
 use crate::discover::{Metadata, OutputMetadata};
-use crate::helpers::configuration::Config;
 use crate::sql::parser::{SchemaDumpStatement};
 
 pub fn dump_schema(schema_name: ObjectName, metadata: &Metadata, stmt: &SchemaDumpStatement) -> Result<(), String> {
