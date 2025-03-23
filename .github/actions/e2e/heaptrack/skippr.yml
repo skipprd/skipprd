@@ -95,20 +95,20 @@ pipelines:
 data_inputs:
 
   s3_bike_hire:
-    s3:
+    S3:
       batch_size_bytes: 2048000
       s3_bucket: skippr-e2e-sample-data
       s3_prefix: bike-hire/
 
   s3_bike_hire_many:
-    s3:
+    S3:
       batch_size_bytes: 2048000
       s3_bucket: skippr-e2e-sample-data
       s3_prefix: many/bike-hire-many
 
 data_outputs:
   test_datalake:
-    athena:
+    Athena:
       athena_workgroup_name: bikehire
       glue_database_name: bikehire
       s3_bucket: skippr-e2e-sample-data-output

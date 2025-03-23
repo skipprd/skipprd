@@ -13,7 +13,7 @@ pipelines:
 
 data_inputs:
   s3_bike_hire:
-    s3:
+    S3:
       batch_size_bytes: 2048000
       s3_bucket: skippr-e2e-sample-data
       s3_prefix: very-small-files
