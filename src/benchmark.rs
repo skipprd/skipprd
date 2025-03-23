@@ -136,7 +136,7 @@ impl PerformanceBenchmark {
         fs::create_dir_all(&output_dir)?;
         
         // Configure the environment for local benchmark
-        Config::setenv("DATA_SOURCE_PLUGIN_NAME", "file");
+        Config::setenv("DATA_SOURCE_PLUGIN_NAME", "File");
         Config::setenv("DATA_SOURCE_PATH", &self.temp_dir);
         Config::setenv("DATA_OUTPUT_PATH", &output_dir);
         

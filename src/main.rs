@@ -832,7 +832,8 @@ async fn sync() {
         METRICS.write().status = MetricsStatus::Running;
     }
 
-    let output = sync_output_plugin("file", "output".to_string()).await.unwrap();
+    let output_plugin_name = Config::get_pipeline_output_plugin_name();
+    let output = sync_output_plugin(&output_plugin_name, "output".to_string()).await.unwrap();
     let shared_output = Arc::new(output);
 
     let shared_output_clone = shared_output.clone();
@@ -879,6 +880,9 @@ async fn sync() {
 }
 
 pub async fn sync_output_plugin(plugin_name: &str, buffer_name: String) -> Result<Box<dyn DataOutputPlugin + Send + Sync>, io::Error> {
+
+    println!("Output plugin: {}", plugin_name);
+    
     match plugin_name {
         // "stdout" => {
         //     let output = DataOutputStdoutPlugin::new(buffer_name).await;
@@ -886,7 +890,7 @@ pub async fn sync_output_plugin(plugin_name: &str, buffer_name: String) -> Resul
         //         .sync()
         //         .await;
         // }
-        "file" => {
+        "File" => {
             let plugin = DataOutputFilePlugin::new(buffer_name).await;
             Ok(Box::new(plugin) as Box<dyn DataOutputPlugin + Send + Sync>)
 
@@ -902,7 +906,7 @@ pub async fn sync_output_plugin(plugin_name: &str, buffer_name: String) -> Resul
         //     }
         //
         // }
-        "athena" => {
+        "Athena" => {
             if *HAS_LICENSE.read() {
                 let plugin = DataOutputAwsAthenaPlugin::new(buffer_name).await;
                 Ok(Box::new(plugin) as Box<dyn DataOutputPlugin + Send + Sync>)
@@ -942,7 +946,7 @@ pub async fn sync_input_plugin(offsets_clone: Arc<Offsets>, shared_output: Arc<B
         //         )
         //         .await;
         // }
-        "file" => {
+        "File" => {
             let mut input = DataSourceLocalFilePlugin::new().await;
             input.sync(
                 offsets_clone,
@@ -950,7 +954,7 @@ pub async fn sync_input_plugin(offsets_clone: Arc<Offsets>, shared_output: Arc<B
             )
                 .await;
         }
-        "s3" => {
+        "S3" => {
             let mut input = DataSourceS3Plugin::new().await;
             input.sync(offsets_clone, shared_output).await;
         }

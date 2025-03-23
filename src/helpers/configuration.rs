@@ -90,10 +90,10 @@ impl PluginConfig {
 
     pub fn plugin_name(&self) -> Option<String> {
         match self {
-            PluginConfig::S3(_s3_config) => Some("s3".to_string()),
+            PluginConfig::S3(_s3_config) => Some("S3".to_string()),
             // PluginConfig::s3_inventory(_s3_inventory_config) => Some("s3_inventory".to_string()),
-            PluginConfig::Athena(_athena_config) => Some("athena".to_string()),
-            PluginConfig::File(_file_config) => Some("file".to_string()),
+            PluginConfig::Athena(_athena_config) => Some("Athena".to_string()),
+            PluginConfig::File(_file_config) => Some("File".to_string()),
         }
     }
 
@@ -426,11 +426,11 @@ impl Config {
 
             if pipline.output.is_some() {
                 // split dot string
-                let input_plugin_name = pipline.output.as_ref().unwrap().split('.').collect::<Vec<&str>>()[1].to_string();
+                let output_plugin_name = pipline.output.as_ref().unwrap().split('.').collect::<Vec<&str>>()[1].to_string();
 
                 let res = match config.data_outputs.as_ref() {
                     Some(data_outputs) => {
-                        match data_outputs.get(&input_plugin_name) {
+                        match data_outputs.get(&output_plugin_name) {
                             Some(plugin_config) => {
                                 plugin_config.plugin_name().clone().or(Some("".to_string())).unwrap()
                             },
@@ -1631,7 +1631,7 @@ impl Config {
                 Ingest::prepare_arrow_schema_with_metadata(&namespace, metadata, flatten).unwrap();
 
                 if Config::get_pipeline_output_plugin_name() != ""
-                    && Config::get_pipeline_output_plugin_name() == "athena"
+                    && Config::get_pipeline_output_plugin_name() == "Athena"
                 {
                     let __output_metadata = if flatten {
                         OutputMetadata::from_flatterened_metadata(metadata.get(namespace).unwrap())
