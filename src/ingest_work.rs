@@ -134,8 +134,6 @@ impl Ingest {
                 // For systems with many cores, limit to avoid excessive context switching
                 if cpu_count > 16 {
                     cpu_count / 2
-                } else if cpu_count > 4 {
-                    cpu_count - 2
                 } else {
                     cpu_count.max(2)
                 }
