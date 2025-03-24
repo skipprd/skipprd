@@ -1,0 +1,105 @@
+site_name: Skippr Docs
+repo_url: https://github.com/skipprd/skipprd
+site_description: Skippr makes it easy to ingest, transform, and load data from any source to any destination.
+theme:
+#  name: bootstrap4
+  name: material
+  custom_dir: overrides
+  features:
+    - navigation.footer
+  palette:
+    # Palette toggle for light mode
+    - scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+
+    # Palette toggle for dark mode
+    - scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+extra_javascript:
+  - javascript/ga-events.js
+extra_css:
+  - stylesheets/app.css
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Quick Start: getting-started/index.md
+  - Configuration:
+      - Configuration Overview: configuration/configuration.md
+      - Api Token: configuration/skippr-api-token.md
+      - Data Source Batch Size Bytes: configuration/data-source-batch-size-bytes.md
+      - Data Source Batch Size Seconds: configuration/data-source-batch-size-seconds.md
+      - Data Source Plugin Name: configuration/data-source-plugin-name.md
+      - Buffer Threshold Bytes: configuration/buffer-threshold-bytes.md
+      - Buffer Threshold Seconds: configuration/buffer-threshold-seconds.md
+      - Transform Namespace Fields: configuration/transform-namespace-fields.md
+      - Transform Partition Fields: configuration/transform-partition-fields.md
+      - Transform Flatten Events: configuration/transform-flatten-events.md
+      - Transform Batch Time Fields: configuration/transform-batch-time-fields.md
+      - Transform Batch Time Unit: configuration/transform-batch-time-unit.md
+      - Pipeline Name: configuration/pipeline-name.md
+      - Workspace Name: configuration/workspace-name.md
+      - Data Dir: configuration/data-dir.md
+      - Chaos Mode: configuration/chaos-mode.md
+  - Plugins:
+      - Overview: plugins/overview/index.md
+      - Inputs:
+          - File: plugins/inputs/file/index.md
+          - S3 Bucket: plugins/inputs/s3/index.md
+          - Kafka: plugins/inputs/kafka/index.md
+      - Outputs:
+          - File: plugins/outputs/file/index.md
+          - S3 Bucket: plugins/outputs/s3/index.md
+          - Kafka: plugins/outputs/kafka/index.md
+  - Advanced:
+      - Core Concepts: advanced/core-concepts.md
+#  - Enterprise:
+#      - AWS: enterprise/aws/index.md
+#      - Azure (Coming Soon): 404.md
+#      - Google (Coming 2021): 404.md
+#      - OpenStack (Coming 2021): 404.md
+#      - VMWare (Coming 2021): 404.md
+#      - Demo: enterprise/demo/index.md
+#  - License: license.md
+
+markdown_extensions:
+  - toc:
+      permalink: True
+
+extra:
+  consent:
+    title: Cookie consent
+    description: >-
+      We use cookies to recognize your repeated visits and preferences, as well
+      as to measure the effectiveness of our documentation and whether users
+      find what they're searching for. With your consent, you're helping us to
+      make our documentation better.
+  analytics:
+    provider: google
+    property: G-9FNNDBH0CQ
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/skipprd/skipprd
+    - icon: fontawesome/brands/twitter
+      link: https://twitter.com/skipprdata
+    - icon: fontawesome/brands/linkedin
+      link: https://www.linkedin.com/company/skippr-io/about/
+    - icon: fontawesome/brands/slack
+      link: https://skipprgroup.slack.com/ssb/redirect
+  feedback:
+    title: Was this page helpful?
+    ratings:
+      - icon: material/emoticon-happy-outline
+        name: This page was helpful
+        data: 1
+        note: >-
+          Thanks for your feedback!
+      - icon: material/emoticon-sad-outline
+        name: This page could be improved
+        data: 0
+        note: >-
+          Thanks for your feedback! Help us improve this page by
+          using our <a href="..." target="_blank" rel="noopener">feedback form</a>.

@@ -23,3 +23,4 @@ test-data/ieu_trip
 skippr.yml
 s3_input_last_continuation_token.txt
 /schema/
+docs/releases/git

@@ -1,0 +1,206 @@
+# Release Notes Todo List
+
+Legend:
+- [ ] Release notes pending
+- [x] Release notes exist
+
+
+Legend:
+- [ ] Release notes pending
+- [x] Release notes exist
+
+## Tags Sorted by Last Code Change (newest first)
+- [x] 5.7.3 # Last code change: Sun Mar 23 14:59:40 2025
+- [x] 5.7.2 # Last code change: Sun Mar 23 14:59:40 2025
+- [x] 5.5.0 # Last code change: Sun Mar 23 14:59:40 2025
+- [x] 5.7.1 # Last code change: Thu Mar 20 12:23:58 2025
+- [x] 5.7.0 # Last code change: Wed Mar 19 15:11:05 2025
+- [x] 5.6.3 # Last code change: Wed Feb 12 13:48:18 2025
+- [x] 5.6.2 # Last code change: Thu Jan 9 02:45:32 2025
+- [x] 5.6.1 # Last code change: Fri Dec 13 15:15:30 2024
+- [x] 5.6.0 # Last code change: Fri Nov 1 16:12:57 2024
+- [x] 5.5.7 # Last code change: Tue Sep 10 10:04:56 2024
+- [x] 5.5.6 # Last code change: Tue Jun 25 11:21:42 2024
+- [x] 5.5.5 # Last code change: Sun Jun 23 10:43:11 2024
+- [x] 5.5.4 # Last code change: Thu Jun 13 16:05:47 2024
+- [x] 5.5.3 # Last code change: Mon Jun 3 18:11:02 2024
+- [x] 5.5.2 # Last code change: Thu May 23 20:17:17 2024
+- [x] 5.5.1 # Last code change: Wed May 15 20:51:35 2024
+- [x] 5.4.1 # Last code change: Wed Apr 24 09:53:36 2024
+- [x] 5.4.0 # Last code change: Thu Apr 11 11:08:20 2024
+- [x] 5.3.0 # Last code change: Wed Apr 3 16:15:36 2024
+- [x] 5.2.2 # Last code change: Tue Mar 26 17:58:18 2024
+- [x] 5.2.1 # Last code change: Fri Mar 15 09:49:43 2024
+- [x] 5.2.0 # Last code change: Tue Mar 12 11:05:52 2024
+- [x] 5.1.0 # Last code change: Tue Mar 5 09:02:10 2024
+- [x] 5.0.0 # Last code change: Tue Feb 27 17:43:56 2024
+- [x] 4.17.35 # Last code change: Mon Feb 26 11:07:19 2024
+- [x] 4.17.33 # Last code change: Thu Dec 14 10:54:49 2023
+- [x] 4.17.34 # Last code change: Wed Dec 13 21:10:20 2023
+- [x] 4.17.32 # Last code change: Tue Dec 12 15:38:04 2023
+- [x] 4.17.31 # Last code change: Thu Dec 7 11:10:33 2023
+- [x] 4.17.30 # Last code change: Tue Nov 28 17:03:53 2023
+- [x] 4.17.29 # Last code change: Tue Nov 28 16:46:57 2023
+- [x] 4.17.28 # Last code change: Mon Nov 27 23:02:46 2023
+- [x] 4.17.27 # Last code change: Mon Nov 27 22:14:36 2023
+- [x] 4.17.26 # Last code change: Mon Nov 27 21:29:26 2023
+- [x] 4.17.25 # Last code change: Mon Nov 27 21:07:39 2023
+- [x] 4.17.24 # Last code change: Mon Nov 27 20:40:19 2023
+- [x] 4.17.23 # Last code change: Mon Nov 27 18:55:34 2023
+- [x] 4.17.22 # Last code change: Mon Nov 27 18:43:04 2023
+- [x] 4.17.21 # Last code change: Mon Nov 27 18:37:31 2023
+- [x] 4.17.20 # Last code change: Sun Nov 26 22:18:03 2023
+- [x] 4.17.19 # Last code change: Sun Nov 26 21:38:03 2023
+- [x] 4.17.18 # Last code change: Sun Nov 26 20:50:14 2023
+- [x] 4.17.17 # Last code change: Sun Nov 26 20:18:45 2023
+- [x] 4.17.16 # Last code change: Sun Nov 26 19:50:22 2023
+- [x] 4.17.15 # Last code change: Sun Nov 26 14:11:13 2023
+- [x] 4.17.14 # Last code change: Sun Nov 26 13:36:56 2023
+- [x] 4.17.13 # Last code change: Sun Nov 26 13:29:49 2023
+- [x] 4.17.12 # Last code change: Sun Nov 26 12:30:54 2023
+- [x] 4.17.11 # Last code change: Sat Nov 25 12:35:21 2023
+- [x] 4.17.10 # Last code change: Sat Nov 25 11:52:53 2023
+- [x] 4.17.9 # Last code change: Sat Nov 25 11:12:53 2023
+- [x] 4.17.8 # Last code change: Sat Nov 25 10:49:26 2023
+- [x] 4.17.7 # Last code change: Fri Nov 24 19:08:26 2023
+- [x] 4.17.6 # Last code change: Thu Nov 23 14:15:14 2023
+- [x] 4.17.5 # Last code change: Thu Nov 23 11:35:08 2023
+- [x] 4.17.4 # Last code change: Thu Nov 23 10:33:27 2023
+- [x] 4.17.3 # Last code change: Thu Nov 23 09:38:52 2023
+- [x] 4.17.2 # Last code change: Thu Nov 23 09:25:06 2023
+- [x] 4.17.1 # Last code change: Thu Nov 23 00:07:48 2023
+- [x] 4.17.0 # Last code change: Fri Nov 17 09:50:13 2023
+- [x] 4.16.1 # Last code change: Thu Nov 16 14:10:38 2023
+- [x] 4.16.0 # Last code change: Wed Nov 15 12:42:13 2023
+- [x] 4.15.15 # Last code change: Mon Nov 13 23:54:41 2023
+- [x] 4.15.14 # Last code change: Mon Nov 13 23:26:04 2023
+- [x] 4.15.12 # Last code change: Mon Nov 13 15:22:08 2023
+- [x] 4.15.11 # Last code change: Mon Nov 13 13:31:43 2023
+- [x] 4.15.10 # Last code change: Thu Nov 9 16:23:40 2023
+- [x] 4.15.9 # Last code change: Thu Nov 9 16:20:22 2023
+- [x] 4.15.8 # Last code change: Thu Nov 9 11:46:18 2023
+- [x] 4.15.7 # Last code change: Thu Nov 9 09:13:05 2023
+- [x] 4.15.6 # Last code change: Wed Nov 8 18:35:17 2023
+- [x] 4.15.5 # Last code change: Tue Nov 7 14:16:08 2023
+- [x] 4.15.4 # Last code change: Sat Nov 4 23:00:09 2023
+- [x] 4.15.3 # Last code change: Thu Nov 2 11:38:14 2023
+- [x] 4.15.2 # Last code change: Wed Nov 1 20:59:43 2023
+- [x] 4.15.1 # Last code change: Wed Nov 1 15:14:54 2023
+- [x] 4.15.0 # Last code change: Tue Oct 31 10:28:49 2023
+- [x] 4.14.4 # Last code change: Tue Oct 17 22:26:13 2023
+- [x] 4.14.3 (Fri Oct 13 17:58:39 2023)
+- [x] 4.14.1 (Fri Oct 13 11:03:14 2023)
+- [x] 4.14.0 (Wed Oct 11 11:16:37 2023)
+- [x] 4.13.0 (Thu Sep 14 14:06:21 2023)
+- [x] 4.13.1 (Fri Sep 8 15:37:24 2023)
+- [x] 4.12.0 (Mon Aug 21 15:44:30 2023)
+- [x] 4.11.3 (Mon Aug 21 13:59:17 2023)
+- [x] 4.11.2 (Sun Aug 20 13:08:09 2023)
+- [x] 4.11.1 (Sat Aug 19 12:15:10 2023)
+- [x] 4.11.0 (Thu Aug 17 22:50:22 2023)
+- [x] 4.10.0 (Thu Aug 17 11:29:51 2023)
+- [x] 4.9.3 (Sun Aug 6 19:26:09 2023)
+- [x] 4.9.2 (Sun Aug 6 17:43:02 2023)
+- [x] 4.9.1 (Sun Aug 6 16:02:25 2023)
+- [x] 4.9.0 (Sun Aug 6 15:47:56 2023)
+- [x] 4.8.11 (Thu Aug 3 13:21:12 2023)
+- [x] 4.8.10 (Thu Aug 3 13:21:12 2023)
+- [x] 4.8.9 # Last code change: Thu Aug 3 13:01:45 2023
+- [x] 4.8.8 # Last code change: Thu Aug 3 12:23:13 2023
+- [x] 4.8.7 # Last code change: Wed Aug 2 11:45:39 2023
+- [x] 4.8.6 # Last code change: Mon Jul 31 15:33:47 2023
+- [x] 4.8.5 # Last code change: Thu Jul 27 12:08:47 2023
+- [x] 4.8.4 # Last code change: Wed Jul 26 17:37:03 2023
+- [x] 4.8.3 # Last code change: Tue Jul 25 17:36:23 2023
+- [x] 4.8.2 # Last code change: Tue Jul 25 16:14:40 2023
+- [x] 4.8.1 # Last code change: Tue Jul 25 13:13:49 2023
+- [x] 4.8.0 # Last code change: Mon Jul 24 22:27:37 2023
+- [x] 4.7.2 # Last code change: Mon Jul 24 12:46:07 2023
+- [x] 4.7.1 # Last code change: Mon Jul 24 10:13:22 2023
+- [x] 4.7.0 # Last code change: Sat Jul 22 17:48:42 2023
+- [x] 4.6.0 # Last code change: Fri Jul 21 20:02:18 2023
+- [x] 4.5.4 # Last code change: Fri Jul 21 18:39:31 2023
+- [x] 4.5.3 # Last code change: Fri Jul 21 18:07:57 2023
+- [x] 4.5.2 # Last code change: Fri Jul 21 17:10:17 2023
+- [x] 4.5.1 # Last code change: Fri Jul 21 13:34:53 2023
+- [x] 4.5.0 # Last code change: Thu Jul 20 15:51:44 2023
+- [x] 4.4.18 # Last code change: Sat Jul 8 15:22:15 2023
+- [x] 4.4.17 # Last code change: Thu Jul 6 18:06:02 2023
+- [x] 4.4.16 # Last code change: Tue Jul 4 08:37:37 2023
+- [x] 4.4.15 # Last code change: Sun Jul 2 14:16:07 2023
+- [x] 4.4.14 # Last code change: Sat Jul 1 23:24:48 2023
+- [x] 4.4.13 # Last code change: Sat Jul 1 23:04:35 2023
+- [x] 4.4.12 # Last code change: Sat Jul 1 22:48:35 2023
+- [x] 4.4.11 # Last code change: Sat Jul 1 14:11:04 2023
+- [x] 4.4.10 # Last code change: Sat Jul 1 11:50:21 2023
+- [x] 4.4.9 # Last code change: Fri Jun 30 22:33:55 2023
+- [x] 4.4.8 # Last code change: Thu Jun 29 20:39:08 2023
+- [x] 4.4.7 # Last code change: Thu Jun 29 17:05:34 2023
+- [x] 4.4.6 # Last code change: Thu Jun 29 12:48:14 2023
+- [x] 4.4.5 # Last code change: Wed Jun 28 18:18:19 2023
+- [x] 4.4.4 # Last code change: Wed Jun 28 11:34:59 2023
+- [x] 4.4.3 # Last code change: Wed Jun 28 09:42:17 2023
+- [x] 4.4.2 # Last code change: Sun Jun 25 19:53:00 2023
+- [x] 4.4.1 # Last code change: Sat Jun 24 15:46:51 2023
+- [x] 4.4.0 # Last code change: Sat Jun 24 15:24:54 2023
+- [x] 4.3.4 # Last code change: Thu Jun 15 13:04:55 2023
+- [x] 3.4.2 # Last code change: Mon Jun 12 22:12:14 2023
+- [x] 3.4.1 # Last code change: Mon Jun 12 19:24:40 2023
+- [x] 3.4.0 # Last code change: Sun Jun 11 12:17:25 2023
+- [x] 3.3.0 # Last code change: Sat Jun 10 18:39:39 2023
+- [x] 3.2.2 # Last code change: Sat Jun 10 10:51:21 2023
+- [x] 3.2.1 # Last code change: Sat Jun 10 09:27:45 2023
+- [x] 3.2.0 # Last code change: Fri Jun 9 14:14:09 2023
+- [x] 3.1.2 # Last code change: Thu Jun 8 21:46:49 2023
+- [x] 3.1.1 # Last code change: Thu Jun 8 17:31:50 2023
+- [x] 3.1.0 # Last code change: Thu Jun 8 10:45:11 2023
+- [x] 1.5.4 # Last code change: Tue Aug 16 19:35:36 2022
+- [x] 1.5.3 # Last code change: Mon Aug 15 22:10:22 2022
+- [x] 1.5.2 # Last code change: Mon Aug 15 15:14:55 2022
+- [x] 1.5.1 # Last code change: Mon Aug 15 14:09:04 2022
+- [x] 1.5.0 # Last code change: Sun Aug 14 14:11:17 2022
+- [x] 1.4.0 # Last code change: Tue May 24 22:36:42 2022
+- [x] 1.3.0 # Last code change: Tue May 24 08:50:24 2022
+- [x] 1.2.14 # Last code change: Thu Apr 28 16:57:41 2022
+- [x] 1.2.13 # Last code change: Mon Apr 4 21:21:21 2022
+- [x] 1.2.11 # Last code change: Mon Apr 4 20:50:29 2022
+- [x] 1.2.10 # Last code change: Mon Apr 4 13:43:57 2022
+- [x] 1.2.9 # Last code change: Mon Apr 4 12:18:22 2022
+- [x] 1.2.8 # Last code change: Sat Apr 2 20:21:13 2022
+- [x] 1.2.7 # Last code change: Sat Apr 2 15:00:06 2022
+- [x] 1.2.6 - Sat Apr 2 14:05:03 2022
+- [x] 1.2.5 - Mon Jan 10 22:33:13 2022
+- [x] 1.2.4 - Tue Jan 4 10:20:25 2022
+- [x] 1.2.3 - Thu Dec 16 12:55:53 2021
+- [x] 1.2.2 - Thu Dec 16 11:31:15 2021
+- [x] 1.2.1 - Thu Dec 16 11:06:44 2021
+- [x] 1.2.0 - Wed Dec 15 18:22:05 2021
+- [x] 1.1.9 - Sat Dec 11 12:54:24 2021
+- [x] 1.1.8 - Tue Dec 7 19:40:38 2021
+- [x] 1.1.7 - Thu Dec 2 18:31:55 2021
+- [x] 1.1.6 - Tue Nov 30 20:34:22 2021
+- [x] 1.1.5 - Thu Nov 18 21:23:52 2021
+- [x] 1.1.4 # Last code change: Thu Nov 18 21:23:52 2021
+- [x] 1.1.3 # Last code change: Wed Nov 17 15:34:52 2021
+- [x] 1.1.2 # Last code change: Tue Nov 16 17:20:47 2021
+- [x] 1.1.1 # Last code change: Sun Nov 14 16:14:05 2021
+- [x] 1.1.0 # Last code change: Sun Nov 14 16:14:05 2021
+- [x] 1.0.1 # Last code change: Wed Nov 10 20:47:17 2021
+- [x] 1.0.0 # Last code change: Thu Oct 28 12:30:50 2021
+- [x] 0.18.2-alpha # Last code change: Wed Oct 27 20:33:03 2021
+- [x] 0.18.1-alpha # Last code change: Tue Oct 19 12:50:57 2021
+- [x] 0.18.0-alpha # Last code change: Tue Oct 19 12:20:48 2021
+- [x] 0.17.0 # Last code change: Wed Sep 8 12:38:05 2021
+- [x] 0.16.12 # Last code change: Tue Sep 7 22:08:32 2021
+- [x] 0.16.11 # Last code change: Tue Sep 7 17:03:24 2021
+- [x] 0.16.10 (Last code change: Fri Jul 16 11:08:28 2021)
+- [x] 0.16.9 (Last code change: Thu Jul 1 22:21:32 2021)
+- [x] 0.16.8 (Last code change: Thu Jul 1 17:07:46 2021)
+- [x] 0.16.7 (Last code change: Fri Jun 25 20:54:58 2021)
+- [x] 0.16.6 (Last code change: Fri May 7 21:59:23 2021)
+- [x] 0.16.5 (Last code change: Thu May 6 18:45:31 2021)
+- [x] 0.16.4 (Last code change: Fri Apr 2 19:23:24 2021)
+- [x] 0.16.3 (Last code change: Tue Mar 23 12:43:48 2021)
+- [x] 0.16.2 (Last code change: Tue Mar 23 10:52:20 2021)
+- [x] 0.16.1 (Last code change: Sun Mar 14 20:18:28 2021)
+- [x] 0.16.0 # Last code change: Thu Mar 11 17:03:16 2021
