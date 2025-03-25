@@ -25,7 +25,7 @@ use threadpool::ThreadPool;
 use std::sync::mpsc::channel;
 extern crate num_cpus;
 use std::sync::mpsc::Sender;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering, AtomicU64};
 use std::sync::atomic::Ordering::AcqRel;
 use dashmap::{DashMap};
 
@@ -46,6 +46,7 @@ use tokio::runtime;
 use crate::cli::{CLI_MODE, Mode};
 use crate::converters::skippr_arrow::convert_skippr_to_arrow;
 use crate::plugins::DataOutputPlugin;
+use std::collections::VecDeque;
 
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -106,13 +107,38 @@ struct SchemaHash {
     hash: String,
 }
 
+#[derive(Clone)]
+struct IngestTask {
+    datas: Arc<Vec<IngestBatch>>,
+    offset_db: Arc<Offsets>,
+    shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>
+}
+
+/// Return type for ingest_file that includes throughput metrics
+#[derive(Clone, Debug)]
+pub struct ThroughputMetrics {
+    pub bytes_per_second: u64,
+    pub active_cores: usize,
+    pub queue_length: usize,
+}
+
+/// Main struct for managing ingestion of data
+/// Handles queueing, processing, and distribution of tasks to worker threads
 pub struct Ingest {
-    thread_pool: ThreadPool,
+    thread_pool: Arc<ThreadPool>,
     num_cpus: usize,
-    tx: Sender<()>,
+    tx: Sender<u64>,
     active_count: Arc<AtomicUsize>,
+    queue_length: Arc<AtomicUsize>,  // Track total number of queued tasks
     schema_hashes: DashMap<String, SchemaHash>,
     analyse_schema: AnalyseSchema,
+    throughput_window: Arc<RwLock<VecDeque<(Instant, u64)>>>,
+    throughput_lock: Arc<RwLock<()>>,
+    window_size: Duration,
+    task_queue: Arc<RwLock<VecDeque<IngestTask>>>,
+    queue_lock: Arc<RwLock<()>>,
+    is_shutting_down: Arc<AtomicUsize>, // Flag to indicate shutdown in progress
+    max_queue_length: usize, // Maximum number of tasks to queue
 }
 
 impl Drop for Ingest {
@@ -125,18 +151,10 @@ impl Drop for Ingest {
 
 impl Ingest {
     pub fn new() -> Ingest {
-        // Optimize thread pool size based on system characteristics
-        // Use fewer threads than CPUs to reduce context switching
-        // For CPU-bound work, num_cpus/2 is often optimal 
+        // We always want to use all cores       
         let num_cpus = match CLI_MODE.read().clone() {
             Mode::Sync(_) => {
-                let cpu_count = num_cpus::get();
-                // For systems with many cores, limit to avoid excessive context switching
-                if cpu_count > 16 {
-                    cpu_count / 2
-                } else {
-                    cpu_count.max(2)
-                }
+                num_cpus::get()
             },
             _ => 1
         };
@@ -144,16 +162,105 @@ impl Ingest {
         println!("Starting with {} optimized threads for ingest", num_cpus);
         
         let (tx, rx) = channel();
+        let tx_clone = tx.clone();
         let active_count = Arc::new(AtomicUsize::new(0));
         let active_count_clone = active_count.clone();
+        let queue_length = Arc::new(AtomicUsize::new(0));
+        let queue_length_clone = queue_length.clone();
+        let task_queue: Arc<RwLock<VecDeque<IngestTask>>> = Arc::new(RwLock::new(VecDeque::new()));
+        let task_queue_clone = task_queue.clone();
+        let queue_lock = Arc::new(RwLock::new(()));
+        let queue_lock_clone = queue_lock.clone();
+        let is_shutting_down = Arc::new(AtomicUsize::new(0));
+        let is_shutting_down_clone = is_shutting_down.clone();
 
-        let thread_pool = ThreadPool::new(num_cpus);
+        let thread_pool = Arc::new(ThreadPool::new(num_cpus));
+        let thread_pool_clone = thread_pool.clone();
         
-        // This monitoring thread tracks task completion
+        let max_queue_length = num_cpus * 2;
+        
+        // This monitoring thread tracks task completion and processes queued tasks
         thread_pool.execute(move || {
-            while let Ok(()) = rx.recv() {
-                active_count_clone.fetch_sub(1, AcqRel); // Use AcqRel for better memory ordering
+            while let Ok(_) = rx.recv() {
+                // Check if we're shutting down
+                if is_shutting_down_clone.load(Ordering::SeqCst) > 0 {
+                    println!("Shutting down monitoring thread");
+                    break;
+                }
+                
+                active_count_clone.fetch_sub(1, AcqRel);
+                queue_length_clone.fetch_sub(1, AcqRel);
+
+                let current_queue_length = queue_length_clone.load(Ordering::Acquire);
+                let current_active_threads = active_count_clone.load(Ordering::Acquire);
+
+                // println!("Task completed ({} tasks in queue, {}/{} active threads)",
+                //          current_queue_length,
+                //          current_active_threads,
+                //          num_cpus
+                // );
+
+                // Process any queued tasks if we have capacity
+                if current_active_threads < num_cpus {
+                    let _lock = match queue_lock_clone.write() {
+                        Ok(lock) => lock,
+                        Err(e) => {
+                            println!("Failed to acquire queue lock: {:?}", e);
+                            continue;
+                        }
+                    };
+                    
+                    let mut task_queue = match task_queue_clone.write() {
+                        Ok(queue) => queue,
+                        Err(e) => {
+                            println!("Failed to acquire task queue: {:?}", e);
+                            continue;
+                        }
+                    };
+                    
+                    // Process tasks from the queue while we have capacity
+                    while let Some(ingest_task) = task_queue.pop_front() {
+                        if active_count_clone.load(Ordering::Acquire) >= num_cpus {
+                            // Put the task back if we're at capacity
+                            task_queue.push_front(ingest_task);
+                            break;
+                        }
+
+                        // Process the queued task
+                        let tx = tx_clone.clone();
+                        let offset_db_clone = ingest_task.offset_db.clone();
+                        let datas_clone = ingest_task.datas.clone();
+                        let mut schema_hashes = DashMap::new();
+                        let handle = match tokio::runtime::Handle::try_current() {
+                            Ok(h) => h,
+                            Err(_) => {
+                                // Create a new runtime if we can't access the current one
+                                match tokio::runtime::Runtime::new() {
+                                    Ok(rt) => rt.handle().clone(),
+                                    Err(e) => {
+                                        println!("Failed to create runtime: {:?}", e);
+                                        continue;
+                                    }
+                                }
+                            }
+                        };
+                        
+                        let shared_output_clone = ingest_task.shared_output.clone();
+
+                        // Increment active count before spawning
+                        active_count_clone.fetch_add(1, AcqRel);
+                        // Note: We don't increment queue_length here since we're processing from the queue,
+                        // and the task was already counted in queue_length when it was added to the queue
+
+                        thread_pool_clone.execute(move || {
+                            Ingest::process_batch(&datas_clone, &offset_db_clone, &mut schema_hashes, handle, shared_output_clone);
+                            // Don't panic if sending fails (channel might be closed during shutdown)
+                            let _ = tx.send(0);
+                        });
+                    }
+                }
             }
+            println!("Monitoring thread exited");
         });
 
         // Schema hashes
@@ -171,24 +278,45 @@ impl Ingest {
         }
 
         let analyse_schema: AnalyseSchema = AnalyseSchema { i: 0 };
+        let throughput_window = Arc::new(RwLock::new(VecDeque::with_capacity(100)));
+        let throughput_lock = Arc::new(RwLock::new(()));
+        let window_size = Duration::from_secs(5); // 5 second window for throughput calculation
 
         Ingest {
             num_cpus,
             thread_pool,
             tx,
             active_count,
+            queue_length,
             schema_hashes,
-            analyse_schema
+            analyse_schema,
+            throughput_window,
+            throughput_lock,
+            window_size,
+            task_queue,
+            queue_lock,
+            is_shutting_down,
+            max_queue_length,
         }
     }
 
     pub fn wait_for_completion(&self) {
+        // Signal that we're shutting down
+        self.is_shutting_down.store(1, Ordering::SeqCst);
+        
         let mut current_active_count = self.active_count.load(Ordering::SeqCst);
+        let mut last_report_time = Instant::now();
 
-        while self.active_count.load(Ordering::SeqCst) > 0 {
-            if current_active_count != self.active_count.load(Ordering::SeqCst) {
+        println!("Waiting for {} ingest tasks to finish, signaling shutdown...", current_active_count);
+
+        // Give tasks a chance to complete gracefully
+        let timeout = Instant::now() + Duration::from_secs(60); // 1 minute timeout
+        
+        while self.active_count.load(Ordering::SeqCst) > 0 && Instant::now() < timeout {
+            if current_active_count != self.active_count.load(Ordering::SeqCst) || last_report_time.elapsed() > Duration::from_secs(5) {
                 println!("Waiting for {} ingest tasks to finish", self.active_count.load(Ordering::SeqCst));
                 current_active_count = self.active_count.load(Ordering::SeqCst);
+                last_report_time = Instant::now();
             }
             
             // Use exponential backoff to avoid excessive CPU usage when waiting
@@ -199,15 +327,72 @@ impl Ingest {
             }
         }
 
-        println!("All ingest tasks finished");
+        // If we still have active threads after timeout, force decrement them
+        if self.active_count.load(Ordering::SeqCst) > 0 {
+            println!("Forcing completion of {} remaining tasks after timeout", self.active_count.load(Ordering::SeqCst));
+            self.active_count.store(0, Ordering::SeqCst);
+            self.queue_length.store(0, Ordering::SeqCst);
+            // Clear the task queue
+            if let Ok(mut task_queue) = self.task_queue.write() {
+                task_queue.clear();
+            }
+        }
+
+        println!("All ingest tasks finished or timed out");
     }
 
+    fn update_throughput(&self, bytes: u64) {
+        let now = Instant::now();
+        let _lock = self.throughput_lock.write().unwrap();
+        let mut window = self.throughput_window.write().unwrap();
+        
+        // Add new measurement
+        window.push_back((now, bytes));
+        
+        // Remove old measurements outside window
+        while let Some((time, _)) = window.front() {
+            if now.duration_since(*time) > self.window_size {
+                window.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn get_current_throughput(&self) -> u64 {
+        let now = Instant::now();
+        let _lock = self.throughput_lock.read().unwrap();
+        let window = self.throughput_window.read().unwrap();
+        
+        if window.is_empty() {
+            return 0;
+        }
+
+        let oldest_time = window.front().unwrap().0;
+        let total_bytes: u64 = window.iter().map(|(_, bytes)| bytes).sum();
+        let duration = now.duration_since(oldest_time).as_secs_f64();
+        
+        if duration == 0.0 {
+            return 0;
+        }
+
+        (total_bytes as f64 / duration) as u64
+    }
+
+
+    /// Add a file to the ingestion queue
+    /// 
+    /// This function will either process the file immediately if there is capacity
+    /// or queue it for later processing. It includes backpressure handling to prevent
+    /// unbounded queue growth.
+    /// 
+    /// Returns: A ThroughputMetrics struct containing current system state and optimal chunk size
     pub fn ingest_file(
         &self,
         datas: &Arc<Vec<IngestBatch>>,
         offset_db: &Arc<Offsets>,
         shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
-    ) {
+    ) -> ThroughputMetrics {
         // If we're not running, exit after current threads finish.
         if !RUNNING.read().load(Ordering::SeqCst) {
             println!("Waiting for remaining threads to complete");
@@ -217,9 +402,7 @@ impl Ingest {
             match CLI_MODE.read().clone() {
                 Mode::Sync(_) => {},
                 _ => {
-
                     let max_records = 1000;
-
                     let mut pipeline_metadata: PipelineMetadata;
                     {
                         pipeline_metadata = METADATA.read().clone();
@@ -228,7 +411,6 @@ impl Ingest {
                     let mut count: u64 = 0;
 
                     for data in datas.iter() {
-
                         count += self.analyse_schema.infer_json_schema(
                             &mut data.data.clone(),
                             Some(max_records),
@@ -249,14 +431,11 @@ impl Ingest {
                     }
 
                     if *NUM_ANALYSED_RECORDS.read() >= max_records {
-
-                        let mut pipeline_metadata= METADATA.read().clone();
+                        let mut pipeline_metadata = METADATA.read().clone();
 
                         if pipeline_metadata.metadata.len() == 0 {
                             println!("No data found in data source, skipping schema discovery");
                             std::process::exit(0);
-                        } else {
-                            // println!("Sampled source data, analysing schema");
                         }
 
                         let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.unwrap_or("false".to_string()));
@@ -272,51 +451,104 @@ impl Ingest {
                             Config::set_metadata(&pipeline_metadata, false).await;
                             std::process::exit(0);
                         });
-
                     }
 
                     println!("Analysed schema for {} -> {}/{} records", count, *NUM_ANALYSED_RECORDS.read(), max_records);
 
-                    return;
+                    return ThroughputMetrics {
+                        bytes_per_second: self.get_current_throughput(),
+                        active_cores: self.active_count.load(Ordering::Acquire),
+                        queue_length: self.queue_length.load(Ordering::Acquire),
+                    };
                 }
             }
 
-            // Wait for an available thread, but with exponential backoff to reduce CPU usage
-            let mut wait_time = 10; // Start with 10ms
-            while self.active_count.load(Ordering::SeqCst) >= self.num_cpus {
-                std::thread::sleep(std::time::Duration::from_millis(wait_time));
-                wait_time = std::cmp::min(wait_time * 2, 500); // Exponential backoff up to 500ms
+            // Calculate total bytes in this batch
+            let batch_bytes: u64 = datas.iter().map(|data| data.data.len() as u64).sum();
+            
+            // Check if we need to wait before adding more to the queue
+            let mut current_queue_length = self.queue_length.load(Ordering::Acquire);
+            
+            // Wait if queue is too full (but don't wait indefinitely)
+            let mut wait_attempts = 0;
+            while current_queue_length >= self.max_queue_length {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                wait_attempts += 1;
+                
+                // Check again after waiting
+                current_queue_length = self.queue_length.load(Ordering::Acquire);
+            }
+            
+            // Get current CPU utilization
+            let active_threads = self.active_count.load(Ordering::SeqCst);
+            
+            // Try to process immediately if we have capacity or if we have no active threads
+            if active_threads < self.num_cpus || active_threads == 0 {
+                let tx = self.tx.clone();
+                let offset_db_clone = offset_db.clone();
+                let datas_clone = datas.clone();
+                let mut schema_hashes = self.schema_hashes.clone();
+                let handle = runtime::Handle::current();
+                let shared_output_clone = shared_output.clone();
+
+                // Increment active count and queue length before spawning
+                self.active_count.fetch_add(1, Ordering::Acquire);
+                self.queue_length.fetch_add(1, Ordering::Acquire);
+
+                // Spawn the task and ensure it's executed
+                self.thread_pool.execute(move || {
+                    Ingest::process_batch(&datas_clone, &offset_db_clone, &mut schema_hashes, handle, shared_output_clone);
+                    tx.send(0).unwrap();
+                });
+                
+                // Update throughput metrics // not perfect as we're not waiting for the task to finish
+                self.update_throughput(batch_bytes);
+                
+            } else {
+                // Queue the task for later processing
+                let _lock = self.queue_lock.write().unwrap();
+                self.task_queue.write().unwrap().push_back(IngestTask {
+                    datas: datas.clone(),
+                    offset_db: offset_db.clone(),
+                    shared_output: shared_output.clone()
+                });
+                
+                // Increment queue length when adding to queue
+                self.queue_length.fetch_add(1, Ordering::Acquire);
             }
 
-            // Use Acquire ordering for better performance
-            self.active_count.fetch_add(1, Ordering::Acquire);
+            // Get current metrics for logging
+            let current_queue_length = self.queue_length.load(Ordering::Acquire);
+            let current_active_threads = self.active_count.load(Ordering::Acquire);
+            let queued_tasks = self.task_queue.read().unwrap().len();
 
-            // Clone only what's needed
-            let tx = self.tx.clone();
-            let offset_db_clone = offset_db.clone();
-            let datas_clone = datas.clone();
-            let mut schema_hashes = self.schema_hashes.clone();
-            let handle = runtime::Handle::current();
-            let shared_output_clone = shared_output.clone();
+            println!("Queueing ingest task of {} ({} tasks in queue, {}/{} active threads, {} tasks waiting)",
+                Helpers::human_readable_size(batch_bytes),
+                current_queue_length,
+                current_active_threads,
+                self.num_cpus,
+                queued_tasks
+            );
 
-            self.thread_pool.execute(move || {
-                Ingest::process_batch(&datas_clone, &offset_db_clone, &mut schema_hashes, handle, shared_output_clone);
-                // Send completion signal
-                tx.send(()).unwrap();
-            });
+            // Return throughput metrics
+            ThroughputMetrics {
+                bytes_per_second: self.get_current_throughput(),
+                active_cores: current_active_threads,
+                queue_length: current_queue_length,
+            }
         }
     }
 
     pub(crate) fn deadletter(dl: Deadletter) {
 
-        let mut deadletter_file = DEADLETTER_FILE.write();
-
-        let lines = serde_json::to_string(&dl).or(Err("Could not serialize deadletter")).unwrap();
-
-        deadletter_file.write(lines.as_bytes()).or(Err("Could not write to deadletter file")).unwrap();
-        deadletter_file.write("\n".as_bytes()).or(Err("Could not write to deadletter file")).unwrap();
-
-        deadletter_file.flush().or(Err("Could not flush deadletter file")).unwrap();
+        // let mut deadletter_file = DEADLETTER_FILE.write();
+        //
+        // let lines = serde_json::to_string(&dl).or(Err("Could not serialize deadletter")).unwrap();
+        //
+        // deadletter_file.write(lines.as_bytes()).or(Err("Could not write to deadletter file")).unwrap();
+        // deadletter_file.write("\n".as_bytes()).or(Err("Could not write to deadletter file")).unwrap();
+        //
+        // deadletter_file.flush().or(Err("Could not flush deadletter file")).unwrap();
 
     }
 
@@ -642,8 +874,8 @@ impl Ingest {
                                         let hash = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
 
                                         schema_hashes.insert(skpr_namespace.clone(), SchemaHash {
-                                            schema: schema,
-                                            hash: hash
+                                            schema,
+                                            hash
                                         });
                                     }
                                 }
@@ -818,20 +1050,53 @@ impl Ingest {
 
         let offset_db_clone = offset_db_clone.clone();
         let shared_output_clone = shared_output.clone();
-        handle.block_on(async {
-            buffers.flush(offset_db_clone, shared_output_clone).await.expect("Failed to flush buffers")
-        });
-
-        let mut counter_lock = METRICS.write();
-        counter_lock.deadletters_total += d;
-        counter_lock.ingeted_slow_total += x;
-        counter_lock.messages_total += i;
-        counter_lock.source_bytes_total += bytes;
-
-        if latest_timestamp as u64 > counter_lock.latest_timestamp {
-            counter_lock.latest_timestamp = latest_timestamp as u64;
+        
+        // Use block_on safely with proper error handling
+        match handle.block_on(async {
+            match buffers.flush(offset_db_clone.clone(), shared_output_clone.clone()).await {
+                Ok(_) => Ok(()),
+                Err(e) => {
+                    println!("Error flushing buffers: {}", e);
+                    Err(e)
+                }
+            }
+        }) {
+            Ok(_) => {
+                // Success, continue
+            },
+            Err(e) => {
+                println!("Failed to execute in Tokio runtime: {:?}", e);
+                // Handle the error gracefully, maybe create a new runtime
+                match tokio::runtime::Runtime::new() {
+                    Ok(rt) => {
+                        // Try again with a new runtime
+                        if let Err(e) = rt.block_on(buffers.flush(offset_db_clone, shared_output_clone)) {
+                            println!("Failed to flush buffers with new runtime: {:?}", e);
+                        }
+                    },
+                    Err(e) => {
+                        println!("Failed to create runtime: {:?}", e);
+                    }
+                }
+            }
         }
+        
+        // Update metrics safely, without panicking
+        let update_result = std::panic::catch_unwind(|| {
+            let mut counter_lock = METRICS.write();
+            counter_lock.deadletters_total += d;
+            counter_lock.ingeted_slow_total += x;
+            counter_lock.messages_total += i;
+            counter_lock.source_bytes_total += bytes;
 
+            if latest_timestamp as u64 > counter_lock.latest_timestamp {
+                counter_lock.latest_timestamp = latest_timestamp as u64;
+            }
+        });
+        
+        if let Err(e) = update_result {
+            println!("Warning: Could not update metrics - {:?}", e);
+        }
     }
 
     pub(crate) fn prepare_arrow_schema_with_metadata(

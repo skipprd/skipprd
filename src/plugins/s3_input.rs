@@ -4,12 +4,11 @@ use aws_sdk_s3::Client;
 
 use flate2::read::GzDecoder;
 
-use std::io::{Cursor, Read};
+use std::io::{Cursor, Read, Write};
 
 use std::sync::{Arc};
 
 use aws_sdk_s3::operation::get_object::{GetObjectError, GetObjectOutput};
-
 
 use std::time::Duration;
 use std::{fs};
@@ -20,14 +19,15 @@ use serde_derive::Deserialize;
 use once_cell::sync::Lazy;
 
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
-use crate::ingest_work::{Ingest, IngestBatch};
+use crate::ingest_work::{Ingest, IngestBatch, ThroughputMetrics};
 
 use tokio::sync::Semaphore;
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::plugins::DataOutputPlugin;
+use crate::helpers::Helpers;
 
-// in data_dir
-const _CONTINUATION_TOKEN_FILE: Lazy<String> = Lazy::new(|| {
+/// Path for storing the S3 continuation token so we can resume syncs
+const CONTINUATION_TOKEN_FILE: Lazy<String> = Lazy::new(|| {
     format!("{}/s3_input_continuation_token", Config::get_data_dir())
 });
 
@@ -54,20 +54,20 @@ impl From<PluginConfig> for DataSourceS3PluginConfig {
     }
 }
 
+/// Plugin for ingesting data from Amazon S3
 pub struct DataSourceS3Plugin {
-    // config: HashMap<String, String>,
-    // buffer: Sender<String>,
     s3_client: Client,
-    // s3_client_rusoto: S3Client,
     ingest: Ingest,
     config: DataSourceS3PluginConfig,
     #[allow(dead_code)]
     temp_dir: String,
     #[allow(dead_code)]
     prefixes: Vec<(String, usize)>,
+    active_threads: usize,
 }
 
 impl DataSourceS3Plugin {
+    /// Create a new S3 input plugin
     pub async fn new() -> DataSourceS3Plugin {
         let s3_config = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
 
@@ -93,7 +93,6 @@ impl DataSourceS3Plugin {
                 s3_delimiter: Some(Config::getenv("DATA_SOURCE_S3_DELIMITER", "/")),
             }
         };
-        
 
         DataSourceS3Plugin {
             s3_client,
@@ -101,38 +100,51 @@ impl DataSourceS3Plugin {
             config,
             temp_dir: temp_dir.to_string(),
             prefixes: Vec::new(),
+            active_threads: 0,
         }
     }
 
+    /// Save the continuation token to a file for resuming later
+    fn save_continuation_token(token: &str) {
+        if let Ok(mut file) = fs::File::create(&*CONTINUATION_TOKEN_FILE) {
+            if let Err(e) = file.write_all(token.as_bytes()) {
+                println!("Failed to save continuation token: {}", e);
+            }
+        }
+    }
+
+    /// Load the continuation token from a file
+    fn load_continuation_token() -> Option<String> {
+        match fs::read_to_string(&*CONTINUATION_TOKEN_FILE) {
+            Ok(token) => Some(token.trim().to_string()),
+            Err(_) => None,
+        }
+    }
+
+    /// Synchronize data from S3 bucket to the ingestion pipeline
+    ///
+    /// This method:
+    /// 1. Lists objects from the configured S3 bucket and prefix
+    /// 2. For each batch of objects, downloads and processes them
+    /// 3. Uses continuation tokens to resume listing where it left off
     pub async fn sync(
         &mut self,
         offsets: Arc<Offsets>,
         shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
     ) {
-
-        // let mut futures = Vec::new();
-
         let offsets_clone = offsets.clone();
-
         let _s3_client = self.s3_client.clone();
-
         let s3_bucket = self.config.s3_bucket.clone();
-        
         let delimiter = "/".to_string();
-
         let inventory_prefix = self.config.s3_prefix.clone();
-
         let max_list_objects = 1000;
-
         let mut _total_objects = 0;
         let mut chunk_size_current = 0;
-
         let mut outputs: Vec<String> = Vec::with_capacity(max_list_objects as usize);
-
-        // create 'objects' outside of loop to avoid re-allocation, and of a fixed size (max_list_objects)
         let mut _objects: Vec<Object> = Vec::with_capacity(max_list_objects as usize);
-
-        let mut _continuation_token = None;
+        let mut _continuation_token: Option<String> = Self::load_continuation_token();
+        let mut chunks_processed = 0;
+        let total_cpus = num_cpus::get();
 
         println!(
             "Syncing bucket: {}, prefix: {}",
@@ -140,8 +152,9 @@ impl DataSourceS3Plugin {
             inventory_prefix
         );
 
-        let chunk_size = self.config.batch_size_bytes.clone().unwrap_or(10000000);
-
+        // Use a fixed chunk size
+        let chunk_size = self.config.batch_size_bytes.clone().unwrap_or(10_000_000) as usize;
+        
         let mut s3_prefix = inventory_prefix.trim_start_matches(&delimiter).to_string();
 
         if s3_prefix == delimiter || s3_prefix == format!(".{}", delimiter) {
@@ -155,12 +168,18 @@ impl DataSourceS3Plugin {
             .prefix(s3_prefix.clone())
             .max_keys(max_list_objects);
 
-        // important to check few times, else slowly arriving drip of objects will result in us never proceeding to the next pipeline
+        // Set initial continuation token if loaded
+        if let Some(token) = &_continuation_token {
+            println!("Resuming from saved continuation token");
+            list_obj_req = list_obj_req.set_continuation_token(Some(token.clone()));
+        }
+
         let max_empty_objects = 2;
         let mut empty_objects_trys = 0;
-
-        // let num_cpus = num_cpus::get();
-        // let num_threads = num_cpus / 4;
+        
+        println!("Starting sync with {} total CPUs and initial chunk size of {}", 
+                total_cpus, 
+                Helpers::human_readable_size(chunk_size as u64));
 
         'outer: loop {
             let mut _i = 0;
@@ -194,40 +213,37 @@ impl DataSourceS3Plugin {
 
                     if !_objects.is_empty() {
                         _skipped_objects = 0;
-
                         _total_objects += _objects.len();
 
+                        // Process objects
                         for object in _objects {
                             let object_key = object.key().unwrap();
                             let _timestamp = object.last_modified().unwrap().secs();
-
-                            // println!("Processing object: {}", object_key);
 
                             let offset_key = OffsetKey {
                                 namespace: s3_bucket.clone(),
                                 partition: object_key.to_string(),
                             };
 
-                            // Check offset is not already processed
                             let has_offsets = offsets_clone.validate(&offset_key, OffsetTypes::Closed, 1);
 
                             if Some(true) != has_offsets {
                                 outputs.push(object_key.to_string());
-
                                 chunk_size_current += object.size().unwrap_or_default();
-
                                 _i += 1;
 
-                                if chunk_size_current >= chunk_size {
-
-                                    self.download_and_ingest(
+                                // If we have enough data for a chunk, process it
+                                if chunk_size_current >= chunk_size as i64 {
+                                    chunks_processed += 1;
+                                    
+                                    // Process the current batch
+                                    let _throughput_metrics = self.download_and_ingest(
                                         &s3_bucket,
                                         &outputs,
                                         &offsets_clone,
                                         shared_output.clone()
                                     ).await;
-
-
+                                    
                                     outputs.clear();
                                     _i = 0;
                                     chunk_size_current = 0;
@@ -236,38 +252,52 @@ impl DataSourceS3Plugin {
                                 _skipped_objects += 1;
                             }
                         }
-
-                        // println!("Skipped objects: {}", _skipped_objects);
                     }
 
                     if let Some(token) = &output.next_continuation_token {
                         _continuation_token = Some(token.to_string().clone());
-
                         list_obj_req = list_obj_req.set_continuation_token(_continuation_token.clone());
+                        // Save the continuation token after each successful request
+                        Self::save_continuation_token(token);
                     } else {
                         if !outputs.is_empty() {
-                            self.download_and_ingest(
+                            chunks_processed += 1;
+                            
+                            // Process remaining items
+                            let _throughput_metrics = self.download_and_ingest(
                                 &s3_bucket,
                                 &outputs,
                                 &offsets_clone,
                                 shared_output.clone()
-                            )
-                                .await;
+                            ).await;
                         }
-
                         break 'outer;
                     }
                 }
             }
         }
 
-        println!("Reached end of S3 pagination");
+        // Wait for all remaining tasks to complete before ending
+        while self.active_threads > 0 {
+            println!("Waiting for {} remaining ingest tasks to complete...", self.active_threads);
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
 
-        // println!("Total objects: {}", total_objects);
-
+        println!("Sync completed: {} chunks processed, final active threads: {}/{}, chunk size: {}", 
+            chunks_processed,
+            self.active_threads,
+            total_cpus,
+            Helpers::human_readable_size(chunk_size as u64)
+        );
+        
+        // Print summary statistics
+        println!("Performance summary:");
+        println!("  - Chunk size: {}", Helpers::human_readable_size(chunk_size as u64));
+        println!("  - Chunks processed: {}", chunks_processed);
+        println!("  - Total objects: {}", _total_objects);
     }
 
-
+    /// Download an S3 object with exponential backoff retry logic
     async fn download_s3_object_with_backoff(
         s3_client: &Client,
         bucket: &String,
@@ -285,27 +315,12 @@ impl DataSourceS3Plugin {
 
             match get_request.send().await {
                 Ok(result) => {
-                    if retries > 0 {
-                        // println!("Successful retry of object {}", key);
-                    }
                     return Ok(result);
                 }
                 Err(err) => {
-
                     retries += 1;
-
                     backoff_duration *= 2;
-
-                    // println!(
-                    //     "Failed to get object {}, retry {} of {} in {} seconds: {}",
-                    //     key,
-                    //     retries,
-                    //     max_retries,
-                    //     backoff_duration.as_secs(),
-                    //     err.to_string()
-                    // );
-
-                    // let wait_time = backoff_duration.as_secs_f64() * 2.0_f64.powi(retries);
+                    
                     tokio::time::sleep(Duration::from_secs_f64(backoff_duration.as_secs_f64())).await;
 
                     if retries >= max_retries {
@@ -317,26 +332,42 @@ impl DataSourceS3Plugin {
         }
     }
 
+    /// Download and ingest a batch of S3 objects
+    ///
+    /// This method:
+    /// 1. Concurrently downloads all objects in the batch
+    /// 2. Processes downloaded objects in batches by file type (gzip vs regular)
+    /// 3. Submits the processed data to the ingestion pipeline
+    /// 
+    /// Returns: Throughput metrics that can be used to adjust future batch sizes
     async fn download_and_ingest(
-        &self,
-        bucket_name: &String,
-        object_keys: &Vec<String>,
-        offsets_clone: &Arc<Offsets>,
+        &mut self,
+        s3_bucket: &String,
+        keys: &Vec<String>,
+        offsets: &Arc<Offsets>,
         shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
-    ) {
+    ) -> ThroughputMetrics {
+        if keys.is_empty() {
+            return ThroughputMetrics {
+                bytes_per_second: 0,
+                active_cores: self.active_threads,
+                queue_length: 0,
+            };
+        }
+        
         let s3_client = self.s3_client.clone();
 
-        // Rip as many files as possible concurrently, we tend to deal with small files
+        // Use a semaphore to limit concurrent downloads
         let semaphore = Arc::new(Semaphore::new(2048));
 
         // Pre-allocate futures vector with known size
-        let futures: Vec<_> = object_keys
+        let futures: Vec<_> = keys
             .clone()
             .into_iter()
             .map(|object_key| {
                 let semaphore = Arc::clone(&semaphore);
                 let s3_client = s3_client.clone();
-                let bucket_name = bucket_name.to_owned();
+                let bucket_name = s3_bucket.to_owned();
 
                 tokio::spawn(async move {
                     let _permit = semaphore.acquire().await.unwrap();
@@ -354,7 +385,6 @@ impl DataSourceS3Plugin {
                         }),
                         Err(_) => Err("Could not get object"),
                     }
-                    // Permit is dropped automatically when the future completes
                 })
             })
             .collect();
@@ -363,7 +393,7 @@ impl DataSourceS3Plugin {
 
         let future_result = join_all(futures).await;
 
-        let bucket_name = bucket_name.clone();
+        let bucket_name = s3_bucket.clone();
         let datas_clone = datas.clone();
 
         // Process the downloaded data in larger batches to reduce context switching
@@ -443,11 +473,23 @@ impl DataSourceS3Plugin {
 
         let batch = datas.read().clone();
         let shared_output_clone = shared_output.clone();
-        self.ingest.ingest_file(&Arc::new(batch), &offsets_clone, shared_output_clone);
+        
+        // Process the batch and get throughput metrics
+        let metrics = self.ingest.ingest_file(&Arc::new(batch), &offsets, shared_output_clone);
+        
+        // Update our active threads count
+        self.active_threads = metrics.active_cores;
+        
+        // Return the metrics for the caller
+        ThroughputMetrics {
+            bytes_per_second: metrics.bytes_per_second,
+            active_cores: metrics.active_cores,
+            queue_length: metrics.queue_length,
+        }
     }
-
 }
 
+/// Helper struct to track a downloaded S3 object
 struct Download {
     key: String,
     response: GetObjectOutput,

@@ -31,4 +31,4 @@ Optimize for readability – Use clear headings, bullet points, and code/config/
 
 Link to relevant sources – Internal links (older blog posts) and external links (official docs).
 
-Save the blog in ./docs/blogs
+Save the blog in ./docs/releases/blogs/[GIT_TAG].md
