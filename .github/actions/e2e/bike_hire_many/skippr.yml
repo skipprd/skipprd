@@ -4,7 +4,7 @@ skippr:
 
 pipelines:
 
-  bike_hire_many:
+  bike_hire_many2:
     auto_approve: yes
     env: test
     buffer_threshold_bytes: 20000000
