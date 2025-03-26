@@ -563,7 +563,7 @@ impl Ingest {
             }
 
             // Calculate total bytes in this batch
-            let batch_bytes = datas.iter().map(|v| v.bytes as u64).sum();
+            let batch_bytes = datas.first().unwrap().bytes as u64;
             
             // Check if we need to wait before adding more to the queue
             let mut current_queue_length = self.queue_length.load(Ordering::Acquire);
