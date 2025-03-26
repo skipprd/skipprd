@@ -18,7 +18,7 @@ use zip::ZipArchive;
 use crate::helpers::configuration::{Config, PluginConfig};
 
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
-use crate::ingest_work::{Ingest, IngestBatch};
+use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
 
 use glob::{glob_with};
 
@@ -98,19 +98,16 @@ impl DataSourceLocalFilePlugin {
         let shared_output_clone = shared_output.clone();
 
         while let Some(batch) = data_batches_stream.next().await {
-
             let offsets_clone = offsets_clone.clone();
             let shared_output_clone = shared_output_clone.clone();
 
-            // let ingest_handle = task::spawn_blocking(move || {
+            let mut ingest_tasks = IngestTasks::new();
+            for b in batch {
+                ingest_tasks.add(IngestTask::new(b, offsets_clone.clone(), shared_output_clone.clone()));
+            }
 
-                // println!("Ingesting batch: {:?}", batch);
-                self.ingest.ingest_file(&Arc::new(batch), &offsets_clone, shared_output_clone);
-            // });
-            // ingest_handle.await.unwrap();
-
+            self.ingest.ingest_file(&Arc::new(ingest_tasks), &offsets_clone, shared_output_clone);
         }
-
     }
 
     pub fn prepare_data_for_processing(
@@ -118,7 +115,7 @@ impl DataSourceLocalFilePlugin {
         offsets_clone: &Arc<Offsets>,
         source_dir: String,
         chunk_size: i64,
-    ) -> impl futures::Stream<Item = Vec<IngestBatch>> {
+    ) -> impl futures::Stream<Item = Vec<Vec<IngestBatch>>> {
 
         // let mut datas: Vec<IngestBatch> = Vec::new();
 
@@ -197,7 +194,7 @@ impl DataSourceLocalFilePlugin {
                                     }
 
                                     if _batch_bytes >= chunk_size && !current_batch.is_empty() {
-                                        tx.unbounded_send(current_batch.clone()).unwrap();
+                                        tx.unbounded_send(vec![current_batch.clone()]).unwrap();
                                         current_batch.clear();
                                         _batch_bytes = 0;
                                         ingest_data = String::new();
@@ -210,7 +207,7 @@ impl DataSourceLocalFilePlugin {
                                     });
 
                                     if !current_batch.is_empty() {
-                                        tx.unbounded_send(current_batch.clone()).unwrap();
+                                        tx.unbounded_send(vec![current_batch.clone()]).unwrap();
                                         current_batch.clear();
                                         _batch_bytes = 0;
                                     }
@@ -226,7 +223,7 @@ impl DataSourceLocalFilePlugin {
                                             let line_len = line.len() as i64;
 
                                             if _batch_bytes + line_len > chunk_size && !current_batch.is_empty() {
-                                                tx.unbounded_send(current_batch.clone()).unwrap();
+                                                tx.unbounded_send(vec![current_batch.clone()]).unwrap();
                                                 current_batch.clear();
                                                 _batch_bytes = 0;
                                             }
@@ -242,7 +239,7 @@ impl DataSourceLocalFilePlugin {
                                         }
 
                                         if !current_batch.is_empty() {
-                                            tx.unbounded_send(current_batch.clone()).unwrap();
+                                            tx.unbounded_send(vec![current_batch.clone()]).unwrap();
                                             current_batch.clear();
                                             _batch_bytes = 0;
                                         }
@@ -260,7 +257,7 @@ impl DataSourceLocalFilePlugin {
                                             let line_len = line.len() as i64;
 
                                             if _batch_bytes + line_len > chunk_size && !current_batch.is_empty() {
-                                                tx.unbounded_send(current_batch.clone()).unwrap();
+                                                tx.unbounded_send(vec![current_batch.clone()]).unwrap();
                                                 current_batch.clear();
                                                 _batch_bytes = 0;
                                             }
@@ -276,7 +273,7 @@ impl DataSourceLocalFilePlugin {
                                         }
 
                                         if !current_batch.is_empty() {
-                                            tx.unbounded_send(current_batch.clone()).unwrap();
+                                            tx.unbounded_send(vec![current_batch.clone()]).unwrap();
                                             current_batch.clear();
                                             _batch_bytes = 0;
                                         }
@@ -323,7 +320,7 @@ impl DataSourceLocalFilePlugin {
                                                     bytes: _batch_bytes as usize
                                                 });
 
-                                                tx.unbounded_send(current_batch.clone()).unwrap();
+                                                tx.unbounded_send(vec![current_batch.clone()]).unwrap();
                                                 current_batch.clear();
                                                 _batch_bytes = 0;
                                                 ingest_data = format!("");
@@ -333,7 +330,7 @@ impl DataSourceLocalFilePlugin {
                                         }
 
                                         if !current_batch.is_empty() {
-                                            tx.unbounded_send(current_batch.clone()).unwrap();
+                                            tx.unbounded_send(vec![current_batch.clone()]).unwrap();
                                             current_batch.clear();
                                             _batch_bytes = 0;
                                         }
@@ -366,7 +363,7 @@ impl DataSourceLocalFilePlugin {
                                                 bytes: _batch_bytes as usize
                                             };
                                             let current_batch: Vec<IngestBatch> = vec![batch];
-                                            tx.unbounded_send(current_batch).unwrap();
+                                            tx.unbounded_send(vec![current_batch]).unwrap();
                                             ingest_data.clear();
                                             _batch_bytes = 0;
                                         }
@@ -379,13 +376,13 @@ impl DataSourceLocalFilePlugin {
                                             bytes: _batch_bytes as usize
                                         };
                                         let current_batch: Vec<IngestBatch> = vec![batch];
-                                        tx.unbounded_send(current_batch).unwrap();
+                                        tx.unbounded_send(vec![current_batch]).unwrap();
                                     }
                                 },
                             }
 
                             if _batch_bytes >= chunk_size {
-                                tx.unbounded_send(current_batch.clone()).unwrap();
+                                tx.unbounded_send(vec![current_batch.clone()]).unwrap();
                                 current_batch.clear();
                                 _batch_bytes = 0;
                             }
@@ -397,7 +394,7 @@ impl DataSourceLocalFilePlugin {
 
             if !current_batch.is_empty() {
                 println!("Sending last batch {:?}", current_batch);
-                tx.unbounded_send(current_batch.clone()).unwrap();
+                tx.unbounded_send(vec![current_batch.clone()]).unwrap();
                 current_batch.clear();
                 _batch_bytes = 0;
             }

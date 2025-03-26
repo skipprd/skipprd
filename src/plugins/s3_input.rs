@@ -19,7 +19,7 @@ use serde_derive::Deserialize;
 use once_cell::sync::Lazy;
 
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
-use crate::ingest_work::{Ingest, IngestBatch, ThroughputMetrics};
+use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks, ThroughputMetrics};
 
 use tokio::sync::Semaphore;
 use crate::helpers::timed_rwlock::TimedRwLock;
@@ -142,7 +142,8 @@ impl DataSourceS3Plugin {
         let max_list_objects = 1000;
         let mut _total_objects = 0;
         let mut chunk_size_current = 0;
-        let mut outputs: Vec<String> = Vec::with_capacity(max_list_objects as usize);
+        let mut outputs: Vec<Vec<String>> = Vec::with_capacity(num_cpus::get());
+        let mut current_chunk: Vec<String> = Vec::with_capacity(self.config.batch_size_bytes.unwrap_or(10_000_000) as usize);
         let mut _objects: Vec<Object> = Vec::with_capacity(max_list_objects as usize);
         let mut _continuation_token: Option<String> = Self::load_continuation_token();
         let mut chunks_processed = 0;
@@ -155,7 +156,7 @@ impl DataSourceS3Plugin {
         );
 
         // Use a fixed chunk size
-        let chunk_size = self.config.batch_size_bytes.clone().unwrap_or(10_000_000) as usize;
+        let chunk_size = self.config.batch_size_bytes.unwrap_or(10_000_000) as usize;
         self.optimal_chunk_size = chunk_size;
 
         let mut s3_prefix = inventory_prefix.trim_start_matches(&delimiter).to_string();
@@ -233,27 +234,41 @@ impl DataSourceS3Plugin {
                             let has_offsets = offsets_clone.validate(&offset_key, OffsetTypes::Closed, 1);
 
                             if Some(true) != has_offsets {
-                                outputs.push(object_key.to_string());
+                                current_chunk.push(object_key.to_string());
                                 chunk_size_current += object.size().unwrap_or_default();
                                 _i += 1;
 
-                                // If we have enough data for a chunk, process it
+                                // If we have enough data for a chunk, add it to outputs
                                 if chunk_size_current >= self.optimal_chunk_size as i64 {
-                                    
-                                    chunks_processed += 1;
-                                    
-                                    // Process the current batch
-                                    let _throughput_metrics = self.download_and_ingest(
-                                        &s3_bucket,
-                                        &outputs,
-                                        &offsets_clone,
-                                        shared_output.clone(),
-                                        chunk_size_current
-                                    ).await;
-                                    
-                                    outputs.clear();
-                                    _i = 0;
+
+                                    // println!("Added chunk {} of size: {}",
+                                    //          outputs.len(),
+                                    //          Helpers::human_readable_size(chunk_size_current as u64)
+                                    // );
+
+                                    outputs.push(current_chunk);
+                                    current_chunk = Vec::with_capacity(chunk_size);
                                     chunk_size_current = 0;
+
+                                    // If we have enough chunks for parallel processing
+                                    if outputs.len() >= total_cpus {
+
+                                        println!("Processing batch with {} in chunks", Helpers::human_readable_size(outputs.len() as u64));
+
+                                        chunks_processed += 1;
+                                        
+                                        // Process the current batch
+                                        let _throughput_metrics = self.download_and_ingest(
+                                            &s3_bucket,
+                                            &outputs,
+                                            &offsets_clone,
+                                            shared_output.clone(),
+                                            chunk_size_current
+                                        ).await;
+                                        
+                                        outputs.clear();
+                                        _i = 0;
+                                    }
                                 }
                             } else {
                                 _skipped_objects += 1;
@@ -267,7 +282,10 @@ impl DataSourceS3Plugin {
                         // Save the continuation token after each successful request
                         Self::save_continuation_token(token);
                     } else {
-                        if !outputs.is_empty() {
+                        if !outputs.is_empty() || !current_chunk.is_empty() {
+                            if !current_chunk.is_empty() {
+                                outputs.push(current_chunk);
+                            }
                             chunks_processed += 1;
                             
                             // Process remaining items
@@ -333,7 +351,7 @@ impl DataSourceS3Plugin {
     async fn download_and_ingest(
         &mut self,
         s3_bucket: &String,
-        keys: &Vec<String>,
+        keys: &Vec<Vec<String>>,
         offsets: &Arc<Offsets>,
         shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
         chunk_size_current: i64
@@ -354,8 +372,8 @@ impl DataSourceS3Plugin {
 
         // Pre-allocate futures vector with known size
         let futures: Vec<_> = keys
-            .clone()
-            .into_iter()
+            .iter()
+            .flat_map(|chunk| chunk.iter().map(|s| s.clone()))
             .map(|object_key| {
                 let semaphore = Arc::clone(&semaphore);
                 let s3_client = s3_client.clone();
@@ -381,12 +399,12 @@ impl DataSourceS3Plugin {
             })
             .collect();
 
-        let datas: Arc<TimedRwLock<Vec<IngestBatch>>> = Arc::new(TimedRwLock::new("datas".to_string(), Vec::with_capacity(futures.len())));
+        let ingest_tasks: Arc<TimedRwLock<IngestTasks>> = Arc::new(TimedRwLock::new("datas".to_string(), IngestTasks::new()));
 
         let future_result = join_all(futures).await;
 
         let bucket_name = s3_bucket.clone();
-        let datas_clone = datas.clone();
+        let ingest_tasks_clone = ingest_tasks.clone();
 
         // Process the downloaded data in larger batches to reduce context switching
         // Group files by extension to process similar files together
@@ -416,12 +434,18 @@ impl DataSourceS3Plugin {
             };
         }
 
+        let mut tasks_total_bytes: usize = 0;
+
         // Process gzip files in a single blocking task
         if !gz_files.is_empty() {
-            let datas_clone = datas_clone.clone();
+            let ingest_tasks_clone = ingest_tasks_clone.clone();
             let bucket_name_clone = bucket_name.clone();
-            
+            let optimal_chunk_size = self.optimal_chunk_size;
+            let shared_output_clone = shared_output.clone();
+            let offsets_clone = offsets.clone();
+
             tokio::task::spawn_blocking(move || {
+                let mut current_batch: IngestTask = IngestTask::new(Vec::new(), offsets_clone.clone(), shared_output_clone.clone());
                 for (key, data_vec) in gz_files {
                     // Something that implements `std::io::Read`
                     let c = Cursor::new(data_vec);
@@ -432,42 +456,78 @@ impl DataSourceS3Plugin {
                     let mut decompressed_data = String::new();
                     stream.read_to_string(&mut decompressed_data).unwrap();
 
-                    datas_clone.write().push(IngestBatch {
+                    let bytes = decompressed_data.len();
+                    tasks_total_bytes += bytes;
+
+                    let mut new_datas = Vec::new();
+                    new_datas.extend(current_batch.datas.iter().cloned());
+                    new_datas.push(IngestBatch {
                         offset_key: OffsetKey {
                             namespace: bucket_name_clone.to_string(),
                             partition: key,
                         },
                         data: decompressed_data,
-                        bytes: chunk_size_current as usize,
+                        bytes,
                     });
+                    current_batch.datas = Arc::new(new_datas);
+
+                    if current_batch.datas.iter().map(|d| d.bytes).sum::<usize>() >= optimal_chunk_size {
+                        // println!("Downloaded and processed {} gzip files of {}", current_batch.datas.len(), Helpers::human_readable_size(current_batch.datas.iter().map(|d| d.bytes).sum::<usize>() as u64));
+                        ingest_tasks_clone.write().add(current_batch);
+
+                        current_batch = IngestTask::new(Vec::new(), offsets_clone.clone(), shared_output_clone.clone());
+                    }
+                }
+                if !current_batch.datas.is_empty() {
+                    ingest_tasks_clone.write().add(current_batch)
                 }
             }).await.unwrap();
         }
 
         // Process regular files in a single blocking task
         if !regular_files.is_empty() {
-            let datas_clone = datas_clone.clone();
+            let datas_clone = ingest_tasks_clone.clone();
             let bucket_name_clone = bucket_name.clone();
-            
+            let optimal_chunk_size = self.optimal_chunk_size;
+            let shared_output_clone = shared_output.clone();
+            let offsets_clone = offsets.clone();
+
             tokio::task::spawn_blocking(move || {
+                let mut current_batch: IngestTask = IngestTask::new(Vec::new(), offsets_clone.clone(), shared_output_clone.clone());
                 for (key, data_vec) in regular_files {
                     let str_data = String::from_utf8(data_vec).unwrap();
 
-                    datas_clone.write().push(IngestBatch {
+                    let bytes = str_data.len();
+                    tasks_total_bytes += bytes;
+
+                    let mut new_datas = Vec::new();
+                    new_datas.extend(current_batch.datas.iter().cloned());
+                    new_datas.push(IngestBatch {
                         offset_key: OffsetKey {
                             namespace: bucket_name_clone.to_string(),
                             partition: key,
                         },
                         data: str_data,
-                        bytes: chunk_size_current as usize,
+                        bytes,
                     });
+                    current_batch.datas = Arc::new(new_datas);
+
+                    if current_batch.datas.iter().map(|d| d.bytes).sum::<usize>() >= optimal_chunk_size {
+                        // println!("Downloaded and processed {} regular files of {}", current_batch.datas.len(), Helpers::human_readable_size(current_batch.datas.iter().map(|d| d.bytes).sum::<usize>() as u64));
+                        datas_clone.write().add(current_batch);
+                        current_batch = IngestTask::new(Vec::new(), offsets_clone.clone(), shared_output_clone.clone());
+                    }
+                }
+                if !current_batch.datas.is_empty() {
+                    datas_clone.write().add(current_batch)
                 }
             }).await.unwrap();
         }
 
-        let batch = datas.read().clone();
+        let batch = ingest_tasks.read().clone();
         let shared_output_clone = shared_output.clone();
-        
+
+
         // Process the batch and get throughput metrics
         let metrics = self.ingest.ingest_file(&Arc::new(batch), &offsets, shared_output_clone);
         

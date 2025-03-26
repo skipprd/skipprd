@@ -15,7 +15,7 @@ use std::fs::{File, OpenOptions};
 
 
 use std::io::{BufWriter, Write};
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 
 use std::process::exit;
 use std::string::ToString;
@@ -59,12 +59,6 @@ pub struct Deadletter {
     pub(crate) records: String,
 }
 
-#[derive(Clone, Debug)]
-pub struct IngestBatch {
-    pub(crate) offset_key: OffsetKey,
-    pub(crate) data: String,
-    pub(crate) bytes: usize,
-}
 
 // Bare metal platforms usually have very small amounts of RAM
 // (in the order of hundreds of KB)
@@ -109,11 +103,52 @@ struct SchemaHash {
     hash: String,
 }
 
+
+#[derive(Clone, Debug)]
+pub struct IngestBatch {
+    pub(crate) offset_key: OffsetKey,
+    pub(crate) data: String,
+    pub(crate) bytes: usize,
+}
+
 #[derive(Clone)]
-struct IngestTask {
-    datas: Arc<Vec<IngestBatch>>,
+pub(crate) struct IngestTask {
+    pub(crate) datas: Arc<Vec<IngestBatch>>,
     offset_db: Arc<Offsets>,
     shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>
+}
+
+impl IngestTask {
+    pub fn new(datas: Vec<IngestBatch>, offset_db: Arc<Offsets>, shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>) -> IngestTask {
+        IngestTask {
+            datas: Arc::new(datas),
+            offset_db,
+            shared_output
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct IngestTasks {
+    tasks: Vec<IngestTask>,
+    bytes: usize,
+}
+
+impl IngestTasks {
+    pub fn new() -> IngestTasks {
+
+        let num_cpus = num_cpus::get();
+
+        IngestTasks {
+            tasks: Vec::with_capacity(num_cpus),
+            bytes: 0,
+        }
+    }
+
+    pub fn add(&mut self, task: IngestTask) {
+        self.bytes += task.datas.iter().map(|v| v.bytes).sum::<usize>();
+        self.tasks.push(task);
+    }
 }
 
 /// Return type for ingest_file that includes throughput metrics
@@ -487,7 +522,7 @@ impl Ingest {
     /// Returns: A ThroughputMetrics struct containing current system state and optimal chunk size
     pub fn ingest_file(
         &self,
-        datas: &Arc<Vec<IngestBatch>>,
+        ingest_batches: &Arc<IngestTasks>,
         offset_db: &Arc<Offsets>,
         shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
     ) -> ThroughputMetrics {
@@ -508,7 +543,7 @@ impl Ingest {
 
                     let mut count: u64 = 0;
 
-                    for data in datas.iter() {
+                    for data in ingest_batches.tasks.first().unwrap().datas.iter() {
                         count += self.analyse_schema.infer_json_schema(
                             &mut data.data.clone(),
                             Some(max_records),
@@ -563,7 +598,7 @@ impl Ingest {
             }
 
             // Calculate total bytes in this batch
-            let batch_bytes = datas.first().unwrap().bytes as u64;
+            let batch_bytes = ingest_batches.bytes;
             
             // Check if we need to wait before adding more to the queue
             let mut current_queue_length = self.queue_length.load(Ordering::Acquire);
@@ -581,45 +616,45 @@ impl Ingest {
             // Get current CPU utilization
             let active_threads = self.active_count.load(Ordering::SeqCst);
             
-            // Try to process immediately if we have capacity or if we have no active threads
-            if active_threads < self.num_cpus || active_threads == 0 {
-                let tx = self.tx.clone();
-                let offset_db_clone = offset_db.clone();
-                let datas_clone = datas.clone();
-                let mut schema_hashes = self.schema_hashes.clone();
-                let handle = runtime::Handle::current();
-                let shared_output_clone = shared_output.clone();
+            for datas in ingest_batches.tasks.iter() {
+                // Try to process immediately if we have capacity or if we have no active threads
+                if active_threads < self.num_cpus || active_threads == 0 {
+                    let tx = self.tx.clone();
+                    let offset_db_clone = offset_db.clone();
+                    let datas_clone = datas.datas.clone();
+                    let mut schema_hashes = self.schema_hashes.clone();
+                    let handle = runtime::Handle::current();
+                    let shared_output_clone = shared_output.clone();
 
-                // Increment active count and queue length before spawning
-                self.active_count.fetch_add(1, Ordering::Acquire);
-                self.queue_length.fetch_add(1, Ordering::Acquire);
+                    // Increment active count and queue length before spawning
+                    self.active_count.fetch_add(1, Ordering::Acquire);
+                    self.queue_length.fetch_add(1, Ordering::Acquire);
 
-                // Spawn the task and ensure it's executed
-                self.thread_pool.execute(move || {
-                    Ingest::process_batch(&datas_clone, &offset_db_clone, &mut schema_hashes, handle, shared_output_clone);
-                    tx.send(0).unwrap();
-                });
-                
-                // Update throughput metrics // not perfect as we're not waiting for the task to finish
-                self.update_throughput(batch_bytes);
+                    // Spawn the task and ensure it's executed
+                    self.thread_pool.execute(move || {
+                        Ingest::process_batch(&datas_clone, &offset_db_clone, &mut schema_hashes, handle, shared_output_clone);
+                        tx.send(0).unwrap();
+                    });
 
-                
-            } else {
-                // Queue the task for later processing
-                let _lock = self.queue_lock.write().unwrap();
-                self.task_queue.write().unwrap().push_back(IngestTask {
-                    datas: datas.clone(),
-                    offset_db: offset_db.clone(),
-                    shared_output: shared_output.clone()
-                });
-                
-                // Increment queue length when adding to queue
-                self.queue_length.fetch_add(1, Ordering::Acquire);
+                    // Update throughput metrics
+                    self.update_throughput(batch_bytes as u64);
+                } else {
+                    // Queue the task for later processing
+                    let _lock = self.queue_lock.write().unwrap();
+                    self.task_queue.write().unwrap().push_back(IngestTask {
+                        datas: datas.datas.clone(),
+                        offset_db: offset_db.clone(),
+                        shared_output: shared_output.clone()
+                    });
 
-                // Update throughput metrics // not perfect as we're not waiting for the task to finish
-                self.update_throughput(batch_bytes);
+                    // Increment queue length when adding to queue
+                    self.queue_length.fetch_add(1, Ordering::Acquire);
+
+                    // Update throughput metrics
+                    self.update_throughput(batch_bytes as u64);
+                }
             }
-
+            
             self.get_optmial_chunk_size();
 
             // Get current metrics for logging
@@ -627,8 +662,9 @@ impl Ingest {
             let current_active_threads = self.active_count.load(Ordering::Acquire);
             let queued_tasks = self.task_queue.read().unwrap().len();
 
-            println!("Queueing ingest task of {} ({} tasks in queue, {}/{} active threads, {} tasks waiting)",
-                Helpers::human_readable_size(batch_bytes),
+            println!("Queueing {} ingest tasks of {} ({} tasks in queue, {}/{} active threads, {} tasks waiting)",
+                ingest_batches.tasks.len(),
+                Helpers::human_readable_size(batch_bytes as u64),
                 current_queue_length,
                 current_active_threads,
                 self.num_cpus,
@@ -722,7 +758,6 @@ impl Ingest {
         let mut buf: HashMap<(String, String, Option<i64>, String), IngestBufferBatch> = HashMap::with_capacity(32);
 
         for ingest_batch in datas.iter() {
-
             bytes += ingest_batch.data.len() as u64;
             
             let has_offsets =
@@ -793,7 +828,6 @@ impl Ingest {
                 };
 
             }
-
 
             for record in unwrapped_records {
 
@@ -1146,10 +1180,6 @@ impl Ingest {
                     
                 }
             }
-
-            // may have deadlettered some records, so we need to update the offset since they won't be in the WAL
-            // offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Closed, 1);
-
         }
         
         buffers.write(buf);
