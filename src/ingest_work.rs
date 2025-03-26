@@ -231,19 +231,6 @@ impl Ingest {
                         let offset_db_clone = ingest_task.offset_db.clone();
                         let datas_clone = ingest_task.datas.clone();
                         let mut schema_hashes = DashMap::new();
-                        let handle = match tokio::runtime::Handle::try_current() {
-                            Ok(h) => h,
-                            Err(_) => {
-                                // Create a new runtime if we can't access the current one
-                                match tokio::runtime::Runtime::new() {
-                                    Ok(rt) => rt.handle().clone(),
-                                    Err(e) => {
-                                        println!("Failed to create runtime: {:?}", e);
-                                        continue;
-                                    }
-                                }
-                            }
-                        };
                         
                         let shared_output_clone = ingest_task.shared_output.clone();
 
@@ -253,7 +240,13 @@ impl Ingest {
                         // and the task was already counted in queue_length when it was added to the queue
 
                         thread_pool_clone.execute(move || {
+                            // Create a new runtime for this thread
+                            let rt = tokio::runtime::Runtime::new().unwrap();
+                            let handle = rt.handle().clone();
+                            
+                            // Process the batch
                             Ingest::process_batch(&datas_clone, &offset_db_clone, &mut schema_hashes, handle, shared_output_clone);
+                            
                             // Don't panic if sending fails (channel might be closed during shutdown)
                             let _ = tx.send(0);
                         });
