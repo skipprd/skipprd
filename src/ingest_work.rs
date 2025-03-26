@@ -472,7 +472,7 @@ impl Ingest {
                      adjustment_factor
             );
             
-            self.optimal_chunk_size.store(optimal_chunk_size, Ordering::Release);
+            self.optimal_chunk_size.store(optimal_chunk_size, Ordering::SeqCst);
             // *self.last_adjustment.write().unwrap() = now;
         }
     }
