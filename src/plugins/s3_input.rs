@@ -64,6 +64,7 @@ pub struct DataSourceS3Plugin {
     #[allow(dead_code)]
     prefixes: Vec<(String, usize)>,
     active_threads: usize,
+    optimal_chunk_size: usize
 }
 
 impl DataSourceS3Plugin {
@@ -101,6 +102,7 @@ impl DataSourceS3Plugin {
             temp_dir: temp_dir.to_string(),
             prefixes: Vec::new(),
             active_threads: 0,
+            optimal_chunk_size: 0,
         }
     }
 
@@ -154,7 +156,8 @@ impl DataSourceS3Plugin {
 
         // Use a fixed chunk size
         let chunk_size = self.config.batch_size_bytes.clone().unwrap_or(10_000_000) as usize;
-        
+        self.optimal_chunk_size = chunk_size;
+
         let mut s3_prefix = inventory_prefix.trim_start_matches(&delimiter).to_string();
 
         if s3_prefix == delimiter || s3_prefix == format!(".{}", delimiter) {
@@ -185,6 +188,8 @@ impl DataSourceS3Plugin {
             let mut _i = 0;
             let mut _list_retries = 0;
             let mut _skipped_objects = 0;
+
+            // chunk_size = self.optimal_chunk_size;
 
             match list_obj_req.clone().send().await {
                 Err(err) => {
@@ -233,7 +238,8 @@ impl DataSourceS3Plugin {
                                 _i += 1;
 
                                 // If we have enough data for a chunk, process it
-                                if chunk_size_current >= chunk_size as i64 {
+                                if chunk_size_current >= self.optimal_chunk_size as i64 {
+
                                     chunks_processed += 1;
                                     
                                     // Process the current batch
@@ -276,7 +282,7 @@ impl DataSourceS3Plugin {
                 }
             }
         }
-        
+
     }
 
     /// Download an S3 object with exponential backoff retry logic
@@ -334,6 +340,7 @@ impl DataSourceS3Plugin {
                 bytes_per_second: 0,
                 active_cores: self.active_threads,
                 queue_length: 0,
+                optimal_chunk_size: self.optimal_chunk_size,
             };
         }
         
@@ -461,12 +468,14 @@ impl DataSourceS3Plugin {
         
         // Update our active threads count
         self.active_threads = metrics.active_cores;
-        
+        self.optimal_chunk_size = metrics.optimal_chunk_size;
+
         // Return the metrics for the caller
         ThroughputMetrics {
             bytes_per_second: metrics.bytes_per_second,
             active_cores: metrics.active_cores,
             queue_length: metrics.queue_length,
+            optimal_chunk_size: metrics.optimal_chunk_size,
         }
     }
 }

@@ -47,7 +47,8 @@ use crate::cli::{CLI_MODE, Mode};
 use crate::converters::skippr_arrow::convert_skippr_to_arrow;
 use crate::plugins::DataOutputPlugin;
 use std::collections::VecDeque;
-
+use libc::rand;
+use rand::{random, Rng};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Deadletter {
@@ -120,6 +121,7 @@ pub struct ThroughputMetrics {
     pub bytes_per_second: u64,
     pub active_cores: usize,
     pub queue_length: usize,
+    pub optimal_chunk_size: usize,
 }
 
 /// Main struct for managing ingestion of data
@@ -128,7 +130,7 @@ pub struct Ingest {
     thread_pool: Arc<ThreadPool>,
     num_cpus: usize,
     tx: Sender<u64>,
-    active_count: Arc<AtomicUsize>,
+    active_count: Arc<AtomicUsize>, // Track total number of active threads
     queue_length: Arc<AtomicUsize>,  // Track total number of queued tasks
     schema_hashes: DashMap<String, SchemaHash>,
     analyse_schema: AnalyseSchema,
@@ -139,6 +141,10 @@ pub struct Ingest {
     queue_lock: Arc<RwLock<()>>,
     is_shutting_down: Arc<AtomicUsize>, // Flag to indicate shutdown in progress
     max_queue_length: usize, // Maximum number of tasks to queue
+    optimal_chunk_size: Arc<AtomicUsize>,
+    throughput_history: Arc<RwLock<VecDeque<(Instant, u64)>>>, // Track throughput over time
+    // last_adjustment: Arc<RwLock<Instant>>, // Track when we last adjusted chunk size
+    // adjustment_cooldown: Duration, // Minimum time between adjustments
 }
 
 impl Drop for Ingest {
@@ -160,12 +166,13 @@ impl Ingest {
         };
         
         println!("Starting with {} optimized threads for ingest", num_cpus);
-        
+
         let (tx, rx) = channel();
         let tx_clone = tx.clone();
         let active_count = Arc::new(AtomicUsize::new(0));
         let active_count_clone = active_count.clone();
         let queue_length = Arc::new(AtomicUsize::new(0));
+        let optimal_chunk_size = Arc::new(AtomicUsize::new(5_000_000));
         let queue_length_clone = queue_length.clone();
         let task_queue: Arc<RwLock<VecDeque<IngestTask>>> = Arc::new(RwLock::new(VecDeque::new()));
         let task_queue_clone = task_queue.clone();
@@ -188,7 +195,8 @@ impl Ingest {
                 //     println!("Shutting down monitoring thread");
                 //     break;
                 // }
-                
+
+
                 active_count_clone.fetch_sub(1, AcqRel);
                 queue_length_clone.fetch_sub(1, AcqRel);
 
@@ -247,7 +255,7 @@ impl Ingest {
                             
                             // Process the batch
                             Ingest::process_batch(&datas_clone, &offset_db_clone, &mut schema_hashes, handle, shared_output_clone);
-                            
+
                             // Don't panic if sending fails (channel might be closed during shutdown)
                             let _ = tx.send(0);
                         });
@@ -276,6 +284,10 @@ impl Ingest {
         let throughput_lock = Arc::new(RwLock::new(()));
         let window_size = Duration::from_secs(5); // 5 second window for throughput calculation
 
+        let throughput_history = Arc::new(RwLock::new(VecDeque::with_capacity(100)));
+        let last_adjustment = Arc::new(RwLock::new(Instant::now()));
+        // let adjustment_cooldown = Duration::from_secs(10); // 10 second cooldown between adjustments
+
         Ingest {
             num_cpus,
             thread_pool,
@@ -291,6 +303,10 @@ impl Ingest {
             queue_lock,
             is_shutting_down,
             max_queue_length,
+            optimal_chunk_size,
+            throughput_history,
+            // last_adjustment,
+            // adjustment_cooldown,
         }
     }
 
@@ -373,6 +389,93 @@ impl Ingest {
         (total_bytes as f64 / duration) as u64
     }
 
+    /**
+     * Optimise the IngestTask chunk size to keep all CPU cores busy and ensure we're queueing the right amount of tasks.
+     * Reduce the chunk size if we have lest active_tasks than cores or the queue isn't full.
+     * Increase the chunk size if we have more active_tasks than cores and a full queue.
+     */
+    fn get_optmial_chunk_size(&self) {
+
+        let now= Instant::now();
+
+        let active_cores = self.active_count.load(Ordering::Acquire);
+        let queue_length = self.queue_length.load(Ordering::Acquire);
+        let current_throughput = self.get_current_throughput();
+        let current_chunk_size = self.optimal_chunk_size.load(Ordering::Acquire);
+        let optimal_chunk_size_min = 1_000_000;
+
+        // Update throughput history
+        {
+            let mut history = self.throughput_history.write().unwrap();
+            history.push_back((now, current_throughput));
+            
+            // Keep only last 10 measurements
+            while history.len() > 10 {
+                history.pop_front();
+            }
+        }
+
+        // Calculate throughput trend
+        let throughput_trend = {
+            let history = self.throughput_history.read().unwrap();
+            if history.len() < 2 {
+                0.0
+            } else {
+                let oldest = history.front().unwrap();
+                let newest = history.back().unwrap();
+                let time_diff = newest.0.duration_since(oldest.0).as_secs_f64();
+                if time_diff == 0.0 {
+                    0.0
+                } else {
+                    (newest.1 as f64 - oldest.1 as f64) / time_diff
+                }
+            }
+        };
+
+        let mut adjustment_factor = 1.0; // Default to no change
+
+        // Only adjust if we're at capacity
+        if active_cores >= self.num_cpus && queue_length >= self.max_queue_length {
+
+            // Randomly check throughput trend to avoid oscillation to avoid oscillation
+            if random::<u64>() % (*self.num_cpus as u64 * 2) == 0 {
+
+                if throughput_trend > 0.0 {
+                    // Throughput is increasing, continue increasing chunk size
+                    adjustment_factor = 1.1;
+                } else if throughput_trend < 0.0 {
+                    // Throughput is decreasing, reduce chunk size
+                    adjustment_factor = 0.9;
+                }
+
+            }
+        } else if active_cores < self.num_cpus && queue_length < ( self.max_queue_length as f32 / 0.2) as  usize {
+            // Reduce chunk size if we have capacity
+            adjustment_factor = 0.9;
+        }
+
+
+        let mut optimal_chunk_size = (current_chunk_size as f64 * adjustment_factor) as usize;
+
+        if optimal_chunk_size < optimal_chunk_size_min {
+            optimal_chunk_size = optimal_chunk_size_min;
+        }
+
+        if current_chunk_size != optimal_chunk_size {
+            println!("Optimising chunk size: active_cores: {}, active_tasks: {}, throughput: {}/s, trend: {:.2}, optimal_chunk_size: {} from {}, adjustment_factor: {}",
+                     active_cores,
+                     queue_length,
+                     Helpers::human_readable_size(current_throughput),
+                     throughput_trend,
+                     Helpers::human_readable_size(optimal_chunk_size as u64),
+                     Helpers::human_readable_size(current_chunk_size as u64),
+                     adjustment_factor
+            );
+            
+            self.optimal_chunk_size.store(optimal_chunk_size, Ordering::Release);
+            // *self.last_adjustment.write().unwrap() = now;
+        }
+    }
 
     /// Add a file to the ingestion queue
     /// 
@@ -453,6 +556,7 @@ impl Ingest {
                         bytes_per_second: self.get_current_throughput(),
                         active_cores: self.active_count.load(Ordering::Acquire),
                         queue_length: self.queue_length.load(Ordering::Acquire),
+                        optimal_chunk_size: self.optimal_chunk_size.load(Ordering::Acquire),
                     };
                 }
             }
@@ -497,6 +601,7 @@ impl Ingest {
                 
                 // Update throughput metrics // not perfect as we're not waiting for the task to finish
                 self.update_throughput(batch_bytes);
+
                 
             } else {
                 // Queue the task for later processing
@@ -509,7 +614,12 @@ impl Ingest {
                 
                 // Increment queue length when adding to queue
                 self.queue_length.fetch_add(1, Ordering::Acquire);
+
+                // Update throughput metrics // not perfect as we're not waiting for the task to finish
+                self.update_throughput(batch_bytes);
             }
+
+            self.get_optmial_chunk_size();
 
             // Get current metrics for logging
             let current_queue_length = self.queue_length.load(Ordering::Acquire);
@@ -529,6 +639,7 @@ impl Ingest {
                 bytes_per_second: self.get_current_throughput(),
                 active_cores: current_active_threads,
                 queue_length: current_queue_length,
+                optimal_chunk_size: self.optimal_chunk_size.load(Ordering::Acquire),
             }
         }
     }
