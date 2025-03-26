@@ -206,6 +206,7 @@ impl DataSourceLocalFilePlugin {
                                     current_batch.push(IngestBatch {
                                         offset_key: offset_key.clone(),
                                         data: ingest_data,
+                                        bytes: _batch_bytes as usize
                                     });
 
                                     if !current_batch.is_empty() {
@@ -236,6 +237,7 @@ impl DataSourceLocalFilePlugin {
                                             current_batch.push(IngestBatch {
                                                 offset_key: offset_key.clone(),
                                                 data: ingest_data,
+                                                bytes: _batch_bytes as usize
                                             });
                                         }
 
@@ -269,6 +271,7 @@ impl DataSourceLocalFilePlugin {
                                             current_batch.push(IngestBatch {
                                                 offset_key: offset_key.clone(),
                                                 data: ingest_data,
+                                                bytes: _batch_bytes as usize
                                             });
                                         }
 
@@ -317,6 +320,7 @@ impl DataSourceLocalFilePlugin {
                                                 current_batch.push(IngestBatch {
                                                     offset_key: offset_key.clone(),
                                                     data: ingest_data,
+                                                    bytes: _batch_bytes as usize
                                                 });
 
                                                 tx.unbounded_send(current_batch.clone()).unwrap();
@@ -359,6 +363,7 @@ impl DataSourceLocalFilePlugin {
                                             let batch = IngestBatch {
                                                 offset_key: offset_key.clone(),
                                                 data: ingest_data.clone(),
+                                                bytes: _batch_bytes as usize
                                             };
                                             let current_batch: Vec<IngestBatch> = vec![batch];
                                             tx.unbounded_send(current_batch).unwrap();
@@ -371,6 +376,7 @@ impl DataSourceLocalFilePlugin {
                                         let batch = IngestBatch {
                                             offset_key: offset_key.clone(),
                                             data: ingest_data,
+                                            bytes: _batch_bytes as usize
                                         };
                                         let current_batch: Vec<IngestBatch> = vec![batch];
                                         tx.unbounded_send(current_batch).unwrap();

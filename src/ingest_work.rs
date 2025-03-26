@@ -63,6 +63,7 @@ pub struct Deadletter {
 pub struct IngestBatch {
     pub(crate) offset_key: OffsetKey,
     pub(crate) data: String,
+    pub(crate) bytes: usize,
 }
 
 // Bare metal platforms usually have very small amounts of RAM
@@ -562,7 +563,7 @@ impl Ingest {
             }
 
             // Calculate total bytes in this batch
-            let batch_bytes: u64 = datas.iter().map(|data| data.data.len() as u64).sum();
+            let batch_bytes = datas.iter().map(|v| v.bytes as u64).sum();
             
             // Check if we need to wait before adding more to the queue
             let mut current_queue_length = self.queue_length.load(Ordering::Acquire);

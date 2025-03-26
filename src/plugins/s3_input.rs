@@ -250,7 +250,8 @@ impl DataSourceS3Plugin {
                                         &s3_bucket,
                                         &outputs,
                                         &offsets_clone,
-                                        shared_output.clone()
+                                        shared_output.clone(),
+                                        chunk_size_current
                                     ).await;
                                     
                                     outputs.clear();
@@ -277,7 +278,8 @@ impl DataSourceS3Plugin {
                                 &s3_bucket,
                                 &outputs,
                                 &offsets_clone,
-                                shared_output.clone()
+                                shared_output.clone(),
+                                chunk_size_current
                             ).await;
                         }
                         break 'outer;
@@ -337,6 +339,7 @@ impl DataSourceS3Plugin {
         keys: &Vec<String>,
         offsets: &Arc<Offsets>,
         shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
+        chunk_size_current: i64
     ) -> ThroughputMetrics {
         if keys.is_empty() {
             return ThroughputMetrics {
@@ -438,6 +441,7 @@ impl DataSourceS3Plugin {
                             partition: key,
                         },
                         data: decompressed_data,
+                        bytes: chunk_size_current as usize,
                     });
                 }
             }).await.unwrap();
@@ -458,6 +462,7 @@ impl DataSourceS3Plugin {
                             partition: key,
                         },
                         data: str_data,
+                        bytes: chunk_size_current as usize,
                     });
                 }
             }).await.unwrap();
