@@ -235,10 +235,13 @@ impl DataSourceS3Plugin {
                             if Some(true) != has_offsets {
                                 outputs.push(object_key.to_string());
                                 chunk_size_current += object.size().unwrap_or_default();
+                                println!("Object Size: {}, Chunk Size: {}, Optimal Chunk Size: {}", Helpers::human_readable_size(object.size().unwrap_or_default() as u64), Helpers::human_readable_size(chunk_size_current as u64), Helpers::human_readable_size(self.optimal_chunk_size as u64));
                                 _i += 1;
 
                                 // If we have enough data for a chunk, process it
                                 if chunk_size_current >= self.optimal_chunk_size as i64 {
+
+                                    println!("Processing chunk of {} objects", _i);
 
                                     chunks_processed += 1;
                                     
