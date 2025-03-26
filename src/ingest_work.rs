@@ -183,10 +183,11 @@ impl Ingest {
         thread_pool.execute(move || {
             while let Ok(_) = rx.recv() {
                 // Check if we're shutting down
-                if is_shutting_down_clone.load(Ordering::SeqCst) > 0 {
-                    println!("Shutting down monitoring thread");
-                    break;
-                }
+                // if is_shutting_down_clone.load(Ordering::SeqCst) > 0 {
+                //     self.wait_for_completion();
+                //     println!("Shutting down monitoring thread");
+                //     break;
+                // }
                 
                 active_count_clone.fetch_sub(1, AcqRel);
                 queue_length_clone.fetch_sub(1, AcqRel);

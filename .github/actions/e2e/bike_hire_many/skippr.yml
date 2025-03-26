@@ -7,7 +7,7 @@ pipelines:
   bike_hire_many2:
     auto_approve: yes
     env: test
-    buffer_threshold_bytes: 20000000
+    buffer_threshold_bytes: 10000000
     buffer_threshold_seconds: 600
     input: data_inputs.s3_bike_hire
     output: data_outputs.test_datalake
