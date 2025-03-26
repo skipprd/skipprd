@@ -276,25 +276,7 @@ impl DataSourceS3Plugin {
                 }
             }
         }
-
-        // Wait for all remaining tasks to complete before ending
-        while self.active_threads > 0 {
-            println!("Waiting for {} remaining ingest tasks to complete...", self.active_threads);
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-
-        println!("Sync completed: {} chunks processed, final active threads: {}/{}, chunk size: {}", 
-            chunks_processed,
-            self.active_threads,
-            total_cpus,
-            Helpers::human_readable_size(chunk_size as u64)
-        );
         
-        // Print summary statistics
-        println!("Performance summary:");
-        println!("  - Chunk size: {}", Helpers::human_readable_size(chunk_size as u64));
-        println!("  - Chunks processed: {}", chunks_processed);
-        println!("  - Total objects: {}", _total_objects);
     }
 
     /// Download an S3 object with exponential backoff retry logic
