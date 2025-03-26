@@ -440,7 +440,7 @@ impl Ingest {
                         println!("Schema discovery complete, writing metadata to Skippr");
 
                         tokio::spawn(async move {
-                            pipeline_metadata.enabled = false;
+                            pipeline_metadata.enabled = true;
                             Config::set_metadata(&pipeline_metadata, false).await;
                             std::process::exit(0);
                         });
