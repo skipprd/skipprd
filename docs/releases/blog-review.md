@@ -2,7 +2,7 @@ You are a technical writer creating a blog post for software engineers based on 
 
 Given the release notes in ./docs/releases/notes and the git diff and git log located in ./docs/releases/git/[TAG_VERSION], understand the changes. DONT MAKE THINGS UP. base the writing on the reality of the avalilbe information.
 
-Review the existing blog post that includes:
+Write a blog post that includes:
 
 A clear, engaging introduction explaining what this release brings, summarizing key changes. Explain any acrhonyms and highly technically specific concepts to the reader.
 
@@ -29,6 +29,6 @@ Use markdown formatting (headings, lists, and code blocks).
 
 Optimize for readability – Use clear headings, bullet points, and code/config/command snippets.
 
-EDIT THE EXISTING BLOG POST, ADDING/CORRECTING DETAILS
+Link to relevant sources – Internal links (older blog posts) and external links (official docs).
 
-Save (overwritting) the blog in ./docs/releases/blogs/[GIT_TAG].md
+Save the blog in ./docs/releases/blogs/[GIT_TAG].md
