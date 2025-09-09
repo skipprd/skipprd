@@ -5,8 +5,20 @@ use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
 use serde_json::{Map, Value};
 use std::borrow::BorrowMut;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
+use once_cell::sync::Lazy;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+use std::cell::RefCell;
+
+thread_local! {
+    static CURRENT_NAMESPACE: RefCell<String> = RefCell::new(String::new());
+}
+
+static PER_NAMESPACE_STATS: Lazy<Mutex<HashMap<String, (usize, Instant)>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static SEEN_FIELDS_BY_NAMESPACE: Lazy<Mutex<HashMap<String, HashSet<String>>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 
 use crate::discover::evolution::Evolution;
@@ -68,6 +80,10 @@ pub fn ingest(
             }
         };
     }
+
+    CURRENT_NAMESPACE.with(|ns| {
+        *ns.borrow_mut() = namespace.to_string();
+    });
 
     let _i = 0;
 
@@ -896,7 +912,10 @@ pub fn discover_ingest(
     metadata: &mut HashMap<String, Metadata>,
     updated_schema: &mut String,
 ) -> String {
+    static TOTAL_NEW_FIELDS: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));
+
     let _foo: AnalyseSchema = AnalyseSchema { i: 0 };
+    let was_present = metadata.contains_key(field);
 
     let discoverd_data_type = "string".to_string().clone();
 
@@ -934,10 +953,58 @@ pub fn discover_ingest(
 
     // discoverd_data_type = metadata.get(field).unwrap().determined_type;
 
-    println!(
-        "Discovered new field: {} of type: {}{}{}",
-        field, metadata.get(field).unwrap().determined_type, if parent_field.is_some() { " of parent field: " } else { "" }, if parent_field.is_some() { parent_field.unwrap() } else { "" }
-    );
+    // Determine if this is a new field for the current process run and namespace
+    let ns = CURRENT_NAMESPACE.with(|ns| ns.borrow().clone());
+    let mut is_new_for_ns = false;
+    if !ns.is_empty() {
+        let mut seen = SEEN_FIELDS_BY_NAMESPACE.lock().unwrap();
+        let entry = seen.entry(ns.clone()).or_insert_with(HashSet::new);
+        // Compose a stable key using parent and field to reduce duplicates for nested structures
+        let key = match parent_field {
+            Some(p) if !p.is_empty() => format!("{}.{}", p, field),
+            _ => field.to_string(),
+        };
+        if !entry.contains(&key) {
+            entry.insert(key);
+            is_new_for_ns = true;
+        }
+    }
+
+    // Only log when first seen in this run for the namespace
+    if is_new_for_ns {
+        // Update global total
+        let _ = TOTAL_NEW_FIELDS.fetch_add(1, Ordering::Relaxed) + 1;
+
+        // Per-namespace stats and summaries
+        let mut stats = PER_NAMESPACE_STATS.lock().unwrap();
+        let entry = stats.entry(ns.clone()).or_insert((0, Instant::now()));
+
+        // Use the unique count from the seen set if available to avoid drift
+        let unique_count = SEEN_FIELDS_BY_NAMESPACE
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&ns).map(|s| s.len()))
+            .unwrap_or(entry.0);
+        entry.0 = unique_count;
+
+        // Suppress detailed logs after a small threshold; keep summaries
+        const DETAIL_LIMIT: usize = 50;
+        if entry.0 <= DETAIL_LIMIT {
+            println!(
+                "Discovered new field: {} of type: {}{}{}",
+                field,
+                metadata.get(field).unwrap().determined_type,
+                if parent_field.is_some() { " of parent field: " } else { "" },
+                if parent_field.is_some() { parent_field.unwrap() } else { "" }
+            );
+        }
+
+        let elapsed_ns = entry.1.elapsed();
+        if entry.0 % 100 == 0 || elapsed_ns >= Duration::from_secs(10) {
+            println!("Discovered {} new fields so far on namespace '{}'", entry.0, ns);
+            entry.1 = Instant::now();
+        }
+    }
 
     // let handle = tokio::runtime::Handle::current();
     // handle.enter();
