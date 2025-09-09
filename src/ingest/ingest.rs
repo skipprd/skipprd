@@ -1,4 +1,5 @@
 use crate::discover::date_formats::DateFormats;
+use chrono::{DateTime, Utc};
 use crate::discover::{AnalyseSchema, Metadata};
 use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;

@@ -1,8 +1,7 @@
 use aws_sdk_s3::{Client as S3Client, Error as S3Error};
 use aws_sdk_s3::primitives::ByteStream;
-use aws_sdk_s3::types::SdkError;
+use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::operation::get_object::GetObjectError;
-use aws_sdk_s3::operation::put_object::PutObjectError;
 use aws_sdk_s3::operation::delete_object::DeleteObjectError;
 use serde_json::Value;
 use std::env;

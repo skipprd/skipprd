@@ -97,7 +97,7 @@ pub fn discover_ingest(
 
     AnalyseSchema::determine_field_types(metadata, parent_data_type, flatten);
 
-    let discoverd_data_type = &metadata.get(field).unwrap().determined_type;
+    let discoverd_data_type = metadata.get(field).unwrap().determined_type.clone();
 
     // println!(
     //     "Discovered new field: '{}' of type: '{}'",
@@ -109,11 +109,11 @@ pub fn discover_ingest(
     // Derive parser kind once per field to avoid repeated string scans in ingest
     if discoverd_data_type == "date" {
         if let Some(meta) = metadata.get_mut(field) {
-            meta.date_parser_kind = Some(Self::derive_date_parser_kind(value, meta.timezone));
+            meta.date_parser_kind = Some(AnalyseSchema::derive_date_parser_kind(value, meta.timezone));
         }
     }
 
-    discoverd_data_type.clone()
+    discoverd_data_type
 }
 
 /**
@@ -1553,7 +1553,7 @@ impl AnalyseSchema {
         }
         // Check space separated with Z
         if value.contains(' ') && value.ends_with('Z') {
-            let format = DateFormats::Iso8601_SpaceZ;
+            let format = DateFormats::Iso8601SpaceZ;
             if let Ok(_) = Helpers::parse_date_from_string(value, format.as_str()) {
                 return Some(format.name());
             }
@@ -1568,7 +1568,7 @@ impl AnalyseSchema {
         }
         // Check space separated with offset
         if value.contains(' ') && (value.contains('+') || value.rfind('-').map(|i| i > 10).unwrap_or(false)) {
-            let format = DateFormats::Iso8601_SpaceOffset;
+            let format = DateFormats::Iso8601SpaceOffset;
             if let Ok(_) = Helpers::parse_date_from_string(value, format.as_str()) {
                 return Some(format.name());
             }

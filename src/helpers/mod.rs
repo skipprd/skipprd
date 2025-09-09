@@ -1,5 +1,5 @@
 #[allow(unused_imports)]
-use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc, FixedOffset};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc, FixedOffset, TimeZone};
 use chrono_tz::Tz;
 use memory_stats::memory_stats;
 use regex::Regex;
@@ -569,7 +569,8 @@ impl Helpers {
         // Fallback: parse naive and assume UTC offset
         if let Some(naive) = Self::slow_parse_naive_dt(date_str, format) {
             let offset = FixedOffset::east_opt(0).ok_or_else(|| "Invalid zero offset".to_string())?;
-            return Ok(chrono::DateTime::<FixedOffset>::from_local(naive, offset));
+            let fixed = offset.from_local_datetime(&naive).single().ok_or_else(|| "Ambiguous or nonexistent local time".to_string())?;
+            return Ok(fixed);
         }
 
         // Date-only
@@ -577,7 +578,8 @@ impl Helpers {
             if let Some(date) = Self::slow_parse_naive_date(date_str, format) {
                 let naive = date.and_hms_opt(0, 0, 0).unwrap_or_default();
                 let offset = FixedOffset::east_opt(0).ok_or_else(|| "Invalid zero offset".to_string())?;
-                return Ok(chrono::DateTime::<FixedOffset>::from_local(naive, offset));
+                let fixed = offset.from_local_datetime(&naive).single().ok_or_else(|| "Ambiguous or nonexistent local time".to_string())?;
+                return Ok(fixed);
             }
         }
 
@@ -586,8 +588,8 @@ impl Helpers {
 
     pub fn apply_timezone_to_naive(datetime: NaiveDateTime, timezone: &str) -> Result<DateTime<Utc>, String> {
         // Try fixed offset like +01:00 or -0500
-        if let Ok(offset) = FixedOffset::parse_from_str(timezone) {
-            let dt = DateTime::<FixedOffset>::from_local(datetime, offset);
+        if let Some(offset) = Helpers::parse_fixed_offset(timezone) {
+            let dt = offset.from_local_datetime(&datetime).single().ok_or_else(|| "Ambiguous or nonexistent local time".to_string())?;
             return Ok(dt.with_timezone(&Utc));
         }
         // Try named timezone via chrono-tz
@@ -597,6 +599,24 @@ impl Helpers {
                 .with_timezone(&Utc)),
             Err(_e) => Err(format!("Unknown timezone: {}", timezone)),
         }
+    }
+
+    #[inline(always)]
+    fn parse_fixed_offset(s: &str) -> Option<FixedOffset> {
+        let b = s.as_bytes();
+        if b.len() == 6 && (b[0] == b'+' || b[0] == b'-') && b[3] == b':' {
+            let sign = if b[0] == b'+' { 1 } else { -1 };
+            let hh = (b[1] - b'0') as i32 * 10 + (b[2] - b'0') as i32;
+            let mm = (b[4] - b'0') as i32 * 10 + (b[5] - b'0') as i32;
+            return FixedOffset::east_opt(sign * (hh * 3600 + mm * 60));
+        }
+        if b.len() == 5 && (b[0] == b'+' || b[0] == b'-') {
+            let sign = if b[0] == b'+' { 1 } else { -1 };
+            let hh = (b[1] - b'0') as i32 * 10 + (b[2] - b'0') as i32;
+            let mm = (b[3] - b'0') as i32 * 10 + (b[4] - b'0') as i32;
+            return FixedOffset::east_opt(sign * (hh * 3600 + mm * 60));
+        }
+        None
     }
 
     #[inline(always)]
@@ -622,7 +642,7 @@ impl Helpers {
 
     // Fast parse for YYYY-MM-DD{sep}HH:MM:SSZ (no millis)
     #[inline(always)]
-    fn fast_parse_z_no_millis(s: &str, sep: char) -> Option<DateTime<Utc>> {
+    pub(crate) fn fast_parse_z_no_millis(s: &str, sep: char) -> Option<DateTime<Utc>> {
         let b = s.as_bytes();
         if b.len() != 20 { return None; }
         if b[4] != b'-' || b[7] != b'-' { return None; }
@@ -642,7 +662,7 @@ impl Helpers {
 
     // Fast parse for YYYY-MM-DD{sep}HH:MM:SS±HH:MM (no millis)
     #[inline(always)]
-    fn fast_parse_offset_no_millis(s: &str, sep: char) -> Option<chrono::DateTime<FixedOffset>> {
+    pub(crate) fn fast_parse_offset_no_millis(s: &str, sep: char) -> Option<chrono::DateTime<FixedOffset>> {
         let b = s.as_bytes();
         if b.len() != 25 { return None; }
         if b[4] != b'-' || b[7] != b'-' { return None; }
@@ -662,38 +682,37 @@ impl Helpers {
         let date = chrono::NaiveDate::from_ymd_opt(year, month, day)?;
         let naive = date.and_hms_opt(hour, min, sec)?;
         let offset = FixedOffset::east_opt(offset_secs)?;
-        // Build FixedOffset by subtracting offset from UTC or using from_local and letting chrono interpret local; we need correct instant:
-        // Create a FixedOffset datetime by combining local wall time and offset
-        Some(chrono::DateTime::<FixedOffset>::from_local(naive, offset))
+        let dt = offset.from_local_datetime(&naive).single()?;
+        Some(dt)
     }
 
     #[cold]
-    fn slow_parse_rfc3339_utc(s: &str) -> Option<DateTime<Utc>> {
+    pub(crate) fn slow_parse_rfc3339_utc(s: &str) -> Option<DateTime<Utc>> {
         DateTime::parse_from_rfc3339(s).ok().map(|d| DateTime::<Utc>::from(d))
     }
 
     #[cold]
-    fn slow_parse_rfc3339_fixed(s: &str) -> Option<chrono::DateTime<FixedOffset>> {
+    pub(crate) fn slow_parse_rfc3339_fixed(s: &str) -> Option<chrono::DateTime<FixedOffset>> {
         chrono::DateTime::parse_from_rfc3339(s).ok()
     }
 
     #[cold]
-    fn slow_parse_format_utc(s: &str, fmt: &str) -> Option<DateTime<Utc>> {
+    pub(crate) fn slow_parse_format_utc(s: &str, fmt: &str) -> Option<DateTime<Utc>> {
         DateTime::parse_from_str(s, fmt).ok().map(|d| DateTime::<Utc>::from(d))
     }
 
     #[cold]
-    fn slow_parse_from_format_fixed(s: &str, fmt: &str) -> Option<chrono::DateTime<FixedOffset>> {
+    pub(crate) fn slow_parse_from_format_fixed(s: &str, fmt: &str) -> Option<chrono::DateTime<FixedOffset>> {
         chrono::DateTime::parse_from_str(s, fmt).ok()
     }
 
     #[cold]
-    fn slow_parse_naive_dt(s: &str, fmt: &str) -> Option<NaiveDateTime> {
+    pub(crate) fn slow_parse_naive_dt(s: &str, fmt: &str) -> Option<NaiveDateTime> {
         NaiveDateTime::parse_from_str(s, fmt).ok()
     }
 
     #[cold]
-    fn slow_parse_naive_date(s: &str, fmt: &str) -> Option<NaiveDate> {
+    pub(crate) fn slow_parse_naive_date(s: &str, fmt: &str) -> Option<NaiveDate> {
         NaiveDate::parse_from_str(s, fmt).ok()
     }
 

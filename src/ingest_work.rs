@@ -14,8 +14,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 
 
-use std::io::{BufWriter, Write};
-use std::ops::{Deref, DerefMut};
+use std::io::{BufWriter};
+use std::ops::{Deref};
 
 use std::process::exit;
 use std::string::ToString;
@@ -25,7 +25,7 @@ use threadpool::ThreadPool;
 use std::sync::mpsc::channel;
 extern crate num_cpus;
 use std::sync::mpsc::Sender;
-use std::sync::atomic::{AtomicUsize, Ordering, AtomicU64};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::atomic::Ordering::AcqRel;
 use dashmap::{DashMap};
 
@@ -47,8 +47,7 @@ use crate::cli::{CLI_MODE, Mode};
 use crate::converters::skippr_arrow::convert_skippr_to_arrow;
 use crate::plugins::DataOutputPlugin;
 use std::collections::VecDeque;
-use libc::rand;
-use rand::{random, Rng};
+use rand::{random};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Deadletter {
@@ -236,7 +235,7 @@ impl Ingest {
                 active_count_clone.fetch_sub(1, AcqRel);
                 queue_length_clone.fetch_sub(1, AcqRel);
 
-                let current_queue_length = queue_length_clone.load(Ordering::Acquire);
+                let _current_queue_length = queue_length_clone.load(Ordering::Acquire);
                 let current_active_threads = active_count_clone.load(Ordering::Acquire);
 
                 // println!("Task completed ({} tasks in queue, {}/{} active threads)",
@@ -474,7 +473,7 @@ impl Ingest {
         if active_cores >= self.num_cpus && queue_length >= self.max_queue_length {
 
             // Randomly check throughput trend to avoid oscillation to avoid oscillation
-            if random::<u64>() % (*self.num_cpus as u64 * 2) == 0 {
+            if random::<u64>() % (self.num_cpus as u64 * 2) == 0 {
 
                 if throughput_trend > 0.0 {
                     // Throughput is increasing, continue increasing chunk size
@@ -601,16 +600,16 @@ impl Ingest {
             let batch_bytes = ingest_batches.bytes;
             
             // Check if we need to wait before adding more to the queue
-            let mut current_queue_length = self.queue_length.load(Ordering::Acquire);
+            let mut _current_queue_length = self.queue_length.load(Ordering::Acquire);
             
             // Wait if queue is too full (but don't wait indefinitely)
-            let mut wait_attempts = 0;
-            while current_queue_length >= self.max_queue_length {
+            let mut _wait_attempts = 0;
+            while _current_queue_length >= self.max_queue_length {
                 std::thread::sleep(std::time::Duration::from_millis(200));
-                wait_attempts += 1;
+                _wait_attempts += 1;
                 
                 // Check again after waiting
-                current_queue_length = self.queue_length.load(Ordering::Acquire);
+                _current_queue_length = self.queue_length.load(Ordering::Acquire);
             }
             
             // Get current CPU utilization
@@ -681,7 +680,7 @@ impl Ingest {
         }
     }
 
-    pub(crate) fn deadletter(dl: Deadletter) {
+    pub(crate) fn deadletter(_dl: Deadletter) {
 
         // let mut deadletter_file = DEADLETTER_FILE.write();
         //
@@ -730,7 +729,7 @@ impl Ingest {
         let mut bytes: u64 = 0;
         let mut latest_timestamp: i64 = 0;
         let mut i: u64 = 0;
-        let mut j = 0;
+        let mut _j = 0;
         let mut d = 0;
         let mut x = 0;
         let mut batch_line: u64 = 0;
@@ -995,14 +994,10 @@ impl Ingest {
 
                                     println!("Updated schema for namespace: {}", skpr_namespace);
                                     
-                                    let mut default_message = Value::Null;
-                                    {
-                                        default_message = create_default_nested_message(&metadata.metadata.get(&skpr_namespace).unwrap().fields);
-                                    }
-
+                                    let _default_message = Value::Null;
                                     {
                                         let mut lock = DEFAULT_NESTED_MESSAGE.write();
-                                        lock.insert(skpr_namespace.clone(), default_message);
+                                        lock.insert(skpr_namespace.clone(), _default_message);
                                     }
 
                                     Ingest::prepare_arrow_schema_with_metadata(&skpr_namespace, &metadata.metadata, flatten).unwrap();
@@ -1176,7 +1171,7 @@ impl Ingest {
                     
                     buf_entry.records.push(ingest_record);
 
-                    j += 1;
+                    _j += 1;
                     
                 }
             }

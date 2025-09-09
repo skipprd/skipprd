@@ -1,6 +1,5 @@
 use std::collections::btree_map::BTreeMap;
 use crate::helpers::configuration::Config;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::json;
 
 use std::hash::{Hash};

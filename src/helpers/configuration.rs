@@ -9,9 +9,6 @@ use std::path::Path;
 use std::sync::{Arc};
 use yaml_rust::YamlLoader;
 
-use nix::libc::exit;
-
-use std::time::{Duration};
 use dashmap::DashMap;
 use ini::configparser::ini::Ini;
 use lazy_static::lazy_static;
@@ -20,13 +17,7 @@ use once_cell::sync::Lazy;
 // use aws_config::profile::profile_file::ProfileFileKind::Config;
 use serde_derive::{Deserialize};
 
-use serde_json::{json, Value};
-
-use reqwest::header::HeaderValue;
-
-
-use reqwest::header::{HeaderMap, HeaderName};
-use reqwest::{Client, StatusCode};
+use serde_json::{Value};
 
 use crate::discover::{Metadata, OutputMetadata, PipelineMetadata};
 use crate::{METADATA};

@@ -146,7 +146,7 @@ impl DataSourceS3Plugin {
         let mut current_chunk: Vec<String> = Vec::with_capacity(self.config.batch_size_bytes.unwrap_or(10_000_000) as usize);
         let mut _objects: Vec<Object> = Vec::with_capacity(max_list_objects as usize);
         let mut _continuation_token: Option<String> = Self::load_continuation_token();
-        let mut chunks_processed = 0;
+        let mut _chunks_processed = 0;
         let total_cpus = num_cpus::get();
 
         println!(
@@ -255,7 +255,7 @@ impl DataSourceS3Plugin {
 
                                         println!("Processing batch with {} in chunks", Helpers::human_readable_size(outputs.len() as u64));
 
-                                        chunks_processed += 1;
+                                        _chunks_processed += 1;
                                         
                                         // Process the current batch
                                         let _throughput_metrics = self.download_and_ingest(
@@ -286,7 +286,7 @@ impl DataSourceS3Plugin {
                             if !current_chunk.is_empty() {
                                 outputs.push(current_chunk);
                             }
-                            chunks_processed += 1;
+                            _chunks_processed += 1;
                             
                             // Process remaining items
                             let _throughput_metrics = self.download_and_ingest(
@@ -354,7 +354,7 @@ impl DataSourceS3Plugin {
         keys: &Vec<Vec<String>>,
         offsets: &Arc<Offsets>,
         shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
-        chunk_size_current: i64
+        _chunk_size_current: i64
     ) -> ThroughputMetrics {
         if keys.is_empty() {
             return ThroughputMetrics {
@@ -434,7 +434,7 @@ impl DataSourceS3Plugin {
             };
         }
 
-        let mut tasks_total_bytes: usize = 0;
+        let mut _tasks_total_bytes: usize = 0;
 
         // Process gzip files in a single blocking task
         if !gz_files.is_empty() {
@@ -457,7 +457,7 @@ impl DataSourceS3Plugin {
                     stream.read_to_string(&mut decompressed_data).unwrap();
 
                     let bytes = decompressed_data.len();
-                    tasks_total_bytes += bytes;
+                    _tasks_total_bytes += bytes;
 
                     let mut new_datas = Vec::new();
                     new_datas.extend(current_batch.datas.iter().cloned());
@@ -498,7 +498,7 @@ impl DataSourceS3Plugin {
                     let str_data = String::from_utf8(data_vec).unwrap();
 
                     let bytes = str_data.len();
-                    tasks_total_bytes += bytes;
+                    _tasks_total_bytes += bytes;
 
                     let mut new_datas = Vec::new();
                     new_datas.extend(current_batch.datas.iter().cloned());

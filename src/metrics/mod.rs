@@ -6,7 +6,7 @@ use chrono::{DateTime};
 use core::time::Duration;
 use std::collections::HashMap;
 use std::sync::Arc;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+ 
 use serde_derive::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::runtime;

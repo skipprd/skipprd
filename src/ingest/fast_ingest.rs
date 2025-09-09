@@ -18,7 +18,7 @@ use crate::ingest::ingest::{ResolvedFieldValue};
 #[allow(unused_imports)]
 use crate::discover::DateCandidate;
 #[allow(unused_imports)]
-use chrono::{FixedOffset, NaiveDateTime, Utc};
+use chrono::{FixedOffset, NaiveDateTime, Utc, DateTime};
 
 #[derive(Default)]
 pub struct IngestRecord {
