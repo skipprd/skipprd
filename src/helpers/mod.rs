@@ -15,9 +15,9 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 
 pub mod configuration;
-pub mod license;
 pub mod logger;
 pub mod offsets;
+pub mod s3;
 pub mod timed_rwlock;
 
 // let CLEAN_FIELD_CACHE = Arc::new(Mutex::new(HashMap<String, bool> = HashMap::new()));

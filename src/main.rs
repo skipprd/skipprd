@@ -66,7 +66,7 @@ use crate::helpers::configuration::{Config, PIPELINE_NAME};
 
 use crate::helpers::logger::{Logger, LogLevel};
 use crate::helpers::offsets::Offsets;
-use crate::helpers::license::HAS_LICENSE;
+
 use crate::plugins::athena::DataOutputAwsAthenaPlugin;
 
 use crate::plugins::s3_input::DataSourceS3Plugin;
@@ -924,13 +924,8 @@ pub async fn sync_output_plugin(plugin_name: &str, buffer_name: String) -> Resul
         //
         // }
         "Athena" => {
-            if *HAS_LICENSE.read() {
-                let plugin = DataOutputAwsAthenaPlugin::new(buffer_name).await;
-                Ok(Box::new(plugin) as Box<dyn DataOutputPlugin + Send + Sync>)
-            } else {
-                // println!("No license found for Athena output plugin. Visit https://skippr.io to get a license.");
-                Err(io::Error::new(io::ErrorKind::Other, "No license found for Athena output plugin. Visit https://skippr.io to get a license."))
-            }
+            let plugin = DataOutputAwsAthenaPlugin::new(buffer_name).await;
+            Ok(Box::new(plugin) as Box<dyn DataOutputPlugin + Send + Sync>)
         }
         "" => {
             println!("No Data {} plugin specified, defaulting to local file", buffer_name);

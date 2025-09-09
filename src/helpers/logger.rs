@@ -5,7 +5,7 @@ use serde_json::json;
 
 use std::hash::{Hash};
 
-use crate::helpers::license::{HAS_LICENSE, TENANT_ID};
+use crate::helpers::s3;
 use serde_derive::Serialize;
 use std::fmt;
 use std::fmt::Debug;
@@ -89,47 +89,12 @@ impl Logger {
         let workspace = Config::get_workspace_name();
         let pipeline = Config::get_pipeline_name();
 
-        let env = Config::get_pipeline_env();
-        let uri = if env != "prod" {
-            format!("https://metrics.{}.api.skippr.io", env)
-        } else {
-            String::from("https://metrics.api.skippr.io")
-        };
-
-        let mut default_api_key = "";
-
-        {
-            if !*HAS_LICENSE.read() {
-                default_api_key = "XxIVftJXN4LF6ARrRqJvKAsv30vhIZHR"
-            }
-        }
-
-        let mut token = Config::get_skippr_api_token();
-        if token.is_empty() {
-           token = default_api_key.to_string();
-        }
-
-        let mut headers = HeaderMap::new();
-        let auth_header = HeaderName::from_static("x-api-key");
-        headers.insert(auth_header, HeaderValue::from_str(&token).unwrap());
-
-        let client = reqwest::Client::builder()
-            .default_headers(headers)
-            // .timeout(Duration::from_secs(10))
-            .build()?;
-
-        let path = "";
-
-        let mut _tenant_id = "".to_string();
-        {
-            _tenant_id = TENANT_ID.read().clone();
-        }
+        let _tenant_id = Config::get_tenant_id();
 
         let mut _run_id = "".to_string();
         {
             _run_id = METRICS.read().run_id.clone();
         }
-        
         
         let data = json!({
             "logs": logs.iter().map(|(_time, log)| {
@@ -148,24 +113,16 @@ impl Logger {
             "exit_code": exit_code
         });
 
-        // println!("Posting data: {:?}", data);
+        // Upload logs to S3
+        let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
+        let s3_key = format!("skippr/{}/{}/logs/{}_{}.json", workspace, pipeline, timestamp, _run_id);
 
-        let response = client
-            .put(format!("{}/{}", uri, path))
-            .json(&data)
-            .send()
-            .await;
-
-        match response {
-            Ok(resp) => {
-                if resp.status().is_success() {
-                    // println!("Logs API Response: {:?}", resp);
-                } else {
-                    println!("Logs API Error: {:?}", resp);
-                }
+        match s3::put_json(&s3_key, &data).await {
+            Ok(_) => {
+                println!("Uploaded logs to S3: {}", s3_key);
             }
             Err(err) => {
-                println!("Logs API Error: {:?}", err);
+                println!("Failed to upload logs to S3: {:?}", err);
             }
         }
         

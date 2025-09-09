@@ -32,7 +32,7 @@ use crate::discover::{Metadata, OutputMetadata, PipelineMetadata};
 use crate::{METADATA};
 
 
-use crate::helpers::license::{HAS_LICENSE, LicenseChecker};
+use crate::helpers::s3;
 
 use crate::plugins::athena::{AwsAthena, DataOutputAwsAthenaPluginConfig};
 
@@ -54,6 +54,7 @@ const DEFAULT_CONFIG: &'static str = "NULL_VALUE";
 pub struct Skippr {
     pub api_token: Option<String>,
     pub workspace: Option<String>,
+    pub tenant_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -159,6 +160,7 @@ impl Config {
             skippr: Some(Skippr {
                 api_token: None,
                 workspace: None,
+                tenant_id: None,
             }),
             pipelines: HashMap::new(),
             data_inputs: None,
@@ -250,6 +252,7 @@ impl Config {
                     app_config.skippr = Some(Skippr {
                         workspace: Some(workspace),
                         api_token: Some(api_token),
+                        tenant_id: None,
                     });
                 }
             }
@@ -566,6 +569,7 @@ impl Config {
                 Skippr {
                     api_token: Some(token.clone()),
                     workspace: None,
+                    tenant_id: None,
                 }
             )).unwrap().api_token.as_ref().or(Some(&token)).unwrap().to_string();
 
@@ -1288,6 +1292,31 @@ impl Config {
         }
     }
 
+    pub fn get_tenant_id() -> String {
+        if Config::get_envcache("TENANT_ID") != "" {
+            return Config::get_envcache("TENANT_ID")
+        } else {
+            let config = Config::get();
+
+            let default_tenant_id = Config::getenv("TENANT_ID", "default");
+
+            let tenant_id = match config.skippr {
+                Some(skippr) => {
+                    match skippr.tenant_id.as_ref() {
+                        Some(tenant_id) => tenant_id.to_string(),
+                        None => default_tenant_id
+                    }
+                }
+                None => {
+                    default_tenant_id
+                }
+            };
+
+            Config::set_evncache("TENANT_ID", &tenant_id.clone());
+            tenant_id
+        }
+    }
+
     pub fn get_full_namespace_name() -> String {
         // let mut helpers = Helpers { CLEAN_FIELD_CACHE: Default::default() };
 
@@ -1315,11 +1344,6 @@ impl Config {
 
     pub async fn get_metadata() -> Result<PipelineMetadata, bool> {
 
-        if !*HAS_LICENSE.read() {
-            // println!("ERROR: No license found, please set the 'LICENSE' environment variable.");
-            return Err(false);
-        }
-
         if Config::get_transform_batch_time_unit() != ""
             && Config::get_transform_batch_time_fields() == ""
         {
@@ -1335,104 +1359,65 @@ impl Config {
         let metadata_dir = format!("{}/metadata/skippr_{}/workspace_{}/pipeline_{}", data_dir, env, workspace, pipeline);
         let metadata_path = format!("{}/metadata.json", metadata_dir);
 
-        let pipeline_metadata: Result<PipelineMetadata, bool> = match fs::metadata(&metadata_path) {
-            Ok(metadata) => {
-                if metadata.is_file() {
-                    let file = File::open(&metadata_path).unwrap();
-                    let reader = BufReader::new(file);
-                    let metadata: PipelineMetadata = serde_json::from_reader(reader).unwrap();
-                    Ok(metadata)
-                } else {
-                    Err(false)
-                }
-            },
-            Err(_e) => {
-
-                println!("Metadata cache file not foun locally, fetching from Skippr SaaS");
-
-                let uri = if env != "prod" {
-                    format!("https://metadata.{}.api.skippr.io", env)
-                } else {
-                    String::from("https://metadata.api.skippr.io")
-                };
-                let token = Config::get_skippr_api_token();
-
-                let mut headers = HeaderMap::new();
-                let auth_header = HeaderName::from_static("x-api-key");
-                headers.insert(auth_header, HeaderValue::from_str(&token).unwrap());
-
-                let client = Client::builder().default_headers(headers).build().unwrap();
-
-                let path = format!(
-                    "workspace/{}/pipeline/{}/status/{}",
-                    workspace, pipeline, "approved"
-                );
-
-                let response = client
-                    .get(&format!("{}/{}", uri, path))
-                    .timeout(Duration::from_secs(15))
-                    .send()
-                    .await;
-
-                let pipeline_metadata: Result<PipelineMetadata, bool> = match response {
-                    Ok(resp) => match resp.status() {
-                        StatusCode::OK => {
-                            let json_result = resp.json::<PipelineMetadata>().await;
-                            match json_result {
-                                Ok(pipeline_metadata) => {
-                                    // Cache to local file
-                                    Config::set_metadata(&pipeline_metadata, false).await;
-                                    Ok(pipeline_metadata)
-                                },
-                                Err(_) => {
-                                    // Re-fetch the response as it's already moved
-                                    let resp = client
-                                        .get(&format!("{}/{}", uri, path))
-                                        .timeout(Duration::from_secs(15))
-                                        .send()
-                                        .await;
-
-                                    match resp {
-                                        Ok(resp) => {
-                                            // migrate to new PipelineMetadata format
-                                            let metadata_result = resp.json::<HashMap<String, crate::discover::Metadata>>().await;
-                                            match metadata_result {
-                                                Ok(metadata) => {
-                                                    println!("Migrating Skippr metadata format from v4 to v5");
-                                                    let pipeline_metadata = PipelineMetadata::from_metadata(metadata)?;
-                                                    // set metadata
-                                                    Config::set_metadata(&pipeline_metadata, false).await;
-                                                    Ok(pipeline_metadata)
-                                                },
-                                                Err(_) => Err(false),
-                                            }
-                                        },
-                                        Err(_) => Err(false),
-                                    }
-                                },
+        // Try S3 first, then fallback to local metadata if S3 is empty
+        let s3_key = format!("skippr/{}/{}/metadata/metadata.json", workspace, pipeline);
+        
+        let pipeline_metadata: Result<PipelineMetadata, bool> = match s3::get_json(&s3_key).await {
+            Ok(json_value) => {
+                match serde_json::from_value::<PipelineMetadata>(json_value) {
+                    Ok(pipeline_metadata) => {
+                        println!("Loaded metadata from S3");
+                        // Cache to local file
+                        Config::set_metadata(&pipeline_metadata, false).await;
+                        Ok(pipeline_metadata)
+                    },
+                    Err(_) => {
+                        println!("Failed to parse metadata from S3, trying local cache");
+                        // Fallback to local metadata
+                        match fs::metadata(&metadata_path) {
+                            Ok(local_metadata) => {
+                                if local_metadata.is_file() {
+                                    let file = File::open(&metadata_path).unwrap();
+                                    let reader = BufReader::new(file);
+                                    let metadata: PipelineMetadata = serde_json::from_reader(reader).unwrap();
+                                    println!("Loaded metadata from local cache, uploading to S3");
+                                    // Upload local metadata to S3 for future use
+                                    Config::set_metadata(&metadata, false).await;
+                                    Ok(metadata)
+                                } else {
+                                    Err(false)
+                                }
+                            },
+                            Err(_) => {
+                                println!("No local metadata found either, creating new metadata");
+                                Err(false)
                             }
                         }
-                        StatusCode::NOT_FOUND => {
+                    }
+                }
+            },
+            Err(_) => {
+                println!("Metadata not found in S3, checking local cache");
+                // Fallback to local metadata
+                match fs::metadata(&metadata_path) {
+                    Ok(local_metadata) => {
+                        if local_metadata.is_file() {
+                            let file = File::open(&metadata_path).unwrap();
+                            let reader = BufReader::new(file);
+                            let metadata: PipelineMetadata = serde_json::from_reader(reader).unwrap();
+                            println!("Loaded metadata from local cache, uploading to S3");
+                            // Upload local metadata to S3 for future use
+                            Config::set_metadata(&metadata, false).await;
+                            Ok(metadata)
+                        } else {
                             Err(false)
                         }
-                        err => unsafe {
-                            println!(
-                                "Metadata HTTP Error: {} - {:?}",
-                                err,
-                                resp.error_for_status()
-                            );
-                            // RUNNING.write().unwrap().store(false, Ordering::SeqCst);
-                            // Err(false)
-                            exit(1);
-                        },
                     },
-                    Err(err) => {
-                        println!("Metadata HTTP Error, shutting down to prevent metadata consistency issues: {:?}", err);
-                        panic!("Metadata HTTP Error: {:?}", err);
+                    Err(_) => {
+                        println!("No metadata found locally or in S3, creating new metadata");
+                        Err(false)
                     }
-                };
-
-                pipeline_metadata
+                }
             }
         };
 
@@ -1462,64 +1447,27 @@ impl Config {
     }
 
     pub async fn delete_metadata() {
-        if !*HAS_LICENSE.read() {
-            // println!("ERROR: No license found, please set the 'LICENSE' environment variable.");
-            return;
-        }
-
         let workspace = Self::get_workspace_name();
         let pipeline = Self::get_pipeline_name();
 
-        let env = Config::get_pipeline_env();
-        let uri = if env != "prod" {
-            format!("https://metadata.{}.api.skippr.io", env)
-        } else {
-            String::from("https://metadata.api.skippr.io")
-        };
-        let token = Config::get_skippr_api_token();
+        let s3_key = format!("skippr/{}/{}/metadata/metadata.json", workspace, pipeline);
 
-        let mut headers = HeaderMap::new();
-        let auth_header = HeaderName::from_static("x-api-key");
-        headers.insert(auth_header, HeaderValue::from_str(&token).unwrap());
-
-        let client = Client::builder().default_headers(headers).build().unwrap();
-
-        let path = format!(
-            "workspace/{}/pipeline/{}",
-            workspace, pipeline
-        );
-
-        let response = client
-            .delete(&format!("{}/{}", uri, path))
-            .timeout(Duration::from_secs(32))
-            .send()
-            .await;
-
-        match response {
-            Ok(resp) => match resp.status() {
-                StatusCode::OK => {
-                    println!("Deleted pipeline metadata in Skippr SaaS");
-                }
-                err => println!("Metadata HTTP Error: {:?}", err.as_str()),
-            },
+        match s3::delete_object(&s3_key).await {
+            Ok(_) => {
+                println!("Deleted pipeline metadata from S3: {}", s3_key);
+            }
             Err(err) => {
-                println!("Metadata HTTP Error: {:?}", err.to_string());
+                println!("Failed to delete metadata from S3: {:?}", err);
             }
         }
     }
 
     pub async fn set_metadata(pipeline_metadata: &PipelineMetadata, evolved: bool) {
 
-        if !*HAS_LICENSE.read() {
-            return;
-        }
-
         let workspace = Self::get_workspace_name();
         let pipeline = Self::get_pipeline_name();
 
         let data_dir = Config::get_data_dir();
-
-        // let uri = Config::getenv("SKIPPR_API_ENDPOINT", "");
         let env = Config::get_pipeline_env();
 
         let metadata_dir = format!("{}/metadata/skippr_{}/workspace_{}/pipeline_{}", data_dir, env, workspace, pipeline);
@@ -1534,7 +1482,7 @@ impl Config {
             ),
         }
 
-        // Clobber file
+        // Clobber local file
         let file = OpenOptions::new()
             .write(true)
             .truncate(true)
@@ -1545,63 +1493,18 @@ impl Config {
         let mut writer = BufWriter::new(file);
         writer.write_all(serde_json::to_string(&pipeline_metadata).unwrap().as_bytes()).unwrap();
         
-        let uri = if env != "prod" {
-            format!("https://metadata.{}.api.skippr.io", env)
-        } else {
-            String::from("https://metadata.api.skippr.io")
-        };
-
-        let token = Config::get_skippr_api_token();
-
-        let mut headers = HeaderMap::new();
-        let auth_header = HeaderName::from_static("x-api-key");
-
-        headers.insert(auth_header, HeaderValue::from_str(&token).unwrap());
-
-        let client = Client::builder().default_headers(headers).build().unwrap();
-
-        let path = "";
-
-        let auto_approve_evolution = Config::get_auto_approve();
-
-        let schema_status = if !evolved {
-            "approved"
-        } else if !auto_approve_evolution && evolved {
-            "pending"
-        } else {
-            "approved"
-        };
-
-        let data = json!({
-            "workspace": workspace,
-            "pipeline": pipeline,
-            "metadata": pipeline_metadata,
-            "status": schema_status
-        });
-
-        let response = client
-            .put(&format!("{}/{}", uri, path))
-            .json(&data)
-            .send()
-            .await;
-
-        // must succeed, else we exit to avoid writing data with schema inconsistency
-        match response {
-            Ok(resp) => {
-                match resp.status() {
-                    StatusCode::OK => {
-                        println!("Updated pipeline metadata in Skippr SaaS");
-                    }
-                    err => unsafe {
-                        println!("Metadata HTTP Error: {:?}", err);
-                        exit(1);
-                    },
-                };
+        // Upload to S3
+        let s3_key = format!("skippr/{}/{}/metadata/metadata.json", workspace, pipeline);
+        let json_value = serde_json::to_value(pipeline_metadata).unwrap();
+        
+        match s3::put_json(&s3_key, &json_value).await {
+            Ok(_) => {
+                println!("Updated pipeline metadata in S3: {}", s3_key);
             }
-            Err(err) =>  unsafe {
-                println!("Metadata HTTP Error: {:?}", err);
-                exit(1);
-            },
+            Err(err) => {
+                println!("Failed to upload metadata to S3: {:?}", err);
+                // Don't exit here, just log the error
+            }
         }
 
         if evolved {
@@ -1616,7 +1519,7 @@ impl Config {
 
     pub async fn sync_schema(metadata: &HashMap<String, Metadata>) {
 
-        if *HAS_LICENSE.read() {
+        {
             let flatten = Config::get_transform_flatten_events();
 
             for (namespace, schema) in metadata.into_iter() {
@@ -1642,22 +1545,13 @@ impl Config {
                     AwsAthena::create_or_update_schema(&namespace, &__output_metadata).await;
                 }
             }
-        } else {
-            println!("No license found for AWS Glue schema plugin. Visit https://skippr.io to get a license.");
         }
 
     }
 
     pub async fn init() {
 
-        let mut _license = LicenseChecker::new();
-        match _license.get_license().await {
-            Ok(_license) => {}
-            Err(err) => unsafe {
-                println!("Error: {}", err);
-                exit(1);
-            }
-        }
+
         
         let data_dir = Config::get_data_dir();
         let ingest_dir = &format!("{}/ingest_buffer", data_dir);

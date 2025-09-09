@@ -14,7 +14,7 @@ use crate::buffer::ingest_buffer::WalIndexMetrics;
 
 use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
-use crate::helpers::license::{HAS_LICENSE, TENANT_ID};
+use crate::helpers::s3;
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::{METRICS, RUNNING};
 
@@ -246,41 +246,7 @@ impl Metrics {
         let workspace = Config::get_workspace_name();
         let pipeline = Config::get_pipeline_name();
 
-        let env = Config::get_pipeline_env();
-        let _uri = if env != "prod" {
-            format!("https://metrics.{}.api.skippr.io", env)
-        } else {
-            String::from("https://metrics.api.skippr.io")
-        };
-
-        let mut default_api_key = "";
-
-        {
-            if !*HAS_LICENSE.read() {
-                default_api_key = "XxIVftJXN4LF6ARrRqJvKAsv30vhIZHR"
-            }
-        }
-
-        let mut token = Config::get_skippr_api_token();
-        if token == "" {
-            token = default_api_key.to_string();
-        }
-
-        let mut headers = HeaderMap::new();
-        let auth_header = HeaderName::from_static("x-api-key");
-        headers.insert(auth_header, HeaderValue::from_str(&token).unwrap());
-
-        let _client = reqwest::Client::builder()
-            .default_headers(headers)
-            // .timeout(Duration::from_secs(10))
-            .build()?;
-
-        let _path = "";
-
-        let tenant_id;
-        {
-            tenant_id = TENANT_ID.read().clone();
-        }
+        let tenant_id = Config::get_tenant_id();
 
         let wal_write_bytes_total = LAST_WAL_WRITE_BYTES_TOTAL.load(Ordering::SeqCst);
         let wal_write_bytes_current = metrics.wal_write_bytes_total - wal_write_bytes_total;
@@ -335,7 +301,7 @@ impl Metrics {
         let total_times: Vec<(String, Duration)> = TimedRwLock::<()>::get_total_wait_times();
         let wait_times: HashMap<String, Duration> = total_times.iter().cloned().collect();
 
-        let _data = json!({
+        let data = json!({
             "metrics": {
                 "ingested_total": metrics.messages_total,
                 "fixed_total": metrics.ingeted_slow_total,
@@ -383,43 +349,21 @@ impl Metrics {
             "exit_code": exit_code
         });
 
+        // Upload metrics to S3
+        let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
+        let s3_key = format!("skippr/{}/{}/metrics/{}_{}.json", workspace, pipeline, timestamp, metrics.run_id);
 
-        // let response = client
-        //     .put(format!("{}/{}", uri, path))
-        //     .json(&data)
-        //     .send()
-        //     .await?;
-        //
-        // match response.error_for_status() {
-        //     Ok(_resp) => {
-        //         // println!("Status HTTP Success: {:?}", resp);
-        //         // println!("Notified Metrics API");
-        //     }
-        //     Err(err) => {
-        //         match err.status() {
-        //             Some(status) => {
-        //                 match status.as_u16() {
-        //                     404 => {
-        //                         println!("Metrics API Not Found: {:?}", err);
-        //                     },
-        //                     403 => {
-        //                         println!("Metrics API Forbidden: Did you set the Skippr API Key?");
-        //                     },
-        //                     500 => {
-        //                         println!("Metrics API Internal Server Error: {:?}", err);
-        //                     },
-        //                     _ => {
-        //                         println!("Metrics HTTP Error: {:?}", err);
-        //                     }
-        //                 }
-        //             },
-        //             None => {
-        //                 println!("Metrics HTTP Error: {:?}", err);
-        //             }
-        //         }
-        //     }
-        // }
-
+        match s3::put_json(&s3_key, &data).await {
+            Ok(_) => {
+                // Only print on exit or error to reduce noise
+                if exit_code.is_some() {
+                    println!("Uploaded metrics to S3: {}", s3_key);
+                }
+            }
+            Err(err) => {
+                println!("Failed to upload metrics to S3: {:?}", err);
+            }
+        }
 
         Ok(())
     }
@@ -434,39 +378,7 @@ impl Metrics {
         let workspace = Config::get_workspace_name();
         let pipeline = Config::get_pipeline_name();
 
-        let env = Config::get_pipeline_env();
-        let _uri = if env != "prod" {
-            format!("https://metrics.{}.api.skippr.io", env)
-        } else {
-            String::from("https://metrics.api.skippr.io")
-        };
-
-        let mut default_api_key = "";
-
-        if !*HAS_LICENSE.read() {
-            default_api_key = "XxIVftJXN4LF6ARrRqJvKAsv30vhIZHR"
-        }
-
-        let mut token = Config::get_skippr_api_token();
-        if token == "" {
-            token = default_api_key.to_string();
-        }
-
-        let mut headers = HeaderMap::new();
-        let auth_header = HeaderName::from_static("x-api-key");
-        headers.insert(auth_header, HeaderValue::from_str(&token).unwrap());
-
-        let _client = reqwest::Client::builder()
-            .default_headers(headers)
-            // .timeout(Duration::from_secs(10))
-            .build()?;
-
-        let _path = "";
-
-        let tenant_id;
-        {
-            tenant_id = TENANT_ID.read().clone();
-        }
+        let tenant_id = Config::get_tenant_id();
 
         let current_time = chrono::Utc::now();
         let run_time_seconds = (current_time - metrics.start_time).num_seconds();
@@ -477,7 +389,7 @@ impl Metrics {
 
         let metrics_env_config = MetricsEnvConfig::new();
 
-        let _data = json!({
+        let data = json!({
             "config": metrics_env_config,
             "type": "config",
             "run_id": metrics.run_id,
@@ -490,44 +402,18 @@ impl Metrics {
             "version": VERSION.unwrap_or("unknown"),
         });
 
-        // println!("Posting data: {:?}", data);
+        // Upload config to S3
+        let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
+        let s3_key = format!("skippr/{}/{}/config/{}_{}.json", workspace, pipeline, timestamp, metrics.run_id);
 
-        // let response = client
-        //     .put(format!("{}/{}", uri, path))
-        //     .json(&data)
-        //     .send()
-        //     .await?;
-        //
-        // match response.error_for_status() {
-        //     Ok(_resp) => {
-        //         // println!("Status HTTP Success: {:?}", _resp);
-        //         // println!("Notified Metrics API");
-        //     }
-        //     Err(err) => {
-        //         match err.status() {
-        //             Some(status) => {
-        //                match status.as_u16() {
-        //                    404 => {
-        //                        println!("Config API Not Found: {:?}", err);
-        //                    },
-        //                    403 => {
-        //                        println!("Config API Forbidden: Did you set the Skippr API Key?");
-        //                    },
-        //                    500 => {
-        //                        println!("Config API Internal Server Error: {:?}", err);
-        //                    },
-        //                    _ => {
-        //                        println!("Config HTTP Error: {:?}", err);
-        //                    }
-        //                }
-        //             }
-        //             None => {
-        //                 println!("Config HTTP Error: {:?}", err);
-        //             }
-        //         }
-        //     }
-        // }
-
+        match s3::put_json(&s3_key, &data).await {
+            Ok(_) => {
+                println!("Uploaded config to S3: {}", s3_key);
+            }
+            Err(err) => {
+                println!("Failed to upload config to S3: {:?}", err);
+            }
+        }
 
         Ok(())
     }

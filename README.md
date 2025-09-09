@@ -100,7 +100,7 @@ SCHEMA_OUTPUT_PLUGIN_NAME=glue \
 SCHEMA_OUTPUT_GLUE_DATABASE_NAME=bikehire \
 DATA_OUTPUT_ATHENA_WORKGROUP_NAME=bikehire \
 PIPELINE_NAME=bikehire \
-SKIPPR_API_TOKEN=your_api_token \
+SKIPPR_S3_BUCKET=your-skippr-bucket \
 DATA_DIR=./data \
 APP_ENV=dev \
 cargo run sync
@@ -121,7 +121,7 @@ docker run --platform=linux/x86_64 \
 -e SCHEMA_OUTPUT_GLUE_DATABASE_NAME=test123 \
 -e DATA_OUTPUT_ATHENA_WORKGROUP_NAME=test123 \
 -e PIPELINE_NAME=test123 \
--e SKIPPR_API_TOKEN=your_api_token \
+-e SKIPPR_S3_BUCKET=your-skippr-bucket \
 -e DATA_DIR=./ \
 -e APP_ENV=test \
 -v `pwd`/data:/data \
