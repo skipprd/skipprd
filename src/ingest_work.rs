@@ -222,7 +222,7 @@ impl Ingest {
         let max_queue_length = num_cpus * 2;
         
         // This monitoring thread tracks task completion and processes queued tasks
-        thread_pool.execute(move || {
+        std::thread::spawn(move || {
             while let Ok(_) = rx.recv() {
                 // Check if we're shutting down
                 // if is_shutting_down_clone.load(Ordering::SeqCst) > 0 {
@@ -706,9 +706,12 @@ impl Ingest {
         let allowed_values = Config::get_partition_allowed_values();
 
         PARTITION_ALLOWED_VALUES_CACHE.with(|cache| {
-            cache.write().unwrap().extend(allowed_values.split(",").map(|v| {
-                Helpers::clean_field_name(v.to_string())
-            }).collect::<HashSet<String>>());
+            let mut w = cache.write().unwrap();
+            if w.is_empty() {
+                w.extend(allowed_values.split(",").map(|v| {
+                    Helpers::clean_field_name(v.to_string())
+                }).collect::<HashSet<String>>());
+            }
         });
 
 
@@ -756,6 +759,7 @@ impl Ingest {
         
         let mut buf: HashMap<(String, String, Option<i64>, String), IngestBufferBatch> = HashMap::with_capacity(32);
 
+        let pipeline_name_cached = Config::get_pipeline_name();
         for ingest_batch in datas.iter() {
             bytes += ingest_batch.data.len() as u64;
             
@@ -769,7 +773,8 @@ impl Ingest {
             } else if format == "xml" {
                 records = SerdeXml::deserialize(ingest_batch.data.as_bytes());
             } else {
-                records = SerdeJson::deserialize(&ingest_batch.data.clone());
+                // Avoid cloning batch data for JSON deserialization
+                records = SerdeJson::deserialize(ingest_batch.data.as_str());
             }
 
             if !entity_field_dot.is_empty() {
@@ -790,10 +795,7 @@ impl Ingest {
                     None => {
                         match record.as_array() {
                             Some(v) => {
-                                for item in v {
-                                    // println!("Item: {}", item);
-                                    unwrapped_records.push(item.clone());
-                                }
+                                unwrapped_records.extend(v.iter().cloned());
                             },
                             None => {
                                 let line_no = if batch_line == 0 || batch_line > ingest_batch.data.lines().count() as u64 {
@@ -871,7 +873,7 @@ impl Ingest {
                     let mut namesapce_cache =  PARSE_NAMESPACE_CACHE.with(|cache| cache.read().unwrap().clone());
                     let skpr_namespace = Helpers::parse_namespace_field(
                         &record,
-                        Config::get_pipeline_name(),
+                        pipeline_name_cached.clone(),
                         &mut namesapce_cache,
                     );
 
