@@ -39,6 +39,7 @@ pub struct DataOutputAwsAthenaPluginConfig {
     // pub time_bucket: Option<String>,
     pub athena_workgroup_name: String,
     pub glue_database_name: String,
+    pub athena_results_s3_bucket: String,
 
 }
 
@@ -91,6 +92,7 @@ impl DataOutputAwsAthenaPlugin {
                 s3_prefix: Config::getenv("DATA_OUTPUT_S3_PREFIX", ""),
                 athena_workgroup_name: Config::getenv("DATA_OUTPUT_ATHENA_WORKGROUP_NAME", ""),
                 glue_database_name: Config::getenv("SCHEMA_OUTPUT_GLUE_DATABASE_NAME", ""),
+                athena_results_s3_bucket: Config::getenv("DATA_OUTPUT_ATHENA_RESULTS_S3_BUCKET", ""),
             }
         }
     }
@@ -435,7 +437,7 @@ impl AwsAthena {
         let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
 
         let workgroup = config.athena_workgroup_name;
-        let bucket = config.s3_bucket;
+        let bucket = config.athena_results_s3_bucket;
         let path = config.s3_prefix;
         let path = path.trim_matches('/');
 
@@ -487,7 +489,7 @@ impl AwsAthena {
         let config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
 
         let workgroup = config.athena_workgroup_name;
-        let bucket = config.s3_bucket;
+        let bucket = config.athena_results_s3_bucket;
         let path = config.s3_prefix;
         let path = path.trim_matches('/');
 
