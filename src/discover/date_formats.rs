@@ -1,4 +1,4 @@
-use crate::discover::date_formats::DateFormats::{Asctime, Atom, AtomZ, Cookie, DateOnly, Iso8601, Iso8601_2, Iso8601_3, Iso8601_4, Iso8601_5, Mysql, Rfc1036, Rfc1123, Rfc2822, Rfc3339, Rfc3339_2, Rfc7231, Rfc822, Rfc850, Rss, W3c};
+use crate::discover::date_formats::DateFormats::{Asctime, Atom, AtomZ, Cookie, DateOnly, Iso8601, Iso8601_2, Iso8601_3, Iso8601_4, Iso8601_5, Iso8601_SpaceOffset, Iso8601_SpaceZ, Mysql, Rfc1036, Rfc1123, Rfc2822, Rfc3339, Rfc3339_2, Rfc7231, Rfc822, Rfc850, Rss, W3c};
 use std::slice::Iter;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -8,6 +8,8 @@ pub enum DateFormats {
     Iso8601_3,
     Iso8601_4,
     Iso8601_5,
+    Iso8601_SpaceZ,
+    Iso8601_SpaceOffset,
     Rfc2822,
     Rfc3339,
     Rfc3339_2,
@@ -28,8 +30,8 @@ pub enum DateFormats {
 
 impl DateFormats {
     pub fn iterator() -> Iter<'static, DateFormats> {
-        static FORMATS: [DateFormats; 21] = [
-            Iso8601, Iso8601_2, Iso8601_3, Iso8601_4, Iso8601_5, Rfc2822, Rfc3339, Rfc3339_2, Atom, AtomZ, Asctime, Cookie, Rfc822,
+        static FORMATS: [DateFormats; 23] = [
+            Iso8601, Iso8601_2, Iso8601_3, Iso8601_4, Iso8601_5, Iso8601_SpaceZ, Iso8601_SpaceOffset, Rfc2822, Rfc3339, Rfc3339_2, Atom, AtomZ, Asctime, Cookie, Rfc822,
             Rfc850, Rfc1036, Rfc1123, Rfc7231, Rss, W3c, Mysql, DateOnly,
         ];
         FORMATS.iter()
@@ -42,6 +44,8 @@ impl DateFormats {
             DateFormats::Iso8601_3 => "Iso8601_3",
             DateFormats::Iso8601_4 => "Iso8601_4",
             DateFormats::Iso8601_5 => "Iso8601_5",
+            DateFormats::Iso8601_SpaceZ => "Iso8601_SpaceZ",
+            DateFormats::Iso8601_SpaceOffset => "Iso8601_SpaceOffset",
             DateFormats::Rfc2822 => "Rfc2822",
             DateFormats::Rfc3339 => "Rfc3339",
             DateFormats::Rfc3339_2 => "Rfc3339_2",
@@ -68,6 +72,8 @@ impl DateFormats {
             DateFormats::Iso8601_3 => "%Y-%m-%dT%H:%M:%S.%f",
             DateFormats::Iso8601_4 => "%Y-%m-%dT%H:%M:%S.%f%z",
             DateFormats::Iso8601_5 => "%Y-%m-%dT%H:%M:%S.%f%z",
+            DateFormats::Iso8601_SpaceZ => "%Y-%m-%d %H:%M:%SZ",
+            DateFormats::Iso8601_SpaceOffset => "%Y-%m-%d %H:%M:%S%z",
             DateFormats::Rfc2822 => "%a, %d %b %Y %H:%M:%S %z",
             DateFormats::Rfc3339 => "%Y-%m-%dT%H:%M:%S.%f%z",
             DateFormats::Rfc3339_2 => "%Y-%m-%dT%H:%M:%S%z",
@@ -94,6 +100,8 @@ impl DateFormats {
             "Iso8601_3" => Ok(DateFormats::Iso8601_3),
             "Iso8601_4" => Ok(DateFormats::Iso8601_4),
             "Iso8601_5" => Ok(DateFormats::Iso8601_5),
+            "Iso8601_SpaceZ" => Ok(DateFormats::Iso8601_SpaceZ),
+            "Iso8601_SpaceOffset" => Ok(DateFormats::Iso8601_SpaceOffset),
             "Rfc2822" => Ok(DateFormats::Rfc2822),
             "Rfc3339" => Ok(DateFormats::Rfc3339),
             "Rfc3339_2" => Ok(DateFormats::Rfc3339_2),

@@ -358,6 +358,7 @@ mod tests {
             parent_type: "root".to_string(),
             types: HashMap::new(),
             date_candidate: None,
+            timezone: false,
             fields: Box::new(HashMap::new()),
             enabled: true,
             out_field_name: "int_field".to_string(),

@@ -500,16 +500,23 @@ pub fn fast_set_date(field: &str, value: &Value, metadata: &HashMap<String, Meta
             let fmt = &date_meta.format;
 
             match DateFormats::from_str(fmt) {
-                Ok(f) => match Helpers::parse_date_from_string(val, f.as_str()) {
-                    Ok(date) => {
-                        let millis = date.timestamp() * 1000;
-                        Ok(ResolvedFieldValue {
-                            field: output_field_name,
-                            value: millis.into(),
-                        })
-                    }
-                    Err(_) => {
-                        Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Could not parse date {} with format {} for field {}", val, fmt, field))))
+                Ok(f) => {
+                    let kind = parent_field_meta.date_parser_kind.clone();
+                    let tz = parent_field_meta.timezone;
+                    let millis = match (kind, tz) {
+                        (Some(crate::discover::DateParserKind::ZNoMsT), true) => Helpers::fast_parse_z_no_millis(val, 'T').map(|d| d.timestamp()*1000),
+                        (Some(crate::discover::DateParserKind::ZNoMsSpace), true) => Helpers::fast_parse_z_no_millis(val, ' ').map(|d| d.timestamp()*1000),
+                        (Some(crate::discover::DateParserKind::OffNoMsT), true) => Helpers::fast_parse_offset_no_millis(val, 'T').map(|d| d.timestamp()*1000),
+                        (Some(crate::discover::DateParserKind::OffNoMsSpace), true) => Helpers::fast_parse_offset_no_millis(val, ' ').map(|d| d.timestamp()*1000),
+                        (Some(crate::discover::DateParserKind::NaiveMysql), false) => Helpers::slow_parse_naive_dt(val, f.as_str()).map(|d| DateTime::<Utc>::from_naive_utc_and_offset(d, Utc).timestamp()*1000),
+                        (Some(crate::discover::DateParserKind::NaiveDateOnly), false) => Helpers::slow_parse_naive_date(val, "%Y-%m-%d").map(|d| DateTime::<Utc>::from_naive_utc_and_offset(d.and_hms_opt(0,0,0).unwrap_or_default(), Utc).timestamp()*1000),
+                        // Fallbacks
+                        (_, true) => Helpers::parse_date_from_string_with_tz(val, f.as_str()).ok().map(|d| d.timestamp()*1000),
+                        (_, false) => Helpers::parse_date_from_string(val, f.as_str()).ok().map(|d| d.timestamp()*1000),
+                    };
+                    match millis {
+                        Some(ms) => Ok(ResolvedFieldValue { field: output_field_name, value: ms.into() }),
+                        None => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Could not parse date {} with format {} for field {}", val, fmt, field)))),
                     }
                 },
                 Err(err) => {
@@ -763,6 +770,7 @@ mod tests {
                 parent_type: String::from("parent"),
                 fields: Box::new(HashMap::new()),
                 date_candidate: Some(date_candidate),
+                timezone: false,
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
                 out_field_name: String::from(field),

@@ -44,6 +44,21 @@ pub struct DateCandidate {
     pub(crate) format: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub enum DateParserKind {
+    ZNoMsT,
+    ZNoMsSpace,
+    ZMsT,
+    ZMsSpace,
+    OffNoMsT,
+    OffNoMsSpace,
+    OffMsT,
+    OffMsSpace,
+    NaiveMysql,
+    NaiveDateOnly,
+    RFC3339,
+}
+
 #[allow(dead_code)]
 pub fn discover_ingest(
     field: &str,
@@ -90,6 +105,13 @@ pub fn discover_ingest(
     // );
 
     *updated_schema = "yes".to_string();
+
+    // Derive parser kind once per field to avoid repeated string scans in ingest
+    if discoverd_data_type == "date" {
+        if let Some(meta) = metadata.get_mut(field) {
+            meta.date_parser_kind = Some(Self::derive_date_parser_kind(value, meta.timezone));
+        }
+    }
 
     discoverd_data_type.clone()
 }
@@ -212,6 +234,8 @@ pub struct Metadata {
     pub(crate) parent_type: String,
     pub(crate) fields: Box<HashMap<String, Metadata>>,
     pub(crate) date_candidate: Option<DateCandidate>,
+    pub(crate) date_parser_kind: Option<DateParserKind>,
+    pub(crate) timezone: bool,
     pub(crate) evolution: Box<HashMap<String, Evolution>>,
     pub(crate) enabled: bool,
     pub(crate) out_field_name: String,
@@ -230,6 +254,8 @@ impl Metadata {
             parent_type: "".to_string(),
             fields: Box::new(Default::default()),
             date_candidate: None,
+            date_parser_kind: None,
+            timezone: false,
             evolution: Box::new(Default::default()),
             enabled: true,
             out_field_name: "".to_string(),
@@ -1233,6 +1259,12 @@ impl AnalyseSchema {
                     data_type = "date".to_string();
                     // self.set_date_field_candidate(field, metadata, &format);
                     self.increment_date_field_candidate_count(field, metadata, &format.to_string());
+                    // If the string clearly includes a timezone indicator, mark metadata timezone as present
+                    if value_str.contains('Z') || value_str.rfind('+').is_some() || value_str.rfind('-').map(|i| i > 10).unwrap_or(false) {
+                        if let Some(meta) = metadata.get_mut(field) {
+                            meta.timezone = true;
+                        }
+                    }
                 }
 
                 // Already hit date field check limit. Force set type if valid date field.
@@ -1512,6 +1544,48 @@ impl AnalyseSchema {
                 return Some(format.name());
             }
         }
+        // Fractional seconds with Z
+        if value.contains('T') && value.contains('Z') && value.contains('.') {
+            let format = DateFormats::Iso8601;
+            if let Ok(_) = Helpers::parse_date_from_string(value, format.as_str()) {
+                return Some(format.name());
+            }
+        }
+        // Check space separated with Z
+        if value.contains(' ') && value.ends_with('Z') {
+            let format = DateFormats::Iso8601_SpaceZ;
+            if let Ok(_) = Helpers::parse_date_from_string(value, format.as_str()) {
+                return Some(format.name());
+            }
+        }
+        // Fractional seconds space separated Z (e.g., 2025-05-29 07:07:00.123Z)
+        if value.contains(' ') && value.ends_with('Z') && value.contains('.') {
+            // Not explicitly listed, but chrono accepts with %f
+            let fmt = "%Y-%m-%d %H:%M:%S.%fZ";
+            if let Ok(_) = Helpers::parse_date_from_string(value, fmt) {
+                return Some("Iso8601_SpaceZ");
+            }
+        }
+        // Check space separated with offset
+        if value.contains(' ') && (value.contains('+') || value.rfind('-').map(|i| i > 10).unwrap_or(false)) {
+            let format = DateFormats::Iso8601_SpaceOffset;
+            if let Ok(_) = Helpers::parse_date_from_string(value, format.as_str()) {
+                return Some(format.name());
+            }
+        }
+        // Fractional seconds with offset
+        if value.contains('T') && (value.contains('+') || value.rfind('-').map(|i| i > 10).unwrap_or(false)) && value.contains('.') {
+            let format = DateFormats::Iso8601_4; // %f%z
+            if let Ok(_) = Helpers::parse_date_from_string(value, format.as_str()) {
+                return Some(format.name());
+            }
+        }
+        if value.contains(' ') && (value.contains('+') || value.rfind('-').map(|i| i > 10).unwrap_or(false)) && value.contains('.') {
+            let fmt = "%Y-%m-%d %H:%M:%S.%f%z";
+            if let Ok(_) = Helpers::parse_date_from_string(value, fmt) {
+                return Some("Iso8601_SpaceOffset");
+            }
+        }
         
         // Check all remaining formats
         for format in DateFormats::iterator() {
@@ -1537,6 +1611,31 @@ impl AnalyseSchema {
         // println!("Value {} is not a date of format that's known", value);
 
         None
+    }
+
+    fn derive_date_parser_kind(sample_value: &serde_json::Value, expect_timezone: bool) -> DateParserKind {
+        let s = match sample_value.as_str() { Some(x) => x, None => return DateParserKind::RFC3339 };
+        let has_ms = s.contains('.');
+        let sep_t = s.contains('T');
+        let has_z = s.ends_with('Z');
+        let has_off = s.contains('+') || s.rfind('-').map(|i| i > 10).unwrap_or(false);
+        if expect_timezone {
+            match (has_ms, sep_t, has_z, has_off) {
+                (false, true,  true,  _    ) => DateParserKind::ZNoMsT,
+                (false, false, true,  _    ) => DateParserKind::ZNoMsSpace,
+                (true,  true,  true,  _    ) => DateParserKind::ZMsT,
+                (true,  false, true,  _    ) => DateParserKind::ZMsSpace,
+                (false, true,  _,     true ) => DateParserKind::OffNoMsT,
+                (false, false, _,     true ) => DateParserKind::OffNoMsSpace,
+                (true,  true,  _,     true ) => DateParserKind::OffMsT,
+                (true,  false, _,     true ) => DateParserKind::OffMsSpace,
+                _ => DateParserKind::RFC3339,
+            }
+        } else {
+            if s.len() == 19 && s.as_bytes()[4] == b'-' && s.as_bytes()[7] == b'-' && (s.as_bytes()[10] == b' ' || s.as_bytes()[10] == b'T') { return DateParserKind::NaiveMysql; }
+            if s.len() == 10 { return DateParserKind::NaiveDateOnly; }
+            DateParserKind::RFC3339
+        }
     }
 
     pub(crate) fn coerce_to_milli_seconds(v: Value) -> Value {
@@ -2839,6 +2938,7 @@ mod tests_flatten_metadata {
             parent_type: "record".to_string(),
             fields: Box::new(HashMap::new()),
             date_candidate: None,
+            timezone: false,
             evolution: Box::new(HashMap::new()),
             enabled: true,
             out_field_name: "child".to_string(),
@@ -2855,6 +2955,7 @@ mod tests_flatten_metadata {
             parent_type: "".to_string(),
             fields: fields,
             date_candidate: None,
+            timezone: false,
             evolution: Box::new(HashMap::new()),
             enabled: true,
             out_field_name: "parent".to_string(),
@@ -2890,6 +2991,7 @@ mod tests_flatten_metadata {
                 parent_type: "".into(),
                 fields: Box::new(HashMap::new()),
                 date_candidate: None,
+                timezone: false,
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
                 out_field_name: "".into(),
@@ -2906,6 +3008,7 @@ mod tests_flatten_metadata {
                 parent_type: "".into(),
                 fields: Box::new(HashMap::new()),
                 date_candidate: None,
+                timezone: false,
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
                 out_field_name: "contacts".into(),
@@ -2922,6 +3025,7 @@ mod tests_flatten_metadata {
                 parent_type: "".into(),
                 fields: Box::new(HashMap::new()),
                 date_candidate: None,
+                timezone: false,
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
                 out_field_name: "0".into(),
@@ -2938,6 +3042,7 @@ mod tests_flatten_metadata {
                 parent_type: "".into(),
                 fields: Box::new(HashMap::new()),
                 date_candidate: None,
+                timezone: false,
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
                 out_field_name: "name".into(),
@@ -2954,6 +3059,7 @@ mod tests_flatten_metadata {
                 parent_type: "".into(),
                 fields: Box::new(HashMap::new()),
                 date_candidate: None,
+                timezone: false,
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
                 out_field_name: "tel".into(),

@@ -1,5 +1,6 @@
 #[allow(unused_imports)]
-use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc, FixedOffset};
+use chrono_tz::Tz;
 use memory_stats::memory_stats;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
@@ -507,40 +508,193 @@ impl Helpers {
         None
     }
 
+    #[inline(always)]
     pub fn parse_date_from_string(date_str: &str, format: &str) -> Result<DateTime<Utc>, String> {
+        // Fast paths for common Z formats without fractional seconds
+        // %Y-%m-%dT%H:%M:%SZ and %Y-%m-%d %H:%M:%SZ
+        if (format == "%Y-%m-%dT%H:%M:%SZ" || format == "%Y-%m-%d %H:%M:%SZ")
+            && (date_str.len() == 20)
+        {
+            if let Some(dt) = Self::fast_parse_z_no_millis(date_str, format.as_bytes()[10] as char) {
+                return Ok(dt);
+            }
+        }
         // First try RFC3339 parsing if this looks like an ISO8601 format
         if date_str.contains('T') && (date_str.contains('Z') || date_str.contains('+')) {
-            if let Ok(date) = DateTime::parse_from_rfc3339(date_str) {
-                return Ok(DateTime::<Utc>::from(date));
-            }
+            if let Some(date) = Self::slow_parse_rfc3339_utc(date_str) { return Ok(date); }
         }
         
         // Try direct DateTime parsing with timezone
-        match DateTime::parse_from_str(date_str, format) {
-            Ok(date) => {
-                return Ok(DateTime::<Utc>::from(date));
-            },
-            Err(_) => {
-                // Try as NaiveDateTime (for formats without timezone)
-                match NaiveDateTime::parse_from_str(date_str, format) {
-                    Ok(date) => return Ok(DateTime::<Utc>::from_naive_utc_and_offset(date, Utc)),
-                    Err(_) => {
-                        // Try as NaiveDate (for date-only formats)
-                        if format.contains("%Y") && format.contains("%m") && format.contains("%d") && 
-                           !format.contains("%H") {
-                            match NaiveDate::parse_from_str(date_str, format) {
-                                Ok(date) => return Ok(DateTime::<Utc>::from_naive_utc_and_offset(
-                                    date.and_hms_opt(0, 0, 0).unwrap_or_default(), Utc)),
-                                Err(_) => {}
-                            }
-                        }
-                    }
-                }
+        if let Some(date) = Self::slow_parse_format_utc(date_str, format) { return Ok(date); }
+        // Try as NaiveDateTime (for formats without timezone)
+        if let Some(date) = Self::slow_parse_naive_dt(date_str, format) {
+            return Ok(DateTime::<Utc>::from_naive_utc_and_offset(date, Utc));
+        }
+        // Try as NaiveDate (for date-only formats)
+        if format.contains("%Y") && format.contains("%m") && format.contains("%d") && !format.contains("%H") {
+            if let Some(date) = Self::slow_parse_naive_date(date_str, format) {
+                return Ok(DateTime::<Utc>::from_naive_utc_and_offset(date.and_hms_opt(0, 0, 0).unwrap_or_default(), Utc));
             }
-        };
+        }
 
         // If all parsing attempts fail
         Err(format!("Could not parse date {} with format {}", date_str, format))
+    }
+
+    #[inline(always)]
+    pub fn parse_date_from_string_with_tz(date_str: &str, format: &str) -> Result<chrono::DateTime<FixedOffset>, String> {
+        // Fast paths for common offset-bearing formats without fractional seconds
+        // %Y-%m-%dT%H:%M:%S%z and %Y-%m-%d %H:%M:%S%z where %z is like +HH:MM
+        if (format == "%Y-%m-%dT%H:%M:%S%z" || format == "%Y-%m-%d %H:%M:%S%z")
+            && (date_str.len() == 25)
+        {
+            if let Some(dt) = Self::fast_parse_offset_no_millis(date_str, format.as_bytes()[10] as char) {
+                return Ok(dt);
+            }
+        }
+        // Also support Z variant fast-path here by promoting to +00:00
+        if (format == "%Y-%m-%dT%H:%M:%SZ" || format == "%Y-%m-%d %H:%M:%SZ") && date_str.len() == 20 {
+            if let Some(dt) = Self::fast_parse_z_no_millis(date_str, format.as_bytes()[10] as char) {
+                return Ok(dt.with_timezone(&FixedOffset::east_opt(0).unwrap()));
+            }
+        }
+        // Prefer RFC3339 if string indicates ISO style with offset/Z
+        if date_str.contains('T') && (date_str.contains('Z') || date_str.contains('+') || date_str.rfind('-').map(|i| i > 10).unwrap_or(false)) {
+            if let Some(date) = Self::slow_parse_rfc3339_fixed(date_str) { return Ok(date); }
+        }
+
+        // Try direct parse with explicit timezone in format
+        if let Some(date) = Self::slow_parse_from_format_fixed(date_str, format) { return Ok(date); }
+
+        // Fallback: parse naive and assume UTC offset
+        if let Some(naive) = Self::slow_parse_naive_dt(date_str, format) {
+            let offset = FixedOffset::east_opt(0).ok_or_else(|| "Invalid zero offset".to_string())?;
+            return Ok(chrono::DateTime::<FixedOffset>::from_local(naive, offset));
+        }
+
+        // Date-only
+        if format.contains("%Y") && format.contains("%m") && format.contains("%d") && !format.contains("%H") {
+            if let Some(date) = Self::slow_parse_naive_date(date_str, format) {
+                let naive = date.and_hms_opt(0, 0, 0).unwrap_or_default();
+                let offset = FixedOffset::east_opt(0).ok_or_else(|| "Invalid zero offset".to_string())?;
+                return Ok(chrono::DateTime::<FixedOffset>::from_local(naive, offset));
+            }
+        }
+
+        Err(format!("Could not parse date {} with format {}", date_str, format))
+    }
+
+    pub fn apply_timezone_to_naive(datetime: NaiveDateTime, timezone: &str) -> Result<DateTime<Utc>, String> {
+        // Try fixed offset like +01:00 or -0500
+        if let Ok(offset) = FixedOffset::parse_from_str(timezone) {
+            let dt = DateTime::<FixedOffset>::from_local(datetime, offset);
+            return Ok(dt.with_timezone(&Utc));
+        }
+        // Try named timezone via chrono-tz
+        match timezone.parse::<Tz>() {
+            Ok(tz) => Ok(tz.from_local_datetime(&datetime).single()
+                .ok_or_else(|| format!("Ambiguous or nonexistent local time for timezone {}", timezone))?
+                .with_timezone(&Utc)),
+            Err(_e) => Err(format!("Unknown timezone: {}", timezone)),
+        }
+    }
+
+    #[inline(always)]
+    fn parse_2digits(bytes: &[u8]) -> Option<u32> {
+        if bytes.len() != 2 { return None; }
+        let d0 = bytes[0].wrapping_sub(b'0');
+        let d1 = bytes[1].wrapping_sub(b'0');
+        if d0 > 9 || d1 > 9 { return None; }
+        Some((d0 as u32) * 10 + (d1 as u32))
+    }
+
+    #[inline(always)]
+    fn parse_4digits(bytes: &[u8]) -> Option<i32> {
+        if bytes.len() != 4 { return None; }
+        let mut v: i32 = 0;
+        for &b in bytes {
+            let d = b.wrapping_sub(b'0');
+            if d > 9 { return None; }
+            v = v * 10 + (d as i32);
+        }
+        Some(v)
+    }
+
+    // Fast parse for YYYY-MM-DD{sep}HH:MM:SSZ (no millis)
+    #[inline(always)]
+    fn fast_parse_z_no_millis(s: &str, sep: char) -> Option<DateTime<Utc>> {
+        let b = s.as_bytes();
+        if b.len() != 20 { return None; }
+        if b[4] != b'-' || b[7] != b'-' { return None; }
+        if b[10] != sep as u8 { return None; }
+        if b[13] != b':' || b[16] != b':' { return None; }
+        if b[19] != b'Z' { return None; }
+        let year = Self::parse_4digits(&b[0..4])?;
+        let month = Self::parse_2digits(&b[5..7])? as u32;
+        let day = Self::parse_2digits(&b[8..10])? as u32;
+        let hour = Self::parse_2digits(&b[11..13])? as u32;
+        let min = Self::parse_2digits(&b[14..16])? as u32;
+        let sec = Self::parse_2digits(&b[17..19])? as u32;
+        let date = chrono::NaiveDate::from_ymd_opt(year, month, day)?;
+        let naive = date.and_hms_opt(hour, min, sec)?;
+        Some(DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc))
+    }
+
+    // Fast parse for YYYY-MM-DD{sep}HH:MM:SS±HH:MM (no millis)
+    #[inline(always)]
+    fn fast_parse_offset_no_millis(s: &str, sep: char) -> Option<chrono::DateTime<FixedOffset>> {
+        let b = s.as_bytes();
+        if b.len() != 25 { return None; }
+        if b[4] != b'-' || b[7] != b'-' { return None; }
+        if b[10] != sep as u8 { return None; }
+        if b[13] != b':' || b[16] != b':' { return None; }
+        let sign = match b[19] { b'+' => 1i32, b'-' => -1i32, _ => return None };
+        if b[22] != b':' { return None; }
+        let year = Self::parse_4digits(&b[0..4])?;
+        let month = Self::parse_2digits(&b[5..7])? as u32;
+        let day = Self::parse_2digits(&b[8..10])? as u32;
+        let hour = Self::parse_2digits(&b[11..13])? as u32;
+        let min = Self::parse_2digits(&b[14..16])? as u32;
+        let sec = Self::parse_2digits(&b[17..19])? as u32;
+        let off_h = Self::parse_2digits(&b[20..22])? as i32;
+        let off_m = Self::parse_2digits(&b[23..25])? as i32;
+        let offset_secs = sign * (off_h * 3600 + off_m * 60);
+        let date = chrono::NaiveDate::from_ymd_opt(year, month, day)?;
+        let naive = date.and_hms_opt(hour, min, sec)?;
+        let offset = FixedOffset::east_opt(offset_secs)?;
+        // Build FixedOffset by subtracting offset from UTC or using from_local and letting chrono interpret local; we need correct instant:
+        // Create a FixedOffset datetime by combining local wall time and offset
+        Some(chrono::DateTime::<FixedOffset>::from_local(naive, offset))
+    }
+
+    #[cold]
+    fn slow_parse_rfc3339_utc(s: &str) -> Option<DateTime<Utc>> {
+        DateTime::parse_from_rfc3339(s).ok().map(|d| DateTime::<Utc>::from(d))
+    }
+
+    #[cold]
+    fn slow_parse_rfc3339_fixed(s: &str) -> Option<chrono::DateTime<FixedOffset>> {
+        chrono::DateTime::parse_from_rfc3339(s).ok()
+    }
+
+    #[cold]
+    fn slow_parse_format_utc(s: &str, fmt: &str) -> Option<DateTime<Utc>> {
+        DateTime::parse_from_str(s, fmt).ok().map(|d| DateTime::<Utc>::from(d))
+    }
+
+    #[cold]
+    fn slow_parse_from_format_fixed(s: &str, fmt: &str) -> Option<chrono::DateTime<FixedOffset>> {
+        chrono::DateTime::parse_from_str(s, fmt).ok()
+    }
+
+    #[cold]
+    fn slow_parse_naive_dt(s: &str, fmt: &str) -> Option<NaiveDateTime> {
+        NaiveDateTime::parse_from_str(s, fmt).ok()
+    }
+
+    #[cold]
+    fn slow_parse_naive_date(s: &str, fmt: &str) -> Option<NaiveDate> {
+        NaiveDate::parse_from_str(s, fmt).ok()
     }
 
     pub fn get_nested_value_from_dot_notation(
@@ -1248,6 +1402,7 @@ mod flattern_tests {
                 parent_type: "".into(),
                 fields: Box::new(HashMap::new()),
                 date_candidate: None,
+                timezone: false,
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
                 out_field_name: "field".into(),
@@ -1264,6 +1419,7 @@ mod flattern_tests {
                 parent_type: "".into(),
                 fields: Box::new(HashMap::new()),
                 date_candidate: None,
+                timezone: false,
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
                 out_field_name: "contact".into(),
@@ -1280,6 +1436,7 @@ mod flattern_tests {
                 parent_type: "".into(),
                 fields: Box::new(HashMap::new()),
                 date_candidate: None,
+                timezone: false,
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
                 out_field_name: "name".into(),
@@ -1296,6 +1453,7 @@ mod flattern_tests {
                 parent_type: "".into(),
                 fields: Box::new(HashMap::new()),
                 date_candidate: None,
+                timezone: false,
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
                 out_field_name: "tel".into(),
@@ -1337,6 +1495,7 @@ mod flattern_tests {
                 parent_type: "".into(),
                 fields: Box::new(HashMap::new()),
                 date_candidate: None,
+                timezone: false,
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
                 out_field_name: "field".into(),
@@ -1353,6 +1512,7 @@ mod flattern_tests {
                 parent_type: "".into(),
                 fields: Box::new(HashMap::new()),
                 date_candidate: None,
+                timezone: false,
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
                 out_field_name: "contacts".into(),
@@ -1369,6 +1529,7 @@ mod flattern_tests {
                 parent_type: "".into(),
                 fields: Box::new(HashMap::new()),
                 date_candidate: None,
+                timezone: false,
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
                 out_field_name: "0".into(),
@@ -1385,6 +1546,7 @@ mod flattern_tests {
                 parent_type: "".into(),
                 fields: Box::new(HashMap::new()),
                 date_candidate: None,
+                timezone: false,
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
                 out_field_name: "name".into(),
@@ -1401,6 +1563,7 @@ mod flattern_tests {
                 parent_type: "".into(),
                 fields: Box::new(HashMap::new()),
                 date_candidate: None,
+                timezone: false,
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
                 out_field_name: "tel".into(),
