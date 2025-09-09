@@ -46,6 +46,7 @@ pub struct Skippr {
     pub api_token: Option<String>,
     pub workspace: Option<String>,
     pub tenant_id: Option<String>,
+    pub skippr_s3_bucket: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -152,6 +153,7 @@ impl Config {
                 api_token: None,
                 workspace: None,
                 tenant_id: None,
+                skippr_s3_bucket: None,
             }),
             pipelines: HashMap::new(),
             data_inputs: None,
@@ -243,6 +245,7 @@ impl Config {
                     app_config.skippr = Some(Skippr {
                         workspace: Some(workspace),
                         api_token: Some(api_token),
+                        skippr_s3_bucket: None,
                         tenant_id: None,
                     });
                 }
@@ -318,6 +321,10 @@ impl Config {
         }
 
         Config::parse_skippr_profile();
+
+        // Ensure SKIPPR_S3_BUCKET env var is set from config (fallbacks handled inside getter)
+        let bucket = Config::get_skippr_s3_bucket();
+        Config::setenv("SKIPPR_S3_BUCKET", &bucket);
 
         // panic!("test");
 
@@ -561,11 +568,37 @@ impl Config {
                     api_token: Some(token.clone()),
                     workspace: None,
                     tenant_id: None,
+                    skippr_s3_bucket: None,
                 }
             )).unwrap().api_token.as_ref().or(Some(&token)).unwrap().to_string();
 
             Config::set_evncache("SKIPPR_API_TOKEN", &token.clone());
             token
+        }
+    }
+
+    pub fn get_skippr_s3_bucket() -> String {
+        if Config::get_envcache("SKIPPR_S3_BUCKET") != "" {
+            return Config::get_envcache("SKIPPR_S3_BUCKET")
+        } else {
+            let config = Config::get();
+
+            let default_bucket = Config::getenv("SKIPPR_S3_BUCKET", "skippr-data");
+
+            let bucket = match config.skippr {
+                Some(skippr) => {
+                    match skippr.skippr_s3_bucket.as_ref() {
+                        Some(bucket) => bucket.to_string(),
+                        None => default_bucket
+                    }
+                }
+                None => {
+                    default_bucket
+                }
+            };
+
+            Config::set_evncache("SKIPPR_S3_BUCKET", &bucket.clone());
+            bucket
         }
     }
 

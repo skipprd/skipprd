@@ -4,9 +4,9 @@ use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::operation::delete_object::DeleteObjectError;
 use serde_json::Value;
-use std::env;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
+use crate::helpers::configuration::Config;
 
 static S3_CLIENT: OnceCell<Arc<S3Client>> = OnceCell::const_new();
 
@@ -20,9 +20,7 @@ pub async fn get_s3_client() -> Arc<S3Client> {
         .clone()
 }
 
-fn get_bucket() -> String {
-    env::var("SKIPPR_S3_BUCKET").unwrap_or_else(|_| "skippr-data".to_string())
-}
+fn get_bucket() -> String { Config::get_skippr_s3_bucket() }
 
 pub async fn put_json(key: &str, value: &Value) -> Result<(), S3Error> {
     let client = get_s3_client().await;
