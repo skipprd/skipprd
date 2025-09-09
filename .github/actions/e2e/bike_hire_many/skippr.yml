@@ -1,6 +1,6 @@
 skippr:
-  api_token: B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg
-  workspace: test
+  skippr_s3_bucket: skippr-e2e-sample-data-output
+  tenant: skippr
 
 pipelines:
 
@@ -25,4 +25,5 @@ data_outputs:
       athena_workgroup_name: bikehire
       glue_database_name: bikehire
       s3_bucket: skippr-e2e-sample-data-output
+      athena_results_s3_bucket: skippr-e2e-sample-data-output
       s3_prefix: bikehire_many

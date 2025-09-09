@@ -1,6 +1,6 @@
 skippr:
-  api_token: B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg
-  workspace: test
+  skippr_s3_bucket: skippr-e2e-sample-data-output
+  tenant_id: skippr
 
 pipelines:
 
