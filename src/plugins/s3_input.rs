@@ -10,7 +10,7 @@ use std::sync::{Arc};
 
 use aws_sdk_s3::operation::get_object::{GetObjectError, GetObjectOutput};
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{fs};
 // use aws_sdk_s3::types::Object;
 // use futures::future::join_all;
@@ -28,7 +28,8 @@ use crate::helpers::Helpers;
 use tokio::sync::mpsc;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinSet;
-// use futures::StreamExt;
+use futures::stream::{self, StreamExt};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Path for storing the S3 continuation token so we can resume syncs
 const CONTINUATION_TOKEN_FILE: Lazy<String> = Lazy::new(|| {
@@ -138,258 +139,141 @@ impl DataSourceS3Plugin {
         offsets: Arc<Offsets>,
         shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
     ) {
-        let offsets_clone = offsets.clone();
+        // Use new stream-based pipeline implementation
+        self.sync_stream(offsets, shared_output).await;
+    }
+
+    async fn sync_stream(
+        &mut self,
+        offsets: Arc<Offsets>,
+        shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
+    ) {
         let s3_bucket = self.config.s3_bucket.clone();
+        let s3_bucket_filter = s3_bucket.clone();
+        let s3_bucket_dl = s3_bucket.clone();
+        let s3_bucket_ns = s3_bucket.clone();
         let delimiter = "/".to_string();
         let inventory_prefix = self.config.s3_prefix.clone();
-        let max_list_objects = 1000;
         let total_cpus = num_cpus::get();
 
-        println!(
-            "Syncing bucket: {}, prefix: {}",
-            s3_bucket.clone(),
-            inventory_prefix
-        );
+        println!("Syncing bucket: {}, prefix: {}", s3_bucket, inventory_prefix);
 
-        // Initialize chunk size with configured batch size
         let chunk_size = self.config.batch_size_bytes.unwrap_or(10_000_000) as usize;
         self.optimal_chunk_size = chunk_size;
 
         let mut s3_prefix = inventory_prefix.trim_start_matches(&delimiter).to_string();
-        if s3_prefix == delimiter || s3_prefix == format!(".{}", delimiter) {
-            s3_prefix = "".to_string();
-        }
+        if s3_prefix == delimiter || s3_prefix == format!(".{}", delimiter) { s3_prefix = "".to_string(); }
 
-        // Stage channels
-        let (keys_tx, mut keys_rx) = mpsc::channel::<(String, i64)>(std::cmp::max(32, total_cpus * 4));
-        let (files_tx, mut files_rx) = mpsc::channel::<DownloadedItem>(std::cmp::max(16, total_cpus * 2));
-
-        // Memory byte-budget semaphore (1 permit = 1 MiB)
-        let mem_budget_mb: u32 = Config::getenv("S3_DOWNLOAD_MEMORY_MB", "4096")
-            .parse::<u32>()
-            .unwrap_or(4096);
+        let mem_budget_mb: u32 = Config::getenv("S3_DOWNLOAD_MEMORY_MB", "4096").parse::<u32>().unwrap_or(4096);
         let mem_sem = Arc::new(Semaphore::new(mem_budget_mb as usize));
 
-        println!(
-            "Starting bounded pipeline (cpus={}, dl_mem={} MiB, init_chunk={})",
-            total_cpus,
-            mem_budget_mb,
-            Helpers::human_readable_size(chunk_size as u64)
-        );
+        println!("Starting stream pipeline (cpus={}, dl_mem={} MiB, init_chunk={})", total_cpus, mem_budget_mb, Helpers::human_readable_size(chunk_size as u64));
 
-        // Lister stage
-        let s3_client_list = self.s3_client.clone();
-        let s3_bucket_list = s3_bucket.clone();
-        let mut list_obj_req = s3_client_list
+        let offsets_clone = offsets.clone();
+        // Build keys iterator by pulling pages manually (compatible with SDK stream type)
+        let mut pager = self.s3_client
             .list_objects_v2()
-            .bucket(s3_bucket_list.clone())
+            .bucket(s3_bucket.clone())
             .prefix(s3_prefix.clone())
-            .max_keys(max_list_objects);
+            .into_paginator()
+            .page_size(1000)
+            .send();
 
-        // Set initial continuation token if loaded
-        if let Some(token) = &Self::load_continuation_token() {
-            println!("Resuming from saved continuation token");
-            list_obj_req = list_obj_req.set_continuation_token(Some(token.clone()));
-        }
-
-        let offsets_for_lister = offsets_clone.clone();
-        let lister_handle = {
-            let keys_tx = keys_tx.clone();
-            tokio::spawn(async move {
-                let mut _list_retries = 0;
-                let max_empty_objects = 2;
-                let mut empty_objects_trys = 0;
-                let mut _continuation_token: Option<String> = None;
-
-                loop {
-                    match list_obj_req.clone().send().await {
-                        Err(err) => {
-                            println!("S3 Error: {:?}", err);
-                            if _list_retries >= 5 {
-                                println!("Max retries reached for S3 ListObjectsV2");
-                                break;
-                            }
-                            _list_retries += 1;
-                            tokio::time::sleep(Duration::from_secs(5 * _list_retries)).await;
-                        }
-                        Ok(output) => {
-                            _list_retries = 0;
-                            let objects = match output.contents {
-                                Some(o) => o,
-                                None => {
-                                    if empty_objects_trys >= max_empty_objects {
-                                        println!("No more objects found in S3, skipping Bucket: {} Prefix: {}", s3_bucket_list, s3_prefix);
-                                        break;
-                                    }
-                                    empty_objects_trys += 1;
-                                    continue;
-                                }
-                            };
-
-                            for object in objects {
-                                let object_key = match object.key() { Some(k) => k.to_string(), None => continue };
-                                let offset_key = OffsetKey {
-                                    namespace: s3_bucket_list.clone(),
-                                    partition: object_key.clone(),
-                                };
-                                if Some(true) == offsets_for_lister.validate(&offset_key, OffsetTypes::Closed, 1) {
-                                    continue;
-                                }
-
-                                let sz = object.size().unwrap_or_default();
-                                if let Err(_e) = keys_tx.send((object_key, sz)).await {
-                                    // receiver dropped
-                                    break;
-                                }
-                            }
-
-                            if let Some(token) = &output.next_continuation_token {
-                                _continuation_token = Some(token.to_string().clone());
-                                list_obj_req = list_obj_req.set_continuation_token(_continuation_token.clone());
-                                Self::save_continuation_token(token);
-                            } else {
-                                break;
-                            }
-                        }
+        // Collect keys lazily into a Vec to drive the rest of the stream
+        let mut all_keys: Vec<String> = Vec::new();
+        while let Some(page_res) = pager.next().await {
+            if let Ok(page) = page_res {
+                if let Some(objects) = page.contents {
+                    for obj in objects {
+                        if let Some(k) = obj.key() { all_keys.push(k.to_string()); }
                     }
                 }
-                // drop sender to signal completion
-                drop(keys_tx);
-            })
-        };
+            }
+        }
 
-        // Downloader supervisor: single receiver, per-key tasks limited by dl_sem
-        let downloader_concurrency = std::cmp::min(256, total_cpus * 8);
-        let dl_sem = Arc::new(Semaphore::new(downloader_concurrency as usize));
-        let mut join_set: JoinSet<()> = JoinSet::new();
-        let s3_client_dl = self.s3_client.clone();
-        let s3_bucket_dl = s3_bucket.clone();
-        let files_tx_dl = files_tx.clone();
-        let mem_sem_dl = mem_sem.clone();
-        let downloader_supervisor = tokio::spawn(async move {
-            while let Some((key, size_bytes)) = keys_rx.recv().await {
-                // Acquire download concurrency permit
-                let dl_permit = match dl_sem.clone().acquire_owned().await {
-                    Ok(p) => p,
-                    Err(_) => break,
+        let keys_stream = stream::iter(all_keys.into_iter())
+            .filter(move |key| {
+                let offsets = offsets_clone.clone();
+                let ns = s3_bucket_filter.clone();
+                let key_clone = key.clone();
+                async move {
+                    let offset_key = OffsetKey { namespace: ns, partition: key_clone };
+                    Some(true) != offsets.validate(&offset_key, OffsetTypes::Closed, 1)
+                }
+            });
+
+        let dl_concurrency = std::cmp::min(256, total_cpus * 8);
+        let s3_client_clone = self.s3_client.clone();
+        let mem_sem_clone = mem_sem.clone();
+        let mut download_stream = keys_stream.map(move |key| {
+            let s3 = s3_client_clone.clone();
+            let bucket = s3_bucket_dl.clone();
+            let mem = mem_sem_clone.clone();
+            async move {
+                let p = mem.acquire_many_owned(1).await.ok();
+                let res = DataSourceS3Plugin::download_s3_object_with_backoff(&s3, &bucket, &key).await;
+                let out = match res {
+                    Ok(response) => {
+                        let mut data = response.body;
+                        let mut data_vec = Vec::new();
+                        while let Some(chunk) = data.next().await { if let Ok(bytes) = chunk { data_vec.extend_from_slice(&bytes); } }
+                        let is_gz = key.contains(".gz");
+                        let decoded = if is_gz {
+                            let res = tokio::task::spawn_blocking(move || {
+                                let c = Cursor::new(data_vec);
+                                let mut stream = GzDecoder::new(c);
+                                let mut decompressed = String::new();
+                                stream.read_to_string(&mut decompressed).map(|_| decompressed)
+                            }).await;
+                            match res { Ok(Ok(s)) => Some(s), _ => None }
+                        } else {
+                            String::from_utf8(data_vec).ok()
+                        };
+                        decoded.map(|s| (key, s))
+                    }
+                    Err(_) => None,
                 };
-
-                let s3_client = s3_client_dl.clone();
-                let bucket = s3_bucket_dl.clone();
-                let files_tx = files_tx_dl.clone();
-                let mem_sem = mem_sem_dl.clone();
-                let mem_budget = mem_budget_mb;
-
-                join_set.spawn(async move {
-                    // Compute memory permits in MiB (at least 1)
-                    let mut permits: u32 = ((std::cmp::max(1i64, size_bytes) as u64 + 1_048_575) / 1_048_576) as u32;
-                    if permits == 0 { permits = 1; }
-                    if permits > mem_budget { permits = mem_budget; }
-
-                    if let Ok(permit) = mem_sem.acquire_many_owned(permits).await {
-                        match DataSourceS3Plugin::download_s3_object_with_backoff(&s3_client, &bucket, &key).await {
-                            Ok(response) => {
-                                let mut data = response.body;
-                                let mut data_vec = Vec::new();
-                                while let Some(chunk) = data.next().await {
-                                    if let Ok(bytes) = chunk { data_vec.extend_from_slice(&bytes); }
-                                }
-                                let is_gz = key.contains(".gz");
-                                let item = DownloadedItem { key, data: data_vec, is_gz, permit };
-                                let _ = files_tx.send(item).await;
-                            }
-                            Err(_e) => {
-                                // download failed; permit dropped here
-                            }
-                        }
-                    }
-
-                    // drop dl_permit at end of task
-                    drop(dl_permit);
-                });
+                if let Some(perm) = p { drop(perm); }
+                out
             }
+        }).buffer_unordered(dl_concurrency);
 
-            // Drain remaining tasks
-            while let Some(_res) = join_set.join_next().await {}
-        });
-
-        // Aggregator stage runs inline so we can update self safely
-        let mut current_batch: IngestTask = IngestTask::new(Vec::new(), offsets.clone(), shared_output.clone());
+        let mut current_batch: Vec<IngestBatch> = Vec::new();
         let mut current_bytes: usize = 0;
-        loop {
-            tokio::select! {
-                maybe_item = files_rx.recv() => {
-                    match maybe_item {
-                        Some(item) => {
-                            let DownloadedItem { key, data, is_gz, permit } = item;
+        let mut pending_tasks: Vec<IngestTask> = Vec::with_capacity(total_cpus);
 
-                            let str_data_res: Result<String, String> = if is_gz {
-                                match tokio::task::spawn_blocking(move || {
-                                    let c = Cursor::new(data);
-                                    let mut stream = GzDecoder::new(c);
-                                    let mut decompressed = String::new();
-                                    match stream.read_to_string(&mut decompressed) {
-                                        Ok(_) => Ok(decompressed),
-                                        Err(e) => Err(format!("Gzip decode failed: {}", e))
-                                    }
-                                }).await {
-                                    Ok(r) => r,
-                                    Err(e) => Err(format!("Join error: {:?}", e))
-                                }
-                            } else {
-                                match String::from_utf8(data) {
-                                    Ok(s) => Ok(s),
-                                    Err(e) => Err(format!("UTF-8 decode failed: {}", e))
-                                }
-                            };
-
-                            drop(permit);
-
-                            let str_data = match str_data_res {
-                                Ok(s) => s,
-                                Err(err) => { println!("Skipping file {} due to decode error: {}", key, err); continue; }
-                            };
-
-                            let bytes = str_data.len();
-                            current_bytes += bytes;
-
-                            let mut new_datas = Vec::new();
-                            new_datas.extend(current_batch.datas.iter().cloned());
-                            new_datas.push(IngestBatch {
-                                offset_key: OffsetKey { namespace: s3_bucket.clone(), partition: key },
-                                data: str_data,
-                                bytes,
-                            });
-                            current_batch.datas = Arc::new(new_datas);
-
-                            if current_bytes >= self.optimal_chunk_size {
-                                let mut tasks = IngestTasks::new();
-                                tasks.add(current_batch);
-                                let tasks_arc = Arc::new(tasks);
-                                let metrics = self.ingest.ingest_file(&tasks_arc, &offsets, shared_output.clone());
-                                self.active_threads = metrics.active_cores;
-                                self.optimal_chunk_size = metrics.optimal_chunk_size;
-                                current_batch = IngestTask::new(Vec::new(), offsets.clone(), shared_output.clone());
-                                current_bytes = 0;
-                            }
-                        },
-                        None => break,
+        futures::pin_mut!(download_stream);
+        while let Some(opt) = StreamExt::next(&mut download_stream).await {
+            if let Some((key, str_data)) = opt {
+                let bytes = str_data.len();
+                current_bytes += bytes;
+                current_batch.push(IngestBatch { offset_key: OffsetKey { namespace: s3_bucket_ns.clone(), partition: key }, data: str_data, bytes });
+                if current_bytes >= self.optimal_chunk_size {
+                    let batch = std::mem::take(&mut current_batch);
+                    current_bytes = 0;
+                    pending_tasks.push(IngestTask::new(batch, offsets.clone(), shared_output.clone()));
+                    if pending_tasks.len() >= total_cpus {
+                        let mut tasks = IngestTasks::new();
+                        for t in pending_tasks.drain(..) { tasks.add(t); }
+                        let tasks_arc = Arc::new(tasks);
+                        let metrics = self.ingest.ingest_file(&tasks_arc, &offsets, shared_output.clone());
+                        self.active_threads = metrics.active_cores;
+                        self.optimal_chunk_size = metrics.optimal_chunk_size;
                     }
                 }
             }
         }
 
-        // Wait for lister and downloader supervisor to finish
-        let _ = lister_handle.await;
-        let _ = downloader_supervisor.await;
-
-        // Flush any remaining
-        if !current_batch.datas.is_empty() {
+        if !current_batch.is_empty() { pending_tasks.push(IngestTask::new(std::mem::take(&mut current_batch), offsets.clone(), shared_output.clone())); }
+        if !pending_tasks.is_empty() {
             let mut tasks = IngestTasks::new();
-            tasks.add(current_batch);
+            for t in pending_tasks.drain(..) { tasks.add(t); }
             let tasks_arc = Arc::new(tasks);
             let _ = self.ingest.ingest_file(&tasks_arc, &offsets, shared_output.clone());
         }
+
+        self.ingest.wait_for_completion();
+        println!("S3 stream pipeline complete; ingest completed");
     }
 
     /// Download an S3 object with exponential backoff retry logic
@@ -445,10 +329,10 @@ impl DataSourceS3Plugin {
     ) -> ThroughputMetrics {
         // Deprecated in bounded pipeline path; keep a no-op metrics return for compatibility
         ThroughputMetrics {
-            bytes_per_second: 0,
-            active_cores: self.active_threads,
-            queue_length: 0,
-            optimal_chunk_size: self.optimal_chunk_size,
+                bytes_per_second: 0,
+                active_cores: self.active_threads,
+                queue_length: 0,
+                optimal_chunk_size: self.optimal_chunk_size,
         }
     }
 }

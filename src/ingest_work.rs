@@ -207,7 +207,10 @@ impl Ingest {
         let active_count = Arc::new(AtomicUsize::new(0));
         let active_count_clone = active_count.clone();
         let queue_length = Arc::new(AtomicUsize::new(0));
-        let optimal_chunk_size = Arc::new(AtomicUsize::new(5_000_000));
+        let start_chunk: usize = Config::getenv("INGEST_START_CHUNK_BYTES", "5000000")
+            .parse::<usize>()
+            .unwrap_or(5_000_000);
+        let optimal_chunk_size = Arc::new(AtomicUsize::new(start_chunk));
         let queue_length_clone = queue_length.clone();
         let task_queue: Arc<RwLock<VecDeque<IngestTask>>> = Arc::new(RwLock::new(VecDeque::new()));
         let task_queue_clone = task_queue.clone();
@@ -219,7 +222,10 @@ impl Ingest {
         let thread_pool = Arc::new(ThreadPool::new(num_cpus));
         let thread_pool_clone = thread_pool.clone();
         
-        let max_queue_length = num_cpus * 2;
+        let queue_factor: usize = Config::getenv("INGEST_MAX_QUEUE_FACTOR", "8")
+            .parse::<usize>()
+            .unwrap_or(8);
+        let max_queue_length = num_cpus * queue_factor;
         
         // This monitoring thread tracks task completion and processes queued tasks
         std::thread::spawn(move || {
@@ -1186,11 +1192,23 @@ impl Ingest {
         
         // Use block_on safely with proper error handling
         match handle.block_on(async {
-            match buffers.flush(offset_db_clone.clone(), shared_output_clone.clone()).await {
-                Ok(_) => Ok(()),
-                Err(e) => {
-                    println!("Error flushing buffers: {}", e);
-                    Err(e)
+            let start = Instant::now();
+            let timeout = Duration::from_secs(30);
+            let flush_fut = buffers.flush(offset_db_clone.clone(), shared_output_clone.clone());
+            match tokio::time::timeout(timeout, flush_fut).await {
+                Ok(res) => match res {
+                    Ok(_) => {
+                        println!("Flushed buffers in {:.2}s", start.elapsed().as_secs_f64());
+                        Ok(())
+                    },
+                    Err(e) => {
+                        println!("Error flushing buffers: {}", e);
+                        Err(e)
+                    }
+                },
+                Err(_) => {
+                    println!("Warning: flush exceeded {:.2}s, continuing to avoid deadlock", timeout.as_secs_f64());
+                    Ok(())
                 }
             }
         }) {
