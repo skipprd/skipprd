@@ -28,6 +28,8 @@ use parquet::file::properties::WriterProperties;
 use serde_derive::Deserialize;
 use crate::ingest::partition_time::TimePartitioner;
 use crate::plugins::DataOutputPlugin;
+use tokio::sync::Semaphore;
+use std::sync::Arc;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataOutputAwsAthenaPluginConfig {
@@ -79,6 +81,7 @@ pub struct DataOutputAwsAthenaPlugin {
     // time_bucket: String,
     #[allow(dead_code)]
     max_async_uploads: i64,
+    upload_sem: Arc<Semaphore>,
 }
 
 
@@ -111,12 +114,16 @@ impl DataOutputAwsAthenaPlugin {
         // let athena_config: DataOutputAwsAthenaPluginConfig = Config::get_pipline_plugin_config("output").unwrap().into();
         let athena_config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
 
+        let max_async_uploads_env = Config::getenv("DATA_OUTPUT_MAX_ASYNC_UPLOADS", "16");
+        let max_async_uploads = max_async_uploads_env.parse::<usize>().unwrap_or(16);
+
         Self {
             s3_client,
             athena_client,
             config: athena_config,
             buffer_name: buffer_name,
-            max_async_uploads: 10,
+            max_async_uploads: max_async_uploads as i64,
+            upload_sem: Arc::new(Semaphore::new(max_async_uploads)),
         }
     }
 
@@ -217,14 +224,35 @@ impl DataOutputAwsAthenaPlugin {
 
         let final_key = format!("{}/{}", full_key, md5_string);
 
-        // Perform the upload asynchronously
-        DataOutputAwsAthenaPlugin::upload_object(
-            self.s3_client.clone(),
-            self.config.s3_bucket.clone(),
-            final_key,
-            stream,
-            tags,
-        ).await
+        // Serialize first, then gate S3 upload by a concurrency semaphore
+        let parquet = Self::serialize_to_parquet(stream).await?;
+        let tags_str = tags.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<String>>().join("&");
+
+        let _permit = self.upload_sem.clone().acquire_owned().await.map_err(|_| io::Error::new(io::ErrorKind::Other, "Semaphore closed"))?;
+
+        // Perform the S3 upload asynchronously
+        let body = ByteStream::from(parquet.bytes.clone());
+        match self
+            .s3_client
+            .put_object()
+            .bucket(&self.config.s3_bucket)
+            .key(&final_key)
+            .body(body)
+            .tagging(tags_str)
+            .send()
+            .await
+        {
+            Ok(_resp) => {
+                println!("Uploaded {} to S3", final_key);
+                metrics_counters::add_parquet_bytes(parquet.size_bytes);
+                metrics_counters::add_parquet_objects(1);
+                metrics_counters::add_parquet_rows(parquet.meta_data.num_rows as u64);
+                Ok(())
+            }
+            Err(err) => {
+                Err(io::Error::new(io::ErrorKind::Other, format!("Failed to upload to bucket {}, will retry later. Error: {}", self.config.s3_bucket, err.into_service_error())))
+            }
+        }
     }
 
     pub(crate) async fn serialize_to_parquet(
@@ -285,27 +313,8 @@ impl DataOutputAwsAthenaPlugin {
         // Create the upload body stream
         let body = ByteStream::from(parquet.bytes);
 
-        // Perform the S3 upload asynchronously
-        match client
-            .put_object()
-            .bucket(&bucket)
-            .key(&key)
-            .body(body)
-            .tagging(tags)
-            .send()
-            .await
-        {
-            Ok(_resp) => {
-                println!("Uploaded {} to S3", key);
-                metrics_counters::add_parquet_bytes(parquet.size_bytes);
-                metrics_counters::add_parquet_objects(1);
-                metrics_counters::add_parquet_rows(parquet.meta_data.num_rows as u64);
-                Ok(())
-            }
-            Err(err) => {
-                Err(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to upload to bucket {}, will retry later. Error: {}", bucket, err.into_service_error())))
-            }
-        }
+        // NOTE: Unused now; upload is performed in inner_sync with concurrency gating
+        unreachable!("upload_object is not used after enabling gated concurrency in inner_sync")
     }
 }
 

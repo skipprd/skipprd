@@ -240,20 +240,30 @@ impl Buffers {
 
         let shared_output_clone = shared_output.clone();
         
-        let mut compact_promises = vec![];
-        
-        let mut compacted_bytes = 0;
-        
-        // Compact the partitions (now the index is unlocked, WAL flushed and offset committed)
-        for partition in compact_index_partitions.values_mut() {
-            let offsets_db_clone = offsets_db.clone();
-            let shared_output_clone2 = shared_output_clone.clone();
-            compact_promises.push(partition.compact_batches_to_parquet(offsets_db_clone, shared_output_clone2));
+        // Compact partitions concurrently with capped parallelism
+        let max_parallel: usize = std::cmp::max(1, std::cmp::min(num_cpus::get(), 16));
+        let mut compacted_bytes: u64 = 0;
+        use futures::stream::StreamExt;
+        let mut in_flight: futures::stream::FuturesUnordered<_> = futures::stream::FuturesUnordered::new();
+        let mut iter = compact_index_partitions.values_mut();
+
+        // Prime the first batch
+        for _ in 0..max_parallel {
+            if let Some(partition) = iter.next() {
+                let offsets_db_clone = offsets_db.clone();
+                let shared_output_clone2 = shared_output_clone.clone();
+                in_flight.push(partition.compact_batches_to_parquet(offsets_db_clone, shared_output_clone2));
+            }
         }
 
-        // await all compact_promises
-        for promise in compact_promises {
-            compacted_bytes += promise.await;
+        // Drive the stream, refilling as tasks complete
+        while let Some(bytes_done) = in_flight.next().await {
+            compacted_bytes += bytes_done as u64;
+            if let Some(partition) = iter.next() {
+                let offsets_db_clone = offsets_db.clone();
+                let shared_output_clone2 = shared_output_clone.clone();
+                in_flight.push(partition.compact_batches_to_parquet(offsets_db_clone, shared_output_clone2));
+            }
         }
 
         {
