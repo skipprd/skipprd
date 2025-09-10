@@ -12,8 +12,8 @@ use aws_sdk_s3::operation::get_object::{GetObjectError, GetObjectOutput};
 
 use std::time::Duration;
 use std::{fs};
-use aws_sdk_s3::types::Object;
-use futures::future::join_all;
+// use aws_sdk_s3::types::Object;
+// use futures::future::join_all;
 
 use serde_derive::Deserialize;
 use once_cell::sync::Lazy;
@@ -22,9 +22,13 @@ use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks, ThroughputMetrics};
 
 use tokio::sync::Semaphore;
-use crate::helpers::timed_rwlock::TimedRwLock;
+// use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::plugins::DataOutputPlugin;
 use crate::helpers::Helpers;
+use tokio::sync::mpsc;
+use tokio::sync::OwnedSemaphorePermit;
+use tokio::task::JoinSet;
+// use futures::StreamExt;
 
 /// Path for storing the S3 continuation token so we can resume syncs
 const CONTINUATION_TOKEN_FILE: Lazy<String> = Lazy::new(|| {
@@ -135,18 +139,10 @@ impl DataSourceS3Plugin {
         shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
     ) {
         let offsets_clone = offsets.clone();
-        let _s3_client = self.s3_client.clone();
         let s3_bucket = self.config.s3_bucket.clone();
         let delimiter = "/".to_string();
         let inventory_prefix = self.config.s3_prefix.clone();
         let max_list_objects = 1000;
-        let mut _total_objects = 0;
-        let mut chunk_size_current = 0;
-        let mut outputs: Vec<Vec<String>> = Vec::with_capacity(num_cpus::get());
-        let mut current_chunk: Vec<String> = Vec::with_capacity(self.config.batch_size_bytes.unwrap_or(10_000_000) as usize);
-        let mut _objects: Vec<Object> = Vec::with_capacity(max_list_objects as usize);
-        let mut _continuation_token: Option<String> = Self::load_continuation_token();
-        let mut _chunks_processed = 0;
         let total_cpus = num_cpus::get();
 
         println!(
@@ -155,154 +151,245 @@ impl DataSourceS3Plugin {
             inventory_prefix
         );
 
-        // Use a fixed chunk size
+        // Initialize chunk size with configured batch size
         let chunk_size = self.config.batch_size_bytes.unwrap_or(10_000_000) as usize;
         self.optimal_chunk_size = chunk_size;
 
         let mut s3_prefix = inventory_prefix.trim_start_matches(&delimiter).to_string();
-
         if s3_prefix == delimiter || s3_prefix == format!(".{}", delimiter) {
             s3_prefix = "".to_string();
         }
 
-        let mut list_obj_req = self
-            .s3_client
+        // Stage channels
+        let (keys_tx, mut keys_rx) = mpsc::channel::<(String, i64)>(std::cmp::max(32, total_cpus * 4));
+        let (files_tx, mut files_rx) = mpsc::channel::<DownloadedItem>(std::cmp::max(16, total_cpus * 2));
+
+        // Memory byte-budget semaphore (1 permit = 1 MiB)
+        let mem_budget_mb: u32 = Config::getenv("S3_DOWNLOAD_MEMORY_MB", "4096")
+            .parse::<u32>()
+            .unwrap_or(4096);
+        let mem_sem = Arc::new(Semaphore::new(mem_budget_mb as usize));
+
+        println!(
+            "Starting bounded pipeline (cpus={}, dl_mem={} MiB, init_chunk={})",
+            total_cpus,
+            mem_budget_mb,
+            Helpers::human_readable_size(chunk_size as u64)
+        );
+
+        // Lister stage
+        let s3_client_list = self.s3_client.clone();
+        let s3_bucket_list = s3_bucket.clone();
+        let mut list_obj_req = s3_client_list
             .list_objects_v2()
-            .bucket(s3_bucket.clone())
+            .bucket(s3_bucket_list.clone())
             .prefix(s3_prefix.clone())
             .max_keys(max_list_objects);
 
         // Set initial continuation token if loaded
-        if let Some(token) = &_continuation_token {
+        if let Some(token) = &Self::load_continuation_token() {
             println!("Resuming from saved continuation token");
             list_obj_req = list_obj_req.set_continuation_token(Some(token.clone()));
         }
 
-        let max_empty_objects = 2;
-        let mut empty_objects_trys = 0;
-        
-        println!("Starting sync with {} total CPUs and initial chunk size of {}", 
-                total_cpus, 
-                Helpers::human_readable_size(chunk_size as u64));
+        let offsets_for_lister = offsets_clone.clone();
+        let lister_handle = {
+            let keys_tx = keys_tx.clone();
+            tokio::spawn(async move {
+                let mut _list_retries = 0;
+                let max_empty_objects = 2;
+                let mut empty_objects_trys = 0;
+                let mut _continuation_token: Option<String> = None;
 
-        'outer: loop {
-            let mut _i = 0;
-            let mut _list_retries = 0;
-            let mut _skipped_objects = 0;
-
-            // chunk_size = self.optimal_chunk_size;
-
-            match list_obj_req.clone().send().await {
-                Err(err) => {
-                    println!("S3 Error: {:?}", err);
-                    if _list_retries >= 5 {
-                        println!("Max retries reached for S3 ListObjectsV2");
-                        break 'outer;
-                    }
-                    _list_retries += 1;
-                    tokio::time::sleep(Duration::from_secs(5 * _list_retries)).await;
-                },
-                Ok(output) => {
-                    _list_retries = 0;
-
-                    _objects = match output.contents {
-                        Some(o) => o,
-                        None => {
-                            if empty_objects_trys >= max_empty_objects {
-                                println!("No more objects found in S3, skipping Bucket: {} Prefix: {}", s3_bucket, s3_prefix);
-                                break 'outer;
+                loop {
+                    match list_obj_req.clone().send().await {
+                        Err(err) => {
+                            println!("S3 Error: {:?}", err);
+                            if _list_retries >= 5 {
+                                println!("Max retries reached for S3 ListObjectsV2");
+                                break;
                             }
-                            empty_objects_trys += 1;
-                            continue;
+                            _list_retries += 1;
+                            tokio::time::sleep(Duration::from_secs(5 * _list_retries)).await;
                         }
-                    };
-
-                    if !_objects.is_empty() {
-                        _skipped_objects = 0;
-                        _total_objects += _objects.len();
-
-                        // Process objects
-                        for object in _objects {
-                            let object_key = object.key().unwrap();
-                            let _timestamp = object.last_modified().unwrap().secs();
-
-                            let offset_key = OffsetKey {
-                                namespace: s3_bucket.clone(),
-                                partition: object_key.to_string(),
+                        Ok(output) => {
+                            _list_retries = 0;
+                            let objects = match output.contents {
+                                Some(o) => o,
+                                None => {
+                                    if empty_objects_trys >= max_empty_objects {
+                                        println!("No more objects found in S3, skipping Bucket: {} Prefix: {}", s3_bucket_list, s3_prefix);
+                                        break;
+                                    }
+                                    empty_objects_trys += 1;
+                                    continue;
+                                }
                             };
 
-                            let has_offsets = offsets_clone.validate(&offset_key, OffsetTypes::Closed, 1);
-
-                            if Some(true) != has_offsets {
-                                current_chunk.push(object_key.to_string());
-                                chunk_size_current += object.size().unwrap_or_default();
-                                _i += 1;
-
-                                // If we have enough data for a chunk, add it to outputs
-                                if chunk_size_current >= self.optimal_chunk_size as i64 {
-
-                                    // println!("Added chunk {} of size: {}",
-                                    //          outputs.len(),
-                                    //          Helpers::human_readable_size(chunk_size_current as u64)
-                                    // );
-
-                                    outputs.push(current_chunk);
-                                    current_chunk = Vec::with_capacity(chunk_size);
-                                    chunk_size_current = 0;
-
-                                    // If we have enough chunks for parallel processing
-                                    if outputs.len() >= total_cpus {
-
-                                        println!("Processing batch with {} in chunks", Helpers::human_readable_size(outputs.len() as u64));
-
-                                        _chunks_processed += 1;
-                                        
-                                        // Process the current batch
-                                        let _throughput_metrics = self.download_and_ingest(
-                                            &s3_bucket,
-                                            &outputs,
-                                            &offsets_clone,
-                                            shared_output.clone(),
-                                            chunk_size_current
-                                        ).await;
-                                        
-                                        outputs.clear();
-                                        _i = 0;
-                                    }
+                            for object in objects {
+                                let object_key = match object.key() { Some(k) => k.to_string(), None => continue };
+                                let offset_key = OffsetKey {
+                                    namespace: s3_bucket_list.clone(),
+                                    partition: object_key.clone(),
+                                };
+                                if Some(true) == offsets_for_lister.validate(&offset_key, OffsetTypes::Closed, 1) {
+                                    continue;
                                 }
+
+                                let sz = object.size().unwrap_or_default();
+                                if let Err(_e) = keys_tx.send((object_key, sz)).await {
+                                    // receiver dropped
+                                    break;
+                                }
+                            }
+
+                            if let Some(token) = &output.next_continuation_token {
+                                _continuation_token = Some(token.to_string().clone());
+                                list_obj_req = list_obj_req.set_continuation_token(_continuation_token.clone());
+                                Self::save_continuation_token(token);
                             } else {
-                                _skipped_objects += 1;
+                                break;
+                            }
+                        }
+                    }
+                }
+                // drop sender to signal completion
+                drop(keys_tx);
+            })
+        };
+
+        // Downloader supervisor: single receiver, per-key tasks limited by dl_sem
+        let downloader_concurrency = std::cmp::min(256, total_cpus * 8);
+        let dl_sem = Arc::new(Semaphore::new(downloader_concurrency as usize));
+        let mut join_set: JoinSet<()> = JoinSet::new();
+        let s3_client_dl = self.s3_client.clone();
+        let s3_bucket_dl = s3_bucket.clone();
+        let files_tx_dl = files_tx.clone();
+        let mem_sem_dl = mem_sem.clone();
+        let downloader_supervisor = tokio::spawn(async move {
+            while let Some((key, size_bytes)) = keys_rx.recv().await {
+                // Acquire download concurrency permit
+                let dl_permit = match dl_sem.clone().acquire_owned().await {
+                    Ok(p) => p,
+                    Err(_) => break,
+                };
+
+                let s3_client = s3_client_dl.clone();
+                let bucket = s3_bucket_dl.clone();
+                let files_tx = files_tx_dl.clone();
+                let mem_sem = mem_sem_dl.clone();
+                let mem_budget = mem_budget_mb;
+
+                join_set.spawn(async move {
+                    // Compute memory permits in MiB (at least 1)
+                    let mut permits: u32 = ((std::cmp::max(1i64, size_bytes) as u64 + 1_048_575) / 1_048_576) as u32;
+                    if permits == 0 { permits = 1; }
+                    if permits > mem_budget { permits = mem_budget; }
+
+                    if let Ok(permit) = mem_sem.acquire_many_owned(permits).await {
+                        match DataSourceS3Plugin::download_s3_object_with_backoff(&s3_client, &bucket, &key).await {
+                            Ok(response) => {
+                                let mut data = response.body;
+                                let mut data_vec = Vec::new();
+                                while let Some(chunk) = data.next().await {
+                                    if let Ok(bytes) = chunk { data_vec.extend_from_slice(&bytes); }
+                                }
+                                let is_gz = key.contains(".gz");
+                                let item = DownloadedItem { key, data: data_vec, is_gz, permit };
+                                let _ = files_tx.send(item).await;
+                            }
+                            Err(_e) => {
+                                // download failed; permit dropped here
                             }
                         }
                     }
 
-                    if let Some(token) = &output.next_continuation_token {
-                        _continuation_token = Some(token.to_string().clone());
-                        list_obj_req = list_obj_req.set_continuation_token(_continuation_token.clone());
-                        // Save the continuation token after each successful request
-                        Self::save_continuation_token(token);
-                    } else {
-                        if !outputs.is_empty() || !current_chunk.is_empty() {
-                            if !current_chunk.is_empty() {
-                                outputs.push(current_chunk);
+                    // drop dl_permit at end of task
+                    drop(dl_permit);
+                });
+            }
+
+            // Drain remaining tasks
+            while let Some(_res) = join_set.join_next().await {}
+        });
+
+        // Aggregator stage runs inline so we can update self safely
+        let mut current_batch: IngestTask = IngestTask::new(Vec::new(), offsets.clone(), shared_output.clone());
+        let mut current_bytes: usize = 0;
+        loop {
+            tokio::select! {
+                maybe_item = files_rx.recv() => {
+                    match maybe_item {
+                        Some(item) => {
+                            let DownloadedItem { key, data, is_gz, permit } = item;
+
+                            let str_data_res: Result<String, String> = if is_gz {
+                                match tokio::task::spawn_blocking(move || {
+                                    let c = Cursor::new(data);
+                                    let mut stream = GzDecoder::new(c);
+                                    let mut decompressed = String::new();
+                                    match stream.read_to_string(&mut decompressed) {
+                                        Ok(_) => Ok(decompressed),
+                                        Err(e) => Err(format!("Gzip decode failed: {}", e))
+                                    }
+                                }).await {
+                                    Ok(r) => r,
+                                    Err(e) => Err(format!("Join error: {:?}", e))
+                                }
+                            } else {
+                                match String::from_utf8(data) {
+                                    Ok(s) => Ok(s),
+                                    Err(e) => Err(format!("UTF-8 decode failed: {}", e))
+                                }
+                            };
+
+                            drop(permit);
+
+                            let str_data = match str_data_res {
+                                Ok(s) => s,
+                                Err(err) => { println!("Skipping file {} due to decode error: {}", key, err); continue; }
+                            };
+
+                            let bytes = str_data.len();
+                            current_bytes += bytes;
+
+                            let mut new_datas = Vec::new();
+                            new_datas.extend(current_batch.datas.iter().cloned());
+                            new_datas.push(IngestBatch {
+                                offset_key: OffsetKey { namespace: s3_bucket.clone(), partition: key },
+                                data: str_data,
+                                bytes,
+                            });
+                            current_batch.datas = Arc::new(new_datas);
+
+                            if current_bytes >= self.optimal_chunk_size {
+                                let mut tasks = IngestTasks::new();
+                                tasks.add(current_batch);
+                                let tasks_arc = Arc::new(tasks);
+                                let metrics = self.ingest.ingest_file(&tasks_arc, &offsets, shared_output.clone());
+                                self.active_threads = metrics.active_cores;
+                                self.optimal_chunk_size = metrics.optimal_chunk_size;
+                                current_batch = IngestTask::new(Vec::new(), offsets.clone(), shared_output.clone());
+                                current_bytes = 0;
                             }
-                            _chunks_processed += 1;
-                            
-                            // Process remaining items
-                            let _throughput_metrics = self.download_and_ingest(
-                                &s3_bucket,
-                                &outputs,
-                                &offsets_clone,
-                                shared_output.clone(),
-                                chunk_size_current
-                            ).await;
-                        }
-                        break 'outer;
+                        },
+                        None => break,
                     }
                 }
             }
         }
 
+        // Wait for lister and downloader supervisor to finish
+        let _ = lister_handle.await;
+        let _ = downloader_supervisor.await;
+
+        // Flush any remaining
+        if !current_batch.datas.is_empty() {
+            let mut tasks = IngestTasks::new();
+            tasks.add(current_batch);
+            let tasks_arc = Arc::new(tasks);
+            let _ = self.ingest.ingest_file(&tasks_arc, &offsets, shared_output.clone());
+        }
     }
 
     /// Download an S3 object with exponential backoff retry logic
@@ -356,191 +443,12 @@ impl DataSourceS3Plugin {
         shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
         _chunk_size_current: i64
     ) -> ThroughputMetrics {
-        if keys.is_empty() {
-            return ThroughputMetrics {
-                bytes_per_second: 0,
-                active_cores: self.active_threads,
-                queue_length: 0,
-                optimal_chunk_size: self.optimal_chunk_size,
-            };
-        }
-        
-        let s3_client = self.s3_client.clone();
-
-        // Use a semaphore to limit concurrent downloads
-        let semaphore = Arc::new(Semaphore::new(2048));
-
-        // Pre-allocate futures vector with known size
-        let futures: Vec<_> = keys
-            .iter()
-            .flat_map(|chunk| chunk.iter().map(|s| s.clone()))
-            .map(|object_key| {
-                let semaphore = Arc::clone(&semaphore);
-                let s3_client = s3_client.clone();
-                let bucket_name = s3_bucket.to_owned();
-
-                tokio::spawn(async move {
-                    let _permit = semaphore.acquire().await.unwrap();
-
-                    match Self::download_s3_object_with_backoff(
-                        &s3_client,
-                        &bucket_name,
-                        &object_key,
-                    )
-                        .await
-                    {
-                        Ok(response) => Ok(Download {
-                            key: object_key,
-                            response,
-                        }),
-                        Err(_) => Err("Could not get object"),
-                    }
-                })
-            })
-            .collect();
-
-        let ingest_tasks: Arc<TimedRwLock<IngestTasks>> = Arc::new(TimedRwLock::new("datas".to_string(), IngestTasks::new()));
-
-        let future_result = join_all(futures).await;
-
-        let bucket_name = s3_bucket.clone();
-        let ingest_tasks_clone = ingest_tasks.clone();
-
-        // Process the downloaded data in larger batches to reduce context switching
-        // Group files by extension to process similar files together
-        let mut gz_files = Vec::new();
-        let mut regular_files = Vec::new();
-
-        for future in future_result {
-            match future.unwrap() {
-                Ok(download) => {
-                    let mut data = download.response.body;
-
-                    // convert the ByteStream into a Vec<u8>
-                    let mut data_vec = Vec::new();
-                    while let Some(chunk) = data.next().await {
-                        data_vec.extend_from_slice(&chunk.unwrap());
-                    }
-
-                    if download.key.contains(".gz") {
-                        gz_files.push((download.key, data_vec));
-                    } else {
-                        regular_files.push((download.key, data_vec));
-                    }
-                }
-                Err(err) => {
-                    println!("{:?}", err);
-                }
-            };
-        }
-
-        let mut _tasks_total_bytes: usize = 0;
-
-        // Process gzip files in a single blocking task
-        if !gz_files.is_empty() {
-            let ingest_tasks_clone = ingest_tasks_clone.clone();
-            let bucket_name_clone = bucket_name.clone();
-            let optimal_chunk_size = self.optimal_chunk_size;
-            let shared_output_clone = shared_output.clone();
-            let offsets_clone = offsets.clone();
-
-            tokio::task::spawn_blocking(move || {
-                let mut current_batch: IngestTask = IngestTask::new(Vec::new(), offsets_clone.clone(), shared_output_clone.clone());
-                for (key, data_vec) in gz_files {
-                    // Something that implements `std::io::Read`
-                    let c = Cursor::new(data_vec);
-
-                    // To inflate on the fly, "pipe" the data through the decoder
-                    let mut stream = GzDecoder::new(c);
-
-                    let mut decompressed_data = String::new();
-                    stream.read_to_string(&mut decompressed_data).unwrap();
-
-                    let bytes = decompressed_data.len();
-                    _tasks_total_bytes += bytes;
-
-                    let mut new_datas = Vec::new();
-                    new_datas.extend(current_batch.datas.iter().cloned());
-                    new_datas.push(IngestBatch {
-                        offset_key: OffsetKey {
-                            namespace: bucket_name_clone.to_string(),
-                            partition: key,
-                        },
-                        data: decompressed_data,
-                        bytes,
-                    });
-                    current_batch.datas = Arc::new(new_datas);
-
-                    if current_batch.datas.iter().map(|d| d.bytes).sum::<usize>() >= optimal_chunk_size {
-                        // println!("Downloaded and processed {} gzip files of {}", current_batch.datas.len(), Helpers::human_readable_size(current_batch.datas.iter().map(|d| d.bytes).sum::<usize>() as u64));
-                        ingest_tasks_clone.write().add(current_batch);
-
-                        current_batch = IngestTask::new(Vec::new(), offsets_clone.clone(), shared_output_clone.clone());
-                    }
-                }
-                if !current_batch.datas.is_empty() {
-                    ingest_tasks_clone.write().add(current_batch)
-                }
-            }).await.unwrap();
-        }
-
-        // Process regular files in a single blocking task
-        if !regular_files.is_empty() {
-            let datas_clone = ingest_tasks_clone.clone();
-            let bucket_name_clone = bucket_name.clone();
-            let optimal_chunk_size = self.optimal_chunk_size;
-            let shared_output_clone = shared_output.clone();
-            let offsets_clone = offsets.clone();
-
-            tokio::task::spawn_blocking(move || {
-                let mut current_batch: IngestTask = IngestTask::new(Vec::new(), offsets_clone.clone(), shared_output_clone.clone());
-                for (key, data_vec) in regular_files {
-                    let str_data = String::from_utf8(data_vec).unwrap();
-
-                    let bytes = str_data.len();
-                    _tasks_total_bytes += bytes;
-
-                    let mut new_datas = Vec::new();
-                    new_datas.extend(current_batch.datas.iter().cloned());
-                    new_datas.push(IngestBatch {
-                        offset_key: OffsetKey {
-                            namespace: bucket_name_clone.to_string(),
-                            partition: key,
-                        },
-                        data: str_data,
-                        bytes,
-                    });
-                    current_batch.datas = Arc::new(new_datas);
-
-                    if current_batch.datas.iter().map(|d| d.bytes).sum::<usize>() >= optimal_chunk_size {
-                        // println!("Downloaded and processed {} regular files of {}", current_batch.datas.len(), Helpers::human_readable_size(current_batch.datas.iter().map(|d| d.bytes).sum::<usize>() as u64));
-                        datas_clone.write().add(current_batch);
-                        current_batch = IngestTask::new(Vec::new(), offsets_clone.clone(), shared_output_clone.clone());
-                    }
-                }
-                if !current_batch.datas.is_empty() {
-                    datas_clone.write().add(current_batch)
-                }
-            }).await.unwrap();
-        }
-
-        let batch = ingest_tasks.read().clone();
-        let shared_output_clone = shared_output.clone();
-
-
-        // Process the batch and get throughput metrics
-        let metrics = self.ingest.ingest_file(&Arc::new(batch), &offsets, shared_output_clone);
-        
-        // Update our active threads count
-        self.active_threads = metrics.active_cores;
-        self.optimal_chunk_size = metrics.optimal_chunk_size;
-
-        // Return the metrics for the caller
+        // Deprecated in bounded pipeline path; keep a no-op metrics return for compatibility
         ThroughputMetrics {
-            bytes_per_second: metrics.bytes_per_second,
-            active_cores: metrics.active_cores,
-            queue_length: metrics.queue_length,
-            optimal_chunk_size: metrics.optimal_chunk_size,
+            bytes_per_second: 0,
+            active_cores: self.active_threads,
+            queue_length: 0,
+            optimal_chunk_size: self.optimal_chunk_size,
         }
     }
 }
@@ -549,5 +457,14 @@ impl DataSourceS3Plugin {
 struct Download {
     key: String,
     response: GetObjectOutput,
+}
+
+
+// Items used in new bounded pipeline
+struct DownloadedItem {
+    key: String,
+    data: Vec<u8>,
+    is_gz: bool,
+    permit: OwnedSemaphorePermit,
 }
 
