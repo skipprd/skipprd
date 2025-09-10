@@ -66,7 +66,6 @@ pub fn create_default_nested_message(metadata: &HashMap<String, Metadata>) -> Va
                 sub_fields.insert(field.to_string() , create_default_nested_message(&meta_data.fields));
                 message[meta_data.out_field_name.clone()] = Value::Object(sub_fields);
             }
-            sort_fields(&mut message);
         }
     }
 
@@ -112,6 +111,7 @@ pub fn sort_fields(value: &mut Value) {
     }
 }
 
+#[inline]
 pub fn fast_path_ingest(
     unwrapped_message: &Value,
     metadata: &HashMap<String, Metadata>,
@@ -128,6 +128,7 @@ pub fn fast_path_ingest(
     
     // Direct unwrap with early return for invalid input
     let object = unwrapped_message.as_object().ok_or("Invalid JSON object")?;
+    if object.is_empty() { return Ok(_message); }
     
     // Pre-compute metadata access to avoid repeated lookups
     let field_count = object.len();
@@ -136,12 +137,15 @@ pub fn fast_path_ingest(
     // First pass - collect field information to process
     for (field, value) in object {
         if let Some(meta_data) = metadata.get(field) {
+            // Skip disabled fields early (no functional change; mirrors deep handlers)
+            if !meta_data.enabled { continue; }
             // Skip null or empty values early
             if value.is_null() || (value.is_string() && value.as_str().unwrap_or_default().is_empty()) {
                 continue;
             }
             
             // Use data_type() method instead of string determined_type
+            // Avoid recomputing out_field_name in insertion path; capture now
             fields_to_process.push((field, value, meta_data.data_type()));
         } else {
             return Err(format!("Field '{}' not found in metadata", field).into());
@@ -149,6 +153,8 @@ pub fn fast_path_ingest(
     }
     
     // Second pass - process all fields
+    // Insert directly into the template object for speed (avoids intermediate indexing conversions)
+    let obj = _message.as_object_mut().ok_or("Template is not an object")?;
     for (field, value, data_type) in fields_to_process {
         // No need to convert string to enum since we already have the enum
         let resolved_value = match fast_set_value_optimized(
@@ -170,7 +176,7 @@ pub fn fast_path_ingest(
         };
 
         if !resolved_value.value.is_null() {
-            _message[resolved_value.field] = resolved_value.value;
+            obj.insert(resolved_value.field, resolved_value.value);
         }
     }
     
@@ -186,6 +192,7 @@ pub fn fast_path_ingest(
 }
 
 /// Optimized version of fast_set_value that uses the DataType enum
+#[inline]
 pub fn fast_set_value_optimized(
     data_type: &SkipprDataType,
     field: &str,
@@ -220,6 +227,7 @@ pub fn fast_set_value_optimized(
 }
 
 /// Optimized version of match_scalar_value_fast that uses the DataType enum
+#[inline]
 pub fn match_scalar_value_optimized(
     field: &str,
     data_type: &SkipprDataType,
@@ -531,6 +539,7 @@ pub fn fast_set_date(field: &str, value: &Value, metadata: &HashMap<String, Meta
     }
 }
 
+#[inline]
 fn process_record_field(
     field: &str,
     value: &Value,
@@ -543,13 +552,14 @@ fn process_record_field(
 
     if value.is_array() {
         let values = value.as_array().ok_or("Value is not an array")?;
+        let mut m = Map::with_capacity(values.len());
         
         // For array-type records, we don't need to check for repetition_count at this level
         // The check will happen in process_array_field when each array element is processed
         
         for (idx, val) in values.iter().enumerate() {
             let sub_field = idx.to_string();
-            let meta_field = metadata.get(field).ok_or(format!("Array field '{}' not found in metadata or it's disabled", idx))?;
+            let meta_field = metadata.get(field).ok_or_else(|| format!("Array field '{}' not found in metadata or it's disabled", idx))?;
             
             // println!("field: {}: value {}\n", sub_field, val);
             
@@ -569,7 +579,10 @@ fn process_record_field(
     } 
     
     else if value.is_object() {
-        for (sub_field, sub_value) in value.as_object().ok_or("Value is not an object")? {
+        let obj = value.as_object().ok_or("Value is not an object")?;
+        // Pre-size map to reduce reallocations when inserting
+        let mut m = Map::with_capacity(obj.len());
+        for (sub_field, sub_value) in obj {
             // Only check direct array fields with record type, as nested checks will be handled in their respective processing functions
             if let Some(meta_field) = metadata.get(field).and_then(|f| f.fields.get(sub_field)) {
                 // Use enum comparisons instead of string comparisons
@@ -589,13 +602,14 @@ fn process_record_field(
                 }
             }
 
-            let meta_field = metadata.get(field).ok_or(format!("Field '{}' not found in metadata", sub_field))?.fields.get(sub_field).ok_or(format!("Subfield '{}' not found in fields", sub_field))?;
+            let parent = metadata.get(field).ok_or_else(|| format!("Field '{}' not found in metadata", sub_field))?;
+            let meta_field = parent.fields.get(sub_field).ok_or_else(|| format!("Subfield '{}' not found in fields", sub_field))?;
             if meta_field.enabled {
                 let newval = fast_set_value(
                     &meta_field.determined_type,
                     sub_field,
                     sub_value,
-                    &metadata.get(field).unwrap().fields,
+                    &parent.fields,
                     None,
                     flatten
                 )?;
@@ -608,6 +622,7 @@ fn process_record_field(
     resolved_value
 }
 
+#[inline]
 fn process_map_field(
     field: &str,
     value: &Value,
@@ -615,22 +630,23 @@ fn process_map_field(
     flatten: bool,
 ) -> Result<ResolvedFieldValue, Box<dyn Error>> {
     let mut new_value = Value::Null;
-    
+
     // Early return if not an object
     if !value.is_object() {
         return Ok(ResolvedFieldValue::new(field.to_string(), new_value));
     }
-    
+
     // Get field metadata once
     let field_metadata = match metadata.get(field) {
         Some(meta) => meta,
         None => return Err(format!("Field '{}' not found in metadata", field).into())
     };
-    
+
+    let obj = value.as_object().unwrap();
     // Pre-allocate with capacity
-    let mut map = serde_json::Map::with_capacity(value.as_object().unwrap().len());
-    
-    for (key, val) in value.as_object().unwrap() {
+    let mut map = serde_json::Map::with_capacity(obj.len());
+
+    for (key, val) in obj {
         // Quick check if this key has metadata
         if let Some(meta_field) = field_metadata.fields.get(key) {
             // Skip disabled fields early
@@ -676,6 +692,7 @@ fn process_map_field(
     Ok(ResolvedFieldValue::new(field.to_string(), new_value))
 }
 
+#[inline]
 fn process_array_field(
     field: &str,
     value: &Value,
@@ -706,33 +723,51 @@ fn process_array_field(
             }
         }
         
+        // Pre-allocate array capacity
+        array.reserve(values.len());
+        
+        let parent_meta_opt = metadata.get(field);
+        let is_record_values = parent_meta_opt.map(|m| m.is_values_type(SkipprDataType::Record)).unwrap_or(false);
         for (idx, val) in values.iter().enumerate() {
-            let mut sub_field = idx.to_string();
-            if let Some(meta) = metadata.get(field) {
-                // Use the enum comparison instead of string comparison
-                if meta.is_values_type(SkipprDataType::Record) {
-                    sub_field = 0.to_string().clone();
+            // Preserve original error behavior: error on first iteration with current idx if parent metadata missing
+            let parent_meta = match parent_meta_opt {
+                Some(m) => m,
+                None => return Err(format!("Array field '{}' not found in metadata or it's disabled", idx).into()),
+            };
+
+            if parent_meta.enabled {
+                if is_record_values {
+                    let sub_field = "0";
+                    let _new_val = match fast_set_value(
+                        &parent_meta.determined_type_values,
+                        sub_field,
+                        val,
+                        &parent_meta.fields,
+                        None,
+                        flatten
+                    ) {
+                        Ok(v) => array.push(v.value),
+                        Err(_e) => {
+                            array.push(Value::Null);
+                        }
+                    };
+                } else {
+                    let sub_field_owned = idx.to_string();
+                    let sub_field = sub_field_owned.as_str();
+                    let _new_val = match fast_set_value(
+                        &parent_meta.determined_type_values,
+                        sub_field,
+                        val,
+                        &parent_meta.fields,
+                        None,
+                        flatten
+                    ) {
+                        Ok(v) => array.push(v.value),
+                        Err(_e) => {
+                            array.push(Value::Null);
+                        }
+                    };
                 }
-            }
-
-            let meta_field = metadata.get(field).ok_or(format!("Array field '{}' not found in metadata or it's disabled", idx))?;
-
-            if meta_field.enabled {
-                let _new_val = match fast_set_value(
-                    &meta_field.determined_type_values,
-                    &sub_field,
-                    val,
-                    &metadata.get(field).unwrap().fields,
-                    None,
-                    flatten
-                ) {
-                    Ok(v) => array.push(v.value),
-                    Err(_e) => {
-                        // @todo - bubble up error and add array evolution support.
-                        // Very slow ingest otherwise so just setting null and dropping values
-                        array.push(Value::Null);
-                    }
-                };
             }
         }
     }
