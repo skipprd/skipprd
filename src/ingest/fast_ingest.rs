@@ -45,21 +45,28 @@ pub fn create_default_nested_message(metadata: &HashMap<String, Metadata>) -> Va
     for (field, meta_data) in metadata {
         if meta_data.enabled {
             if meta_data.fields.is_empty() {
-                message[meta_data.out_field_name.as_str()] = Value::Null;
+                message[meta_data.out_field_name.clone()] = Value::Null;
             } else if meta_data.determined_type == "array" {
                 if meta_data.determined_type_values == "record" {
-                    // Default for arrays of records is an empty array
-                    message[meta_data.out_field_name.as_str()] = Value::Array(Vec::new());
+                    // message[meta_data.out_field_name.clone()] = create_default_nested_message(&meta_data.fields);
+                    let fields = create_default_nested_message(&meta_data.fields);
+                    message[meta_data.out_field_name.clone()] = Value::Array(vec![]);
+                    if fields.as_array().is_some() {
+                        for field in fields.as_array().unwrap().iter() {
+                            message.as_array_mut().unwrap().push(field.clone());
+                        }
+                    }
                 } else {
-                    message[meta_data.out_field_name.as_str()] = Value::Array(Vec::new());
+                    message[meta_data.out_field_name.clone()] = Value::Array(Vec::new());
                 }
             } else if meta_data.determined_type == "map" {
-                message[meta_data.out_field_name.as_str()] = Value::Object(Map::new());
+                message[meta_data.out_field_name.clone()] = Value::Object(Map::new());
             } else {
                 let mut sub_fields = Map::new();
                 sub_fields.insert(field.to_string() , create_default_nested_message(&meta_data.fields));
-                message[meta_data.out_field_name.as_str()] = Value::Object(sub_fields);
+                message[meta_data.out_field_name.clone()] = Value::Object(sub_fields);
             }
+            sort_fields(&mut message);
         }
     }
 
@@ -120,35 +127,41 @@ pub fn fast_path_ingest(
     };
     
     // Direct unwrap with early return for invalid input
-    let object = unwrapped_message.as_object().ok_or_else(|| "Invalid JSON object")?;
+    let object = unwrapped_message.as_object().ok_or("Invalid JSON object")?;
     
-    // Insert directly into the template object for speed
-    let obj = _message.as_object_mut().ok_or_else(|| "Template is not an object")?;
+    // Pre-compute metadata access to avoid repeated lookups
+    let field_count = object.len();
+    let mut fields_to_process = Vec::with_capacity(field_count);
     
-    // Single-pass processing: iterate and process immediately
-    for (field, value) in object.iter() {
-        let meta_data = match metadata.get(field) {
-            Some(m) => m,
-            None => return Err(format!("Field '{}' not found in metadata", field).into()),
-        };
-
-        // Skip null or empty values early
-        if value.is_null() || (value.is_string() && value.as_str().unwrap_or_default().is_empty()) {
-            continue;
+    // First pass - collect field information to process
+    for (field, value) in object {
+        if let Some(meta_data) = metadata.get(field) {
+            // Skip null or empty values early
+            if value.is_null() || (value.is_string() && value.as_str().unwrap_or_default().is_empty()) {
+                continue;
+            }
+            
+            // Use data_type() method instead of string determined_type
+            fields_to_process.push((field, value, meta_data.data_type()));
+        } else {
+            return Err(format!("Field '{}' not found in metadata", field).into());
         }
-
-        let data_type = meta_data.data_type();
-
+    }
+    
+    // Second pass - process all fields
+    for (field, value, data_type) in fields_to_process {
+        // No need to convert string to enum since we already have the enum
         let resolved_value = match fast_set_value_optimized(
             &data_type,
             field,
             value,
             metadata,
             None,
-            flatten,
+            flatten
         ) {
             Ok(v) => v,
             Err(e) => {
+                // Check if the error is related to array repetition_count
                 if e.to_string().contains("Falling back to slow path") {
                     return Err(e);
                 }
@@ -157,7 +170,7 @@ pub fn fast_path_ingest(
         };
 
         if !resolved_value.value.is_null() {
-            obj.insert(resolved_value.field, resolved_value.value);
+            _message[resolved_value.field] = resolved_value.value;
         }
     }
     
@@ -202,11 +215,7 @@ pub fn fast_set_value_optimized(
         SkipprDataType::Map => process_map_field(field, value, metadata, flatten),
         SkipprDataType::Array => process_array_field(field, value, metadata, flatten),
         SkipprDataType::Date => fast_set_date(field, value, metadata),
-        _ => {
-            // Cache output field name once for scalar values
-            let output_field_name = Metadata::get_field_out_field_name(metadata, field);
-            match_scalar_value_optimized_with_name(field, data_type, value, metadata, apply_evolution_bool, flatten, &output_field_name)
-        }
+        _ => match_scalar_value_optimized(field, data_type, value, metadata, apply_evolution_bool, flatten),
     }
 }
 
@@ -227,44 +236,33 @@ pub fn match_scalar_value_optimized(
         });
     }
 
+    // Use cached field name lookups to reduce repetitive transformations
     let output_field_name = Metadata::get_field_out_field_name(metadata, field);
-    match_scalar_value_optimized_with_name(field, data_type, value, metadata, apply_evolution, flatten, &output_field_name)
-}
 
-pub fn match_scalar_value_optimized_with_name(
-    field: &str,
-    data_type: &SkipprDataType,
-    value: &Value,
-    metadata: &HashMap<String, Metadata>,
-    apply_evolution: bool,
-    flatten: bool,
-    output_field_name: &str,
-) -> Result<ResolvedFieldValue, Box<dyn Error>> {
-    // Use provided output_field_name to avoid repeated lookup work
     match data_type {
         SkipprDataType::String => {
             if let Some(s) = value.as_str() {
                 // Fast path for actual strings
                 return Ok(ResolvedFieldValue {
-                    field: output_field_name.to_string(),
+                    field: output_field_name,
                     value: Value::String(s.to_string()),
                 });
             } else if let Some(i) = value.as_i64() {
                 // Convert integer to string
                 return Ok(ResolvedFieldValue {
-                    field: output_field_name.to_string(),
+                    field: output_field_name,
                     value: Value::String(i.to_string()),
                 });
             } else if let Some(f) = value.as_f64() {
                 // Convert float to string
                 return Ok(ResolvedFieldValue {
-                    field: output_field_name.to_string(),
+                    field: output_field_name,
                     value: Value::String(f.to_string()),
                 });
             } else if let Some(b) = value.as_bool() {
                 // Convert boolean to string
                 return Ok(ResolvedFieldValue {
-                    field: output_field_name.to_string(),
+                    field: output_field_name,
                     value: Value::String(b.to_string()),
                 });
             } else if apply_evolution {
@@ -280,14 +278,14 @@ pub fn match_scalar_value_optimized_with_name(
             if let Some(i) = value.as_i64() {
                 // Fast path for actual integers
                 return Ok(ResolvedFieldValue {
-                    field: output_field_name.to_string(),
+                    field: output_field_name,
                     value: Value::Number(serde_json::Number::from(i)),
                 });
             } else if let Some(s) = value.as_str() {
                 // Try parsing string as integer
                 if let Ok(i) = s.parse::<i64>() {
                     return Ok(ResolvedFieldValue {
-                        field: output_field_name.to_string(),
+                        field: output_field_name,
                         value: Value::Number(serde_json::Number::from(i)),
                     });
                 }
@@ -306,31 +304,31 @@ pub fn match_scalar_value_optimized_with_name(
             if let Some(i) = value.as_i64() {
                 // Ensure 32-bit range
                 return Ok(ResolvedFieldValue {
-                    field: output_field_name.to_string(),
+                    field: output_field_name,
                     value: Value::Number(serde_json::Number::from(i as i32)),
                 });
             } else if let Some(s) = value.as_str() {
                 // Try parsing string as integer
                 if let Ok(i) = s.parse::<i32>() {
                     return Ok(ResolvedFieldValue {
-                        field: output_field_name.to_string(),
+                        field: output_field_name,
                         value: Value::Number(serde_json::Number::from(i)),
                     });
                 } else if s == "true" {
                     return Ok(ResolvedFieldValue {
-                        field: output_field_name.to_string(),
+                        field: output_field_name,
                         value: Value::Number(serde_json::Number::from(1)),
                     });
                 } else if s == "false" {
                     return Ok(ResolvedFieldValue {
-                        field: output_field_name.to_string(),
+                        field: output_field_name,
                         value: Value::Number(serde_json::Number::from(0)),
                     });
                 }
             } else if let Some(b) = value.as_bool() {
                 // Convert boolean to integer (true -> 1, false -> 0)
                 return Ok(ResolvedFieldValue {
-                    field: output_field_name.to_string(),
+                    field: output_field_name,
                     value: Value::Number(serde_json::Number::from(if b { 1 } else { 0 })),
                 });
             }
@@ -348,21 +346,21 @@ pub fn match_scalar_value_optimized_with_name(
             if let Some(i) = value.as_i64() {
                 // Convert to milliseconds if necessary
                 return Ok(ResolvedFieldValue {
-                    field: output_field_name.to_string(),
+                    field: output_field_name,
                     value: AnalyseSchema::coerce_to_milli_seconds(Value::Number(serde_json::Number::from(i))),
                 });
             } else if let Some(s) = value.as_str() {
                 // Try parsing string as timestamp
                 if let Ok(i) = s.parse::<i64>() {
                     return Ok(ResolvedFieldValue {
-                        field: output_field_name.to_string(),
+                        field: output_field_name,
                         value: AnalyseSchema::coerce_to_milli_seconds(Value::Number(serde_json::Number::from(i))),
                     });
                 }
             } else if let Some(b) = value.as_bool() {
                 // Convert boolean to timestamp (true -> 1, false -> 0)
                 return Ok(ResolvedFieldValue {
-                    field: output_field_name.to_string(),
+                    field: output_field_name,
                     value: Value::Number(serde_json::Number::from(if b { 1 } else { 0 })),
                 });
             }
@@ -380,7 +378,7 @@ pub fn match_scalar_value_optimized_with_name(
             if let Some(f) = value.as_f64() {
                 // Fast path for floats
                 return Ok(ResolvedFieldValue {
-                    field: output_field_name.to_string(),
+                    field: output_field_name,
                     value: Value::Number(serde_json::Number::from_f64(f).unwrap()),
                 });
             } else if let Some(s) = value.as_str() {
@@ -388,7 +386,7 @@ pub fn match_scalar_value_optimized_with_name(
                 if let Ok(f) = s.parse::<f64>() {
                     if let Some(num) = serde_json::Number::from_f64(f) {
                         return Ok(ResolvedFieldValue {
-                            field: output_field_name.to_string(),
+                            field: output_field_name,
                             value: Value::Number(num),
                         });
                     }
@@ -408,24 +406,24 @@ pub fn match_scalar_value_optimized_with_name(
             if let Some(b) = value.as_bool() {
                 // Fast path for booleans
                 return Ok(ResolvedFieldValue {
-                    field: output_field_name.to_string(),
+                    field: output_field_name,
                     value: Value::Bool(b),
                 });
             } else if let Some(s) = value.as_str() {
                 // Try parsing string as boolean
                 if let Ok(b) = s.parse::<bool>() {
                     return Ok(ResolvedFieldValue {
-                        field: output_field_name.to_string(),
+                        field: output_field_name,
                         value: Value::Bool(b),
                     });
                 } else if s == "0" {
                     return Ok(ResolvedFieldValue {
-                        field: output_field_name.to_string(),
+                        field: output_field_name,
                         value: Value::Bool(false),
                     });
                 } else if s == "1" {
                     return Ok(ResolvedFieldValue {
-                        field: output_field_name.to_string(),
+                        field: output_field_name,
                         value: Value::Bool(true),
                     });
                 }
@@ -433,7 +431,7 @@ pub fn match_scalar_value_optimized_with_name(
                 // Convert 0/1 to boolean
                 if i == 0 || i == 1 {
                     return Ok(ResolvedFieldValue {
-                        field: output_field_name.to_string(),
+                        field: output_field_name,
                         value: Value::Bool(i == 1),
                     });
                 }
@@ -448,69 +446,8 @@ pub fn match_scalar_value_optimized_with_name(
             
             Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a boolean", value))))
         },
-        _ => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Unknown data type '{:?}'", data_type)))),
+        _ => Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Unknown data type 'unknown'")))),
     }
-}
-
-/// Convert a scalar value to a JSON Value without constructing a field name.
-/// Used by primitive arrays to avoid per-element ResolvedFieldValue allocations.
-pub fn convert_scalar_value_optimized(
-    field: &str,
-    data_type: &SkipprDataType,
-    value: &Value,
-    metadata: &HashMap<String, Metadata>,
-    apply_evolution: bool,
-    flatten: bool
-) -> Result<Value, Box<dyn Error>> {
-    if value.is_null() {
-        return Ok(Value::Null);
-    }
-
-    match data_type {
-        SkipprDataType::String => {
-            if let Some(s) = value.as_str() {
-                return Ok(Value::String(s.to_string()));
-            } else if let Some(i) = value.as_i64() { return Ok(Value::String(i.to_string())); }
-            else if let Some(f) = value.as_f64() { return Ok(Value::String(f.to_string())); }
-            else if let Some(b) = value.as_bool() { return Ok(Value::String(b.to_string())); }
-        },
-        SkipprDataType::Long => {
-            if let Some(i) = value.as_i64() { return Ok(Value::Number(serde_json::Number::from(i))); }
-            else if let Some(s) = value.as_str() { if let Ok(i) = s.parse::<i64>() { return Ok(Value::Number(serde_json::Number::from(i))); } }
-        },
-        SkipprDataType::Integer => {
-            if let Some(i) = value.as_i64() { return Ok(Value::Number(serde_json::Number::from(i as i32))); }
-            else if let Some(s) = value.as_str() {
-                if let Ok(i) = s.parse::<i32>() { return Ok(Value::Number(serde_json::Number::from(i))); }
-                else if s == "true" { return Ok(Value::Number(serde_json::Number::from(1))); }
-                else if s == "false" { return Ok(Value::Number(serde_json::Number::from(0))); }
-            } else if let Some(b) = value.as_bool() { return Ok(Value::Number(serde_json::Number::from(if b { 1 } else { 0 }))); }
-        },
-        SkipprDataType::TimestampMilli | SkipprDataType::Timestamp => {
-            if let Some(i) = value.as_i64() { return Ok(AnalyseSchema::coerce_to_milli_seconds(Value::Number(serde_json::Number::from(i)))); }
-            else if let Some(s) = value.as_str() { if let Ok(i) = s.parse::<i64>() { return Ok(AnalyseSchema::coerce_to_milli_seconds(Value::Number(serde_json::Number::from(i)))); } }
-            else if let Some(b) = value.as_bool() { return Ok(Value::Number(serde_json::Number::from(if b { 1 } else { 0 }))); }
-        },
-        SkipprDataType::Double => {
-            if let Some(f) = value.as_f64() { return Ok(Value::Number(serde_json::Number::from_f64(f).unwrap())); }
-            else if let Some(s) = value.as_str() { if let Ok(f) = s.parse::<f64>() { if let Some(num) = serde_json::Number::from_f64(f) { return Ok(Value::Number(num)); } } }
-        },
-        SkipprDataType::Boolean => {
-            if let Some(b) = value.as_bool() { return Ok(Value::Bool(b)); }
-            else if let Some(s) = value.as_str() {
-                if let Ok(b) = s.parse::<bool>() { return Ok(Value::Bool(b)); }
-                else if s == "0" { return Ok(Value::Bool(false)); }
-                else if s == "1" { return Ok(Value::Bool(true)); }
-            } else if let Some(i) = value.as_i64() { if i == 0 || i == 1 { return Ok(Value::Bool(i == 1)); } }
-        },
-        _ => {}
-    }
-
-    if apply_evolution {
-        if let Ok(v) = Evolution::apply_evolution_factory(field, value, metadata, flatten) { return Ok(v.value); }
-    }
-
-    Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Value {} is not a {:?}", value, data_type))))
 }
 
 // Keep the original functions for backward compatibility
@@ -564,7 +501,7 @@ pub fn fast_set_date(field: &str, value: &Value, metadata: &HashMap<String, Meta
 
             match DateFormats::from_str(fmt) {
                 Ok(f) => {
-                    let kind = parent_field_meta.date_parser_kind.as_ref();
+                    let kind = parent_field_meta.date_parser_kind.clone();
                     let tz = parent_field_meta.timezone;
                     let millis = match (kind, tz) {
                         (Some(crate::discover::DateParserKind::ZNoMsT), true) => Helpers::fast_parse_z_no_millis(val, 'T').map(|d| d.timestamp()*1000),
@@ -601,19 +538,18 @@ fn process_record_field(
     flatten: bool,
 ) -> Result<ResolvedFieldValue, Box<dyn Error>> {
     let mut m = Map::new();
-    let parent = metadata.get(field).ok_or_else(|| format!("Field '{}' not found in metadata", field))?;
     
     let mut resolved_value: Result<ResolvedFieldValue, Box<dyn Error>> = Ok(ResolvedFieldValue::new(field.to_string(), Value::Null));
 
     if value.is_array() {
-        let values = value.as_array().unwrap();
+        let values = value.as_array().ok_or("Value is not an array")?;
         
         // For array-type records, we don't need to check for repetition_count at this level
         // The check will happen in process_array_field when each array element is processed
         
         for (idx, val) in values.iter().enumerate() {
             let sub_field = idx.to_string();
-            let meta_field = parent;
+            let meta_field = metadata.get(field).ok_or(format!("Array field '{}' not found in metadata or it's disabled", idx))?;
             
             // println!("field: {}: value {}\n", sub_field, val);
             
@@ -622,7 +558,7 @@ fn process_record_field(
                     &meta_field.determined_type,
                     &sub_field,
                     val,
-                    &parent.fields,
+                    &metadata.get(field).unwrap().fields,
                     None,
                     flatten
                 )?;
@@ -633,12 +569,9 @@ fn process_record_field(
     } 
     
     else if value.is_object() {
-        let obj = value.as_object().unwrap();
-        // Pre-allocate capacity for subfields
-        m = Map::with_capacity(obj.len());
-        for (sub_field, sub_value) in obj {
+        for (sub_field, sub_value) in value.as_object().ok_or("Value is not an object")? {
             // Only check direct array fields with record type, as nested checks will be handled in their respective processing functions
-            if let Some(meta_field) = parent.fields.get(sub_field) {
+            if let Some(meta_field) = metadata.get(field).and_then(|f| f.fields.get(sub_field)) {
                 // Use enum comparisons instead of string comparisons
                 if meta_field.is_type(SkipprDataType::Array) && meta_field.is_values_type(SkipprDataType::Record) {
                     // If it's an array of records, check the length against repetition_count
@@ -656,13 +589,13 @@ fn process_record_field(
                 }
             }
 
-            let meta_field = parent.fields.get(sub_field).ok_or_else(|| format!("Subfield '{}' not found in fields", sub_field))?;
+            let meta_field = metadata.get(field).ok_or(format!("Field '{}' not found in metadata", sub_field))?.fields.get(sub_field).ok_or(format!("Subfield '{}' not found in fields", sub_field))?;
             if meta_field.enabled {
                 let newval = fast_set_value(
                     &meta_field.determined_type,
                     sub_field,
                     sub_value,
-                    &parent.fields,
+                    &metadata.get(field).unwrap().fields,
                     None,
                     flatten
                 )?;
@@ -694,11 +627,10 @@ fn process_map_field(
         None => return Err(format!("Field '{}' not found in metadata", field).into())
     };
     
-    // Cache object reference and pre-allocate with capacity
-    let obj = value.as_object().unwrap();
-    let mut map = serde_json::Map::with_capacity(obj.len());
+    // Pre-allocate with capacity
+    let mut map = serde_json::Map::with_capacity(value.as_object().unwrap().len());
     
-    for (key, val) in obj {
+    for (key, val) in value.as_object().unwrap() {
         // Quick check if this key has metadata
         if let Some(meta_field) = field_metadata.fields.get(key) {
             // Skip disabled fields early
@@ -756,62 +688,52 @@ fn process_array_field(
     let out_field_name = Metadata::get_field_out_field_name(metadata, field);
 
     if value.is_array() {
-        let values = value.as_array().unwrap();
-        array.reserve(values.len());
-
+        let values = value.as_array().ok_or("Value is not an array")?;
+        
         // Only check repetition_count for arrays of records, as primitive arrays don't have the constraint
-        if let Some(parent) = metadata.get(field) {
+        if let Some(meta) = metadata.get(field) {
             // Use the enum comparison instead of string comparison
-            if parent.is_values_type(SkipprDataType::Record) {
+            if meta.is_values_type(SkipprDataType::Record) {
                 let array_length = values.len() as i32;
-                if array_length > parent.repetition_count {
+                if array_length > meta.repetition_count {
                     // Reject the message if array has more elements than repetition_count
                     return Err(Box::new(std::io::Error::new(
                         std::io::ErrorKind::InvalidData, 
                         format!("Array field '{}' has {} elements, but repetition_count is {}. Falling back to slow path.", 
-                                field, array_length, parent.repetition_count)
+                                field, array_length, meta.repetition_count)
                     )));
                 }
             }
-
-            // Process elements
-            let values_type = SkipprDataType::from_str(&parent.determined_type_values);
-            let is_record = values_type == SkipprDataType::Record;
-
-            for (idx, val) in values.iter().enumerate() {
-                if !parent.enabled { continue; }
-
-                if is_record {
-                    // Records: route through existing machinery to preserve behavior
-                    let sub_field = if is_record { 0.to_string() } else { idx.to_string() };
-                    let _new_val = match fast_set_value(
-                        &parent.determined_type_values,
-                        &sub_field,
-                        val,
-                        &parent.fields,
-                        None,
-                        flatten
-                    ) {
-                        Ok(v) => array.push(v.value),
-                        Err(_e) => { array.push(Value::Null); }
-                    };
-                } else {
-                    // Primitive arrays: avoid constructing field names per element
-                    match convert_scalar_value_optimized(
-                        field,
-                        &values_type,
-                        val,
-                        metadata,
-                        true,
-                        flatten,
-                    ) {
-                        Ok(v) => array.push(v),
-                        Err(_e) => array.push(Value::Null),
-                    }
+        }
+        
+        for (idx, val) in values.iter().enumerate() {
+            let mut sub_field = idx.to_string();
+            if let Some(meta) = metadata.get(field) {
+                // Use the enum comparison instead of string comparison
+                if meta.is_values_type(SkipprDataType::Record) {
+                    sub_field = 0.to_string().clone();
                 }
             }
-        } else {
-            return Err(format!("Array field '{}' not found in metadata or it's disabled", field).into());
+
+            let meta_field = metadata.get(field).ok_or(format!("Array field '{}' not found in metadata or it's disabled", idx))?;
+
+            if meta_field.enabled {
+                let _new_val = match fast_set_value(
+                    &meta_field.determined_type_values,
+                    &sub_field,
+                    val,
+                    &metadata.get(field).unwrap().fields,
+                    None,
+                    flatten
+                ) {
+                    Ok(v) => array.push(v.value),
+                    Err(_e) => {
+                        // @todo - bubble up error and add array evolution support.
+                        // Very slow ingest otherwise so just setting null and dropping values
+                        array.push(Value::Null);
+                    }
+                };
+            }
         }
     }
     if flatten {
@@ -848,6 +770,7 @@ mod tests {
                 parent_type: String::from("parent"),
                 fields: Box::new(HashMap::new()),
                 date_candidate: Some(date_candidate),
+                date_parser_kind: None,
                 timezone: false,
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
@@ -1294,7 +1217,7 @@ mod tests_process_array_field_repetition_count {
         let flatten = false;
         
         let mut metadata = HashMap::new();
-        let mut meta_data_item = Metadata::new()?;
+        let mut meta_data_item = Metadata::new().unwrap();
         meta_data_item.determined_type = "array".to_string();
         meta_data_item.determined_type_values = "record".to_string();
         // Set repetition_count to 2, which is less than the 3 elements in the array

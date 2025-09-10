@@ -1105,6 +1105,7 @@ mod tests_set_date {
                 parent_type: String::from("parent"),
                 fields: Box::new(HashMap::new()),
                 date_candidate: Some(date_candidate),
+                date_parser_kind: None,
                 timezone: false,
                 evolution: Box::new(HashMap::new()),
                 enabled: true,
