@@ -180,19 +180,19 @@ impl DataSourceS3Plugin {
             .send();
 
         // Collect keys lazily into a Vec to drive the rest of the stream
-        let mut all_keys: Vec<String> = Vec::new();
+        let mut all_keys: Vec<(String, i64)> = Vec::new();
         while let Some(page_res) = pager.next().await {
             if let Ok(page) = page_res {
                 if let Some(objects) = page.contents {
                     for obj in objects {
-                        if let Some(k) = obj.key() { all_keys.push(k.to_string()); }
+                        if let Some(k) = obj.key() { all_keys.push((k.to_string(), obj.size().unwrap_or_default())); }
                     }
                 }
             }
         }
 
         let keys_stream = stream::iter(all_keys.into_iter())
-            .filter(move |key| {
+            .filter(move |(key, _size)| {
                 let offsets = offsets_clone.clone();
                 let ns = s3_bucket_filter.clone();
                 let key_clone = key.clone();
@@ -202,15 +202,20 @@ impl DataSourceS3Plugin {
                 }
             });
 
-        let dl_concurrency = std::cmp::min(256, total_cpus * 8);
+        let dl_concurrency_env = Config::getenv("S3_DOWNLOAD_CONCURRENCY", "");
+        let env_dl = dl_concurrency_env.parse::<usize>().ok().filter(|v| *v > 0);
+        let tuned_dl = crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.load(std::sync::atomic::Ordering::Relaxed);
+        let dl_concurrency = env_dl.unwrap_or_else(|| tuned_dl.clamp(8, 512));
         let s3_client_clone = self.s3_client.clone();
         let mem_sem_clone = mem_sem.clone();
-        let mut download_stream = keys_stream.map(move |key| {
+        let mut download_stream = keys_stream.map(move |(key, size_bytes)| {
             let s3 = s3_client_clone.clone();
             let bucket = s3_bucket_dl.clone();
             let mem = mem_sem_clone.clone();
             async move {
-                let p = mem.acquire_many_owned(1).await.ok();
+                // Acquire permits roughly equal to MiB of object size (min 1)
+                let permits: u32 = (((std::cmp::max(1i64, size_bytes) as u64) + 1_048_575) / 1_048_576) as u32;
+                let p = mem.acquire_many_owned(permits).await.ok();
                 let res = DataSourceS3Plugin::download_s3_object_with_backoff(&s3, &bucket, &key).await;
                 let out = match res {
                     Ok(response) => {
@@ -226,7 +231,7 @@ impl DataSourceS3Plugin {
                                 stream.read_to_string(&mut decompressed).map(|_| decompressed)
                             }).await;
                             match res { Ok(Ok(s)) => Some(s), _ => None }
-                        } else {
+                    } else {
                             String::from_utf8(data_vec).ok()
                         };
                         decoded.map(|s| (key, s))

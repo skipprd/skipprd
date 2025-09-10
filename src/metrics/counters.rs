@@ -18,6 +18,11 @@ pub static PARQUET_PERSISTED_ROWS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU6
 pub static PARQUET_PERSISTED_OBJECTS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static LATEST_TIMESTAMP: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 
+// Dynamic tuning targets (self-tuned by ingest; read by components)
+pub static UPLOAD_CONCURRENCY_TARGET: Lazy<std::sync::atomic::AtomicUsize> = Lazy::new(|| std::sync::atomic::AtomicUsize::new(16));
+pub static WAL_COMPACTION_CONCURRENCY_TARGET: Lazy<std::sync::atomic::AtomicUsize> = Lazy::new(|| std::sync::atomic::AtomicUsize::new(16));
+pub static S3_DOWNLOAD_CONCURRENCY_TARGET: Lazy<std::sync::atomic::AtomicUsize> = Lazy::new(|| std::sync::atomic::AtomicUsize::new(256));
+
 #[inline]
 pub fn add_messages(n: u64) { MESSAGES_TOTAL.fetch_add(n, Ordering::Relaxed); }
 #[inline]

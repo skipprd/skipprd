@@ -115,7 +115,9 @@ impl DataOutputAwsAthenaPlugin {
         let athena_config: DataOutputAwsAthenaPluginConfig = DataOutputAwsAthenaPlugin::get_config();
 
         let max_async_uploads_env = Config::getenv("DATA_OUTPUT_MAX_ASYNC_UPLOADS", "16");
-        let max_async_uploads = max_async_uploads_env.parse::<usize>().unwrap_or(16);
+        let env_uploads = max_async_uploads_env.parse::<usize>().ok();
+        let tuned_uploads = crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.load(std::sync::atomic::Ordering::Relaxed);
+        let max_async_uploads = env_uploads.unwrap_or(tuned_uploads);
 
         Self {
             s3_client,

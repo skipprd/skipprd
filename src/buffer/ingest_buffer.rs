@@ -241,7 +241,10 @@ impl Buffers {
         let shared_output_clone = shared_output.clone();
         
         // Compact partitions concurrently with capped parallelism
-        let max_parallel: usize = std::cmp::max(1, std::cmp::min(num_cpus::get(), 16));
+        let max_parallel_env = Config::getenv("WAL_COMPACTION_MAX_PARALLEL", "");
+        let max_parallel_env_val = max_parallel_env.parse::<usize>().ok().filter(|v| *v > 0);
+        let tuned = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.load(std::sync::atomic::Ordering::Relaxed);
+        let max_parallel: usize = max_parallel_env_val.unwrap_or_else(|| tuned.clamp(1, 64));
         let mut compacted_bytes: u64 = 0;
         use futures::stream::StreamExt;
         let mut in_flight: futures::stream::FuturesUnordered<_> = futures::stream::FuturesUnordered::new();

@@ -193,13 +193,18 @@ impl Drop for Ingest {
 
 impl Ingest {
     pub fn new() -> Ingest {
-        // We always want to use all cores       
-        let num_cpus = match CLI_MODE.read().clone() {
+        // We always want to use all cores unless overridden by env
+        let default_threads = match CLI_MODE.read().clone() {
             Mode::Sync(_) => {
                 num_cpus::get()
             },
             _ => 1
         };
+        let num_cpus = Config::getenv("INGEST_THREADS", "")
+            .parse::<usize>()
+            .ok()
+            .filter(|v| *v > 0)
+            .unwrap_or(default_threads);
         
         println!("Starting with {} optimized threads for ingest", num_cpus);
 
@@ -662,6 +667,32 @@ impl Ingest {
             }
             
             self.get_optmial_chunk_size();
+
+            // Self-tune concurrency targets based on queue pressure and active cores
+            {
+                let active = self.active_count.load(Ordering::Acquire);
+                let queued = self.queue_length.load(Ordering::Acquire);
+                let capacity = self.num_cpus;
+                let pressure = (queued as f64) / ((self.max_queue_length as f64).max(1.0));
+
+                // Upload tuning: grow when high pressure and full CPU; shrink when low pressure
+                let upload_cur = crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.load(Ordering::Relaxed);
+                let upload_next = if active >= capacity && pressure > 0.6 { upload_cur.saturating_add(2).min(64) }
+                    else if pressure < 0.2 { upload_cur.saturating_sub(1).max(4) } else { upload_cur };
+                if upload_next != upload_cur { crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.store(upload_next, Ordering::Relaxed); }
+
+                // WAL compaction tuning
+                let wal_cur = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.load(Ordering::Relaxed);
+                let wal_next = if active >= capacity && pressure > 0.6 { wal_cur.saturating_add(1).min(32) }
+                    else if pressure < 0.2 { wal_cur.saturating_sub(1).max(2) } else { wal_cur };
+                if wal_next != wal_cur { crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.store(wal_next, Ordering::Relaxed); }
+
+                // S3 download tuning (upper bound; memory semaphore still applies)
+                let dl_cur = crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.load(Ordering::Relaxed);
+                let dl_next = if active < capacity && pressure < 0.3 { dl_cur.saturating_add(8).min(512) }
+                    else if pressure > 0.7 { dl_cur.saturating_sub(8).max(64) } else { dl_cur };
+                if dl_next != dl_cur { crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.store(dl_next, Ordering::Relaxed); }
+            }
 
             // Get current metrics for logging
             let current_queue_length = self.queue_length.load(Ordering::Acquire);
@@ -1188,6 +1219,19 @@ impl Ingest {
         
         buffers.write(buf);
 
+        // Update metrics early to reflect decode throughput before WAL flush
+        let update_result = std::panic::catch_unwind(|| {
+            metrics_hot::add_deadletters(d);
+            metrics_hot::add_ingested_slow(x);
+            metrics_hot::add_messages(i);
+            metrics_hot::add_source_bytes(bytes);
+            metrics_hot::update_latest_timestamp_max(latest_timestamp as u64);
+        });
+        
+        if let Err(e) = update_result {
+            println!("Warning: Could not update metrics - {:?}", e);
+        }
+
         let offset_db_clone = offset_db_clone.clone();
         let shared_output_clone = shared_output.clone();
         
@@ -1232,20 +1276,6 @@ impl Ingest {
             }
         }
         
-        // Update metrics safely, without panicking
-        let update_result = std::panic::catch_unwind(|| {
-            metrics_hot::add_deadletters(d);
-            metrics_hot::add_ingested_slow(x);
-            metrics_hot::add_messages(i);
-            metrics_hot::add_source_bytes(bytes);
-
-            // Update latest_timestamp atomically without locking
-            metrics_hot::update_latest_timestamp_max(latest_timestamp as u64);
-        });
-        
-        if let Err(e) = update_result {
-            println!("Warning: Could not update metrics - {:?}", e);
-        }
     }
 
     pub(crate) fn prepare_arrow_schema_with_metadata(
