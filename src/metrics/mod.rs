@@ -31,6 +31,8 @@ pub static LAST_WAL_COMPACTED_FILES_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static LAST_PARQUET_PERSISTED_BYTES_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static LAST_PARQUET_PERSISTED_ROWS_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static LAST_PARQUET_PERSISTED_OBJECTS_TOTAL: AtomicU64 = AtomicU64::new(0);
+// Printer-only delta state (separate from upload deltas)
+pub static LAST_PRINT_MESSAGES_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 
 const VERSION: Option<&str> = option_env!("CARGO_PKG_VERSION");
@@ -324,6 +326,12 @@ impl Metrics {
         let deadletters_current = metrics_snapshot.deadletters_total - last_deadletters_total;
         LAST_DEADLETTERS_TOTAL.store(metrics_snapshot.deadletters_total, Ordering::SeqCst);
 
+        // Merge latest timestamp from atomics as well
+        metrics_snapshot.latest_timestamp = std::cmp::max(
+            metrics_snapshot.latest_timestamp,
+            crate::metrics::counters::LATEST_TIMESTAMP.load(Ordering::Relaxed)
+        );
+
         let start_time_utc_str = metrics_snapshot.start_time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
         // get runtime in seconds from metrics.start_time
@@ -466,26 +474,25 @@ impl Metrics {
             move || {
                 if RUNNING.read().load(Ordering::SeqCst) {
 
-                    let metrics: Metrics;
-                    {
-                        metrics = METRICS.read().clone();
-                    }
-
                     let now_lock = now_clone.read();
-
-                    let last_messages_total_val = LAST_MESSAGES_TOTAL.load(Ordering::SeqCst);
-                    let ingested_current = metrics.messages_total - last_messages_total_val;
+                    // Use atomic counters for totals and compute per-minute using a separate atomic
+                    let hot_messages = crate::metrics::counters::MESSAGES_TOTAL.load(Ordering::Relaxed);
+                    let hot_bytes = crate::metrics::counters::SOURCE_BYTES_TOTAL.load(Ordering::Relaxed);
+                    let hot_dead = crate::metrics::counters::DEADLETTERS_TOTAL.load(Ordering::Relaxed);
+                    let hot_fixed = crate::metrics::counters::INGESTED_SLOW_TOTAL.load(Ordering::Relaxed);
+                    let last_print = LAST_PRINT_MESSAGES_TOTAL.swap(hot_messages, Ordering::SeqCst);
+                    let ingested_current = hot_messages.saturating_sub(last_print);
 
                     if ingested_current > 0 {
                         println!("Messages per Min: {}", ingested_current);
-                        println!("Messages Fixed: {}", metrics.ingeted_slow_total);
+                        println!("Messages Fixed: {}", hot_fixed);
                         // println!("Bytes per Min: {}", metrics.bytes_current);
 
-                        let human_bytes = Helpers::human_readable_size(metrics.source_bytes_total);
+                        let human_bytes = Helpers::human_readable_size(hot_bytes);
 
                         println!("Bytes Total: {}", human_bytes);
-                        println!("Messages Total: {}", metrics.messages_total);
-                        println!("Deadletter Total: {}", metrics.deadletters_total);
+                        println!("Messages Total: {}", hot_messages);
+                        println!("Deadletter Total: {}", hot_dead);
                         println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
 
                         // let total_times: Vec<(String, Duration)> = TimedRwLock::<()>::get_total_wait_times();
@@ -493,8 +500,6 @@ impl Metrics {
                         //     println!("{}: {}ms", key, value.as_millis());
                         // }
                     }
-
-                    drop(metrics);
 
                     handle_clone.spawn(async move {
                         match Metrics::send_metrics(None).await {

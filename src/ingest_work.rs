@@ -1199,7 +1199,6 @@ impl Ingest {
             match tokio::time::timeout(timeout, flush_fut).await {
                 Ok(res) => match res {
                     Ok(_) => {
-                        println!("Flushed buffers in {:.2}s", start.elapsed().as_secs_f64());
                         Ok(())
                     },
                     Err(e) => {
@@ -1240,18 +1239,8 @@ impl Ingest {
             metrics_hot::add_messages(i);
             metrics_hot::add_source_bytes(bytes);
 
-            // update latest_timestamp with minimal locking
-            let mut needs_update = false;
-            {
-                let current_latest = METRICS.read().latest_timestamp;
-                if latest_timestamp as u64 > current_latest { needs_update = true; }
-            }
-            if needs_update {
-                let mut w = METRICS.write();
-                if latest_timestamp as u64 > w.latest_timestamp {
-                    w.latest_timestamp = latest_timestamp as u64;
-                }
-            }
+            // Update latest_timestamp atomically without locking
+            metrics_hot::update_latest_timestamp_max(latest_timestamp as u64);
         });
         
         if let Err(e) = update_result {

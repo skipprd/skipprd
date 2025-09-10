@@ -3,7 +3,7 @@ use crate::converters::skippr_hive::SkipprHive;
 use crate::discover::{OutputMetadata, PipelineMetadata};
 use crate::helpers::configuration::{Config, PluginConfig};
 use crate::helpers::Helpers;
-use crate::{METADATA, METRICS};
+use crate::{METADATA};
 use crate::metrics::counters as metrics_counters;
 use aws_sdk_athena::types::{EncryptionConfiguration, EncryptionOption, ResultConfiguration, ResultConfigurationUpdates, Tag, WorkGroupConfiguration, WorkGroupConfigurationUpdates};
 use aws_sdk_athena::Client as AthenaClient;

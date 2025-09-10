@@ -16,6 +16,7 @@ pub static WAL_COMPACTED_ROWS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::n
 pub static PARQUET_PERSISTED_BYTES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static PARQUET_PERSISTED_ROWS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static PARQUET_PERSISTED_OBJECTS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static LATEST_TIMESTAMP: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 
 #[inline]
 pub fn add_messages(n: u64) { MESSAGES_TOTAL.fetch_add(n, Ordering::Relaxed); }
@@ -43,5 +44,16 @@ pub fn add_parquet_bytes(n: u64) { PARQUET_PERSISTED_BYTES_TOTAL.fetch_add(n, Or
 pub fn add_parquet_rows(n: u64) { PARQUET_PERSISTED_ROWS_TOTAL.fetch_add(n, Ordering::Relaxed); }
 #[inline]
 pub fn add_parquet_objects(n: u64) { PARQUET_PERSISTED_OBJECTS_TOTAL.fetch_add(n, Ordering::Relaxed); }
+
+#[inline]
+pub fn update_latest_timestamp_max(ts: u64) {
+    let mut current = LATEST_TIMESTAMP.load(Ordering::Relaxed);
+    while ts > current {
+        match LATEST_TIMESTAMP.compare_exchange(current, ts, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(prev) => current = prev,
+        }
+    }
+}
 
 
