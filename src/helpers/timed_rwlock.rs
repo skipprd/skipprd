@@ -45,10 +45,9 @@ impl<T> TimedRwLock<T> {
                     break;
                 }
                 Err(_) => {
-                    if i == 0 {
+                    i += 1;
+                    if i % 10 == 1 {
                         println!("waiting on a read lock {}", self.name);
-                    } else { 
-                        i += 1
                     }
                     sleep(Duration::from_millis(100));
                 }
@@ -87,10 +86,9 @@ impl<T> TimedRwLock<T> {
                     break;
                 }
                 Err(_) => {
-                    if i == 0 {
+                    i += 1;
+                    if i % 10 == 1 {
                         println!("waiting on a write lock {}", self.name);
-                    } else {
-                        i += 1
                     }
                     sleep(Duration::from_millis(100));
                 }

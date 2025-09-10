@@ -6,6 +6,7 @@ use crate::helpers::Helpers;
 use crate::ingest::ingest::ingest;
 use crate::serdes::json::SerdeJson;
 use crate::{ARROW_SCHEMA, METADATA, METRICS, RUNNING};
+use crate::metrics::counters as metrics_hot;
 
 
 use once_cell::sync::Lazy;
@@ -1234,14 +1235,22 @@ impl Ingest {
         
         // Update metrics safely, without panicking
         let update_result = std::panic::catch_unwind(|| {
-            let mut counter_lock = METRICS.write();
-            counter_lock.deadletters_total += d;
-            counter_lock.ingeted_slow_total += x;
-            counter_lock.messages_total += i;
-            counter_lock.source_bytes_total += bytes;
+            metrics_hot::add_deadletters(d);
+            metrics_hot::add_ingested_slow(x);
+            metrics_hot::add_messages(i);
+            metrics_hot::add_source_bytes(bytes);
 
-            if latest_timestamp as u64 > counter_lock.latest_timestamp {
-                counter_lock.latest_timestamp = latest_timestamp as u64;
+            // update latest_timestamp with minimal locking
+            let mut needs_update = false;
+            {
+                let current_latest = METRICS.read().latest_timestamp;
+                if latest_timestamp as u64 > current_latest { needs_update = true; }
+            }
+            if needs_update {
+                let mut w = METRICS.write();
+                if latest_timestamp as u64 > w.latest_timestamp {
+                    w.latest_timestamp = latest_timestamp as u64;
+                }
             }
         });
         

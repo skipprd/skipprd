@@ -4,6 +4,7 @@ use crate::discover::{OutputMetadata, PipelineMetadata};
 use crate::helpers::configuration::{Config, PluginConfig};
 use crate::helpers::Helpers;
 use crate::{METADATA, METRICS};
+use crate::metrics::counters as metrics_counters;
 use aws_sdk_athena::types::{EncryptionConfiguration, EncryptionOption, ResultConfiguration, ResultConfigurationUpdates, Tag, WorkGroupConfiguration, WorkGroupConfigurationUpdates};
 use aws_sdk_athena::Client as AthenaClient;
 use aws_sdk_glue::types::{Column, DatabaseInput, PartitionIndex, PartitionInput, SerDeInfo, StorageDescriptor, TableInput};
@@ -296,10 +297,9 @@ impl DataOutputAwsAthenaPlugin {
         {
             Ok(_resp) => {
                 println!("Uploaded {} to S3", key);
-                let mut counter_lock = METRICS.write();
-                counter_lock.parquet_persisted_bytes_total += parquet.size_bytes;
-                counter_lock.parquet_persisted_objects_total += 1;
-                counter_lock.parquet_persisted_rows_total += parquet.meta_data.num_rows as u64;
+                metrics_counters::add_parquet_bytes(parquet.size_bytes);
+                metrics_counters::add_parquet_objects(1);
+                metrics_counters::add_parquet_rows(parquet.meta_data.num_rows as u64);
                 Ok(())
             }
             Err(err) => {

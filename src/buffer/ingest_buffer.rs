@@ -23,6 +23,7 @@ use once_cell::sync::Lazy;
 use serde_derive::{Deserialize, Serialize};
 use serde_json::{Value};
 use crate::{METRICS};
+use crate::metrics::counters as metrics_hot;
 use crate::buffer::BufferChunker;
 use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
@@ -182,11 +183,8 @@ impl Buffers {
 
         }
 
-        {
-            let mut counter_lock = METRICS.write();
-            counter_lock.wal_write_bytes_total += bytes;
-            counter_lock.wal_write_rows_total += rows;
-        }
+        metrics_hot::add_wal_write_bytes(bytes);
+        metrics_hot::add_wal_write_rows(rows);
 
         // offsets_db.flush();
 
@@ -655,12 +653,9 @@ impl WalPartition {
             Ok(()) => {
                 // println!("Synced WAL partition to output: {} {}", self.namespace, self.partition);
         
-                {
-                    let mut counter_lock = METRICS.write();
-                    counter_lock.wal_compacted_bytes_total += wal_compacted_bytes_total;
-                    counter_lock.wal_compacted_rows_total += wal_compacted_rows_total;
-                    counter_lock.wal_compacted_files_total += wal_compacted_files_total;
-                }
+                metrics_hot::add_wal_compacted_bytes(wal_compacted_bytes_total);
+                metrics_hot::add_wal_compacted_rows(wal_compacted_rows_total);
+                metrics_hot::add_wal_compacted_files(wal_compacted_files_total);
 
                 // Rename the processed WAL file to a tombstone file
                 for wal_file in self.files.iter() {

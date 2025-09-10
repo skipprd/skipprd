@@ -18,6 +18,8 @@ use crate::helpers::s3;
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::{METRICS, RUNNING};
 
+pub mod counters;
+
 pub static LAST_MESSAGES_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static LAST_FIXED_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static LAST_DEADLETTERS_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -264,75 +266,105 @@ impl Metrics {
         let wal_compacted_files_current = metrics.wal_compacted_files_total - wal_compacted_files_total;
         LAST_WAL_COMPACTED_FILES_TOTAL.store(metrics.wal_compacted_files_total, Ordering::SeqCst);
 
+        // Merge counters (atomics) into snapshot before computing deltas
+        use crate::metrics::counters as hot;
+        let hot_messages = hot::MESSAGES_TOTAL.load(Ordering::Relaxed);
+        let hot_dead = hot::DEADLETTERS_TOTAL.load(Ordering::Relaxed);
+        let hot_slow = hot::INGESTED_SLOW_TOTAL.load(Ordering::Relaxed);
+        let hot_src = hot::SOURCE_BYTES_TOTAL.load(Ordering::Relaxed);
+        let hot_w_wb = hot::WAL_WRITE_BYTES_TOTAL.load(Ordering::Relaxed);
+        let hot_w_wr = hot::WAL_WRITE_ROWS_TOTAL.load(Ordering::Relaxed);
+        let hot_c_b = hot::WAL_COMPACTED_BYTES_TOTAL.load(Ordering::Relaxed);
+        let hot_c_f = hot::WAL_COMPACTED_FILES_TOTAL.load(Ordering::Relaxed);
+        let hot_c_r = hot::WAL_COMPACTED_ROWS_TOTAL.load(Ordering::Relaxed);
+        let hot_p_b = hot::PARQUET_PERSISTED_BYTES_TOTAL.load(Ordering::Relaxed);
+        let hot_p_r = hot::PARQUET_PERSISTED_ROWS_TOTAL.load(Ordering::Relaxed);
+        let hot_p_o = hot::PARQUET_PERSISTED_OBJECTS_TOTAL.load(Ordering::Relaxed);
+
+        let mut metrics_snapshot = metrics.clone();
+        metrics_snapshot.messages_total += hot_messages;
+        metrics_snapshot.deadletters_total += hot_dead;
+        metrics_snapshot.ingeted_slow_total += hot_slow;
+        metrics_snapshot.source_bytes_total += hot_src;
+        metrics_snapshot.wal_write_bytes_total += hot_w_wb;
+        metrics_snapshot.wal_write_rows_total += hot_w_wr;
+        metrics_snapshot.wal_compacted_bytes_total += hot_c_b;
+        metrics_snapshot.wal_compacted_files_total += hot_c_f;
+        metrics_snapshot.wal_compacted_rows_total += hot_c_r;
+        metrics_snapshot.parquet_persisted_bytes_total += hot_p_b;
+        metrics_snapshot.parquet_persisted_rows_total += hot_p_r;
+        metrics_snapshot.parquet_persisted_objects_total += hot_p_o;
+
+        // Now compute parquet deltas from merged snapshot
         let parquet_persisted_bytes_total = LAST_PARQUET_PERSISTED_BYTES_TOTAL.load(Ordering::SeqCst);
-        let parquet_persisted_bytes_current = metrics.parquet_persisted_bytes_total - parquet_persisted_bytes_total;
-        LAST_PARQUET_PERSISTED_BYTES_TOTAL.store(metrics.parquet_persisted_bytes_total, Ordering::SeqCst);
+        let parquet_persisted_bytes_current = metrics_snapshot.parquet_persisted_bytes_total - parquet_persisted_bytes_total;
+        LAST_PARQUET_PERSISTED_BYTES_TOTAL.store(metrics_snapshot.parquet_persisted_bytes_total, Ordering::SeqCst);
 
         let parquet_persisted_rows_total = LAST_PARQUET_PERSISTED_ROWS_TOTAL.load(Ordering::SeqCst);
-        let parquet_persisted_rows_current = metrics.parquet_persisted_rows_total - parquet_persisted_rows_total;
-        LAST_PARQUET_PERSISTED_ROWS_TOTAL.store(metrics.parquet_persisted_rows_total, Ordering::SeqCst);
+        let parquet_persisted_rows_current = metrics_snapshot.parquet_persisted_rows_total - parquet_persisted_rows_total;
+        LAST_PARQUET_PERSISTED_ROWS_TOTAL.store(metrics_snapshot.parquet_persisted_rows_total, Ordering::SeqCst);
 
         let parquet_persisted_objects_total = LAST_PARQUET_PERSISTED_OBJECTS_TOTAL.load(Ordering::SeqCst);
-        let parquet_persisted_objects_current = metrics.parquet_persisted_objects_total - parquet_persisted_objects_total;
-        LAST_PARQUET_PERSISTED_OBJECTS_TOTAL.store(metrics.parquet_persisted_objects_total, Ordering::SeqCst);
+        let parquet_persisted_objects_current = metrics_snapshot.parquet_persisted_objects_total - parquet_persisted_objects_total;
+        LAST_PARQUET_PERSISTED_OBJECTS_TOTAL.store(metrics_snapshot.parquet_persisted_objects_total, Ordering::SeqCst);
 
         let source_bytes_total = LAST_SOURCE_BYTES_TOTAL.load(Ordering::SeqCst);
-        let source_bytes_current = metrics.source_bytes_total - source_bytes_total;
-        LAST_SOURCE_BYTES_TOTAL.store(metrics.source_bytes_total, Ordering::SeqCst);
+        let source_bytes_current = metrics_snapshot.source_bytes_total - source_bytes_total;
+        LAST_SOURCE_BYTES_TOTAL.store(metrics_snapshot.source_bytes_total, Ordering::SeqCst);
 
         let last_messages_total = LAST_MESSAGES_TOTAL.load(Ordering::SeqCst);
-        let ingested_current = metrics.messages_total - last_messages_total;
-        LAST_MESSAGES_TOTAL.store(metrics.messages_total, Ordering::SeqCst);
+        let ingested_current = metrics_snapshot.messages_total - last_messages_total;
+        LAST_MESSAGES_TOTAL.store(metrics_snapshot.messages_total, Ordering::SeqCst);
 
         let last_fixed_total = LAST_FIXED_TOTAL.load(Ordering::SeqCst);
-        let fixed_current = metrics.ingeted_slow_total - last_fixed_total;
-        LAST_FIXED_TOTAL.store(metrics.ingeted_slow_total, Ordering::SeqCst);
+        let fixed_current = metrics_snapshot.ingeted_slow_total - last_fixed_total;
+        LAST_FIXED_TOTAL.store(metrics_snapshot.ingeted_slow_total, Ordering::SeqCst);
 
         let last_deadletters_total = LAST_DEADLETTERS_TOTAL.load(Ordering::SeqCst);
-        let deadletters_current = metrics.deadletters_total - last_deadletters_total;
-        LAST_DEADLETTERS_TOTAL.store(metrics.deadletters_total, Ordering::SeqCst);
+        let deadletters_current = metrics_snapshot.deadletters_total - last_deadletters_total;
+        LAST_DEADLETTERS_TOTAL.store(metrics_snapshot.deadletters_total, Ordering::SeqCst);
 
-        let start_time_utc_str = metrics.start_time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let start_time_utc_str = metrics_snapshot.start_time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
         // get runtime in seconds from metrics.start_time
         let current_time = chrono::Utc::now();
-        let run_time_seconds = (current_time - metrics.start_time).num_seconds();
+        let run_time_seconds = (current_time - metrics_snapshot.start_time).num_seconds();
 
         let total_times: Vec<(String, Duration)> = TimedRwLock::<()>::get_total_wait_times();
         let wait_times: HashMap<String, Duration> = total_times.iter().cloned().collect();
 
         let data = json!({
             "metrics": {
-                "ingested_total": metrics.messages_total,
-                "fixed_total": metrics.ingeted_slow_total,
-                "deadletters_total": metrics.deadletters_total,
+                "ingested_total": metrics_snapshot.messages_total,
+                "fixed_total": metrics_snapshot.ingeted_slow_total,
+                "deadletters_total": metrics_snapshot.deadletters_total,
                 "ingested_current": ingested_current,
                 "fixed_current": fixed_current,
                 "deadletters_current": deadletters_current,
-                "latest_timestamp": metrics.latest_timestamp,
-                "offset_db_size": metrics.offset_db_size,
+                "latest_timestamp": metrics_snapshot.latest_timestamp,
+                "offset_db_size": metrics_snapshot.offset_db_size,
                 "run_time_seconds": run_time_seconds,
                 "bytes_current": source_bytes_current,
-                "wal_index_namespaces_total": metrics.wal_index_namespaces_total,
-                "wal_index_partitions_total": metrics.wal_index_partitions_total,
-                "wal_index_files_total": metrics.wal_index_files_total,
-                "wal_index_bytes_total": metrics.wal_index_bytes_total,
-                "wal_write_bytes_total": metrics.wal_write_bytes_total,
-                "wal_index_metrics": metrics.wal_index_metrics,
-                "bytes_total": metrics.source_bytes_total,
-                "wal_write_bytes_total": metrics.wal_write_bytes_total,
+                "wal_index_namespaces_total": metrics_snapshot.wal_index_namespaces_total,
+                "wal_index_partitions_total": metrics_snapshot.wal_index_partitions_total,
+                "wal_index_files_total": metrics_snapshot.wal_index_files_total,
+                "wal_index_bytes_total": metrics_snapshot.wal_index_bytes_total,
+                "wal_write_bytes_total": metrics_snapshot.wal_write_bytes_total,
+                "wal_index_metrics": metrics_snapshot.wal_index_metrics,
+                "bytes_total": metrics_snapshot.source_bytes_total,
+                "wal_write_bytes_total": metrics_snapshot.wal_write_bytes_total,
                 "wal_write_bytes_current": wal_write_bytes_current,
-                "wal_write_rows_total": metrics.wal_write_rows_total,
+                "wal_write_rows_total": metrics_snapshot.wal_write_rows_total,
                 "wal_write_rows_current": wal_write_rows_current,
-                "wal_compacted_bytes_total": metrics.wal_compacted_bytes_total,
+                "wal_compacted_bytes_total": metrics_snapshot.wal_compacted_bytes_total,
                 "wal_compacted_bytes_current": wal_compacted_bytes_current,
-                "wal_compacted_files_total": metrics.wal_compacted_files_total,
+                "wal_compacted_files_total": metrics_snapshot.wal_compacted_files_total,
                 "wal_compacted_files_current": wal_compacted_files_current,
-                "parquet_persisted_bytes_total": metrics.parquet_persisted_bytes_total,
+                "parquet_persisted_bytes_total": metrics_snapshot.parquet_persisted_bytes_total,
                 "parquet_persisted_bytes_current": parquet_persisted_bytes_current,
-                "parquet_persisted_rows_total": metrics.parquet_persisted_rows_total,
+                "parquet_persisted_rows_total": metrics_snapshot.parquet_persisted_rows_total,
                 "parquet_persisted_rows_current": parquet_persisted_rows_current,
-                "parquet_persisted_objects_total": metrics.parquet_persisted_objects_total,
+                "parquet_persisted_objects_total": metrics_snapshot.parquet_persisted_objects_total,
                 "parquet_persisted_objects_current": parquet_persisted_objects_current,
                 "lock_wait_times": wait_times,
             },
