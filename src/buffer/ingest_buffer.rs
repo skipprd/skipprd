@@ -308,8 +308,8 @@ impl Buffers {
                     }
                     if !to_compact.is_empty() {
                         // remove from index to avoid double work
-                        {
-                            let mut index = WAL_PARTITION_INDEX.write();
+        {
+            let mut index = WAL_PARTITION_INDEX.write();
                             for (k, _) in to_compact.iter() { index.index.remove(k); }
                         }
                         let tuned = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.load(std::sync::atomic::Ordering::Relaxed).clamp(1, 64);
@@ -348,9 +348,9 @@ impl Buffers {
 
         // Step 1: Rebuild the index for this run, then extract partitions and release the lock
         let partitions_to_compact: Vec<WalPartition> = {
-            let mut wal_index = WAL_PARTITION_INDEX.write();
-            wal_index.index.clear(); // avoid duplicates
-            wal_index.recover(offsets_db.clone()).expect("Failed to recover WAL index");
+        let mut wal_index = WAL_PARTITION_INDEX.write();
+        wal_index.index.clear(); // avoid duplicates
+        wal_index.recover(offsets_db.clone()).expect("Failed to recover WAL index");
 
             // Move partitions out for processing without holding the lock during awaits
             let mut parts = Vec::with_capacity(wal_index.index.len());
@@ -793,9 +793,9 @@ impl WalPartition {
        
         let first_file_opt = self.files.first_mut();
         if first_file_opt.is_none() {
-            println!("No WAL files to compact for partition: {} {}", self.namespace, self.partition);
-            return wal_compacted_bytes_total;
-        }
+                println!("No WAL files to compact for partition: {} {}", self.namespace, self.partition);
+                return wal_compacted_bytes_total;
+            }
 
         let wal_bucket = Config::get_wal_s3_bucket();
         let wal_prefix = Config::get_wal_s3_prefix().trim_matches('/').to_string();
@@ -912,8 +912,22 @@ impl WalPartition {
                         for wal_file in self.files.iter() {
                             let rel = wal_file.path.to_string_lossy().replace(&base, "").trim_start_matches('/').to_string();
                             let key = if wal_prefix.is_empty() { rel.clone() } else { format!("{}/{}", wal_prefix, rel) };
-                            if let Err(e) = s3c.delete_object().bucket(&wal_bucket).key(&key).send().await {
-                                println!("Failed to delete S3 WAL {}: {}", key, e);
+                            let mut retries = 0u32;
+                            loop {
+                                match s3c.delete_object().bucket(&wal_bucket).key(&key).send().await {
+                                    Ok(_) => break,
+                        Err(e) => {
+                                        retries += 1;
+                                        if retries <= 5 {
+                                            let delay = 1u64 << retries; // 2,4,8,16,32s
+                                            println!("Retrying delete of S3 WAL {} in {}s (attempt {}): {:?}", key, delay, retries, e);
+                                            tokio_sleep(TokioDuration::from_secs(delay)).await;
+                                        } else {
+                                            println!("Failed to delete S3 WAL {} after {} retries: {:?}", key, retries, e);
+                                            break;
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -927,7 +941,7 @@ impl WalPartition {
                             println!("Failed to tombstone WAL file: {}, Error: {}", wal_file.path.to_string_lossy(), e);
                         }
                     }
-                    self.prune_tombstone_wals();
+                self.prune_tombstone_wals();
                 }
             },
             Err(e) => {
