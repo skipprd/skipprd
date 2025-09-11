@@ -629,23 +629,36 @@ impl Config {
         }
     }
 
-    pub fn set_wal_s3_bucket(value: &str) {
-        Config::setenv("WAL_S3_BUCKET", value);
+    // WAL prefix (default derived: {tenant}/{workspace}/{pipeline}/wal)
+    pub fn get_wal_s3_prefix() -> String {
+        let default_prefix = format!(
+            "{}/{}/{}/wal",
+            Config::get_tenant(),
+            Config::get_workspace_name(),
+            Config::get_pipeline_name()
+        );
+        default_prefix
     }
 
-    // WAL prefix (default "wal")
-    pub fn get_wal_s3_prefix() -> String {
-        if Config::get_envcache("WAL_S3_PREFIX") != "" {
-            return Config::get_envcache("WAL_S3_PREFIX")
+    // Coalescing controls for WAL (reduce S3 requests)
+    pub fn get_wal_tasks_per_file() -> u64 {
+        if Config::get_envcache("WAL_TASKS_PER_FILE") != "" {
+            return Config::get_envcache("WAL_TASKS_PER_FILE").parse::<u64>().unwrap_or(64)
         } else {
-            let prefix = Config::getenv("WAL_S3_PREFIX", "wal");
-            Config::set_evncache("WAL_S3_PREFIX", &prefix);
-            prefix
+            let val = Config::getenv("WAL_TASKS_PER_FILE", "64");
+            Config::set_evncache("WAL_TASKS_PER_FILE", &val);
+            val.parse::<u64>().unwrap_or(64)
         }
     }
 
-    pub fn set_wal_s3_prefix(value: &str) {
-        Config::setenv("WAL_S3_PREFIX", value);
+    pub fn get_wal_max_delay_seconds() -> u64 {
+        if Config::get_envcache("WAL_MAX_DELAY_SECONDS") != "" {
+            return Config::get_envcache("WAL_MAX_DELAY_SECONDS").parse::<u64>().unwrap_or(60)
+        } else {
+            let val = Config::getenv("WAL_MAX_DELAY_SECONDS", "60");
+            Config::set_evncache("WAL_MAX_DELAY_SECONDS", &val);
+            val.parse::<u64>().unwrap_or(60)
+        }
     }
 
     pub fn get_pipelines() -> Vec<String> {

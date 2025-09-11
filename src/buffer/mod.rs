@@ -1,4 +1,5 @@
 pub mod ingest_buffer;
+pub mod wal_accumulator;
 
 use chrono::{DateTime, Datelike, TimeZone, Timelike, Utc};
 use url::form_urlencoded;

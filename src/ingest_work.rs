@@ -49,6 +49,7 @@ use crate::converters::skippr_arrow::convert_skippr_to_arrow;
 use crate::plugins::DataOutputPlugin;
 use std::collections::VecDeque;
 use rand::{random};
+use crate::buffer::wal_accumulator::{accumulate_map as wal_accumulate_map, ensure_running as wal_ensure_running};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Deadletter {
@@ -1230,8 +1231,6 @@ impl Ingest {
             }
         }
         
-        buffers.write(buf);
-
         // Update metrics early to reflect decode throughput before WAL flush
         let update_result = std::panic::catch_unwind(|| {
             metrics_hot::add_deadletters(d);
@@ -1245,49 +1244,13 @@ impl Ingest {
             println!("Warning: Could not update metrics - {:?}", e);
         }
 
-        let offset_db_clone = offset_db_clone.clone();
-        let shared_output_clone = shared_output.clone();
-        
-        // Use block_on safely with proper error handling
-        match handle.block_on(async {
-            let start = Instant::now();
-            let timeout = Duration::from_secs(30);
-            let flush_fut = buffers.flush(offset_db_clone.clone(), shared_output_clone.clone());
-            match tokio::time::timeout(timeout, flush_fut).await {
-                Ok(res) => match res {
-                    Ok(_) => {
-                        Ok(())
-                    },
-                    Err(e) => {
-                        println!("Error flushing buffers: {}", e);
-                        Err(e)
-                    }
-                },
-                Err(_) => {
-                    println!("Warning: flush exceeded {:.2}s, continuing to avoid deadlock", timeout.as_secs_f64());
-                    Ok(())
-                }
-            }
-        }) {
-            Ok(_) => {
-                // Success, continue
-            },
-            Err(e) => {
-                println!("Failed to execute in Tokio runtime: {:?}", e);
-                // Handle the error gracefully, maybe create a new runtime
-                match tokio::runtime::Runtime::new() {
-                    Ok(rt) => {
-                        // Try again with a new runtime
-                        if let Err(e) = rt.block_on(buffers.flush(offset_db_clone, shared_output_clone)) {
-                            println!("Failed to flush buffers with new runtime: {:?}", e);
-                        }
-                    },
-                    Err(e) => {
-                        println!("Failed to create runtime: {:?}", e);
-                    }
-                }
-            }
-        }
+        // Start WAL accumulator once
+        wal_ensure_running(offset_db_clone.clone(), shared_output.clone());
+
+        // Accumulate this task's map into the global accumulator (FireAndForget mode)
+        wal_accumulate_map(buf);
+
+        // No direct flush here; the accumulator will coalesce and flush based on thresholds
         
     }
 
