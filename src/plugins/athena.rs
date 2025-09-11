@@ -28,8 +28,27 @@ use parquet::file::properties::WriterProperties;
 use serde_derive::Deserialize;
 use crate::ingest::partition_time::TimePartitioner;
 use crate::plugins::DataOutputPlugin;
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, Mutex};
 use std::sync::Arc;
+use once_cell::sync::Lazy;
+use tokio::time::{sleep as tokio_sleep, Duration as TokioDuration};
+use dashmap::DashMap;
+use rand::Rng;
+
+// Global control-plane throttling and serialization
+static GLUE_MAX_CONCURRENCY: Lazy<usize> = Lazy::new(|| {
+    Config::getenv("GLUE_MAX_CONCURRENCY", "2").parse::<usize>().unwrap_or(2)
+});
+static GLUE_CP_SEM: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(*GLUE_MAX_CONCURRENCY));
+static ATHENA_WG_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static NAMESPACE_LOCKS: Lazy<DashMap<String, Arc<Mutex<()>>>> = Lazy::new(|| DashMap::new());
+
+fn get_namespace_lock(namespace: &str) -> Arc<Mutex<()>> {
+    NAMESPACE_LOCKS
+        .entry(namespace.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataOutputAwsAthenaPluginConfig {
@@ -339,7 +358,42 @@ impl DataOutputAwsAthenaPlugin {
 pub struct AwsAthena {}
 
 impl AwsAthena {
+    // Generic backoff helper for Glue/Athena control-plane
+    // Interprets "RETRY_TRANSIENT" as a signal to retry
+    async fn backoff_retry<F, Fut, T>(mut op: F, op_name: &str) -> Result<T, String>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<T, String>>,
+    {
+        let mut attempt: u32 = 0;
+        loop {
+            match op().await {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    let s = e.to_string();
+                    // Missing region/creds: don't spin forever, report once
+                    if s.contains("Missing Region") || s.contains("CredentialsNotLoaded") {
+                        return Err(s);
+                    }
+                    // Transient or explicit retry signal
+                    if s.contains("Throttling") || s.contains("TooManyRequests") || s.contains("ConcurrentModification") || s == "RETRY_TRANSIENT" {
+                        attempt += 1;
+                        if attempt > 6 { return Err(s); }
+                        let base = 200u64 * (1u64 << attempt.min(6));
+                        let jitter: u64 = rand::thread_rng().gen_range(0..100);
+                        let delay_ms = base + jitter;
+                        println!("Glue/Athena {} retry {} in {}ms: {}", op_name, attempt, delay_ms, s);
+                        tokio_sleep(TokioDuration::from_millis(delay_ms)).await;
+                        continue;
+                    }
+                    return Err(s);
+                }
+            }
+        }
+    }
     pub async fn create_or_update_schema(namespace: &str, schema: &OutputMetadata) {
+        // Serialize workgroup changes to avoid Athena InvalidRequestException on concurrent updates
+        let _wg_guard = ATHENA_WG_LOCK.lock().await;
         match AwsAthena::get_work_group().await {
             Ok(true) => {}
             Ok(false) => {}
@@ -359,33 +413,36 @@ impl AwsAthena {
                 }
             },
         }
+        drop(_wg_guard);
+
+        // Limit Glue control-plane concurrency globally
+        let _cp_permit = GLUE_CP_SEM.acquire().await.unwrap();
+
+        // Serialize by namespace to avoid ConcurrentModificationException
+        let ns_lock = get_namespace_lock(namespace);
+        let _ns_guard = ns_lock.lock().await;
 
         match AwsAthena::glue_get_database().await {
             Ok(true) => {}
             Ok(false) => {}
-            Err(_err) => match AwsAthena::glue_create_database().await {
-                Ok(_) => {}
-                Err(err) => {
+            Err(_err) => {
+                // Create database with backoff; AlreadyExists => success
+                if let Err(err) = AwsAthena::backoff_retry(|| AwsAthena::glue_create_database(), "create_database").await {
                     println!("ERROR creating Glue database: {}", err);
                 }
-            },
+            }
         }
 
         match AwsAthena::glue_get_table(namespace).await {
-            Ok(table) => match AwsAthena::glue_update_table(namespace, schema, table).await {
-                Ok(_) => {
-                    // println!("Update table {}", namespace)
-                }
-                Err(err) => {
+            Ok(table) => {
+                if let Err(err) = AwsAthena::backoff_retry(|| AwsAthena::glue_update_table(namespace, schema, table.clone()), "update_table").await {
                     println!("ERROR updating Glue table: {}", err);
                 }
-            },
+            }
             Err(_err) => {
-                match AwsAthena::glue_create_table(namespace, schema).await {
-                    Ok(_) => {}
-                    Err(err) => {
-                        println!("ERROR creating glue table: {}", err);
-                    }
+                // Create table with backoff; AlreadyExists => success
+                if let Err(err) = AwsAthena::backoff_retry(|| AwsAthena::glue_create_table(namespace, schema), "create_table").await {
+                    println!("ERROR creating glue table: {}", err);
                 }
                 // println!("Create Hive Table Error: {}", err.into_service_error().to_string())
             }
@@ -593,7 +650,13 @@ impl AwsAthena {
             .await
         {
             Ok(_output) => Ok(true),
-            Err(err) => Err(err.into_service_error().to_string()),
+            Err(err) => {
+                let s = err.into_service_error().to_string();
+                if s.contains("AlreadyExistsException") {
+                    return Ok(true);
+                }
+                Err(s)
+            }
         }
     }
 
@@ -1008,8 +1071,11 @@ impl AwsAthena {
         match create_table_cmd.send().await {
             Ok(_output) => Ok(true),
             Err(err) => {
-                println!("{:?}", err);
-                Err(err.into_service_error().to_string())
+                let s = err.into_service_error().to_string();
+                if s.contains("AlreadyExistsException") {
+                    return Ok(true);
+                }
+                Err(s)
             }
         }
     }
@@ -1083,7 +1149,14 @@ impl AwsAthena {
             .await
         {
             Ok(_output) => Ok(true),
-            Err(err) => Err(err.into_service_error().to_string()),
+            Err(err) => {
+                let s = err.into_service_error().to_string();
+                // Treat concurrent modification as transient
+                if s.contains("ConcurrentModificationException") {
+                    return Err("RETRY_TRANSIENT".to_string());
+                }
+                Err(s)
+            }
         }
     }
 
@@ -1155,6 +1228,11 @@ impl AwsAthena {
             .build();
 
         if !partition_cache.contains(&md5_digest) {
+            // Gate by global semaphore and per-namespace mutex
+            let _cp_permit = GLUE_CP_SEM.acquire().await.unwrap();
+            let ns_lock = get_namespace_lock(namespace);
+            let _ns_guard = ns_lock.lock().await;
+
             match glue_client
                 .get_partition()
                 .database_name(&database)
@@ -1164,63 +1242,58 @@ impl AwsAthena {
                 .await
             {
                 Ok(_) => {
-                    // partition exists, update it
-                    match glue_client
-                        .update_partition()
-                        .database_name(database)
-                        .table_name(namespace)
-                        .partition_input(partition_conf)
-                        .set_partition_value_list(Some(partition_values))
-                        .send()
-                        .await
-                    {
-                        Ok(_) => {
-                            // println!("Updated Athena partition");
-                            partition_cache.push(md5_digest);
-                        }
-                        Err(err) => {
-                            println!(
-                                "Failed to update Athena partition: {}",
-                                err.into_service_error()
-                            );
-                        }
+                    // partition exists, update it with backoff
+                    let update_res: Result<(), String> = AwsAthena::backoff_retry(|| async {
+                        glue_client
+                            .update_partition()
+                            .database_name(database.clone())
+                            .table_name(namespace)
+                            .partition_input(partition_conf.clone())
+                            .set_partition_value_list(Some(partition_values.clone()))
+                            .send()
+                            .await
+                            .map(|_| true)
+                            .map_err(|e| e.into_service_error().to_string())
+                    }, "update_partition").await.map(|_| ());
+
+                    if let Err(err) = update_res {
+                        println!("Failed to update Athena partition: {}", err);
+                    } else {
+                        partition_cache.push(md5_digest);
                     }
                 }
                 Err(_err) => {
+                    // partition does not exist, create it with backoff; AlreadyExists is fine
+                    let create_res: Result<(), String> = AwsAthena::backoff_retry(|| async {
+                        match glue_client
+                            .create_partition()
+                            .database_name(&database)
+                            .table_name(namespace)
+                            .partition_input(partition_conf.clone())
+                            .send()
+                            .await {
+                                Ok(_) => Ok(true),
+                                Err(e) => {
+                                    let s = e.into_service_error().to_string();
+                                    if s.contains("AlreadyExistsException") { Ok(true) } else { Err(s) }
+                                }
+                            }
+                    }, "create_partition").await.map(|_| ());
 
-                    // partition does not exist, create it
-                    match glue_client
-                        .create_partition()
-                        .database_name(&database)
-                        .table_name(namespace)
-                        .partition_input(partition_conf)
-                        .send()
-                        .await
-                    {
+                    match create_res {
                         Ok(_) => {
                             println!("Created new Athena partition");
                         }
                         Err(err) => {
-                            println!(
-                                "Failed to create new Athena partition: {}",
-                                err.into_service_error()
-                            );
-                            println!(
-                                "Database: {}, Table: {}, Values: {:?}",
-                                database, namespace, partition_values
-                            );
+                            println!("Failed to create new Athena partition: {}", err);
+                            println!("Database: {}, Table: {}, Values: {:?}", database, namespace, partition_values);
                         }
                     }
-                } // ,
-                  // Err(err) => {
-                  //     println!("Failed to get Athena partition: {}", err);
-                  // }
+                }
             }
-            // } else {
-            //     println!("Partition already exists in cache");
-            //     println!("Database: {}, Table: {}, Values: {:?}", database, namespace, partition_values);
         }
 
         Ok(true)
     }
 }
+
