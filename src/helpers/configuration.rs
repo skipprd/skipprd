@@ -1606,34 +1606,49 @@ impl Config {
 
     pub async fn sync_schema(metadata: &HashMap<String, Metadata>) {
 
-        {
-            let flatten = Config::get_transform_flatten_events();
+        use once_cell::sync::Lazy as OnceLazy;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static SCHEMA_SYNC_IN_PROGRESS: OnceLazy<AtomicBool> = OnceLazy::new(|| AtomicBool::new(false));
+        if SCHEMA_SYNC_IN_PROGRESS.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            return;
+        }
 
-            for (namespace, schema) in metadata.into_iter() {
-                println!("Updating Hive '{}' schema", namespace);
+        let flatten = Config::get_transform_flatten_events();
 
-                let default_message = create_default_nested_message(&schema.fields);
-                {
-                    let mut lock = DEFAULT_NESTED_MESSAGE.write();
-                    lock.insert(namespace.clone(), default_message);
-                }
+        for (namespace, schema) in metadata.into_iter() {
+            // debounce per namespace (500ms)
+            use dashmap::DashMap;
+            static LAST_SYNC: OnceLazy<DashMap<String, std::time::Instant>> = OnceLazy::new(|| DashMap::new());
+            let now = std::time::Instant::now();
+            if let Some(last) = LAST_SYNC.get(namespace) {
+                if now.duration_since(*last) < std::time::Duration::from_millis(500) { continue; }
+            }
+            LAST_SYNC.insert(namespace.clone(), now);
 
-                Ingest::prepare_arrow_schema_with_metadata(&namespace, metadata, flatten).unwrap();
+            println!("Updating Hive '{}' schema", namespace);
 
-                if Config::get_pipeline_output_plugin_name() != ""
-                    && Config::get_pipeline_output_plugin_name() == "Athena"
-                {
-                    let __output_metadata = if flatten {
-                        OutputMetadata::from_flatterened_metadata(metadata.get(namespace).unwrap())
-                    } else {
-                        OutputMetadata::from_metadata(metadata.get(namespace).unwrap())
-                    };
+            let default_message = create_default_nested_message(&schema.fields);
+            {
+                let mut lock = DEFAULT_NESTED_MESSAGE.write();
+                lock.insert(namespace.clone(), default_message);
+            }
 
-                    AwsAthena::create_or_update_schema(&namespace, &__output_metadata).await;
-                }
+            Ingest::prepare_arrow_schema_with_metadata(&namespace, metadata, flatten).unwrap();
+
+            if Config::get_pipeline_output_plugin_name() != ""
+                && Config::get_pipeline_output_plugin_name() == "Athena"
+            {
+                let __output_metadata = if flatten {
+                    OutputMetadata::from_flatterened_metadata(metadata.get(namespace).unwrap())
+                } else {
+                    OutputMetadata::from_metadata(metadata.get(namespace).unwrap())
+                };
+
+                AwsAthena::create_or_update_schema(&namespace, &__output_metadata).await;
             }
         }
 
+        SCHEMA_SYNC_IN_PROGRESS.store(false, Ordering::SeqCst);
     }
 
     pub async fn init() {

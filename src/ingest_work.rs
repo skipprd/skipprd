@@ -6,6 +6,13 @@ use crate::helpers::Helpers;
 use crate::ingest::ingest::ingest;
 use crate::serdes::json::SerdeJson;
 use crate::{ARROW_SCHEMA, ARROW_SCHEMA_VERSION, METADATA, METRICS, RUNNING};
+use dashmap::DashMap;
+use std::sync::atomic::AtomicBool;
+use std::sync::Mutex;
+use arrow::datatypes::{Schema as ArrowSchema, DataType as ArrowDataType, Field as ArrowField};
+// Per-namespace schema readiness flag to eliminate first-batch races
+static SCHEMA_READY: once_cell::sync::Lazy<DashMap<String, AtomicBool>> = once_cell::sync::Lazy::new(|| DashMap::new());
+static SCHEMA_PREP_LOCKS: once_cell::sync::Lazy<DashMap<String, Arc<std::sync::Mutex<()>>>> = once_cell::sync::Lazy::new(|| DashMap::new());
 use crate::metrics::counters as metrics_hot;
 
 
@@ -29,7 +36,7 @@ extern crate num_cpus;
 use std::sync::mpsc::Sender;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::atomic::Ordering::AcqRel;
-use dashmap::{DashMap};
+// use dashmap::{DashMap};
 
 use crate::ingest::fast_ingest::{create_default_nested_message, DEFAULT_NESTED_MESSAGE, fast_path_ingest};
 
@@ -194,6 +201,38 @@ impl Drop for Ingest {
 }
 
 impl Ingest {
+    #[inline]
+    fn load_stable_schema_hash(skpr_namespace: &str, metadata: &HashMap<String, Metadata>, flatten: bool) -> SchemaHash {
+        const MAX_ITERS: u32 = 50; // ~500ms
+        let mut iters = 0u32;
+        loop {
+            let v1 = ARROW_SCHEMA_VERSION.read().get(skpr_namespace).map(|v| v.load(Ordering::Relaxed)).unwrap_or(0);
+            let schema_opt = ARROW_SCHEMA.read().get(skpr_namespace).map(Arc::clone);
+            if schema_opt.is_none() {
+                // Singleflight prepare
+                let lock = SCHEMA_PREP_LOCKS.entry(skpr_namespace.to_string()).or_insert_with(|| Arc::new(std::sync::Mutex::new(()))).clone();
+                let _guard = lock.lock().unwrap();
+                if ARROW_SCHEMA.read().get(skpr_namespace).is_none() {
+                    let _ = Ingest::prepare_arrow_schema_with_metadata(skpr_namespace, metadata, flatten);
+                }
+            }
+            let schema = ARROW_SCHEMA.read().get(skpr_namespace).map(Arc::clone).unwrap();
+            let v2 = ARROW_SCHEMA_VERSION.read().get(skpr_namespace).map(|v| v.load(Ordering::Relaxed)).unwrap_or(0);
+            if v1 == v2 {
+                let hash = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
+                return SchemaHash { schema, hash };
+            }
+            if iters >= MAX_ITERS { // fallback
+                let hash = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
+                if (iters > 0) {
+                    println!("Schema for namespace {} changed during stable read, proceeding with latest version", skpr_namespace);
+                }
+                return SchemaHash { schema, hash };
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            iters += 1;
+        }
+    }
     pub fn new() -> Ingest {
         // We always want to use all cores unless overridden by env
         let default_threads = match CLI_MODE.read().clone() {
@@ -1108,129 +1147,10 @@ impl Ingest {
                         _time: skpr_time_bucket.clone(),
                     };
 
-                    let mut schema_hash = match schema_hashes.get(&skpr_namespace) {
-                        Some(hash) => hash.clone(),
-                        None => {
-                            // Try a single read first to avoid unnecessary cloning
-                            let schema_opt = {
-                                ARROW_SCHEMA.read().get(&skpr_namespace).map(Arc::clone)
-                            };
-                            
-                            if let Some(schema) = schema_opt {
-                                // We found the schema, create and return the hash
-                                let hash = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
-                                let schema_hash = SchemaHash {
-                                    schema,
-                                    hash
-                                };
-                                schema_hashes.insert(skpr_namespace.clone(), schema_hash.clone());
-                                schema_hash
-                            } else {
-                                // Schema not found, we need to create it
-                                println!("Schema not found for namespace: {}, creating it", skpr_namespace);
-                                
-                                // Create schema with a timeout to prevent deadlock
-                                let start_time = Instant::now();
-                                let timeout = Duration::from_secs(30); // 30 second timeout
-                                let mut created = false;
-                                
-                                // Try to create the schema if needed
-                                if METADATA.read().metadata.get(&skpr_namespace).is_some() {
-                                    let metadata_clone = METADATA.read().clone();
-                                    match Ingest::prepare_arrow_schema_with_metadata(&skpr_namespace, &metadata_clone.metadata, flatten) {
-                                        Ok(_) => {
-                                            created = true;
-                                            println!("Created schema for namespace: {}", skpr_namespace);
-                                        },
-                                        Err(e) => {
-                                            println!("Failed to create schema: {}", e);
-                                        }
-                                    }
-                                }
-                                
-                                // Wait with timeout
-                                let mut i = 0;
-                                while !created && start_time.elapsed() < timeout {
-                                    // Check if schema now exists
-                                    if let Some(schema) = ARROW_SCHEMA.read().get(&skpr_namespace).map(Arc::clone) {
-                                        let hash = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
-                                        let schema_hash = SchemaHash {
-                                            schema,
-                                            hash
-                                        };
-                                        schema_hashes.insert(skpr_namespace.clone(), schema_hash.clone());
-                                        // return schema_hash;
-                                    }
-                                    
-                                    if i == 0 || i % 100 == 0 {
-                                        println!("Waiting for schema to be prepared for namespace: {} (timeout in {}s)", 
-                                            skpr_namespace, 
-                                            (timeout.as_secs() as f64 - start_time.elapsed().as_secs_f64()).max(0.0));
-                                    }
-                                    std::thread::sleep(std::time::Duration::from_millis(100));
-                                    i += 1;
-                                }
-                                
-                                // If we timed out, create a default schema to unblock processing
-                                if !created && start_time.elapsed() >= timeout {
-                                    println!("Timed out waiting for schema, creating default schema for namespace: {}", skpr_namespace);
-                                    
-                                    // Create a default empty schema as fallback
-                                    let schema = Arc::new(arrow::datatypes::Schema::empty());
-                                    ARROW_SCHEMA.write().insert(skpr_namespace.to_string(), schema.clone());
-                                    
-                                    let hash = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
-                                    let schema_hash = SchemaHash {
-                                        schema,
-                                        hash
-                                    };
-                                    schema_hashes.insert(skpr_namespace.clone(), schema_hash.clone());
-                                    schema_hash
-                                } else {
-                                    // We should have the schema by now
-                                    let schema = Arc::clone(ARROW_SCHEMA.read().get(&skpr_namespace).unwrap());
-                                    let hash = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
-                                    
-                                    let schema_hash = SchemaHash {
-                                        schema,
-                                        hash
-                                    };
-                                    
-                                    schema_hashes.insert(skpr_namespace.clone(), schema_hash.clone());
-                                    schema_hash
-                                }
-                            }
-                        }
-                    };
+                    // Old ad-hoc schema fetch/retry path removed in favor of stable snapshot loader
 
-                    // Refresh schema only when version changes to minimize ARROW_SCHEMA reads
-                    let version_changed = {
-                        let vmap = ARROW_SCHEMA_VERSION.read();
-                        if let Some(v) = vmap.get(&skpr_namespace) {
-                            // Store last seen version with the schema hash key; we piggyback by using the hash string as cache key.
-                            // If absent, treat as changed once to seed cache.
-                            let cached_key = format!("{}::__ver__", skpr_namespace);
-                            static LAST_SEEN: once_cell::sync::Lazy<std::sync::Mutex<HashMap<String, u64>>> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
-                            let mut guard = LAST_SEEN.lock().unwrap();
-                            let prev = guard.get(&cached_key).cloned().unwrap_or(0);
-                            let cur = v.load(Ordering::Relaxed);
-                            if cur != prev {
-                                guard.insert(cached_key, cur);
-                                true
-                            } else { false }
-                        } else { true }
-                    };
-
-                    if version_changed {
-                        if let Some(cur_schema) = ARROW_SCHEMA.read().get(&skpr_namespace).map(Arc::clone) {
-                            let cur_hash = format!("{:?}", md5::compute(format!("{:?}", cur_schema.deref())));
-                            if cur_hash != schema_hash.hash {
-                                let fresh = SchemaHash { schema: cur_schema.clone(), hash: cur_hash.clone() };
-                                schema_hashes.insert(skpr_namespace.clone(), fresh.clone());
-                                schema_hash = fresh;
-                            }
-                        }
-                    }
+                    // Load schema and hash using a stable version snapshot to avoid races
+                    let schema_hash = Ingest::load_stable_schema_hash(&skpr_namespace, &METADATA.read().metadata, flatten);
 
                     let buf_entry = buf.entry((
                         skpr_namespace.clone(),
@@ -1239,6 +1159,19 @@ impl Ingest {
                         schema_hash.hash
                     )).or_insert_with(|| {
 
+                        // Ensure schema is prepared and visible before creating first batch for this namespace
+                        {
+                            // If schema not marked ready yet, block briefly until it is
+                            const MAX_WAIT_ITERS: u32 = 50; // ~5s total
+                            let mut iters: u32 = 0;
+                            loop {
+                                let ready = SCHEMA_READY.get(&skpr_namespace).map(|f| f.load(Ordering::Relaxed)).unwrap_or(false);
+                                if ready { break; }
+                                if iters >= MAX_WAIT_ITERS { break; }
+                                std::thread::sleep(std::time::Duration::from_millis(100));
+                                iters += 1;
+                            }
+                        }
                         IngestBufferBatch {
                             offsets: HashMap::new(),
                             _namespace: skpr_namespace.clone(),
@@ -1324,6 +1257,9 @@ impl Ingest {
             let entry = vmap.entry(skpr_namespace.to_string()).or_insert_with(|| AtomicU64::new(0));
             entry.fetch_add(1, Ordering::Relaxed);
         }
+
+        // Mark schema as ready deterministically for this namespace
+        SCHEMA_READY.entry(skpr_namespace.to_string()).or_insert_with(|| AtomicBool::new(true)).store(true, Ordering::Relaxed);
 
         Ok(_schema_ref)
     }
