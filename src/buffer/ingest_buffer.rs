@@ -825,11 +825,38 @@ impl WalPartition {
             Some(S3Client::new(&aws_conf))
         } else { None };
 
-        // Always use in-memory Arrow schema for namespace to stay in sync with discovery
-        let schema: SchemaRef = match ARROW_SCHEMA.read().get(&self.namespace).cloned() {
-            Some(s) => s,
-            None => {
-                println!("Missing in-memory schema for namespace: {}", self.namespace);
+        // Determine schema from the first WAL file in this shard to avoid type mismatches
+        let schema: SchemaRef = if storage.eq_ignore_ascii_case("disk") {
+            match self.files.first_mut().and_then(|wf| wf.read_schema_from_stream().ok()) {
+                Some(s) => s,
+                None => {
+                    println!("Failed to read schema from local WAL for namespace: {}", self.namespace);
+                    return wal_compacted_bytes_total;
+                }
+            }
+        } else {
+            // s3: read schema from first object
+            if let (Some(s3c), Some(first)) = (s3.as_ref(), self.files.first()) {
+                let rel = first.path.to_string_lossy().replace(&base, "").trim_start_matches('/').to_string();
+                let key = if wal_prefix.is_empty() { rel.clone() } else { format!("{}/{}", wal_prefix, rel) };
+                match s3c.get_object().bucket(&wal_bucket).key(&key).send().await {
+                    Ok(resp) => {
+                        let bytes = resp.body.collect().await.unwrap().into_bytes();
+                        use std::io::{Cursor, Seek};
+                        let mut cursor = Cursor::new(bytes);
+                        let mut offset_size = [0u8; 8];
+                        if std::io::Read::read_exact(&mut cursor, &mut offset_size).is_err() { println!("Failed to read WAL offset header from S3 {}", key); return wal_compacted_bytes_total; }
+                        let skip = u64::from_le_bytes(offset_size);
+                        let _ = std::io::Seek::seek(&mut cursor, io::SeekFrom::Current(skip as i64));
+                        match StreamReader::try_new(cursor, None) {
+                            Ok(sr) => sr.schema(),
+                            Err(e) => { println!("Failed to init Arrow stream to read schema from S3 WAL {}: {}", key, e); return wal_compacted_bytes_total; }
+                        }
+                    }
+                    Err(e) => { println!("Failed to download WAL from S3 {}: {}", key, e); return wal_compacted_bytes_total; }
+                }
+            } else {
+                println!("WAL_STORAGE is 's3' but missing client or files");
                 return wal_compacted_bytes_total;
             }
         };

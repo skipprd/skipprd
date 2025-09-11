@@ -5,7 +5,7 @@ use crate::helpers::offsets::{OffsetKey, Offsets, OffsetTypes};
 use crate::helpers::Helpers;
 use crate::ingest::ingest::ingest;
 use crate::serdes::json::SerdeJson;
-use crate::{ARROW_SCHEMA, METADATA, METRICS, RUNNING};
+use crate::{ARROW_SCHEMA, ARROW_SCHEMA_VERSION, METADATA, METRICS, RUNNING};
 use crate::metrics::counters as metrics_hot;
 
 
@@ -21,6 +21,7 @@ use std::ops::{Deref};
 use std::process::exit;
 use std::string::ToString;
 use std::sync::{Arc, RwLock};
+use std::sync::atomic::AtomicU64;
 use std::time::{Instant, SystemTime, Duration};
 use threadpool::ThreadPool;
 use std::sync::mpsc::channel;
@@ -1107,7 +1108,7 @@ impl Ingest {
                         _time: skpr_time_bucket.clone(),
                     };
 
-                    let schema_hash = match schema_hashes.get(&skpr_namespace) {
+                    let mut schema_hash = match schema_hashes.get(&skpr_namespace) {
                         Some(hash) => hash.clone(),
                         None => {
                             // Try a single read first to avoid unnecessary cloning
@@ -1202,6 +1203,35 @@ impl Ingest {
                         }
                     };
 
+                    // Refresh schema only when version changes to minimize ARROW_SCHEMA reads
+                    let version_changed = {
+                        let vmap = ARROW_SCHEMA_VERSION.read();
+                        if let Some(v) = vmap.get(&skpr_namespace) {
+                            // Store last seen version with the schema hash key; we piggyback by using the hash string as cache key.
+                            // If absent, treat as changed once to seed cache.
+                            let cached_key = format!("{}::__ver__", skpr_namespace);
+                            static LAST_SEEN: once_cell::sync::Lazy<std::sync::Mutex<HashMap<String, u64>>> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
+                            let mut guard = LAST_SEEN.lock().unwrap();
+                            let prev = guard.get(&cached_key).cloned().unwrap_or(0);
+                            let cur = v.load(Ordering::Relaxed);
+                            if cur != prev {
+                                guard.insert(cached_key, cur);
+                                true
+                            } else { false }
+                        } else { true }
+                    };
+
+                    if version_changed {
+                        if let Some(cur_schema) = ARROW_SCHEMA.read().get(&skpr_namespace).map(Arc::clone) {
+                            let cur_hash = format!("{:?}", md5::compute(format!("{:?}", cur_schema.deref())));
+                            if cur_hash != schema_hash.hash {
+                                let fresh = SchemaHash { schema: cur_schema.clone(), hash: cur_hash.clone() };
+                                schema_hashes.insert(skpr_namespace.clone(), fresh.clone());
+                                schema_hash = fresh;
+                            }
+                        }
+                    }
+
                     let buf_entry = buf.entry((
                         skpr_namespace.clone(),
                         skpr_partition.clone(),
@@ -1281,6 +1311,19 @@ impl Ingest {
         _schema_ref = Arc::new(_arrow_schema.unwrap());
 
         ARROW_SCHEMA.write().insert(skpr_namespace.to_string(), _schema_ref.clone());
+
+        // Refresh default nested message template for fast ingest determinism
+        if let Some(ns_meta) = metadata.get(skpr_namespace) {
+            let template = create_default_nested_message(&ns_meta.fields);
+            DEFAULT_NESTED_MESSAGE.write().insert(skpr_namespace.to_string(), template);
+        }
+
+        // Bump schema version for this namespace AFTER updating schema and template
+        {
+            let mut vmap = ARROW_SCHEMA_VERSION.write();
+            let entry = vmap.entry(skpr_namespace.to_string()).or_insert_with(|| AtomicU64::new(0));
+            entry.fetch_add(1, Ordering::Relaxed);
+        }
 
         Ok(_schema_ref)
     }

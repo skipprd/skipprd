@@ -167,10 +167,7 @@ pub fn fast_path_ingest(
         ) {
             Ok(v) => v,
             Err(e) => {
-                // Check if the error is related to array repetition_count
-                if e.to_string().contains("Falling back to slow path") {
-                    return Err(e);
-                }
+                if e.to_string().contains("Falling back to slow path") { return Err(e); }
                 return Err(e);
             }
         };

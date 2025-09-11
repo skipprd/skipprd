@@ -20,7 +20,7 @@ use std::thread;
 
 use std::fs;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering, AtomicU64};
 use std::thread::sleep;
 use std::time::Instant;
 
@@ -111,6 +111,7 @@ pub static LOGGER: Lazy<Arc<tokio::sync::RwLock<Logger>>> = Lazy::new(|| Logger:
 pub static METRICS: Lazy<Arc<TimedRwLock<Metrics>>> = Lazy::new(|| Arc::new(TimedRwLock::new("metrics".to_string(), Metrics::new())));
 pub static METADATA: Lazy<Arc<TimedRwLock<PipelineMetadata>>> = Lazy::new(|| Arc::new(TimedRwLock::new("metadata".to_string(), PipelineMetadata::new())));
 pub static ARROW_SCHEMA: Lazy<Arc<TimedRwLock<HashMap<String, Arc<Schema>>>>> = Lazy::new(|| Arc::new(TimedRwLock::new("arrow_schema".to_string(), HashMap::new())));
+pub static ARROW_SCHEMA_VERSION: Lazy<Arc<TimedRwLock<HashMap<String, AtomicU64>>>> = Lazy::new(|| Arc::new(TimedRwLock::new("arrow_schema_version".to_string(), HashMap::new())));
 
 #[derive(Clone, Debug)]
 struct PipelineCache {
