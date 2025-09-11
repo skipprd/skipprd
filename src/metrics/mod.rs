@@ -250,7 +250,7 @@ impl Metrics {
         let workspace = Config::get_workspace_name();
         let pipeline = Config::get_pipeline_name();
 
-        let tenant_id = Config::get_tenant_id();
+        let tenant = Config::get_tenant();
 
         let wal_write_bytes_total = LAST_WAL_WRITE_BYTES_TOTAL.load(Ordering::SeqCst);
         let wal_write_bytes_current = metrics.wal_write_bytes_total - wal_write_bytes_total;
@@ -269,33 +269,33 @@ impl Metrics {
         LAST_WAL_COMPACTED_FILES_TOTAL.store(metrics.wal_compacted_files_total, Ordering::SeqCst);
 
         // Merge counters (atomics) into snapshot before computing deltas
-        use crate::metrics::counters as hot;
-        let hot_messages = hot::MESSAGES_TOTAL.load(Ordering::Relaxed);
-        let hot_dead = hot::DEADLETTERS_TOTAL.load(Ordering::Relaxed);
-        let hot_slow = hot::INGESTED_SLOW_TOTAL.load(Ordering::Relaxed);
-        let hot_src = hot::SOURCE_BYTES_TOTAL.load(Ordering::Relaxed);
-        let hot_w_wb = hot::WAL_WRITE_BYTES_TOTAL.load(Ordering::Relaxed);
-        let hot_w_wr = hot::WAL_WRITE_ROWS_TOTAL.load(Ordering::Relaxed);
-        let hot_c_b = hot::WAL_COMPACTED_BYTES_TOTAL.load(Ordering::Relaxed);
-        let hot_c_f = hot::WAL_COMPACTED_FILES_TOTAL.load(Ordering::Relaxed);
-        let hot_c_r = hot::WAL_COMPACTED_ROWS_TOTAL.load(Ordering::Relaxed);
-        let hot_p_b = hot::PARQUET_PERSISTED_BYTES_TOTAL.load(Ordering::Relaxed);
-        let hot_p_r = hot::PARQUET_PERSISTED_ROWS_TOTAL.load(Ordering::Relaxed);
-        let hot_p_o = hot::PARQUET_PERSISTED_OBJECTS_TOTAL.load(Ordering::Relaxed);
+        use crate::metrics::counters as counters;
+        let messages_total_counter = counters::MESSAGES_TOTAL.load(Ordering::Relaxed);
+        let deadletters_total_counter = counters::DEADLETTERS_TOTAL.load(Ordering::Relaxed);
+        let ingested_slow_total_counter = counters::INGESTED_SLOW_TOTAL.load(Ordering::Relaxed);
+        let source_bytes_total_counter = counters::SOURCE_BYTES_TOTAL.load(Ordering::Relaxed);
+        let wal_write_bytes_total_counter = counters::WAL_WRITE_BYTES_TOTAL.load(Ordering::Relaxed);
+        let wal_write_rows_total_counter = counters::WAL_WRITE_ROWS_TOTAL.load(Ordering::Relaxed);
+        let wal_compacted_bytes_total_counter = counters::WAL_COMPACTED_BYTES_TOTAL.load(Ordering::Relaxed);
+        let wal_compacted_files_total_counter = counters::WAL_COMPACTED_FILES_TOTAL.load(Ordering::Relaxed);
+        let wal_compacted_rows_total_counter = counters::WAL_COMPACTED_ROWS_TOTAL.load(Ordering::Relaxed);
+        let parquet_persisted_bytes_total_counter = counters::PARQUET_PERSISTED_BYTES_TOTAL.load(Ordering::Relaxed);
+        let parquet_persisted_rows_total_counter = counters::PARQUET_PERSISTED_ROWS_TOTAL.load(Ordering::Relaxed);
+        let parquet_persisted_objects_total_counter = counters::PARQUET_PERSISTED_OBJECTS_TOTAL.load(Ordering::Relaxed);
 
         let mut metrics_snapshot = metrics.clone();
-        metrics_snapshot.messages_total += hot_messages;
-        metrics_snapshot.deadletters_total += hot_dead;
-        metrics_snapshot.ingeted_slow_total += hot_slow;
-        metrics_snapshot.source_bytes_total += hot_src;
-        metrics_snapshot.wal_write_bytes_total += hot_w_wb;
-        metrics_snapshot.wal_write_rows_total += hot_w_wr;
-        metrics_snapshot.wal_compacted_bytes_total += hot_c_b;
-        metrics_snapshot.wal_compacted_files_total += hot_c_f;
-        metrics_snapshot.wal_compacted_rows_total += hot_c_r;
-        metrics_snapshot.parquet_persisted_bytes_total += hot_p_b;
-        metrics_snapshot.parquet_persisted_rows_total += hot_p_r;
-        metrics_snapshot.parquet_persisted_objects_total += hot_p_o;
+        metrics_snapshot.messages_total += messages_total_counter;
+        metrics_snapshot.deadletters_total += deadletters_total_counter;
+        metrics_snapshot.ingeted_slow_total += ingested_slow_total_counter;
+        metrics_snapshot.source_bytes_total += source_bytes_total_counter;
+        metrics_snapshot.wal_write_bytes_total += wal_write_bytes_total_counter;
+        metrics_snapshot.wal_write_rows_total += wal_write_rows_total_counter;
+        metrics_snapshot.wal_compacted_bytes_total += wal_compacted_bytes_total_counter;
+        metrics_snapshot.wal_compacted_files_total += wal_compacted_files_total_counter;
+        metrics_snapshot.wal_compacted_rows_total += wal_compacted_rows_total_counter;
+        metrics_snapshot.parquet_persisted_bytes_total += parquet_persisted_bytes_total_counter;
+        metrics_snapshot.parquet_persisted_rows_total += parquet_persisted_rows_total_counter;
+        metrics_snapshot.parquet_persisted_objects_total += parquet_persisted_objects_total_counter;
 
         // Now compute parquet deltas from merged snapshot
         let parquet_persisted_bytes_total = LAST_PARQUET_PERSISTED_BYTES_TOTAL.load(Ordering::SeqCst);
@@ -389,7 +389,7 @@ impl Metrics {
 
             "type": "metric",
             "run_id": metrics.run_id,
-            "tenant_id": tenant_id,
+            "tenant": tenant,
             "workspace_name": workspace,
             "pipeline_name": pipeline,
             "status": metrics.status.name(),
@@ -401,7 +401,7 @@ impl Metrics {
 
         // Upload metrics to S3
         let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
-        let s3_key = format!("skippr/{}/{}/metrics/{}_{}.json", workspace, pipeline, timestamp, metrics.run_id);
+        let s3_key = format!("{}/{}/{}/metrics/{}_{}.json", tenant, workspace, pipeline, timestamp, metrics.run_id);
 
         match s3::put_json(&s3_key, &data).await {
             Ok(_) => {
@@ -429,7 +429,7 @@ impl Metrics {
         let workspace = Config::get_workspace_name();
         let pipeline = Config::get_pipeline_name();
 
-        let tenant_id = Config::get_tenant_id();
+        let tenant = Config::get_tenant();
 
         let current_time = chrono::Utc::now();
         let run_time_seconds = (current_time - metrics.start_time).num_seconds();
@@ -444,7 +444,7 @@ impl Metrics {
             "config": metrics_env_config,
             "type": "config",
             "run_id": metrics.run_id,
-            "tenant_id": tenant_id,
+            "tenant": tenant,
             "workspace_name": workspace,
             "pipeline_name": pipeline,
             "status": metrics.status.name(),
@@ -455,7 +455,7 @@ impl Metrics {
 
         // Upload config to S3
         let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
-        let s3_key = format!("skippr/{}/{}/config/{}_{}.json", workspace, pipeline, timestamp, metrics.run_id);
+        let s3_key = format!("{}/{}/{}/config/{}_{}.json", tenant, workspace, pipeline, timestamp, metrics.run_id);
 
         match s3::put_json(&s3_key, &data).await {
             Ok(_) => {
@@ -487,23 +487,31 @@ impl Metrics {
 
                     let now_lock = now_clone.read();
                     // Use atomic counters for totals and compute per-minute using a separate atomic
-                    let hot_messages = crate::metrics::counters::MESSAGES_TOTAL.load(Ordering::Relaxed);
-                    let hot_bytes = crate::metrics::counters::SOURCE_BYTES_TOTAL.load(Ordering::Relaxed);
-                    let hot_dead = crate::metrics::counters::DEADLETTERS_TOTAL.load(Ordering::Relaxed);
-                    let hot_fixed = crate::metrics::counters::INGESTED_SLOW_TOTAL.load(Ordering::Relaxed);
-                    let last_print = LAST_PRINT_MESSAGES_TOTAL.swap(hot_messages, Ordering::SeqCst);
-                    let ingested_current = hot_messages.saturating_sub(last_print);
+                    let messages_total_counter = crate::metrics::counters::MESSAGES_TOTAL.load(Ordering::Relaxed);
+                    let source_bytes_total_counter = crate::metrics::counters::SOURCE_BYTES_TOTAL.load(Ordering::Relaxed);
+                    let deadletters_total_counter = crate::metrics::counters::DEADLETTERS_TOTAL.load(Ordering::Relaxed);
+                    let ingested_slow_total_counter = crate::metrics::counters::INGESTED_SLOW_TOTAL.load(Ordering::Relaxed);
+                    let last_print = LAST_PRINT_MESSAGES_TOTAL.swap(messages_total_counter, Ordering::SeqCst);
+                    let ingested_current = messages_total_counter.saturating_sub(last_print);
+                    // Compute per-minute for fixed and deadletters using dedicated atomics
+                    static LAST_PRINT_FIXED_TOTAL: AtomicU64 = AtomicU64::new(0);
+                    static LAST_PRINT_DEAD_TOTAL: AtomicU64 = AtomicU64::new(0);
+                    let last_fixed = LAST_PRINT_FIXED_TOTAL.swap(ingested_slow_total_counter, Ordering::SeqCst);
+                    let fixed_current = ingested_slow_total_counter.saturating_sub(last_fixed);
+                    let last_dead = LAST_PRINT_DEAD_TOTAL.swap(deadletters_total_counter, Ordering::SeqCst);
+                    let dead_current = deadletters_total_counter.saturating_sub(last_dead);
 
                     if ingested_current > 0 {
                         println!("Messages per Min: {}", ingested_current);
-                        println!("Messages Fixed: {}", hot_fixed);
+                        println!("Messages Fixed per Min: {}", fixed_current);
                         // println!("Bytes per Min: {}", metrics.bytes_current);
 
-                        let human_bytes = Helpers::human_readable_size(hot_bytes);
+                        let human_bytes = Helpers::human_readable_size(source_bytes_total_counter);
 
                         println!("Bytes Total: {}", human_bytes);
-                        println!("Messages Total: {}", hot_messages);
-                        println!("Deadletter Total: {}", hot_dead);
+                        println!("Messages Total: {}", messages_total_counter);
+                        println!("Deadletters per Min: {}", dead_current);
+                        println!("Deadletter Total: {}", deadletters_total_counter);
                         println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
 
                         // Upload/throughput summary
