@@ -374,6 +374,16 @@ impl Metrics {
                 "parquet_persisted_rows_current": parquet_persisted_rows_current,
                 "parquet_persisted_objects_total": metrics_snapshot.parquet_persisted_objects_total,
                 "parquet_persisted_objects_current": parquet_persisted_objects_current,
+                // Upload telemetry
+                "uploads_total": crate::metrics::counters::UPLOADS_TOTAL.load(Ordering::SeqCst),
+                "uploads_in_flight": crate::metrics::counters::UPLOADS_IN_FLIGHT.load(Ordering::SeqCst),
+                "upload_latency_ns_total": crate::metrics::counters::UPLOAD_LATENCY_NS_TOTAL.load(Ordering::SeqCst),
+                // Tuning targets and runtime state
+                "upload_concurrency_target": crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.load(Ordering::SeqCst),
+                "wal_compaction_concurrency_target": crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.load(Ordering::SeqCst),
+                "s3_download_concurrency_target": crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.load(Ordering::SeqCst),
+                "active_threads": crate::metrics::counters::ACTIVE_THREADS.load(Ordering::SeqCst),
+                "queue_length": crate::metrics::counters::QUEUE_LENGTH.load(Ordering::SeqCst),
                 "lock_wait_times": wait_times,
             },
 
@@ -402,6 +412,7 @@ impl Metrics {
             }
             Err(err) => {
                 println!("Failed to upload metrics to S3: {:?}", err);
+                println!("Hint: ensure AWS region is set (AWS_REGION or AWS_DEFAULT_REGION) and metrics bucket is configured.");
             }
         }
 
@@ -494,6 +505,20 @@ impl Metrics {
                         println!("Messages Total: {}", hot_messages);
                         println!("Deadletter Total: {}", hot_dead);
                         println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
+
+                        // Upload/throughput summary
+                        let up_total = crate::metrics::counters::UPLOADS_TOTAL.load(Ordering::SeqCst);
+                        let up_inflight = crate::metrics::counters::UPLOADS_IN_FLIGHT.load(Ordering::SeqCst);
+                        let up_lat_ns_total = crate::metrics::counters::UPLOAD_LATENCY_NS_TOTAL.load(Ordering::SeqCst);
+                        let avg_up_ms = if up_total > 0 { (up_lat_ns_total / up_total) as f64 / 1_000_000.0 } else { 0.0 };
+                        let up_target = crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.load(Ordering::SeqCst);
+                        let wal_target = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.load(Ordering::SeqCst);
+                        let dl_target = crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.load(Ordering::SeqCst);
+                        let active = crate::metrics::counters::ACTIVE_THREADS.load(Ordering::SeqCst);
+                        let queue = crate::metrics::counters::QUEUE_LENGTH.load(Ordering::SeqCst);
+
+                        println!("Uploads total: {}, inflight: {}, avg latency: {:.2} ms", up_total, up_inflight, avg_up_ms);
+                        println!("Targets - upload: {}, wal: {}, s3_download: {} | active: {}, queue: {}", up_target, wal_target, dl_target, active, queue);
 
                         // let total_times: Vec<(String, Duration)> = TimedRwLock::<()>::get_total_wait_times();
                         // for (key, value) in total_times.iter() {

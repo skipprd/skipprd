@@ -679,25 +679,38 @@ impl Ingest {
                 let upload_cur = crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.load(Ordering::Relaxed);
                 let upload_next = if active >= capacity && pressure > 0.6 { upload_cur.saturating_add(2).min(64) }
                     else if pressure < 0.2 { upload_cur.saturating_sub(1).max(4) } else { upload_cur };
-                if upload_next != upload_cur { crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.store(upload_next, Ordering::Relaxed); }
+                if upload_next != upload_cur {
+                    crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.store(upload_next, Ordering::Relaxed);
+                    println!("tune: upload_concurrency {} -> {} (active={}/{} queue={} pressure={:.2})", upload_cur, upload_next, active, capacity, queued, pressure);
+                }
 
                 // WAL compaction tuning
                 let wal_cur = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.load(Ordering::Relaxed);
                 let wal_next = if active >= capacity && pressure > 0.6 { wal_cur.saturating_add(1).min(32) }
                     else if pressure < 0.2 { wal_cur.saturating_sub(1).max(2) } else { wal_cur };
-                if wal_next != wal_cur { crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.store(wal_next, Ordering::Relaxed); }
+                if wal_next != wal_cur {
+                    crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.store(wal_next, Ordering::Relaxed);
+                    println!("tune: wal_compaction {} -> {} (active={}/{} queue={} pressure={:.2})", wal_cur, wal_next, active, capacity, queued, pressure);
+                }
 
                 // S3 download tuning (upper bound; memory semaphore still applies)
                 let dl_cur = crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.load(Ordering::Relaxed);
                 let dl_next = if active < capacity && pressure < 0.3 { dl_cur.saturating_add(8).min(512) }
                     else if pressure > 0.7 { dl_cur.saturating_sub(8).max(64) } else { dl_cur };
-                if dl_next != dl_cur { crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.store(dl_next, Ordering::Relaxed); }
+                if dl_next != dl_cur {
+                    crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.store(dl_next, Ordering::Relaxed);
+                    println!("tune: s3_download {} -> {} (active={}/{} queue={} pressure={:.2})", dl_cur, dl_next, active, capacity, queued, pressure);
+                }
             }
 
             // Get current metrics for logging
             let current_queue_length = self.queue_length.load(Ordering::Acquire);
             let current_active_threads = self.active_count.load(Ordering::Acquire);
             let queued_tasks = self.task_queue.read().unwrap().len();
+
+            // Export runtime state for summary logging and metrics payload
+            crate::metrics::counters::set_active_threads(current_active_threads);
+            crate::metrics::counters::set_queue_length(current_queue_length);
 
             println!("Queueing {} ingest tasks of {} ({} tasks in queue, {}/{} active threads, {} tasks waiting)",
                 ingest_batches.tasks.len(),

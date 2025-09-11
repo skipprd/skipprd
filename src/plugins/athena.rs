@@ -230,7 +230,19 @@ impl DataOutputAwsAthenaPlugin {
         let parquet = Self::serialize_to_parquet(stream).await?;
         let tags_str = tags.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<String>>().join("&");
 
+        // Resize semaphore if target changed dynamically
+        {
+            let target = crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.load(std::sync::atomic::Ordering::Relaxed);
+            let current = self.upload_sem.available_permits() + 1; // approx
+            if target as usize != current {
+                // Best-effort: add or drain permits to approximate target
+                if target as usize > current { self.upload_sem.add_permits(target as usize - current); }
+                println!("tune: upload_sem target={} available={} (approx)", target, self.upload_sem.available_permits());
+            }
+        }
         let _permit = self.upload_sem.clone().acquire_owned().await.map_err(|_| io::Error::new(io::ErrorKind::Other, "Semaphore closed"))?;
+        let upload_start = std::time::Instant::now();
+        crate::metrics::counters::inc_uploads_in_flight();
 
         // Perform the S3 upload asynchronously
         let body = ByteStream::from(parquet.bytes.clone());
@@ -249,9 +261,13 @@ impl DataOutputAwsAthenaPlugin {
                 metrics_counters::add_parquet_bytes(parquet.size_bytes);
                 metrics_counters::add_parquet_objects(1);
                 metrics_counters::add_parquet_rows(parquet.meta_data.num_rows as u64);
+                crate::metrics::counters::add_upload(1);
+                crate::metrics::counters::add_upload_latency_ns(upload_start.elapsed().as_nanos() as u64);
+                crate::metrics::counters::dec_uploads_in_flight();
                 Ok(())
             }
             Err(err) => {
+                crate::metrics::counters::dec_uploads_in_flight();
                 Err(io::Error::new(io::ErrorKind::Other, format!("Failed to upload to bucket {}, will retry later. Error: {}", self.config.s3_bucket, err.into_service_error())))
             }
         }

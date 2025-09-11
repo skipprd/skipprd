@@ -23,6 +23,15 @@ pub static UPLOAD_CONCURRENCY_TARGET: Lazy<std::sync::atomic::AtomicUsize> = Laz
 pub static WAL_COMPACTION_CONCURRENCY_TARGET: Lazy<std::sync::atomic::AtomicUsize> = Lazy::new(|| std::sync::atomic::AtomicUsize::new(16));
 pub static S3_DOWNLOAD_CONCURRENCY_TARGET: Lazy<std::sync::atomic::AtomicUsize> = Lazy::new(|| std::sync::atomic::AtomicUsize::new(256));
 
+// Upload telemetry
+pub static UPLOADS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static UPLOAD_LATENCY_NS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static UPLOADS_IN_FLIGHT: Lazy<std::sync::atomic::AtomicUsize> = Lazy::new(|| std::sync::atomic::AtomicUsize::new(0));
+
+// Ingest runtime telemetry
+pub static ACTIVE_THREADS: Lazy<std::sync::atomic::AtomicUsize> = Lazy::new(|| std::sync::atomic::AtomicUsize::new(0));
+pub static QUEUE_LENGTH: Lazy<std::sync::atomic::AtomicUsize> = Lazy::new(|| std::sync::atomic::AtomicUsize::new(0));
+
 #[inline]
 pub fn add_messages(n: u64) { MESSAGES_TOTAL.fetch_add(n, Ordering::Relaxed); }
 #[inline]
@@ -60,5 +69,18 @@ pub fn update_latest_timestamp_max(ts: u64) {
         }
     }
 }
+
+#[inline]
+pub fn add_upload(n: u64) { UPLOADS_TOTAL.fetch_add(n, Ordering::Relaxed); }
+#[inline]
+pub fn add_upload_latency_ns(n: u64) { UPLOAD_LATENCY_NS_TOTAL.fetch_add(n, Ordering::Relaxed); }
+#[inline]
+pub fn inc_uploads_in_flight() { UPLOADS_IN_FLIGHT.fetch_add(1, Ordering::Relaxed); }
+#[inline]
+pub fn dec_uploads_in_flight() { UPLOADS_IN_FLIGHT.fetch_sub(1, Ordering::Relaxed); }
+#[inline]
+pub fn set_active_threads(n: usize) { ACTIVE_THREADS.store(n, Ordering::Relaxed); }
+#[inline]
+pub fn set_queue_length(n: usize) { QUEUE_LENGTH.store(n, Ordering::Relaxed); }
 
 

@@ -206,6 +206,7 @@ impl DataSourceS3Plugin {
         let env_dl = dl_concurrency_env.parse::<usize>().ok().filter(|v| *v > 0);
         let tuned_dl = crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.load(std::sync::atomic::Ordering::Relaxed);
         let dl_concurrency = env_dl.unwrap_or_else(|| tuned_dl.clamp(8, 512));
+        println!("tune: s3_download_concurrency={} (env_override={:?})", dl_concurrency, env_dl);
         let s3_client_clone = self.s3_client.clone();
         let mem_sem_clone = mem_sem.clone();
         let mut download_stream = keys_stream.map(move |(key, size_bytes)| {
