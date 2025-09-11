@@ -7,6 +7,8 @@ use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 use crate::helpers::configuration::Config;
+use rand::{thread_rng, Rng};
+use std::time::Duration;
 
 static S3_CLIENT: OnceCell<Arc<S3Client>> = OnceCell::const_new();
 
@@ -26,14 +28,34 @@ pub async fn put_json(key: &str, value: &Value) -> Result<(), S3Error> {
     let client = get_s3_client().await;
     let bucket = get_bucket();
     let body = serde_json::to_vec(value).unwrap();
-    client
-        .put_object()
-        .bucket(bucket)
-        .key(key)
-        .body(ByteStream::from(body))
-        .send()
-        .await?;
-    Ok(())
+
+    // Simple retry with exponential backoff and jitter for transient throttling
+    let mut attempt: u32 = 0;
+    let max_attempts: u32 = 6;
+    loop {
+        match client
+            .put_object()
+            .bucket(&bucket)
+            .key(key)
+            .body(ByteStream::from(body.clone()))
+            .send()
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                attempt += 1;
+                if attempt >= max_attempts {
+                    println!("Failed to upload metrics to S3 after {} attempts: {:?}", attempt, e);
+                    return Err(e.into());
+                }
+                // backoff 200ms * 2^attempt with jitter up to 100ms
+                let base = 200u64.saturating_mul(1u64 << attempt.min(10));
+                let jitter: u64 = thread_rng().gen_range(0..100);
+                let sleep_ms = (base + jitter).min(5_000);
+                tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+            }
+        }
+    }
 }
 
 pub async fn get_json(key: &str) -> Result<Value, SdkError<GetObjectError>> {
