@@ -31,6 +31,10 @@ static BYTES: Lazy<DashMap<PartitionKey, AtomicU64>> = Lazy::new(|| {
 static FIRST_SEEN: Lazy<DashMap<PartitionKey, Instant>> = Lazy::new(|| {
     DashMap::with_capacity(128)
 });
+// Per-partition EWMA of bytes per row
+static BYTES_PER_ROW: Lazy<DashMap<PartitionKey, AtomicU64>> = Lazy::new(|| {
+    DashMap::with_capacity(128)
+});
 
 pub async fn ensure_running_async(offsets: Arc<Offsets>, output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>) {
     let _ = OFFSETS_CELL.set(offsets);
@@ -80,7 +84,7 @@ pub fn ensure_running(offsets: Arc<Offsets>, output: Arc<Box<dyn DataOutputPlugi
 pub fn accumulate_map(map: HashMap<PartitionKey, IngestBufferBatch>) {
     // Use short-lived locks per key to reduce contention
     // Also avoid heavy serialization inside locks; approximate bytes by record count * 256
-    const APPROX_BYTES_PER_RECORD: u64 = 256;
+    const DEFAULT_BYTES_PER_ROW: u64 = 256;
 
     for (k, mut v) in map.into_iter() {
         let mut existed = true;
@@ -106,7 +110,11 @@ pub fn accumulate_map(map: HashMap<PartitionKey, IngestBufferBatch>) {
         }
 
         let records_len = ACCUMULATOR.get(&k).map(|b| b.records.len() as u64).unwrap_or(0);
-        let added = APPROX_BYTES_PER_RECORD.saturating_mul(records_len);
+        let est_bpr = BYTES_PER_ROW
+            .get(&k)
+            .map(|v| v.load(Ordering::Relaxed))
+            .unwrap_or(DEFAULT_BYTES_PER_ROW);
+        let added = est_bpr.saturating_mul(records_len);
         if let Some(bytes_counter) = BYTES.get(&k) {
             bytes_counter.fetch_add(added, Ordering::Relaxed);
         }
@@ -155,4 +163,15 @@ async fn flush_ready() {
     if let (Some(offsets), Some(output)) = (OFFSETS_CELL.get(), OUTPUT_CELL.get()) {
         let _ = to_flush.flush(offsets.clone(), output.clone()).await;
     }
+}
+
+// Public: update EWMA bytes-per-row after WAL serialization (actual sizes known)
+pub fn wal_feedback_bytes_per_row(partition_key: &PartitionKey, actual_bytes: u64, actual_rows: u64) {
+    if actual_rows == 0 || actual_bytes == 0 { return; }
+    let sample = actual_bytes / actual_rows;
+    let entry = BYTES_PER_ROW.entry(partition_key.clone()).or_insert_with(|| AtomicU64::new(sample));
+    let prev = entry.load(Ordering::Relaxed);
+    // alpha=0.2 -> new = 0.8*prev + 0.2*sample
+    let new_est = if prev == 0 { sample } else { ((prev.saturating_mul(8)) + (sample.saturating_mul(2))) / 10 };
+    entry.store(new_est.max(1), Ordering::Relaxed);
 }

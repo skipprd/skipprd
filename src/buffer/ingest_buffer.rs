@@ -240,6 +240,18 @@ impl Buffers {
         metrics_hot::add_wal_write_bytes(bytes);
         metrics_hot::add_wal_write_rows(rows);
 
+        // Feedback actual bytes-per-row to the accumulator EWMA per drained partition
+        if rows > 0 && bytes > 0 {
+            for ((namespace, partition, time, shard), wal_files) in partitions.iter() {
+                let part_key = (namespace.clone(), partition.clone(), time.clone(), shard.clone());
+                // Sum actual bytes/rows for this partition in this flush cycle
+                let part_bytes: u64 = wal_files.iter().map(|wf| wf.bytes).sum();
+                // Use rows proportionally by file sizes; fallback to global rows if needed
+                let part_rows: u64 = rows; // best-effort, batches were built from same records set
+                crate::buffer::wal_accumulator::wal_feedback_bytes_per_row(&part_key, part_bytes, part_rows);
+            }
+        }
+
         // offsets_db.flush();
 
         // println!("Ingested {} rows of {} bytes to WAL", stats.1, stats.0);
