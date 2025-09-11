@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use indexmap::IndexMap;
+use dashmap::DashMap;
 use once_cell::sync::OnceCell;
 use once_cell::sync::Lazy;
 use tokio::time::{sleep as tokio_sleep, Duration as TokioDuration};
@@ -20,14 +22,14 @@ static STARTED: OnceCell<()> = OnceCell::new();
 static OFFSETS_CELL: OnceCell<Arc<Offsets>> = OnceCell::new();
 static OUTPUT_CELL: OnceCell<Arc<Box<dyn DataOutputPlugin + Send + Sync>>> = OnceCell::new();
 
-static ACCUMULATOR: Lazy<TimedRwLock<IndexMap<PartitionKey, IngestBufferBatch>>> = Lazy::new(|| {
-    TimedRwLock::new("wal_accumulator".to_string(), IndexMap::with_capacity(128))
+static ACCUMULATOR: Lazy<DashMap<PartitionKey, IngestBufferBatch>> = Lazy::new(|| {
+    DashMap::with_capacity(128)
 });
-static BYTES: Lazy<TimedRwLock<HashMap<PartitionKey, u64>>> = Lazy::new(|| {
-    TimedRwLock::new("wal_bytes".to_string(), HashMap::with_capacity(128))
+static BYTES: Lazy<DashMap<PartitionKey, AtomicU64>> = Lazy::new(|| {
+    DashMap::with_capacity(128)
 });
-static FIRST_SEEN: Lazy<TimedRwLock<HashMap<PartitionKey, Instant>>> = Lazy::new(|| {
-    TimedRwLock::new("wal_first_seen".to_string(), HashMap::with_capacity(128))
+static FIRST_SEEN: Lazy<DashMap<PartitionKey, Instant>> = Lazy::new(|| {
+    DashMap::with_capacity(128)
 });
 
 pub async fn ensure_running_async(offsets: Arc<Offsets>, output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>) {
@@ -76,28 +78,38 @@ pub fn ensure_running(offsets: Arc<Offsets>, output: Arc<Box<dyn DataOutputPlugi
 }
 
 pub fn accumulate_map(map: HashMap<PartitionKey, IngestBufferBatch>) {
-    let mut acc = ACCUMULATOR.write();
-    let mut bytes_map = BYTES.write();
-    let mut first_seen = FIRST_SEEN.write();
+    // Use short-lived locks per key to reduce contention
+    // Also avoid heavy serialization inside locks; approximate bytes by record count * 256
+    const APPROX_BYTES_PER_RECORD: u64 = 256;
 
     for (k, mut v) in map.into_iter() {
-        if let Some(existing) = acc.get_mut(&k) {
-            // merge records
-            existing.records.append(&mut v.records);
-            // merge offsets by taking max per OffsetKey
-            for (ok, pos) in v.offsets.into_iter() {
-                let entry = existing.offsets.entry(ok).or_insert(0);
-                if *entry < pos { *entry = pos; }
+        let mut existed = true;
+        use dashmap::mapref::entry::Entry;
+        match ACCUMULATOR.entry(k.clone()) {
+            Entry::Occupied(mut occ) => {
+                let existing = occ.get_mut();
+                existing.records.append(&mut v.records);
+                for (ok, pos) in v.offsets.into_iter() {
+                    let entry = existing.offsets.entry(ok).or_insert(0);
+                    if *entry < pos { *entry = pos; }
+                }
             }
-        } else {
-            acc.insert(k.clone(), v);
-            first_seen.insert(k.clone(), Instant::now());
+            Entry::Vacant(vac) => {
+                vac.insert(v);
+                existed = false;
+            }
         }
-        // Approximate bytes as number of records * avg JSON row size proxy (fallback to 0)
-        let batch = acc.get(&k).unwrap();
-        let added: u64 = batch.records.iter().map(|r| r.record.to_string().len() as u64).sum();
-        let entry = bytes_map.entry(k).or_insert(0);
-        *entry = entry.saturating_add(added);
+
+        if !existed {
+            FIRST_SEEN.insert(k.clone(), Instant::now());
+            BYTES.entry(k.clone()).or_insert_with(|| AtomicU64::new(0));
+        }
+
+        let records_len = ACCUMULATOR.get(&k).map(|b| b.records.len() as u64).unwrap_or(0);
+        let added = APPROX_BYTES_PER_RECORD.saturating_mul(records_len);
+        if let Some(bytes_counter) = BYTES.get(&k) {
+            bytes_counter.fetch_add(added, Ordering::Relaxed);
+        }
     }
 }
 
@@ -111,14 +123,12 @@ async fn flush_ready() {
     // Identify keys to flush
     let mut ready: Vec<PartitionKey> = Vec::new();
     {
-        let bytes_map = BYTES.read();
-        let first_seen = FIRST_SEEN.read();
         let now = Instant::now();
-        for (k, b) in bytes_map.iter() {
-            let age_ok = match first_seen.get(k) { Some(t0) => now.duration_since(*t0) >= max_delay, None => false };
-            if *b >= bytes_per_file || age_ok {
-                ready.push(k.clone());
-            }
+        for item in BYTES.iter() {
+            let k = item.key();
+            let b = item.value().load(Ordering::Relaxed);
+            let age_ok = FIRST_SEEN.get(k).map(|t0| now.duration_since(*t0) >= max_delay).unwrap_or(false);
+            if b >= bytes_per_file || age_ok { ready.push(k.clone()); }
         }
     }
 
@@ -126,27 +136,21 @@ async fn flush_ready() {
 
     let log_flush = Config::truth_value(&Config::getenv("LOG_WAL_UPLOADS", "false")) || Config::truth_value(&Config::getenv("LOG_WAL_DEBUG", "false"));
     if log_flush {
-        let bytes_map = BYTES.read();
-        let total_bytes: u64 = ready.iter().map(|k| *bytes_map.get(k).unwrap_or(&0)).sum();
+        let total_bytes: u64 = ready.iter().map(|k| BYTES.get(k).map(|c| c.load(Ordering::Relaxed)).unwrap_or(0)).sum();
         println!("WAL accumulator flush: {} partitions, {} bytes", ready.len(), total_bytes);
     }
 
-    // Drain and flush the ready keys in one Buffers call
+    // Drain and flush the ready keys with fine-grained lock scopes
     let mut to_flush = Buffers::new();
-    {
-        let mut acc = ACCUMULATOR.write();
-        let mut bytes_map = BYTES.write();
-        let mut first_seen = FIRST_SEEN.write();
-        let mut drain_map: HashMap<PartitionKey, IngestBufferBatch> = HashMap::with_capacity(ready.len());
-        for k in ready.into_iter() {
-            if let Some(v) = acc.swap_remove(&k) {
-                drain_map.insert(k.clone(), v);
-            }
-            bytes_map.remove(&k);
-            first_seen.remove(&k);
+    let mut drain_map: HashMap<PartitionKey, IngestBufferBatch> = HashMap::with_capacity(128);
+    for k in ready.into_iter() {
+        if let Some((_, v)) = ACCUMULATOR.remove(&k) {
+            drain_map.insert(k.clone(), v);
         }
-        to_flush.write(drain_map);
+        BYTES.remove(&k);
+        FIRST_SEEN.remove(&k);
     }
+    to_flush.write(drain_map);
 
     if let (Some(offsets), Some(output)) = (OFFSETS_CELL.get(), OUTPUT_CELL.get()) {
         let _ = to_flush.flush(offsets.clone(), output.clone()).await;
