@@ -1,5 +1,6 @@
 mod arr;
 use std::time::{Duration, SystemTime};
+use rand::Rng;
 
 use arrow::datatypes::Schema;
 
@@ -664,23 +665,18 @@ async fn discover() {
     });
 
 
-    let mut out_pnanner = periodic::Planner::new();
-
     use rand::Rng; // 0.8.5
 
-    let _offsets_clone = offsets_db.clone();
-
+    let mut out_pnanner = periodic::Planner::new();
     if Config::get_pipeline_chaos_mode() {
         out_pnanner.add(
             move || {
                 if RUNNING.read().load(Ordering::SeqCst) {
-
                     println!("Chaos mode throwing a random exit. You can disable this test mode buy removing CHAOS_MODE flag or setting to 'no'");
-
-                    std::process::exit(0);
+                    std::process::exit(1);
                 }
-
-            }, periodic::Every::new(Duration::from_secs(rand::thread_rng().gen_range(60..90))),
+            },
+            periodic::Every::new(Duration::from_secs(rand::thread_rng().gen_range(60..90))),
         );
     }
 
@@ -838,6 +834,20 @@ async fn sync() {
     let shared_output = Arc::new(output);
 
     let shared_output_clone = shared_output.clone();
+
+    // Arm chaos interrupt for sync runs using the old planner (deterministic tick)
+    let mut out_pnanner = periodic::Planner::new();
+    if Config::get_pipeline_chaos_mode() {
+        out_pnanner.add(
+            move || {
+                if RUNNING.read().load(Ordering::SeqCst) {
+                    println!("Chaos mode throwing a random exit. You can disable this test mode buy removing CHAOS_MODE flag or setting to 'no'");
+                    std::process::exit(0);
+                }
+            },
+            periodic::Every::new(Duration::from_secs(rand::thread_rng().gen_range(60..90))),
+        );
+    }
 
     // sync schema if output plugin configured
     if output_plugin_name != "" {
