@@ -45,7 +45,7 @@ const DEFAULT_CONFIG: &'static str = "NULL_VALUE";
 pub struct Skippr {
     pub api_token: Option<String>,
     pub workspace: Option<String>,
-    pub tenant_id: Option<String>,
+    pub tenant: Option<String>,
     pub skippr_s3_bucket: Option<String>,
 }
 
@@ -152,7 +152,7 @@ impl Config {
             skippr: Some(Skippr {
                 api_token: None,
                 workspace: None,
-                tenant_id: None,
+                tenant: None,
                 skippr_s3_bucket: None,
             }),
             pipelines: HashMap::new(),
@@ -246,7 +246,7 @@ impl Config {
                         workspace: Some(workspace),
                         api_token: Some(api_token),
                         skippr_s3_bucket: None,
-                        tenant_id: None,
+                        tenant: None,
                     });
                 }
             }
@@ -567,7 +567,7 @@ impl Config {
                 Skippr {
                     api_token: Some(token.clone()),
                     workspace: None,
-                    tenant_id: None,
+                    tenant: None,
                     skippr_s3_bucket: None,
                 }
             )).unwrap().api_token.as_ref().or(Some(&token)).unwrap().to_string();
@@ -1375,28 +1375,28 @@ impl Config {
         }
     }
 
-    pub fn get_tenant_id() -> String {
-        if Config::get_envcache("TENANT_ID") != "" {
-            return Config::get_envcache("TENANT_ID")
+    pub fn get_tenant() -> String {
+        if Config::get_envcache("TENANT") != "" {
+            return Config::get_envcache("TENANT")
         } else {
             let config = Config::get();
 
-            let default_tenant_id = Config::getenv("TENANT_ID", "default");
+            let default_tenant = Config::getenv("TENANT", "default");
 
-            let tenant_id = match config.skippr {
+            let tenant = match config.skippr {
                 Some(skippr) => {
-                    match skippr.tenant_id.as_ref() {
-                        Some(tenant_id) => tenant_id.to_string(),
-                        None => default_tenant_id
+                    match skippr.tenant.as_ref() {
+                        Some(tenant) => tenant.to_string(),
+                        None => default_tenant
                     }
                 }
                 None => {
-                    default_tenant_id
+                    default_tenant
                 }
             };
 
-            Config::set_evncache("TENANT_ID", &tenant_id.clone());
-            tenant_id
+            Config::set_evncache("TENANT", &tenant.clone());
+            tenant
         }
     }
 
@@ -1435,6 +1435,7 @@ impl Config {
 
         let data_dir = Config::get_data_dir();
 
+        let tenant = Self::get_tenant();
         let workspace = Self::get_workspace_name();
         let pipeline = Self::get_pipeline_name();
         let env = Config::get_pipeline_env();
@@ -1443,7 +1444,7 @@ impl Config {
         let metadata_path = format!("{}/metadata.json", metadata_dir);
 
         // Try S3 first, then fallback to local metadata if S3 is empty
-        let s3_key = format!("skippr/{}/{}/metadata/metadata.json", workspace, pipeline);
+        let s3_key = format!("{}/{}/{}/metadata/metadata.json", tenant, workspace, pipeline);
         
         let pipeline_metadata: Result<PipelineMetadata, bool> = match s3::get_json(&s3_key).await {
             Ok(json_value) => {
@@ -1530,10 +1531,11 @@ impl Config {
     }
 
     pub async fn delete_metadata() {
+        let tenant = Self::get_tenant();
         let workspace = Self::get_workspace_name();
         let pipeline = Self::get_pipeline_name();
 
-        let s3_key = format!("skippr/{}/{}/metadata/metadata.json", workspace, pipeline);
+        let s3_key = format!("{}/{}/{}/metadata/metadata.json", tenant, workspace, pipeline);
 
         match s3::delete_object(&s3_key).await {
             Ok(_) => {
@@ -1547,6 +1549,7 @@ impl Config {
 
     pub async fn set_metadata(pipeline_metadata: &PipelineMetadata, evolved: bool) {
 
+        let tenant = Self::get_tenant();
         let workspace = Self::get_workspace_name();
         let pipeline = Self::get_pipeline_name();
 
@@ -1577,7 +1580,7 @@ impl Config {
         writer.write_all(serde_json::to_string(&pipeline_metadata).unwrap().as_bytes()).unwrap();
         
         // Upload to S3
-        let s3_key = format!("skippr/{}/{}/metadata/metadata.json", workspace, pipeline);
+        let s3_key = format!("{}/{}/{}/metadata/metadata.json", tenant, workspace, pipeline);
         let json_value = serde_json::to_value(pipeline_metadata).unwrap();
         
         match s3::put_json(&s3_key, &json_value).await {

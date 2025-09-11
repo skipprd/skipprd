@@ -85,10 +85,11 @@ impl Logger {
         logs: BTreeMap<SystemTime, Log>,
         exit_code: Option<i8>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let tenant = Config::get_tenant();
         let workspace = Config::get_workspace_name();
         let pipeline = Config::get_pipeline_name();
 
-        let _tenant_id = Config::get_tenant_id();
+        let _tenant = Config::get_tenant();
 
         let mut _run_id = "".to_string();
         {
@@ -104,7 +105,7 @@ impl Logger {
                 })
             }).collect::<Vec<_>>(),
             "type": "log",
-            "tenant_id": _tenant_id,
+            "tenant": _tenant,
             "workspace_name": workspace,
             "pipeline_name": pipeline,
             "run_id": _run_id,
@@ -114,7 +115,7 @@ impl Logger {
 
         // Upload logs to S3
         let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
-        let s3_key = format!("skippr/{}/{}/logs/{}_{}.json", workspace, pipeline, timestamp, _run_id);
+        let s3_key = format!("{}/{}/{}/logs/{}_{}.json", tenant, workspace, pipeline, timestamp, _run_id);
 
         match s3::put_json(&s3_key, &data).await {
             Ok(_) => {
