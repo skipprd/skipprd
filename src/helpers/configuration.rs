@@ -583,7 +583,7 @@ impl Config {
         } else {
             let config = Config::get();
 
-            let default_bucket = Config::getenv("SKIPPR_S3_BUCKET", "skippr-data");
+            let default_bucket = Config::getenv("SKIPPR_S3_BUCKET", "");
 
             let bucket = match config.skippr {
                 Some(skippr) => {
