@@ -40,6 +40,7 @@ use futures::stream::StreamExt as FuturesStreamExt;
 use std::future::Future;
 use std::pin::Pin;
 use crate::ARROW_SCHEMA;
+use crate::buffer::wal_accumulator::PartitionKey;
 
 #[allow(dead_code)]
 pub static TOTAL_ROWS: Lazy<TimedRwLock<AtomicU64>> =
@@ -315,12 +316,12 @@ impl Buffers {
                         let mut in_flight: futures::stream::FuturesUnordered<Pin<Box<dyn Future<Output = u64> + Send>>> = futures::stream::FuturesUnordered::new();
                         let mut iter = to_compact.into_iter();
                         let offsets_cell = OFFSETS_CELL.get().unwrap().clone();
-                        let output_cell = OUTPUT_CELL.get().unwrap().clone();
+                        let output_cloned = OUTPUT_CELL.get().unwrap().clone();
                         for _ in 0..tuned {
                             if let Some((_k, p)) = iter.next() {
                                 let mut wal = p;
                                 let offsets_cloned = offsets_cell.clone();
-                                let output_cloned = output_cell.clone();
+                                let output_cloned = output_cloned.clone();
                                 in_flight.push(Box::pin(async move { wal.compact_batches_to_parquet(offsets_cloned, output_cloned).await }));
                             }
                         }
@@ -436,6 +437,130 @@ impl WalPartitionIndex {
         let started = std::time::Instant::now();
         let mut count = 0;
         let mut bytes = 0;
+
+        // For S3-backed WAL, index S3 objects under the current prefix instead of local files
+        if Config::get_wal_storage().eq_ignore_ascii_case("s3") {
+            println!("Indexing WAL on S3 (current prefix only)");
+            let wal_bucket = Config::get_wal_s3_bucket();
+            let wal_prefix = Config::get_wal_s3_prefix().trim_matches('/').to_string();
+            let prefixes = vec![format!("{}/", wal_prefix), wal_prefix.clone()];
+            println!("Listing S3 WALs at s3://{}/{} (and fallback without trailing slash)", wal_bucket, prefixes[0]);
+
+            // Async indexer that writes directly to the global WAL_PARTITION_INDEX
+            let indexer = async move {
+                let started = std::time::Instant::now();
+                let aws_conf = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
+                let s3 = S3Client::new(&aws_conf);
+                let mut files_indexed: u64 = 0;
+                let mut total_bytes: u64 = 0;
+                let mut namespaces: HashSet<String> = HashSet::new();
+                // Collect entries to minimize lock time
+                let mut entries: Vec<(PartitionKey, WalFile)> = Vec::new();
+                for pfx in prefixes.iter() {
+                    let mut page_count: u64 = 0;
+                    let mut paginator = s3.list_objects_v2().bucket(&wal_bucket).prefix(pfx).into_paginator().send();
+                    while let Some(page) = paginator.next().await {
+                        match page {
+                            Ok(resp) => {
+                                page_count += 1;
+                                for obj in resp.contents() {
+                                    if let (Some(key), Some(size)) = (obj.key(), obj.size()) {
+                                        if !key.ends_with(".wal") { continue; }
+                                        let remainder = key.strip_prefix(&format!("{}/", wal_prefix)).unwrap_or(key);
+                                        let mut parts = remainder.split('/');
+                                        let shard_dir = match parts.next() { Some(s) => s, None => "" };
+                                        let filename = match parts.next() { Some(f) => f, None => "" };
+                                        if filename.is_empty() { continue; }
+
+                                        let namespace = BufferChunker::decode_file_namespace(filename);
+                                        let partition = BufferChunker::decode_file_partition(filename);
+                                        let time_val = BufferChunker::decode_file_time(filename);
+                                        let time_opt = if time_val > 0 { Some(time_val) } else { None };
+                                        let shard = BufferChunker::decode_file_shard(filename);
+
+                                        let data_dir = Config::get_data_dir();
+                                        let base = format!("{}/ingest_buffer", data_dir);
+                                        let path = PathBuf::from(format!("{}/{}/{}", base, shard_dir, filename));
+
+                                        let wal_file = WalFile {
+                                            path,
+                                            namespace: namespace.clone(),
+                                            partition: partition.clone(),
+                                            time: time_opt,
+                                            shard: shard.clone(),
+                                            bytes: size as u64,
+                                            file: Arc::new(TimedRwLock::new("wal_file".to_string(), None)),
+                                            updated_at: obj.last_modified().map(|dt| SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(dt.secs() as u64)).unwrap_or(SystemTime::now()),
+                                            offsets: HashMap::new(),
+                                        };
+                                        let key = (namespace.clone(), partition.clone(), time_opt, shard.clone());
+                                        entries.push((key, wal_file));
+                                        namespaces.insert(namespace);
+                                        total_bytes += size as u64;
+                                        files_indexed += 1;
+                                        if files_indexed % 1000 == 0 {
+                                            println!("Indexed {} WAL files on S3 for {} namespaces (prefix attempt: {})", files_indexed, namespaces.len(), pfx);
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                println!("Failed to list S3 WALs for prefix {}: {}", pfx, e);
+                                break;
+                            }
+                        }
+                    }
+                    if files_indexed > 0 {
+                        println!("S3 WAL listing found {} objects across {} pages for prefix {}", files_indexed, page_count, pfx);
+                        break;
+                    } else {
+                        println!("No objects found under prefix {}", pfx);
+                    }
+                }
+
+                // Apply to global index
+                {
+                    let mut index = WAL_PARTITION_INDEX.write();
+                    for (partition_key, wal_file) in entries.into_iter() {
+                        let added_bytes = wal_file.bytes;
+                        let partition = index.index.entry(partition_key.clone()).or_insert_with(|| WalPartition {
+                            files: Vec::new(),
+                            namespace: partition_key.0.clone(),
+                            partition: partition_key.1.clone(),
+                            time: partition_key.2,
+                            shard: partition_key.3.clone(),
+                            updated_at: SystemTime::UNIX_EPOCH,
+                            bytes: 0,
+                        });
+                        if partition.updated_at < wal_file.updated_at {
+                            partition.updated_at = wal_file.updated_at;
+                        }
+                        partition.bytes += added_bytes;
+                        partition.files.push(wal_file);
+                        index.bytes += added_bytes;
+                    }
+
+                    // Update metrics
+                    let mut metrics = METRICS.write();
+                    metrics.wal_index_namespaces_total = namespaces.len() as u64;
+                    metrics.wal_index_partitions_total = index.index.len() as u64;
+                    metrics.wal_index_files_total = index.index.values().map(|p| p.files.len() as u64).sum();
+                    metrics.wal_index_bytes_total = index.bytes as u64;
+                }
+
+                let elapsed = started.elapsed().as_secs_f64();
+                println!("Indexed {} WAL files on S3 in {:.2}s, {} total bytes", files_indexed, elapsed, Helpers::human_readable_size(total_bytes));
+            };
+
+            if tokio::runtime::Handle::try_current().is_ok() {
+                tokio::spawn(indexer);
+            } else {
+                let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                rt.block_on(indexer);
+            }
+
+            return Ok(());
+        }
 
         println!("Indexing WAL");
 
