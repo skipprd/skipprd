@@ -32,6 +32,14 @@ use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::ingest_work::{Deadletter, Ingest};
 use crate::plugins::DataOutputPlugin;
 use std::os::fd::AsRawFd;
+use aws_sdk_s3::primitives::ByteStream as S3ByteStream;
+use aws_sdk_s3::Client as S3Client;
+use once_cell::sync::OnceCell;
+use tokio::time::{sleep as tokio_sleep, Duration as TokioDuration};
+use futures::stream::StreamExt as FuturesStreamExt;
+use std::future::Future;
+use std::pin::Pin;
+use crate::ARROW_SCHEMA;
 
 #[allow(dead_code)]
 pub static TOTAL_ROWS: Lazy<TimedRwLock<AtomicU64>> =
@@ -109,6 +117,14 @@ impl Buffers {
         // println!("Flushing {} WAL files", self.buf.len());
 
         let mut partitions: HashMap<(String, String, Option<i64>, String), Vec<WalFile>> = HashMap::with_capacity(self.buf.len());
+        let wal_storage = Config::get_wal_storage();
+        let wal_bucket = Config::get_wal_s3_bucket();
+        let wal_prefix = Config::get_wal_s3_prefix().trim_matches('/').to_string();
+        let data_dir_base = Config::get_data_dir();
+        let wal_base = format!("{}/ingest_buffer", data_dir_base);
+        let aws_conf_opt = if wal_storage.eq_ignore_ascii_case("s3") { Some(aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await) } else { None };
+        let s3_opt = aws_conf_opt.as_ref().map(|c| S3Client::new(c));
+        let mut uploaded_bytes: u64 = 0;
 
         for ((namespace, partition, time, shard), ingest_buffer_batch) in self.buf.iter_mut() {
 
@@ -179,7 +195,44 @@ impl Buffers {
 
             wal_file.finish()?;
 
-            partition_entry.push(wal_file);
+            // Upload WAL to S3 (or keep on disk) and commit offsets upon durable write
+            let mut should_index = true;
+            if wal_storage.eq_ignore_ascii_case("s3") {
+                let rel = wal_file.path.to_string_lossy().replace(&wal_base, "").trim_start_matches('/').to_string();
+                let key = if wal_prefix.is_empty() { rel.clone() } else { format!("{}/{}", wal_prefix, rel) };
+                if let Some(s3) = &s3_opt {
+                    match S3ByteStream::from_path(&wal_file.path).await {
+                        Ok(body) => {
+                            match s3.put_object().bucket(&wal_bucket).key(&key).body(body).send().await {
+                                Ok(_) => {
+                                    if Config::truth_value(&Config::getenv("LOG_WAL_UPLOADS", "false")) {
+                                        println!("Uploaded WAL to s3://{}/{}", wal_bucket, key);
+                                    }
+                                    // commit offsets now
+                                    wal_file.offsets.iter().for_each(|(offset, position)| {
+                                        let offset_key = OffsetKey { namespace: offset.namespace.clone(), partition: offset.partition.clone() };
+                                        offsets_db.insert(&offset_key, OffsetTypes::Position, *position);
+                                        offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
+                                    });
+                                    uploaded_bytes += wal_file.bytes;
+                                }
+                                Err(e) => { println!("Failed to upload WAL {}: {}", key, e); should_index = false; }
+                            }
+                        }
+                        Err(e) => { println!("Failed to stream WAL for upload {}: {}", wal_file.path.to_string_lossy(), e); should_index = false; }
+                    }
+                } else { should_index = false; }
+            } else {
+                // disk storage: commit offsets after local fsync+rename
+                wal_file.offsets.iter().for_each(|(offset, position)| {
+                    let offset_key = OffsetKey { namespace: offset.namespace.clone(), partition: offset.partition.clone() };
+                    offsets_db.insert(&offset_key, OffsetTypes::Position, *position);
+                    offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
+                });
+                uploaded_bytes += wal_file.bytes;
+            }
+
+            if should_index { partition_entry.push(wal_file); }
 
         }
 
@@ -192,11 +245,9 @@ impl Buffers {
 
         self.buf.clear();
 
-        let mut compact_index_partitions: HashMap<(String, String, Option<i64>, String), WalPartition> = HashMap::new();
-
         {
             let mut index = WAL_PARTITION_INDEX.write();
-            index.bytes += bytes;
+            index.bytes += uploaded_bytes;
 
             for ((namespace, partition, time, shard), wal_files) in partitions.iter_mut() {
                 let wal_partition = index.index.entry((namespace.clone(), partition.clone(), time.clone(), shard.clone()))
@@ -221,62 +272,75 @@ impl Buffers {
                 wal_partition.files.append(wal_files);
             }
 
-            // Evaluate candidates for compaction
-            for (key, wal_partition) in index.index.iter() {
-
-                if wal_partition.check_wal_rotate(force_compact) {
-                    compact_index_partitions.insert(key.clone(), wal_partition.clone());
-                }
-            }
-
-            // pop partitions ready for compaction from the index.
-            // in failure scenario, index is recovered on startup.
-            for key in compact_index_partitions.keys() {
-                index.index.remove(&key);
-            }
-
         }
 
-
-        let shared_output_clone = shared_output.clone();
-        
-        // Compact partitions concurrently with capped parallelism
-        let max_parallel_env = Config::getenv("WAL_COMPACTION_MAX_PARALLEL", "");
-        let max_parallel_env_val = max_parallel_env.parse::<usize>().ok().filter(|v| *v > 0);
-        let tuned = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.load(std::sync::atomic::Ordering::Relaxed);
-        let max_parallel: usize = max_parallel_env_val.unwrap_or_else(|| tuned.clamp(1, 64));
-        let mut compacted_bytes: u64 = 0;
-        use futures::stream::StreamExt;
-        let mut in_flight: futures::stream::FuturesUnordered<_> = futures::stream::FuturesUnordered::new();
-        let mut iter = compact_index_partitions.values_mut();
-
-        // Prime the first batch
-        for _ in 0..max_parallel {
-            if let Some(partition) = iter.next() {
-                let offsets_db_clone = offsets_db.clone();
-                let shared_output_clone2 = shared_output_clone.clone();
-                in_flight.push(partition.compact_batches_to_parquet(offsets_db_clone, shared_output_clone2));
-            }
-        }
-
-        // Drive the stream, refilling as tasks complete
-        while let Some(bytes_done) = in_flight.next().await {
-            compacted_bytes += bytes_done as u64;
-            if let Some(partition) = iter.next() {
-                let offsets_db_clone = offsets_db.clone();
-                let shared_output_clone2 = shared_output_clone.clone();
-                in_flight.push(partition.compact_batches_to_parquet(offsets_db_clone, shared_output_clone2));
-            }
-        }
-
-        {
-            let mut index = WAL_PARTITION_INDEX.write();
-            index.bytes -= compacted_bytes;
-        }
-        
-        // println!("Wrote {} rows to WAL", rows);
+        // Start background compactor once
+        Buffers::ensure_compactor_running(offsets_db.clone(), shared_output.clone());
 
         Ok(())
+    }
+
+    /// Ensure a single background compactor is running.
+    ///
+    /// The compactor watches `WAL_PARTITION_INDEX` and, when partitions exceed
+    /// the configured byte/time thresholds (`buffer_threshold_bytes` / `buffer_threshold_seconds`),
+    /// it reads the partition's WAL objects from S3, compacts them into the configured output
+    /// (typically Athena S3), and reduces the tracked index bytes accordingly.
+    ///
+    /// Offsets are NOT committed here; they are committed in `Buffers::flush` immediately after
+    /// each WAL object is successfully uploaded to S3, making compaction fully decoupled from ingest.
+    fn ensure_compactor_running(offsets_db: Arc<Offsets>, shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>) {
+        static STARTED: OnceCell<()> = OnceCell::new();
+        static OFFSETS_CELL: OnceCell<Arc<Offsets>> = OnceCell::new();
+        static OUTPUT_CELL: OnceCell<Arc<Box<dyn DataOutputPlugin + Send + Sync>>> = OnceCell::new();
+        let _ = OFFSETS_CELL.set(offsets_db);
+        let _ = OUTPUT_CELL.set(shared_output);
+        if STARTED.set(()).is_ok() {
+            tokio::spawn(async move {
+                loop {
+                    let mut to_compact: Vec<( (String, String, Option<i64>, String), WalPartition)> = Vec::new();
+                    {
+                        let index = WAL_PARTITION_INDEX.read();
+                        for (k, v) in index.index.iter() {
+                            if v.check_wal_rotate(false) { to_compact.push((k.clone(), v.clone())); }
+                        }
+                    }
+                    if !to_compact.is_empty() {
+                        // remove from index to avoid double work
+                        {
+                            let mut index = WAL_PARTITION_INDEX.write();
+                            for (k, _) in to_compact.iter() { index.index.remove(k); }
+                        }
+                        let tuned = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.load(std::sync::atomic::Ordering::Relaxed).clamp(1, 64);
+                        let mut in_flight: futures::stream::FuturesUnordered<Pin<Box<dyn Future<Output = u64> + Send>>> = futures::stream::FuturesUnordered::new();
+                        let mut iter = to_compact.into_iter();
+                        let offsets_cell = OFFSETS_CELL.get().unwrap().clone();
+                        let output_cell = OUTPUT_CELL.get().unwrap().clone();
+                        for _ in 0..tuned {
+                            if let Some((_k, p)) = iter.next() {
+                                let mut wal = p;
+                                let offsets_cloned = offsets_cell.clone();
+                                let output_cloned = output_cell.clone();
+                                in_flight.push(Box::pin(async move { wal.compact_batches_to_parquet(offsets_cloned, output_cloned).await }));
+                            }
+                        }
+                        let mut compacted_bytes: u64 = 0;
+                        while let Some(bytes_done) = in_flight.next().await {
+                            compacted_bytes += bytes_done as u64;
+                            if let Some((_k, p)) = iter.next() {
+                                let mut wal = p;
+                                let offsets_cloned = OFFSETS_CELL.get().unwrap().clone();
+                                let output_cloned = OUTPUT_CELL.get().unwrap().clone();
+                                in_flight.push(Box::pin(async move { wal.compact_batches_to_parquet(offsets_cloned, output_cloned).await }));
+                            }
+                        }
+                        let mut index = WAL_PARTITION_INDEX.write();
+                        index.bytes = index.bytes.saturating_sub(compacted_bytes);
+                    }
+                    tokio_sleep(TokioDuration::from_millis(500)).await;
+                }
+            });
+        }
     }
 
     pub async fn compact_all_partitions(force: bool, offsets_db: Arc<Offsets>, shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>) {
@@ -369,7 +433,7 @@ impl WalPartitionIndex {
     }
 
     pub fn recover(&mut self, offsets_db: Arc<Offsets>) -> io::Result<()> {
-
+        let started = std::time::Instant::now();
         let mut count = 0;
         let mut bytes = 0;
 
@@ -441,6 +505,11 @@ impl WalPartitionIndex {
         }
 
         println!("Indexed {} of {} WAL files for {} namespaces in {} partitions", count, wal_files_count, namespaces.len(), self.index.len());
+        let elapsed = started.elapsed().as_secs_f64();
+        if elapsed > 0.0 {
+            let rate = (count as f64 / elapsed) as u64;
+            println!("WAL indexing took {:.2}s ~ {} files/s, {} total bytes", elapsed, rate, Helpers::human_readable_size(bytes as u64));
+        }
 
         let mut wal_index_metrics: WalIndexMetrics = WalIndexMetrics {
             metrics: Vec::new()
@@ -603,20 +672,7 @@ impl WalPartition {
             Some(&self.shard)
         );
 
-        // commit offsets         
-        self.files.iter().for_each(|wal_file| {
-            wal_file.offsets.iter().for_each(|(offset, position)| {
-                let offset_key = OffsetKey {
-                    namespace: offset.namespace.clone(),
-                    partition: offset.partition.clone(),
-                };
-
-                offsets_db.insert(&offset_key, OffsetTypes::Position, *position);
-                offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
-            });
-        });
-        
-        offsets_db.flush();
+        // NOTE: offsets are committed AFTER successful upload now (moved below)
         
         // @todo - replace random_str with a sequence/segment number for imdepotent object uploads.
         // Suspect that will be required to handle retries and failures, while still avoiding overwriting existing data.
@@ -628,38 +684,82 @@ impl WalPartition {
         let mut wal_compacted_rows_total = 0;
         let mut wal_compacted_files_total = 0;
        
-        let first_file = match self.files.first_mut() {
-            Some(file) => file,
+        let first_file_opt = self.files.first_mut();
+        if first_file_opt.is_none() {
+            println!("No WAL files to compact for partition: {} {}", self.namespace, self.partition);
+            return wal_compacted_bytes_total;
+        }
+
+        let wal_bucket = Config::get_wal_s3_bucket();
+        let wal_prefix = Config::get_wal_s3_prefix().trim_matches('/').to_string();
+        let data_dir = Config::get_data_dir();
+        let base = format!("{}/ingest_buffer", data_dir);
+        let storage = Config::get_wal_storage();
+        let s3 = if storage.eq_ignore_ascii_case("s3") {
+            let aws_conf = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
+            Some(S3Client::new(&aws_conf))
+        } else { None };
+
+        // Always use in-memory Arrow schema for namespace to stay in sync with discovery
+        let schema: SchemaRef = match ARROW_SCHEMA.read().get(&self.namespace).cloned() {
+            Some(s) => s,
             None => {
-                println!("No WAL files to compact for partition: {} {}", self.namespace, self.partition);
-                return wal_compacted_bytes_total;
-            }
-        };
-        
-        let schema = match first_file.read_schema_from_stream() {
-            Ok(schema) => schema,
-            Err(e) => {
-                // let file = first_file;
-                println!("Failed to read schema from WAL file: {} of bytes: {}, Error {}. Skipping to next WAL partition.", first_file.path.to_str().unwrap(), first_file.bytes, e);
+                println!("Missing in-memory schema for namespace: {}", self.namespace);
                 return wal_compacted_bytes_total;
             }
         };
 
 
-        let batches = self.files.iter_mut().map(|wal_file| {
+        // Read from disk when WAL_STORAGE=disk; read from S3 when WAL_STORAGE=s3
+        let mut batches: Vec<RecordBatch> = Vec::new();
+        for wal_file in self.files.iter_mut() {
             wal_compacted_bytes_total += wal_file.bytes;
             wal_compacted_files_total += 1;
-
-            let batches = wal_file.read_from_stream().unwrap();
-
-            wal_compacted_rows_total += batches.iter().map(|batch| batch.num_rows()).sum::<usize>() as u64;
-
-            batches
-
-        }).flatten().collect::<Vec<RecordBatch>>();
+            if storage.eq_ignore_ascii_case("disk") {
+                match wal_file.read_from_stream() {
+                    Ok(mut local_batches) => {
+                        wal_compacted_rows_total += local_batches.iter().map(|b| b.num_rows() as u64).sum::<u64>();
+                        batches.append(&mut local_batches);
+                    }
+                    Err(e) => { println!("Failed reading local WAL {}: {}", wal_file.path.to_string_lossy(), e); }
+                }
+            } else {
+                if let Some(s3c) = &s3 {
+                    let rel = wal_file.path.to_string_lossy().replace(&base, "").trim_start_matches('/').to_string();
+                    let key = if wal_prefix.is_empty() { rel.clone() } else { format!("{}/{}", wal_prefix, rel) };
+                    match s3c.get_object().bucket(&wal_bucket).key(&key).send().await {
+                        Ok(resp) => {
+                            let bytes = resp.body.collect().await.unwrap().into_bytes();
+                            use std::io::{Cursor, Seek};
+                            let mut cursor = Cursor::new(bytes);
+                            let mut offset_size = [0u8; 8];
+                            if std::io::Read::read_exact(&mut cursor, &mut offset_size).is_err() { println!("Failed to read WAL offset header from S3 {}", key); continue; }
+                            let skip = u64::from_le_bytes(offset_size);
+                            let _ = std::io::Seek::seek(&mut cursor, io::SeekFrom::Current(skip as i64));
+                            match StreamReader::try_new(cursor, None) {
+                                Ok(sr) => {
+                                    for batch_res in sr {
+                                        match batch_res {
+                                            Ok(batch) => { wal_compacted_rows_total += batch.num_rows() as u64; batches.push(batch); },
+                                            Err(e) => { println!("Failed reading batch from S3 WAL {}: {}", key, e); break; }
+                                        }
+                                    }
+                                }
+                                Err(e) => { println!("Failed to init Arrow stream from S3 WAL {}: {}", key, e); }
+                            }
+                        }
+                        Err(e) => { println!("Failed to download WAL from S3 {}: {}", key, e); }
+                    }
+                } else {
+                    println!("WAL_STORAGE is 's3' but S3 client not initialized; skipping file");
+                }
+            }
+        }
 
         let batch_stream: SendableRecordBatchStream = Box::pin(MemoryStream::try_new(batches, schema.clone(), None).unwrap());
 
+
+        // (No re-upload here; WALs were uploaded earlier in flush prior to offset commit.)
 
         match shared_output.sync(batch_stream, output_file_name).await {
         // match shared_output.write().sync(batch_stream, output_file_name).await {
@@ -669,6 +769,21 @@ impl WalPartition {
                 metrics_hot::add_wal_compacted_bytes(wal_compacted_bytes_total);
                 metrics_hot::add_wal_compacted_rows(wal_compacted_rows_total);
                 metrics_hot::add_wal_compacted_files(wal_compacted_files_total);
+
+
+
+                // Delete S3 WALs when in S3 mode, and tombstone local files to free disk
+                if storage.eq_ignore_ascii_case("s3") {
+                    if let Some(s3c) = &s3 {
+                        for wal_file in self.files.iter() {
+                            let rel = wal_file.path.to_string_lossy().replace(&base, "").trim_start_matches('/').to_string();
+                            let key = if wal_prefix.is_empty() { rel.clone() } else { format!("{}/{}", wal_prefix, rel) };
+                            if let Err(e) = s3c.delete_object().bucket(&wal_bucket).key(&key).send().await {
+                                println!("Failed to delete S3 WAL {}: {}", key, e);
+                            }
+                        }
+                    }
+                }
 
                 // Rename the processed WAL file to a tombstone file
                 for wal_file in self.files.iter() {

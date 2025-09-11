@@ -602,6 +602,52 @@ impl Config {
         }
     }
 
+    // WAL storage selection: "s3" (default) or "disk"
+    pub fn get_wal_storage() -> String {
+        if Config::get_envcache("WAL_STORAGE") != "" {
+            return Config::get_envcache("WAL_STORAGE")
+        } else {
+            let val = Config::getenv("WAL_STORAGE", "s3");
+            Config::set_evncache("WAL_STORAGE", &val);
+            val
+        }
+    }
+
+    pub fn set_wal_storage(value: &str) {
+        Config::setenv("WAL_STORAGE", value);
+    }
+
+    // WAL S3 bucket (fallback to SKIPPR_S3_BUCKET)
+    pub fn get_wal_s3_bucket() -> String {
+        if Config::get_envcache("WAL_S3_BUCKET") != "" {
+            return Config::get_envcache("WAL_S3_BUCKET")
+        } else {
+            let fallback = Config::get_skippr_s3_bucket();
+            let bucket = Config::getenv("WAL_S3_BUCKET", &fallback);
+            Config::set_evncache("WAL_S3_BUCKET", &bucket);
+            bucket
+        }
+    }
+
+    pub fn set_wal_s3_bucket(value: &str) {
+        Config::setenv("WAL_S3_BUCKET", value);
+    }
+
+    // WAL prefix (default "wal")
+    pub fn get_wal_s3_prefix() -> String {
+        if Config::get_envcache("WAL_S3_PREFIX") != "" {
+            return Config::get_envcache("WAL_S3_PREFIX")
+        } else {
+            let prefix = Config::getenv("WAL_S3_PREFIX", "wal");
+            Config::set_evncache("WAL_S3_PREFIX", &prefix);
+            prefix
+        }
+    }
+
+    pub fn set_wal_s3_prefix(value: &str) {
+        Config::setenv("WAL_S3_PREFIX", value);
+    }
+
     pub fn get_pipelines() -> Vec<String> {
         let config = Config::get();
 
