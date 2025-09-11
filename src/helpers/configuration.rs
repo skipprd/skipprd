@@ -641,13 +641,14 @@ impl Config {
     }
 
     // Coalescing controls for WAL (reduce S3 requests)
-    pub fn get_wal_tasks_per_file() -> u64 {
-        if Config::get_envcache("WAL_TASKS_PER_FILE") != "" {
-            return Config::get_envcache("WAL_TASKS_PER_FILE").parse::<u64>().unwrap_or(64)
+    // Target WAL object size in bytes (default 4 MiB)
+    pub fn get_wal_bytes_per_file() -> u64 {
+        if Config::get_envcache("WAL_BYTES_PER_FILE") != "" {
+            return Config::get_envcache("WAL_BYTES_PER_FILE").parse::<u64>().unwrap_or(4 * 1024 * 1024)
         } else {
-            let val = Config::getenv("WAL_TASKS_PER_FILE", "64");
-            Config::set_evncache("WAL_TASKS_PER_FILE", &val);
-            val.parse::<u64>().unwrap_or(64)
+            let val = Config::getenv("WAL_BYTES_PER_FILE", &(4 * 1024 * 1024).to_string());
+            Config::set_evncache("WAL_BYTES_PER_FILE", &val);
+            val.parse::<u64>().unwrap_or(4 * 1024 * 1024)
         }
     }
 
