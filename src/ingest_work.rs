@@ -249,6 +249,53 @@ impl Ingest {
         
         println!("Starting with {} optimized threads for ingest", num_cpus);
 
+        // Optional: cap hot-path concurrencies via env, and auto-cap on CI
+        let is_ci = {
+            let ga = Config::getenv("GITHUB_ACTIONS", "");
+            let ci = Config::getenv("CI", "");
+            ga.eq_ignore_ascii_case("true") || ci == "1" || ci.eq_ignore_ascii_case("true")
+        };
+
+        // Upload concurrency override/cap
+        if let Ok(v) = Config::getenv("UPLOAD_CONCURRENCY", "").parse::<usize>() { if v > 0 {
+            crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.store(v, std::sync::atomic::Ordering::Relaxed);
+            println!("tune: upload_concurrency set by env={}", v);
+        }} else if is_ci {
+            let cap = 8usize;
+            let cur = crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.load(std::sync::atomic::Ordering::Relaxed);
+            if cur > cap {
+                crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.store(cap, std::sync::atomic::Ordering::Relaxed);
+                println!("tune: upload_concurrency capped for CI to {}", cap);
+            }
+        }
+
+        // WAL compaction concurrency override/cap
+        if let Ok(v) = Config::getenv("WAL_COMPACTION_CONCURRENCY", "").parse::<usize>() { if v > 0 {
+            crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.store(v, std::sync::atomic::Ordering::Relaxed);
+            println!("tune: wal_compaction set by env={}", v);
+        }} else if is_ci {
+            let cap = 4usize;
+            let cur = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.load(std::sync::atomic::Ordering::Relaxed);
+            if cur > cap {
+                crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.store(cap, std::sync::atomic::Ordering::Relaxed);
+                println!("tune: wal_compaction capped for CI to {}", cap);
+            }
+        }
+
+        // S3 download concurrency override/cap (global target). Per-plugin may still clamp via memory semaphore
+        if let Ok(v) = Config::getenv("S3_DOWNLOAD_CONCURRENCY", "").parse::<usize>() { if v > 0 {
+            let clamped = v.clamp(8, 512);
+            crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.store(clamped, std::sync::atomic::Ordering::Relaxed);
+            println!("tune: s3_download set by env={} (clamped)", clamped);
+        }} else if is_ci {
+            let cap = 128usize;
+            let cur = crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.load(std::sync::atomic::Ordering::Relaxed);
+            if cur > cap {
+                crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.store(cap, std::sync::atomic::Ordering::Relaxed);
+                println!("tune: s3_download capped for CI to {}", cap);
+            }
+        }
+
         let (tx, rx) = channel();
         let tx_clone = tx.clone();
         let active_count = Arc::new(AtomicUsize::new(0));

@@ -1,2 +1,2 @@
-checks for chaos_mode:
+checks for bike_hire:
   - row_count = 5100051
