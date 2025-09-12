@@ -269,10 +269,10 @@ impl Ingest {
         let thread_pool = Arc::new(ThreadPool::new(num_cpus));
         let thread_pool_clone = thread_pool.clone();
         
-        let queue_factor: usize = Config::getenv("INGEST_MAX_QUEUE_FACTOR", "8")
+        let queue_factor: usize = Config::getenv("INGEST_MAX_QUEUE_FACTOR", "2")
             .parse::<usize>()
-            .unwrap_or(8);
-        let max_queue_length = num_cpus * queue_factor;
+            .unwrap_or(2);
+        let max_queue_length = (num_cpus * queue_factor).max(num_cpus);
         
         // This monitoring thread tracks task completion and processes queued tasks
         std::thread::spawn(move || {
@@ -656,8 +656,8 @@ impl Ingest {
             
             // Wait if queue is too full (but don't wait indefinitely)
             let mut _wait_attempts = 0;
-            while _current_queue_length >= self.max_queue_length {
-                std::thread::sleep(std::time::Duration::from_millis(200));
+            while _current_queue_length >= (self.max_queue_length as f32 * 0.5) as usize {
+                std::thread::sleep(std::time::Duration::from_millis(100));
                 _wait_attempts += 1;
                 
                 // Check again after waiting
@@ -717,8 +717,8 @@ impl Ingest {
 
                 // Upload tuning: grow when high pressure and full CPU; shrink when low pressure
                 let upload_cur = crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.load(Ordering::Relaxed);
-                let upload_next = if active >= capacity && pressure > 0.6 { upload_cur.saturating_add(2).min(64) }
-                    else if pressure < 0.2 { upload_cur.saturating_sub(1).max(4) } else { upload_cur };
+                let upload_next = if active >= capacity && pressure > 0.8 { upload_cur.saturating_add(1).min(32) }
+                    else if pressure < 0.4 { upload_cur.saturating_sub(1).max(4) } else { upload_cur };
                 if upload_next != upload_cur {
                     crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.store(upload_next, Ordering::Relaxed);
                     println!("tune: upload_concurrency {} -> {} (active={}/{} queue={} pressure={:.2})", upload_cur, upload_next, active, capacity, queued, pressure);
@@ -726,8 +726,8 @@ impl Ingest {
 
                 // WAL compaction tuning
                 let wal_cur = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.load(Ordering::Relaxed);
-                let wal_next = if active >= capacity && pressure > 0.6 { wal_cur.saturating_add(1).min(32) }
-                    else if pressure < 0.2 { wal_cur.saturating_sub(1).max(2) } else { wal_cur };
+                let wal_next = if active >= capacity && pressure > 0.8 { wal_cur.saturating_add(1).min(16) }
+                    else if pressure < 0.4 { wal_cur.saturating_sub(1).max(2) } else { wal_cur };
                 if wal_next != wal_cur {
                     crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.store(wal_next, Ordering::Relaxed);
                     println!("tune: wal_compaction {} -> {} (active={}/{} queue={} pressure={:.2})", wal_cur, wal_next, active, capacity, queued, pressure);
@@ -735,8 +735,8 @@ impl Ingest {
 
                 // S3 download tuning (upper bound; memory semaphore still applies)
                 let dl_cur = crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.load(Ordering::Relaxed);
-                let dl_next = if active < capacity && pressure < 0.3 { dl_cur.saturating_add(8).min(512) }
-                    else if pressure > 0.7 { dl_cur.saturating_sub(8).max(64) } else { dl_cur };
+                let dl_next = if active < capacity && pressure < 0.2 { dl_cur.saturating_add(4).min(256) }
+                    else if pressure > 0.8 { dl_cur.saturating_sub(16).max(64) } else { dl_cur };
                 if dl_next != dl_cur {
                     crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.store(dl_next, Ordering::Relaxed);
                     println!("tune: s3_download {} -> {} (active={}/{} queue={} pressure={:.2})", dl_cur, dl_next, active, capacity, queued, pressure);
