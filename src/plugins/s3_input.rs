@@ -216,16 +216,55 @@ impl DataSourceS3Plugin {
         let tuned_dl = crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.load(std::sync::atomic::Ordering::Relaxed);
         let dl_concurrency = env_dl.unwrap_or_else(|| tuned_dl.clamp(8, 512));
         println!("tune: s3_download_concurrency={} (env_override={:?})", dl_concurrency, env_dl);
+        let dl_sem = Arc::new(Semaphore::new(dl_concurrency));
+
+        // Background manager to dynamically adjust effective download concurrency to tuned target
+        {
+            let dl_sem_mgr = dl_sem.clone();
+            tokio::spawn(async move {
+                use std::sync::atomic::Ordering as AtomicOrdering;
+                use tokio::time::{sleep, Duration};
+                let mut configured_total: usize = dl_concurrency;
+                let mut held: Vec<OwnedSemaphorePermit> = Vec::new();
+                loop {
+                    sleep(Duration::from_millis(500)).await;
+                    let target = crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.load(AtomicOrdering::Relaxed).clamp(8, 512);
+                    if target > configured_total {
+                        let add = target - configured_total;
+                        dl_sem_mgr.add_permits(add);
+                        configured_total = target;
+                        // Release any held permits up to new target
+                        while held.len() > 0 && held.len() + dl_sem_mgr.available_permits() > 0 && held.len() > (configured_total.saturating_sub(dl_sem_mgr.available_permits())) {
+                            // drop one permit
+                            let _ = held.pop();
+                        }
+                    } else if target < configured_total {
+                        let mut need_to_hold = configured_total - target;
+                        // Try to acquire and hold permits to reduce effective concurrency
+                        while need_to_hold > 0 {
+                            match dl_sem_mgr.try_acquire_owned() {
+                                Ok(p) => { held.push(p); need_to_hold -= 1; }
+                                Err(_) => break,
+                            }
+                        }
+                        configured_total = target;
+                    }
+                }
+            });
+        }
         let s3_client_clone = self.s3_client.clone();
         let mem_sem_clone = mem_sem.clone();
+        let dl_sem_clone = dl_sem.clone();
         let mut download_stream = keys_stream.map(move |(key, size_bytes)| {
             let s3 = s3_client_clone.clone();
             let bucket = s3_bucket_dl.clone();
             let mem = mem_sem_clone.clone();
+            let dl_ctrl = dl_sem_clone.clone();
             async move {
                 // Acquire permits roughly equal to MiB of object size (min 1)
                 let permits: u32 = (((std::cmp::max(1i64, size_bytes) as u64) + 1_048_575) / 1_048_576) as u32;
                 let p = mem.acquire_many_owned(permits).await.ok();
+                let p_dl = dl_ctrl.acquire_owned().await.ok();
                 let res = DataSourceS3Plugin::download_s3_object_with_backoff(&s3, &bucket, &key).await;
                 let out = match res {
                     Ok(response) => {
@@ -249,9 +288,10 @@ impl DataSourceS3Plugin {
                     Err(_) => None,
                 };
                 if let Some(perm) = p { drop(perm); }
+                if let Some(perm_dl) = p_dl { drop(perm_dl); }
                 out
             }
-        }).buffer_unordered(dl_concurrency);
+        }).buffer_unordered(dl_concurrency.min(32));
 
         let mut current_batch: Vec<IngestBatch> = Vec::new();
         let mut current_bytes: usize = 0;

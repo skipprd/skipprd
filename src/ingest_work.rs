@@ -705,23 +705,18 @@ impl Ingest {
             // Calculate total bytes in this batch
             let batch_bytes = ingest_batches.bytes;
             
-            // Check if we need to wait before adding more to the queue
-            let mut _current_queue_length = self.queue_length.load(Ordering::Acquire);
-            
-            // Wait if queue is too full (but don't wait indefinitely)
-            let mut _wait_attempts = 0;
-            while _current_queue_length >= (self.max_queue_length as f32 * 0.5) as usize {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                _wait_attempts += 1;
-                
-                // Check again after waiting
-                _current_queue_length = self.queue_length.load(Ordering::Acquire);
-            }
+            // Per-batch: no pre-wait; we gate per-task below to keep queue depth bounded
             
             // Get current CPU utilization (refresh inside loop to avoid oversubscription)
             let mut _active_threads_snapshot = self.active_count.load(Ordering::SeqCst);
             
             for datas in ingest_batches.tasks.iter() {
+                // Per-task queue gating: block if queue is at or above configured max depth
+                let mut _current_queue_length = self.queue_length.load(Ordering::Acquire);
+                while _current_queue_length >= self.max_queue_length {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    _current_queue_length = self.queue_length.load(Ordering::Acquire);
+                }
                 // Refresh snapshot each iteration to avoid spawning beyond capacity
                 _active_threads_snapshot = self.active_count.load(Ordering::SeqCst);
                 if _active_threads_snapshot < self.num_cpus {
