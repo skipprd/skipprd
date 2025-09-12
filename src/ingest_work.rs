@@ -719,11 +719,13 @@ impl Ingest {
             let mut _active_threads_snapshot = self.active_count.load(Ordering::SeqCst);
             
             for datas in ingest_batches.tasks.iter() {
-                // Per-task queue gating: block if queue is at or above configured max depth
-                let mut _current_queue_length = self.queue_length.load(Ordering::Acquire);
-                while _current_queue_length >= self.max_queue_length {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                    _current_queue_length = self.queue_length.load(Ordering::Acquire);
+                // Per-task queue gating: block with Condvar until queue depth below max
+                if self.queue_length.load(Ordering::Acquire) >= self.max_queue_length {
+                    let (lock, cv) = &*self.queue_cv;
+                    let mut guard = lock.lock().unwrap();
+                    while self.queue_length.load(Ordering::Acquire) >= self.max_queue_length {
+                        guard = cv.wait(guard).unwrap();
+                    }
                 }
                 // Refresh snapshot each iteration to avoid spawning beyond capacity
                 _active_threads_snapshot = self.active_count.load(Ordering::SeqCst);
