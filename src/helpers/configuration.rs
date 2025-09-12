@@ -31,6 +31,7 @@ use toml;
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::ingest::fast_ingest::{create_default_nested_message, DEFAULT_NESTED_MESSAGE};
 use crate::ingest_work::Ingest;
+use tokio::sync::mpsc::{UnboundedSender, UnboundedReceiver, unbounded_channel};
 use crate::plugins::file_input::{DataSourceLocalFilePluginConfig};
 use crate::plugins::s3_input::DataSourceS3PluginConfig;
 // use crate::plugins::s3_inventory::{DataSourceS3InventoryPluginConfig};
@@ -1464,11 +1465,18 @@ impl Config {
                                 if local_metadata.is_file() {
                                     let file = File::open(&metadata_path).unwrap();
                                     let reader = BufReader::new(file);
-                                    let metadata: PipelineMetadata = serde_json::from_reader(reader).unwrap();
-                                    println!("Loaded metadata from local cache, uploading to S3");
-                                    // Upload local metadata to S3 for future use
-                                    Config::set_metadata(&metadata, false).await;
-                                    Ok(metadata)
+                                    match serde_json::from_reader::<_, PipelineMetadata>(reader) {
+                                        Ok(metadata) => {
+                                            println!("Loaded metadata from local cache, uploading to S3");
+                                            // Upload local metadata to S3 for future use
+                                            Config::set_metadata(&metadata, false).await;
+                                            Ok(metadata)
+                                        }
+                                        Err(e) => {
+                                            println!("Failed to parse local metadata ({}), recreating new metadata", e);
+                                            Err(false)
+                                        }
+                                    }
                                 } else {
                                     Err(false)
                                 }
@@ -1489,11 +1497,18 @@ impl Config {
                         if local_metadata.is_file() {
                             let file = File::open(&metadata_path).unwrap();
                             let reader = BufReader::new(file);
-                            let metadata: PipelineMetadata = serde_json::from_reader(reader).unwrap();
-                            println!("Loaded metadata from local cache, uploading to S3");
-                            // Upload local metadata to S3 for future use
-                            Config::set_metadata(&metadata, false).await;
-                            Ok(metadata)
+                            match serde_json::from_reader::<_, PipelineMetadata>(reader) {
+                                Ok(metadata) => {
+                                    println!("Loaded metadata from local cache, uploading to S3");
+                                    // Upload local metadata to S3 for future use
+                                    Config::set_metadata(&metadata, false).await;
+                                    Ok(metadata)
+                                }
+                                Err(e) => {
+                                    println!("Failed to parse local metadata ({}), creating new metadata", e);
+                                    Err(false)
+                                }
+                            }
                         } else {
                             Err(false)
                         }
@@ -1604,51 +1619,55 @@ impl Config {
         }
     }
 
+    // Schema update worker
+    fn ensure_schema_worker() -> UnboundedSender<String> {
+        use once_cell::sync::Lazy as OnceLazy;
+        static SENDER: OnceLazy<std::sync::Mutex<Option<UnboundedSender<String>>>> = OnceLazy::new(|| std::sync::Mutex::new(None));
+        {
+            let mut guard = SENDER.lock().unwrap();
+            if let Some(tx) = guard.as_ref() { return tx.clone(); }
+            let (tx, mut rx): (UnboundedSender<String>, UnboundedReceiver<String>) = unbounded_channel();
+            *guard = Some(tx.clone());
+
+            // Coalesce pending namespaces
+            let pending: DashMap<String, ()> = DashMap::new();
+            tokio::spawn(async move {
+                while let Some(ns) = rx.recv().await {
+                    if pending.insert(ns.clone(), ()).is_some() { continue; }
+                    // small debounce window
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    // process and clear
+                    let flatten = Config::get_transform_flatten_events();
+                    let md_snapshot = { METADATA.read().metadata.clone() };
+                    if let Some(schema) = md_snapshot.get(&ns) {
+                        // template update
+                        let default_message = create_default_nested_message(&schema.fields);
+                        {
+                            let mut lock = DEFAULT_NESTED_MESSAGE.write();
+                            lock.insert(ns.clone(), default_message);
+                        }
+                        // arrow schema publish
+                        let _ = Ingest::prepare_arrow_schema_with_metadata(&ns, &md_snapshot, flatten);
+                        // optional Athena
+                        if Config::get_pipeline_output_plugin_name() == "Athena" {
+                            let out_meta = if flatten { OutputMetadata::from_flatterened_metadata(schema) } else { OutputMetadata::from_metadata(schema) };
+                            let _ = AwsAthena::create_or_update_schema(&ns, &out_meta).await;
+                        }
+                    }
+                    pending.remove(&ns);
+                }
+            });
+            return tx;
+        }
+    }
+
     pub async fn sync_schema(metadata: &HashMap<String, Metadata>) {
 
-        use once_cell::sync::Lazy as OnceLazy;
-        use std::sync::atomic::{AtomicBool, Ordering};
-        static SCHEMA_SYNC_IN_PROGRESS: OnceLazy<AtomicBool> = OnceLazy::new(|| AtomicBool::new(false));
-        if SCHEMA_SYNC_IN_PROGRESS.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
-            return;
+        // Enqueue namespaces for background processing and return immediately
+        let tx = Config::ensure_schema_worker();
+        for (namespace, _schema) in metadata.into_iter() {
+            let _ = tx.send(namespace.clone());
         }
-
-        let flatten = Config::get_transform_flatten_events();
-
-        for (namespace, schema) in metadata.into_iter() {
-            // debounce per namespace (500ms)
-            use dashmap::DashMap;
-            static LAST_SYNC: OnceLazy<DashMap<String, std::time::Instant>> = OnceLazy::new(|| DashMap::new());
-            let now = std::time::Instant::now();
-            if let Some(last) = LAST_SYNC.get(namespace) {
-                if now.duration_since(*last) < std::time::Duration::from_millis(500) { continue; }
-            }
-            LAST_SYNC.insert(namespace.clone(), now);
-
-            println!("Updating Hive '{}' schema", namespace);
-
-            let default_message = create_default_nested_message(&schema.fields);
-            {
-                let mut lock = DEFAULT_NESTED_MESSAGE.write();
-                lock.insert(namespace.clone(), default_message);
-            }
-
-            Ingest::prepare_arrow_schema_with_metadata(&namespace, metadata, flatten).unwrap();
-
-            if Config::get_pipeline_output_plugin_name() != ""
-                && Config::get_pipeline_output_plugin_name() == "Athena"
-            {
-                let __output_metadata = if flatten {
-                    OutputMetadata::from_flatterened_metadata(metadata.get(namespace).unwrap())
-                } else {
-                    OutputMetadata::from_metadata(metadata.get(namespace).unwrap())
-                };
-
-                AwsAthena::create_or_update_schema(&namespace, &__output_metadata).await;
-            }
-        }
-
-        SCHEMA_SYNC_IN_PROGRESS.store(false, Ordering::SeqCst);
     }
 
     pub async fn init() {
