@@ -206,18 +206,18 @@ impl Ingest {
         const MAX_ITERS: u32 = 50; // ~500ms
         let mut iters = 0u32;
         loop {
-            let v1 = ARROW_SCHEMA_VERSION.read().get(skpr_namespace).map(|v| v.load(Ordering::Relaxed)).unwrap_or(0);
-            let schema_opt = ARROW_SCHEMA.read().get(skpr_namespace).map(Arc::clone);
+            let v1 = ARROW_SCHEMA_VERSION.get(skpr_namespace).map(|v| v.value().load(Ordering::Relaxed)).unwrap_or(0);
+            let schema_opt = ARROW_SCHEMA.get(skpr_namespace).map(|e| Arc::clone(&e.value().load()));
             if schema_opt.is_none() {
                 // Singleflight prepare
                 let lock = SCHEMA_PREP_LOCKS.entry(skpr_namespace.to_string()).or_insert_with(|| Arc::new(std::sync::Mutex::new(()))).clone();
                 let _guard = lock.lock().unwrap();
-                if ARROW_SCHEMA.read().get(skpr_namespace).is_none() {
+                if ARROW_SCHEMA.get(skpr_namespace).is_none() {
                     let _ = Ingest::prepare_arrow_schema_with_metadata(skpr_namespace, metadata, flatten);
                 }
             }
-            let schema = ARROW_SCHEMA.read().get(skpr_namespace).map(Arc::clone).unwrap();
-            let v2 = ARROW_SCHEMA_VERSION.read().get(skpr_namespace).map(|v| v.load(Ordering::Relaxed)).unwrap_or(0);
+            let schema: SchemaRef = ARROW_SCHEMA.get(skpr_namespace).map(|e| Arc::clone(&e.value().load())).unwrap();
+            let v2 = ARROW_SCHEMA_VERSION.get(skpr_namespace).map(|v| v.value().load(Ordering::Relaxed)).unwrap_or(0);
             if v1 == v2 {
                 let hash = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
                 return SchemaHash { schema, hash };
@@ -356,15 +356,14 @@ impl Ingest {
         // Schema hashes
         let schema_hashes = DashMap::new();
 
-        {
-            let schemas = ARROW_SCHEMA.read();
-            for (namespace, schema) in schemas.iter() {
-                let schema_hash = SchemaHash {
-                    schema: Arc::clone(schema),
-                    hash: format!("{:?}", md5::compute(format!("{:?}", Arc::clone(schema).deref())))
-                };
-                schema_hashes.insert(namespace.clone(), schema_hash);
-            }
+        for item in ARROW_SCHEMA.iter() {
+            let namespace = item.key().clone();
+            let schema: SchemaRef = Arc::clone(&item.value().load());
+            let schema_hash = SchemaHash {
+                schema: Arc::clone(&schema),
+                hash: format!("{:?}", md5::compute(format!("{:?}", schema.deref())))
+            };
+            schema_hashes.insert(namespace, schema_hash);
         }
 
         let analyse_schema: AnalyseSchema = AnalyseSchema { i: 0 };
@@ -588,10 +587,8 @@ impl Ingest {
                 Mode::Sync(_) => {},
                 _ => {
                     let max_records = 1000;
-                    let mut pipeline_metadata: PipelineMetadata;
-                    {
-                        pipeline_metadata = METADATA.read().clone();
-                    }
+                    let pipeline_metadata_arc = METADATA.load();
+                    let mut pipeline_metadata: PipelineMetadata = pipeline_metadata_arc.as_ref().clone();
 
                     let mut count: u64 = 0;
 
@@ -612,11 +609,13 @@ impl Ingest {
                     }
 
                     {
-                        METADATA.write().metadata = pipeline_metadata.metadata.clone();
+                        let mut new_pm = METADATA.load().as_ref().clone();
+                        new_pm.metadata = pipeline_metadata.metadata.clone();
+                        METADATA.store(Arc::new(new_pm));
                     }
 
                     if *NUM_ANALYSED_RECORDS.read() >= max_records {
-                        let mut pipeline_metadata = METADATA.read().clone();
+                        let mut pipeline_metadata = METADATA.load().as_ref().clone();
 
                         if pipeline_metadata.metadata.len() == 0 {
                             println!("No data found in data source, skipping schema discovery");
@@ -989,12 +988,14 @@ impl Ingest {
                         }
                     }
 
-                    if METADATA.read().metadata.get(&skpr_namespace).is_none() {
-                        METADATA.write().metadata.insert(skpr_namespace.clone(), Metadata::new().unwrap());
+                    if METADATA.load().metadata.get(&skpr_namespace).is_none() {
+                        let mut new_pm = METADATA.load().as_ref().clone();
+                        new_pm.metadata.insert(skpr_namespace.clone(), Metadata::new().unwrap());
+                        METADATA.store(Arc::new(new_pm));
                         println!("Discovered new namespace: {}", skpr_namespace);
                     }
 
-                    let msg = match METADATA.read().metadata.get(&skpr_namespace) {
+                    let msg = match METADATA.load().metadata.get(&skpr_namespace) {
                         Some(metadata) => {
                             fast_path_ingest(
                                 &record,
@@ -1021,7 +1022,7 @@ impl Ingest {
                             // This may be called very often making troublesome data even worse
                             let mut metadata: PipelineMetadata;
                             {
-                                metadata = METADATA.read().clone();
+                                metadata = METADATA.load().as_ref().clone();
                             }
 
                             let msg = match ingest(
@@ -1077,7 +1078,9 @@ impl Ingest {
                                 if updated_schema.as_str() == "yes" {
                                     
                                     {
-                                        METADATA.write().metadata = metadata.metadata.clone();
+                                        let mut new_pm = METADATA.load().as_ref().clone();
+                                        new_pm.metadata = metadata.metadata.clone();
+                                        METADATA.store(Arc::new(new_pm));
                                     }
 
                                     updated_schema = "no".to_string();
@@ -1097,9 +1100,7 @@ impl Ingest {
                                     Ingest::prepare_arrow_schema_with_metadata(&skpr_namespace, &metadata.metadata, flatten).unwrap();
 
                                     {
-                                        let schemas = ARROW_SCHEMA.read();
-
-                                        let schema = Arc::clone(schemas.get(&skpr_namespace).unwrap());
+                                        let schema: SchemaRef = Arc::clone(&ARROW_SCHEMA.get(&skpr_namespace).unwrap().value().load());
                                         let hash = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
 
                                         schema_hashes.insert(skpr_namespace.clone(), SchemaHash {
@@ -1150,7 +1151,8 @@ impl Ingest {
                     // Old ad-hoc schema fetch/retry path removed in favor of stable snapshot loader
 
                     // Load schema and hash using a stable version snapshot to avoid races
-                    let schema_hash = Ingest::load_stable_schema_hash(&skpr_namespace, &METADATA.read().metadata, flatten);
+                    let md = METADATA.load();
+                    let schema_hash = Ingest::load_stable_schema_hash(&skpr_namespace, &md.metadata, flatten);
 
                     let buf_entry = buf.entry((
                         skpr_namespace.clone(),
@@ -1243,7 +1245,12 @@ impl Ingest {
 
         _schema_ref = Arc::new(_arrow_schema.unwrap());
 
-        ARROW_SCHEMA.write().insert(skpr_namespace.to_string(), _schema_ref.clone());
+        // Publish schema via ArcSwap per-namespace
+        use dashmap::mapref::entry::Entry;
+        match ARROW_SCHEMA.entry(skpr_namespace.to_string()) {
+            Entry::Occupied(o) => { o.get().store(_schema_ref.clone()); },
+            Entry::Vacant(v) => { v.insert(arc_swap::ArcSwap::from(_schema_ref.clone())); },
+        }
 
         // Refresh default nested message template for fast ingest determinism
         if let Some(ns_meta) = metadata.get(skpr_namespace) {
@@ -1253,8 +1260,7 @@ impl Ingest {
 
         // Bump schema version for this namespace AFTER updating schema and template
         {
-            let mut vmap = ARROW_SCHEMA_VERSION.write();
-            let entry = vmap.entry(skpr_namespace.to_string()).or_insert_with(|| AtomicU64::new(0));
+            let entry = ARROW_SCHEMA_VERSION.entry(skpr_namespace.to_string()).or_insert_with(|| AtomicU64::new(0));
             entry.fetch_add(1, Ordering::Relaxed);
         }
 

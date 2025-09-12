@@ -371,7 +371,7 @@ pub async fn query(sql_str: &str) {
             metadata.clone_from(&&file_content_metadata);
 
             {
-                METADATA.write().clone_from(&skippr_metadata);
+                METADATA.store(Arc::new(skippr_metadata.clone()));
             }
 
             Config::set_metadata(&skippr_metadata, true).await;
@@ -441,7 +441,7 @@ pub async fn query(sql_str: &str) {
             }
 
             {
-                METADATA.write().clone_from(&skippr_metadata);
+                METADATA.store(Arc::new(skippr_metadata.clone()));
             }
 
             Config::set_metadata(&skippr_metadata, true).await;
@@ -470,7 +470,7 @@ pub async fn query(sql_str: &str) {
             alter_column_type(&mut metadata, &stmt).expect("Failed to alter column type");
 
             {
-                METADATA.write().clone_from(&skippr_metadata);
+                METADATA.store(Arc::new(skippr_metadata.clone()));
             }
 
             Config::set_metadata(&skippr_metadata, false).await;
@@ -518,7 +518,7 @@ pub async fn query(sql_str: &str) {
                     
                     // Update the global metadata
                     {
-                        METADATA.write().clone_from(&skippr_metadata);
+                        METADATA.store(Arc::new(skippr_metadata.clone()));
                     }
                     
                     // Save the updated metadata

@@ -40,13 +40,17 @@ use futures::stream::StreamExt as FuturesStreamExt;
 use std::future::Future;
 use std::pin::Pin;
 use crate::ARROW_SCHEMA;
+use dashmap::DashMap;
+use std::sync::atomic::Ordering as AtomicOrdering;
 use crate::buffer::wal_accumulator::PartitionKey;
 
 #[allow(dead_code)]
 pub static TOTAL_ROWS: Lazy<TimedRwLock<AtomicU64>> =
     Lazy::new(|| TimedRwLock::new("record_batch_total".to_string(), AtomicU64::new(0)));
 
-pub static WAL_PARTITION_INDEX: Lazy<TimedRwLock<WalPartitionIndex>> = Lazy::new(|| TimedRwLock::new("wal_partition_index".to_string(), WalPartitionIndex::new()));
+// Lock-free WAL index and counters
+pub static WAL_INDEX: Lazy<DashMap<PartitionKey, WalPartition>> = Lazy::new(|| DashMap::new());
+pub static WAL_BYTES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 
 // lazy_static! {
 //     pub static ref WAL_INDEX: TimedRwLock<WalIndex> = TimedRwLock::new("wal_index".to_string(), WalIndex::new());
@@ -106,11 +110,11 @@ impl Buffers {
 
         let mut force_compact = false;
         {
-            let index = WAL_PARTITION_INDEX.read();
-            
-            if index.is_disk_bytes_exceeded() {
-                println!("Disk bytes {} of {} bytes, compacting all partitions", index.bytes, index.max_bytes);
-                // Buffers::compact_all_partitions(true, offsets_db.clone(), shared_output.clone()).await;
+            // Check disk bytes via atomic counter vs threshold
+            let max_bytes = Config::get_pipeline_buffer_threshold_bytes();
+            let bytes = WAL_BYTES_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
+            if bytes > (max_bytes - (max_bytes as f64 * 0.1) as u64) {
+                println!("Disk bytes {} of {} bytes, compacting all partitions", bytes, max_bytes);
                 force_compact = true;
             }
         }
@@ -258,13 +262,20 @@ impl Buffers {
 
         self.buf.clear();
 
-        {
-            let mut index = WAL_PARTITION_INDEX.write();
-            index.bytes += uploaded_bytes;
-
-            for ((namespace, partition, time, shard), wal_files) in partitions.iter_mut() {
-                let wal_partition = index.index.entry((namespace.clone(), partition.clone(), time.clone(), shard.clone()))
-                    .or_insert_with(|| WalPartition {
+        WAL_BYTES_TOTAL.fetch_add(uploaded_bytes, std::sync::atomic::Ordering::Relaxed);
+        for ((namespace, partition, time, shard), wal_files) in partitions.into_iter() {
+            use dashmap::mapref::entry::Entry;
+            match WAL_INDEX.entry((namespace.clone(), partition.clone(), time.clone(), shard.clone())) {
+                Entry::Occupied(mut occ) => {
+                    let wal_partition = occ.get_mut();
+                    wal_files.iter().for_each(|wf| wal_partition.bytes += wf.bytes);
+                    for wf in wal_files.into_iter() {
+                        if wf.updated_at > wal_partition.updated_at { wal_partition.updated_at = wf.updated_at; }
+                        wal_partition.files.push(wf);
+                    }
+                }
+                Entry::Vacant(vac) => {
+                    let mut part = WalPartition {
                         files: Vec::new(),
                         namespace: namespace.clone(),
                         partition: partition.clone(),
@@ -272,19 +283,15 @@ impl Buffers {
                         shard: shard.clone(),
                         updated_at: SystemTime::now(),
                         bytes: 0,
-                    });
-
-
-                wal_files.iter().for_each(|wal_file| wal_partition.bytes += wal_file.bytes);
-                wal_files.iter().for_each(|wal_file| {
-                    if wal_file.updated_at > wal_partition.updated_at {
-                        wal_partition.updated_at = wal_file.updated_at
+                    };
+                    for wf in wal_files.into_iter() {
+                        if wf.updated_at > part.updated_at { part.updated_at = wf.updated_at; }
+                        part.bytes += wf.bytes;
+                        part.files.push(wf);
                     }
-                });
-
-                wal_partition.files.append(wal_files);
+                    vac.insert(part);
+                }
             }
-
         }
 
         // Start background compactor once
@@ -312,18 +319,14 @@ impl Buffers {
             tokio::spawn(async move {
                 loop {
                     let mut to_compact: Vec<( (String, String, Option<i64>, String), WalPartition)> = Vec::new();
-                    {
-                        let index = WAL_PARTITION_INDEX.read();
-                        for (k, v) in index.index.iter() {
-                            if v.check_wal_rotate(false) { to_compact.push((k.clone(), v.clone())); }
-                        }
+                    for item in WAL_INDEX.iter() {
+                        let k = item.key().clone();
+                        let v = item.value().clone();
+                        if v.check_wal_rotate(false) { to_compact.push((k, v)); }
                     }
                     if !to_compact.is_empty() {
                         // remove from index to avoid double work
-        {
-            let mut index = WAL_PARTITION_INDEX.write();
-                            for (k, _) in to_compact.iter() { index.index.remove(k); }
-                        }
+                        for (k, _) in to_compact.iter() { WAL_INDEX.remove(k); }
                         let tuned = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.load(std::sync::atomic::Ordering::Relaxed).clamp(1, 64);
                         let mut in_flight: futures::stream::FuturesUnordered<Pin<Box<dyn Future<Output = u64> + Send>>> = futures::stream::FuturesUnordered::new();
                         let mut iter = to_compact.into_iter();
@@ -347,8 +350,7 @@ impl Buffers {
                                 in_flight.push(Box::pin(async move { wal.compact_batches_to_parquet(offsets_cloned, output_cloned).await }));
                             }
                         }
-                        let mut index = WAL_PARTITION_INDEX.write();
-                        index.bytes = index.bytes.saturating_sub(compacted_bytes);
+                        WAL_BYTES_TOTAL.fetch_update(std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed, |v| Some(v.saturating_sub(compacted_bytes))).ok();
                     }
                     tokio_sleep(TokioDuration::from_millis(500)).await;
                 }
@@ -358,19 +360,15 @@ impl Buffers {
 
     pub async fn compact_all_partitions(force: bool, offsets_db: Arc<Offsets>, shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>) {
 
-        // Step 1: Rebuild the index for this run, then extract partitions and release the lock
+        // Step 1: Rebuild the index for this run, then extract partitions (no global lock)
+        wal_recover(offsets_db.clone()).expect("Failed to recover WAL index");
         let partitions_to_compact: Vec<WalPartition> = {
-        let mut wal_index = WAL_PARTITION_INDEX.write();
-        wal_index.index.clear(); // avoid duplicates
-        wal_index.recover(offsets_db.clone()).expect("Failed to recover WAL index");
-
-            // Move partitions out for processing without holding the lock during awaits
-            let mut parts = Vec::with_capacity(wal_index.index.len());
-            for (_k, p) in wal_index.index.drain() {
-                if force || p.check_wal_rotate(false) {
-                    parts.push(p);
-                }
+            let mut parts = Vec::new();
+            for item in WAL_INDEX.iter() {
+                if force || item.value().check_wal_rotate(false) { parts.push(item.value().clone()); }
             }
+            // Drop index to avoid double work
+            WAL_INDEX.clear();
             parts
         };
 
@@ -405,12 +403,8 @@ impl Buffers {
         }
 
         // Step 3: Reduce WAL bytes counter
-        {
-            let mut wal_index = WAL_PARTITION_INDEX.write();
-            wal_index.bytes = wal_index.bytes.saturating_sub(total_compacted_bytes);
-        }
+        WAL_BYTES_TOTAL.fetch_update(std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed, |v| Some(v.saturating_sub(total_compacted_bytes))).ok();
     }
-
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -435,35 +429,22 @@ impl WalIndexMetrics {
 }
 
 #[derive(Default, Clone)]
-pub struct WalPartitionIndex {
-    // Maps namespace, partition, and time to WAL file information
-    index: HashMap<(String, String, Option<i64>, String), WalPartition>,
-    bytes: u64,
-    max_bytes: u64, // max bytes to store on disk, useful when in serverless runtime
-}
+pub struct WalPartitionIndex { /* deprecated */ }
 
 impl WalPartitionIndex {
-    fn new() -> Self {
-        WalPartitionIndex {
-            index: HashMap::new(),
-            bytes: 0,
-            max_bytes: Config::get_pipeline_buffer_threshold_bytes(),
-        }
-    }
+    fn new() -> Self { WalPartitionIndex { } }
+}
 
-    fn is_disk_bytes_exceeded(&self) -> bool {
-        self.bytes > (self.max_bytes - (self.max_bytes as f64 * 0.1) as u64) // ensure 10% headroom
+pub fn wal_recover(offsets_db: Arc<Offsets>) -> io::Result<()> {
+    // Delegate based on backend
+    if Config::get_wal_storage().eq_ignore_ascii_case("s3") {
+        return Buffers::wal_recover_s3(offsets_db);
     }
+    Buffers::wal_recover_disk(offsets_db)
+}
 
-    pub fn recover(&mut self, offsets_db: Arc<Offsets>) -> io::Result<()> {
-        // Delegate based on backend
-        if Config::get_wal_storage().eq_ignore_ascii_case("s3") {
-            return self.recover_s3(offsets_db);
-        }
-        self.recover_disk(offsets_db)
-    }
-
-    pub fn recover_disk(&mut self, offsets_db: Arc<Offsets>) -> io::Result<()> {
+impl Buffers {
+pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
         let started = std::time::Instant::now();
         let mut count = 0;
         let mut bytes = 0;
@@ -508,31 +489,39 @@ impl WalPartitionIndex {
             count += 1;
             bytes += wal_file.bytes;
 
-            let wal_file_partition = self.index.entry(partition_key).or_insert_with(|| WalPartition {
-                files: Vec::new(),
-                namespace: wal_file.namespace.clone(),
-                partition: wal_file.partition.clone(),
-                time: wal_file.time.clone(),
-                shard: wal_file.shard.clone(),
-                updated_at: SystemTime::UNIX_EPOCH,
-                bytes: 0,
-            });
-
-            if wal_file_partition.updated_at < wal_file.updated_at {
-                wal_file_partition.updated_at = wal_file.updated_at;
+            use dashmap::mapref::entry::Entry;
+            match WAL_INDEX.entry(partition_key.clone()) {
+                Entry::Occupied(mut occ) => {
+                    let part = occ.get_mut();
+                    if part.updated_at < wal_file.updated_at { part.updated_at = wal_file.updated_at; }
+                    part.bytes += wal_file.bytes;
+                    part.files.push(wal_file.clone());
+                }
+                Entry::Vacant(vac) => {
+                    let mut part = WalPartition {
+                        files: Vec::new(),
+                        namespace: partition_key.0.clone(),
+                        partition: partition_key.1.clone(),
+                        time: partition_key.2,
+                        shard: partition_key.3.clone(),
+                        updated_at: SystemTime::UNIX_EPOCH,
+                        bytes: 0,
+                    };
+                    if part.updated_at < wal_file.updated_at { part.updated_at = wal_file.updated_at; }
+                    part.bytes += wal_file.bytes;
+                    part.files.push(wal_file.clone());
+                    vac.insert(part);
+                }
             }
-            wal_file_partition.bytes += wal_file.bytes;
 
-            self.bytes += wal_file.bytes; // track total bytes of whole index
-
-            wal_file_partition.files.push(wal_file);
+            WAL_BYTES_TOTAL.fetch_add(wal_file.bytes, AtomicOrdering::Relaxed);
 
             if count % 1000 == 0 {
-                println!("Indexed {} of {} WAL files for {} namespaces in {} partitions", count, wal_files_count, namespaces.len(), self.index.len());
+                println!("Indexed {} of {} WAL files for {} namespaces in {} partitions", count, wal_files_count, namespaces.len(), WAL_INDEX.len());
             }
         }
 
-        println!("Indexed {} of {} WAL files for {} namespaces in {} partitions", count, wal_files_count, namespaces.len(), self.index.len());
+        println!("Indexed {} of {} WAL files for {} namespaces in {} partitions", count, wal_files_count, namespaces.len(), WAL_INDEX.len());
         let elapsed = started.elapsed().as_secs_f64();
         if elapsed > 0.0 {
             let rate = (count as f64 / elapsed) as u64;
@@ -556,15 +545,16 @@ impl WalPartitionIndex {
         {
             let mut metrics = METRICS.write();
             metrics.wal_index_namespaces_total = namespaces.len() as u64;
-            metrics.wal_index_partitions_total = self.index.len() as u64;
+            metrics.wal_index_partitions_total = WAL_INDEX.len() as u64;
             metrics.wal_index_files_total = count as u64;
-            metrics.wal_index_bytes_total = bytes as u64;
+            metrics.wal_index_bytes_total = WAL_BYTES_TOTAL.load(AtomicOrdering::Relaxed) as u64;
             metrics.wal_index_metrics = wal_index_metrics;
         }
 
         println!("Syncing offsets to DB");
 
-        for (_key, wal_partition) in self.index.iter_mut() {
+        for item in WAL_INDEX.iter() {
+            let wal_partition = &mut item.value().clone();
             // ensure offsets committed
             for wal_file in wal_partition.files.iter_mut() {
                 wal_file.offsets.iter().for_each(|(offset, position)| {
@@ -581,7 +571,7 @@ impl WalPartitionIndex {
     }
 
     /// Blocking S3 WAL index recovery used for end-of-ingest compaction
-    pub fn recover_s3(&mut self, _offsets_db: Arc<Offsets>) -> io::Result<()> {
+    pub fn wal_recover_s3(_offsets_db: Arc<Offsets>) -> io::Result<()> {
         let started = std::time::Instant::now();
         if Config::get_wal_storage().eq_ignore_ascii_case("s3") {
             println!("Indexing WAL from S3");
@@ -655,33 +645,44 @@ impl WalPartitionIndex {
             let (entries, namespaces, total_bytes, _files_indexed) = rx.recv().unwrap();
 
             // Apply results to this index without taking global WAL_PARTITION_INDEX locks
-            self.index.clear();
-            self.bytes = 0;
+            WAL_INDEX.clear();
+            WAL_BYTES_TOTAL.store(0, AtomicOrdering::Relaxed);
             for (partition_key, wal_file) in entries.into_iter() {
-                let added_bytes = wal_file.bytes;
-                let partition = self.index.entry(partition_key.clone()).or_insert_with(|| WalPartition {
-                    files: Vec::new(),
-                    namespace: partition_key.0.clone(),
-                    partition: partition_key.1.clone(),
-                    time: partition_key.2,
-                    shard: partition_key.3.clone(),
-                    updated_at: SystemTime::UNIX_EPOCH,
-                    bytes: 0,
-                });
-                if partition.updated_at < wal_file.updated_at { partition.updated_at = wal_file.updated_at; }
-                partition.bytes += added_bytes;
-                partition.files.push(wal_file);
-                self.bytes += added_bytes;
+                use dashmap::mapref::entry::Entry;
+                match WAL_INDEX.entry(partition_key.clone()) {
+                    Entry::Occupied(mut occ) => {
+                        let part = occ.get_mut();
+                        if part.updated_at < wal_file.updated_at { part.updated_at = wal_file.updated_at; }
+                        part.bytes += wal_file.bytes;
+                        part.files.push(wal_file.clone());
+                    }
+                    Entry::Vacant(vac) => {
+                        let mut part = WalPartition {
+                            files: Vec::new(),
+                            namespace: partition_key.0.clone(),
+                            partition: partition_key.1.clone(),
+                            time: partition_key.2,
+                            shard: partition_key.3.clone(),
+                            updated_at: SystemTime::UNIX_EPOCH,
+                            bytes: 0,
+                        };
+                        if part.updated_at < wal_file.updated_at { part.updated_at = wal_file.updated_at; }
+                        part.bytes += wal_file.bytes;
+                        part.files.push(wal_file.clone());
+                        vac.insert(part);
+                    }
+                }
+                WAL_BYTES_TOTAL.fetch_add(wal_file.bytes, AtomicOrdering::Relaxed);
             }
             let mut metrics = METRICS.write();
             metrics.wal_index_namespaces_total = namespaces.len() as u64;
-            metrics.wal_index_partitions_total = self.index.len() as u64;
-            metrics.wal_index_files_total = self.index.values().map(|p| p.files.len() as u64).sum();
-            metrics.wal_index_bytes_total = self.bytes as u64;
+            metrics.wal_index_partitions_total = WAL_INDEX.len() as u64;
+            metrics.wal_index_files_total = WAL_INDEX.iter().map(|p| p.value().files.len() as u64).sum();
+            metrics.wal_index_bytes_total = WAL_BYTES_TOTAL.load(AtomicOrdering::Relaxed) as u64;
             return Ok(());
         }
         // Disk mode: fall back to normal recover
-        self.recover(_offsets_db)
+        Self::wal_recover_disk(_offsets_db)
     }
 
     fn list_wal_files() -> io::Result<Vec<PathBuf>> {

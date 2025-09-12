@@ -1612,7 +1612,7 @@ impl Config {
         if evolved {
 
             {
-                METADATA.write().clone_from(&pipeline_metadata);
+                METADATA.store(Arc::new(pipeline_metadata.clone()));
             }
 
             Config::sync_schema(&pipeline_metadata.metadata).await;
@@ -1638,7 +1638,7 @@ impl Config {
                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                     // process and clear
                     let flatten = Config::get_transform_flatten_events();
-                    let md_snapshot = { METADATA.read().metadata.clone() };
+                    let md_snapshot = { METADATA.load().metadata.clone() };
                     if let Some(schema) = md_snapshot.get(&ns) {
                         // template update
                         let default_message = create_default_nested_message(&schema.fields);

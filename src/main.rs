@@ -81,10 +81,11 @@ use crate::plugins::file_input::DataSourceLocalFilePlugin;
 // use crate::plugins::stdout_output::DataOutputStdoutPlugin;
 
 use datafusion::prelude::*;
-use crate::buffer::ingest_buffer::{Buffers, WAL_PARTITION_INDEX};
+use crate::buffer::ingest_buffer::{Buffers, wal_recover};
 // use crate::buffer::BufferChunker;
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::ingest_work::Ingest;
+use arc_swap::ArcSwap;
 use crate::plugins::DataOutputPlugin;
 use crate::plugins::file_output::DataOutputFilePlugin;
 use crate::sql::query::query;
@@ -110,9 +111,11 @@ pub static OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE: Lazy<TimedRwLock<AtomicBool>> =
 
 pub static LOGGER: Lazy<Arc<tokio::sync::RwLock<Logger>>> = Lazy::new(|| Logger::new(100));
 pub static METRICS: Lazy<Arc<TimedRwLock<Metrics>>> = Lazy::new(|| Arc::new(TimedRwLock::new("metrics".to_string(), Metrics::new())));
-pub static METADATA: Lazy<Arc<TimedRwLock<PipelineMetadata>>> = Lazy::new(|| Arc::new(TimedRwLock::new("metadata".to_string(), PipelineMetadata::new())));
-pub static ARROW_SCHEMA: Lazy<Arc<TimedRwLock<HashMap<String, Arc<Schema>>>>> = Lazy::new(|| Arc::new(TimedRwLock::new("arrow_schema".to_string(), HashMap::new())));
-pub static ARROW_SCHEMA_VERSION: Lazy<Arc<TimedRwLock<HashMap<String, AtomicU64>>>> = Lazy::new(|| Arc::new(TimedRwLock::new("arrow_schema_version".to_string(), HashMap::new())));
+// Publish metadata via ArcSwap; readers do lock-free loads
+pub static METADATA: Lazy<ArcSwap<PipelineMetadata>> = Lazy::new(|| ArcSwap::new(Arc::new(PipelineMetadata::new())));
+// Per-namespace Arrow schema snapshots and versions
+pub static ARROW_SCHEMA: Lazy<dashmap::DashMap<String, ArcSwap<Schema>>> = Lazy::new(|| dashmap::DashMap::new());
+pub static ARROW_SCHEMA_VERSION: Lazy<dashmap::DashMap<String, AtomicU64>> = Lazy::new(|| dashmap::DashMap::new());
 
 #[derive(Clone, Debug)]
 struct PipelineCache {
@@ -513,9 +516,7 @@ async fn discover() {
         }
     };
 
-    {
-        METADATA.write().clone_from(&pipeline_metadata);
-    }
+    METADATA.store(Arc::new(pipeline_metadata.clone()));
 
     let offsets = match Offsets::init() {
         Ok(offsets) => offsets,
@@ -529,10 +530,7 @@ async fn discover() {
 
     let _offsets_clone = offsets_db.clone();
 
-    {
-        let mut wal_index = WAL_PARTITION_INDEX.write();
-        wal_index.recover(offsets_db.clone()).expect("Failed to recover WAL index");
-    }
+    wal_recover(offsets_db.clone()).expect("Failed to recover WAL index");
     
     // let output = DataOutputAwsAthenaPlugin::new("output".to_string()).await;
     // let output_plugin_name = Config::get_pipeline_output_plugin_name();
@@ -803,9 +801,7 @@ async fn sync() {
 
     println!("Syncing pipeline: {}", pipeline_name);
 
-    {
-        METADATA.write().clone_from(&pipeline_metadata);
-    }
+    METADATA.store(Arc::new(pipeline_metadata.clone()));
 
 
     let offsets_db = match Offsets::init() {
@@ -820,10 +816,7 @@ async fn sync() {
 
     let _offsets_clone = offsets_db.clone();
 
-    {
-        let mut wal_index = WAL_PARTITION_INDEX.write();
-        wal_index.recover(offsets_db.clone()).expect("Failed to recover WAL index");
-    }
+    wal_recover(offsets_db.clone()).expect("Failed to recover WAL index");
     
     {
         METRICS.write().status = MetricsStatus::Running;

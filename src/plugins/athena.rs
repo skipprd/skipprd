@@ -215,10 +215,7 @@ impl DataOutputAwsAthenaPlugin {
         if !partition_values.is_empty() {
             let flatten = Config::get_transform_flatten_events();
             
-            let metadata: PipelineMetadata;
-            {
-                metadata = METADATA.read().clone();
-            }
+            let metadata: PipelineMetadata = METADATA.load().as_ref().clone();
        
             let partition_metadata = if flatten {
                 OutputMetadata::from_flatterened_metadata(metadata.metadata.get(&namespace).unwrap())
