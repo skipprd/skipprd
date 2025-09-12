@@ -8,7 +8,6 @@ use crate::serdes::json::SerdeJson;
 use crate::{ARROW_SCHEMA, ARROW_SCHEMA_VERSION, METADATA, METRICS, RUNNING};
 use dashmap::DashMap;
 use std::sync::atomic::AtomicBool;
-use std::sync::Mutex;
 use arrow::datatypes::{Schema as ArrowSchema, DataType as ArrowDataType, Field as ArrowField};
 // Per-namespace schema readiness flag to eliminate first-batch races
 static SCHEMA_READY: once_cell::sync::Lazy<DashMap<String, AtomicBool>> = once_cell::sync::Lazy::new(|| DashMap::new());
@@ -27,7 +26,7 @@ use std::ops::{Deref};
 
 use std::process::exit;
 use std::string::ToString;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Condvar, Mutex};
 use std::sync::atomic::AtomicU64;
 use std::time::{Instant, SystemTime, Duration};
 use threadpool::ThreadPool;
@@ -48,6 +47,8 @@ use crate::serdes::xml::SerdeXml;
 // use crate::converters::skippr_avro::convert_skippr_to_avro_field_types;
 
 use arrow::error::ArrowError;
+use arrow::json::ReaderBuilder as ArrowJsonReaderBuilder;
+use arrow::record_batch::RecordBatch;
 use arrow::datatypes;
 use arrow_schema::SchemaRef;
 use serde_derive::{Deserialize, Serialize};
@@ -1081,7 +1082,7 @@ impl Ingest {
                         }
                     };
 
-                    let record_value = match msg {
+                    let mut record_value = match msg {
                         Ok(msg) => {
                             msg
                         },
@@ -1213,6 +1214,8 @@ impl Ingest {
                         }
                     };
 
+                    // Per-record Arrow pre-validation removed; batch-level serialization handles fallback
+
                     let ingest_record = IngestRecord {
                         record: record_value,
                         _namespace: skpr_namespace.clone(),
@@ -1254,6 +1257,7 @@ impl Ingest {
                             _shard: "".to_string(),
                             records: vec![ingest_record.clone()],
                             schema: schema_hash.schema,
+                            record_batches: None,
                         }
                     });
                     
@@ -1279,6 +1283,78 @@ impl Ingest {
         
         if let Err(e) = update_result {
             println!("Warning: Could not update metrics - {:?}", e);
+        }
+
+        // Serialize each entry's normalized JSON into Arrow RecordBatches eagerly (all-or-nothing per batch)
+        // If serialization fails, re-ingest entire batch via slow path to evolve schema and retry once
+        for ((_ns, _part, _time, _hash), entry) in buf.iter_mut() {
+            let mut try_serialize = |schema: SchemaRef, values: &Vec<&serde_json::Value>| -> Option<Vec<RecordBatch>> {
+                let mut decoder = ArrowJsonReaderBuilder::new(schema).build_decoder().ok()?;
+                if decoder.serialize(values).is_err() { return None; }
+                match decoder.flush() { Ok(Some(b)) => Some(vec![b]), _ => None }
+            };
+
+            let values_ref: Vec<&serde_json::Value> = entry.records.iter().map(|r| &r.record).collect();
+            if values_ref.is_empty() { continue; }
+
+            // First attempt using current snapshot schema
+            if let Some(batches) = try_serialize(entry.schema.clone(), &values_ref) {
+                entry.record_batches = Some(batches);
+                entry.records.clear();
+                continue;
+            }
+
+            // Fallback: slow-path ingest for the entire batch to evolve schema if needed
+            let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.or(Some("no".to_string())).unwrap());
+            let skpr_namespace = entry._namespace.clone();
+
+            let mut metadata = METADATA.load().as_ref().clone();
+            let mut updated_schema_flag = "no".to_string();
+            let mut any_changed = false;
+            let mut persistent_error: Option<String> = None;
+            for rec in entry.records.iter_mut() {
+                match ingest(
+                    &rec.record,
+                    &mut metadata.metadata.get_mut(&skpr_namespace).unwrap().fields,
+                    &skpr_namespace,
+                    &mut updated_schema_flag,
+                    flatten,
+                ) {
+                    Ok(msg2) => { rec.record = msg2; any_changed = true; },
+                    Err(e2) => { persistent_error = Some(e2.to_string()); break; }
+                }
+            }
+
+            if let Some(err) = persistent_error {
+                // Deadletter entire batch and skip further processing for this entry
+                let joined = entry.records.iter().map(|r| r.record.to_string()).collect::<Vec<String>>().join("\n");
+                let dl = Deadletter { namespace: skpr_namespace.clone(), partition: entry._partition.clone(), time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(), error: err, records: joined };
+                Self::deadletter(dl);
+                continue;
+            }
+
+            if any_changed && Config::get_auto_approve() {
+                METADATA.store(Arc::new(metadata.clone()));
+                handle.block_on(async { Config::set_metadata(&metadata, true).await; });
+                let _ = Ingest::prepare_arrow_schema_with_metadata(&skpr_namespace, &metadata.metadata, flatten);
+                if let Some(swap) = ARROW_SCHEMA.get(&skpr_namespace) {
+                    entry.schema = Arc::clone(&swap.value().load());
+                    let hash = format!("{:?}", md5::compute(format!("{:?}", entry.schema.deref())));
+                    schema_hashes.insert(skpr_namespace.clone(), SchemaHash { schema: entry.schema.clone(), hash });
+                }
+            }
+
+            // Retry batch serialization once with potentially evolved schema
+            let values_ref2: Vec<&serde_json::Value> = entry.records.iter().map(|r| &r.record).collect();
+            if let Some(batches) = try_serialize(entry.schema.clone(), &values_ref2) {
+                entry.record_batches = Some(batches);
+                entry.records.clear();
+            } else {
+                // Deadletter entire batch if still failing
+                let joined = entry.records.iter().map(|r| r.record.to_string()).collect::<Vec<String>>().join("\n");
+                let dl = Deadletter { namespace: skpr_namespace.clone(), partition: entry._partition.clone(), time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(), error: "Arrow serialization failed after schema evolution".to_string(), records: joined };
+                Self::deadletter(dl);
+            }
         }
 
         // Start WAL accumulator once

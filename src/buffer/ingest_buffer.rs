@@ -55,6 +55,7 @@ pub static TOTAL_ROWS: Lazy<TimedRwLock<AtomicU64>> =
 pub static WAL_INDEX: Lazy<DashMap<PartitionKey, WalPartition>> = Lazy::new(|| DashMap::new());
 pub static WAL_BYTES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 static COMPACTION_LOCK: OnceCell<std::sync::Mutex<()>> = OnceCell::new();
+static COMPACTION_ASYNC_LOCK: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio::sync::Mutex::new(()));
 
 // lazy_static! {
 //     pub static ref WAL_INDEX: TimedRwLock<WalIndex> = TimedRwLock::new("wal_index".to_string(), WalIndex::new());
@@ -119,6 +120,7 @@ pub struct IngestBufferBatch {
     pub(crate) _shard: String,
     pub(crate) records: Vec<IngestRecord>,
     pub(crate) schema: SchemaRef,
+    pub(crate) record_batches: Option<Vec<RecordBatch>>,
 }
 
 pub struct Buffers {
@@ -179,40 +181,20 @@ impl Buffers {
             
             let arrow_schema = ingest_buffer_batch.schema.clone();
 
-            let mut decoder = ReaderBuilder::new(arrow_schema).build_decoder().unwrap();
-
-            let mut record_batches = Vec::with_capacity(
-                (ingest_buffer_batch.records.len() / 1000).max(1)
-            );
-            
-            let json_values = ingest_buffer_batch.records.iter().map(|record| &record.record).collect::<Vec<&Value>>();
-            decoder.serialize(&json_values).unwrap();
-
-            match decoder.flush() {
-                Ok(Some(batch)) => {
-                    record_batches.push(batch);
-                },
-                Ok(None) => {
-                    // println!("No record batch");
-                },
-                Err(e) => {
-                    println!("Error decoding record batch for namespace: {}: {}. Deadlettering", namespace, e);
-                    
-                    let deadletters: String = ingest_buffer_batch.records.iter().map(|record| record.record.to_string()).collect::<Vec<String>>().join("\n");
-
-                    let dl = Deadletter {
-                        namespace: namespace.clone(),
-                        partition: partition.clone(),
-                        time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(),
-                        error: format!("Error decoding record batch: {}. Deadlettering", e),
-                        records: deadletters,
-                    };
-
-                    Ingest::deadletter(dl);
-                    
-                    continue;
+            let mut record_batches = if let Some(b) = ingest_buffer_batch.record_batches.clone() { b } else {
+                let arrow_schema = ingest_buffer_batch.schema.clone();
+                let mut decoder = ReaderBuilder::new(arrow_schema).build_decoder().unwrap();
+                let mut record_batches = Vec::with_capacity(
+                    (ingest_buffer_batch.records.len() / 1000).max(1)
+                );
+                let json_values = ingest_buffer_batch.records.iter().map(|record| &record.record).collect::<Vec<&Value>>();
+                decoder.serialize(&json_values).unwrap();
+                match decoder.flush() {
+                    Ok(Some(batch)) => { record_batches.push(batch); },
+                    _ => {}
                 }
-            }
+                record_batches
+            };
             
             if record_batches.is_empty() {
                 continue;
@@ -358,9 +340,7 @@ impl Buffers {
         if STARTED.set(()).is_ok() {
             tokio::spawn(async move {
                 loop {
-                    // Single-flight per loop iteration using async mutex to avoid holding a non-Send guard across await
-                    static ASYNC_COMPACTION_LOCK: once_cell::sync::Lazy<tokio::sync::Mutex<()>> = once_cell::sync::Lazy::new(|| tokio::sync::Mutex::new(()));
-                    let _guard = ASYNC_COMPACTION_LOCK.lock().await;
+                    let _guard = COMPACTION_ASYNC_LOCK.lock().await;
                     let mut to_compact: Vec<( (String, String, Option<i64>, String), WalPartition)> = Vec::new();
                     for item in WAL_INDEX.iter() {
                         let k = item.key().clone();
@@ -404,9 +384,7 @@ impl Buffers {
     pub async fn compact_all_partitions(force: bool, offsets_db: Arc<Offsets>, shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>) {
 
         // Step 1: Single-flight compaction: rebuild the index and extract partitions
-        static ASYNC_COMPACTION_LOCK: once_cell::sync::Lazy<tokio::sync::Mutex<()>> = once_cell::sync::Lazy::new(|| tokio::sync::Mutex::new(()));
-        // Use blocking here (we are in async fn), so await the lock
-        let _guard = ASYNC_COMPACTION_LOCK.lock().await;
+        let _guard = COMPACTION_ASYNC_LOCK.lock().await;
         wal_recover(offsets_db.clone()).expect("Failed to recover WAL index");
         let partitions_to_compact: Vec<WalPartition> = {
             let mut parts = Vec::new();
