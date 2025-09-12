@@ -1565,6 +1565,11 @@ impl Config {
 
     pub async fn set_metadata(pipeline_metadata: &PipelineMetadata, evolved: bool) {
 
+        use once_cell::sync::Lazy as OnceLazy;
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+        static LAST_NAMESPACE_HASH: OnceLazy<DashMap<String, String>> = OnceLazy::new(|| DashMap::new());
+        static META_INFLIGHT: OnceLazy<DashMap<String, AtomicBool>> = OnceLazy::new(|| DashMap::new());
+ 
         let tenant = Self::get_tenant();
         let workspace = Self::get_workspace_name();
         let pipeline = Self::get_pipeline_name();
@@ -1584,38 +1589,60 @@ impl Config {
             ),
         }
 
-        // Clobber local file
-        let file = OpenOptions::new()
-            .write(true)
-            .truncate(true)
-            .create(true)
-            .open(&metadata_path)
-            .unwrap();
-        
-        let mut writer = BufWriter::new(file);
-        writer.write_all(serde_json::to_string(&pipeline_metadata).unwrap().as_bytes()).unwrap();
-        
-        // Upload to S3
-        let s3_key = format!("{}/{}/{}/metadata/metadata.json", tenant, workspace, pipeline);
-        let json_value = serde_json::to_value(pipeline_metadata).unwrap();
-        
-        match s3::put_json(&s3_key, &json_value).await {
-            Ok(_) => {
-                println!("Updated pipeline metadata in S3: {}", s3_key);
-            }
-            Err(err) => {
-                println!("Failed to upload metadata to S3: {:?}", err);
-                // Don't exit here, just log the error
+        // Compute changed namespaces by hashing per-namespace metadata
+        let mut changed_namespaces: Vec<String> = Vec::new();
+        for (ns, meta) in pipeline_metadata.metadata.iter() {
+            if let Ok(ser) = serde_json::to_string(meta) {
+                let hash = format!("{:?}", md5::compute(ser));
+                let prev = LAST_NAMESPACE_HASH.get(ns).map(|e| e.value().clone());
+                if prev.as_deref() != Some(hash.as_str()) {
+                    LAST_NAMESPACE_HASH.insert(ns.clone(), hash);
+                    changed_namespaces.push(ns.clone());
+                }
             }
         }
 
+        if changed_namespaces.is_empty() {
+            return;
+        }
+
+        // Clobber local file once
+        {
+            let file = OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .create(true)
+                .open(&metadata_path)
+                .unwrap();
+            let mut writer = BufWriter::new(file);
+            writer.write_all(serde_json::to_string(&pipeline_metadata).unwrap().as_bytes()).unwrap();
+        }
+
+        // Single-flight upload (pipeline wide) via inflight flag
+        let key = "__pipeline__".to_string();
+        let inflight = META_INFLIGHT.entry(key.clone()).or_insert_with(|| AtomicBool::new(false));
+        if inflight.compare_exchange(false, true, AtomicOrdering::SeqCst, AtomicOrdering::SeqCst).is_err() {
+            // Another upload is in-flight, skip
+            return;
+        }
+
+        // Upload to S3 (no blocking locks held across await)
+        let s3_key = format!("{}/{}/{}/metadata/metadata.json", tenant, workspace, pipeline);
+        let json_value = serde_json::to_value(pipeline_metadata).unwrap();
+        let res = s3::put_json(&s3_key, &json_value).await;
+        match res {
+            Ok(_) => { println!("Updated pipeline metadata in S3: {}", s3_key); }
+            Err(err) => { println!("Failed to upload metadata to S3: {:?}", err); }
+        }
+        inflight.store(false, AtomicOrdering::SeqCst);
+
         if evolved {
-
-            {
-                METADATA.store(Arc::new(pipeline_metadata.clone()));
+            METADATA.store(Arc::new(pipeline_metadata.clone()));
+            // Only enqueue namespaces that changed
+            let tx = Config::ensure_schema_worker();
+            for ns in changed_namespaces.into_iter() {
+                let _ = tx.send(ns);
             }
-
-            Config::sync_schema(&pipeline_metadata.metadata).await;
         }
     }
 
