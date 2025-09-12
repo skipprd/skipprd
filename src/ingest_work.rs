@@ -1255,7 +1255,7 @@ impl Ingest {
                             _partition: skpr_partition.clone(),
                             _time: skpr_time_bucket,
                             _shard: "".to_string(),
-                            records: vec![ingest_record.clone()],
+                            records: Vec::with_capacity(1024),
                             schema: schema_hash.schema,
                             record_batches: None,
                         }

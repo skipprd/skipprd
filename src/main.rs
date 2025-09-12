@@ -738,6 +738,35 @@ async fn discover() {
     
     println!("Pipeline '{}' sync complete", pipeline_name);
 
+    // Final metrics snapshot (same as periodic per-minute print)
+    {
+        use std::sync::atomic::Ordering as AtomicOrdering;
+        let messages_total_counter = crate::metrics::counters::MESSAGES_TOTAL.load(AtomicOrdering::Relaxed);
+        let source_bytes_total_counter = crate::metrics::counters::SOURCE_BYTES_TOTAL.load(AtomicOrdering::Relaxed);
+        let deadletters_total_counter = crate::metrics::counters::DEADLETTERS_TOTAL.load(AtomicOrdering::Relaxed);
+        let ingested_slow_total_counter = crate::metrics::counters::INGESTED_SLOW_TOTAL.load(AtomicOrdering::Relaxed);
+        let human_bytes = crate::helpers::Helpers::human_readable_size(source_bytes_total_counter);
+        println!("Messages per Min: {}", 0);
+        println!("Messages Fixed per Min: {}", 0);
+        println!("Bytes Total: {}", human_bytes);
+        println!("Messages Total: {}", messages_total_counter);
+        println!("Deadletters per Min: {}", 0);
+        println!("Deadletter Total: {}", deadletters_total_counter);
+        // Runtime not directly accessible here; print 0 to keep format consistent
+        println!("Runtime: {} seconds", 0);
+        let up_total = crate::metrics::counters::UPLOADS_TOTAL.load(AtomicOrdering::SeqCst);
+        let up_inflight = crate::metrics::counters::UPLOADS_IN_FLIGHT.load(AtomicOrdering::SeqCst);
+        let up_lat_ns_total = crate::metrics::counters::UPLOAD_LATENCY_NS_TOTAL.load(AtomicOrdering::SeqCst);
+        let avg_up_ms = if up_total > 0 { (up_lat_ns_total / up_total) as f64 / 1_000_000.0 } else { 0.0 };
+        let up_target = crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.load(AtomicOrdering::SeqCst);
+        let wal_target = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.load(AtomicOrdering::SeqCst);
+        let dl_target = crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.load(AtomicOrdering::SeqCst);
+        let active = crate::metrics::counters::ACTIVE_THREADS.load(AtomicOrdering::SeqCst);
+        let queue = crate::metrics::counters::QUEUE_LENGTH.load(AtomicOrdering::SeqCst);
+        println!("Uploads total: {}, inflight: {}, avg latency: {:.2} ms", up_total, up_inflight, avg_up_ms);
+        println!("Targets - upload: {}, wal: {}, s3_download: {} | active: {}, queue: {}", up_target, wal_target, dl_target, active, queue);
+    }
+
 }
 
 async fn sync() {

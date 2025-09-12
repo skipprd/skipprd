@@ -93,6 +93,13 @@ pub fn accumulate_map(map: HashMap<PartitionKey, IngestBufferBatch>) {
             Entry::Occupied(mut occ) => {
                 let existing = occ.get_mut();
                 existing.records.append(&mut v.records);
+                if let Some(mut vb) = v.record_batches.take() {
+                    if let Some(ref mut eb) = existing.record_batches {
+                        eb.append(&mut vb);
+                    } else {
+                        existing.record_batches = Some(vb);
+                    }
+                }
                 for (ok, pos) in v.offsets.into_iter() {
                     let entry = existing.offsets.entry(ok).or_insert(0);
                     if *entry < pos { *entry = pos; }
@@ -109,12 +116,24 @@ pub fn accumulate_map(map: HashMap<PartitionKey, IngestBufferBatch>) {
             BYTES.entry(k.clone()).or_insert_with(|| AtomicU64::new(0));
         }
 
-        let records_len = ACCUMULATOR.get(&k).map(|b| b.records.len() as u64).unwrap_or(0);
+        // Estimate added bytes based on rows newly added in this call.
+        let added_rows: u64 = {
+            let mut rows = 0u64;
+            // Note: `v` has been moved into ACCUMULATOR. To approximate added rows,
+            // read from ACCUMULATOR and sum rows in record_batches if present; otherwise use records len.
+            if let Some(acc) = ACCUMULATOR.get(&k) {
+                if let Some(ref batches) = acc.record_batches {
+                    rows = batches.iter().map(|b| b.num_rows() as u64).sum();
+                }
+                rows = rows.saturating_add(acc.records.len() as u64);
+            }
+            rows
+        };
         let est_bpr = BYTES_PER_ROW
             .get(&k)
             .map(|v| v.load(Ordering::Relaxed))
             .unwrap_or(DEFAULT_BYTES_PER_ROW);
-        let added = est_bpr.saturating_mul(records_len);
+        let added = est_bpr.saturating_mul(added_rows);
         if let Some(bytes_counter) = BYTES.get(&k) {
             bytes_counter.fetch_add(added, Ordering::Relaxed);
         }
