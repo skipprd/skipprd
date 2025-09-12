@@ -242,7 +242,7 @@ impl DataSourceS3Plugin {
                         let mut need_to_hold = configured_total - target;
                         // Try to acquire and hold permits to reduce effective concurrency
                         while need_to_hold > 0 {
-                            match dl_sem_mgr.try_acquire_owned() {
+                            match dl_sem_mgr.clone().try_acquire_owned() {
                                 Ok(p) => { held.push(p); need_to_hold -= 1; }
                                 Err(_) => break,
                             }

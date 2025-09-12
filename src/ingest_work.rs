@@ -184,6 +184,7 @@ pub struct Ingest {
     window_size: Duration,
     task_queue: Arc<RwLock<VecDeque<IngestTask>>>,
     queue_lock: Arc<RwLock<()>>,
+    queue_cv: Arc<(Mutex<()>, Condvar)>,
     is_shutting_down: Arc<AtomicUsize>, // Flag to indicate shutdown in progress
     max_queue_length: usize, // Maximum number of tasks to queue
     optimal_chunk_size: Arc<AtomicUsize>,
@@ -316,7 +317,9 @@ impl Ingest {
         let task_queue: Arc<RwLock<VecDeque<IngestTask>>> = Arc::new(RwLock::new(VecDeque::new()));
         let task_queue_clone = task_queue.clone();
         let queue_lock = Arc::new(RwLock::new(()));
+        let queue_cv: Arc<(Mutex<()>, Condvar)> = Arc::new((Mutex::new(()), Condvar::new()));
         let queue_lock_clone = queue_lock.clone();
+        let queue_cv_clone = queue_cv.clone();
         let is_shutting_down = Arc::new(AtomicUsize::new(0));
         let is_shutting_down_clone = is_shutting_down.clone();
 
@@ -341,6 +344,9 @@ impl Ingest {
 
                 active_count_clone.fetch_sub(1, AcqRel);
                 queue_length_clone.fetch_sub(1, AcqRel);
+                // Wake any producers waiting on queue capacity
+                let (lock, cv) = &*queue_cv_clone;
+                if let Ok(_g) = lock.lock() { cv.notify_all(); }
 
                 let _current_queue_length = queue_length_clone.load(Ordering::Acquire);
                 let current_active_threads = active_count_clone.load(Ordering::Acquire);
@@ -442,6 +448,7 @@ impl Ingest {
             window_size,
             task_queue,
             queue_lock,
+            queue_cv,
             is_shutting_down,
             max_queue_length,
             optimal_chunk_size,
