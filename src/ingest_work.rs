@@ -235,9 +235,16 @@ impl Ingest {
     }
     pub fn new() -> Ingest {
         // We always want to use all cores unless overridden by env
+        // On CI, cap default threads to reduce contention unless explicitly overridden
+        let is_ci = {
+            let ga = Config::getenv("GITHUB_ACTIONS", "");
+            let ci = Config::getenv("CI", "");
+            ga.eq_ignore_ascii_case("true") || ci == "1" || ci.eq_ignore_ascii_case("true")
+        };
         let default_threads = match CLI_MODE.read().clone() {
             Mode::Sync(_) => {
-                num_cpus::get()
+                let cores = num_cpus::get();
+                if is_ci { cores.min(8) } else { cores }
             },
             _ => 1
         };
@@ -316,9 +323,9 @@ impl Ingest {
         let thread_pool = Arc::new(ThreadPool::new(num_cpus));
         let thread_pool_clone = thread_pool.clone();
         
-        let queue_factor: usize = Config::getenv("INGEST_MAX_QUEUE_FACTOR", "2")
+        let queue_factor: usize = Config::getenv("INGEST_MAX_QUEUE_FACTOR", if is_ci { "1" } else { "2" })
             .parse::<usize>()
-            .unwrap_or(2);
+            .unwrap_or(if is_ci { 1 } else { 2 });
         let max_queue_length = (num_cpus * queue_factor).max(num_cpus);
         
         // This monitoring thread tracks task completion and processes queued tasks
@@ -711,12 +718,13 @@ impl Ingest {
                 _current_queue_length = self.queue_length.load(Ordering::Acquire);
             }
             
-            // Get current CPU utilization
-            let active_threads = self.active_count.load(Ordering::SeqCst);
+            // Get current CPU utilization (refresh inside loop to avoid oversubscription)
+            let mut _active_threads_snapshot = self.active_count.load(Ordering::SeqCst);
             
             for datas in ingest_batches.tasks.iter() {
-                // Try to process immediately if we have capacity or if we have no active threads
-                if active_threads < self.num_cpus || active_threads == 0 {
+                // Refresh snapshot each iteration to avoid spawning beyond capacity
+                _active_threads_snapshot = self.active_count.load(Ordering::SeqCst);
+                if _active_threads_snapshot < self.num_cpus {
                     let tx = self.tx.clone();
                     let offset_db_clone = offset_db.clone();
                     let datas_clone = datas.datas.clone();
@@ -762,9 +770,25 @@ impl Ingest {
                 let capacity = self.num_cpus;
                 let pressure = (queued as f64) / ((self.max_queue_length as f64).max(1.0));
 
+                // Respect CI caps or env-defined maxima to avoid runaway growth
+                let is_ci = {
+                    let ga = Config::getenv("GITHUB_ACTIONS", "");
+                    let ci = Config::getenv("CI", "");
+                    ga.eq_ignore_ascii_case("true") || ci == "1" || ci.eq_ignore_ascii_case("true")
+                };
+                let max_upload = Config::getenv("UPLOAD_CONCURRENCY_MAX", "")
+                    .parse::<usize>().ok().filter(|v| *v > 0)
+                    .unwrap_or_else(|| if is_ci { 8 } else { 32 });
+                let max_wal = Config::getenv("WAL_COMPACTION_CONCURRENCY_MAX", "")
+                    .parse::<usize>().ok().filter(|v| *v > 0)
+                    .unwrap_or_else(|| if is_ci { 4 } else { 16 });
+                let max_dl = Config::getenv("S3_DOWNLOAD_CONCURRENCY_MAX", "")
+                    .parse::<usize>().ok().filter(|v| *v > 0)
+                    .unwrap_or_else(|| if is_ci { 128 } else { 256 });
+
                 // Upload tuning: grow when high pressure and full CPU; shrink when low pressure
                 let upload_cur = crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.load(Ordering::Relaxed);
-                let upload_next = if active >= capacity && pressure > 0.8 { upload_cur.saturating_add(1).min(32) }
+                let upload_next = if active >= capacity && pressure > 0.8 { upload_cur.saturating_add(1).min(max_upload) }
                     else if pressure < 0.4 { upload_cur.saturating_sub(1).max(4) } else { upload_cur };
                 if upload_next != upload_cur {
                     crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.store(upload_next, Ordering::Relaxed);
@@ -773,7 +797,7 @@ impl Ingest {
 
                 // WAL compaction tuning
                 let wal_cur = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.load(Ordering::Relaxed);
-                let wal_next = if active >= capacity && pressure > 0.8 { wal_cur.saturating_add(1).min(16) }
+                let wal_next = if active >= capacity && pressure > 0.8 { wal_cur.saturating_add(1).min(max_wal) }
                     else if pressure < 0.4 { wal_cur.saturating_sub(1).max(2) } else { wal_cur };
                 if wal_next != wal_cur {
                     crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.store(wal_next, Ordering::Relaxed);
@@ -782,7 +806,7 @@ impl Ingest {
 
                 // S3 download tuning (upper bound; memory semaphore still applies)
                 let dl_cur = crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.load(Ordering::Relaxed);
-                let dl_next = if active < capacity && pressure < 0.2 { dl_cur.saturating_add(4).min(256) }
+                let dl_next = if active < capacity && pressure < 0.2 { dl_cur.saturating_add(4).min(max_dl) }
                     else if pressure > 0.8 { dl_cur.saturating_sub(16).max(64) } else { dl_cur };
                 if dl_next != dl_cur {
                     crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.store(dl_next, Ordering::Relaxed);
