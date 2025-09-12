@@ -223,7 +223,7 @@ jobs:
         uses: actions/download-artifact@v4
 
       - name: Test linux x86 release
-        uses: ./.github/actions/e2e/chaos_mode
+        uses: ./.github/actions/e2e/bike_hire
 #        uses: ./.github/actions/e2e/bike_hire_many
         with:
           architecture_name: linux_x86

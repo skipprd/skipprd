@@ -43,6 +43,9 @@ use crate::ARROW_SCHEMA;
 use dashmap::DashMap;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use crate::buffer::wal_accumulator::PartitionKey;
+use rand::{thread_rng, Rng};
+use aws_sdk_s3::error::SdkError as S3SdkError;
+use aws_sdk_s3::operation::get_object::{GetObjectError, GetObjectOutput};
 
 #[allow(dead_code)]
 pub static TOTAL_ROWS: Lazy<TimedRwLock<AtomicU64>> =
@@ -55,6 +58,42 @@ pub static WAL_BYTES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 // lazy_static! {
 //     pub static ref WAL_INDEX: TimedRwLock<WalIndex> = TimedRwLock::new("wal_index".to_string(), WalIndex::new());
 // }
+
+/// Download an S3 object with exponential backoff and jitter.
+/// - Retries transient failures up to a small cap
+/// - Does not retry on NoSuchKey
+async fn s3_get_object_with_backoff(
+    client: &S3Client,
+    bucket: &str,
+    key: &str,
+) -> Result<GetObjectOutput, GetObjectError> {
+    let mut attempt: u32 = 0;
+    let max_attempts: u32 = 6;
+    loop {
+        match client.get_object().bucket(bucket).key(key).send().await {
+            Ok(resp) => return Ok(resp),
+            Err(e) => {
+                // Do not retry if the object truly doesn't exist
+                let no_such_key = matches!(&e, S3SdkError::ServiceError(se) if se.err().is_no_such_key());
+                if no_such_key { return Err(e.into_service_error()); }
+
+                attempt += 1;
+                if attempt >= max_attempts {
+                    return Err(e.into_service_error());
+                }
+                // 200ms * 2^attempt with up to 100ms jitter, capped
+                let base = 200u64.saturating_mul(1u64 << attempt.min(10));
+                let jitter: u64 = thread_rng().gen_range(0..100);
+                let sleep_ms = (base + jitter).min(5_000);
+                println!(
+                    "Retrying S3 get_object s3://{}/{} in {}ms (attempt {} of {})",
+                    bucket, key, sleep_ms, attempt, max_attempts
+                );
+                tokio_sleep(TokioDuration::from_millis(sleep_ms)).await;
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 pub struct OffsetKeySerialize {
@@ -834,7 +873,7 @@ impl WalPartition {
             if let (Some(s3c), Some(first)) = (s3.as_ref(), self.files.first()) {
                 let rel = first.path.to_string_lossy().replace(&base, "").trim_start_matches('/').to_string();
                 let key = if wal_prefix.is_empty() { rel.clone() } else { format!("{}/{}", wal_prefix, rel) };
-                match s3c.get_object().bucket(&wal_bucket).key(&key).send().await {
+                match s3_get_object_with_backoff(s3c, &wal_bucket, &key).await {
                     Ok(resp) => {
                         let bytes = resp.body.collect().await.unwrap().into_bytes();
                         use std::io::{Cursor, Seek};
@@ -874,7 +913,7 @@ impl WalPartition {
                 if let Some(s3c) = &s3 {
                     let rel = wal_file.path.to_string_lossy().replace(&base, "").trim_start_matches('/').to_string();
                     let key = if wal_prefix.is_empty() { rel.clone() } else { format!("{}/{}", wal_prefix, rel) };
-                    match s3c.get_object().bucket(&wal_bucket).key(&key).send().await {
+                    match s3_get_object_with_backoff(s3c, &wal_bucket, &key).await {
                         Ok(resp) => {
                             let bytes = resp.body.collect().await.unwrap().into_bytes();
                             use std::io::{Cursor, Seek};
