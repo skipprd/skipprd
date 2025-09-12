@@ -77,6 +77,7 @@ async-trait = "0.1.77"
 thiserror = "1.0.58"
 object_store = { version = "0.9.1", features = ["aws"] }
 rayon = "1.8.0"
+arc-swap = "1.6"
 
 [dev-dependencies]
 serial_test = "1.0.0"
