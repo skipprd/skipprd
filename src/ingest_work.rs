@@ -925,8 +925,7 @@ impl Ingest {
         for ingest_batch in datas.iter() {
             bytes += ingest_batch.data.len() as u64;
             
-            let has_offsets =
-                offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Closed, 0);
+            let has_offsets = offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Closed, 0);
             let current_line_offset = offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Position, 0);
 
             let mut records: Vec<Value>;

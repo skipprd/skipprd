@@ -54,6 +54,7 @@ pub static TOTAL_ROWS: Lazy<TimedRwLock<AtomicU64>> =
 // Lock-free WAL index and counters
 pub static WAL_INDEX: Lazy<DashMap<PartitionKey, WalPartition>> = Lazy::new(|| DashMap::new());
 pub static WAL_BYTES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+static COMPACTION_LOCK: OnceCell<std::sync::Mutex<()>> = OnceCell::new();
 
 // lazy_static! {
 //     pub static ref WAL_INDEX: TimedRwLock<WalIndex> = TimedRwLock::new("wal_index".to_string(), WalIndex::new());
@@ -357,6 +358,9 @@ impl Buffers {
         if STARTED.set(()).is_ok() {
             tokio::spawn(async move {
                 loop {
+                    // Single-flight per loop iteration using async mutex to avoid holding a non-Send guard across await
+                    static ASYNC_COMPACTION_LOCK: once_cell::sync::Lazy<tokio::sync::Mutex<()>> = once_cell::sync::Lazy::new(|| tokio::sync::Mutex::new(()));
+                    let _guard = ASYNC_COMPACTION_LOCK.lock().await;
                     let mut to_compact: Vec<( (String, String, Option<i64>, String), WalPartition)> = Vec::new();
                     for item in WAL_INDEX.iter() {
                         let k = item.key().clone();
@@ -399,7 +403,10 @@ impl Buffers {
 
     pub async fn compact_all_partitions(force: bool, offsets_db: Arc<Offsets>, shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>) {
 
-        // Step 1: Rebuild the index for this run, then extract partitions (no global lock)
+        // Step 1: Single-flight compaction: rebuild the index and extract partitions
+        static ASYNC_COMPACTION_LOCK: once_cell::sync::Lazy<tokio::sync::Mutex<()>> = once_cell::sync::Lazy::new(|| tokio::sync::Mutex::new(()));
+        // Use blocking here (we are in async fn), so await the lock
+        let _guard = ASYNC_COMPACTION_LOCK.lock().await;
         wal_recover(offsets_db.clone()).expect("Failed to recover WAL index");
         let partitions_to_compact: Vec<WalPartition> = {
             let mut parts = Vec::new();
@@ -833,9 +840,16 @@ impl WalPartition {
 
         // NOTE: offsets are committed AFTER successful upload now (moved below)
         
-        // @todo - replace random_str with a sequence/segment number for imdepotent object uploads.
-        // Suspect that will be required to handle retries and failures, while still avoiding overwriting existing data.
-        output_file_name = format!("{}-{}", output_file_name, Helpers::random_str(32));
+        // Deterministic output name for idempotent compaction uploads: hash of WAL file signatures
+        // This ensures repeated compactions of the same partition overwrite the same object, avoiding duplicates
+        let mut sigs: Vec<String> = self.files.iter().map(|wf| {
+            let ts = wf.updated_at.duration_since(SystemTime::UNIX_EPOCH).unwrap_or(std::time::Duration::from_secs(0)).as_secs();
+            format!("{}:{}:{}", wf.path.to_string_lossy(), wf.bytes, ts)
+        }).collect();
+        sigs.sort();
+        let joined = sigs.join("|");
+        let stable_hash = format!("{:x}", md5::compute(joined));
+        output_file_name = format!("{}-{}", output_file_name, stable_hash);
 
         // println!("Compacting WAL partition to Parquet, Namespace: {} Partition: {} {}", self.namespace, self.partition, self.time.unwrap_or(0));
 
@@ -993,7 +1007,7 @@ impl WalPartition {
                             println!("Failed to tombstone WAL file: {}, Error: {}", wal_file.path.to_string_lossy(), e);
                         }
                     }
-                self.prune_tombstone_wals();
+                    self.prune_tombstone_wals();
                 }
             },
             Err(e) => {
