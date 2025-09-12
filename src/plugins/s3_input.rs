@@ -164,7 +164,16 @@ impl DataSourceS3Plugin {
         let mut s3_prefix = inventory_prefix.trim_start_matches(&delimiter).to_string();
         if s3_prefix == delimiter || s3_prefix == format!(".{}", delimiter) { s3_prefix = "".to_string(); }
 
-        let mem_budget_mb: u32 = Config::getenv("S3_DOWNLOAD_MEMORY_MB", "4096").parse::<u32>().unwrap_or(4096);
+        // Cap S3 download memory on CI by default; allow env override
+        let is_ci = {
+            let ga = Config::getenv("GITHUB_ACTIONS", "");
+            let ci = Config::getenv("CI", "");
+            ga.eq_ignore_ascii_case("true") || ci == "1" || ci.eq_ignore_ascii_case("true")
+        };
+        let default_mb = if is_ci { "2048" } else { "4096" };
+        let parsed_mb = Config::getenv("S3_DOWNLOAD_MEMORY_MB", default_mb).parse::<u32>().unwrap_or_else(|_| if is_ci { 2048 } else { 4096 });
+        // Clamp to a reasonable range to avoid runaway allocations
+        let mem_budget_mb: u32 = parsed_mb.clamp(256, if is_ci { 2048 } else { 16384 });
         let mem_sem = Arc::new(Semaphore::new(mem_budget_mb as usize));
 
         println!("Starting stream pipeline (cpus={}, dl_mem={} MiB, init_chunk={})", total_cpus, mem_budget_mb, Helpers::human_readable_size(chunk_size as u64));
@@ -247,6 +256,19 @@ impl DataSourceS3Plugin {
         let mut current_batch: Vec<IngestBatch> = Vec::new();
         let mut current_bytes: usize = 0;
         let mut pending_tasks: Vec<IngestTask> = Vec::with_capacity(total_cpus);
+        // Bound total bytes staged in memory before dispatching to ingest threads
+        let is_ci_pending = {
+            let ga = Config::getenv("GITHUB_ACTIONS", "");
+            let ci = Config::getenv("CI", "");
+            ga.eq_ignore_ascii_case("true") || ci == "1" || ci.eq_ignore_ascii_case("true")
+        };
+        let pending_max_bytes_env = Config::getenv("INGEST_PENDING_MAX_BYTES", "");
+        let pending_max_bytes: usize = pending_max_bytes_env
+            .parse::<usize>()
+            .ok()
+            .filter(|v| *v > 0)
+            .unwrap_or_else(|| if is_ci_pending { 512 * 1024 * 1024 } else { 2 * 1024 * 1024 * 1024 });
+        let mut pending_bytes_sum: usize = 0;
 
         futures::pin_mut!(download_stream);
         while let Some(opt) = StreamExt::next(&mut download_stream).await {
@@ -255,22 +277,29 @@ impl DataSourceS3Plugin {
                 current_bytes += bytes;
                 current_batch.push(IngestBatch { offset_key: OffsetKey { namespace: s3_bucket_ns.clone(), partition: key }, data: str_data, bytes });
                 if current_bytes >= self.optimal_chunk_size {
+                    let batch_bytes = current_bytes;
                     let batch = std::mem::take(&mut current_batch);
                     current_bytes = 0;
+                    pending_bytes_sum = pending_bytes_sum.saturating_add(batch_bytes);
                     pending_tasks.push(IngestTask::new(batch, offsets.clone(), shared_output.clone()));
-                    if pending_tasks.len() >= total_cpus {
+                    if pending_tasks.len() >= total_cpus || pending_bytes_sum >= pending_max_bytes {
                         let mut tasks = IngestTasks::new();
                         for t in pending_tasks.drain(..) { tasks.add(t); }
                         let tasks_arc = Arc::new(tasks);
                         let metrics = self.ingest.ingest_file(&tasks_arc, &offsets, shared_output.clone());
                         self.active_threads = metrics.active_cores;
                         self.optimal_chunk_size = metrics.optimal_chunk_size;
+                        pending_bytes_sum = 0;
                     }
                 }
             }
         }
 
-        if !current_batch.is_empty() { pending_tasks.push(IngestTask::new(std::mem::take(&mut current_batch), offsets.clone(), shared_output.clone())); }
+        if !current_batch.is_empty() {
+            let batch_bytes = current_bytes;
+            pending_bytes_sum = pending_bytes_sum.saturating_add(batch_bytes);
+            pending_tasks.push(IngestTask::new(std::mem::take(&mut current_batch), offsets.clone(), shared_output.clone()));
+        }
         if !pending_tasks.is_empty() {
             let mut tasks = IngestTasks::new();
             for t in pending_tasks.drain(..) { tasks.add(t); }
