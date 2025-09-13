@@ -23,18 +23,18 @@ env:
 #  GITHUB_REF: ${{ startsWith(github.ref, 'refs/tags/') && replace(github.ref, 'refs/tags/', '') || '1.1.1' }}
 
 jobs:
-  del_runs:
-    runs-on: ubuntu-latest
-    permissions:
-      actions: write
-    steps:
-      - name: Delete workflow runs
-        uses: Mattraks/delete-workflow-runs@v2
-        with:
-          token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          retain_days: 30
-          keep_minimum_runs: 30
+#  del_runs:
+#    runs-on: ubuntu-latest
+#    permissions:
+#      actions: write
+#    steps:
+#      - name: Delete workflow runs
+#        uses: Mattraks/delete-workflow-runs@v2
+#        with:
+#          token: ${{ github.token }}
+#          repository: ${{ github.repository }}
+#          retain_days: 30
+#          keep_minimum_runs: 30
   # Check crate compiles
 #  cargo_check:
 #    name: cargo check
@@ -118,21 +118,21 @@ jobs:
 ##          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
 
 
-  macos_arm64:
-    if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/0.0.0')
-#    needs: smoke_test
-    name: cargo build (mac arm64)
-    runs-on:
-      - macOS
-      - self-hosted
-      - ARM64 #MacBook-Pro-3
-    steps:
-      - uses: actions/checkout@v3
-      - name: Build macOS arm64 release
-        uses: ./.github/actions/rust-build-release
-        with:
-          rust-version: stable
-          architecture_name: macos_arm64
+#  macos_arm64:
+#    if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/0.0.0')
+##    needs: smoke_test
+#    name: cargo build (mac arm64)
+#    runs-on:
+#      - macOS
+#      - self-hosted
+#      - ARM64 #MacBook-Pro-3
+#    steps:
+#      - uses: actions/checkout@v3
+#      - name: Build macOS arm64 release
+#        uses: ./.github/actions/rust-build-release
+#        with:
+#          rust-version: stable
+#          architecture_name: macos_arm64
 
 #  macos_arm64_test:
 #    needs:
@@ -158,21 +158,21 @@ jobs:
 #          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 #          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
 
-  macos_x86:
-    if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/0.0.0')
-    name: cargo build (mac x86)
-#    needs: smoke_test
-    runs-on:
-      - macOS
-      - self-hosted
-      - X64 #MacBook-Pro-4
-    steps:
-      - uses: actions/checkout@v3
-      - name: Build macOS x86 release
-        uses: ./.github/actions/rust-build-release
-        with:
-          rust-version: stable
-          architecture_name: macos_x86
+#  macos_x86:
+#    if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/0.0.0')
+#    name: cargo build (mac x86)
+##    needs: smoke_test
+#    runs-on:
+#      - macOS
+#      - self-hosted
+#      - X64 #MacBook-Pro-4
+#    steps:
+#      - uses: actions/checkout@v3
+#      - name: Build macOS x86 release
+#        uses: ./.github/actions/rust-build-release
+#        with:
+#          rust-version: stable
+#          architecture_name: macos_x86
 
   linux_x86:
 #    needs: smoke_test
