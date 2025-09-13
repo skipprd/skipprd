@@ -14,6 +14,7 @@ use crate::discover::evolution::Evolution;
 use crate::helpers::Helpers;
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::ingest::ingest::{ResolvedFieldValue};
+use crate::discover::evolution::{EvolutionProposal, EvolutionSpec};
 
 #[allow(unused_imports)]
 use crate::discover::DateCandidate;
@@ -148,6 +149,8 @@ pub fn fast_path_ingest(
             // Avoid recomputing out_field_name in insertion path; capture now
             fields_to_process.push((field, value, meta_data.data_type()));
         } else {
+            // Propose evolution for missing field under root
+            if crate::helpers::configuration::Config::log_wal_enabled() { println!("fast_path_ingest: missing field in metadata: '{}' ns={}", field, namespace); }
             return Err(format!("Field '{}' not found in metadata", field).into());
         }
     }
@@ -167,6 +170,7 @@ pub fn fast_path_ingest(
         ) {
             Ok(v) => v,
             Err(e) => {
+                if crate::helpers::configuration::Config::log_wal_enabled() { println!("fast_path_ingest: set_value failed for field='{}' err={}", field, e); }
                 if e.to_string().contains("Falling back to slow path") { return Err(e); }
                 return Err(e);
             }

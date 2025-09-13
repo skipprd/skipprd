@@ -12,6 +12,8 @@ use arrow::datatypes::{Schema as ArrowSchema, DataType as ArrowDataType, Field a
 // Per-namespace schema readiness flag to eliminate first-batch races
 static SCHEMA_READY: once_cell::sync::Lazy<DashMap<String, AtomicBool>> = once_cell::sync::Lazy::new(|| DashMap::new());
 static SCHEMA_PREP_LOCKS: once_cell::sync::Lazy<DashMap<String, Arc<std::sync::Mutex<()>>>> = once_cell::sync::Lazy::new(|| DashMap::new());
+// Single-flight guard for metadata evolution per namespace
+static EVOLUTION_LOCKS: once_cell::sync::Lazy<DashMap<String, Arc<std::sync::Mutex<()>>>> = once_cell::sync::Lazy::new(|| DashMap::new());
 use crate::metrics::counters as metrics_hot;
 
 
@@ -38,6 +40,8 @@ use std::sync::atomic::Ordering::AcqRel;
 // use dashmap::{DashMap};
 
 use crate::ingest::fast_ingest::{create_default_nested_message, DEFAULT_NESTED_MESSAGE, fast_path_ingest};
+use crate::ingest::sequencer::propose_and_wait;
+use crate::discover::evolution::{EvolutionProposal, EvolutionSpec, infer_specs_for_record};
 
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::buffer::ingest_buffer::{Buffers, IngestBufferBatch, IngestRecord};
@@ -203,6 +207,26 @@ impl Drop for Ingest {
 }
 
 impl Ingest {
+    fn infer_required_type(value: &serde_json::Value) -> (String, Option<String>) {
+        use serde_json::Value as V;
+        match value {
+            V::Null => ("string".to_string(), None),
+            V::Bool(_) => ("boolean".to_string(), None),
+            V::Number(n) => {
+                if n.is_i64() { ("long".to_string(), None) } else { ("double".to_string(), None) }
+            },
+            V::String(_) => ("string".to_string(), None),
+            V::Array(arr) => {
+                if let Some(V::Object(_)) = arr.get(0) { ("array".to_string(), Some("record".to_string())) } else { ("array".to_string(), Some("string".to_string())) }
+            },
+            V::Object(_) => ("record".to_string(), None),
+        }
+    }
+
+    fn build_evolution_from_record(namespace: &str, record: &serde_json::Value, metadata: &HashMap<String, Metadata>) -> EvolutionProposal {
+        let fields = infer_specs_for_record(record, metadata);
+        EvolutionProposal { namespace: namespace.to_string(), fields }
+    }
     #[inline]
     fn load_stable_schema_hash(skpr_namespace: &str, metadata: &HashMap<String, Metadata>, flatten: bool) -> SchemaHash {
         const MAX_ITERS: u32 = 50; // ~500ms
@@ -221,12 +245,14 @@ impl Ingest {
             let schema: SchemaRef = ARROW_SCHEMA.get(skpr_namespace).map(|e| Arc::clone(&e.value().load())).unwrap();
             let v2 = ARROW_SCHEMA_VERSION.get(skpr_namespace).map(|v| v.value().load(Ordering::Relaxed)).unwrap_or(0);
             if v1 == v2 {
-                let hash = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
+                // Use schema version for shard to align WAL partitioning
+                let hash = format!("{}", v2);
                 return SchemaHash { schema, hash };
             }
             if iters >= MAX_ITERS { // fallback
-                let hash = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
-                if (iters > 0) {
+                let shard_version = ARROW_SCHEMA_VERSION.get(skpr_namespace).map(|v| v.value().load(Ordering::Relaxed)).unwrap_or(0);
+                let hash = format!("{}", shard_version);
+                if iters > 0 {
                     println!("Schema for namespace {} changed during stable read, proceeding with latest version", skpr_namespace);
                 }
                 return SchemaHash { schema, hash };
@@ -420,10 +446,8 @@ impl Ingest {
         for item in ARROW_SCHEMA.iter() {
             let namespace = item.key().clone();
             let schema: SchemaRef = Arc::clone(&item.value().load());
-            let schema_hash = SchemaHash {
-                schema: Arc::clone(&schema),
-                hash: format!("{:?}", md5::compute(format!("{:?}", schema.deref())))
-            };
+            let version = ARROW_SCHEMA_VERSION.get(&namespace).map(|v| v.value().load(Ordering::Relaxed)).unwrap_or(0);
+            let schema_hash = SchemaHash { schema: Arc::clone(&schema), hash: format!("{}", version) };
             schema_hashes.insert(namespace, schema_hash);
         }
 
@@ -1085,138 +1109,43 @@ impl Ingest {
                     };
 
                     let mut record_value = match msg {
-                        Ok(msg) => {
-                            msg
-                        },
+                        Ok(msg) => msg,
                         Err(_err) => {
-
-                            // println!("Falling back to slow path due to: {}", _err);
-
-                            // hurrendous allocation, but we're handling an error case.
-                            // It's important to not update METADATA mutex for other threads till we know the discovered schema is valid
-                            // This may be called very often making troublesome data even worse
-                            let mut metadata: PipelineMetadata;
-                            {
-                                metadata = METADATA.load().as_ref().clone();
-                            }
-
-                            let msg = match ingest(
-                                &record,
-                                &mut metadata.metadata.get_mut(&skpr_namespace).unwrap().fields,
-                                &skpr_namespace,
-                                &mut updated_schema,
-                                flatten,
-                            ) {
-                                Ok(msg) => msg,
-                                Err(_err) => {
-
-                                    updated_schema = "no".to_string();
-
-                                    drop(metadata); // drop discovered schema to ensure we can accedentally use it
-
-                                    // @todo - if we're going to log this, we should only do it when the schema was evovled for the deadlettered record
-                                    if METRICS.read().deadletters_total == 0 {
-                                        println!("Record deadlettered, schema evolution for deadletters will be ignored: {}", _err);
-                                    }
-
-                                    // deadletter record
-                                    let line_str = match ingest_batch.data.lines().nth(batch_line as usize - 1) {
-                                        Some(line) => line,
-                                        None => {
-                                            // println!("Could not find line {} in batch", batch_line);
-                                            ""
+                            // Slow-path: evolve locally via ingest() and update schema in-memory
+                            let mut md_local = METADATA.load().as_ref().clone();
+                            let ns_fields_opt = md_local.metadata.get_mut(&skpr_namespace).map(|m| &mut m.fields);
+                            if let Some(ns_fields) = ns_fields_opt {
+                                let mut updated = "no".to_string();
+                                match ingest(&record, ns_fields, &skpr_namespace, &mut updated, flatten) {
+                                    Ok(v) => {
+                                        if updated == "yes" {
+                                            METADATA.store(Arc::new(md_local.clone()));
+                                            let _ = Ingest::prepare_arrow_schema_with_metadata(&skpr_namespace, &md_local.metadata, flatten);
+                                            if Config::log_wal_enabled() { println!("Ingest: schema evolved for ns={} (per-record)", skpr_namespace); }
                                         }
-                                    };
-
-                                    let dl = Deadletter {
-                                        namespace: ingest_batch.offset_key.namespace.clone(),
-                                        partition: ingest_batch.offset_key.partition.clone(),
-                                        time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(),
-                                        error: _err.to_string(),
-                                        records: line_str.to_string(),
-                                    };
-
-                                    Self::deadletter(dl);
-                                    offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Position, batch_line);
-
-                                    let mut counter_lock = METRICS.write();
-                                    counter_lock.deadletters_total += 1;
-
-                                    continue
-                                }
-                            };
-
-                            
-                            // update metadata in runtime and ingest message
-                            if Config::get_auto_approve() {
-
-                                if updated_schema.as_str() == "yes" {
-                                    
-                                    {
-                                        let mut new_pm = METADATA.load().as_ref().clone();
-                                        new_pm.metadata = metadata.metadata.clone();
-                                        METADATA.store(Arc::new(new_pm));
-                                    }
-
-                                    updated_schema = "no".to_string();
-
-                                    handle.block_on(async {
-                                        Config::set_metadata(&metadata, true).await;
-                                    });
-
-                                    println!("Updated schema for namespace: {}", skpr_namespace);
-                                    
-                                    let _default_message = Value::Null;
-                                    {
-                                        let mut lock = DEFAULT_NESTED_MESSAGE.write();
-                                        lock.insert(skpr_namespace.clone(), _default_message);
-                                    }
-
-                                    Ingest::prepare_arrow_schema_with_metadata(&skpr_namespace, &metadata.metadata, flatten).unwrap();
-
-                                    {
-                                        let schema: SchemaRef = Arc::clone(&ARROW_SCHEMA.get(&skpr_namespace).unwrap().value().load());
-                                        let hash = format!("{:?}", md5::compute(format!("{:?}", schema.deref())));
-
-                                        schema_hashes.insert(skpr_namespace.clone(), SchemaHash {
-                                            schema,
-                                            hash
-                                        });
+                                        v
+                                    },
+                                    Err(e) => {
+                                        if Config::log_wal_enabled() { println!("Ingest: slow-path failed ns={} err={}", skpr_namespace, e); }
+                                        let dl = Deadletter { namespace: skpr_namespace.clone(), partition: skpr_partition.clone(), time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(), error: e.to_string(), records: record.to_string() };
+                                        Self::deadletter(dl);
+                                        Value::Null
                                     }
                                 }
-
-                                x += 1;
-
-                                msg
-
-                            } else { // or just deadletter message for later approval
-                                let line_str = match ingest_batch.data.lines().nth(batch_line as usize - 1) {
-                                    Some(line) => line,
-                                    None => {
-                                        // println!("Could not find line {} in batch", batch_line);
-                                        ""
-                                    }
-                                };
-
-                                let dl = Deadletter {
-                                    namespace: ingest_batch.offset_key.namespace.clone(),
-                                    partition: ingest_batch.offset_key.partition.clone(),
-                                    time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(),
-                                    error: "Schema evolution is disabled".to_string(),
-                                    records: line_str.to_string(),
-                                };
-
-                                Self::deadletter(dl);
-                                offset_db_clone.insert(&ingest_batch.offset_key, OffsetTypes::Position, batch_line);
-                                
-                                d += 1;
-
-                                continue;
+                            } else {
+                                if Config::log_wal_enabled() { println!("Ingest: namespace missing in metadata ns={}", skpr_namespace); }
+                                Value::Null
                             }
                         }
                     };
 
                     // Per-record Arrow pre-validation removed; batch-level serialization handles fallback
+
+                    // Skip records that failed both fast-path and slow-path evolution
+                    if record_value.is_null() {
+                        if Config::log_wal_enabled() { println!("Ingest: record dropped after evolution ns={} (null)", skpr_namespace); }
+                        continue;
+                    }
 
                     let ingest_record = IngestRecord {
                         record: record_value,
@@ -1224,8 +1153,6 @@ impl Ingest {
                         _partition: skpr_partition.clone(),
                         _time: skpr_time_bucket.clone(),
                     };
-
-                    // Old ad-hoc schema fetch/retry path removed in favor of stable snapshot loader
 
                     // Load schema and hash using a stable version snapshot to avoid races
                     let md = METADATA.load();
@@ -1265,7 +1192,6 @@ impl Ingest {
                     
                     // an ingest batch consist of many small files/queue messages, etc. Each will need its offset committed in the WAL.
                     buf_entry.offsets.insert(ingest_batch.offset_key.clone(), batch_line);
-                    
                     buf_entry.records.push(ingest_record);
 
                     _j += 1;
@@ -1290,6 +1216,30 @@ impl Ingest {
         // Serialize each entry's normalized JSON into Arrow RecordBatches eagerly (all-or-nothing per batch)
         // If serialization fails, re-ingest entire batch via slow path to evolve schema and retry once
         for ((_ns, _part, _time, _hash), entry) in buf.iter_mut() {
+            // Seed schema for brand-new namespaces with inferred specs from this entry
+            let ns = entry._namespace.clone();
+            let md_snapshot = METADATA.load();
+            let is_empty_ns = md_snapshot.metadata.get(&ns).map(|m| m.fields.is_empty()).unwrap_or(true);
+            drop(md_snapshot);
+            if is_empty_ns {
+                let ns_md = METADATA.load().metadata.get(&ns).cloned().unwrap_or(Metadata::new().unwrap());
+                let mut specs = Vec::new();
+                let values_ref_seed: Vec<&serde_json::Value> = entry.records.iter().map(|r| &r.record).collect();
+                for v in values_ref_seed.into_iter() { specs.extend(infer_specs_for_record(v, ns_md.fields.as_ref())); }
+                if !specs.is_empty() {
+                    let proposal = EvolutionProposal { namespace: ns.clone(), fields: specs };
+                    let _vb = match runtime::Handle::try_current() {
+                        Ok(h) => h.block_on(async { propose_and_wait(&ns, proposal, 3000).await }),
+                        Err(_) => {
+                            let rt = runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+                            rt.block_on(async { propose_and_wait(&ns, proposal, 3000).await })
+                        }
+                    };
+                    if let Some(swap) = ARROW_SCHEMA.get(&ns) {
+                        entry.schema = Arc::clone(&swap.value().load());
+                    }
+                }
+            }
             let mut try_serialize = |schema: SchemaRef, values: &Vec<&serde_json::Value>| -> Option<Vec<RecordBatch>> {
                 let mut decoder = ArrowJsonReaderBuilder::new(schema).build_decoder().ok()?;
                 if decoder.serialize(values).is_err() { return None; }
@@ -1315,15 +1265,19 @@ impl Ingest {
             let mut any_changed = false;
             let mut persistent_error: Option<String> = None;
             for rec in entry.records.iter_mut() {
-                match ingest(
-                    &rec.record,
-                    &mut metadata.metadata.get_mut(&skpr_namespace).unwrap().fields,
-                    &skpr_namespace,
-                    &mut updated_schema_flag,
-                    flatten,
-                ) {
-                    Ok(msg2) => { rec.record = msg2; any_changed = true; },
-                    Err(e2) => { persistent_error = Some(e2.to_string()); break; }
+                let fields_ref_opt = metadata.metadata.get_mut(&skpr_namespace).map(|m| &mut m.fields);
+                match fields_ref_opt {
+                    None => { persistent_error = Some(format!("No metadata for namespace {} during slow-path ingest", skpr_namespace)); break; }
+                    Some(fields_ref) => match ingest(
+                        &rec.record,
+                        fields_ref,
+                        &skpr_namespace,
+                        &mut updated_schema_flag,
+                        flatten,
+                    ) {
+                        Ok(msg2) => { rec.record = msg2; any_changed = true; },
+                        Err(e2) => { persistent_error = Some(e2.to_string()); break; }
+                    }
                 }
             }
 
@@ -1335,13 +1289,24 @@ impl Ingest {
                 continue;
             }
 
-            if any_changed && Config::get_auto_approve() {
+            if any_changed {
+                // Always update in-memory metadata and Arrow schema so this run can serialize
                 METADATA.store(Arc::new(metadata.clone()));
-                handle.block_on(async { Config::set_metadata(&metadata, true).await; });
+                // Persist only if auto-approve is enabled
+                if Config::get_auto_approve() {
+                    match runtime::Handle::try_current() {
+                        Ok(h) => { h.block_on(async { Config::set_metadata(&metadata, true).await; }); },
+                        Err(_) => {
+                            let rt = runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+                            rt.block_on(async { Config::set_metadata(&metadata, true).await; });
+                        }
+                    }
+                }
                 let _ = Ingest::prepare_arrow_schema_with_metadata(&skpr_namespace, &metadata.metadata, flatten);
                 if let Some(swap) = ARROW_SCHEMA.get(&skpr_namespace) {
                     entry.schema = Arc::clone(&swap.value().load());
-                    let hash = format!("{:?}", md5::compute(format!("{:?}", entry.schema.deref())));
+                    let shard_version = ARROW_SCHEMA_VERSION.get(&skpr_namespace).map(|v| v.value().load(Ordering::Relaxed)).unwrap_or(0);
+                    let hash = format!("{}", shard_version);
                     schema_hashes.insert(skpr_namespace.clone(), SchemaHash { schema: entry.schema.clone(), hash });
                 }
             }
@@ -1356,6 +1321,7 @@ impl Ingest {
                 let joined = entry.records.iter().map(|r| r.record.to_string()).collect::<Vec<String>>().join("\n");
                 let dl = Deadletter { namespace: skpr_namespace.clone(), partition: entry._partition.clone(), time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(), error: "Arrow serialization failed after schema evolution".to_string(), records: joined };
                 Self::deadletter(dl);
+                if Config::log_wal_enabled() { println!("Batch serialize failed after retry: ns={} deadlettered", entry._namespace); }
             }
         }
 
@@ -1395,21 +1361,52 @@ impl Ingest {
 
         _schema_ref = Arc::new(_arrow_schema.unwrap());
 
+        // Compute new schema hash for change detection using a stable fingerprint
+        let new_hash = crate::converters::skippr_arrow::stable_schema_fingerprint(&_schema_ref);
+
         // Publish schema via ArcSwap per-namespace
         use dashmap::mapref::entry::Entry;
+        let mut did_update_schema = false;
+        let mut prev_hash_opt: Option<String> = None;
         match ARROW_SCHEMA.entry(skpr_namespace.to_string()) {
-            Entry::Occupied(o) => { o.get().store(_schema_ref.clone()); },
-            Entry::Vacant(v) => { v.insert(arc_swap::ArcSwap::from(_schema_ref.clone())); },
+            Entry::Occupied(o) => {
+                let prev = o.get().load();
+                let prev_hash = crate::converters::skippr_arrow::stable_schema_fingerprint(&prev);
+                prev_hash_opt = Some(prev_hash.clone());
+                if prev_hash != new_hash {
+                    // Only accept monotonic (superset) schema changes; ignore regressions
+                    if crate::converters::skippr_arrow::is_schema_superset(&_schema_ref, &prev) {
+                        o.get().store(_schema_ref.clone());
+                        did_update_schema = true;
+                        if Config::debug_enabled() {
+                            println!("Arrow schema updated for namespace {}: {} -> {}", skpr_namespace, prev_hash, new_hash);
+                        }
+                    } else if Config::debug_enabled() {
+                        println!("Arrow schema change rejected (non-superset) for namespace {}: {} !-> {}", skpr_namespace, prev_hash, new_hash);
+                    }
+                } else if Config::debug_enabled() {
+                    println!("Arrow schema unchanged for namespace {}: {}", skpr_namespace, new_hash);
+                }
+            },
+            Entry::Vacant(v) => {
+                v.insert(arc_swap::ArcSwap::from(_schema_ref.clone()));
+                did_update_schema = true;
+                if Config::debug_enabled() {
+                    println!("Arrow schema initialized for namespace {}: {}", skpr_namespace, new_hash);
+                }
+            },
         }
 
         // Refresh default nested message template for fast ingest determinism
-        if let Some(ns_meta) = metadata.get(skpr_namespace) {
-            let template = create_default_nested_message(&ns_meta.fields);
-            DEFAULT_NESTED_MESSAGE.write().insert(skpr_namespace.to_string(), template);
+        if did_update_schema {
+            if let Some(ns_meta) = metadata.get(skpr_namespace) {
+                let template = create_default_nested_message(&ns_meta.fields);
+                DEFAULT_NESTED_MESSAGE.write().insert(skpr_namespace.to_string(), template);
+            }
         }
 
         // Bump schema version for this namespace AFTER updating schema and template
-        {
+        if did_update_schema {
             let entry = ARROW_SCHEMA_VERSION.entry(skpr_namespace.to_string()).or_insert_with(|| AtomicU64::new(0));
             entry.fetch_add(1, Ordering::Relaxed);
         }

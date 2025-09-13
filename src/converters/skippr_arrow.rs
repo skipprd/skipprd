@@ -66,8 +66,14 @@ fn generate_datatype(t: &InferredType) -> Result<DataType, ArrowError> {
 
 // fn generate_fields(spec: &HashMap<String, InferredType>) -> Result<Vec<Field>, ArrowError> {
 fn generate_fields(spec: &HashMap<String, InferredType>) -> Vec<Field> {
-    spec.iter()
-        .map(|(k, types)| Field::new(k, generate_datatype(types).unwrap(), true))
+    // Deterministic field order to avoid schema hash thrash and redundant WAL prefixes
+    let mut keys: Vec<&String> = spec.keys().collect();
+    keys.sort();
+    keys.into_iter()
+        .map(|k| {
+            let types = spec.get(k).unwrap();
+            Field::new(k, generate_datatype(types).unwrap(), true)
+        })
         .collect()
 }
 
@@ -132,6 +138,60 @@ pub fn convert_skippr_to_arrow(
         convert_skippr_to_arrow_field_types(&metadata).unwrap();
 
     generate_schema(field_types)
+}
+
+#[allow(dead_code)]
+pub fn stable_schema_fingerprint(schema: &Schema) -> String {
+    // Create a deterministic, minimal representation: sorted fields by name with canonicalized datatypes
+    let mut pairs: Vec<(String, String)> = schema
+        .fields()
+        .iter()
+        .map(|f| (f.name().to_string(), format!("{:?}", f.data_type())))
+        .collect();
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut s = String::new();
+    for (name, dtype) in pairs.into_iter() {
+        s.push_str(&name);
+        s.push(':');
+        s.push_str(&dtype);
+        s.push('|');
+    }
+    format!("{:x}", md5::compute(s))
+}
+
+fn is_datatype_equal_recursive(new_dt: &DataType, old_dt: &DataType) -> bool {
+    use DataType::*;
+    if new_dt == old_dt { return true; }
+    match (new_dt, old_dt) {
+        // Exact timestamp equality must include unit (timezone ignored for our usage since we never set it)
+        (Timestamp(u1, _), Timestamp(u2, _)) if u1 == u2 => true,
+        // Lists: element types must be exactly equal
+        (List(new_field), List(old_field)) => is_datatype_equal_recursive(new_field.data_type(), old_field.data_type()),
+        // Structs: all old fields must exist and be exactly equal in the new struct
+        (Struct(new_fields), Struct(old_fields)) => {
+            for old_f in old_fields.iter() {
+                if let Some(new_f) = new_fields.iter().find(|f| f.name() == old_f.name()) {
+                    if !is_datatype_equal_recursive(new_f.data_type(), old_f.data_type()) { return false; }
+                } else {
+                    return false;
+                }
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+pub fn is_schema_superset(new_schema: &Schema, old_schema: &Schema) -> bool {
+    // Every old field must be present in new with an exactly equal datatype (types are immutable)
+    for old_field in old_schema.fields().iter() {
+        if let Some(new_field) = new_schema.fields().iter().find(|f| f.name() == old_field.name()) {
+            if !is_datatype_equal_recursive(new_field.data_type(), old_field.data_type()) { return false; }
+        } else {
+            return false;
+        }
+    }
+    true
 }
 
 fn convert_skippr_to_arrow_field_types(

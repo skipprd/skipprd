@@ -202,14 +202,18 @@ impl DataOutputAwsAthenaPlugin {
         let time_partition_str = BufferChunker::decode_file_time_to_datetime_string(&filename);
 
         if !time_partition_str.is_empty() {
-            let time_partition_values = TimePartitioner::new(&filename).get_granularity_values().unwrap();
-            let granularity_names = TimePartitioner::get_granularity_names();
-
-            partition_values.extend(time_partition_values.iter().map(|v| v.to_string()));
-
-            granularity_names.iter().enumerate().for_each(|(i, granularity)| {
-                full_key = format!("{}/{}={}", full_key, granularity, time_partition_values[i]);
-            });
+            match TimePartitioner::new(&filename).get_granularity_values() {
+                Ok(time_partition_values) => {
+                    let granularity_names = TimePartitioner::get_granularity_names();
+                    partition_values.extend(time_partition_values.iter().map(|v| v.to_string()));
+                    granularity_names.iter().enumerate().for_each(|(i, granularity)| {
+                        full_key = format!("{}/{}={}", full_key, granularity, time_partition_values[i]);
+                    });
+                },
+                Err(e) => {
+                    println!("Warning: failed to derive time partitions from filename '{}': {}. Proceeding without time partitions.", filename, e);
+                }
+            }
         }
 
         if !partition_values.is_empty() {
@@ -217,22 +221,25 @@ impl DataOutputAwsAthenaPlugin {
             
             let metadata: PipelineMetadata = METADATA.load().as_ref().clone();
        
-            let partition_metadata = if flatten {
-                OutputMetadata::from_flatterened_metadata(metadata.metadata.get(&namespace).unwrap())
-            } else {
-                OutputMetadata::from_metadata(metadata.metadata.get(&namespace).unwrap())
-            };
+            let ns_md_opt = metadata.metadata.get(&namespace);
+            let partition_metadata_opt = if let Some(ns_md) = ns_md_opt {
+                Some(if flatten { OutputMetadata::from_flatterened_metadata(ns_md) } else { OutputMetadata::from_metadata(ns_md) })
+            } else { None };
 
             // Handle partition creation asynchronously
-            if let Err(_err) = AwsAthena::glue_create_partition(
-                &namespace,
-                partition_values.clone(),
-                &full_key,
-                &mut partition_cache,
-                &partition_metadata,
-            ).await {
-                // Log error but continue with upload
-                println!("Warning: Failed to create partition: {}", _err);
+            if let Some(partition_metadata) = partition_metadata_opt {
+                if let Err(_err) = AwsAthena::glue_create_partition(
+                    &namespace,
+                    partition_values.clone(),
+                    &full_key,
+                    &mut partition_cache,
+                    &partition_metadata,
+                ).await {
+                    // Log error but continue with upload
+                    println!("Warning: Failed to create partition: {}", _err);
+                }
+            } else {
+                println!("Warning: no metadata for namespace '{}' when creating partition for key '{}'; skipping partition creation.", namespace, full_key);
             }
         }
 
@@ -246,12 +253,13 @@ impl DataOutputAwsAthenaPlugin {
         let parquet = Self::serialize_to_parquet(stream).await?;
         let tags_str = tags.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<String>>().join("&");
 
-        // Resize semaphore if target changed dynamically
+        // Resize semaphore if target changed dynamically (clamp to 1..256)
         {
-            let target = crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.load(std::sync::atomic::Ordering::Relaxed);
+            let target = crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .clamp(1, 256);
             let current = self.upload_sem.available_permits() + 1; // approx
             if target as usize != current {
-                // Best-effort: add or drain permits to approximate target
                 if target as usize > current { self.upload_sem.add_permits(target as usize - current); }
                 println!("tune: upload_sem target={} available={} (approx)", target, self.upload_sem.available_permits());
             }
@@ -1229,6 +1237,47 @@ impl AwsAthena {
             let _cp_permit = GLUE_CP_SEM.acquire().await.unwrap();
             let ns_lock = get_namespace_lock(namespace);
             let _ns_guard = ns_lock.lock().await;
+
+            // Ensure table exists; if missing, create DB/table before proceeding
+            match glue_client
+                .get_table()
+                .database_name(&database)
+                .name(namespace)
+                .send()
+                .await
+            {
+                Ok(_) => { /* table exists, proceed */ }
+                Err(e) => {
+                    if let SdkError::ServiceError(se) = &e {
+                        if matches!(se.err(), GetTableError::EntityNotFoundException(_)) {
+                            println!("Glue table '{}' not found in database '{}'; creating it...", namespace, database);
+                            // Ensure database exists
+                            match AwsAthena::glue_get_database().await {
+                                Ok(true) => {}
+                                _ => {
+                                    if let Err(err) = AwsAthena::backoff_retry(|| AwsAthena::glue_create_database(), "create_database").await {
+                                        println!("ERROR creating Glue database '{}': {}", database, err);
+                                        // Cannot proceed without DB; skip partition creation this time
+                                        partition_cache.push(md5_digest);
+                                        return Ok(true);
+                                    }
+                                }
+                            }
+                            // Create table with backoff; if it already exists due to race, it's fine
+                            if let Err(err) = AwsAthena::backoff_retry(|| AwsAthena::glue_create_table(namespace, metadata), "create_table").await {
+                                println!("ERROR creating Glue table '{}.{}': {}", database, namespace, err);
+                                // Skip partition creation for this key to avoid hot-looping
+                                partition_cache.push(md5_digest);
+                                return Ok(true);
+                            }
+                            println!("Created Glue table '{}.{}'", database, namespace);
+                            // Fallthrough to partition create/update below
+                        }
+                    }
+                    // For other errors, just log and continue to best-effort partition ops
+                    println!("Warning: get_table failed for '{}.{}': {}", database, namespace, e);
+                }
+            }
 
             match glue_client
                 .get_partition()

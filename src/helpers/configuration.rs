@@ -147,6 +147,12 @@ pub static PIPELINE_NAME: Lazy<Arc<TimedRwLock<String>>> = Lazy::new(|| Arc::new
 
 #[allow(dead_code)]
 impl Config {
+    pub fn log_wal_enabled() -> bool {
+        // Unified flag overrides
+        if Self::truth_value(&Self::getenv("LOG_WAL", "")) { return true; }
+        // Backward-compatible behavior
+        Self::truth_value(&Self::getenv("LOG_WAL_DEBUG", "false")) || Self::truth_value(&Self::getenv("LOG_WAL_UPLOADS", "false"))
+    }
 
     pub fn new() -> Config {
         Config {
@@ -1592,10 +1598,16 @@ impl Config {
         // Compute changed namespaces by hashing per-namespace metadata
         let mut changed_namespaces: Vec<String> = Vec::new();
         for (ns, meta) in pipeline_metadata.metadata.iter() {
-            if let Ok(ser) = serde_json::to_string(meta) {
-                let hash = format!("{:?}", md5::compute(ser));
+            {
+                let hash = Config::compute_namespace_md5(meta);
                 let prev = LAST_NAMESPACE_HASH.get(ns).map(|e| e.value().clone());
                 if prev.as_deref() != Some(hash.as_str()) {
+                    if Config::debug_enabled() {
+                        match prev {
+                            Some(ph) => println!("Metadata change detected for namespace {}: {} -> {}", ns, ph, hash),
+                            None => println!("Metadata initialized for namespace {}: {}", ns, hash),
+                        }
+                    }
                     LAST_NAMESPACE_HASH.insert(ns.clone(), hash);
                     changed_namespaces.push(ns.clone());
                 }
@@ -1604,6 +1616,10 @@ impl Config {
 
         if changed_namespaces.is_empty() {
             return;
+        }
+
+        if Config::debug_enabled() {
+            println!("set_metadata: {} namespaces changed: {}", changed_namespaces.len(), changed_namespaces.join(","));
         }
 
         // Clobber local file once
@@ -1661,8 +1677,8 @@ impl Config {
             tokio::spawn(async move {
                 while let Some(ns) = rx.recv().await {
                     if pending.insert(ns.clone(), ()).is_some() { continue; }
-                    // small debounce window
-                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    // small debounce window (increase to curb churn)
+                    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
                     // process and clear
                     let flatten = Config::get_transform_flatten_events();
                     let md_snapshot = { METADATA.load().metadata.clone() };
@@ -1773,6 +1789,43 @@ impl Config {
         }
         
         false
+    }
+
+    pub fn debug_enabled() -> bool {
+        // Consolidated switch to enable detailed ingest/schema/WAL logs
+        Self::truth_value(&Self::getenv("SKIPPR_DEBUG_LOGS", "false"))
+    }
+
+    // Compute a stable md5 for a namespace's Metadata by canonicalizing JSON key order
+    pub fn compute_namespace_md5(meta: &Metadata) -> String {
+        // Build a canonical, schema-only view of metadata, ignoring counters and transient fields
+        fn build_schema_view(meta: &Metadata) -> Value {
+            // Only include fields that influence Arrow schema
+            let mut obj = serde_json::Map::new();
+            obj.insert("enabled".to_string(), Value::Bool(meta.enabled));
+            obj.insert("out_field_name".to_string(), Value::String(meta.out_field_name.clone()));
+            obj.insert("determined_type".to_string(), Value::String(meta.determined_type.clone()));
+            obj.insert("determined_type_values".to_string(), Value::String(meta.determined_type_values.clone()));
+            obj.insert("repetition_count".to_string(), Value::Number(serde_json::Number::from(meta.repetition_count)));
+
+            // Recurse into child fields deterministically
+            if !meta.fields.is_empty() {
+                let mut fields_vec: Vec<(String, Value)> = meta.fields
+                    .iter()
+                    .map(|(k, v)| (k.clone(), build_schema_view(v)))
+                    .collect();
+                fields_vec.sort_by(|a, b| a.0.cmp(&b.0));
+                let mut fields_obj = serde_json::Map::with_capacity(fields_vec.len());
+                for (k, v) in fields_vec { fields_obj.insert(k, v); }
+                obj.insert("fields".to_string(), Value::Object(fields_obj));
+            }
+
+            Value::Object(obj)
+        }
+
+        let v = build_schema_view(meta);
+        let s = serde_json::to_string(&v).unwrap_or_default();
+        format!("{:?}", md5::compute(s))
     }
 }
 

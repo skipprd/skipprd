@@ -7,6 +7,7 @@ use std::str::FromStr;
 use std::borrow::BorrowMut;
 use serde_derive::{Deserialize, Serialize};
 use crate::ingest::ingest::{discover_ingest, ResolvedFieldValue};
+use crate::discover::PipelineMetadata;
 
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -281,6 +282,92 @@ impl Evolution {
         }
     }
 
+}
+
+// Proposal DTOs used by the sequencer/data-plane
+#[derive(Clone, Debug)]
+pub struct EvolutionSpec {
+    pub parent: Option<String>,
+    pub field: String,
+    pub required_type: String,
+    pub values_type: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct EvolutionProposal {
+    pub namespace: String,
+    pub fields: Vec<EvolutionSpec>,
+}
+
+pub fn infer_specs_for_record(record: &serde_json::Value, metadata: &HashMap<String, Metadata>) -> Vec<EvolutionSpec> {
+    let mut specs = Vec::new();
+    if let Some(obj) = record.as_object() {
+        for (k, v) in obj.iter() {
+            match metadata.get(k) {
+                None => {
+                    // brand new field
+                    let (req, vals) = infer_required_type(v);
+                    specs.push(EvolutionSpec { parent: None, field: k.clone(), required_type: req, values_type: vals });
+                },
+                Some(md) => {
+                    // existing field but possibly different type -> propose sibling evolution
+                    let analyser = AnalyseSchema { i: 0 };
+                    // Work on a temp copy to reuse resolver
+                    let mut temp = metadata.clone();
+                    let detected = analyser.resolve_field_type(temp.borrow_mut(), &k.to_string(), v.clone().borrow_mut());
+                    if !detected.is_empty() && detected != md.determined_type {
+                        if detected == "array" {
+                            // refine using element type
+                            let (req, vals) = infer_required_type(v);
+                            specs.push(EvolutionSpec { parent: None, field: k.clone(), required_type: req, values_type: vals });
+                        } else {
+                            specs.push(EvolutionSpec { parent: None, field: k.clone(), required_type: detected, values_type: None });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    specs
+}
+
+fn infer_required_type(value: &serde_json::Value) -> (String, Option<String>) {
+    use serde_json::Value as V;
+    match value {
+        V::Null => ("string".to_string(), None),
+        V::Bool(_) => ("boolean".to_string(), None),
+        V::Number(n) => {
+            if n.is_i64() { ("long".to_string(), None) } else { ("double".to_string(), None) }
+        },
+        V::String(_) => ("string".to_string(), None),
+        V::Array(arr) => {
+            if let Some(V::Object(_)) = arr.get(0) { ("array".to_string(), Some("record".to_string())) } else { ("array".to_string(), Some("string".to_string())) }
+        },
+        V::Object(_) => ("record".to_string(), None),
+    }
+}
+
+pub fn apply_specs_to_namespace(namespace: &str, specs: &[EvolutionSpec], pm: &mut PipelineMetadata) {
+    if let Some(ns_meta) = pm.metadata.get_mut(namespace) {
+        for s in specs.iter() {
+            let target: &mut HashMap<String, Metadata> = match &s.parent {
+                Some(parent) => match ns_meta.fields.get_mut(parent) { Some(m) => &mut m.fields, None => continue },
+                None => &mut ns_meta.fields,
+            };
+            let evolved_name = if s.required_type == "array" && s.values_type.is_some() {
+                format!("{}_array_{}", s.field, s.values_type.clone().unwrap())
+            } else {
+                format!("{}_{}", s.field, s.required_type)
+            };
+            if !target.contains_key(&evolved_name) {
+                let mut md = Metadata::new().unwrap();
+                md.determined_type = if s.required_type == "array" { s.values_type.clone().unwrap_or("string".to_string()) } else { s.required_type.clone() };
+                md.out_field_name = evolved_name.clone();
+                md.enabled = true;
+                target.insert(evolved_name, md);
+            }
+        }
+    }
 }
 
 

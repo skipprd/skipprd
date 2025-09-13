@@ -35,6 +35,7 @@ use std::os::fd::AsRawFd;
 use aws_sdk_s3::primitives::ByteStream as S3ByteStream;
 use aws_sdk_s3::Client as S3Client;
 use once_cell::sync::OnceCell;
+use std::sync::atomic::AtomicBool;
 use tokio::time::{sleep as tokio_sleep, Duration as TokioDuration};
 use futures::stream::StreamExt as FuturesStreamExt;
 use std::future::Future;
@@ -56,6 +57,7 @@ pub static WAL_INDEX: Lazy<DashMap<PartitionKey, WalPartition>> = Lazy::new(|| D
 pub static WAL_BYTES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 static COMPACTION_LOCK: OnceCell<std::sync::Mutex<()>> = OnceCell::new();
 static COMPACTION_ASYNC_LOCK: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio::sync::Mutex::new(()));
+static FORCE_COMPACT_ONCE: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
 
 // lazy_static! {
 //     pub static ref WAL_INDEX: TimedRwLock<WalIndex> = TimedRwLock::new("wal_index".to_string(), WalIndex::new());
@@ -174,6 +176,9 @@ impl Buffers {
         let mut uploaded_bytes: u64 = 0;
 
         for ((namespace, partition, time, shard), ingest_buffer_batch) in self.buf.iter_mut() {
+            if Config::log_wal_enabled() {
+                println!("Buffers::flush: preparing partition ns={} part={} time={} shard={} records={} batches_prebuilt={}", namespace, partition, time.unwrap_or(0), shard, ingest_buffer_batch.records.len(), ingest_buffer_batch.record_batches.as_ref().map(|b| b.len()).unwrap_or(0));
+            }
 
             // println!("Writing {} rows to WAL {} {} {} {}", ingest_buffer_batch.records.len(), namespace, partition, time.unwrap_or(0), shard);
 
@@ -188,6 +193,7 @@ impl Buffers {
                     (ingest_buffer_batch.records.len() / 1000).max(1)
                 );
                 let json_values = ingest_buffer_batch.records.iter().map(|record| &record.record).collect::<Vec<&Value>>();
+                if Config::log_wal_enabled() { println!("Buffers::flush: serializing {} json values into Arrow batch", json_values.len()); }
                 decoder.serialize(&json_values).unwrap();
                 match decoder.flush() {
                     Ok(Some(batch)) => { record_batches.push(batch); },
@@ -197,6 +203,8 @@ impl Buffers {
             };
             
             if record_batches.is_empty() {
+                if Config::log_wal_enabled() { println!("Buffers::flush: no record batches produced for ns={} time={} shard={}, skipping write", namespace, time.unwrap_or(0), shard); }
+                // Ensure we still update bytes counters, but nothing to write
                 continue;
             }
 
@@ -212,6 +220,7 @@ impl Buffers {
             // println!("WAL File {} offset: {:?}", wal_file.path.to_str().unwrap(), ingest_buffer_batch.offset);
             
             let stat = wal_file.write_to_stream(&record_batches)?;
+            if Config::log_wal_enabled() { println!("Buffers::flush: wrote WAL bytes={} rows={} to {}", stat.0, stat.1, wal_file.path.to_string_lossy()); }
 
             bytes += stat.0;
             rows += stat.1;
@@ -232,8 +241,8 @@ impl Buffers {
                         Ok(body) => {
                             match s3.put_object().bucket(&wal_bucket).key(&key).body(body).send().await {
                                 Ok(_) => {
-                                    if Config::truth_value(&Config::getenv("LOG_WAL_UPLOADS", "false")) {
-                                        println!("Uploaded WAL to s3://{}/{}", wal_bucket, key);
+                                    if Config::debug_enabled() || Config::log_wal_enabled() {
+                                        println!("Uploaded WAL to s3://{}/{} (ns={},part={},time={},shard={})", wal_bucket, key, namespace, partition, time.unwrap_or(0), shard);
                                     }
                                     // commit offsets now
                                     wal_file.offsets.iter().for_each(|(offset, position)| {
@@ -286,6 +295,16 @@ impl Buffers {
 
         WAL_BYTES_TOTAL.fetch_add(uploaded_bytes, std::sync::atomic::Ordering::Relaxed);
         for ((namespace, partition, time, shard), wal_files) in partitions.into_iter() {
+            if Config::debug_enabled() {
+                println!(
+                    "WAL flush partition ns={} part={} time={} shard={} files={}",
+                    namespace,
+                    partition,
+                    time.unwrap_or(0),
+                    shard,
+                    wal_files.len()
+                );
+            }
             use dashmap::mapref::entry::Entry;
             match WAL_INDEX.entry((namespace.clone(), partition.clone(), time.clone(), shard.clone())) {
                 Entry::Occupied(mut occ) => {
@@ -342,10 +361,11 @@ impl Buffers {
                 loop {
                     let _guard = COMPACTION_ASYNC_LOCK.lock().await;
                     let mut to_compact: Vec<( (String, String, Option<i64>, String), WalPartition)> = Vec::new();
+                    let force_once = FORCE_COMPACT_ONCE.swap(false, AtomicOrdering::Relaxed);
                     for item in WAL_INDEX.iter() {
                         let k = item.key().clone();
                         let v = item.value().clone();
-                        if v.check_wal_rotate(false) { to_compact.push((k, v)); }
+                        if v.check_wal_rotate(force_once) { to_compact.push((k, v)); }
                     }
                     if !to_compact.is_empty() {
                         // remove from index to avoid double work
@@ -383,51 +403,54 @@ impl Buffers {
 
     pub async fn compact_all_partitions(force: bool, offsets_db: Arc<Offsets>, shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>) {
 
-        // Step 1: Single-flight compaction: rebuild the index and extract partitions
-        let _guard = COMPACTION_ASYNC_LOCK.lock().await;
-        wal_recover(offsets_db.clone()).expect("Failed to recover WAL index");
-        let partitions_to_compact: Vec<WalPartition> = {
-            let mut parts = Vec::new();
-            for item in WAL_INDEX.iter() {
-                if force || item.value().check_wal_rotate(false) { parts.push(item.value().clone()); }
+        // Repeat a small number of times to tolerate eventual S3 listings and late arrivals
+        for _attempt in 0..3 {
+            // Step 1: Single-flight compaction: rebuild the index and extract partitions
+            let _guard = COMPACTION_ASYNC_LOCK.lock().await;
+            wal_recover(offsets_db.clone()).expect("Failed to recover WAL index");
+            let partitions_to_compact: Vec<WalPartition> = {
+                let mut parts = Vec::new();
+                for item in WAL_INDEX.iter() {
+                    if force || item.value().check_wal_rotate(false) { parts.push(item.value().clone()); }
+                }
+                // Drop index to avoid double work
+                WAL_INDEX.clear();
+                parts
+            };
+
+            if partitions_to_compact.is_empty() {
+                break;
             }
-            // Drop index to avoid double work
-            WAL_INDEX.clear();
-            parts
-        };
 
-        if partitions_to_compact.is_empty() {
-            return;
-        }
+            // Step 2: Parallel compaction with bounded concurrency
+            let concurrency = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .clamp(1, 64);
 
-        // Step 2: Parallel compaction with bounded concurrency
-        let concurrency = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .clamp(1, 64);
+            let mut in_flight: futures::stream::FuturesUnordered<Pin<Box<dyn Future<Output = u64> + Send>>> = futures::stream::FuturesUnordered::new();
+            let mut iter = partitions_to_compact.into_iter();
 
-        let mut in_flight: futures::stream::FuturesUnordered<Pin<Box<dyn Future<Output = u64> + Send>>> = futures::stream::FuturesUnordered::new();
-        let mut iter = partitions_to_compact.into_iter();
-
-        for _ in 0..concurrency {
-            if let Some(mut p) = iter.next() {
-                let offsets_db_clone = offsets_db.clone();
-                let shared_output2 = shared_output.clone();
-                in_flight.push(Box::pin(async move { p.compact_batches_to_parquet(offsets_db_clone, shared_output2).await }));
+            for _ in 0..concurrency {
+                if let Some(mut p) = iter.next() {
+                    let offsets_db_clone = offsets_db.clone();
+                    let shared_output2 = shared_output.clone();
+                    in_flight.push(Box::pin(async move { p.compact_batches_to_parquet(offsets_db_clone, shared_output2).await }));
+                }
             }
-        }
 
-        let mut total_compacted_bytes: u64 = 0;
-        while let Some(bytes_done) = in_flight.next().await {
-            total_compacted_bytes += bytes_done as u64;
-            if let Some(mut p) = iter.next() {
-                let offsets_db_clone = offsets_db.clone();
-                let shared_output2 = shared_output.clone();
-                in_flight.push(Box::pin(async move { p.compact_batches_to_parquet(offsets_db_clone, shared_output2).await }));
+            let mut total_compacted_bytes: u64 = 0;
+            while let Some(bytes_done) = in_flight.next().await {
+                total_compacted_bytes += bytes_done as u64;
+                if let Some(mut p) = iter.next() {
+                    let offsets_db_clone = offsets_db.clone();
+                    let shared_output2 = shared_output.clone();
+                    in_flight.push(Box::pin(async move { p.compact_batches_to_parquet(offsets_db_clone, shared_output2).await }));
+                }
             }
-        }
 
-        // Step 3: Reduce WAL bytes counter
-        WAL_BYTES_TOTAL.fetch_update(std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed, |v| Some(v.saturating_sub(total_compacted_bytes))).ok();
+            // Step 3: Reduce WAL bytes counter
+            WAL_BYTES_TOTAL.fetch_update(std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed, |v| Some(v.saturating_sub(total_compacted_bytes))).ok();
+        }
     }
 }
 
@@ -481,6 +504,7 @@ pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
 
         if wal_files_count == 0 {
             println!("Indexed {} of {} WAL files", count, wal_files_count);
+            FORCE_COMPACT_ONCE.store(true, AtomicOrdering::Relaxed);
             return Ok(());
         }
 
@@ -542,10 +566,12 @@ pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
 
             if count % 1000 == 0 {
                 println!("Indexed {} of {} WAL files for {} namespaces in {} partitions", count, wal_files_count, namespaces.len(), WAL_INDEX.len());
+                FORCE_COMPACT_ONCE.store(true, AtomicOrdering::Relaxed);
             }
         }
 
         println!("Indexed {} of {} WAL files for {} namespaces in {} partitions", count, wal_files_count, namespaces.len(), WAL_INDEX.len());
+        FORCE_COMPACT_ONCE.store(true, AtomicOrdering::Relaxed);
         let elapsed = started.elapsed().as_secs_f64();
         if elapsed > 0.0 {
             let rate = (count as f64 / elapsed) as u64;
@@ -911,19 +937,46 @@ impl WalPartition {
                             use std::io::{Cursor, Seek};
                             let mut cursor = Cursor::new(bytes);
                             let mut offset_size = [0u8; 8];
-                            if std::io::Read::read_exact(&mut cursor, &mut offset_size).is_err() { println!("Failed to read WAL offset header from S3 {}", key); continue; }
+                            // Validate header presence
+                            if std::io::Read::read_exact(&mut cursor, &mut offset_size).is_err() {
+                                println!("Failed to read WAL offset header from S3 {}", key);
+                                if Config::truth_value(&Config::getenv("DELETE_CORRUPT_WAL", "false")) {
+                                    let _ = s3c.delete_object().bucket(&wal_bucket).key(&key).send().await;
+                                }
+                                continue;
+                            }
                             let skip = u64::from_le_bytes(offset_size);
+                            // Validate we have at least skip bytes available
+                            let remaining = cursor.get_ref().len() as i64 - cursor.position() as i64;
+                            if remaining < skip as i64 {
+                                println!("Invalid WAL header for S3 {}: skip {} exceeds remaining {} bytes", key, skip, remaining);
+                                if Config::truth_value(&Config::getenv("DELETE_CORRUPT_WAL", "false")) {
+                                    let _ = s3c.delete_object().bucket(&wal_bucket).key(&key).send().await;
+                                }
+                                continue;
+                            }
                             let _ = std::io::Seek::seek(&mut cursor, io::SeekFrom::Current(skip as i64));
                             match StreamReader::try_new(cursor, None) {
                                 Ok(sr) => {
                                     for batch_res in sr {
                                         match batch_res {
                                             Ok(batch) => { wal_compacted_rows_total += batch.num_rows() as u64; batches.push(batch); },
-                                            Err(e) => { println!("Failed reading batch from S3 WAL {}: {}", key, e); break; }
+                                            Err(e) => {
+                                                println!("Failed reading batch from S3 WAL {}: {}", key, e);
+                                                if Config::truth_value(&Config::getenv("DELETE_CORRUPT_WAL", "false")) {
+                                                    let _ = s3c.delete_object().bucket(&wal_bucket).key(&key).send().await;
+                                                }
+                                                break;
+                                            }
                                         }
                                     }
                                 }
-                                Err(e) => { println!("Failed to init Arrow stream from S3 WAL {}: {}", key, e); }
+                                Err(e) => {
+                                    println!("Failed to init Arrow stream from S3 WAL {}: {}", key, e);
+                                    if Config::truth_value(&Config::getenv("DELETE_CORRUPT_WAL", "false")) {
+                                        let _ = s3c.delete_object().bucket(&wal_bucket).key(&key).send().await;
+                                    }
+                                }
                             }
                         }
                         Err(e) => { println!("Failed to download WAL from S3 {}: {}", key, e); }

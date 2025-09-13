@@ -141,7 +141,7 @@ pub fn accumulate_map(map: HashMap<PartitionKey, IngestBufferBatch>) {
 }
 
 async fn flush_ready() {
-    let bytes_per_file = Config::get_wal_bytes_per_file();
+    let bytes_per_file = Config::get_wal_bytes_per_file().max(64 * 1024); // safety minimum
     let mut max_delay = Duration::from_secs(Config::get_wal_max_delay_seconds());
     if Config::truth_value(&Config::getenv("LOG_WAL_DEBUG", "false")) {
         max_delay = Duration::from_secs(1);
@@ -162,7 +162,7 @@ async fn flush_ready() {
     if ready.is_empty() { return; }
 
     let log_flush = Config::truth_value(&Config::getenv("LOG_WAL_UPLOADS", "false")) || Config::truth_value(&Config::getenv("LOG_WAL_DEBUG", "false"));
-    if log_flush {
+    if log_flush || Config::log_wal_enabled() {
         let total_bytes: u64 = ready.iter().map(|k| BYTES.get(k).map(|c| c.load(Ordering::Relaxed)).unwrap_or(0)).sum();
         println!("WAL accumulator flush: {} partitions, {} bytes", ready.len(), total_bytes);
     }
@@ -177,9 +177,13 @@ async fn flush_ready() {
         BYTES.remove(&k);
         FIRST_SEEN.remove(&k);
     }
+    if Config::log_wal_enabled() {
+        println!("WAL accumulator: drained {} partitions for flush", drain_map.len());
+    }
     to_flush.write(drain_map);
 
     if let (Some(offsets), Some(output)) = (OFFSETS_CELL.get(), OUTPUT_CELL.get()) {
+        if Config::log_wal_enabled() { println!("WAL accumulator: invoking Buffers::flush"); }
         let _ = to_flush.flush(offsets.clone(), output.clone()).await;
     }
 }

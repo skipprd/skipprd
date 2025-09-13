@@ -76,7 +76,8 @@ pub fn ingest(
         message = match DEFAULT_NESTED_MESSAGE.read().get(namespace) {
             Some(m) => m.clone(),
             None => {
-                Value::Null
+                if Config::log_wal_enabled() { println!("ingest: no DEFAULT_NESTED_MESSAGE for ns={}, starting with empty object", namespace); }
+                Value::Object(Map::new())
             }
         };
     }
@@ -87,7 +88,17 @@ pub fn ingest(
 
     let _i = 0;
 
-    for (field, value) in unwrapped_message.as_object().unwrap() {
+    let obj = match unwrapped_message.as_object() {
+        Some(o) => o,
+        None => {
+            if Config::log_wal_enabled() { println!("ingest: input was not an object for ns={}", namespace); }
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "ingest expects a JSON object record"
+            )));
+        }
+    };
+    for (field, value) in obj {
         // let field = Helpers::clean_field_name(field.to_string());
 
         // println!("Ingesting field: {:?}", field);
@@ -1072,7 +1083,8 @@ pub fn set_date(
         }
         None => {
             // Handle the value error applying the Evolution Strategy
-            Evolution::evolve_field(&field.to_string(), value, parent_field, parent_data_type, metadata, updated_schema, flatten)
+            // No direct evolution here; return error so caller can propose via sequencer
+            Err(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("Field: {} => {} value: {} mismatched", parent_field.unwrap_or("root"), field, value))))
         }
     }
 }

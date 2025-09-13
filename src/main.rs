@@ -701,6 +701,9 @@ async fn discover() {
 
     let shared_output_clone = shared_output.clone();
     Buffers::compact_all_partitions(true, offsets_db.clone(), shared_output_clone).await;
+    // Second pass: re-index S3 and drain any WALs that appeared late
+    let shared_output_clone = shared_output.clone();
+    Buffers::compact_all_partitions(true, offsets_db.clone(), shared_output_clone).await;
 
     {
         OUTPUT_RUNNING
@@ -897,6 +900,9 @@ async fn sync() {
         METRICS.write().status = MetricsStatus::Finishing;
     }
 
+    let shared_output_clone = shared_output.clone();
+    Buffers::compact_all_partitions(true, offsets_db.clone(), shared_output_clone).await;
+    // Second pass: re-index S3 and drain any WALs that appeared late
     let shared_output_clone = shared_output.clone();
     Buffers::compact_all_partitions(true, offsets_db.clone(), shared_output_clone).await;
 
