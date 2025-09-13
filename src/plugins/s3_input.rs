@@ -30,6 +30,25 @@ use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinSet;
 use futures::stream::{self, StreamExt};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::io::BufRead as _;
+use std::sync::atomic::Ordering as AtomicOrdering;
+use std::fs as stdfs;
+
+fn read_meminfo_kib(key: &str) -> Option<u64> {
+    if let Ok(file) = std::fs::File::open("/proc/meminfo") {
+        let reader = std::io::BufReader::new(file);
+        for line in reader.lines().flatten() {
+            if line.starts_with(key) {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 { if let Ok(v) = parts[1].parse::<u64>() { return Some(v); } }
+            }
+        }
+    }
+    None
+}
+
+fn read_mem_total_mib() -> Option<u64> { read_meminfo_kib("MemTotal:").map(|kib| kib / 1024) }
+fn read_mem_available_mib() -> Option<u64> { read_meminfo_kib("MemAvailable:").map(|kib| kib / 1024) }
 
 /// Path for storing the S3 continuation token so we can resume syncs
 const CONTINUATION_TOKEN_FILE: Lazy<String> = Lazy::new(|| {
@@ -69,7 +88,9 @@ pub struct DataSourceS3Plugin {
     #[allow(dead_code)]
     prefixes: Vec<(String, usize)>,
     active_threads: usize,
-    optimal_chunk_size: usize
+    optimal_chunk_size: usize,
+    #[allow(dead_code)]
+    pending_cap: Option<Arc<AtomicUsize>>,
 }
 
 impl DataSourceS3Plugin {
@@ -108,6 +129,7 @@ impl DataSourceS3Plugin {
             prefixes: Vec::new(),
             active_threads: 0,
             optimal_chunk_size: 0,
+            pending_cap: None,
         }
     }
 
@@ -259,6 +281,62 @@ impl DataSourceS3Plugin {
                 }
             });
         }
+        // Background memory manager to dynamically adjust effective download memory permits and staging cap
+        {
+            let mem_sem_mgr = mem_sem.clone();
+            let pending_default_is_ci = {
+                let ga = Config::getenv("GITHUB_ACTIONS", "");
+                let ci = Config::getenv("CI", "");
+                ga.eq_ignore_ascii_case("true") || ci == "1" || ci.eq_ignore_ascii_case("true")
+            };
+            let pending_default: usize = Config::getenv("INGEST_PENDING_MAX_BYTES", "").parse::<usize>().ok().filter(|v| *v > 0).unwrap_or_else(|| if pending_default_is_ci { 512 * 1024 * 1024 } else { 2 * 1024 * 1024 * 1024 });
+            let pending_cap = Arc::new(AtomicUsize::new(pending_default));
+            // Expose to outer scope
+            let pending_cap_outer = pending_cap.clone();
+            // Spawn manager
+            tokio::spawn(async move {
+                let mut configured_total: usize = mem_budget_mb as usize;
+                let mut held: Vec<OwnedSemaphorePermit> = Vec::new();
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                    // Read memory stats (Linux /proc). If unavailable, skip adjustments
+                    let (avail_mib_opt, total_mib_opt) = (read_mem_available_mib(), read_mem_total_mib());
+                    if avail_mib_opt.is_none() || total_mib_opt.is_none() { continue; }
+                    let avail_mib = avail_mib_opt.unwrap();
+                    let total_mib = total_mib_opt.unwrap();
+                    // Keep at least 25% free; target download memory to at most 50% of available
+                    let min_free_mib = (total_mib as f64 * 0.25) as u64;
+                    let target_mem_mib: usize = if avail_mib > min_free_mib { ((avail_mib as f64) * 0.5) as usize } else { ((avail_mib as f64) * 0.3) as usize };
+                    let target_mem_mib = target_mem_mib.clamp(256, mem_budget_mb as usize);
+                    // Adjust semaphore to target
+                    if target_mem_mib > configured_total {
+                        let add = target_mem_mib - configured_total;
+                        mem_sem_mgr.add_permits(add);
+                        configured_total = target_mem_mib;
+                        // Release any held permits beyond need
+                        while held.len() > 0 && held.len() + mem_sem_mgr.available_permits() > 0 && held.len() > (configured_total.saturating_sub(mem_sem_mgr.available_permits())) {
+                            let _ = held.pop();
+                        }
+                    } else if target_mem_mib < configured_total {
+                        let mut need_to_hold = configured_total - target_mem_mib;
+                        while need_to_hold > 0 {
+                            match mem_sem_mgr.clone().try_acquire_owned() {
+                                Ok(p) => { held.push(p); need_to_hold -= 1; }
+                                Err(_) => break,
+                            }
+                        }
+                        configured_total = target_mem_mib;
+                    }
+                    // Tune pending staging cap to at most 25% of available RAM, min 64 MiB
+                    let pending_target = ((avail_mib as usize) * 1024 * 1024) / 4;
+                    let pending_target = pending_target.clamp(64 * 1024 * 1024, pending_default);
+                    pending_cap.store(pending_target, AtomicOrdering::Relaxed);
+                }
+            });
+            // Store the atomic in self via closure capture: replace fixed pending cap below
+            // We pass this arc down by capturing in the stream loop via move
+            self.pending_cap = Some(pending_cap_outer);
+        }
         let s3_client_clone = self.s3_client.clone();
         let mem_sem_clone = mem_sem.clone();
         let dl_sem_clone = dl_sem.clone();
@@ -318,17 +396,19 @@ impl DataSourceS3Plugin {
         let mut current_bytes: usize = 0;
         let mut pending_tasks: Vec<IngestTask> = Vec::with_capacity(total_cpus);
         // Bound total bytes staged in memory before dispatching to ingest threads
+        // Use dynamic pending cap if memory manager is active; fallback to env default
         let is_ci_pending = {
             let ga = Config::getenv("GITHUB_ACTIONS", "");
             let ci = Config::getenv("CI", "");
             ga.eq_ignore_ascii_case("true") || ci == "1" || ci.eq_ignore_ascii_case("true")
         };
         let pending_max_bytes_env = Config::getenv("INGEST_PENDING_MAX_BYTES", "");
-        let pending_max_bytes: usize = pending_max_bytes_env
+        let pending_default_max: usize = pending_max_bytes_env
             .parse::<usize>()
             .ok()
             .filter(|v| *v > 0)
             .unwrap_or_else(|| if is_ci_pending { 512 * 1024 * 1024 } else { 2 * 1024 * 1024 * 1024 });
+        let pending_cap_arc = self.pending_cap.clone().unwrap_or_else(|| Arc::new(AtomicUsize::new(pending_default_max)));
         let mut pending_bytes_sum: usize = 0;
 
         futures::pin_mut!(download_stream);
@@ -343,7 +423,7 @@ impl DataSourceS3Plugin {
                     current_bytes = 0;
                     pending_bytes_sum = pending_bytes_sum.saturating_add(batch_bytes);
                     pending_tasks.push(IngestTask::new(batch, offsets.clone(), shared_output.clone()));
-                    if pending_tasks.len() >= total_cpus || pending_bytes_sum >= pending_max_bytes {
+                    if pending_tasks.len() >= total_cpus || pending_bytes_sum >= pending_cap_arc.load(AtomicOrdering::Relaxed) {
                         let mut tasks = IngestTasks::new();
                         for t in pending_tasks.drain(..) { tasks.add(t); }
                         let tasks_arc = Arc::new(tasks);
