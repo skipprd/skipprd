@@ -1,6 +1,7 @@
 skippr:
   skippr_s3_bucket: skippr-e2e-sample-data-output
   tenant: skippr
+  workspace: test
 
 pipelines:
 
