@@ -154,8 +154,8 @@ impl Buffers {
 
         let mut force_compact = false;
         {
-            // Check disk bytes via atomic counter vs threshold
-            let max_bytes = Config::get_pipeline_buffer_threshold_bytes();
+            // Check disk bytes via atomic counter vs disk threshold (not per-partition file size)
+            let max_bytes = Config::get_pipeline_buffer_disk_threshold_bytes();
             let bytes = WAL_BYTES_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
             if bytes > (max_bytes - (max_bytes as f64 * 0.1) as u64) {
                 println!("Disk bytes {} of {} bytes, compacting all partitions", bytes, max_bytes);
@@ -922,8 +922,17 @@ impl WalPartition {
             if storage.eq_ignore_ascii_case("disk") {
                 match wal_file.read_from_stream() {
                     Ok(mut local_batches) => {
-                        wal_compacted_rows_total += local_batches.iter().map(|b| b.num_rows() as u64).sum::<u64>();
-                        batches.append(&mut local_batches);
+                        // Enforce schema compatibility; skip mismatched batches defensively
+                        let mut kept: Vec<RecordBatch> = Vec::with_capacity(local_batches.len());
+                        for b in local_batches.drain(..) {
+                            if b.schema().as_ref() != schema.as_ref() {
+                                println!("Skipping WAL batch due to schema mismatch for ns={} part={} time={}", self.namespace, self.partition, self.time.unwrap_or(0));
+                                continue;
+                            }
+                            wal_compacted_rows_total += b.num_rows() as u64;
+                            kept.push(b);
+                        }
+                        batches.append(&mut kept);
                     }
                     Err(e) => { println!("Failed reading local WAL {}: {}", wal_file.path.to_string_lossy(), e); }
                 }
@@ -960,7 +969,13 @@ impl WalPartition {
                                 Ok(sr) => {
                                     for batch_res in sr {
                                         match batch_res {
-                                            Ok(batch) => { wal_compacted_rows_total += batch.num_rows() as u64; batches.push(batch); },
+                                            Ok(batch) => {
+                                                if batch.schema().as_ref() != schema.as_ref() {
+                                                    println!("Skipping WAL batch from S3 due to schema mismatch for ns={} part={} time={}", self.namespace, self.partition, self.time.unwrap_or(0));
+                                                    continue;
+                                                }
+                                                wal_compacted_rows_total += batch.num_rows() as u64; batches.push(batch);
+                                            },
                                             Err(e) => {
                                                 println!("Failed reading batch from S3 WAL {}: {}", key, e);
                                                 if Config::truth_value(&Config::getenv("DELETE_CORRUPT_WAL", "false")) {

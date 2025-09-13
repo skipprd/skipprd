@@ -174,6 +174,9 @@ impl DataSourceS3Plugin {
         let parsed_mb = Config::getenv("S3_DOWNLOAD_MEMORY_MB", default_mb).parse::<u32>().unwrap_or_else(|_| if is_ci { 2048 } else { 4096 });
         // Clamp to a reasonable range to avoid runaway allocations
         let mem_budget_mb: u32 = parsed_mb.clamp(256, if is_ci { 2048 } else { 16384 });
+        // Expected decompression expansion factor (used per-object, not for total capacity)
+        let inflate_ratio_env = Config::getenv("S3_INFLATE_RATIO", "4");
+        let inflate_ratio: u32 = inflate_ratio_env.parse::<u32>().unwrap_or(4).clamp(1, 32);
         let mem_sem = Arc::new(Semaphore::new(mem_budget_mb as usize));
 
         println!("Starting stream pipeline (cpus={}, dl_mem={} MiB, init_chunk={})", total_cpus, mem_budget_mb, Helpers::human_readable_size(chunk_size as u64));
@@ -188,19 +191,23 @@ impl DataSourceS3Plugin {
             .page_size(1000)
             .send();
 
-        // Collect keys lazily into a Vec to drive the rest of the stream
-        let mut all_keys: Vec<(String, i64)> = Vec::new();
-        while let Some(page_res) = pager.next().await {
-            if let Ok(page) = page_res {
-                if let Some(objects) = page.contents {
-                    for obj in objects {
-                        if let Some(k) = obj.key() { all_keys.push((k.to_string(), obj.size().unwrap_or_default())); }
-                    }
+        // Stream keys directly from the paginator without materializing all results
+        let keys_stream = stream::unfold(pager, |mut p| async move {
+                match p.next().await {
+                    Some(Ok(page)) => {
+                        let items: Vec<(String, i64)> = page.contents
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter_map(|obj| {
+                                obj.key().map(|k| (k.to_string(), obj.size().unwrap_or_default()))
+                            })
+                            .collect();
+                        Some((stream::iter(items), p))
+                    },
+                    _ => None,
                 }
-            }
-        }
-
-        let keys_stream = stream::iter(all_keys.into_iter())
+            })
+            .flatten()
             .filter(move |(key, _size)| {
                 let offsets = offsets_clone.clone();
                 let ns = s3_bucket_filter.clone();
@@ -255,15 +262,18 @@ impl DataSourceS3Plugin {
         let s3_client_clone = self.s3_client.clone();
         let mem_sem_clone = mem_sem.clone();
         let dl_sem_clone = dl_sem.clone();
+        let inflate_ratio_clone = inflate_ratio;
         let mut download_stream = keys_stream.map(move |(key, size_bytes)| {
             let s3 = s3_client_clone.clone();
             let bucket = s3_bucket_dl.clone();
             let mem = mem_sem_clone.clone();
             let dl_ctrl = dl_sem_clone.clone();
+            let inflate_ratio = inflate_ratio_clone;
             async move {
-                // Acquire permits roughly equal to MiB of object size (min 1)
-                let permits: u32 = (((std::cmp::max(1i64, size_bytes) as u64) + 1_048_575) / 1_048_576) as u32;
-                let p = mem.acquire_many_owned(permits).await.ok();
+                // Acquire permits for estimated decompressed MiB (min 1)
+                let est_uncompressed_bytes: u64 = (std::cmp::max(1i64, size_bytes) as u64).saturating_mul(inflate_ratio as u64);
+                let permits: u32 = ((est_uncompressed_bytes + 1_048_575) / 1_048_576) as u32;
+                let p = mem.clone().acquire_many_owned(permits.max(1)).await.ok();
                 let p_dl = dl_ctrl.acquire_owned().await.ok();
                 let res = DataSourceS3Plugin::download_s3_object_with_backoff(&s3, &bucket, &key).await;
                 let out = match res {
@@ -279,8 +289,19 @@ impl DataSourceS3Plugin {
                                 let mut decompressed = String::new();
                                 stream.read_to_string(&mut decompressed).map(|_| decompressed)
                             }).await;
-                            match res { Ok(Ok(s)) => Some(s), _ => None }
-                    } else {
+                            match res {
+                                Ok(Ok(s)) => {
+                                    // Top-up permits if actual size exceeded estimate
+                                    let actual_bytes = s.len() as u64;
+                                    if actual_bytes > est_uncompressed_bytes {
+                                        let extra = ((actual_bytes - est_uncompressed_bytes) + 1_048_575) / 1_048_576;
+                                        let _ = mem.clone().acquire_many_owned(extra as u32).await.ok();
+                                    }
+                                    Some(s)
+                                },
+                                _ => None
+                            }
+                        } else {
                             String::from_utf8(data_vec).ok()
                         };
                         decoded.map(|s| (key, s))
