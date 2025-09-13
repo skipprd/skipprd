@@ -1403,6 +1403,16 @@ impl Ingest {
                 let template = create_default_nested_message(&ns_meta.fields);
                 DEFAULT_NESTED_MESSAGE.write().insert(skpr_namespace.to_string(), template);
             }
+            // Kick schema sync (e.g., create/update Glue tables) on first publish and subsequent true updates
+            if crate::helpers::configuration::Config::get_pipeline_output_plugin_name() == "Athena" {
+                let md_clone: std::collections::HashMap<String, Metadata> = metadata.clone();
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn(async move { crate::helpers::configuration::Config::sync_schema(&md_clone).await; });
+                } else {
+                    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+                    rt.spawn(async move { crate::helpers::configuration::Config::sync_schema(&md_clone).await; });
+                }
+            }
         }
 
         // Bump schema version for this namespace AFTER updating schema and template
