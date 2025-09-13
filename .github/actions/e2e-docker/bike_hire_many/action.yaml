@@ -28,8 +28,6 @@ runs:
           -e AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} \
           -e AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} \
           -e AWS_DEFAULT_REGION=us-east-1 \
-          -e SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output \
-          -e TENANT_ID=skippr \
           -e SKIPPR_CONFIG_FILE=/foo/skippr.yml \
           -v `pwd`/.github/actions/e2e-docker/bike_hire_many/:/foo/ \
           ./skippr-${{ inputs.architecture_name }}/skippr discover --pipeline bike_hire_many
@@ -37,8 +35,6 @@ runs:
           -e AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} \
           -e AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} \
           -e AWS_DEFAULT_REGION=us-east-1 \
-          -e SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output \
-          -e TENANT_ID=skippr \
           -e SKIPPR_CONFIG_FILE=/foo/skippr.yml \
           -v `pwd`/.github/actions/e2e-docker/bike_hire_many/:/foo/ \
           skippr/skippr:latest sync --pipeline bike_hire_many

@@ -24,7 +24,7 @@ runs:
         
         AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-${{ inputs.architecture_name }}/skippr discover --pipeline bike_hire_many
         
-        SKIPPR_CHAOS_MODE=no AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-${{ inputs.architecture_name }}/skippr sync --pipeline bike_hire_many
+        AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-${{ inputs.architecture_name }}/skippr sync --pipeline bike_hire_many
 
 
     - name: Asset Athena

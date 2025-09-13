@@ -23,7 +23,7 @@ runs:
         
         ls -la ./
         
-        SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output TENANT_ID=skippr AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-${{ inputs.architecture_name }}/skippr discover --pipeline bike_hire
+        AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-${{ inputs.architecture_name }}/skippr discover --pipeline bike_hire
         ./skippr-${{ inputs.architecture_name }}/skippr query --sql "ENABLE PIPELINE bike_hire"
         
 
@@ -62,7 +62,7 @@ runs:
       shell: bash
       run: |
         if [[ "${{ inputs.architecture_name }}" == "linux_x86" || "${{ inputs.architecture_name }}" == "macos_arm64" || "${{ inputs.architecture_name }}" == "macos-x86" ]]; then
-          SKIPPR_S3_BUCKET=skippr-e2e-sample-data-output TENANT_ID=skippr AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 heaptrack ./skippr-${{ inputs.architecture_name }}/skippr sync --pipeline bike_hire
+          AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 heaptrack ./skippr-${{ inputs.architecture_name }}/skippr sync --pipeline bike_hire
           mv heaptrack.*.zst heaptrack_output.zst
         fi
 
