@@ -152,16 +152,8 @@ impl Buffers {
         let mut bytes: u64 = 0;
         let mut rows: u64 = 0;
 
-        let mut force_compact = false;
-        {
-            // Check disk bytes via atomic counter vs disk threshold (not per-partition file size)
-            let max_bytes = Config::get_pipeline_buffer_disk_threshold_bytes();
-            let bytes = WAL_BYTES_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
-            if bytes > (max_bytes - (max_bytes as f64 * 0.1) as u64) {
-                println!("Disk bytes {} of {} bytes, compacting all partitions", bytes, max_bytes);
-                force_compact = true;
-            }
-        }
+        // Removed global disk-cap compaction check; compaction is governed per-namespace by
+        // BUFFER_THRESHOLD_BYTES and BUFFER_THRESHOLD_SECONDS in WalPartition::check_wal_rotate.
 
         // println!("Flushing {} WAL files", self.buf.len());
 

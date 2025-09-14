@@ -1125,32 +1125,6 @@ impl Config {
         }
     }
 
-    pub fn get_pipeline_buffer_disk_threshold_bytes() -> u64 {
-        if Config::get_envcache("BUFFER_DISK_THRESHOLD_BYTES") != "" {
-            return Config::get_envcache("BUFFER_DISK_THRESHOLD_BYTES").parse::<u64>().unwrap()
-        } else {
-
-            let pipline = Config::get_pipeline_config();
-
-            // Low default to support AWS Lambda by default
-            let four_gb = "4294967296";
-
-            let default = Config::getenv("BUFFER_DISK_THRESHOLD_BYTES", four_gb).parse::<u64>().unwrap();
-
-            let buffer_disk_threshold_bytes = match pipline.buffer_disk_threshold_bytes.as_ref() {
-                Some(buffer_disk_threshold_bytes) => {
-                    buffer_disk_threshold_bytes
-                }
-                None => {
-                    &default
-                }
-            };
-
-            Config::set_evncache("BUFFER_DISK_THRESHOLD_BYTES", &buffer_disk_threshold_bytes.to_string());
-            buffer_disk_threshold_bytes.clone()
-        }
-    }
-
     pub fn get_pipeline_buffer_threshold_seconds() -> u64 {
         if Config::get_envcache("BUFFER_THRESHOLD_SECONDS") != "" {
             return Config::get_envcache("BUFFER_THRESHOLD_SECONDS").parse::<u64>().unwrap()
