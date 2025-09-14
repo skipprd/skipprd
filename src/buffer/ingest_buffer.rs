@@ -219,7 +219,10 @@ impl Buffers {
 
             // println!("Wrote records to WAL file: {}", wal_file.path.to_str().unwrap());
 
-            wal_file.flush()?;
+            // fsync only when WAL_STORAGE=disk; for s3 mode, we will upload and then delete local file
+            if wal_storage.eq_ignore_ascii_case("disk") {
+                wal_file.flush()?;
+            }
 
             wal_file.finish()?;
 
@@ -243,6 +246,8 @@ impl Buffers {
                                         offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
                                     });
                                     uploaded_bytes += wal_file.bytes;
+                                    // In s3 mode, remove local WAL immediately to reduce EBS pressure
+                                    let _ = std::fs::remove_file(&wal_file.path);
                                 }
                                 Err(e) => { println!("Failed to upload WAL {}: {}", key, e); should_index = false; }
                             }
