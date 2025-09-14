@@ -57,12 +57,77 @@ use arrow::datatypes;
 use arrow_schema::SchemaRef;
 use serde_derive::{Deserialize, Serialize};
 use tokio::runtime;
+use tokio::sync::{mpsc, oneshot};
 use crate::cli::{CLI_MODE, Mode};
 use crate::converters::skippr_arrow::convert_skippr_to_arrow;
 use crate::plugins::DataOutputPlugin;
 use std::collections::VecDeque;
 use rand::{random};
 use crate::buffer::wal_accumulator::{accumulate_map as wal_accumulate_map, ensure_running as wal_ensure_running};
+
+// Single-threaded slow-ingest queue to serialize metadata evolution and value coercion
+#[derive(Debug)]
+struct SlowIngestTask {
+    namespace: String,
+    record: Value,
+    flatten: bool,
+    resp_tx: oneshot::Sender<Result<Value, String>>,
+}
+
+static SLOW_INGEST_TX: once_cell::sync::OnceCell<mpsc::Sender<SlowIngestTask>> = once_cell::sync::OnceCell::new();
+
+fn ensure_slow_ingest_worker() {
+    if SLOW_INGEST_TX.get().is_some() { return; }
+    let (tx, mut rx) = mpsc::channel::<SlowIngestTask>(10_000);
+    let _ = SLOW_INGEST_TX.set(tx);
+    // Spawn single worker
+    let worker = async move {
+        while let Some(task) = rx.recv().await {
+            // Serialize evolution: take per-namespace lock to reduce contention
+            let ns_lock = EVOLUTION_LOCKS.entry(task.namespace.clone()).or_insert_with(|| Arc::new(std::sync::Mutex::new(()))).clone();
+            let _guard = ns_lock.lock().unwrap();
+            // Evolve against global METADATA snapshot
+            let mut md_local = METADATA.load().as_ref().clone();
+            let result = (|| {
+                if let Some(ns_meta) = md_local.metadata.get_mut(&task.namespace) {
+                    let mut updated = "no".to_string();
+                    match ingest(&task.record, &mut ns_meta.fields, &task.namespace, &mut updated, task.flatten) {
+                        Ok(mut v) => {
+                            if updated == "yes" {
+                                METADATA.store(Arc::new(md_local.clone()));
+                                // Refresh Arrow schema (monotonic guard applies inside)
+                                let _ = Ingest::prepare_arrow_schema_with_metadata(&task.namespace, &md_local.metadata, task.flatten);
+                            }
+                            Ok(v)
+                        }
+                        Err(e) => Err(e.to_string()),
+                    }
+                } else {
+                    Err(format!("No metadata for namespace {}", task.namespace))
+                }
+            })();
+            let _ = task.resp_tx.send(result);
+        }
+    };
+    if let Ok(handle) = runtime::Handle::try_current() {
+        handle.spawn(worker);
+    } else {
+        std::thread::spawn(|| {
+            let rt = runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+            rt.block_on(worker);
+        });
+    }
+}
+
+fn slow_ingest_blocking(namespace: &str, record: &Value, flatten: bool) -> Result<Value, String> {
+    ensure_slow_ingest_worker();
+    let tx = SLOW_INGEST_TX.get().expect("slow ingest channel unavailable").clone();
+    let (resp_tx, resp_rx) = oneshot::channel();
+    let task = SlowIngestTask { namespace: namespace.to_string(), record: record.clone(), flatten, resp_tx };
+    // Send and wait
+    if let Err(_e) = tx.blocking_send(task) { return Err("Slow ingest worker unavailable".to_string()); }
+    resp_rx.blocking_recv().unwrap_or_else(|_| Err("Slow ingest response dropped".to_string()))
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Deadletter {
@@ -1111,30 +1176,15 @@ impl Ingest {
                     let mut record_value = match msg {
                         Ok(msg) => msg,
                         Err(_err) => {
-                            // Slow-path: evolve locally via ingest() and update schema in-memory
-                            let mut md_local = METADATA.load().as_ref().clone();
-                            let ns_fields_opt = md_local.metadata.get_mut(&skpr_namespace).map(|m| &mut m.fields);
-                            if let Some(ns_fields) = ns_fields_opt {
-                                let mut updated = "no".to_string();
-                                match ingest(&record, ns_fields, &skpr_namespace, &mut updated, flatten) {
-                                    Ok(v) => {
-                                        if updated == "yes" {
-                                            METADATA.store(Arc::new(md_local.clone()));
-                                            let _ = Ingest::prepare_arrow_schema_with_metadata(&skpr_namespace, &md_local.metadata, flatten);
-                                            if Config::log_wal_enabled() { println!("Ingest: schema evolved for ns={} (per-record)", skpr_namespace); }
-                                        }
-                                        v
-                                    },
-                                    Err(e) => {
-                                        if Config::log_wal_enabled() { println!("Ingest: slow-path failed ns={} err={}", skpr_namespace, e); }
-                                        let dl = Deadletter { namespace: skpr_namespace.clone(), partition: skpr_partition.clone(), time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(), error: e.to_string(), records: record.to_string() };
-                                        Self::deadletter(dl);
-                                        Value::Null
-                                    }
+                            // Route to single-threaded slow-ingest queue to serialize evolution
+                            match slow_ingest_blocking(&skpr_namespace, &record, flatten) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    if Config::log_wal_enabled() { println!("Ingest: slow-path failed ns={} err={}", skpr_namespace, e); }
+                                    let dl = Deadletter { namespace: skpr_namespace.clone(), partition: skpr_partition.clone(), time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(), error: e.to_string(), records: record.to_string() };
+                                    Self::deadletter(dl);
+                                    Value::Null
                                 }
-                            } else {
-                                if Config::log_wal_enabled() { println!("Ingest: namespace missing in metadata ns={}", skpr_namespace); }
-                                Value::Null
                             }
                         }
                     };
@@ -1249,66 +1299,37 @@ impl Ingest {
             let values_ref: Vec<&serde_json::Value> = entry.records.iter().map(|r| &r.record).collect();
             if values_ref.is_empty() { continue; }
 
-            // First attempt using current snapshot schema
+            // First attempt using current snapshot schema (should succeed after serialized evolution)
             if let Some(batches) = try_serialize(entry.schema.clone(), &values_ref) {
                 entry.record_batches = Some(batches);
                 entry.records.clear();
                 continue;
             }
 
-            // Fallback: slow-path ingest for the entire batch to evolve schema if needed
+            // Fallback: route each record through the single-threaded slow-ingest queue
             let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.or(Some("no".to_string())).unwrap());
             let skpr_namespace = entry._namespace.clone();
-
-            let mut metadata = METADATA.load().as_ref().clone();
-            let mut updated_schema_flag = "no".to_string();
-            let mut any_changed = false;
             let mut persistent_error: Option<String> = None;
             for rec in entry.records.iter_mut() {
-                let fields_ref_opt = metadata.metadata.get_mut(&skpr_namespace).map(|m| &mut m.fields);
-                match fields_ref_opt {
-                    None => { persistent_error = Some(format!("No metadata for namespace {} during slow-path ingest", skpr_namespace)); break; }
-                    Some(fields_ref) => match ingest(
-                        &rec.record,
-                        fields_ref,
-                        &skpr_namespace,
-                        &mut updated_schema_flag,
-                        flatten,
-                    ) {
-                        Ok(msg2) => { rec.record = msg2; any_changed = true; },
-                        Err(e2) => { persistent_error = Some(e2.to_string()); break; }
-                    }
+                match slow_ingest_blocking(&skpr_namespace, &rec.record, flatten) {
+                    Ok(v) => { rec.record = v; },
+                    Err(e) => { persistent_error = Some(e); break; }
                 }
             }
 
             if let Some(err) = persistent_error {
-                // Deadletter entire batch and skip further processing for this entry
                 let joined = entry.records.iter().map(|r| r.record.to_string()).collect::<Vec<String>>().join("\n");
                 let dl = Deadletter { namespace: skpr_namespace.clone(), partition: entry._partition.clone(), time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(), error: err, records: joined };
                 Self::deadletter(dl);
                 continue;
             }
 
-            if any_changed {
-                // Always update in-memory metadata and Arrow schema so this run can serialize
-                METADATA.store(Arc::new(metadata.clone()));
-                // Persist only if auto-approve is enabled
-                if Config::get_auto_approve() {
-                    match runtime::Handle::try_current() {
-                        Ok(h) => { h.block_on(async { Config::set_metadata(&metadata, true).await; }); },
-                        Err(_) => {
-                            let rt = runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
-                            rt.block_on(async { Config::set_metadata(&metadata, true).await; });
-                        }
-                    }
-                }
-                let _ = Ingest::prepare_arrow_schema_with_metadata(&skpr_namespace, &metadata.metadata, flatten);
-                if let Some(swap) = ARROW_SCHEMA.get(&skpr_namespace) {
-                    entry.schema = Arc::clone(&swap.value().load());
-                    let shard_version = ARROW_SCHEMA_VERSION.get(&skpr_namespace).map(|v| v.value().load(Ordering::Relaxed)).unwrap_or(0);
-                    let hash = format!("{}", shard_version);
-                    schema_hashes.insert(skpr_namespace.clone(), SchemaHash { schema: entry.schema.clone(), hash });
-                }
+            // Ensure entry.schema points to latest prepared schema for the namespace
+            if let Some(swap) = ARROW_SCHEMA.get(&skpr_namespace) {
+                entry.schema = Arc::clone(&swap.value().load());
+                let shard_version = ARROW_SCHEMA_VERSION.get(&skpr_namespace).map(|v| v.value().load(Ordering::Relaxed)).unwrap_or(0);
+                let hash = format!("{}", shard_version);
+                schema_hashes.insert(skpr_namespace.clone(), SchemaHash { schema: entry.schema.clone(), hash });
             }
 
             // Retry batch serialization once with potentially evolved schema
