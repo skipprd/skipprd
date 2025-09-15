@@ -32,9 +32,7 @@ static FIRST_SEEN: Lazy<DashMap<PartitionKey, Instant>> = Lazy::new(|| {
     DashMap::with_capacity(128)
 });
 // Per-partition EWMA of bytes per row
-static BYTES_PER_ROW: Lazy<DashMap<PartitionKey, AtomicU64>> = Lazy::new(|| {
-    DashMap::with_capacity(128)
-});
+// Deprecated: bytes-per-row EWMA was used for byte estimation; we now track actual batch memory
 
 pub async fn ensure_running_async(offsets: Arc<Offsets>, output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>) {
     let _ = OFFSETS_CELL.set(offsets);
@@ -92,7 +90,6 @@ pub fn accumulate_map(map: HashMap<PartitionKey, IngestBufferBatch>) {
         match ACCUMULATOR.entry(k.clone()) {
             Entry::Occupied(mut occ) => {
                 let existing = occ.get_mut();
-                existing.records.append(&mut v.records);
                 if let Some(mut vb) = v.record_batches.take() {
                     if let Some(ref mut eb) = existing.record_batches {
                         eb.append(&mut vb);
@@ -116,26 +113,21 @@ pub fn accumulate_map(map: HashMap<PartitionKey, IngestBufferBatch>) {
             BYTES.entry(k.clone()).or_insert_with(|| AtomicU64::new(0));
         }
 
-        // Estimate added bytes based on rows newly added in this call.
-        let added_rows: u64 = {
-            let mut rows = 0u64;
-            // Note: `v` has been moved into ACCUMULATOR. To approximate added rows,
-            // read from ACCUMULATOR and sum rows in record_batches if present; otherwise use records len.
-            if let Some(acc) = ACCUMULATOR.get(&k) {
-                if let Some(ref batches) = acc.record_batches {
-                    rows = batches.iter().map(|b| b.num_rows() as u64).sum();
-                }
-                rows = rows.saturating_add(acc.records.len() as u64);
+        // Estimate added bytes strictly from materialized Arrow RecordBatches
+        let mut added_est_bytes: u64 = 0;
+        if let Some(acc) = ACCUMULATOR.get(&k) {
+            if let Some(ref batches) = acc.record_batches {
+                let batch_bytes: u64 = batches
+                    .iter()
+                    .map(|b| b.get_array_memory_size() as u64)
+                    .sum();
+                added_est_bytes = added_est_bytes.saturating_add(batch_bytes);
             }
-            rows
-        };
-        let est_bpr = BYTES_PER_ROW
-            .get(&k)
-            .map(|v| v.load(Ordering::Relaxed))
-            .unwrap_or(DEFAULT_BYTES_PER_ROW);
-        let added = est_bpr.saturating_mul(added_rows);
-        if let Some(bytes_counter) = BYTES.get(&k) {
-            bytes_counter.fetch_add(added, Ordering::Relaxed);
+        }
+        if added_est_bytes > 0 {
+            if let Some(bytes_counter) = BYTES.get(&k) {
+                bytes_counter.fetch_add(added_est_bytes, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -186,15 +178,4 @@ async fn flush_ready() {
         if Config::log_wal_enabled() { println!("WAL accumulator: invoking Buffers::flush"); }
         let _ = to_flush.flush(offsets.clone(), output.clone()).await;
     }
-}
-
-// Public: update EWMA bytes-per-row after WAL serialization (actual sizes known)
-pub fn wal_feedback_bytes_per_row(partition_key: &PartitionKey, actual_bytes: u64, actual_rows: u64) {
-    if actual_rows == 0 || actual_bytes == 0 { return; }
-    let sample = actual_bytes / actual_rows;
-    let entry = BYTES_PER_ROW.entry(partition_key.clone()).or_insert_with(|| AtomicU64::new(sample));
-    let prev = entry.load(Ordering::Relaxed);
-    // alpha=0.2 -> new = 0.8*prev + 0.2*sample
-    let new_est = if prev == 0 { sample } else { ((prev.saturating_mul(8)) + (sample.saturating_mul(2))) / 10 };
-    entry.store(new_est.max(1), Ordering::Relaxed);
 }

@@ -1014,6 +1014,8 @@ impl Ingest {
         };
         
         let mut buf: HashMap<(String, String, Option<i64>, String), IngestBufferBatch> = HashMap::with_capacity(32);
+        // Temporary storage for raw JSON records prior to Arrow batch building
+        let mut raw_values: HashMap<(String, String, Option<i64>, String), Vec<IngestRecord>> = HashMap::with_capacity(32);
 
         let pipeline_name_cached = Config::get_pipeline_name();
         for ingest_batch in datas.iter() {
@@ -1208,12 +1210,13 @@ impl Ingest {
                     let md = METADATA.load();
                     let schema_hash = Ingest::load_stable_schema_hash(&skpr_namespace, &md.metadata, flatten);
 
-                    let buf_entry = buf.entry((
+                    let key = (
                         skpr_namespace.clone(),
                         skpr_partition.clone(),
                         skpr_time_bucket.clone(),
                         schema_hash.hash
-                    )).or_insert_with(|| {
+                    );
+                    let buf_entry = buf.entry(key.clone()).or_insert_with(|| {
 
                         // Ensure schema is prepared and visible before creating first batch for this namespace
                         {
@@ -1234,7 +1237,6 @@ impl Ingest {
                             _partition: skpr_partition.clone(),
                             _time: skpr_time_bucket,
                             _shard: "".to_string(),
-                            records: Vec::with_capacity(1024),
                             schema: schema_hash.schema,
                             record_batches: None,
                         }
@@ -1242,7 +1244,7 @@ impl Ingest {
                     
                     // an ingest batch consist of many small files/queue messages, etc. Each will need its offset committed in the WAL.
                     buf_entry.offsets.insert(ingest_batch.offset_key.clone(), batch_line);
-                    buf_entry.records.push(ingest_record);
+                    raw_values.entry(key).or_insert_with(|| Vec::with_capacity(1024)).push(ingest_record);
 
                     _j += 1;
                     
@@ -1265,7 +1267,8 @@ impl Ingest {
 
         // Serialize each entry's normalized JSON into Arrow RecordBatches eagerly (all-or-nothing per batch)
         // If serialization fails, re-ingest entire batch via slow path to evolve schema and retry once
-        for ((_ns, _part, _time, _hash), entry) in buf.iter_mut() {
+        for (k, entry) in buf.iter_mut() {
+            let records_vec = raw_values.remove(k).unwrap_or_default();
             // Seed schema for brand-new namespaces with inferred specs from this entry
             let ns = entry._namespace.clone();
             let md_snapshot = METADATA.load();
@@ -1274,7 +1277,7 @@ impl Ingest {
             if is_empty_ns {
                 let ns_md = METADATA.load().metadata.get(&ns).cloned().unwrap_or(Metadata::new().unwrap());
                 let mut specs = Vec::new();
-                let values_ref_seed: Vec<&serde_json::Value> = entry.records.iter().map(|r| &r.record).collect();
+                let values_ref_seed: Vec<&serde_json::Value> = records_vec.iter().map(|r| &r.record).collect();
                 for v in values_ref_seed.into_iter() { specs.extend(infer_specs_for_record(v, ns_md.fields.as_ref())); }
                 if !specs.is_empty() {
                     let proposal = EvolutionProposal { namespace: ns.clone(), fields: specs };
@@ -1296,13 +1299,12 @@ impl Ingest {
                 match decoder.flush() { Ok(Some(b)) => Some(vec![b]), _ => None }
             };
 
-            let values_ref: Vec<&serde_json::Value> = entry.records.iter().map(|r| &r.record).collect();
+            let values_ref: Vec<&serde_json::Value> = records_vec.iter().map(|r| &r.record).collect();
             if values_ref.is_empty() { continue; }
 
             // First attempt using current snapshot schema (should succeed after serialized evolution)
             if let Some(batches) = try_serialize(entry.schema.clone(), &values_ref) {
                 entry.record_batches = Some(batches);
-                entry.records.clear();
                 continue;
             }
 
@@ -1310,15 +1312,16 @@ impl Ingest {
             let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.or(Some("no".to_string())).unwrap());
             let skpr_namespace = entry._namespace.clone();
             let mut persistent_error: Option<String> = None;
-            for rec in entry.records.iter_mut() {
+            let mut fixed_records: Vec<serde_json::Value> = Vec::with_capacity(values_ref.len());
+            for rec in records_vec.iter() {
                 match slow_ingest_blocking(&skpr_namespace, &rec.record, flatten) {
-                    Ok(v) => { rec.record = v; },
+                    Ok(v) => { fixed_records.push(v); },
                     Err(e) => { persistent_error = Some(e); break; }
                 }
             }
 
             if let Some(err) = persistent_error {
-                let joined = entry.records.iter().map(|r| r.record.to_string()).collect::<Vec<String>>().join("\n");
+                let joined = values_ref.iter().map(|r| r.to_string()).collect::<Vec<String>>().join("\n");
                 let dl = Deadletter { namespace: skpr_namespace.clone(), partition: entry._partition.clone(), time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(), error: err, records: joined };
                 Self::deadletter(dl);
                 continue;
@@ -1333,13 +1336,12 @@ impl Ingest {
             }
 
             // Retry batch serialization once with potentially evolved schema
-            let values_ref2: Vec<&serde_json::Value> = entry.records.iter().map(|r| &r.record).collect();
+            let values_ref2: Vec<&serde_json::Value> = if fixed_records.is_empty() { records_vec.iter().map(|r| &r.record).collect() } else { fixed_records.iter().collect() };
             if let Some(batches) = try_serialize(entry.schema.clone(), &values_ref2) {
                 entry.record_batches = Some(batches);
-                entry.records.clear();
             } else {
                 // Deadletter entire batch if still failing
-                let joined = entry.records.iter().map(|r| r.record.to_string()).collect::<Vec<String>>().join("\n");
+                let joined = values_ref2.iter().map(|r| r.to_string()).collect::<Vec<String>>().join("\n");
                 let dl = Deadletter { namespace: skpr_namespace.clone(), partition: entry._partition.clone(), time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(), error: "Arrow serialization failed after schema evolution".to_string(), records: joined };
                 Self::deadletter(dl);
                 if Config::log_wal_enabled() { println!("Batch serialize failed after retry: ns={} deadlettered", entry._namespace); }

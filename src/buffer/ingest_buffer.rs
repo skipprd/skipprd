@@ -34,6 +34,7 @@ use crate::plugins::DataOutputPlugin;
 use std::os::fd::AsRawFd;
 use aws_sdk_s3::primitives::ByteStream as S3ByteStream;
 use aws_sdk_s3::Client as S3Client;
+use bytes::Bytes;
 use once_cell::sync::OnceCell;
 use std::sync::atomic::AtomicBool;
 use tokio::time::{sleep as tokio_sleep, Duration as TokioDuration};
@@ -120,7 +121,6 @@ pub struct IngestBufferBatch {
     pub(crate) _partition: String,
     pub(crate) _time: Option<i64>,
     pub(crate) _shard: String,
-    pub(crate) records: Vec<IngestRecord>,
     pub(crate) schema: SchemaRef,
     pub(crate) record_batches: Option<Vec<RecordBatch>>,
 }
@@ -169,30 +169,16 @@ impl Buffers {
 
         for ((namespace, partition, time, shard), ingest_buffer_batch) in self.buf.iter_mut() {
             if Config::log_wal_enabled() {
-                println!("Buffers::flush: preparing partition ns={} part={} time={} shard={} records={} batches_prebuilt={}", namespace, partition, time.unwrap_or(0), shard, ingest_buffer_batch.records.len(), ingest_buffer_batch.record_batches.as_ref().map(|b| b.len()).unwrap_or(0));
+                println!("Buffers::flush: preparing partition ns={} part={} time={} shard={} batches_prebuilt={}", namespace, partition, time.unwrap_or(0), shard, ingest_buffer_batch.record_batches.as_ref().map(|b| b.len()).unwrap_or(0));
             }
 
-            // println!("Writing {} rows to WAL {} {} {} {}", ingest_buffer_batch.records.len(), namespace, partition, time.unwrap_or(0), shard);
+            // println!("Writing WAL for ns={} part={} time={} shard={}", namespace, partition, time.unwrap_or(0), shard);
 
             let partition_entry = partitions.entry((namespace.clone(), partition.clone(), time.clone(), shard.clone())).or_insert_with(|| Vec::with_capacity(1)); // Usually just one file per entry
             
             let arrow_schema = ingest_buffer_batch.schema.clone();
 
-            let mut record_batches = if let Some(b) = ingest_buffer_batch.record_batches.clone() { b } else {
-                let arrow_schema = ingest_buffer_batch.schema.clone();
-                let mut decoder = ReaderBuilder::new(arrow_schema).build_decoder().unwrap();
-                let mut record_batches = Vec::with_capacity(
-                    (ingest_buffer_batch.records.len() / 1000).max(1)
-                );
-                let json_values = ingest_buffer_batch.records.iter().map(|record| &record.record).collect::<Vec<&Value>>();
-                if Config::log_wal_enabled() { println!("Buffers::flush: serializing {} json values into Arrow batch", json_values.len()); }
-                decoder.serialize(&json_values).unwrap();
-                match decoder.flush() {
-                    Ok(Some(batch)) => { record_batches.push(batch); },
-                    _ => {}
-                }
-                record_batches
-            };
+            let mut record_batches = if let Some(b) = ingest_buffer_batch.record_batches.clone() { b } else { Vec::new() };
             
             if record_batches.is_empty() {
                 if Config::log_wal_enabled() { println!("Buffers::flush: no record batches produced for ns={} time={} shard={}, skipping write", namespace, time.unwrap_or(0), shard); }
@@ -200,89 +186,66 @@ impl Buffers {
                 continue;
             }
 
-            let mut wal_file = WalFile::new(
-                namespace,
-                partition,
-                *time,
-                shard,
-                ingest_buffer_batch.offsets.clone(),
-            )?;
-
-
-            // println!("WAL File {} offset: {:?}", wal_file.path.to_str().unwrap(), ingest_buffer_batch.offset);
-            
-            let stat = wal_file.write_to_stream(&record_batches)?;
-            if Config::log_wal_enabled() { println!("Buffers::flush: wrote WAL bytes={} rows={} to {}", stat.0, stat.1, wal_file.path.to_string_lossy()); }
-
-            bytes += stat.0;
-            rows += stat.1;
-
-            // println!("Wrote records to WAL file: {}", wal_file.path.to_str().unwrap());
-
-            // fsync only when WAL_STORAGE=disk; for s3 mode, we will upload and then delete local file
-            if wal_storage.eq_ignore_ascii_case("disk") {
-                wal_file.flush()?;
-            }
-
-            wal_file.finish()?;
-
-            // Upload WAL to S3 (or keep on disk) and commit offsets upon durable write
             let mut should_index = true;
             if wal_storage.eq_ignore_ascii_case("s3") {
-                let rel = wal_file.path.to_string_lossy().replace(&wal_base, "").trim_start_matches('/').to_string();
-                let key = if wal_prefix.is_empty() { rel.clone() } else { format!("{}/{}", wal_prefix, rel) };
                 if let Some(s3) = &s3_opt {
-                    match S3ByteStream::from_path(&wal_file.path).await {
-                        Ok(body) => {
-                            match s3.put_object().bucket(&wal_bucket).key(&key).body(body).send().await {
-                                Ok(_) => {
-                                    if Config::debug_enabled() || Config::log_wal_enabled() {
-                                        println!("Uploaded WAL to s3://{}/{} (ns={},part={},time={},shard={})", wal_bucket, key, namespace, partition, time.unwrap_or(0), shard);
-                                    }
-                                    // commit offsets now
-                                    wal_file.offsets.iter().for_each(|(offset, position)| {
-                                        let offset_key = OffsetKey { namespace: offset.namespace.clone(), partition: offset.partition.clone() };
-                                        offsets_db.insert(&offset_key, OffsetTypes::Position, *position);
-                                        offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
-                                    });
-                                    uploaded_bytes += wal_file.bytes;
-                                    // In s3 mode, remove local WAL immediately to reduce EBS pressure
-                                    let _ = std::fs::remove_file(&wal_file.path);
-                                }
-                                Err(e) => { println!("Failed to upload WAL {}: {}", key, e); should_index = false; }
+                    match WalStream::write_to_stream(
+                        s3,
+                        &wal_bucket,
+                        &wal_prefix,
+                        &wal_base,
+                        namespace,
+                        partition,
+                        *time,
+                        shard,
+                        &record_batches,
+                        &ingest_buffer_batch.offsets,
+                    ).await {
+                        Ok((wal_file, stat_rows, stat_bytes)) => {
+                            if Config::debug_enabled() || Config::log_wal_enabled() {
+                                println!("Uploaded WAL to s3 (ns={},part={},time={},shard={})", namespace, partition, time.unwrap_or(0), shard);
                             }
+                            ingest_buffer_batch.offsets.iter().for_each(|(offset, position)| {
+                                let offset_key = OffsetKey { namespace: offset.namespace.clone(), partition: offset.partition.clone() };
+                                offsets_db.insert(&offset_key, OffsetTypes::Position, *position);
+                                offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
+                            });
+                            rows += stat_rows;
+                            bytes += stat_bytes;
+                            partition_entry.push(wal_file);
                         }
-                        Err(e) => { println!("Failed to stream WAL for upload {}: {}", wal_file.path.to_string_lossy(), e); should_index = false; }
+                        Err(_e) => { should_index = false; }
                     }
                 } else { should_index = false; }
             } else {
-                // disk storage: commit offsets after local fsync+rename
+                // Disk mode: use local WAL file path
+                let mut wal_file = WalFile::new(
+                    namespace,
+                    partition,
+                    *time,
+                    shard,
+                    ingest_buffer_batch.offsets.clone(),
+                )?;
+                let stat = wal_file.write_to_stream(&record_batches)?;
+                if wal_storage.eq_ignore_ascii_case("disk") { wal_file.flush()?; }
+                wal_file.finish()?;
                 wal_file.offsets.iter().for_each(|(offset, position)| {
                     let offset_key = OffsetKey { namespace: offset.namespace.clone(), partition: offset.partition.clone() };
                     offsets_db.insert(&offset_key, OffsetTypes::Position, *position);
                     offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
                 });
                 uploaded_bytes += wal_file.bytes;
+                bytes += stat.0;
+                rows += stat.1;
+                if should_index { partition_entry.push(wal_file); }
             }
-
-            if should_index { partition_entry.push(wal_file); }
 
         }
 
         metrics_hot::add_wal_write_bytes(bytes);
         metrics_hot::add_wal_write_rows(rows);
 
-        // Feedback actual bytes-per-row to the accumulator EWMA per drained partition
-        if rows > 0 && bytes > 0 {
-            for ((namespace, partition, time, shard), wal_files) in partitions.iter() {
-                let part_key = (namespace.clone(), partition.clone(), time.clone(), shard.clone());
-                // Sum actual bytes/rows for this partition in this flush cycle
-                let part_bytes: u64 = wal_files.iter().map(|wf| wf.bytes).sum();
-                // Use rows proportionally by file sizes; fallback to global rows if needed
-                let part_rows: u64 = rows; // best-effort, batches were built from same records set
-                crate::buffer::wal_accumulator::wal_feedback_bytes_per_row(&part_key, part_bytes, part_rows);
-            }
-        }
+        // Removed bytes-per-row EWMA feedback; accumulator now relies on actual RecordBatch memory sizes
 
         // offsets_db.flush();
 
@@ -1176,6 +1139,77 @@ pub struct WalFile {
     pub(crate) file: Arc<TimedRwLock<Option<File>>>,
     pub(crate) updated_at: SystemTime,
     pub(crate) offsets: HashMap<OffsetKey, u64>,
+}
+
+#[derive(Clone)]
+struct WalStream {
+    pub(crate) namespace: String,
+    pub(crate) partition: String,
+    pub(crate) time: Option<i64>,
+    pub(crate) shard: String,
+    pub(crate) bytes: u64,
+    pub(crate) offsets: HashMap<OffsetKey, u64>,
+}
+
+impl WalStream {
+    async fn write_to_stream(
+        s3: &S3Client,
+        bucket: &str,
+        wal_prefix: &str,
+        wal_base: &str,
+        namespace: &str,
+        partition: &str,
+        time: Option<i64>,
+        shard: &str,
+        record_batches: &Vec<RecordBatch>,
+        offsets: &HashMap<OffsetKey, u64>,
+    ) -> Result<(WalFile, u64, u64), ArrowError> {
+        // Build offsets header
+        let bin_offset = bincode::serialize(offsets).unwrap();
+        let mut buffer: Vec<u8> = Vec::with_capacity(8 + bin_offset.len() + record_batches.iter().map(|b| b.get_array_memory_size()).sum::<usize>());
+        let offset_size_le = (bin_offset.len() as u64).to_le_bytes();
+        use std::io::Write as IoWrite;
+        buffer.write_all(&offset_size_le).unwrap();
+        buffer.write_all(&bin_offset).unwrap();
+        // Write Arrow stream
+        let codec = Some(CompressionType::LZ4_FRAME);
+        let options = IpcWriteOptions::default().try_with_compression(codec)?;
+        {
+            let mut stream_writer = StreamWriter::try_new_with_options(&mut buffer, &record_batches[0].schema(), options)?;
+            for batch in record_batches.iter() { stream_writer.write(batch).expect("Failed to write batch to Arrow stream"); }
+            stream_writer.finish()?;
+        }
+        let total_bytes = buffer.len() as u64;
+        let body = S3ByteStream::from(Bytes::from(buffer));
+        // Determine S3 key deterministically
+        let base_name = BufferChunker::encode_chunk_name("ingest", Some(namespace), Some(partition), time, Some(shard));
+        let file_name = format!("{}&id={}.wal", base_name, Helpers::random_str(32));
+        let rel = format!("{}/{}", shard, file_name);
+        let key = if wal_prefix.is_empty() { rel.clone() } else { format!("{}/{}", wal_prefix, rel) };
+        // Upload
+        match s3.put_object().bucket(bucket).key(&key).body(body).send().await {
+            Ok(_) => {
+                let wf_path = std::path::PathBuf::from(format!("{}/{}", wal_base, rel));
+                let wal_file = WalFile {
+                    path: wf_path,
+                    namespace: namespace.to_string(),
+                    partition: partition.to_string(),
+                    time,
+                    shard: shard.to_string(),
+                    bytes: total_bytes,
+                    file: Arc::new(TimedRwLock::new("wal_file".to_string(), None)),
+                    updated_at: SystemTime::now(),
+                    offsets: offsets.clone(),
+                };
+                let rows: u64 = record_batches.iter().map(|b| b.num_rows() as u64).sum();
+                Ok((wal_file, rows, total_bytes))
+            }
+            Err(e) => {
+                println!("Failed to upload WAL {}: {}", key, e);
+                Err(ArrowError::IoError("Failed to upload WAL".to_string(), std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
+            }
+        }
+    }
 }
 
 impl WalFile {
