@@ -17,6 +17,8 @@ use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
 use bincode;
 use datafusion::physical_plan::memory::MemoryStream;
 use datafusion::physical_plan::SendableRecordBatchStream;
+use datafusion::physical_plan::RecordBatchStream;
+use datafusion::error::DataFusionError;
 use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
 use indexmap::IndexMap;
 use once_cell::sync::Lazy;
@@ -41,6 +43,7 @@ use tokio::time::{sleep as tokio_sleep, Duration as TokioDuration};
 use futures::stream::StreamExt as FuturesStreamExt;
 use std::future::Future;
 use std::pin::Pin;
+use std::task::{Context as TaskContext, Poll as TaskPoll};
 use crate::ARROW_SCHEMA;
 use dashmap::DashMap;
 use std::sync::atomic::Ordering as AtomicOrdering;
@@ -48,6 +51,7 @@ use crate::buffer::wal_accumulator::PartitionKey;
 use rand::{thread_rng, Rng};
 use aws_sdk_s3::error::SdkError as S3SdkError;
 use aws_sdk_s3::operation::get_object::{GetObjectError, GetObjectOutput};
+use tokio::sync::mpsc;
 
 #[allow(dead_code)]
 pub static TOTAL_ROWS: Lazy<TimedRwLock<AtomicU64>> =
@@ -64,7 +68,7 @@ static FORCE_COMPACT_ONCE: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false
 //     pub static ref WAL_INDEX: TimedRwLock<WalIndex> = TimedRwLock::new("wal_index".to_string(), WalIndex::new());
 // }
 
-// Moved into WalStream as read_from_stream()
+// Moved into WalS3Object as read_from_stream()
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 pub struct OffsetKeySerialize {
@@ -155,7 +159,7 @@ impl Buffers {
             let mut should_index = true;
             if wal_storage.eq_ignore_ascii_case("s3") {
                 if let Some(s3) = &s3_opt {
-                    match WalStream::write_to_stream(
+                    match WalS3Object::write_to_stream(
                         s3,
                         &wal_bucket,
                         &wal_prefix,
@@ -817,7 +821,7 @@ impl WalPartition {
             if let (Some(s3c), Some(first)) = (s3.as_ref(), self.files.first()) {
                 let rel = first.path.to_string_lossy().replace(&base, "").trim_start_matches('/').to_string();
                 let key = if wal_prefix.is_empty() { rel.clone() } else { format!("{}/{}", wal_prefix, rel) };
-                match WalStream::read_from_stream(s3c, &wal_bucket, &key).await {
+                match WalS3Object::read_from_stream(s3c, &wal_bucket, &key).await {
                     Ok(resp) => {
                         let bytes = resp.body.collect().await.unwrap().into_bytes();
                         use std::io::{Cursor, Seek};
@@ -840,95 +844,156 @@ impl WalPartition {
         };
 
 
-        // Read from disk when WAL_STORAGE=disk; read from S3 when WAL_STORAGE=s3
-        let mut batches: Vec<RecordBatch> = Vec::new();
-        for wal_file in self.files.iter_mut() {
-            wal_compacted_bytes_total += wal_file.bytes;
+        // Prepare a streaming RecordBatch source over WAL files to avoid pre-collecting all batches in memory
+        for wf in self.files.iter() {
+            wal_compacted_bytes_total += wf.bytes;
             wal_compacted_files_total += 1;
-            if storage.eq_ignore_ascii_case("disk") {
-                match wal_file.read_from_stream() {
-                    Ok(mut local_batches) => {
-                        // Enforce schema compatibility; skip mismatched batches defensively
-                        let mut kept: Vec<RecordBatch> = Vec::with_capacity(local_batches.len());
-                        for b in local_batches.drain(..) {
-                            if b.schema().as_ref() != schema.as_ref() {
-                                println!("Skipping WAL batch due to schema mismatch for ns={} part={} time={}", self.namespace, self.partition, self.time.unwrap_or(0));
-                                continue;
-                            }
-                            wal_compacted_rows_total += b.num_rows() as u64;
-                            kept.push(b);
-                        }
-                        batches.append(&mut kept);
-                    }
-                    Err(e) => { println!("Failed reading local WAL {}: {}", wal_file.path.to_string_lossy(), e); }
-                }
-            } else {
-                if let Some(s3c) = &s3 {
-                    let rel = wal_file.path.to_string_lossy().replace(&base, "").trim_start_matches('/').to_string();
-                    let key = if wal_prefix.is_empty() { rel.clone() } else { format!("{}/{}", wal_prefix, rel) };
-                    match WalStream::read_from_stream(s3c, &wal_bucket, &key).await {
-                        Ok(resp) => {
-                            let bytes = resp.body.collect().await.unwrap().into_bytes();
-                            use std::io::{Cursor, Seek};
-                            let mut cursor = Cursor::new(bytes);
+        }
+
+        let (tx, rx) = mpsc::channel::<Result<RecordBatch, DataFusionError>>(8);
+        let schema_clone = schema.clone();
+        let namespace = self.namespace.clone();
+        let partition = self.partition.clone();
+        let time_val = self.time;
+        let files = self.files.clone();
+        let delete_corrupt = Config::truth_value(&Config::getenv("DELETE_CORRUPT_WAL", "false"));
+        let row_counter = Arc::new(AtomicU64::new(0));
+        let row_counter_task = row_counter.clone();
+        let s3c_opt = s3.clone();
+        let wal_bucket_cloned = wal_bucket.clone();
+        let wal_prefix_cloned = wal_prefix.clone();
+        let base_cloned = base.clone();
+
+        let storage_clone = storage.clone();
+        tokio::spawn(async move {
+            for mut wal_file in files.into_iter() {
+                if storage_clone.eq_ignore_ascii_case("disk") {
+                    // Read from local file
+                    match OpenOptions::new().read(true).open(&wal_file.path) {
+                        Ok(file) => {
+                            let mut reader = io::BufReader::new(file);
+                            // Skip WAL offsets header
                             let mut offset_size = [0u8; 8];
-                            // Validate header presence
-                            if std::io::Read::read_exact(&mut cursor, &mut offset_size).is_err() {
-                                println!("Failed to read WAL offset header from S3 {}", key);
-                                if Config::truth_value(&Config::getenv("DELETE_CORRUPT_WAL", "false")) {
-                                    let _ = s3c.delete_object().bucket(&wal_bucket).key(&key).send().await;
-                                }
+                            if let Err(e) = reader.read_exact(&mut offset_size) {
+                                println!("Failed to read WAL header for {}: {}", wal_file.path.to_string_lossy(), e);
                                 continue;
                             }
                             let skip = u64::from_le_bytes(offset_size);
-                            // Validate we have at least skip bytes available
-                            let remaining = cursor.get_ref().len() as i64 - cursor.position() as i64;
-                            if remaining < skip as i64 {
-                                println!("Invalid WAL header for S3 {}: skip {} exceeds remaining {} bytes", key, skip, remaining);
-                                if Config::truth_value(&Config::getenv("DELETE_CORRUPT_WAL", "false")) {
-                                    let _ = s3c.delete_object().bucket(&wal_bucket).key(&key).send().await;
-                                }
+                            if let Err(e) = reader.seek(io::SeekFrom::Current(skip as i64)) {
+                                println!("Failed to seek WAL stream {}: {}", wal_file.path.to_string_lossy(), e);
                                 continue;
                             }
-                            let _ = std::io::Seek::seek(&mut cursor, io::SeekFrom::Current(skip as i64));
-                            match StreamReader::try_new(cursor, None) {
+                            match StreamReader::try_new(reader, None) {
                                 Ok(sr) => {
-                                    for batch_res in sr {
-                                        match batch_res {
+                                    for item in sr {
+                                        match item {
                                             Ok(batch) => {
-                                                if batch.schema().as_ref() != schema.as_ref() {
-                                                    println!("Skipping WAL batch from S3 due to schema mismatch for ns={} part={} time={}", self.namespace, self.partition, self.time.unwrap_or(0));
+                                                if batch.schema().as_ref() != schema_clone.as_ref() {
+                                                    println!("Skipping WAL batch due to schema mismatch for ns={} part={} time={}", namespace, partition, time_val.unwrap_or(0));
                                                     continue;
                                                 }
-                                                wal_compacted_rows_total += batch.num_rows() as u64; batches.push(batch);
-                                            },
+                                                row_counter_task.fetch_add(batch.num_rows() as u64, AtomicOrdering::Relaxed);
+                                                if tx.send(Ok(batch)).await.is_err() { break; }
+                                            }
                                             Err(e) => {
-                                                println!("Failed reading batch from S3 WAL {}: {}", key, e);
-                                                if Config::truth_value(&Config::getenv("DELETE_CORRUPT_WAL", "false")) {
-                                                    let _ = s3c.delete_object().bucket(&wal_bucket).key(&key).send().await;
-                                                }
+                                                let _ = tx.send(Err(DataFusionError::ArrowError(e, None))).await;
                                                 break;
                                             }
                                         }
                                     }
                                 }
                                 Err(e) => {
-                                    println!("Failed to init Arrow stream from S3 WAL {}: {}", key, e);
-                                    if Config::truth_value(&Config::getenv("DELETE_CORRUPT_WAL", "false")) {
-                                        let _ = s3c.delete_object().bucket(&wal_bucket).key(&key).send().await;
-                                    }
+                                    println!("Failed to init Arrow stream for local WAL {}: {}", wal_file.path.to_string_lossy(), e);
                                 }
                             }
                         }
-                        Err(e) => { println!("Failed to download WAL from S3 {}: {}", key, e); }
+                        Err(e) => {
+                            println!("Failed to open WAL file {}: {}", wal_file.path.to_string_lossy(), e);
+                        }
                     }
                 } else {
-                    println!("WAL_STORAGE is 's3' but S3 client not initialized; skipping file");
+                    // Read from S3
+                    if let Some(s3c) = &s3c_opt {
+                        let rel = wal_file.path.to_string_lossy().replace(&base_cloned, "").trim_start_matches('/').to_string();
+                        let key = if wal_prefix_cloned.is_empty() { rel.clone() } else { format!("{}/{}", wal_prefix_cloned, rel) };
+                        match WalS3Object::read_from_stream(s3c, &wal_bucket_cloned, &key).await {
+                            Ok(resp) => {
+                                let bytes = match resp.body.collect().await { Ok(b) => b.into_bytes(), Err(e) => { println!("Failed collecting S3 body {}: {}", key, e); continue; } };
+                                let mut cursor = std::io::Cursor::new(bytes);
+                                let mut offset_size = [0u8; 8];
+                                if std::io::Read::read_exact(&mut cursor, &mut offset_size).is_err() {
+                                    println!("Failed to read WAL offset header from S3 {}", key);
+                                    if delete_corrupt { let _ = s3c.delete_object().bucket(&wal_bucket_cloned).key(&key).send().await; }
+                                    continue;
+                                }
+                                let skip = u64::from_le_bytes(offset_size);
+                                let remaining = cursor.get_ref().len() as i64 - cursor.position() as i64;
+                                if remaining < skip as i64 {
+                                    println!("Invalid WAL header for S3 {}: skip {} exceeds remaining {} bytes", key, skip, remaining);
+                                    if delete_corrupt { let _ = s3c.delete_object().bucket(&wal_bucket_cloned).key(&key).send().await; }
+                                    continue;
+                                }
+                                let _ = std::io::Seek::seek(&mut cursor, io::SeekFrom::Current(skip as i64));
+                                match StreamReader::try_new(cursor, None) {
+                                    Ok(sr) => {
+                                        for batch_res in sr {
+                                            match batch_res {
+                                                Ok(batch) => {
+                                                    if batch.schema().as_ref() != schema_clone.as_ref() {
+                                                        println!("Skipping WAL batch from S3 due to schema mismatch for ns={} part={} time={}", namespace, partition, time_val.unwrap_or(0));
+                                                        continue;
+                                                    }
+                                                    row_counter_task.fetch_add(batch.num_rows() as u64, AtomicOrdering::Relaxed);
+                                                    if tx.send(Ok(batch)).await.is_err() { break; }
+                                                }
+                                                Err(e) => {
+                                                    println!("Failed reading batch from S3 WAL {}: {}", key, e);
+                                                    if delete_corrupt { let _ = s3c.delete_object().bucket(&wal_bucket_cloned).key(&key).send().await; }
+                                                    let _ = tx.send(Err(DataFusionError::ArrowError(e, None))).await;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        println!("Failed to init Arrow stream from S3 WAL {}: {}", key, e);
+                                        if delete_corrupt { let _ = s3c.delete_object().bucket(&wal_bucket_cloned).key(&key).send().await; }
+                                    }
+                                }
+                            }
+                            Err(e) => { println!("Failed to download WAL from S3 {}: {}", key, e); }
+                        }
+                    } else {
+                        println!("WAL_STORAGE is 's3' but S3 client not initialized; skipping file");
+                    }
+                }
+            }
+            // Close channel
+            drop(tx);
+        });
+
+        struct WalRecordBatchStream {
+            schema: SchemaRef,
+            rx: mpsc::Receiver<Result<RecordBatch, DataFusionError>>,
+        }
+
+        impl futures::Stream for WalRecordBatchStream {
+            type Item = Result<RecordBatch, DataFusionError>;
+            fn poll_next(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> TaskPoll<Option<Self::Item>> {
+                let inner = unsafe { self.get_unchecked_mut() };
+                match inner.rx.poll_recv(cx) {
+                    TaskPoll::Ready(Some(item)) => TaskPoll::Ready(Some(item)),
+                    TaskPoll::Ready(None) => TaskPoll::Ready(None),
+                    TaskPoll::Pending => TaskPoll::Pending,
                 }
             }
         }
 
-        let batch_stream: SendableRecordBatchStream = Box::pin(MemoryStream::try_new(batches, schema.clone(), None).unwrap());
+        impl RecordBatchStream for WalRecordBatchStream {
+            fn schema(&self) -> SchemaRef { self.schema.clone() }
+        }
+
+        let batch_stream: SendableRecordBatchStream = Box::pin(WalRecordBatchStream { schema: schema.clone(), rx });
 
 
         // (No re-upload here; WALs were uploaded earlier in flush prior to offset commit.)
@@ -939,6 +1004,8 @@ impl WalPartition {
                 // println!("Synced WAL partition to output: {} {}", self.namespace, self.partition);
         
                 metrics_hot::add_wal_compacted_bytes(wal_compacted_bytes_total);
+                // Use observed streamed row count
+                wal_compacted_rows_total = row_counter.load(AtomicOrdering::Relaxed);
                 metrics_hot::add_wal_compacted_rows(wal_compacted_rows_total);
                 metrics_hot::add_wal_compacted_files(wal_compacted_files_total);
 
@@ -1108,7 +1175,7 @@ pub struct WalFile {
 }
 
 #[derive(Clone)]
-struct WalStream {
+struct WalS3Object {
     pub(crate) namespace: String,
     pub(crate) partition: String,
     pub(crate) time: Option<i64>,
@@ -1117,7 +1184,7 @@ struct WalStream {
     pub(crate) offsets: HashMap<OffsetKey, u64>,
 }
 
-impl WalStream {
+impl WalS3Object {
     /// Download an S3 object with exponential backoff and jitter.
     /// - Retries transient failures up to a small cap
     /// - Does not retry on NoSuchKey
