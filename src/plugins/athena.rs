@@ -12,6 +12,7 @@ use aws_sdk_glue::Client as GlueClient;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::{Client as S3Client, Error};
 use aws_sdk_s3::types::{Delete, ObjectIdentifier};
+use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 
 use std::collections::HashMap;
 use std::io;
@@ -24,6 +25,7 @@ use futures::{StreamExt};
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
+use tokio::task::block_in_place;
 
 use serde_derive::Deserialize;
 use crate::ingest::partition_time::TimePartitioner;
@@ -249,8 +251,7 @@ impl DataOutputAwsAthenaPlugin {
 
         let final_key = format!("{}/{}", full_key, md5_string);
 
-        // Serialize first, then gate S3 upload by a concurrency semaphore
-        let parquet = Self::serialize_to_parquet(stream).await?;
+        // Prepare S3 tagging string
         let tags_str = tags.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<String>>().join("&");
 
         // Resize semaphore if target changed dynamically (clamp to 1..256)
@@ -268,33 +269,210 @@ impl DataOutputAwsAthenaPlugin {
         let upload_start = std::time::Instant::now();
         crate::metrics::counters::inc_uploads_in_flight();
 
-        // Perform the S3 upload asynchronously
-        let body = ByteStream::from(parquet.bytes.clone());
-        match self
+        // Stream Parquet to S3 via multipart upload
+        let bucket = self.config.s3_bucket.clone();
+        let key_for_upload = final_key.clone();
+
+        // Initiate multipart upload
+        let create_out = self
             .s3_client
-            .put_object()
-            .bucket(&self.config.s3_bucket)
-            .key(&final_key)
-            .body(body)
+            .create_multipart_upload()
+            .bucket(&bucket)
+            .key(&key_for_upload)
+            .content_type("application/octet-stream")
             .tagging(tags_str)
             .send()
             .await
-        {
-            Ok(_resp) => {
-                println!("Uploaded {} to S3", final_key);
-                metrics_counters::add_parquet_bytes(parquet.size_bytes);
-                metrics_counters::add_parquet_objects(1);
-                metrics_counters::add_parquet_rows(parquet.meta_data.num_rows as u64);
-                crate::metrics::counters::add_upload(1);
-                crate::metrics::counters::add_upload_latency_ns(upload_start.elapsed().as_nanos() as u64);
-                crate::metrics::counters::dec_uploads_in_flight();
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to initiate multipart upload: {}", e.into_service_error())))?;
+        let upload_id = create_out.upload_id().unwrap_or("").to_string();
+        if upload_id.is_empty() {
+            crate::metrics::counters::dec_uploads_in_flight();
+            return Err(io::Error::new(io::ErrorKind::Other, "Missing upload_id from S3"));
+        }
+
+        // Writer that uploads parts as bytes are produced
+        struct MultipartWriter {
+            client: S3Client,
+            bucket: String,
+            key: String,
+            upload_id: String,
+            part_size: usize,
+            buffer: Vec<u8>,
+            next_part: i32,
+            parts: Vec<CompletedPart>,
+            total_bytes: u64,
+        }
+
+        impl MultipartWriter {
+            fn new(client: S3Client, bucket: String, key: String, upload_id: String, part_size: usize) -> Self {
+                Self {
+                    client,
+                    bucket,
+                    key,
+                    upload_id,
+                    part_size: part_size.max(5 * 1024 * 1024),
+                    buffer: Vec::with_capacity(part_size.max(5 * 1024 * 1024)),
+                    next_part: 1,
+                    parts: Vec::new(),
+                    total_bytes: 0,
+                }
+            }
+
+            fn upload_chunk_blocking(&mut self, chunk: Vec<u8>) -> io::Result<()> {
+                let client = self.client.clone();
+                let bucket = self.bucket.clone();
+                let key = self.key.clone();
+                let upload_id = self.upload_id.clone();
+                let part_number = self.next_part;
+                self.next_part += 1;
+                self.total_bytes += chunk.len() as u64;
+                block_in_place(|| {
+                    let body = ByteStream::from(Bytes::from(chunk));
+                    let fut = async move {
+                        client
+                            .upload_part()
+                            .bucket(bucket)
+                            .key(key)
+                            .upload_id(upload_id)
+                            .part_number(part_number)
+                            .body(body)
+                            .send()
+                            .await
+                    };
+                    match tokio::runtime::Handle::current().block_on(fut) {
+                        Ok(resp) => {
+                            let etag = resp.e_tag().unwrap_or("").to_string();
+                            let part = CompletedPart::builder().e_tag(etag).part_number(part_number).build();
+                            self.parts.push(part);
+                            Ok(())
+                        }
+                        Err(e) => Err(io::Error::new(io::ErrorKind::Other, format!("upload_part failed: {}", e.into_service_error()))),
+                    }
+                })
+            }
+
+            fn flush_full_parts(&mut self) -> io::Result<()> {
+                while self.buffer.len() >= self.part_size {
+                    let chunk = self.buffer.drain(..self.part_size).collect::<Vec<u8>>();
+                    self.upload_chunk_blocking(chunk)?;
+                }
                 Ok(())
             }
-            Err(err) => {
-                crate::metrics::counters::dec_uploads_in_flight();
-                Err(io::Error::new(io::ErrorKind::Other, format!("Failed to upload to bucket {}, will retry later. Error: {}", self.config.s3_bucket, err.into_service_error())))
+
+            fn complete(&mut self) -> io::Result<u64> {
+                // Upload remaining as final part (can be < 5MiB)
+                if !self.buffer.is_empty() {
+                    let chunk = std::mem::take(&mut self.buffer);
+                    self.upload_chunk_blocking(chunk)?;
+                }
+                // Complete multipart upload
+                let client = self.client.clone();
+                let bucket = self.bucket.clone();
+                let key = self.key.clone();
+                let upload_id = self.upload_id.clone();
+                let parts = self.parts.clone();
+                block_in_place(|| {
+                    let fut = async move {
+                        client
+                            .complete_multipart_upload()
+                            .bucket(bucket)
+                            .key(key)
+                            .upload_id(upload_id)
+                            .multipart_upload(
+                                CompletedMultipartUpload::builder()
+                                    .set_parts(Some(parts))
+                                    .build(),
+                            )
+                            .send()
+                            .await
+                    };
+                    match tokio::runtime::Handle::current().block_on(fut) {
+                        Ok(_) => Ok(()),
+                        Err(e) => Err(io::Error::new(io::ErrorKind::Other, format!("complete_multipart_upload failed: {}", e.into_service_error()))),
+                    }
+                })?;
+                Ok(self.total_bytes)
+            }
+
+            fn abort(&self) {
+                let client = self.client.clone();
+                let bucket = self.bucket.clone();
+                let key = self.key.clone();
+                let upload_id = self.upload_id.clone();
+                let _ = block_in_place(|| {
+                    let fut = async move {
+                        client
+                            .abort_multipart_upload()
+                            .bucket(bucket)
+                            .key(key)
+                            .upload_id(upload_id)
+                            .send()
+                            .await
+                    };
+                    tokio::runtime::Handle::current().block_on(fut).map(|_| ())
+                });
             }
         }
+
+        impl std::io::Write for MultipartWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.buffer.extend_from_slice(buf);
+                // Upload any full parts
+                self.flush_full_parts()?;
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                // No-op; completion will upload the tail
+                Ok(())
+            }
+        }
+
+        // Configure parquet writer
+        let props = WriterProperties::builder()
+            .set_dictionary_enabled(false)
+            .set_encoding(parquet::basic::Encoding::PLAIN)
+            .set_compression(Compression::SNAPPY)
+            .build();
+
+        let mut writer = MultipartWriter::new(
+            self.s3_client.clone(),
+            bucket.clone(),
+            key_for_upload.clone(),
+            upload_id.clone(),
+            Config::getenv("PARQUET_MULTIPART_PART_BYTES", "67108864").parse::<usize>().unwrap_or(64 * 1024 * 1024),
+        );
+
+        let schema = stream.schema();
+        let mut parquet_writer = ArrowWriter::try_new(&mut writer, schema, Some(props))
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to init ArrowWriter: {}", e)))?;
+
+        let mut rows_written: u64 = 0;
+        let mut batches = stream;
+        while let Some(batch_res) = batches.next().await {
+            let batch = batch_res.map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Stream error: {}", e)))?;
+            rows_written += batch.num_rows() as u64;
+            parquet_writer.write(&batch).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Parquet write error: {}", e)))?;
+        }
+
+        let _meta = parquet_writer.close().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Parquet close error: {}", e)))?;
+        let uploaded_bytes = match writer.complete() {
+            Ok(sz) => sz,
+            Err(e) => {
+                // Best-effort abort
+                writer.abort();
+                crate::metrics::counters::dec_uploads_in_flight();
+                return Err(e);
+            }
+        };
+
+        println!("Uploaded {} to S3", final_key);
+        metrics_counters::add_parquet_bytes(uploaded_bytes);
+        metrics_counters::add_parquet_objects(1);
+        metrics_counters::add_parquet_rows(rows_written);
+        crate::metrics::counters::add_upload(1);
+        crate::metrics::counters::add_upload_latency_ns(upload_start.elapsed().as_nanos() as u64);
+        crate::metrics::counters::dec_uploads_in_flight();
+        Ok(())
     }
 
     pub(crate) async fn serialize_to_parquet(
