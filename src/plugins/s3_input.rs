@@ -304,9 +304,9 @@ impl DataSourceS3Plugin {
                     if avail_mib_opt.is_none() || total_mib_opt.is_none() { continue; }
                     let avail_mib = avail_mib_opt.unwrap();
                     let total_mib = total_mib_opt.unwrap();
-                    // Keep at least 25% free; target download memory to at most 50% of available
-                    let min_free_mib = (total_mib as f64 * 0.25) as u64;
-                    let target_mem_mib: usize = if avail_mib > min_free_mib { ((avail_mib as f64) * 0.5) as usize } else { ((avail_mib as f64) * 0.3) as usize };
+                    // Keep at least 10% free; target download memory to at most 50% of available
+                    let min_free_mib = (total_mib as f64 * 0.1) as u64;
+                    let target_mem_mib: usize = if avail_mib > min_free_mib { ((avail_mib as f64) * 0.8) as usize } else { ((avail_mib as f64) * 0.3) as usize };
                     let target_mem_mib = target_mem_mib.clamp(256, mem_budget_mb as usize);
                     // Adjust semaphore to target
                     if target_mem_mib > configured_total {
