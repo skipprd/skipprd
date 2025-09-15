@@ -1,11 +1,9 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 use dashmap::DashMap;
 use tokio::sync::{mpsc, watch};
 use once_cell::sync::Lazy;
 
-use crate::discover::{Metadata};
-use crate::{METADATA, ARROW_SCHEMA, ARROW_SCHEMA_VERSION};
+use crate::{METADATA, ARROW_SCHEMA_VERSION};
 use crate::ingest::fast_ingest::create_default_nested_message;
 use crate::ingest_work::Ingest;
 use crate::helpers::configuration::Config;

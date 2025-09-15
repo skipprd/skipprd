@@ -148,8 +148,8 @@ impl PerformanceBenchmark {
         let arc_output_plugin = Arc::new(boxed_output_plugin);
         
         // Set up memory measurement 
-        let mut initial_memory = 0.0;
-        let mut peak_memory = 0.0;
+        let initial_memory = 0.0;
+        let peak_memory = 0.0;
         
         #[cfg(target_os = "linux")]
         {

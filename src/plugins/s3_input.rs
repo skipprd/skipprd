@@ -10,7 +10,7 @@ use std::sync::{Arc};
 
 use aws_sdk_s3::operation::get_object::{GetObjectError, GetObjectOutput};
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use std::{fs};
 // use aws_sdk_s3::types::Object;
 // use futures::future::join_all;
@@ -25,14 +25,11 @@ use tokio::sync::Semaphore;
 // use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::plugins::DataOutputPlugin;
 use crate::helpers::Helpers;
-use tokio::sync::mpsc;
 use tokio::sync::OwnedSemaphorePermit;
-use tokio::task::JoinSet;
 use futures::stream::{self, StreamExt};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 use std::io::BufRead as _;
 use std::sync::atomic::Ordering as AtomicOrdering;
-use std::fs as stdfs;
 
 fn read_meminfo_kib(key: &str) -> Option<u64> {
     if let Ok(file) = std::fs::File::open("/proc/meminfo") {
@@ -205,7 +202,7 @@ impl DataSourceS3Plugin {
 
         let offsets_clone = offsets.clone();
         // Build keys iterator by pulling pages manually (compatible with SDK stream type)
-        let mut pager = self.s3_client
+        let pager = self.s3_client
             .list_objects_v2()
             .bucket(s3_bucket.clone())
             .prefix(s3_prefix.clone())
@@ -341,7 +338,7 @@ impl DataSourceS3Plugin {
         let mem_sem_clone = mem_sem.clone();
         let dl_sem_clone = dl_sem.clone();
         let inflate_ratio_clone = inflate_ratio;
-        let mut download_stream = keys_stream.map(move |(key, size_bytes)| {
+        let download_stream = keys_stream.map(move |(key, size_bytes)| {
             let s3 = s3_client_clone.clone();
             let bucket = s3_bucket_dl.clone();
             let mem = mem_sem_clone.clone();

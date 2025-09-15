@@ -2,7 +2,6 @@
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Instant, Duration};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::thread::sleep;
 use dashmap::DashMap;
 use lazy_static::lazy_static;
 

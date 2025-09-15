@@ -14,7 +14,6 @@ use crate::discover::evolution::Evolution;
 use crate::helpers::Helpers;
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::ingest::ingest::{ResolvedFieldValue};
-use crate::discover::evolution::{EvolutionProposal, EvolutionSpec};
 
 #[allow(unused_imports)]
 use crate::discover::DateCandidate;
@@ -547,7 +546,7 @@ fn process_record_field(
     metadata: &HashMap<String, Metadata>,
     flatten: bool,
 ) -> Result<ResolvedFieldValue, Box<dyn Error>> {
-    let mut m = Map::new();
+    let m = Map::new();
     
     let mut resolved_value: Result<ResolvedFieldValue, Box<dyn Error>> = Ok(ResolvedFieldValue::new(field.to_string(), Value::Null));
 

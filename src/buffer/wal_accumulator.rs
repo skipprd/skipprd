@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use indexmap::IndexMap;
 use dashmap::DashMap;
 use once_cell::sync::OnceCell;
 use once_cell::sync::Lazy;
@@ -12,7 +11,6 @@ use tokio::time::{sleep as tokio_sleep, Duration as TokioDuration};
 use crate::buffer::ingest_buffer::{Buffers, IngestBufferBatch};
 use crate::helpers::configuration::Config;
 use crate::helpers::offsets::Offsets;
-use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::plugins::DataOutputPlugin;
 
 // Partition key: (namespace, partition, time, shard)

@@ -5,10 +5,9 @@ use crate::helpers::offsets::{OffsetKey, Offsets, OffsetTypes};
 use crate::helpers::Helpers;
 use crate::ingest::ingest::ingest;
 use crate::serdes::json::SerdeJson;
-use crate::{ARROW_SCHEMA, ARROW_SCHEMA_VERSION, METADATA, METRICS, RUNNING};
+use crate::{ARROW_SCHEMA, ARROW_SCHEMA_VERSION, METADATA, RUNNING};
 use dashmap::DashMap;
 use std::sync::atomic::AtomicBool;
-use arrow::datatypes::{Schema as ArrowSchema, DataType as ArrowDataType, Field as ArrowField};
 // Per-namespace schema readiness flag to eliminate first-batch races
 static SCHEMA_READY: once_cell::sync::Lazy<DashMap<String, AtomicBool>> = once_cell::sync::Lazy::new(|| DashMap::new());
 static SCHEMA_PREP_LOCKS: once_cell::sync::Lazy<DashMap<String, Arc<std::sync::Mutex<()>>>> = once_cell::sync::Lazy::new(|| DashMap::new());
@@ -24,7 +23,6 @@ use std::fs::{File, OpenOptions};
 
 
 use std::io::{BufWriter};
-use std::ops::{Deref};
 
 use std::process::exit;
 use std::string::ToString;
@@ -41,7 +39,7 @@ use std::sync::atomic::Ordering::AcqRel;
 
 use crate::ingest::fast_ingest::{create_default_nested_message, DEFAULT_NESTED_MESSAGE, fast_path_ingest};
 use crate::ingest::sequencer::propose_and_wait;
-use crate::discover::evolution::{EvolutionProposal, EvolutionSpec, infer_specs_for_record};
+use crate::discover::evolution::{EvolutionProposal, infer_specs_for_record};
 
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::buffer::ingest_buffer::{Buffers, IngestBufferBatch, IngestRecord};
@@ -92,7 +90,7 @@ fn ensure_slow_ingest_worker() {
                 if let Some(ns_meta) = md_local.metadata.get_mut(&task.namespace) {
                     let mut updated = "no".to_string();
                     match ingest(&task.record, &mut ns_meta.fields, &task.namespace, &mut updated, task.flatten) {
-                        Ok(mut v) => {
+                        Ok(v) => {
                             if updated == "yes" {
                                 METADATA.store(Arc::new(md_local.clone()));
                                 // Refresh Arrow schema (monotonic guard applies inside)
@@ -981,16 +979,16 @@ impl Ingest {
 
         let _aprox_now = SystemTime::now();
         
-        let mut updated_schema= "no".to_string();
+        let updated_schema= "no".to_string();
 
-        let mut buffers = Buffers::new();
+        let buffers = Buffers::new();
 
         let mut bytes: u64 = 0;
         let mut latest_timestamp: i64 = 0;
         let mut i: u64 = 0;
         let mut _j = 0;
         let mut d = 0;
-        let mut x = 0;
+        let x = 0;
         let mut batch_line: u64 = 0;
 
         let format = match Config::get_pipline_plugin_config("input") {
@@ -1175,7 +1173,7 @@ impl Ingest {
                         }
                     };
 
-                    let mut record_value = match msg {
+                    let record_value = match msg {
                         Ok(msg) => msg,
                         Err(_err) => {
                             // Route to single-threaded slow-ingest queue to serialize evolution
@@ -1293,7 +1291,7 @@ impl Ingest {
                     }
                 }
             }
-            let mut try_serialize = |schema: SchemaRef, values: &Vec<&serde_json::Value>| -> Option<Vec<RecordBatch>> {
+            let try_serialize = |schema: SchemaRef, values: &Vec<&serde_json::Value>| -> Option<Vec<RecordBatch>> {
                 let mut decoder = ArrowJsonReaderBuilder::new(schema).build_decoder().ok()?;
                 if decoder.serialize(values).is_err() { return None; }
                 match decoder.flush() { Ok(Some(b)) => Some(vec![b]), _ => None }

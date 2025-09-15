@@ -465,14 +465,14 @@ impl DataOutputAwsAthenaPlugin {
             }
         };
 
-        println!("Uploaded {} to S3", final_key);
+                println!("Uploaded {} to S3", final_key);
         metrics_counters::add_parquet_bytes(uploaded_bytes);
-        metrics_counters::add_parquet_objects(1);
+                metrics_counters::add_parquet_objects(1);
         metrics_counters::add_parquet_rows(rows_written);
-        crate::metrics::counters::add_upload(1);
-        crate::metrics::counters::add_upload_latency_ns(upload_start.elapsed().as_nanos() as u64);
-        crate::metrics::counters::dec_uploads_in_flight();
-        Ok(())
+                crate::metrics::counters::add_upload(1);
+                crate::metrics::counters::add_upload_latency_ns(upload_start.elapsed().as_nanos() as u64);
+                crate::metrics::counters::dec_uploads_in_flight();
+                Ok(())
     }
 
     pub(crate) async fn serialize_to_parquet(
@@ -518,20 +518,20 @@ impl DataOutputAwsAthenaPlugin {
     }
 
     async fn upload_object(
-        client: S3Client,
-        bucket: String,
-        key: String,
+        _client: S3Client,
+        _bucket: String,
+        _key: String,
         stream: SendableRecordBatchStream,
         tag_hashmap: HashMap<String, String>
     ) -> Result<(), std::io::Error> {
 
-        let tags = tag_hashmap.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<String>>().join("&");
+        let _tags = tag_hashmap.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<String>>().join("&");
 
         // Serialize to parquet asynchronously
         let parquet = Self::serialize_to_parquet(stream).await?;
 
         // Create the upload body stream
-        let body = ByteStream::from(parquet.bytes);
+        let _body = ByteStream::from(parquet.bytes);
 
         // NOTE: Unused now; upload is performed in inner_sync with concurrency gating
         unreachable!("upload_object is not used after enabling gated concurrency in inner_sync")

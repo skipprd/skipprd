@@ -14,7 +14,6 @@ use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use std::{io, process};
 
-use std::collections::HashMap;
 
 use std::sync::{Arc};
 use std::thread;
@@ -747,7 +746,7 @@ async fn discover() {
         let messages_total_counter = crate::metrics::counters::MESSAGES_TOTAL.load(AtomicOrdering::Relaxed);
         let source_bytes_total_counter = crate::metrics::counters::SOURCE_BYTES_TOTAL.load(AtomicOrdering::Relaxed);
         let deadletters_total_counter = crate::metrics::counters::DEADLETTERS_TOTAL.load(AtomicOrdering::Relaxed);
-        let ingested_slow_total_counter = crate::metrics::counters::INGESTED_SLOW_TOTAL.load(AtomicOrdering::Relaxed);
+        let _ingested_slow_total_counter = crate::metrics::counters::INGESTED_SLOW_TOTAL.load(AtomicOrdering::Relaxed);
         let human_bytes = crate::helpers::Helpers::human_readable_size(source_bytes_total_counter);
         println!("Messages per Min: {}", 0);
         println!("Messages Fixed per Min: {}", 0);
