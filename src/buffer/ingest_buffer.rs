@@ -1461,6 +1461,32 @@ impl WalS3Object {
                 return Err(ArrowError::IoError("WAL multipart complete failed".to_string(), e));
             }
         };
+        // Post-upload validation: HEAD size check
+        if let Ok(head) = s3.head_object().bucket(bucket).key(&key).send().await {
+            if let Some(len) = head.content_length() {
+                if len as u64 != total_bytes {
+                    // Size mismatch: delete object and error
+                    let _ = s3.delete_object().bucket(bucket).key(&key).send().await;
+                    return Err(ArrowError::IoError("WAL upload size mismatch".to_string(), std::io::Error::new(std::io::ErrorKind::Other, "content-length mismatch")));
+                }
+            }
+        }
+        // Quick schema probe via ranged GET of first 128 KiB
+        if let Ok(probe) = s3.get_object().bucket(bucket).key(&key).range("bytes=0-131071").send().await {
+            let ok = tokio::task::spawn_blocking(move || {
+                let async_reader = probe.body.into_async_read();
+                let mut bridge = SyncIoBridge::new(async_reader);
+                let mut offset_size = [0u8; 8];
+                if std::io::Read::read_exact(&mut bridge, &mut offset_size).is_err() { return false; }
+                let skip = u64::from_le_bytes(offset_size);
+                let _ = std::io::copy(&mut bridge.by_ref().take(skip), &mut io::sink());
+                StreamReader::try_new(bridge, None).is_ok()
+            }).await.unwrap_or(false);
+            if !ok {
+                let _ = s3.delete_object().bucket(bucket).key(&key).send().await;
+                return Err(ArrowError::IoError("WAL upload validation failed".to_string(), std::io::Error::new(std::io::ErrorKind::Other, "schema probe failed")));
+            }
+        }
         let wf_path = std::path::PathBuf::from(format!("{}/{}", wal_base, rel));
         let wal_file = WalFile {
             path: wf_path,
