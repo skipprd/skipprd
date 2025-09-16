@@ -923,12 +923,12 @@ impl WalPartition {
                             // Skip WAL offsets header
                             let mut offset_size = [0u8; 8];
                             if let Err(e) = reader.read_exact(&mut offset_size) {
-                                println!("Failed to read WAL header for {}: {}", wal_file.path.to_string_lossy(), e);
+                                println!("ERROR: Failed to read WAL header for {}: {}", wal_file.path.to_string_lossy(), e);
                                 continue;
                             }
                             let skip = u64::from_le_bytes(offset_size);
                             if let Err(e) = reader.seek(io::SeekFrom::Current(skip as i64)) {
-                                println!("Failed to seek WAL stream {}: {}", wal_file.path.to_string_lossy(), e);
+                                println!("ERROR: Failed to seek WAL stream {}: {}", wal_file.path.to_string_lossy(), e);
                                 continue;
                             }
                             match StreamReader::try_new(reader, None) {
@@ -937,7 +937,7 @@ impl WalPartition {
                                         match item {
                                             Ok(batch) => {
                                                 if batch.schema().as_ref() != schema_clone.as_ref() {
-                                                    println!("Skipping WAL batch due to schema mismatch for ns={} part={} time={}", namespace, partition, time_val.unwrap_or(0));
+                                                    println!("ERROR: Skipping WAL batch due to schema mismatch for ns={} part={} time={}", namespace, partition, time_val.unwrap_or(0));
                                                     continue;
                                                 }
                                                 row_counter_task.fetch_add(batch.num_rows() as u64, AtomicOrdering::Relaxed);
