@@ -495,8 +495,7 @@ impl DataOutputAwsAthenaPlugin {
                 return Err(e);
             }
         };
-
-                println!("Uploaded {} to S3", final_key);
+        println!("Uploaded {} to S3 (rows={}, bytes={})", final_key, rows_written, uploaded_bytes);
         metrics_counters::add_parquet_bytes(uploaded_bytes);
                 metrics_counters::add_parquet_objects(1);
         metrics_counters::add_parquet_rows(rows_written);

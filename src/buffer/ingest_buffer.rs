@@ -1297,11 +1297,14 @@ pub async fn force_drain_all(offsets_db: Arc<Offsets>, shared_output: Arc<Box<dy
     // Rebuild WAL index from backend to ensure no partitions are missed
     let _ = wal_recover(offsets_db.clone());
     // Enqueue all partitions
+    let mut enqueued = 0usize;
     for item in WAL_INDEX.iter() {
         let key = item.key().clone();
         let _ = Buffers::enqueue_compaction(CompactionTask { key, force: true });
         OUTSTANDING_COMPACTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        enqueued += 1;
     }
+    println!("Compactor: force-drain enqueued {} partitions (wal_bytes_total={})", enqueued, WAL_BYTES_TOTAL.load(std::sync::atomic::Ordering::Relaxed));
     // Signal no more tasks by stopping enqueues; then wait for counters to drain
     // Wait until inflight reaches zero
     let notify = DISPATCH_NOTIFY.get().cloned().unwrap_or_else(|| Arc::new(tokio::sync::Notify::new()));
@@ -1311,6 +1314,7 @@ pub async fn force_drain_all(offsets_db: Arc<Offsets>, shared_output: Arc<Box<dy
         }
         notify.notified().await;
     }
+    println!("Compactor: force-drain complete (inflight=0, outstanding=0)");
 }
 
 #[derive(Clone)]

@@ -194,7 +194,8 @@ pub async fn flush_all_now() {
     BYTES.clear();
     FIRST_SEEN.clear();
     if Config::log_wal_enabled() {
-        println!("WAL accumulator: force-flush {} partitions", drain_map.len());
+        let total_bytes: u64 = BYTES.iter().map(|e| e.value().load(Ordering::Relaxed)).sum();
+        println!("WAL accumulator: force-flush {} partitions (approx {} bytes)", drain_map.len(), total_bytes);
     }
     to_flush.write(drain_map);
     if let (Some(offsets), Some(output)) = (OFFSETS_CELL.get(), OUTPUT_CELL.get()) {
