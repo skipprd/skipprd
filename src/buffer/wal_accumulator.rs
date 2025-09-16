@@ -133,11 +133,13 @@ pub fn accumulate_map(map: HashMap<PartitionKey, IngestBufferBatch>) {
 async fn flush_ready() {
     let bytes_per_file = Config::get_wal_bytes_per_file().max(64 * 1024); // safety minimum
     let mut max_delay = Duration::from_secs(Config::get_wal_max_delay_seconds());
+    // Ensure compactor sees steady WALs under load; cap to small window
+    if max_delay > Duration::from_secs(2) { max_delay = Duration::from_secs(2); }
     if Config::truth_value(&Config::getenv("LOG_WAL_DEBUG", "false")) {
         max_delay = Duration::from_secs(1);
     }
 
-    // Identify keys to flush
+    // Identify keys to flush (close-before-compact)
     let mut ready: Vec<PartitionKey> = Vec::new();
     {
         let now = Instant::now();

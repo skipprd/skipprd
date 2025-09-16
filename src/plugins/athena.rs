@@ -256,11 +256,8 @@ impl DataOutputAwsAthenaPlugin {
             }
         }
 
-        // Generate consistent md5 hash of the filename
-        let md5_digest = md5::compute(&filename);
-        let md5_string = hex::encode(&md5_digest.0);
-
-        let final_key = format!("{}/{}", full_key, md5_string);
+        // Use deterministic segment-suffixed filename from compactor; no extra digest
+        let final_key = format!("{}/{}", full_key, filename);
 
         // Prepare S3 tagging string
         let tags_str = tags.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<String>>().join("&");
@@ -282,8 +279,16 @@ impl DataOutputAwsAthenaPlugin {
         let upload_start = std::time::Instant::now();
         crate::metrics::counters::inc_uploads_in_flight();
 
-        // Stream Parquet to S3 via multipart upload
         let bucket = self.config.s3_bucket.clone();
+
+        // Stream Parquet to S3 via multipart upload
+        if Config::debug_enabled() || Config::log_wal_enabled() {
+            println!(
+                "Uploader: start ns={} key_base={} filename={} bucket={}",
+                namespace, full_key, filename, bucket
+            );
+        }
+
         let key_for_upload = final_key.clone();
 
         // Initiate multipart upload
@@ -477,10 +482,15 @@ impl DataOutputAwsAthenaPlugin {
         let mut rows_written: u64 = 0;
         let mut batches = stream;
         // Drive streaming write with small in-loop yields to allow multiple uploads interleave fairly
+        let mut batch_index: u64 = 0;
         while let Some(batch_res) = batches.next().await {
             let batch = batch_res.map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Stream error: {}", e)))?;
             rows_written += batch.num_rows() as u64;
             parquet_writer.write(&batch).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Parquet write error: {}", e)))?;
+            if Config::debug_enabled() {
+                println!("Uploader: wrote batch idx={} rows={} key={}", batch_index, batch.num_rows(), key_for_upload);
+            }
+            batch_index += 1;
             // Cooperative yield for fairness among concurrent tasks
             tokio::task::yield_now().await;
         }
@@ -496,6 +506,12 @@ impl DataOutputAwsAthenaPlugin {
             }
         };
         println!("Uploaded {} to S3 (rows={}, bytes={})", final_key, rows_written, uploaded_bytes);
+        if Config::debug_enabled() || Config::log_wal_enabled() {
+            println!(
+                "Uploader: complete key={} upload_id={} parts={} total_bytes={} rows={}",
+                key_for_upload, upload_id, writer.parts.len(), uploaded_bytes, rows_written
+            );
+        }
         metrics_counters::add_parquet_bytes(uploaded_bytes);
                 metrics_counters::add_parquet_objects(1);
         metrics_counters::add_parquet_rows(rows_written);
