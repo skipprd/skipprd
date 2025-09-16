@@ -326,6 +326,13 @@ impl DataOutputAwsAthenaPlugin {
                 let part_number = self.next_part;
                 self.next_part += 1;
                 self.total_bytes += chunk.len() as u64;
+                println!(
+                    "uploading part {} for {} (size={}, total={})",
+                    part_number,
+                    key,
+                    Helpers::human_readable_size((chunk.len()) as u64),
+                    Helpers::human_readable_size(self.total_bytes)
+                );
                 block_in_place(|| {
                     let body = ByteStream::from(Bytes::from(chunk));
                     let fut = async move {
@@ -371,6 +378,12 @@ impl DataOutputAwsAthenaPlugin {
                 let key = self.key.clone();
                 let upload_id = self.upload_id.clone();
                 let parts = self.parts.clone();
+                println!(
+                    "completing multipart upload for {} (parts={}, total={})",
+                    key,
+                    parts.len(),
+                    Helpers::human_readable_size(self.total_bytes)
+                );
                 block_in_place(|| {
                     let fut = async move {
                         client

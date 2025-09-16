@@ -49,6 +49,7 @@ use aws_sdk_s3::error::SdkError as S3SdkError;
 use aws_sdk_s3::operation::get_object::{GetObjectError, GetObjectOutput};
 use tokio::sync::mpsc;
 use tokio_util::io::SyncIoBridge;
+use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 
 #[allow(dead_code)]
 pub static TOTAL_ROWS: Lazy<TimedRwLock<AtomicU64>> =
@@ -284,6 +285,7 @@ impl Buffers {
         let _ = OUTPUT_CELL.set(shared_output);
         if STARTED.set(()).is_ok() {
             tokio::spawn(async move {
+                let mut idle_ticks: u64 = 0;
                 loop {
                     let _guard = COMPACTION_ASYNC_LOCK.lock().await;
                     let mut to_compact: Vec<( (String, String, Option<i64>, String), WalPartition)> = Vec::new();
@@ -298,6 +300,7 @@ impl Buffers {
                         for (k, _) in to_compact.iter() { WAL_INDEX.remove(k); }
                         // Release the global compaction lock before doing async compaction work
                         drop(_guard);
+                        idle_ticks = 0;
                         let tuned = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.load(std::sync::atomic::Ordering::Relaxed).clamp(1, 64);
                         let mut in_flight: futures::stream::FuturesUnordered<Pin<Box<dyn Future<Output = u64> + Send>>> = futures::stream::FuturesUnordered::new();
                         let mut iter = to_compact.into_iter();
@@ -325,6 +328,11 @@ impl Buffers {
                     } else {
                         // Nothing to do; release lock before sleeping
                         drop(_guard);
+                        idle_ticks += 1;
+                        if idle_ticks % 10 == 0 {
+                            let queued = WAL_INDEX.iter().count();
+                            println!("compactor heartbeat: idle_ticks={}, queued_partitions={}, wal_bytes_total={}", idle_ticks, queued, Helpers::human_readable_size(WAL_BYTES_TOTAL.load(std::sync::atomic::Ordering::Relaxed)));
+                        }
                     }
                     tokio_sleep(TokioDuration::from_millis(500)).await;
                 }
@@ -1250,51 +1258,216 @@ impl WalS3Object {
         record_batches: &Vec<RecordBatch>,
         offsets: &HashMap<OffsetKey, u64>,
     ) -> Result<(WalFile, u64, u64), ArrowError> {
-        // Build offsets header
-        let bin_offset = bincode::serialize(offsets).unwrap();
-        let mut buffer: Vec<u8> = Vec::with_capacity(8 + bin_offset.len() + record_batches.iter().map(|b| b.get_array_memory_size()).sum::<usize>());
-        let offset_size_le = (bin_offset.len() as u64).to_le_bytes();
-        use std::io::Write as IoWrite;
-        buffer.write_all(&offset_size_le).unwrap();
-        buffer.write_all(&bin_offset).unwrap();
-        // Write Arrow stream
-        let codec = Some(CompressionType::LZ4_FRAME);
-        let options = IpcWriteOptions::default().try_with_compression(codec)?;
-        {
-            let mut stream_writer = StreamWriter::try_new_with_options(&mut buffer, &record_batches[0].schema(), options)?;
-            for batch in record_batches.iter() { stream_writer.write(batch).expect("Failed to write batch to Arrow stream"); }
-            stream_writer.finish()?;
-        }
-        let total_bytes = buffer.len() as u64;
-        let body = S3ByteStream::from(Bytes::from(buffer));
         // Determine S3 key deterministically
         let base_name = BufferChunker::encode_chunk_name("ingest", Some(namespace), Some(partition), time, Some(shard));
         let file_name = format!("{}&id={}.wal", base_name, Helpers::random_str(32));
         let rel = format!("{}/{}", shard, file_name);
         let key = if wal_prefix.is_empty() { rel.clone() } else { format!("{}/{}", wal_prefix, rel) };
-        // Upload
-        match s3.put_object().bucket(bucket).key(&key).body(body).send().await {
-            Ok(_) => {
-                let wf_path = std::path::PathBuf::from(format!("{}/{}", wal_base, rel));
-                let wal_file = WalFile {
-                    path: wf_path,
-                    namespace: namespace.to_string(),
-                    partition: partition.to_string(),
-                    time,
-                    shard: shard.to_string(),
-                    bytes: total_bytes,
-                    file: Arc::new(TimedRwLock::new("wal_file".to_string(), None)),
-                    updated_at: SystemTime::now(),
-                    offsets: offsets.clone(),
-                };
-                let rows: u64 = record_batches.iter().map(|b| b.num_rows() as u64).sum();
-                Ok((wal_file, rows, total_bytes))
+
+        // Initiate multipart upload
+        let create_out = s3
+            .create_multipart_upload()
+            .bucket(bucket)
+            .key(&key)
+            .content_type("application/octet-stream")
+            .send()
+            .await
+            .map_err(|e| ArrowError::IoError("Failed to initiate WAL multipart".to_string(), std::io::Error::new(std::io::ErrorKind::Other, e.into_service_error().to_string())))?;
+        let upload_id = create_out.upload_id().unwrap_or("").to_string();
+        if upload_id.is_empty() {
+            return Err(ArrowError::IoError("Missing upload_id".to_string(), std::io::Error::new(std::io::ErrorKind::Other, "no upload id")));
+        }
+
+        // Multipart writer that uploads as Arrow stream is produced
+        struct MultipartWriter {
+            client: S3Client,
+            bucket: String,
+            key: String,
+            upload_id: String,
+            part_size: usize,
+            buffer: Vec<u8>,
+            next_part: i32,
+            parts: Vec<CompletedPart>,
+            total_bytes: u64,
+        }
+
+        impl MultipartWriter {
+            fn new(client: S3Client, bucket: String, key: String, upload_id: String, part_size: usize) -> Self {
+                Self {
+                    client,
+                    bucket,
+                    key,
+                    upload_id,
+                    part_size: part_size.max(5 * 1024 * 1024),
+                    buffer: Vec::with_capacity(part_size.max(5 * 1024 * 1024)),
+                    next_part: 1,
+                    parts: Vec::new(),
+                    total_bytes: 0,
+                }
             }
-            Err(e) => {
-                println!("Failed to upload WAL {}: {}", key, e);
-                Err(ArrowError::IoError("Failed to upload WAL".to_string(), std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
+
+            fn upload_chunk_blocking(&mut self, chunk: Vec<u8>) -> io::Result<()> {
+                let client = self.client.clone();
+                let bucket = self.bucket.clone();
+                let key = self.key.clone();
+                let upload_id = self.upload_id.clone();
+                let part_number = self.next_part;
+                self.next_part += 1;
+                self.total_bytes += chunk.len() as u64;
+                println!(
+                    "wal: uploading part {} for {} (size={}, total={})",
+                    part_number,
+                    key,
+                    Helpers::human_readable_size((chunk.len()) as u64),
+                    Helpers::human_readable_size(self.total_bytes)
+                );
+                tokio::task::block_in_place(|| {
+                    let body = S3ByteStream::from(Bytes::from(chunk));
+                    let fut = async move {
+                        client
+                            .upload_part()
+                            .bucket(bucket)
+                            .key(key)
+                            .upload_id(upload_id)
+                            .part_number(part_number)
+                            .body(body)
+                            .send()
+                            .await
+                    };
+                    match tokio::runtime::Handle::current().block_on(fut) {
+                        Ok(resp) => {
+                            let etag = resp.e_tag().unwrap_or("").to_string();
+                            let part = CompletedPart::builder().e_tag(etag).part_number(part_number).build();
+                            self.parts.push(part);
+                            Ok(())
+                        }
+                        Err(e) => Err(io::Error::new(io::ErrorKind::Other, format!("upload_part failed: {}", e.into_service_error()))),
+                    }
+                })
+            }
+
+            fn flush_full_parts(&mut self) -> io::Result<()> {
+                while self.buffer.len() >= self.part_size {
+                    let chunk = self.buffer.drain(..self.part_size).collect::<Vec<u8>>();
+                    self.upload_chunk_blocking(chunk)?;
+                }
+                Ok(())
+            }
+
+            fn complete(&mut self) -> io::Result<u64> {
+                if !self.buffer.is_empty() {
+                    let chunk = std::mem::take(&mut self.buffer);
+                    self.upload_chunk_blocking(chunk)?;
+                }
+                let client = self.client.clone();
+                let bucket = self.bucket.clone();
+                let key = self.key.clone();
+                let upload_id = self.upload_id.clone();
+                let parts = self.parts.clone();
+                println!(
+                    "wal: completing multipart upload for {} (parts={}, total={})",
+                    key,
+                    parts.len(),
+                    Helpers::human_readable_size(self.total_bytes)
+                );
+                tokio::task::block_in_place(|| {
+                    let fut = async move {
+                        client
+                            .complete_multipart_upload()
+                            .bucket(bucket)
+                            .key(key)
+                            .upload_id(upload_id)
+                            .multipart_upload(
+                                CompletedMultipartUpload::builder()
+                                    .set_parts(Some(parts))
+                                    .build(),
+                            )
+                            .send()
+                            .await
+                    };
+                    match tokio::runtime::Handle::current().block_on(fut) {
+                        Ok(_) => Ok(()),
+                        Err(e) => Err(io::Error::new(io::ErrorKind::Other, format!("complete_multipart_upload failed: {}", e.into_service_error()))),
+                    }
+                })?;
+                Ok(self.total_bytes)
+            }
+
+            fn abort(&self) {
+                let client = self.client.clone();
+                let bucket = self.bucket.clone();
+                let key = self.key.clone();
+                let upload_id = self.upload_id.clone();
+                let _ = tokio::task::block_in_place(|| {
+                    let fut = async move {
+                        client
+                            .abort_multipart_upload()
+                            .bucket(bucket)
+                            .key(key)
+                            .upload_id(upload_id)
+                            .send()
+                            .await
+                    };
+                    tokio::runtime::Handle::current().block_on(fut).map(|_| ())
+                });
             }
         }
+
+        impl std::io::Write for MultipartWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.buffer.extend_from_slice(buf);
+                self.flush_full_parts()?;
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+
+        // Build offsets header and Arrow stream directly into multipart writer
+        let mut writer = MultipartWriter::new(
+            s3.clone(),
+            bucket.to_string(),
+            key.clone(),
+            upload_id.clone(),
+            Config::getenv("WAL_MULTIPART_PART_BYTES", "8388608").parse::<usize>().unwrap_or(8 * 1024 * 1024),
+        );
+        {
+            use std::io::Write as IoWrite;
+            let bin_offset = bincode::serialize(offsets).unwrap();
+            let offset_size_le = (bin_offset.len() as u64).to_le_bytes();
+            writer.write_all(&offset_size_le).map_err(|e| ArrowError::IoError("WAL header write failed".to_string(), e))?;
+            writer.write_all(&bin_offset).map_err(|e| ArrowError::IoError("WAL header write failed".to_string(), e))?;
+        }
+        let codec = Some(CompressionType::LZ4_FRAME);
+        let options = IpcWriteOptions::default().try_with_compression(codec)?;
+        let mut rows: u64 = 0;
+        {
+            let mut stream_writer = StreamWriter::try_new_with_options(&mut writer, &record_batches[0].schema(), options)?;
+            for batch in record_batches.iter() {
+                rows += batch.num_rows() as u64;
+                stream_writer.write(batch).map_err(|e| ArrowError::from_external_error(Box::new(e)))?;
+            }
+            stream_writer.finish()?;
+        }
+        let total_bytes = match writer.complete() {
+            Ok(sz) => sz,
+            Err(e) => {
+                writer.abort();
+                return Err(ArrowError::IoError("WAL multipart complete failed".to_string(), e));
+            }
+        };
+        let wf_path = std::path::PathBuf::from(format!("{}/{}", wal_base, rel));
+        let wal_file = WalFile {
+            path: wf_path,
+            namespace: namespace.to_string(),
+            partition: partition.to_string(),
+            time,
+            shard: shard.to_string(),
+            bytes: total_bytes,
+            file: Arc::new(TimedRwLock::new("wal_file".to_string(), None)),
+            updated_at: SystemTime::now(),
+            offsets: offsets.clone(),
+        };
+        Ok((wal_file, rows, total_bytes))
     }
 }
 
