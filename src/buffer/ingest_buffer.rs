@@ -302,12 +302,16 @@ impl Buffers {
                         let wal_cur = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.load(AO::Relaxed);
                         if wal_cur != desired {
                             crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.store(desired, AO::Relaxed);
-                            println!("tune: wal_compaction {} -> {} (ingest_active={} queued={} idle_cpus={})", wal_cur, desired, active, queued, idle);
+                            if Config::log_wal_enabled() {
+                                println!("tune: wal_compaction {} -> {} (ingest_active={} queued={} idle_cpus={})", wal_cur, desired, active, queued, idle);
+                            }
                         }
                         let up_cur = crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.load(AO::Relaxed);
                         if up_cur != desired {
                             crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.store(desired, AO::Relaxed);
-                            println!("tune: upload_concurrency {} -> {} (ingest_active={} queued={} idle_cpus={})", up_cur, desired, active, queued, idle);
+                            if Config::log_wal_enabled() {
+                                println!("tune: upload_concurrency {} -> {} (ingest_active={} queued={} idle_cpus={})", up_cur, desired, active, queued, idle);
+                            }
                         }
                     }
                     let mut to_compact: Vec<( (String, String, Option<i64>, String), WalPartition)> = Vec::new();

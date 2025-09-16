@@ -262,7 +262,9 @@ impl DataOutputAwsAthenaPlugin {
             let current = self.upload_sem.available_permits() + 1; // approx
             if target as usize != current {
                 if target as usize > current { self.upload_sem.add_permits(target as usize - current); }
-                println!("tune: upload_sem target={} available={} (approx)", target, self.upload_sem.available_permits());
+                if Config::log_wal_enabled() {
+                    println!("tune: upload_sem target={} available={} (approx)", target, self.upload_sem.available_permits());
+                }
             }
         }
         let _permit = self.upload_sem.clone().acquire_owned().await.map_err(|_| io::Error::new(io::ErrorKind::Other, "Semaphore closed"))?;

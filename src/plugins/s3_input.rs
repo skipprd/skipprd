@@ -241,7 +241,9 @@ impl DataSourceS3Plugin {
         let env_dl = dl_concurrency_env.parse::<usize>().ok().filter(|v| *v > 0);
         let tuned_dl = crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.load(std::sync::atomic::Ordering::Relaxed);
         let dl_concurrency = env_dl.unwrap_or_else(|| tuned_dl.clamp(8, 512));
-        println!("tune: s3_download_concurrency={} (env_override={:?})", dl_concurrency, env_dl);
+        if Config::log_wal_enabled() {
+            println!("tune: s3_download_concurrency={} (env_override={:?})", dl_concurrency, env_dl);
+        }
         let dl_sem = Arc::new(Semaphore::new(dl_concurrency));
 
         // Background manager to dynamically adjust effective download concurrency to tuned target

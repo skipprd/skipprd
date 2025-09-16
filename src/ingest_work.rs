@@ -357,26 +357,34 @@ impl Ingest {
         // Upload concurrency override/cap
         if let Ok(v) = Config::getenv("UPLOAD_CONCURRENCY", "").parse::<usize>() { if v > 0 {
             crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.store(v, std::sync::atomic::Ordering::Relaxed);
-            println!("tune: upload_concurrency set by env={}", v);
+            if Config::log_wal_enabled() {
+                println!("tune: upload_concurrency set by env={}", v);
+            }
         }} else if is_ci {
             let cap = 8usize;
             let cur = crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.load(std::sync::atomic::Ordering::Relaxed);
             if cur > cap {
                 crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.store(cap, std::sync::atomic::Ordering::Relaxed);
-                println!("tune: upload_concurrency capped for CI to {}", cap);
+                if Config::log_wal_enabled() {
+                    println!("tune: upload_concurrency capped for CI to {}", cap);
+                }
             }
         }
 
         // WAL compaction concurrency override/cap
         if let Ok(v) = Config::getenv("WAL_COMPACTION_CONCURRENCY", "").parse::<usize>() { if v > 0 {
             crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.store(v, std::sync::atomic::Ordering::Relaxed);
-            println!("tune: wal_compaction set by env={}", v);
+            if Config::log_wal_enabled() {
+                println!("tune: wal_compaction set by env={}", v);
+            }
         }} else if is_ci {
             let cap = 4usize;
             let cur = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.load(std::sync::atomic::Ordering::Relaxed);
             if cur > cap {
                 crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.store(cap, std::sync::atomic::Ordering::Relaxed);
-                println!("tune: wal_compaction capped for CI to {}", cap);
+                if Config::log_wal_enabled() {
+                    println!("tune: wal_compaction capped for CI to {}", cap);
+                }
             }
         }
 
@@ -384,13 +392,17 @@ impl Ingest {
         if let Ok(v) = Config::getenv("S3_DOWNLOAD_CONCURRENCY", "").parse::<usize>() { if v > 0 {
             let clamped = v.clamp(8, 512);
             crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.store(clamped, std::sync::atomic::Ordering::Relaxed);
-            println!("tune: s3_download set by env={} (clamped)", clamped);
+            if Config::log_wal_enabled() {
+                println!("tune: s3_download set by env={} (clamped)", clamped);
+            }
         }} else if is_ci {
             let cap = 128usize;
             let cur = crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.load(std::sync::atomic::Ordering::Relaxed);
             if cur > cap {
                 crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.store(cap, std::sync::atomic::Ordering::Relaxed);
-                println!("tune: s3_download capped for CI to {}", cap);
+                if Config::log_wal_enabled() {
+                    println!("tune: s3_download capped for CI to {}", cap);
+                }
             }
         }
 
@@ -884,7 +896,9 @@ impl Ingest {
                     else if pressure < 0.4 { upload_cur.saturating_sub(1).max(4) } else { upload_cur };
                 if upload_next != upload_cur {
                     crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.store(upload_next, Ordering::Relaxed);
-                    println!("tune: upload_concurrency {} -> {} (active={}/{} queue={} pressure={:.2})", upload_cur, upload_next, active, capacity, queued, pressure);
+                    if Config::log_wal_enabled() {
+                        println!("tune: upload_concurrency {} -> {} (active={}/{} queue={} pressure={:.2})", upload_cur, upload_next, active, capacity, queued, pressure);
+                    }
                 }
 
                 // WAL compaction tuning
@@ -893,7 +907,9 @@ impl Ingest {
                     else if pressure < 0.4 { wal_cur.saturating_sub(1).max(2) } else { wal_cur };
                 if wal_next != wal_cur {
                     crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.store(wal_next, Ordering::Relaxed);
-                    println!("tune: wal_compaction {} -> {} (active={}/{} queue={} pressure={:.2})", wal_cur, wal_next, active, capacity, queued, pressure);
+                    if Config::log_wal_enabled() {
+                        println!("tune: wal_compaction {} -> {} (active={}/{} queue={} pressure={:.2})", wal_cur, wal_next, active, capacity, queued, pressure);
+                    }
                 }
 
                 // S3 download tuning (upper bound; memory semaphore still applies)
@@ -902,7 +918,9 @@ impl Ingest {
                     else if pressure > 0.8 { dl_cur.saturating_sub(16).max(64) } else { dl_cur };
                 if dl_next != dl_cur {
                     crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.store(dl_next, Ordering::Relaxed);
-                    println!("tune: s3_download {} -> {} (active={}/{} queue={} pressure={:.2})", dl_cur, dl_next, active, capacity, queued, pressure);
+                    if Config::log_wal_enabled() {
+                        println!("tune: s3_download {} -> {} (active={}/{} queue={} pressure={:.2})", dl_cur, dl_next, active, capacity, queued, pressure);
+                    }
                 }
             }
 
