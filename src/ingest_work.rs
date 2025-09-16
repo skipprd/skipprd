@@ -95,6 +95,18 @@ fn ensure_slow_ingest_worker() {
                                 METADATA.store(Arc::new(md_local.clone()));
                                 // Refresh Arrow schema (monotonic guard applies inside)
                                 let _ = Ingest::prepare_arrow_schema_with_metadata(&task.namespace, &md_local.metadata, task.flatten);
+                                // Persist updated metadata immediately so output plugin sees new namespaces
+                                // Best-effort: block here to avoid partition-creation races
+                                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                                    let md_clone = md_local.clone();
+                                    handle.spawn(async move { Config::set_metadata(&md_clone, false).await; });
+                                } else {
+                                    let md_clone = md_local.clone();
+                                    std::thread::spawn(move || {
+                                        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                                        rt.block_on(async move { Config::set_metadata(&md_clone, false).await; });
+                                    });
+                                }
                             }
                             Ok(v)
                         }
@@ -1306,6 +1318,25 @@ impl Ingest {
                     };
                     if let Some(swap) = ARROW_SCHEMA.get(&ns) {
                         entry.schema = Arc::clone(&swap.value().load());
+                    }
+                    // Persist updated metadata and kick schema sync for this namespace
+                    let md_snapshot2 = METADATA.load().as_ref().clone();
+                    if let Ok(h) = runtime::Handle::try_current() {
+                        let md_clone2 = md_snapshot2.clone();
+                        h.spawn(async move { Config::set_metadata(&md_clone2, false).await; });
+                        let md_clone3 = md_snapshot2.clone();
+                        h.spawn(async move { Config::sync_schema(&md_clone3.metadata).await; });
+                    } else {
+                        let md_clone2 = md_snapshot2.clone();
+                        std::thread::spawn(move || {
+                            let rt = runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                            rt.block_on(async move { Config::set_metadata(&md_clone2, false).await; });
+                        });
+                        let md_clone3 = md_snapshot2.clone();
+                        std::thread::spawn(move || {
+                            let rt2 = runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                            rt2.block_on(async move { Config::sync_schema(&md_clone3.metadata).await; });
+                        });
                     }
                 }
             }
