@@ -184,11 +184,13 @@ pub async fn flush_all_now() {
     // Snapshot and drain all keys
     let mut to_flush = Buffers::new();
     let mut drain_map: HashMap<PartitionKey, IngestBufferBatch> = HashMap::with_capacity(ACCUMULATOR.len());
-    for item in ACCUMULATOR.iter() {
-        drain_map.insert(item.key().clone(), item.value().clone());
+    // Collect keys, then remove to obtain owned values (avoids Clone)
+    let keys: Vec<PartitionKey> = ACCUMULATOR.iter().map(|e| e.key().clone()).collect();
+    for k in keys.into_iter() {
+        if let Some((_, v)) = ACCUMULATOR.remove(&k) {
+            drain_map.insert(k.clone(), v);
+        }
     }
-    // Remove after snapshot to minimize lock thrash
-    for k in drain_map.keys() { ACCUMULATOR.remove(k); }
     BYTES.clear();
     FIRST_SEEN.clear();
     if Config::log_wal_enabled() {

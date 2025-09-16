@@ -934,13 +934,20 @@ async fn sync() {
 
     // Final concise metrics
     {
+        use crate::metrics::counters as counters;
         let m = METRICS.read();
+        let messages_total = m.messages_total + counters::MESSAGES_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
+        let source_bytes_total = m.source_bytes_total + counters::SOURCE_BYTES_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
+        let parquet_objects = m.parquet_persisted_objects_total + counters::PARQUET_PERSISTED_OBJECTS_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
+        let parquet_rows = m.parquet_persisted_rows_total + counters::PARQUET_PERSISTED_ROWS_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
+        let parquet_bytes = m.parquet_persisted_bytes_total + counters::PARQUET_PERSISTED_BYTES_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
         println!(
-            "Final metrics: msgs_total={} bytes_total={} uploads_total={} avg_upload_latency_ms={:.2}",
-            m.message_total,
-            m.bytes_total,
-            m.uploads_total,
-            (m.upload_latency_ns_total as f64 / (m.uploads_total.max(1)) as f64) / 1_000_000.0
+            "Final metrics: msgs_total={} src_bytes_total={} parquet_rows_total={} parquet_bytes_total={} parquet_objects_total={}",
+            messages_total,
+            source_bytes_total,
+            parquet_rows,
+            parquet_bytes,
+            parquet_objects
         );
     }
     println!("Pipeline sync complete");
