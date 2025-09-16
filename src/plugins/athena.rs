@@ -220,28 +220,33 @@ impl DataOutputAwsAthenaPlugin {
 
         if !partition_values.is_empty() {
             let flatten = Config::get_transform_flatten_events();
-            
             let metadata: PipelineMetadata = METADATA.load().as_ref().clone();
-       
             let ns_md_opt = metadata.metadata.get(&namespace);
             let partition_metadata_opt = if let Some(ns_md) = ns_md_opt {
                 Some(if flatten { OutputMetadata::from_flatterened_metadata(ns_md) } else { OutputMetadata::from_metadata(ns_md) })
             } else { None };
 
-            // Handle partition creation asynchronously
-            if let Some(partition_metadata) = partition_metadata_opt {
-                if let Err(_err) = AwsAthena::glue_create_partition(
-                    &namespace,
-                    partition_values.clone(),
-                    &full_key,
-                    &mut partition_cache,
-                    &partition_metadata,
-                ).await {
-                    // Log error but continue with upload
-                    println!("Warning: Failed to create partition: {}", _err);
+            // Kick off partition creation in background to avoid gating uploads
+            match partition_metadata_opt {
+                Some(partition_metadata) => {
+                    let namespace_bg = namespace.to_string();
+                    let full_key_bg = full_key.clone();
+                    let mut cache_bg = partition_cache.clone();
+                    tokio::spawn(async move {
+                        if let Err(err) = AwsAthena::glue_create_partition(
+                            &namespace_bg,
+                            partition_values,
+                            &full_key_bg,
+                            &mut cache_bg,
+                            &partition_metadata,
+                        ).await {
+                            println!("Warning: Failed to create partition: {}", err);
+                        }
+                    });
                 }
-            } else {
-                println!("Warning: no metadata for namespace '{}' when creating partition for key '{}'; skipping partition creation.", namespace, full_key);
+                None => {
+                    println!("Warning: no metadata for namespace '{}' when creating partition for key '{}'; skipping partition creation.", namespace, full_key);
+                }
             }
         }
 
@@ -262,9 +267,9 @@ impl DataOutputAwsAthenaPlugin {
             let current = self.upload_sem.available_permits() + 1; // approx
             if target as usize != current {
                 if target as usize > current { self.upload_sem.add_permits(target as usize - current); }
-                if Config::log_wal_enabled() {
-                    println!("tune: upload_sem target={} available={} (approx)", target, self.upload_sem.available_permits());
-                }
+                // if Config::log_wal_enabled() {
+                println!("tune: upload_sem target={} available={} (approx)", target, self.upload_sem.available_permits());
+                // }
             }
         }
         let _permit = self.upload_sem.clone().acquire_owned().await.map_err(|_| io::Error::new(io::ErrorKind::Other, "Semaphore closed"))?;
@@ -465,10 +470,13 @@ impl DataOutputAwsAthenaPlugin {
 
         let mut rows_written: u64 = 0;
         let mut batches = stream;
+        // Drive streaming write with small in-loop yields to allow multiple uploads interleave fairly
         while let Some(batch_res) = batches.next().await {
             let batch = batch_res.map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Stream error: {}", e)))?;
             rows_written += batch.num_rows() as u64;
             parquet_writer.write(&batch).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Parquet write error: {}", e)))?;
+            // Cooperative yield for fairness among concurrent tasks
+            tokio::task::yield_now().await;
         }
 
         let _meta = parquet_writer.close().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Parquet close error: {}", e)))?;
@@ -1470,7 +1478,7 @@ impl AwsAthena {
                         }
                     }
                     // For other errors, just log and continue to best-effort partition ops
-                    println!("Warning: get_table failed for '{}.{}': {}", database, namespace, e);
+                    // println!("Warning: get_table failed for '{}.{}': {}", database, namespace, e);
                 }
             }
 
