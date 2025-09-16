@@ -699,6 +699,8 @@ async fn discover() {
     }
 
     // Deterministic drain: enqueue and compact all remaining WALs in the queue model
+    // Ensure any residual accumulator data is written to WALs before compaction
+    crate::buffer::wal_accumulator::flush_all_now().await;
     buffer::ingest_buffer::force_drain_all(offsets_db.clone(), shared_output.clone()).await;
     // Wait for background Glue partition tasks to settle to avoid undercount at end
     crate::plugins::athena::DataOutputAwsAthenaPlugin::await_partition_tasks_zero().await;
@@ -930,6 +932,17 @@ async fn sync() {
     //         .await;
     // }
 
+    // Final concise metrics
+    {
+        let m = METRICS.read();
+        println!(
+            "Final metrics: msgs_total={} bytes_total={} uploads_total={} avg_upload_latency_ms={:.2}",
+            m.message_total,
+            m.bytes_total,
+            m.uploads_total,
+            (m.upload_latency_ns_total as f64 / (m.uploads_total.max(1)) as f64) / 1_000_000.0
+        );
+    }
     println!("Pipeline sync complete");
 }
 

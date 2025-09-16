@@ -177,3 +177,25 @@ async fn flush_ready() {
         let _ = to_flush.flush(offsets.clone(), output.clone()).await;
     }
 }
+
+/// Force-flush ALL accumulated batches regardless of thresholds.
+/// Used at end-of-ingest to ensure no in-memory data is left un-WALed.
+pub async fn flush_all_now() {
+    // Snapshot and drain all keys
+    let mut to_flush = Buffers::new();
+    let mut drain_map: HashMap<PartitionKey, IngestBufferBatch> = HashMap::with_capacity(ACCUMULATOR.len());
+    for item in ACCUMULATOR.iter() {
+        drain_map.insert(item.key().clone(), item.value().clone());
+    }
+    // Remove after snapshot to minimize lock thrash
+    for k in drain_map.keys() { ACCUMULATOR.remove(k); }
+    BYTES.clear();
+    FIRST_SEEN.clear();
+    if Config::log_wal_enabled() {
+        println!("WAL accumulator: force-flush {} partitions", drain_map.len());
+    }
+    to_flush.write(drain_map);
+    if let (Some(offsets), Some(output)) = (OFFSETS_CELL.get(), OUTPUT_CELL.get()) {
+        let _ = to_flush.flush(offsets.clone(), output.clone()).await;
+    }
+}

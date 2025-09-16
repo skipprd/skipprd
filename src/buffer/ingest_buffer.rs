@@ -401,7 +401,8 @@ impl Buffers {
     fn enqueue_compaction(task: CompactionTask) -> Result<(), ()> {
         // Deduplicate by partition key to prevent concurrent compactions of same workset
         use dashmap::mapref::entry::Entry;
-        match INFLIGHT_PARTITIONS.entry(task.key.clone()) {
+        let key_clone = task.key.clone();
+        match INFLIGHT_PARTITIONS.entry(key_clone.clone()) {
             Entry::Occupied(_) => return Err(()),
             Entry::Vacant(v) => { v.insert(()); }
         }
@@ -412,12 +413,12 @@ impl Buffers {
                     // Failed to enqueue, release the in-flight guard
                     // (Key must match exactly what we inserted)
                     // Remove without caring about value
-                    INFLIGHT_PARTITIONS.remove(&task.key);
+                    INFLIGHT_PARTITIONS.remove(&key_clone);
                     Err(())
                 }
             }
         } else {
-            INFLIGHT_PARTITIONS.remove(&task.key);
+            INFLIGHT_PARTITIONS.remove(&key_clone);
             Err(())
         }
     }
@@ -706,7 +707,7 @@ pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
                                 Err(_e) => { break; }
                             }
                         }
-                        if files_indexed > 0 { break; }
+                        // Do not break early; scan all prefixes to avoid missing shards
                     }
                     let elapsed = started.elapsed().as_secs_f64();
                     println!("Indexed {} WAL files on S3 in {:.2}s (blocking), {} total bytes", files_indexed, elapsed, Helpers::human_readable_size(total_bytes));
@@ -911,38 +912,50 @@ impl WalPartition {
 
         // Determine schema from the first WAL file in this shard to avoid type mismatches
         let schema: SchemaRef = if storage.eq_ignore_ascii_case("disk") {
-            match self.files.first_mut().and_then(|wf| wf.read_schema_from_stream().ok()) {
+            // Try files in order until one yields a schema
+            let mut schema_opt: Option<SchemaRef> = None;
+            for wf in self.files.iter_mut() {
+                if let Ok(s) = wf.read_schema_from_stream() { schema_opt = Some(s); break; }
+            }
+            match schema_opt {
                 Some(s) => s,
                 None => {
-                    println!("Failed to read schema from local WAL for namespace: {}", self.namespace);
+                    println!("Failed to read schema from local WALs for namespace: {}", self.namespace);
                     return wal_compacted_bytes_total;
                 }
             }
         } else {
-            // s3: read schema from first object
-            if let (Some(s3c), Some(first)) = (s3.as_ref(), self.files.first()) {
-                let rel = first.path.to_string_lossy().replace(&base, "").trim_start_matches('/').to_string();
-                let key = if wal_prefix.is_empty() { rel.clone() } else { format!("{}/{}", wal_prefix, rel) };
-                match WalS3Object::read_from_stream(s3c, &wal_bucket, &key).await {
-                    Ok(resp) => {
-                        let handle = tokio::task::spawn_blocking(move || {
-                            let async_reader = resp.body.into_async_read();
-                            let mut bridge = SyncIoBridge::new(async_reader);
-                        let mut offset_size = [0u8; 8];
-                            if std::io::Read::read_exact(&mut bridge, &mut offset_size).is_err() { return Err("header"); }
-                        let skip = u64::from_le_bytes(offset_size);
-                            let _ = std::io::copy(&mut bridge.by_ref().take(skip), &mut io::sink());
-                            match StreamReader::try_new(bridge, None) {
-                                Ok(sr) => Ok(sr.schema()),
-                                Err(_) => Err("stream")
+            // s3: read schema from first successful object
+            if let Some(s3c) = s3.as_ref() {
+                let mut schema_opt: Option<SchemaRef> = None;
+                for first in self.files.iter() {
+                    let rel = first.path.to_string_lossy().replace(&base, "").trim_start_matches('/').to_string();
+                    let key = if wal_prefix.is_empty() { rel.clone() } else { format!("{}/{}", wal_prefix, rel) };
+                    match WalS3Object::read_from_stream(s3c, &wal_bucket, &key).await {
+                        Ok(resp) => {
+                            let handle = tokio::task::spawn_blocking(move || {
+                                let async_reader = resp.body.into_async_read();
+                                let mut bridge = SyncIoBridge::new(async_reader);
+                                let mut offset_size = [0u8; 8];
+                                if std::io::Read::read_exact(&mut bridge, &mut offset_size).is_err() { return Err("header"); }
+                                let skip = u64::from_le_bytes(offset_size);
+                                let _ = std::io::copy(&mut bridge.by_ref().take(skip), &mut io::sink());
+                                match StreamReader::try_new(bridge, None) {
+                                    Ok(sr) => Ok(sr.schema()),
+                                    Err(_) => Err("stream")
+                                }
+                            });
+                            match handle.await {
+                                Ok(Ok(s)) => { schema_opt = Some(s); break; }
+                                _ => { println!("Failed to init Arrow stream to read schema from S3 WAL {}", key); }
                             }
-                        });
-                        match handle.await {
-                            Ok(Ok(s)) => s,
-                            _ => { println!("Failed to init Arrow stream to read schema from S3 WAL {}", key); return wal_compacted_bytes_total; }
                         }
+                        Err(e) => { println!("Failed to download WAL from S3 {}: {}", key, e); }
                     }
-                    Err(e) => { println!("Failed to download WAL from S3 {}: {}", key, e); return wal_compacted_bytes_total; }
+                }
+                match schema_opt {
+                    Some(s) => s,
+                    None => { println!("WAL_STORAGE is 's3' but unable to read schema from any file"); return wal_compacted_bytes_total; }
                 }
             } else {
                 println!("WAL_STORAGE is 's3' but missing client or files");
@@ -995,7 +1008,7 @@ impl WalPartition {
                                     for item in sr {
                                         match item {
                                             Ok(batch) => {
-                                                if batch.schema().as_ref() != schema_clone.as_ref() {
+                                                if !WalPartition::schemas_equivalent(&batch.schema(), &schema_clone) {
                                                     println!("ERROR: Skipping WAL batch due to schema mismatch for ns={} part={} time={}", namespace, partition, time_val.unwrap_or(0));
                                 continue;
                             }
@@ -1048,7 +1061,7 @@ impl WalPartition {
                                     for batch_res in sr {
                                         match batch_res {
                                                     Ok(batch) => {
-                                                        if batch.schema().as_ref() != schema_inner.as_ref() {
+                                                        if !WalPartition::schemas_equivalent(&batch.schema(), &schema_inner) {
                                                             println!("Skipping WAL batch from S3 due to schema mismatch for ns={} part={} time={}", namespace_inner, partition_inner, time_val.unwrap_or(0));
                                                             continue;
                                                         }
