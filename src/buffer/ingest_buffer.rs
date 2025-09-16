@@ -884,16 +884,8 @@ impl WalPartition {
 
         // NOTE: offsets are committed AFTER successful upload now (moved below)
         
-        // Deterministic output name for idempotent compaction uploads: hash of WAL file signatures
-        // This ensures repeated compactions of the same partition overwrite the same object, avoiding duplicates
-        let mut sigs: Vec<String> = self.files.iter().map(|wf| {
-            let ts = wf.updated_at.duration_since(SystemTime::UNIX_EPOCH).unwrap_or(std::time::Duration::from_secs(0)).as_secs();
-            format!("{}:{}:{}", wf.path.to_string_lossy(), wf.bytes, ts)
-        }).collect();
-        sigs.sort();
-        let joined = sigs.join("|");
-        let stable_hash = format!("{:x}", md5::compute(joined));
-        output_file_name = format!("{}-{}", output_file_name, stable_hash);
+        // Use a stable, deterministic filename derived only from (namespace, partition, time, shard)
+        // The uploader derives the final S3 key from md5(filename). Keeping filename stable ensures overwrite semantics.
 
         // println!("Compacting WAL partition to Parquet, Namespace: {} Partition: {} {}", self.namespace, self.partition, self.time.unwrap_or(0));
 
