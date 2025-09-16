@@ -50,6 +50,7 @@ use aws_sdk_s3::operation::get_object::{GetObjectError, GetObjectOutput};
 use tokio::sync::mpsc;
 use tokio_util::io::SyncIoBridge;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
+use num_cpus;
 
 #[allow(dead_code)]
 pub static TOTAL_ROWS: Lazy<TimedRwLock<AtomicU64>> =
@@ -288,6 +289,27 @@ impl Buffers {
                 let mut idle_ticks: u64 = 0;
                 loop {
                     let _guard = COMPACTION_ASYNC_LOCK.lock().await;
+                    // If ingest is idle, boost WAL/Upload concurrency to utilize all CPUs
+                    {
+                        use std::sync::atomic::Ordering as AO;
+                        let active = crate::metrics::counters::ACTIVE_THREADS.load(AO::Relaxed);
+                        let queued = crate::metrics::counters::QUEUE_LENGTH.load(AO::Relaxed);
+                        let cpus = num_cpus::get().clamp(1, 256);
+                        // Desired parallelism for compaction/uploads equals idle CPUs when there is ingest pressure;
+                        // if no queued ingest, allow full CPU utilization
+                        let idle = if queued > 0 { cpus.saturating_sub(active) } else { cpus };
+                        let desired = idle.clamp(1, cpus);
+                        let wal_cur = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.load(AO::Relaxed);
+                        if wal_cur != desired {
+                            crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.store(desired, AO::Relaxed);
+                            println!("tune: wal_compaction {} -> {} (ingest_active={} queued={} idle_cpus={})", wal_cur, desired, active, queued, idle);
+                        }
+                        let up_cur = crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.load(AO::Relaxed);
+                        if up_cur != desired {
+                            crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.store(desired, AO::Relaxed);
+                            println!("tune: upload_concurrency {} -> {} (ingest_active={} queued={} idle_cpus={})", up_cur, desired, active, queued, idle);
+                        }
+                    }
                     let mut to_compact: Vec<( (String, String, Option<i64>, String), WalPartition)> = Vec::new();
                     let force_once = FORCE_COMPACT_ONCE.swap(false, AtomicOrdering::Relaxed);
                     for item in WAL_INDEX.iter() {
@@ -1280,6 +1302,7 @@ impl WalS3Object {
 
         // Multipart writer that uploads as Arrow stream is produced
         struct MultipartWriter {
+            
             client: S3Client,
             bucket: String,
             key: String,
@@ -1314,13 +1337,13 @@ impl WalS3Object {
                 let part_number = self.next_part;
                 self.next_part += 1;
                 self.total_bytes += chunk.len() as u64;
-                println!(
-                    "wal: uploading part {} for {} (size={}, total={})",
-                    part_number,
-                    key,
-                    Helpers::human_readable_size((chunk.len()) as u64),
-                    Helpers::human_readable_size(self.total_bytes)
-                );
+                // println!(
+                //     "wal: uploading part {} for {} (size={}, total={})",
+                //     part_number,
+                //     key,
+                //     Helpers::human_readable_size((chunk.len()) as u64),
+                //     Helpers::human_readable_size(self.total_bytes)
+                // );
                 tokio::task::block_in_place(|| {
                     let body = S3ByteStream::from(Bytes::from(chunk));
                     let fut = async move {
@@ -1364,12 +1387,14 @@ impl WalS3Object {
                 let key = self.key.clone();
                 let upload_id = self.upload_id.clone();
                 let parts = self.parts.clone();
-                println!(
-                    "wal: completing multipart upload for {} (parts={}, total={})",
-                    key,
-                    parts.len(),
-                    Helpers::human_readable_size(self.total_bytes)
-                );
+                if Config::log_wal_enabled() {
+                    println!(
+                        "wal: completing multipart upload for {} (parts={}, total={})",
+                        key,
+                        parts.len(),
+                        Helpers::human_readable_size(self.total_bytes)
+                    );
+                }
                 tokio::task::block_in_place(|| {
                     let fut = async move {
                         client
