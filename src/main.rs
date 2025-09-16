@@ -698,11 +698,10 @@ async fn discover() {
         OUTPUT_RUNNING.write().store(true, Ordering::SeqCst);
     }
 
-    let shared_output_clone = shared_output.clone();
-    Buffers::compact_all_partitions(true, offsets_db.clone(), shared_output_clone).await;
-    // Second pass: re-index S3 and drain any WALs that appeared late
-    let shared_output_clone = shared_output.clone();
-    Buffers::compact_all_partitions(true, offsets_db.clone(), shared_output_clone).await;
+    // Deterministic drain: enqueue and compact all remaining WALs in the queue model
+    buffer::ingest_buffer::force_drain_all(offsets_db.clone(), shared_output.clone()).await;
+    // Wait for background Glue partition tasks to settle to avoid undercount at end
+    crate::plugins::athena::DataOutputAwsAthenaPlugin::await_partition_tasks_zero().await;
 
     {
         OUTPUT_RUNNING

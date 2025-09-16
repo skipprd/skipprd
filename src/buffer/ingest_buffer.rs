@@ -51,6 +51,7 @@ use tokio::sync::mpsc;
 use tokio_util::io::SyncIoBridge;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use num_cpus;
+use tokio::sync::Semaphore as TokioSemaphore;
 
 #[allow(dead_code)]
 pub static TOTAL_ROWS: Lazy<TimedRwLock<AtomicU64>> =
@@ -64,6 +65,12 @@ static COMPACTION_ASYNC_LOCK: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio:
 static FORCE_COMPACT_ONCE: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
 static COMPACTOR_RUNNING: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
 static LAST_COMPACTOR_RUN_TS: Lazy<std::sync::atomic::AtomicU64> = Lazy::new(|| std::sync::atomic::AtomicU64::new(0));
+static COMPACTION_DISPATCH_STARTED: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
+static COMPACTION_TX: OnceCell<tokio::sync::mpsc::Sender<CompactionTask>> = OnceCell::new();
+static DISPATCH_NOTIFY: OnceCell<Arc<tokio::sync::Notify>> = OnceCell::new();
+static COMPACTION_CONCURRENCY: Lazy<Arc<TokioSemaphore>> = Lazy::new(|| Arc::new(TokioSemaphore::new(16)));
+static INFLIGHT_COMPACTIONS: Lazy<std::sync::atomic::AtomicUsize> = Lazy::new(|| std::sync::atomic::AtomicUsize::new(0));
+static OUTSTANDING_COMPACTIONS: Lazy<std::sync::atomic::AtomicUsize> = Lazy::new(|| std::sync::atomic::AtomicUsize::new(0));
 
 // lazy_static! {
 //     pub static ref WAL_INDEX: TimedRwLock<WalIndex> = TimedRwLock::new("wal_index".to_string(), WalIndex::new());
@@ -164,29 +171,29 @@ impl Buffers {
                         &wal_bucket,
                         &wal_prefix,
                         &wal_base,
-                        namespace,
-                        partition,
-                        *time,
-                        shard,
+                namespace,
+                partition,
+                *time,
+                shard,
                         &record_batches,
                         &ingest_buffer_batch.offsets,
                     ).await {
                         Ok((wal_file, stat_rows, stat_bytes)) => {
-                            if Config::debug_enabled() || Config::log_wal_enabled() {
+                                    if Config::debug_enabled() || Config::log_wal_enabled() {
                                 println!("Uploaded WAL to s3 (ns={},part={},time={},shard={})", namespace, partition, time.unwrap_or(0), shard);
-                            }
+                                    }
                             ingest_buffer_batch.offsets.iter().for_each(|(offset, position)| {
-                                let offset_key = OffsetKey { namespace: offset.namespace.clone(), partition: offset.partition.clone() };
-                                offsets_db.insert(&offset_key, OffsetTypes::Position, *position);
-                                offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
-                            });
+                                        let offset_key = OffsetKey { namespace: offset.namespace.clone(), partition: offset.partition.clone() };
+                                        offsets_db.insert(&offset_key, OffsetTypes::Position, *position);
+                                        offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
+                                    });
                             rows += stat_rows;
                             bytes += stat_bytes;
                             partition_entry.push(wal_file);
-                        }
+                                }
                         Err(_e) => { let _ = _e; }
-                    }
-                }
+                            }
+                        }
             } else {
                 // Disk mode: use local WAL file path
                 let mut wal_file = WalFile::new(
@@ -265,8 +272,18 @@ impl Buffers {
             }
         }
 
-        // Start background compactor once
-        Buffers::ensure_compactor_running(offsets_db.clone(), shared_output.clone());
+        // Threshold-based compaction trigger per partition; start dispatcher and enqueue tasks
+        Self::start_compaction_dispatch_once(shared_output.clone(), offsets_db.clone());
+        for item in WAL_INDEX.iter() {
+            let part = item.value();
+            if part.is_file_size_exceeded() || part.is_file_time_exceeded() {
+                let _ = Self::enqueue_compaction(CompactionTask {
+                    key: item.key().clone(),
+                    force: false,
+                });
+                OUTSTANDING_COMPACTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
 
         Ok(())
     }
@@ -296,18 +313,18 @@ impl Buffers {
             return;
         }
         LAST_COMPACTOR_RUN_TS.store(now_secs, AO::Relaxed);
-        tokio::spawn(async move {
+            tokio::spawn(async move {
             // Single-shot compaction run
-            let _guard = COMPACTION_ASYNC_LOCK.lock().await;
+                    let _guard = COMPACTION_ASYNC_LOCK.lock().await;
             // Snapshot and remove worklist
             let mut to_compact: Vec<((String, String, Option<i64>, String), WalPartition)> = Vec::new();
             let force_once = FORCE_COMPACT_ONCE.swap(false, AO::Relaxed);
-            for item in WAL_INDEX.iter() {
-                let k = item.key().clone();
-                let v = item.value().clone();
-                if v.check_wal_rotate(force_once) { to_compact.push((k, v)); }
-            }
-            for (k, _) in to_compact.iter() { WAL_INDEX.remove(k); }
+                    for item in WAL_INDEX.iter() {
+                        let k = item.key().clone();
+                        let v = item.value().clone();
+                        if v.check_wal_rotate(force_once) { to_compact.push((k, v)); }
+                    }
+                        for (k, _) in to_compact.iter() { WAL_INDEX.remove(k); }
             drop(_guard);
 
             if to_compact.is_empty() { COMPACTOR_RUNNING.store(false, AO::Relaxed); return; }
@@ -315,32 +332,73 @@ impl Buffers {
             let concurrency = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET
                 .load(AO::Relaxed)
                 .clamp(1, 64);
-            let mut in_flight: futures::stream::FuturesUnordered<Pin<Box<dyn Future<Output = u64> + Send>>> = futures::stream::FuturesUnordered::new();
-            let mut iter = to_compact.into_iter();
+                        let mut in_flight: futures::stream::FuturesUnordered<Pin<Box<dyn Future<Output = u64> + Send>>> = futures::stream::FuturesUnordered::new();
+                        let mut iter = to_compact.into_iter();
             for _ in 0..concurrency {
-                if let Some((_k, p)) = iter.next() {
-                    let mut wal = p;
+                            if let Some((_k, p)) = iter.next() {
+                                let mut wal = p;
                     let offsets_cloned = offsets_db.clone();
                     let output_cloned = shared_output.clone();
-                    in_flight.push(Box::pin(async move { wal.compact_batches_to_parquet(offsets_cloned, output_cloned).await }));
-                }
-            }
-            let mut compacted_bytes: u64 = 0;
-            while let Some(bytes_done) = in_flight.next().await {
-                compacted_bytes += bytes_done as u64;
-                if let Some((_k, p)) = iter.next() {
-                    let mut wal = p;
+                                in_flight.push(Box::pin(async move { wal.compact_batches_to_parquet(offsets_cloned, output_cloned).await }));
+                            }
+                        }
+                        let mut compacted_bytes: u64 = 0;
+                        while let Some(bytes_done) = in_flight.next().await {
+                            compacted_bytes += bytes_done as u64;
+                            if let Some((_k, p)) = iter.next() {
+                                let mut wal = p;
                     let offsets_cloned = offsets_db.clone();
                     let output_cloned = shared_output.clone();
-                    in_flight.push(Box::pin(async move { wal.compact_batches_to_parquet(offsets_cloned, output_cloned).await }));
-                }
-            }
+                                in_flight.push(Box::pin(async move { wal.compact_batches_to_parquet(offsets_cloned, output_cloned).await }));
+                            }
+                        }
             WAL_BYTES_TOTAL.fetch_update(AO::Relaxed, AO::Relaxed, |v| Some(v.saturating_sub(compacted_bytes))).ok();
             COMPACTOR_RUNNING.store(false, AO::Relaxed);
             // Update last run timestamp at end as well
             let end_secs = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or(std::time::Duration::from_secs(0)).as_secs() as u64;
             LAST_COMPACTOR_RUN_TS.store(end_secs, AO::Relaxed);
         });
+    }
+
+    // New compaction queue definitions
+    fn start_compaction_dispatch_once(shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>, offsets_db: Arc<Offsets>) {
+        use std::sync::atomic::Ordering as AO;
+        if COMPACTION_DISPATCH_STARTED
+            .compare_exchange(false, true, AO::Relaxed, AO::Relaxed)
+            .is_err()
+        { return; }
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<CompactionTask>(1024);
+        let _ = COMPACTION_TX.set(tx);
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let _ = DISPATCH_NOTIFY.set(notify.clone());
+        // Single receiver fan-out with bounded concurrency
+        tokio::spawn(async move {
+            while let Some(task) = rx.recv().await {
+                let shared_output = shared_output.clone();
+                let offsets_db = offsets_db.clone();
+                let notify = notify.clone();
+                let sem = COMPACTION_CONCURRENCY.clone();
+                let permit = sem.acquire_owned().await.unwrap();
+                INFLIGHT_COMPACTIONS.fetch_add(1, AO::Relaxed);
+                tokio::spawn(async move {
+                    let _permit = permit; // keep permit until end of task
+                    let _ = (&task.key.0, &task.key.1, task.key.2, &task.key.3);
+                    if let Some(mut entry) = WAL_INDEX.remove(&task.key).map(|(_, v)| v) {
+                        let _ = entry.compact_batches_to_parquet(offsets_db.clone(), shared_output.clone()).await;
+                    }
+                    INFLIGHT_COMPACTIONS.fetch_sub(1, AO::Relaxed);
+                    OUTSTANDING_COMPACTIONS.fetch_sub(1, AO::Relaxed);
+                    notify.notify_waiters();
+                });
+            }
+        });
+    }
+
+    fn enqueue_compaction(task: CompactionTask) -> Result<(), ()> {
+        if let Some(tx) = COMPACTION_TX.get() {
+            tx.try_send(task).map_err(|_| ())
+        } else { Err(()) }
     }
 
     pub async fn compact_all_partitions(force: bool, offsets_db: Arc<Offsets>, shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>) {
@@ -846,9 +904,9 @@ impl WalPartition {
                         let handle = tokio::task::spawn_blocking(move || {
                             let async_reader = resp.body.into_async_read();
                             let mut bridge = SyncIoBridge::new(async_reader);
-                            let mut offset_size = [0u8; 8];
+                        let mut offset_size = [0u8; 8];
                             if std::io::Read::read_exact(&mut bridge, &mut offset_size).is_err() { return Err("header"); }
-                            let skip = u64::from_le_bytes(offset_size);
+                        let skip = u64::from_le_bytes(offset_size);
                             let _ = std::io::copy(&mut bridge.by_ref().take(skip), &mut io::sink());
                             match StreamReader::try_new(bridge, None) {
                                 Ok(sr) => Ok(sr.schema()),
@@ -915,8 +973,8 @@ impl WalPartition {
                                             Ok(batch) => {
                                                 if batch.schema().as_ref() != schema_clone.as_ref() {
                                                     println!("ERROR: Skipping WAL batch due to schema mismatch for ns={} part={} time={}", namespace, partition, time_val.unwrap_or(0));
-                                                    continue;
-                                                }
+                                continue;
+                            }
                                                 row_counter_task.fetch_add(batch.num_rows() as u64, AtomicOrdering::Relaxed);
                                                 if tx.send(Ok(batch)).await.is_err() { break; }
                                             }
@@ -962,9 +1020,9 @@ impl WalPartition {
                                     let skip = u64::from_le_bytes(offset_size);
                                     let _ = std::io::copy(&mut bridge.by_ref().take(skip), &mut io::sink());
                                     match StreamReader::try_new(bridge, None) {
-                                        Ok(sr) => {
-                                            for batch_res in sr {
-                                                match batch_res {
+                                Ok(sr) => {
+                                    for batch_res in sr {
+                                        match batch_res {
                                                     Ok(batch) => {
                                                         if batch.schema().as_ref() != schema_inner.as_ref() {
                                                             println!("Skipping WAL batch from S3 due to schema mismatch for ns={} part={} time={}", namespace_inner, partition_inner, time_val.unwrap_or(0));
@@ -976,27 +1034,27 @@ impl WalPartition {
                                                     Err(e) => {
                                                         println!("Failed reading batch from S3 WAL {}: {}", key_inner, e);
                                                         let _ = tx2.blocking_send(Err(DataFusionError::ArrowError(e, None)));
-                                                        break;
-                                                    }
-                                                }
+                                                break;
                                             }
                                         }
-                                        Err(e) => {
-                                            println!("Failed to init Arrow stream from S3 WAL {}: {}", key_inner, e);
-                                        }
                                     }
+                                }
+                                Err(e) => {
+                                            println!("Failed to init Arrow stream from S3 WAL {}: {}", key_inner, e);
+                                    }
+                                }
                                     if delete_corrupt_inner {
                                         let _ = futures::executor::block_on(s3c_clone.delete_object().bucket(&wal_bucket_moved).key(&key_inner).send());
-                                    }
-                                });
                             }
-                            Err(e) => { println!("Failed to download WAL from S3 {}: {}", key, e); }
+                                });
                         }
-                    } else {
-                        println!("WAL_STORAGE is 's3' but S3 client not initialized; skipping file");
+                        Err(e) => { println!("Failed to download WAL from S3 {}: {}", key, e); }
                     }
+                } else {
+                    println!("WAL_STORAGE is 's3' but S3 client not initialized; skipping file");
                 }
             }
+        }
             // Close channel
             drop(tx);
         });
@@ -1186,6 +1244,35 @@ impl WalPartition {
 
         Ok(results)
 
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CompactionTask {
+    key: (String, String, Option<i64>, String),
+    force: bool,
+}
+
+// Public drain used at end-of-ingest to compact any remaining WALs regardless of thresholds
+pub async fn force_drain_all(offsets_db: Arc<Offsets>, shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>) {
+    // Start dispatcher if needed
+    Buffers::start_compaction_dispatch_once(shared_output.clone(), offsets_db.clone());
+    // Rebuild WAL index from backend to ensure no partitions are missed
+    let _ = wal_recover(offsets_db.clone());
+    // Enqueue all partitions
+    for item in WAL_INDEX.iter() {
+        let key = item.key().clone();
+        let _ = Buffers::enqueue_compaction(CompactionTask { key, force: true });
+        OUTSTANDING_COMPACTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    // Signal no more tasks by stopping enqueues; then wait for counters to drain
+    // Wait until inflight reaches zero
+    let notify = DISPATCH_NOTIFY.get().cloned().unwrap_or_else(|| Arc::new(tokio::sync::Notify::new()));
+    loop {
+        if OUTSTANDING_COMPACTIONS.load(std::sync::atomic::Ordering::Relaxed) == 0 && INFLIGHT_COMPACTIONS.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+            break;
+        }
+        notify.notified().await;
     }
 }
 

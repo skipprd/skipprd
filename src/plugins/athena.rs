@@ -30,12 +30,13 @@ use tokio::task::block_in_place;
 use serde_derive::Deserialize;
 use crate::ingest::partition_time::TimePartitioner;
 use crate::plugins::DataOutputPlugin;
-use tokio::sync::{Semaphore, Mutex};
+use tokio::sync::{Semaphore, Mutex, Notify};
 use std::sync::Arc;
 use once_cell::sync::Lazy;
 use tokio::time::{sleep as tokio_sleep, Duration as TokioDuration};
 use dashmap::DashMap;
 use rand::Rng;
+use std::sync::atomic::{AtomicUsize, Ordering as AO};
 
 // Global control-plane throttling and serialization
 static GLUE_MAX_CONCURRENCY: Lazy<usize> = Lazy::new(|| {
@@ -44,6 +45,8 @@ static GLUE_MAX_CONCURRENCY: Lazy<usize> = Lazy::new(|| {
 static GLUE_CP_SEM: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(*GLUE_MAX_CONCURRENCY));
 static ATHENA_WG_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 static NAMESPACE_LOCKS: Lazy<DashMap<String, Arc<Mutex<()>>>> = Lazy::new(|| DashMap::new());
+static PARTITION_TASKS_IN_FLIGHT: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));
+static PARTITIONS_NOTIFY: Lazy<Notify> = Lazy::new(|| Notify::new());
 
 fn get_namespace_lock(namespace: &str) -> Arc<Mutex<()>> {
     NAMESPACE_LOCKS
@@ -232,20 +235,23 @@ impl DataOutputAwsAthenaPlugin {
                     let namespace_bg = namespace.to_string();
                     let full_key_bg = full_key.clone();
                     let mut cache_bg = partition_cache.clone();
+                    PARTITION_TASKS_IN_FLIGHT.fetch_add(1, AO::Relaxed);
                     tokio::spawn(async move {
                         if let Err(err) = AwsAthena::glue_create_partition(
                             &namespace_bg,
                             partition_values,
                             &full_key_bg,
                             &mut cache_bg,
-                            &partition_metadata,
-                        ).await {
+                    &partition_metadata,
+                ).await {
                             println!("Warning: Failed to create partition: {}", err);
                         }
+                        PARTITION_TASKS_IN_FLIGHT.fetch_sub(1, AO::Relaxed);
+                        PARTITIONS_NOTIFY.notify_waiters();
                     });
                 }
                 None => {
-                    println!("Warning: no metadata for namespace '{}' when creating partition for key '{}'; skipping partition creation.", namespace, full_key);
+                println!("Warning: no metadata for namespace '{}' when creating partition for key '{}'; skipping partition creation.", namespace, full_key);
                 }
             }
         }
@@ -268,7 +274,7 @@ impl DataOutputAwsAthenaPlugin {
             if target as usize != current {
                 if target as usize > current { self.upload_sem.add_permits(target as usize - current); }
                 if Config::log_wal_enabled() {
-                    println!("tune: upload_sem target={} available={} (approx)", target, self.upload_sem.available_permits());
+                println!("tune: upload_sem target={} available={} (approx)", target, self.upload_sem.available_permits());
                 }
             }
         }
@@ -498,6 +504,13 @@ impl DataOutputAwsAthenaPlugin {
                 crate::metrics::counters::add_upload_latency_ns(upload_start.elapsed().as_nanos() as u64);
                 crate::metrics::counters::dec_uploads_in_flight();
                 Ok(())
+            }
+
+    pub async fn await_partition_tasks_zero() {
+        loop {
+            if PARTITION_TASKS_IN_FLIGHT.load(AO::Relaxed) == 0 { break; }
+            PARTITIONS_NOTIFY.notified().await;
+        }
     }
 
     pub(crate) async fn serialize_to_parquet(
