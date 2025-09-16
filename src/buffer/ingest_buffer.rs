@@ -62,6 +62,8 @@ pub static WAL_BYTES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 // static COMPACTION_LOCK: OnceCell<std::sync::Mutex<()>> = OnceCell::new();
 static COMPACTION_ASYNC_LOCK: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio::sync::Mutex::new(()));
 static FORCE_COMPACT_ONCE: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
+static COMPACTOR_RUNNING: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
+static LAST_COMPACTOR_RUN_TS: Lazy<std::sync::atomic::AtomicU64> = Lazy::new(|| std::sync::atomic::AtomicU64::new(0));
 
 // lazy_static! {
 //     pub static ref WAL_INDEX: TimedRwLock<WalIndex> = TimedRwLock::new("wal_index".to_string(), WalIndex::new());
@@ -279,91 +281,66 @@ impl Buffers {
     /// Offsets are NOT committed here; they are committed in `Buffers::flush` immediately after
     /// each WAL object is successfully uploaded to S3, making compaction fully decoupled from ingest.
     fn ensure_compactor_running(offsets_db: Arc<Offsets>, shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>) {
-        static STARTED: OnceCell<()> = OnceCell::new();
-        static OFFSETS_CELL: OnceCell<Arc<Offsets>> = OnceCell::new();
-        static OUTPUT_CELL: OnceCell<Arc<Box<dyn DataOutputPlugin + Send + Sync>>> = OnceCell::new();
-        let _ = OFFSETS_CELL.set(offsets_db);
-        let _ = OUTPUT_CELL.set(shared_output);
-        if STARTED.set(()).is_ok() {
-            tokio::spawn(async move {
-                let mut idle_ticks: u64 = 0;
-                loop {
-                    let _guard = COMPACTION_ASYNC_LOCK.lock().await;
-                    // If ingest is idle, boost WAL/Upload concurrency to utilize all CPUs
-                    {
-                        use std::sync::atomic::Ordering as AO;
-                        let active = crate::metrics::counters::ACTIVE_THREADS.load(AO::Relaxed);
-                        let queued = crate::metrics::counters::QUEUE_LENGTH.load(AO::Relaxed);
-                        let cpus = num_cpus::get().clamp(1, 256);
-                        // Desired parallelism for compaction/uploads equals idle CPUs when there is ingest pressure;
-                        // if no queued ingest, allow full CPU utilization
-                        let idle = if queued > 0 { cpus.saturating_sub(active) } else { cpus };
-                        let desired = idle.clamp(1, cpus);
-                        let wal_cur = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.load(AO::Relaxed);
-                        if wal_cur != desired {
-                            crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.store(desired, AO::Relaxed);
-                            if Config::log_wal_enabled() {
-                                println!("tune: wal_compaction {} -> {} (ingest_active={} queued={} idle_cpus={})", wal_cur, desired, active, queued, idle);
-                            }
-                        }
-                        let up_cur = crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.load(AO::Relaxed);
-                        if up_cur != desired {
-                            crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.store(desired, AO::Relaxed);
-                            if Config::log_wal_enabled() {
-                                println!("tune: upload_concurrency {} -> {} (ingest_active={} queued={} idle_cpus={})", up_cur, desired, active, queued, idle);
-                            }
-                        }
-                    }
-                    let mut to_compact: Vec<( (String, String, Option<i64>, String), WalPartition)> = Vec::new();
-                    let force_once = FORCE_COMPACT_ONCE.swap(false, AtomicOrdering::Relaxed);
-                    for item in WAL_INDEX.iter() {
-                        let k = item.key().clone();
-                        let v = item.value().clone();
-                        if v.check_wal_rotate(force_once) { to_compact.push((k, v)); }
-                    }
-                    if !to_compact.is_empty() {
-                        // remove from index to avoid double work
-                        for (k, _) in to_compact.iter() { WAL_INDEX.remove(k); }
-                        // Release the global compaction lock before doing async compaction work
-                        drop(_guard);
-                        idle_ticks = 0;
-                        let tuned = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.load(std::sync::atomic::Ordering::Relaxed).clamp(1, 64);
-                        let mut in_flight: futures::stream::FuturesUnordered<Pin<Box<dyn Future<Output = u64> + Send>>> = futures::stream::FuturesUnordered::new();
-                        let mut iter = to_compact.into_iter();
-                        let offsets_cell = OFFSETS_CELL.get().unwrap().clone();
-                        let output_cloned = OUTPUT_CELL.get().unwrap().clone();
-                        for _ in 0..tuned {
-                            if let Some((_k, p)) = iter.next() {
-                                let mut wal = p;
-                                let offsets_cloned = offsets_cell.clone();
-                                let output_cloned = output_cloned.clone();
-                                in_flight.push(Box::pin(async move { wal.compact_batches_to_parquet(offsets_cloned, output_cloned).await }));
-                            }
-                        }
-                        let mut compacted_bytes: u64 = 0;
-                        while let Some(bytes_done) = in_flight.next().await {
-                            compacted_bytes += bytes_done as u64;
-                            if let Some((_k, p)) = iter.next() {
-                                let mut wal = p;
-                                let offsets_cloned = OFFSETS_CELL.get().unwrap().clone();
-                                let output_cloned = OUTPUT_CELL.get().unwrap().clone();
-                                in_flight.push(Box::pin(async move { wal.compact_batches_to_parquet(offsets_cloned, output_cloned).await }));
-                            }
-                        }
-                        WAL_BYTES_TOTAL.fetch_update(std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed, |v| Some(v.saturating_sub(compacted_bytes))).ok();
-                    } else {
-                        // Nothing to do; release lock before sleeping
-                        drop(_guard);
-                        idle_ticks += 1;
-                        if idle_ticks % 10 == 0 {
-                            let queued = WAL_INDEX.iter().count();
-                            println!("compactor heartbeat: idle_ticks={}, queued_partitions={}, wal_bytes_total={}", idle_ticks, queued, Helpers::human_readable_size(WAL_BYTES_TOTAL.load(std::sync::atomic::Ordering::Relaxed)));
-                        }
-                    }
-                    tokio_sleep(TokioDuration::from_millis(500)).await;
-                }
-            });
+        use std::sync::atomic::Ordering as AO;
+        if COMPACTOR_RUNNING
+            .compare_exchange(false, true, AO::Relaxed, AO::Relaxed)
+            .is_err()
+        {
+            return; // Already running; fire-and-forget singleton
         }
+        // Cooldown from previous run (1 second)
+        let now_secs = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or(std::time::Duration::from_secs(0)).as_secs() as u64;
+        let last_secs = LAST_COMPACTOR_RUN_TS.load(AO::Relaxed);
+        if now_secs.saturating_sub(last_secs) < 1 {
+            COMPACTOR_RUNNING.store(false, AO::Relaxed);
+            return;
+        }
+        LAST_COMPACTOR_RUN_TS.store(now_secs, AO::Relaxed);
+        tokio::spawn(async move {
+            // Single-shot compaction run
+            let _guard = COMPACTION_ASYNC_LOCK.lock().await;
+            // Snapshot and remove worklist
+            let mut to_compact: Vec<((String, String, Option<i64>, String), WalPartition)> = Vec::new();
+            let force_once = FORCE_COMPACT_ONCE.swap(false, AO::Relaxed);
+            for item in WAL_INDEX.iter() {
+                let k = item.key().clone();
+                let v = item.value().clone();
+                if v.check_wal_rotate(force_once) { to_compact.push((k, v)); }
+            }
+            for (k, _) in to_compact.iter() { WAL_INDEX.remove(k); }
+            drop(_guard);
+
+            if to_compact.is_empty() { COMPACTOR_RUNNING.store(false, AO::Relaxed); return; }
+
+            let concurrency = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET
+                .load(AO::Relaxed)
+                .clamp(1, 64);
+            let mut in_flight: futures::stream::FuturesUnordered<Pin<Box<dyn Future<Output = u64> + Send>>> = futures::stream::FuturesUnordered::new();
+            let mut iter = to_compact.into_iter();
+            for _ in 0..concurrency {
+                if let Some((_k, p)) = iter.next() {
+                    let mut wal = p;
+                    let offsets_cloned = offsets_db.clone();
+                    let output_cloned = shared_output.clone();
+                    in_flight.push(Box::pin(async move { wal.compact_batches_to_parquet(offsets_cloned, output_cloned).await }));
+                }
+            }
+            let mut compacted_bytes: u64 = 0;
+            while let Some(bytes_done) = in_flight.next().await {
+                compacted_bytes += bytes_done as u64;
+                if let Some((_k, p)) = iter.next() {
+                    let mut wal = p;
+                    let offsets_cloned = offsets_db.clone();
+                    let output_cloned = shared_output.clone();
+                    in_flight.push(Box::pin(async move { wal.compact_batches_to_parquet(offsets_cloned, output_cloned).await }));
+                }
+            }
+            WAL_BYTES_TOTAL.fetch_update(AO::Relaxed, AO::Relaxed, |v| Some(v.saturating_sub(compacted_bytes))).ok();
+            COMPACTOR_RUNNING.store(false, AO::Relaxed);
+            // Update last run timestamp at end as well
+            let end_secs = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or(std::time::Duration::from_secs(0)).as_secs() as u64;
+            LAST_COMPACTOR_RUN_TS.store(end_secs, AO::Relaxed);
+        });
     }
 
     pub async fn compact_all_partitions(force: bool, offsets_db: Arc<Offsets>, shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>) {
