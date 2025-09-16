@@ -71,6 +71,7 @@ static DISPATCH_NOTIFY: OnceCell<Arc<tokio::sync::Notify>> = OnceCell::new();
 static COMPACTION_CONCURRENCY: Lazy<Arc<TokioSemaphore>> = Lazy::new(|| Arc::new(TokioSemaphore::new(16)));
 static INFLIGHT_COMPACTIONS: Lazy<std::sync::atomic::AtomicUsize> = Lazy::new(|| std::sync::atomic::AtomicUsize::new(0));
 static OUTSTANDING_COMPACTIONS: Lazy<std::sync::atomic::AtomicUsize> = Lazy::new(|| std::sync::atomic::AtomicUsize::new(0));
+static INFLIGHT_PARTITIONS: Lazy<DashMap<(String, String, Option<i64>, String), ()>> = Lazy::new(|| DashMap::new());
 
 // lazy_static! {
 //     pub static ref WAL_INDEX: TimedRwLock<WalIndex> = TimedRwLock::new("wal_index".to_string(), WalIndex::new());
@@ -389,6 +390,8 @@ impl Buffers {
                     }
                     INFLIGHT_COMPACTIONS.fetch_sub(1, AO::Relaxed);
                     OUTSTANDING_COMPACTIONS.fetch_sub(1, AO::Relaxed);
+                    // Clear in-flight guard for this partition key
+                    INFLIGHT_PARTITIONS.remove(&task.key);
                     notify.notify_waiters();
                 });
             }
@@ -396,9 +399,27 @@ impl Buffers {
     }
 
     fn enqueue_compaction(task: CompactionTask) -> Result<(), ()> {
+        // Deduplicate by partition key to prevent concurrent compactions of same workset
+        use dashmap::mapref::entry::Entry;
+        match INFLIGHT_PARTITIONS.entry(task.key.clone()) {
+            Entry::Occupied(_) => return Err(()),
+            Entry::Vacant(v) => { v.insert(()); }
+        }
         if let Some(tx) = COMPACTION_TX.get() {
-            tx.try_send(task).map_err(|_| ())
-        } else { Err(()) }
+            match tx.try_send(task) {
+                Ok(_) => Ok(()),
+                Err(_) => {
+                    // Failed to enqueue, release the in-flight guard
+                    // (Key must match exactly what we inserted)
+                    // Remove without caring about value
+                    INFLIGHT_PARTITIONS.remove(&task.key);
+                    Err(())
+                }
+            }
+        } else {
+            INFLIGHT_PARTITIONS.remove(&task.key);
+            Err(())
+        }
     }
 
     pub async fn compact_all_partitions(force: bool, offsets_db: Arc<Offsets>, shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>) {
@@ -798,6 +819,17 @@ struct WalPartition {
 }
 
 impl WalPartition {
+    fn schemas_equivalent(a: &SchemaRef, b: &SchemaRef) -> bool {
+        let sa = a.as_ref();
+        let sb = b.as_ref();
+        if sa.fields().len() != sb.fields().len() { return false; }
+        for (fa, fb) in sa.fields().iter().zip(sb.fields().iter()) {
+            if fa.name() != fb.name() { return false; }
+            if fa.data_type() != fb.data_type() { return false; }
+            if fa.is_nullable() != fb.is_nullable() { return false; }
+        }
+        true
+    }
     fn prune_tombstone_wals(&mut self) {
         // println!("Purging tombstone WAL files");
         let data_dir = Config::get_data_dir();
