@@ -249,9 +249,9 @@ impl Buffers {
                 // No WAL_INDEX: compactor will inspect SEGMENT_SNAPSHOTS to decide work
             }
             for (offset, position) in snapshot_offsets.iter() {
-                let offset_key = OffsetKey { namespace: offset.namespace.clone(), partition: offset.partition.clone() };
-                offsets_db.insert(&offset_key, OffsetTypes::Position, *position);
-                offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
+                    let offset_key = OffsetKey { namespace: offset.namespace.clone(), partition: offset.partition.clone() };
+                    offsets_db.insert(&offset_key, OffsetTypes::Position, *position);
+                    offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
             }
         }
 
@@ -302,12 +302,25 @@ impl Buffers {
         // Drain/persist in-memory snapshots first so compactor works only on disk
         let _ = flush_all_segments(offsets_db.clone()).await;
 
+        // Parallel compaction of on-disk segment partitions
+        use futures::stream::StreamExt;
+            let concurrency = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .clamp(1, 64) as usize;
+
         loop {
-            // Process until no more candidates
-            match Buffers::compact_one_partition(force, shared_output.clone(), offsets_db.clone()).await {
-                Ok(did_work) => { if !did_work { break; } }
-                Err(_e) => { break; }
+            let candidates = Buffers::next_compaction_candidates(concurrency, force);
+            if candidates.is_empty() { break; }
+
+            let mut in_flight: futures::stream::FuturesUnordered<Pin<Box<dyn Future<Output = ()> + Send>>> = futures::stream::FuturesUnordered::new();
+            for (path, meta, idx) in candidates.into_iter() {
+                let out = shared_output.clone();
+                let off = offsets_db.clone();
+                in_flight.push(Box::pin(async move {
+                    let _ = Buffers::compact_segment_partition(&path, &meta, &idx, out, off).await;
+                }));
             }
+            while let Some(_) = in_flight.next().await {}
         }
 
         // Sweep: remove any fully-tombstoned segments left behind
@@ -376,6 +389,31 @@ impl Buffers {
         hasher.update(&idx.updated_at_secs.to_le_bytes());
         let digest = hasher.finalize();
         hex::encode(&digest[..8])
+    }
+
+    fn next_compaction_candidates(limit: usize, force: bool) -> Vec<(PathBuf, SegmentFileMetadata, crate::buffer::segment_file::SegmentPartitionIndexEntry)> {
+        let mut out: Vec<(PathBuf, SegmentFileMetadata, crate::buffer::segment_file::SegmentPartitionIndexEntry)> = Vec::with_capacity(limit);
+        let seg_dir = PathBuf::from(format!("{}/segment_buffer/segs", Config::get_data_dir()));
+        if !seg_dir.exists() { return out; }
+        for entry in fs::read_dir(&seg_dir).unwrap_or_else(|_| fs::read_dir("/").unwrap()) {
+            if out.len() >= limit { break; }
+            if let Ok(ent) = entry {
+                let path = ent.path();
+                if path.extension().and_then(|s| s.to_str()) != Some("seg") { continue; }
+                let seg = SegmentFile { path: path.clone() };
+                if let Ok(meta) = seg.read_metadata() {
+                    let now_secs = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
+                    for idx in meta.index.iter() {
+                        if Buffers::is_partition_tombstoned(&path, &idx.key) { continue; }
+                        if Buffers::should_compact(idx.bytes, idx.updated_at_secs, now_secs, force) {
+                            out.push((path.clone(), meta.clone(), idx.clone()));
+                            if out.len() >= limit { break; }
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
 
     fn sweep_segment_cleanup() {
