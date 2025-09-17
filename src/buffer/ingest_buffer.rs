@@ -1,9 +1,12 @@
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Durability { Memory, Disk }
 use std::fs::{File, OpenOptions};
 use std::{fs, io};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io::{BufReader, Read, Seek, Write};
 use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
 use arrow::array::RecordBatch;
@@ -38,6 +41,7 @@ use std::sync::atomic::Ordering as AtomicOrdering;
 use sha2::{Sha256, Digest};
 use hex;
 use std::os::fd::AsRawFd;
+use crate::buffer::segment_file::{SegmentFile, SegmentFileMetadata};
 
 type PartitionKey = (String, String, Option<i64>, String);
 use tokio::sync::mpsc;
@@ -47,7 +51,6 @@ pub static TOTAL_ROWS: Lazy<TimedRwLock<AtomicU64>> =
     Lazy::new(|| TimedRwLock::new("record_batch_total".to_string(), AtomicU64::new(0)));
 
 // Lock-free WAL index and counters
-pub(crate) static WAL_INDEX: Lazy<DashMap<PartitionKey, Arc<tokio::sync::Mutex<WalPartition>>>> = Lazy::new(|| DashMap::new());
 pub static WAL_BYTES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 static CONSUMER_STARTED: Lazy<std::sync::atomic::AtomicBool> = Lazy::new(|| std::sync::atomic::AtomicBool::new(false));
 
@@ -56,8 +59,31 @@ static PARTITION_NOTIFIES: Lazy<DashMap<PartitionKey, Arc<tokio::sync::Notify>>>
 
 // Global in-memory segment accumulator (reduces tiny WAL files across threads)
 static SEGMENT_LIVE: Lazy<Arc<std::sync::Mutex<GlobalSegment>>> = Lazy::new(|| Arc::new(std::sync::Mutex::new(GlobalSegment::new())));
-// Queue of snapshots ready to flush to WAL (produced by rotation in write())
-static SEGMENT_SNAPSHOTS: Lazy<std::sync::Mutex<std::collections::VecDeque<(HashMap<PartitionKey, Vec<RecordBatch>>, HashMap<OffsetKey, u64>)>>> = Lazy::new(|| std::sync::Mutex::new(std::collections::VecDeque::with_capacity(8)));
+// Segment snapshot representation
+#[derive(Clone)]
+struct SegmentPartitionMeta { bytes: u64, updated_at: SystemTime }
+
+#[derive(Clone)]
+struct SegmentSnapshot {
+    id: String,
+    durability: Durability,
+    created_at: SystemTime,
+    updated_at: SystemTime,
+    total_bytes: u64,
+    offsets: HashMap<OffsetKey, u64>,
+    batches: HashMap<PartitionKey, Vec<RecordBatch>>, // present only if in_memory
+    meta: HashMap<PartitionKey, SegmentPartitionMeta>,
+}
+
+impl SegmentSnapshot {
+    fn new(id: String, offsets: HashMap<OffsetKey, u64>, batches: HashMap<PartitionKey, Vec<RecordBatch>>, meta: HashMap<PartitionKey, SegmentPartitionMeta>, total_bytes: u64) -> Self {
+        let now = SystemTime::now();
+        SegmentSnapshot { id, durability: Durability::Memory, created_at: now, updated_at: now, total_bytes, offsets, batches, meta }
+    }
+}
+
+// Queue of snapshots produced by rotation in write()
+static SEGMENT_SNAPSHOTS: Lazy<std::sync::Mutex<std::collections::VecDeque<Arc<std::sync::Mutex<SegmentSnapshot>>>>> = Lazy::new(|| std::sync::Mutex::new(std::collections::VecDeque::with_capacity(8)));
 
 // lazy_static! {
 //     pub static ref WAL_INDEX: TimedRwLock<WalIndex> = TimedRwLock::new("wal_index".to_string(), WalIndex::new());
@@ -160,9 +186,21 @@ impl Buffers {
             let last_update_elapsed = seg.updated_at.elapsed().map(|d| d.as_secs()).unwrap_or(0);
             let should_rotate = (seg.bytes >= byte_threshold || age_secs >= time_threshold || last_update_elapsed >= time_threshold) && seg.bytes > 0;
             if should_rotate {
-                let snapshot = seg.take();
+                let (batches, offsets, total_bytes) = seg.take();
                 seg.flushed_at = SystemTime::now();
-                if let Ok(mut q) = SEGMENT_SNAPSHOTS.lock() { q.push_back((snapshot.0, snapshot.1)); }
+                // Build per-partition meta
+                let mut meta: HashMap<PartitionKey, SegmentPartitionMeta> = HashMap::new();
+                for (k, v) in batches.iter() {
+                    let bytes_estimate = v.iter().map(|b| b.get_array_memory_size() as u64).sum();
+                    meta.insert(k.clone(), SegmentPartitionMeta { bytes: bytes_estimate, updated_at: SystemTime::now() });
+                }
+                let snapshot = SegmentSnapshot::new(Helpers::random_str(16), offsets, batches, meta, total_bytes);
+                if Config::log_wal_enabled() || Config::debug_enabled() {
+                    let part_count = snapshot.meta.len();
+                    let reason = if seg.bytes >= byte_threshold { "size" } else { "time" };
+                    println!("Segment rotated: id={} reason={} total_bytes={} partitions={}", snapshot.id, reason, snapshot.total_bytes, part_count);
+                }
+                if let Ok(mut q) = SEGMENT_SNAPSHOTS.lock() { q.push_back(Arc::new(std::sync::Mutex::new(snapshot))); }
             }
             seg.add(key, batches_vec.drain(..).collect(), &ingest_buffer_batch.offsets);
         }
@@ -179,39 +217,42 @@ impl Buffers {
         loop {
             let next_snapshot_opt = { let mut q = SEGMENT_SNAPSHOTS.lock().unwrap(); q.pop_front() };
             if next_snapshot_opt.is_none() { break; }
-            let (snapshot_batches, snapshot_offsets) = next_snapshot_opt.unwrap();
+            let snap_arc = next_snapshot_opt.unwrap();
+            let (snapshot_id, snapshot_offsets, snapshot_batches) = {
+                let s = snap_arc.lock().unwrap();
+                // Only persist if in Memory durability
+                if s.durability != Durability::Memory { continue; }
+                (s.id.clone(), s.offsets.clone(), s.batches.clone())
+            };
+            // Persist to SegmentFile
+            let seg_dir = PathBuf::from(format!("{}/segment_buffer/segs", Config::get_data_dir()));
+            let seg_file = SegmentFile::new(&seg_dir, &snapshot_id).map_err(|e| ArrowError::from_external_error(Box::new(e)))?;
+            let mut partitions_meta: HashMap<PartitionKey, (u64, SystemTime)> = HashMap::new();
+            for (k, v) in snapshot_batches.iter() { let bytes_estimate = v.iter().map(|b| b.get_array_memory_size() as u64).sum(); partitions_meta.insert(k.clone(), (bytes_estimate, SystemTime::now())); }
+            let (seg_bytes, seg_rows) = seg_file.write_snapshot(&snapshot_offsets, &snapshot_batches, &partitions_meta).map_err(|e| ArrowError::from_external_error(Box::new(e)))?;
+            if Config::log_wal_enabled() || Config::debug_enabled() {
+                println!("Segment persisted: file={} id={} bytes={} rows={} partitions={}", seg_file.path.to_string_lossy(), snapshot_id, seg_bytes, seg_rows, snapshot_batches.len());
+            }
+            uploaded_bytes += seg_bytes;
+            rows += seg_rows;
+            // Update snapshot state to on-disk
+            {
+                let mut s = snap_arc.lock().unwrap();
+                s.durability = Durability::Disk;
+            }
+            // Publish to index
             for ((namespace, partition, time, shard), batches) in snapshot_batches.into_iter() {
                 if batches.is_empty() { continue; }
                 let mut per_partition_offsets: HashMap<OffsetKey, u64> = HashMap::new();
                 for (ok, pos) in snapshot_offsets.iter() { if ok.namespace == namespace && ok.partition == partition { per_partition_offsets.insert(ok.clone(), *pos); } }
-                let mut wal_file = WalFile::new(&namespace, &partition, time, &shard, HashMap::new())?;
-                let stat = wal_file.write_to_stream(&batches)?;
-                wal_file.flush()?;
-                wal_file.finish()?;
-                uploaded_bytes += wal_file.bytes;
-                bytes += stat.0;
-                rows += stat.1;
                 let partition_key: PartitionKey = (namespace.clone(), partition.clone(), time, shard.clone());
-                match WAL_INDEX.entry(partition_key.clone()) {
-                    dashmap::mapref::entry::Entry::Occupied(mut occ) => {
-                        if let Ok(mut part) = occ.get_mut().try_lock() {
-                            part.bytes = part.bytes.saturating_add(wal_file.bytes);
-                            part.updated_at = SystemTime::now();
-                            part.queue.push_back(WalEntry::Disk { wal: wal_file, offsets: per_partition_offsets.clone() });
-                            if let Some(n) = PARTITION_NOTIFIES.get(&partition_key) { n.notify_waiters(); }
-                        }
-                    }
-                    dashmap::mapref::entry::Entry::Vacant(vac) => {
-                        let mut part = WalPartition { queue: std::collections::VecDeque::new(), bytes: wal_file.bytes, updated_at: SystemTime::now(), namespace: namespace.clone(), partition: partition.clone(), time, shard: shard.clone() };
-                        part.queue.push_back(WalEntry::Disk { wal: wal_file, offsets: per_partition_offsets.clone() });
-                        let arc = Arc::new(tokio::sync::Mutex::new(part));
-                        vac.insert(arc);
-                        PARTITION_NOTIFIES.insert(partition_key.clone(), Arc::new(tokio::sync::Notify::new()));
-                        if let Some(n) = PARTITION_NOTIFIES.get(&partition_key) { n.notify_waiters(); }
-                    }
-                }
+                // No WAL_INDEX: compactor will inspect SEGMENT_SNAPSHOTS to decide work
             }
-            for (offset, position) in snapshot_offsets.iter() { let offset_key = OffsetKey { namespace: offset.namespace.clone(), partition: offset.partition.clone() }; offsets_db.insert(&offset_key, OffsetTypes::Position, *position); }
+            for (offset, position) in snapshot_offsets.iter() {
+                let offset_key = OffsetKey { namespace: offset.namespace.clone(), partition: offset.partition.clone() };
+                offsets_db.insert(&offset_key, OffsetTypes::Position, *position);
+                offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
+            }
         }
 
         metrics_hot::add_wal_write_bytes(bytes);
@@ -221,7 +262,7 @@ impl Buffers {
 
         WAL_BYTES_TOTAL.fetch_add(uploaded_bytes, std::sync::atomic::Ordering::Relaxed);
 
-        Buffers::start_single_consumer(shared_output.clone());
+        Buffers::start_single_consumer(shared_output.clone(), offsets_db.clone());
 
         Ok(())
     }
@@ -235,290 +276,317 @@ impl Buffers {
     ///
     /// Offsets are NOT committed here; they are committed in `Buffers::flush` immediately after
     /// each WAL object is successfully uploaded to S3, making compaction fully decoupled from ingest.
-    fn start_single_consumer(shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>) {
+    fn start_single_consumer(shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>, offsets_db: Arc<Offsets>) {
         use std::sync::atomic::Ordering as AO;
         if CONSUMER_STARTED.compare_exchange(false, true, AO::Relaxed, AO::Relaxed).is_err() { return; }
             tokio::spawn(async move {
-            loop {
-                // Single-threaded: process at most one partition per tick
-                let mut worked = false;
-                    for item in WAL_INDEX.iter() {
-                    if let Some(entry) = WAL_INDEX.get(item.key()) {
-                        if let Ok(mut part) = entry.try_lock() {
-                            if part.check_wal_rotate(false) {
-                                // Peek entries until threshold; stream and then pop
-                                let _ = part.compact_batches_to_parquet(Arc::new(Offsets::init().unwrap()), shared_output.clone()).await;
-                                part.clear_queue();
-                                worked = true;
-                                break;
-                            }
+                loop {
+                    match Buffers::compact_one_partition(false, shared_output.clone(), offsets_db.clone()).await {
+                        Ok(did_work) => {
+                            if !did_work { tokio_sleep(TokioDuration::from_millis(500)).await; }
+                        }
+                        Err(e) => {
+                            println!("Compactor error: {}", e);
+                            tokio_sleep(TokioDuration::from_millis(1000)).await;
                         }
                     }
                 }
-                if !worked {
-                    if let Some(n) = PARTITION_NOTIFIES.iter().next().map(|e| e.value().clone()) { n.notified().await; } else { tokio_sleep(TokioDuration::from_millis(200)).await; }
-                }
-            }
-        });
+            });
     }
 
     // Removed compaction dispatch; replaced by single-thread consumer
 
     // Removed enqueue_compaction
 
-    pub async fn compact_all_partitions(_force: bool, offsets_db: Arc<Offsets>, shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>) {
+    pub async fn compact_all_partitions(force: bool, offsets_db: Arc<Offsets>, shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>) {
+        // Drain/persist in-memory snapshots first so compactor works only on disk
+        let _ = flush_all_segments(offsets_db.clone()).await;
 
         loop {
-            // Step 1: rebuild the index (disk)
-            wal_recover(offsets_db.clone()).expect("Failed to recover WAL index");
-            let partitions_to_compact: Vec<WalPartition> = {
-                let mut parts = Vec::new();
-                for item in WAL_INDEX.iter() {
-                    let key = item.key().clone();
-                    let part_arc = item.value().clone();
-                    // Lock briefly to decide and pop one closed segment
-                    let g = part_arc.lock().await;
-                    parts.push(WalPartition {
-                        queue: g.queue.clone(),
-                        bytes: g.bytes,
-                        updated_at: g.updated_at,
-                        namespace: g.namespace.clone(),
-                        partition: g.partition.clone(),
-                        time: g.time,
-                        shard: g.shard.clone(),
-                    });
-                }
-                parts
-            };
-
-            if partitions_to_compact.is_empty() {
-                break;
+            // Process until no more candidates
+            match Buffers::compact_one_partition(force, shared_output.clone(), offsets_db.clone()).await {
+                Ok(did_work) => { if !did_work { break; } }
+                Err(_e) => { break; }
             }
-
-            // Step 2: Parallel compaction with bounded concurrency
-            let concurrency = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET
-                .load(std::sync::atomic::Ordering::Relaxed)
-                .clamp(1, 64);
-
-            let mut in_flight: futures::stream::FuturesUnordered<Pin<Box<dyn Future<Output = u64> + Send>>> = futures::stream::FuturesUnordered::new();
-            let mut iter = partitions_to_compact.into_iter();
-
-            for _ in 0..concurrency {
-                if let Some(mut p) = iter.next() {
-                    // Ensure we rotate the open files into a closed segment before compaction
-                    // queue model: no rotation needed
-                    let offsets_db_clone = offsets_db.clone();
-                    let shared_output2 = shared_output.clone();
-                    in_flight.push(Box::pin(async move {
-                        let bytes = p.compact_batches_to_parquet(offsets_db_clone, shared_output2).await;
-                        bytes
-                    }));
-                }
-            }
-
-            let mut total_compacted_bytes: u64 = 0;
-            while let Some(bytes_done) = in_flight.next().await {
-                total_compacted_bytes += bytes_done as u64;
-                if let Some(mut p) = iter.next() {
-                    // queue model: no rotation needed
-                    let offsets_db_clone = offsets_db.clone();
-                    let shared_output2 = shared_output.clone();
-                    in_flight.push(Box::pin(async move {
-                        let bytes = p.compact_batches_to_parquet(offsets_db_clone, shared_output2).await;
-                        bytes
-                    }));
-                }
-            }
-
-            // Step 3: Reduce WAL bytes counter
-            WAL_BYTES_TOTAL.fetch_update(std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed, |v| Some(v.saturating_sub(total_compacted_bytes))).ok();
-            // Loop again; will break when no segments remain
         }
+
+        // Sweep: remove any fully-tombstoned segments left behind
+        Buffers::sweep_segment_cleanup();
+    }
+
+    async fn compact_one_partition(force: bool, shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>, offsets_db: Arc<Offsets>) -> io::Result<bool> {
+        let seg_dir = PathBuf::from(format!("{}/segment_buffer/segs", Config::get_data_dir()));
+        let mut best: Option<(PathBuf, SegmentFileMetadata, crate::buffer::segment_file::SegmentPartitionIndexEntry)> = None;
+        // Scan .seg files and pick the first partition meeting thresholds
+        if seg_dir.exists() {
+            for entry in fs::read_dir(&seg_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) != Some("seg") { continue; }
+                // Read metadata once per file
+                let seg = SegmentFile { path: path.clone() };
+                let meta = match seg.read_metadata() { Ok(m) => m, Err(e) => { println!("Failed to read segment metadata {}: {}", path.to_string_lossy(), e); continue; } };
+                let now_secs = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
+                for idx in meta.index.iter() {
+                    if Buffers::is_partition_tombstoned(&path, &idx.key) { continue; }
+                    let should = Buffers::should_compact(idx.bytes, idx.updated_at_secs, now_secs, force);
+                    if should {
+                        best = Some((path.clone(), meta.clone(), idx.clone()));
+                        break;
+                    }
+                }
+                if best.is_some() { break; }
+            }
+        }
+        if let Some((path, meta, idx)) = best {
+            let (ns, part, time, shard) = (&idx.key.0, &idx.key.1, idx.key.2.unwrap_or(0), &idx.key.3);
+            println!("Compactor: candidate ns={} part={} time={} shard={} bytes={} updated_at={}", ns, part, time, shard, idx.bytes, idx.updated_at_secs);
+            Buffers::compact_segment_partition(&path, &meta, &idx, shared_output.clone(), offsets_db.clone()).await.ok();
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn should_compact(bytes: u64, updated_at_secs: u64, now_secs: u64, force: bool) -> bool {
+        if force { return true; }
+        let byte_threshold = Config::get_pipeline_buffer_threshold_bytes();
+        let time_threshold = Config::get_pipeline_buffer_threshold_seconds() as u64;
+        bytes >= byte_threshold || now_secs.saturating_sub(updated_at_secs) >= time_threshold
+    }
+
+    fn tombstone_dir() -> PathBuf { PathBuf::from(format!("{}/segment_buffer/done", Config::get_data_dir())) }
+
+    fn partition_tombstone_path(seg_path: &PathBuf, key: &PartitionKey) -> PathBuf {
+        let snapshot_id = seg_path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
+        let (ns, part, time_opt, shard) = key;
+        let time = time_opt.unwrap_or(0);
+        let safe = |s: &str| s.replace('/', "_");
+        let file = format!("{}.seg.{}.{}.{}.{}.tombstone", snapshot_id, safe(ns), safe(part), time, safe(shard));
+        Buffers::tombstone_dir().join(file)
+    }
+
+    fn is_partition_tombstoned(seg_path: &PathBuf, key: &PartitionKey) -> bool { Buffers::partition_tombstone_path(seg_path, key).exists() }
+
+    fn compute_compaction_id(seg_path: &PathBuf, idx: &crate::buffer::segment_file::SegmentPartitionIndexEntry) -> String {
+        let mut hasher = Sha256::new();
+        if let Some(name) = seg_path.file_name().and_then(|s| s.to_str()) { hasher.update(name.as_bytes()); }
+        hasher.update(&idx.start.to_le_bytes());
+        hasher.update(&idx.len.to_le_bytes());
+        hasher.update(&idx.bytes.to_le_bytes());
+        hasher.update(&idx.updated_at_secs.to_le_bytes());
+        let digest = hasher.finalize();
+        hex::encode(&digest[..8])
+    }
+
+    fn sweep_segment_cleanup() {
+        let seg_dir = PathBuf::from(format!("{}/segment_buffer/segs", Config::get_data_dir()));
+        if !seg_dir.exists() { return; }
+        for entry in fs::read_dir(&seg_dir).unwrap_or_else(|_| fs::read_dir("/").unwrap()) {
+            if let Ok(ent) = entry {
+                let p = ent.path();
+                if p.extension().and_then(|s| s.to_str()) != Some("seg") { continue; }
+                let segf = SegmentFile { path: p.clone() };
+                if let Ok(m) = segf.read_metadata() {
+                    let mut remaining = 0usize;
+                    for idx in m.index.iter() { if !Buffers::is_partition_tombstoned(&p, &idx.key) { remaining += 1; } }
+                    if remaining == 0 {
+                        match fs::remove_file(&p) {
+                            Ok(_) => {
+                                println!("Removed fully-compacted segment {}", p.to_string_lossy());
+                                // remove all tombstones for this segment
+                                for part in m.index.iter() {
+                                    let tp = Buffers::partition_tombstone_path(&p, &part.key);
+                                    if tp.exists() { if let Err(e) = fs::remove_file(&tp) { println!("Failed to remove tombstone {:?}: {}", tp, e); } }
+                                }
+                            },
+                            Err(e) => println!("Failed to remove fully-compacted segment {}: {}", p.to_string_lossy(), e),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn compact_segment_partition(
+        seg_path: &PathBuf,
+        meta: &SegmentFileMetadata,
+        idx: &crate::buffer::segment_file::SegmentPartitionIndexEntry,
+        shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
+        offsets_db: Arc<Offsets>,
+    ) -> io::Result<()> {
+        let (namespace, partition, time, shard) = (idx.key.0.clone(), idx.key.1.clone(), idx.key.2, idx.key.3.clone());
+        let mut out_key = BufferChunker::encode_chunk_name("output", Some(&namespace), Some(&partition), time, Some(&shard));
+        let compaction_id = Buffers::compute_compaction_id(seg_path, idx);
+        out_key = format!("{}-c={}", out_key, compaction_id);
+
+        println!("Compactor: start ns={} part={} time={} shard={} seg={} bytes={} out_key={}",
+            namespace, partition, time.unwrap_or(0), shard, seg_path.to_string_lossy(), idx.bytes, out_key);
+
+        // Determine schema by opening and creating a StreamReader once
+        let schema: SchemaRef = {
+            let mut file = OpenOptions::new().read(true).open(&seg_path)?;
+            file.seek(io::SeekFrom::Start(idx.start))?;
+            let reader = io::BufReader::new(file);
+            let sr = StreamReader::try_new(reader, None)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e)))?;
+            sr.schema()
+        };
+
+        let (tx, rx) = mpsc::channel::<Result<RecordBatch, DataFusionError>>(8);
+        let seg_path_clone = seg_path.clone();
+        let start_pos = idx.start;
+        let part_len = idx.len;
+        tokio::spawn(async move {
+            match OpenOptions::new().read(true).open(&seg_path_clone) {
+                Ok(mut file) => {
+                    if let Err(e) = file.seek(io::SeekFrom::Start(start_pos)) { let _ = tx.send(Err(DataFusionError::IoError(e))); return; }
+                    let mut reader = io::BufReader::new(file);
+                    // Limit reads to the partition len by wrapping the reader in Take
+                    use std::io::Read as IoRead;
+                    let mut take = reader.take(part_len);
+                    match StreamReader::try_new(&mut take, None) {
+                        Ok(sr) => {
+                            for item in sr { match item { Ok(batch) => { if tx.send(Ok(batch)).await.is_err() { break; } }, Err(e) => { let _ = tx.send(Err(DataFusionError::ArrowError(e, None))).await; break; } } }
+                        }
+                        Err(e) => { let _ = tx.send(Err(DataFusionError::ArrowError(e, None))).await; }
+                    }
+                }
+                Err(e) => { let _ = tx.send(Err(DataFusionError::IoError(e))); }
+            }
+            drop(tx);
+        });
+
+        struct SegRecordBatchStream { schema: SchemaRef, rx: mpsc::Receiver<Result<RecordBatch, DataFusionError>> }
+        impl futures::Stream for SegRecordBatchStream {
+            type Item = Result<RecordBatch, DataFusionError>;
+            fn poll_next(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> TaskPoll<Option<Self::Item>> {
+                // Safety: we only move rx
+                let inner = unsafe { self.get_unchecked_mut() };
+                match inner.rx.poll_recv(cx) {
+                    TaskPoll::Ready(Some(item)) => TaskPoll::Ready(Some(item)),
+                    TaskPoll::Ready(None) => TaskPoll::Ready(None),
+                    TaskPoll::Pending => TaskPoll::Pending,
+                }
+            }
+        }
+        impl RecordBatchStream for SegRecordBatchStream { fn schema(&self) -> SchemaRef { self.schema.clone() } }
+
+        let batch_stream: SendableRecordBatchStream = Box::pin(SegRecordBatchStream { schema: schema.clone(), rx });
+        if let Err(e) = shared_output.sync(batch_stream, out_key.clone()).await {
+            println!("Compactor upload failed for {}: {}", out_key, e);
+            return Ok(());
+        }
+
+        // Do not commit offsets here; they are committed upon persisting .seg in flush()
+
+        // Write tombstone to avoid reprocessing this partition from this segment
+        let tdir = Buffers::tombstone_dir(); let _ = fs::create_dir_all(&tdir);
+        let tpath = Buffers::partition_tombstone_path(seg_path, &idx.key);
+        if let Err(e) = fs::write(&tpath, b"") { println!("Failed to write tombstone {:?}: {}", tpath, e); }
+        println!("Compactor: finished out_key={} tombstone={}", out_key, tpath.to_string_lossy());
+
+        // If all partitions in this segment are tombstoned, delete the .seg file
+        let segf = SegmentFile { path: seg_path.clone() };
+        match segf.read_metadata() {
+            Ok(m) => {
+                let mut remaining = 0usize;
+                for p in m.index.iter() { if !Buffers::is_partition_tombstoned(seg_path, &p.key) { remaining += 1; } }
+                if remaining == 0 {
+                    // remove segment file
+                    if let Err(e) = fs::remove_file(seg_path) {
+                        println!("Failed to remove fully-compacted segment {}: {}", seg_path.to_string_lossy(), e);
+                    } else {
+                        println!("Removed fully-compacted segment {}", seg_path.to_string_lossy());
+                        // remove all tombstones for this segment
+                        for part in m.index.iter() {
+                            let tp = Buffers::partition_tombstone_path(seg_path, &part.key);
+                            if tp.exists() { if let Err(e) = fs::remove_file(&tp) { println!("Failed to remove tombstone {:?}: {}", tp, e); } }
+                        }
+                    }
+                }
+            }
+            Err(e) => { println!("Failed to re-read segment metadata for cleanup {}: {}", seg_path.to_string_lossy(), e); }
+        }
+        Ok(())
     }
 
 pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
         let started = std::time::Instant::now();
-        let mut count = 0;
-        let mut bytes = 0;
+        let mut count = 0u64;
+        let mut bytes = 0u64;
 
-        println!("Indexing WAL");
+        println!("Indexing WAL (.seg)");
 
-        let wal_files = Self::list_wal_files()?;
-
-        let wal_files_count = wal_files.len();
-
-        if wal_files_count == 0 {
-            println!("Indexed {} of {} WAL files", count, wal_files_count);
-            return Ok(());
+        // Only scan the segment buffer directory, not the db dir
+        let seg_dir = PathBuf::from(format!("{}/segment_buffer", Config::get_data_dir()));
+        let mut seg_files: Vec<PathBuf> = Vec::new();
+        if seg_dir.exists() {
+            for entry in fs::read_dir(&seg_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("seg") { seg_files.push(path); }
+            }
         }
 
-        let mut namespaces = HashSet::new();
-        let mut namespace_partitions: HashMap<String, HashSet<(String, String, Option<i64>, String)>> = HashMap::new();
+        let seg_files_count = seg_files.len();
+        let mut namespaces: HashSet<String> = HashSet::new();
         let mut namespace_partition_files: HashMap<(String, String, Option<i64>, String), u64> = HashMap::new();
         let mut namespace_partition_bytes: HashMap<(String, String, Option<i64>, String), u64> = HashMap::new();
 
-        for file_path in wal_files {
+        let mut committed_offsets: u64 = 0;
 
-            let wal_file = match WalFile::from_path(&file_path) {
-                Ok(wal_file) => wal_file,
-                Err(e) => {
-                    println!("Failed to index WAL file: {} of bytes: {}, Error {}.", file_path.to_str().unwrap(), file_path.metadata().unwrap().len(), e);
-                    continue;
-                }
-            };
-
-            let partition_key = (wal_file.namespace.clone(), wal_file.partition.clone(), wal_file.time.clone(), wal_file.shard.clone());
-
-            namespaces.insert(wal_file.namespace.clone());
-            namespace_partitions.entry(wal_file.namespace.clone()).or_insert_with(|| HashSet::new()).insert(partition_key.clone());
-            let val = namespace_partition_files.entry(partition_key.clone()).or_insert(0);
-            *val += 1;
-
-            namespace_partition_bytes.entry(partition_key.clone()).or_insert(0);
-            let val = namespace_partition_bytes.entry(partition_key.clone()).or_insert(0);
-            *val += wal_file.bytes;
-
-            count += 1;
-            bytes += wal_file.bytes;
-
-            use dashmap::mapref::entry::Entry;
-            match WAL_INDEX.entry(partition_key.clone()) {
-                Entry::Occupied(mut occ) => {
-                    if let Ok(mut part) = occ.get_mut().try_lock() {
-                        if part.updated_at < wal_file.updated_at { part.updated_at = wal_file.updated_at; }
-                        part.bytes += wal_file.bytes;
-                        part.queue.push_back(WalEntry::from_disk(wal_file.clone()));
+        for file_path in seg_files {
+            let seg = SegmentFile { path: file_path.clone() };
+            match seg.read_metadata() {
+                Ok(meta) => {
+                    // Accumulate bytes and partitions from index
+                    for idx in meta.index.iter() {
+                        let key = idx.key.clone();
+                        namespaces.insert(key.0.clone());
+                        *namespace_partition_files.entry(key.clone()).or_insert(0) += 1;
+                        *namespace_partition_bytes.entry(key.clone()).or_insert(0) = (*namespace_partition_bytes.get(&key).unwrap_or(&0)).saturating_add(idx.bytes);
+                    }
+                    bytes = bytes.saturating_add(meta.total_bytes);
+                    count = count.saturating_add(1);
+                    // Commit offsets from this segment
+                    for (ok, pos) in meta.offsets.iter() {
+                        let offset_key = OffsetKey { namespace: ok.namespace.clone(), partition: ok.partition.clone() };
+                        offsets_db.insert(&offset_key, OffsetTypes::Position, *pos);
+                        offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
+                        committed_offsets = committed_offsets.saturating_add(1);
                     }
                 }
-                Entry::Vacant(vac) => {
-                    let mut part = WalPartition {
-                        queue: std::collections::VecDeque::new(),
-                        bytes: 0,
-                        updated_at: SystemTime::UNIX_EPOCH,
-                        namespace: partition_key.0.clone(),
-                        partition: partition_key.1.clone(),
-                        time: partition_key.2,
-                        shard: partition_key.3.clone(),
-                    };
-                    if part.updated_at < wal_file.updated_at { part.updated_at = wal_file.updated_at; }
-                    part.bytes += wal_file.bytes;
-                    part.queue.push_back(WalEntry::from_disk(wal_file.clone()));
-                    vac.insert(Arc::new(tokio::sync::Mutex::new(part)));
-                }
+                Err(e) => { println!("Failed to read segment metadata {}: {}", file_path.to_string_lossy(), e); }
             }
-
-            WAL_BYTES_TOTAL.fetch_add(wal_file.bytes, AtomicOrdering::Relaxed);
-
-            if count % 1000 == 0 { println!("Indexed {} of {} WAL files for {} namespaces in {} partitions", count, wal_files_count, namespaces.len(), WAL_INDEX.len()); }
         }
 
-        if Config::debug_enabled() || Config::log_wal_enabled() { println!("Indexed {} of {} WAL files for {} namespaces in {} partitions", count, wal_files_count, namespaces.len(), WAL_INDEX.len()); }
         let elapsed = started.elapsed().as_secs_f64();
-        if elapsed > 0.0 {
-            let rate = (count as f64 / elapsed) as u64;
-            let real_rate = rate.min(wal_files_count as u64);
-            println!("WAL indexing took {:.2}s ~ {} files/s, {} total bytes", elapsed, real_rate, Helpers::human_readable_size(bytes as u64));
-        }
+        println!("Indexed {} of {} Segment files for {} namespaces", count, seg_files_count, namespaces.len());
+        if elapsed > 0.0 { let rate = (count as f64 / elapsed) as u64; println!("WAL indexing took {:.2}s ~ {} files/s, {} total bytes", elapsed, rate, Helpers::human_readable_size(bytes as u64)); }
+        println!("Committed {} offsets from .seg files", committed_offsets);
 
         let mut wal_index_metrics: WalIndexMetrics = WalIndexMetrics { metrics: Vec::new() };
-
-        for (namespace, partition_key) in namespace_partitions {
-            let human_bytes = Helpers::human_readable_size(namespace_partition_bytes.iter().filter(|(k, _v)| k.0 == namespace).map(|(_k, v)| v).sum::<u64>());
-            if Config::debug_enabled() || Config::log_wal_enabled() { println!("Namespace {} contains {} partitions and {} files of {}", namespace, partition_key.len(), namespace_partition_files.iter().filter(|(k, _v)| k.0 == namespace).map(|(_k, v)| v).sum::<u64>(), human_bytes); }
-
-            wal_index_metrics.metrics.push(WalIndexMetric {
-                namespace: namespace.clone(),
-                partitions: partition_key.len() as u64,
-                files: namespace_partition_files.iter().filter(|(k, _v)| k.0 == namespace).map(|(_k, v)| v).sum(),
-                bytes: namespace_partition_bytes.iter().filter(|(k, _v)| k.0 == namespace).map(|(_k, v)| v).sum(),
-            });
+        for ((ns, _part, _time, _shard), file_count) in namespace_partition_files.iter() {
+            let bytes_sum: u64 = namespace_partition_bytes.iter().filter(|(k, _)| &k.0 == ns).map(|(_, v)| *v).sum();
+            wal_index_metrics.metrics.push(WalIndexMetric { namespace: ns.clone(), partitions: 0, files: *file_count, bytes: bytes_sum });
         }
-
         {
             let mut metrics = METRICS.write();
             metrics.wal_index_namespaces_total = namespaces.len() as u64;
-            metrics.wal_index_partitions_total = WAL_INDEX.len() as u64;
+            metrics.wal_index_partitions_total = 0;
             metrics.wal_index_files_total = count as u64;
-            metrics.wal_index_bytes_total = WAL_BYTES_TOTAL.load(AtomicOrdering::Relaxed) as u64;
+            metrics.wal_index_bytes_total = bytes as u64;
             metrics.wal_index_metrics = wal_index_metrics;
         }
 
-        println!("Syncing offsets form WAL to DB");
-
-        for item in WAL_INDEX.iter() {
-            let wal_partition_arc = item.value();
-            if let Ok(mut wal_partition) = wal_partition_arc.try_lock() {
-            // ensure offsets Position persisted; Closed will be set on successful compaction
-            for wal_file in wal_partition.queue.iter() {
-                wal_file.offsets().iter().for_each(|(offset, position)| {
-                    let offset_key = OffsetKey { namespace: offset.namespace.clone(), partition: offset.partition.clone() };
-                    offsets_db.insert(&offset_key, OffsetTypes::Position, *position);
-                });
-            }
-            }
-        }
-
         offsets_db.flush();
-
-        println!("Indexed {} of {} WAL files", count, wal_files_count);
-
         Ok(())
     }
 
     /// Blocking S3 WAL index recovery used for end-of-ingest compaction
-    pub fn wal_recover_s3(offsets_db: Arc<Offsets>) -> io::Result<()> {
-        // Reverted: Delegate to disk-based recovery exclusively
-        Self::wal_recover_disk(offsets_db)
-    }
+    pub fn wal_recover_s3(_offsets_db: Arc<Offsets>) -> io::Result<()> { Ok(()) }
 
-    fn list_wal_files() -> io::Result<Vec<PathBuf>> {
-        let data_dir = Config::get_data_dir();
-        let wal_dir = PathBuf::from(format!("{}/ingest_buffer", data_dir));
-        let mut wal_files = Vec::new();
-
-        // remove empty dirs
-        for entry in glob_with(&format!("{}/**/*", wal_dir.to_str().unwrap()), MatchOptions {
-            case_sensitive: false,
-            require_literal_separator: false,
-            require_literal_leading_dot: false,
-        }).expect("Failed to clean WAL dir") {
-
-            let path = entry.expect("Failed to read WAL file");
-
-            // remove empty files
-            if path.is_file() && path.metadata().unwrap().len() == 0 {
-                if Config::debug_enabled() { println!("Removing empty WAL file: {}", path.to_str().unwrap()); }
-                fs::remove_file(&path).unwrap();
-            }
-
-            // remove .tmp files
-            if path.is_file() && path.extension().and_then(OsStr::to_str) == Some("tmp") {
-                if Config::debug_enabled() { println!("Removing temp WAL file: {}", path.to_str().unwrap()); }
-                fs::remove_file(&path).unwrap();
-            }
-
-            // remove empty dirs
-            // if path.is_dir() {
-            //     if fs::read_dir(&path).unwrap().count() == 0 {
-            //         println!("Removing empty WAL dir: {}", path.to_str().unwrap());
-            //         fs::remove_dir_all(&path).unwrap();
-            //     }
-            // }
-        }
-
-        let options = MatchOptions {
-            case_sensitive: false,
-            require_literal_separator: false,
-            require_literal_leading_dot: false,
-        };
-
-        for entry in glob_with(&format!("{}/**/*.wal", wal_dir.to_str().unwrap()), options).expect("Failed to read WAL files") {
-
-            let path = entry.expect("Failed to read WAL file");
-            wal_files.push(path);
-        }
-        Ok(wal_files)
-    }
+    fn list_wal_files() -> io::Result<Vec<PathBuf>> { Ok(Vec::new()) }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -562,8 +630,7 @@ pub async fn drain_all_partitions(shared_output: Arc<Box<dyn DataOutputPlugin + 
     let _ = flush_all_segments(offsets.clone()).await;
 
     // Collect partition arcs
-    let mut parts: Vec<Arc<tokio::sync::Mutex<WalPartition>>> = Vec::with_capacity(WAL_INDEX.len());
-    for item in WAL_INDEX.iter() { parts.push(item.value().clone()); }
+    let mut parts: Vec<Arc<tokio::sync::Mutex<WalPartition>>> = Vec::new();
 
     // Bounded parallel compaction across partitions (single-threaded per partition via the mutex)
     let concurrency = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET
@@ -618,39 +685,31 @@ pub async fn flush_all_segments(offsets_db: Arc<Offsets>) -> Result<(), ArrowErr
 
     // Drain any rotated snapshots first
     loop {
-        let next_snapshot_opt = { let mut q = SEGMENT_SNAPSHOTS.lock().unwrap(); q.pop_front() };
-        if next_snapshot_opt.is_none() { break; }
-        let (snapshot_batches, snapshot_offsets) = next_snapshot_opt.unwrap();
-        for ((namespace, partition, time, shard), batches) in snapshot_batches.into_iter() {
+            let next_snapshot_opt = { let mut q = SEGMENT_SNAPSHOTS.lock().unwrap(); q.pop_front() };
+            if next_snapshot_opt.is_none() { break; }
+            let snap_arc = next_snapshot_opt.unwrap();
+            let (snapshot_id, snapshot_offsets, snapshot_batches) = {
+                let s = snap_arc.lock().unwrap();
+                if s.durability != Durability::Memory { continue; }
+                (s.id.clone(), s.offsets.clone(), s.batches.clone())
+            };
+            let seg_dir = PathBuf::from(format!("{}/segment_buffer/segs", Config::get_data_dir()));
+            let seg_file = SegmentFile::new(&seg_dir, &snapshot_id).map_err(|e| ArrowError::from_external_error(Box::new(e)))?;
+            let mut partitions_meta: HashMap<PartitionKey, (u64, SystemTime)> = HashMap::new();
+            for (k, v) in snapshot_batches.iter() { let bytes_estimate = v.iter().map(|b| b.get_array_memory_size() as u64).sum(); partitions_meta.insert(k.clone(), (bytes_estimate, SystemTime::now())); }
+            let (seg_bytes, seg_rows) = seg_file.write_snapshot(&snapshot_offsets, &snapshot_batches, &partitions_meta).map_err(|e| ArrowError::from_external_error(Box::new(e)))?;
+            uploaded_bytes += seg_bytes;
+            rows += seg_rows;
+            {
+                let mut s = snap_arc.lock().unwrap();
+                s.durability = Durability::Disk;
+            }
+            for ((namespace, partition, time, shard), batches) in snapshot_batches.into_iter() {
             if batches.is_empty() { continue; }
             let mut per_partition_offsets: HashMap<OffsetKey, u64> = HashMap::new();
-            for (ok, pos) in snapshot_offsets.iter() { if ok.namespace == namespace && ok.partition == partition { per_partition_offsets.insert(ok.clone(), *pos); } }
-            let mut wal_file = WalFile::new(&namespace, &partition, time, &shard, HashMap::new())?;
-            let stat = wal_file.write_to_stream(&batches)?;
-            wal_file.flush()?;
-            wal_file.finish()?;
-            uploaded_bytes += wal_file.bytes;
-            bytes += stat.0;
-            rows += stat.1;
+                for (ok, pos) in snapshot_offsets.iter() { if ok.namespace == namespace && ok.partition == partition { per_partition_offsets.insert(ok.clone(), *pos); } }
             let partition_key: PartitionKey = (namespace.clone(), partition.clone(), time, shard.clone());
-            match WAL_INDEX.entry(partition_key.clone()) {
-                dashmap::mapref::entry::Entry::Occupied(mut occ) => {
-                    if let Ok(mut part) = occ.get_mut().try_lock() {
-                        part.bytes = part.bytes.saturating_add(wal_file.bytes);
-                        part.updated_at = SystemTime::now();
-                        part.queue.push_back(WalEntry::Disk { wal: wal_file, offsets: per_partition_offsets.clone() });
-                        if let Some(n) = PARTITION_NOTIFIES.get(&partition_key) { n.notify_waiters(); }
-                    }
-                }
-                dashmap::mapref::entry::Entry::Vacant(vac) => {
-                    let mut part = WalPartition { queue: std::collections::VecDeque::new(), bytes: wal_file.bytes, updated_at: SystemTime::now(), namespace: namespace.clone(), partition: partition.clone(), time, shard: shard.clone() };
-                    part.queue.push_back(WalEntry::Disk { wal: wal_file, offsets: per_partition_offsets.clone() });
-                    let arc = Arc::new(tokio::sync::Mutex::new(part));
-                    vac.insert(arc);
-                    PARTITION_NOTIFIES.insert(partition_key.clone(), Arc::new(tokio::sync::Notify::new()));
-                    if let Some(n) = PARTITION_NOTIFIES.get(&partition_key) { n.notify_waiters(); }
-                }
-            }
+            // compactor will inspect SEGMENT_SNAPSHOTS instead
         }
         for (offset, position) in snapshot_offsets.iter() { let offset_key = OffsetKey { namespace: offset.namespace.clone(), partition: offset.partition.clone() }; offsets_db.insert(&offset_key, OffsetTypes::Position, *position); }
     }
@@ -665,47 +724,14 @@ pub async fn flush_all_segments(offsets_db: Arc<Offsets>) -> Result<(), ArrowErr
         if batches.is_empty() { continue; }
         let mut per_partition_offsets: HashMap<OffsetKey, u64> = HashMap::new();
         for (ok, pos) in to_flush_offsets.iter() { if ok.namespace == namespace && ok.partition == partition { per_partition_offsets.insert(ok.clone(), *pos); } }
-        let mut wal_file = WalFile::new(&namespace, &partition, time, &shard, HashMap::new())?;
-        let stat = wal_file.write_to_stream(&batches)?;
-        wal_file.flush()?;
-        wal_file.finish()?;
-        uploaded_bytes += wal_file.bytes;
-        bytes += stat.0;
-        rows += stat.1;
-
-        let partition_key: PartitionKey = (namespace.clone(), partition.clone(), time, shard.clone());
-        match WAL_INDEX.entry(partition_key.clone()) {
-            dashmap::mapref::entry::Entry::Occupied(mut occ) => {
-                if let Ok(mut part) = occ.get_mut().try_lock() {
-                    part.bytes = part.bytes.saturating_add(wal_file.bytes);
-                    part.updated_at = SystemTime::now();
-                    part.queue.push_back(WalEntry::Disk { wal: wal_file, offsets: per_partition_offsets.clone() });
-                    if let Some(n) = PARTITION_NOTIFIES.get(&partition_key) { n.notify_waiters(); }
-                }
-            }
-            dashmap::mapref::entry::Entry::Vacant(vac) => {
-                let mut part = WalPartition {
-                    queue: std::collections::VecDeque::new(),
-                    bytes: wal_file.bytes,
-                    updated_at: SystemTime::now(),
-                    namespace: namespace.clone(),
-                    partition: partition.clone(),
-                    time,
-                    shard: shard.clone(),
-                };
-                part.queue.push_back(WalEntry::Disk { wal: wal_file, offsets: per_partition_offsets.clone() });
-                let arc = Arc::new(tokio::sync::Mutex::new(part));
-                vac.insert(arc);
-                PARTITION_NOTIFIES.insert(partition_key.clone(), Arc::new(tokio::sync::Notify::new()));
-                if let Some(n) = PARTITION_NOTIFIES.get(&partition_key) { n.notify_waiters(); }
-            }
-        }
+        // No live-segment write here anymore
     }
 
     // Persist offsets Position atomically across the flushed segment
     for (offset, position) in to_flush_offsets.iter() {
         let offset_key = OffsetKey { namespace: offset.namespace.clone(), partition: offset.partition.clone() };
         offsets_db.insert(&offset_key, OffsetTypes::Position, *position);
+        offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
     }
 
     metrics_hot::add_wal_write_bytes(bytes);
@@ -717,14 +743,13 @@ pub async fn flush_all_segments(offsets_db: Arc<Offsets>) -> Result<(), ArrowErr
 
 #[derive(Clone)]
 enum WalEntry {
-    Disk { wal: WalFile, offsets: HashMap<OffsetKey, u64> },
+    Segment { path: PathBuf, key: PartitionKey, offsets: HashMap<OffsetKey, u64>, bytes: u64, updated_at: SystemTime },
 }
 
 impl WalEntry {
-    fn bytes(&self) -> u64 { match self { WalEntry::Disk { wal, .. } => wal.bytes } }
-    fn updated_at(&self) -> SystemTime { match self { WalEntry::Disk { wal, .. } => wal.updated_at } }
-    fn offsets(&self) -> &HashMap<OffsetKey, u64> { match self { WalEntry::Disk { offsets, .. } => offsets } }
-    fn from_disk(w: WalFile) -> Self { WalEntry::Disk { wal: w, offsets: HashMap::new() } }
+    fn bytes(&self) -> u64 { match self { WalEntry::Segment { bytes, .. } => *bytes } }
+    fn updated_at(&self) -> SystemTime { match self { WalEntry::Segment { updated_at, .. } => *updated_at } }
+    fn offsets(&self) -> &HashMap<OffsetKey, u64> { match self { WalEntry::Segment { offsets, .. } => offsets } }
 }
 
 fn load_partition_segment_counter(namespace: &str, partition: &str, time: Option<i64>, shard: &str) -> Option<u64> {
@@ -832,7 +857,7 @@ impl WalPartition {
         // Deterministic compaction id
         let mut hasher = Sha256::new();
         for e in self.queue.iter() {
-            if let WalEntry::Disk { wal, .. } = e { hasher.update(wal.path.as_os_str().as_encoded_bytes()); hasher.update(&wal.bytes.to_le_bytes()); let ts = wal.updated_at.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_nanos(); hasher.update(&ts.to_le_bytes()); }
+            if let WalEntry::Segment { path, bytes, updated_at, .. } = e { hasher.update(path.as_os_str().as_encoded_bytes()); hasher.update(&bytes.to_le_bytes()); let ts = updated_at.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_nanos(); hasher.update(&ts.to_le_bytes()); }
         }
         let compaction_id = {
             let digest = hasher.finalize();
@@ -856,7 +881,8 @@ impl WalPartition {
 
         let schema: SchemaRef = {
             let mut schema_opt: Option<SchemaRef> = None;
-            for wf in segment_files.iter() { let WalEntry::Disk { wal, .. } = wf; if let Ok(s) = wal.clone().read_schema_from_stream() { schema_opt = Some(s); break; } }
+            // For Segment entries, we will read schema later from SegmentFile; fallback not needed here
+            // Keep returning an error if none found
             match schema_opt {
                 Some(s) => s,
                 None => { println!("Failed to read schema from local WALs for namespace: {}", self.namespace); return wal_compacted_bytes_total; }
@@ -889,14 +915,14 @@ impl WalPartition {
         tokio::spawn(async move {
             for wal_entry in files.into_iter() {
                 match wal_entry {
-                    WalEntry::Disk { wal: d, .. } => {
-                        match OpenOptions::new().read(true).open(&d.path) {
+                    WalEntry::Segment { path, .. } => {
+                        match OpenOptions::new().read(true).open(&path) {
                             Ok(file) => {
                                 let mut reader = io::BufReader::new(file);
                             let mut offset_size = [0u8; 8];
-                                if let Err(e) = reader.read_exact(&mut offset_size) { println!("ERROR: Failed to read WAL header for {}: {}", d.path.to_string_lossy(), e); continue; }
+                                if let Err(e) = reader.read_exact(&mut offset_size) { println!("ERROR: Failed to read segment header for {}: {}", path.to_string_lossy(), e); continue; }
                             let skip = u64::from_le_bytes(offset_size);
-                                if let Err(e) = reader.seek(io::SeekFrom::Current(skip as i64)) { println!("ERROR: Failed to seek WAL stream {}: {}", d.path.to_string_lossy(), e); continue; }
+                                if let Err(e) = reader.seek(io::SeekFrom::Current(skip as i64)) { println!("ERROR: Failed to seek segment stream {}: {}", path.to_string_lossy(), e); continue; }
                                 match StreamReader::try_new(reader, None) {
                                     Ok(sr) => {
                                         for item in sr { match item { Ok(batch) => {
@@ -906,10 +932,10 @@ impl WalPartition {
                                             if tx.send(Ok(batch)).await.is_err() { break; }
                                         }, Err(e) => { batch_error_counter.fetch_add(1, AtomicOrdering::Relaxed); let _ = tx.send(Err(DataFusionError::ArrowError(e, None))).await; break; } } }
                                     }
-                                    Err(e) => { println!("Failed to init Arrow stream for local WAL {}: {}", d.path.to_string_lossy(), e); }
+                                    Err(e) => { println!("Failed to init Arrow stream for local segment {}: {}", path.to_string_lossy(), e); }
                                 }
                             }
-                            Err(e) => { println!("Failed to open WAL file {}: {}", d.path.to_string_lossy(), e); }
+                            Err(e) => { println!("Failed to open segment file {}: {}", path.to_string_lossy(), e); }
                         }
                     }
                 }
@@ -953,7 +979,7 @@ impl WalPartition {
 
                 // On successful compaction, mark offsets as Closed
                         for wal_entry in segment_files.iter() {
-                    let WalEntry::Disk { offsets, .. } = wal_entry;
+                    let WalEntry::Segment { offsets, .. } = wal_entry;
                     for (offset, position) in offsets.iter() {
                         let offset_key = OffsetKey { namespace: offset.namespace.clone(), partition: offset.partition.clone() };
                         _offsets_db.insert(&offset_key, OffsetTypes::Closed, *position);
@@ -961,9 +987,9 @@ impl WalPartition {
                 }
 
                     for wal_entry in segment_files.iter() {
-                    let WalEntry::Disk { wal, .. } = wal_entry;
+                    let WalEntry::Segment { path, .. } = wal_entry;
                         let tombstone_path = format!("{}/ingest_buffer/done/{}.tombstone", data_dir, Helpers::random_str(32));
-                    if let Err(e) = fs::rename(&wal.path, tombstone_path) { println!("Failed to tombstone WAL file: {}, Error: {}", wal.path.to_string_lossy(), e); }
+                    if let Err(e) = fs::rename(&path, tombstone_path) { println!("Failed to tombstone segment file: {}, Error: {}", path.to_string_lossy(), e); }
                     }
                     self.prune_tombstone_wals();
                 // Remove exactly the entries we compacted from the front of the queue

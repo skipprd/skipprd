@@ -897,9 +897,9 @@ async fn sync() {
 
     println!("All buffers flushed to output plugin");
 
-    // Deterministic drain: compact all remaining WALs via ingest_buffer helper
+    // Deterministic drain: compact all remaining on-disk segments to parquet
     {
-        crate::buffer::ingest_buffer::drain_all_partitions(shared_output.clone(), offsets_db.clone()).await;
+        Buffers::compact_all_partitions(true, offsets_db.clone(), shared_output.clone()).await;
     }
     // Single-thread model: no background compaction tasks remain here
     // Wait for background Glue partition tasks to settle to avoid undercount at end
