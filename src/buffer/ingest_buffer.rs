@@ -184,10 +184,10 @@ impl Buffers {
             let mut wal_file = WalFile::new(&namespace, &partition, time, &shard, HashMap::new())?;
             let stat = wal_file.write_to_stream(&batches)?;
             wal_file.flush()?;
-            wal_file.finish()?;
-            uploaded_bytes += wal_file.bytes;
-            bytes += stat.0;
-            rows += stat.1;
+                wal_file.finish()?;
+                uploaded_bytes += wal_file.bytes;
+                bytes += stat.0;
+                rows += stat.1;
 
             // Publish to in-memory WAL index
             let partition_key: PartitionKey = (namespace.clone(), partition.clone(), time, shard.clone());
@@ -347,7 +347,7 @@ impl Buffers {
         }
     }
 
-    pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
+pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
         let started = std::time::Instant::now();
         let mut count = 0;
         let mut bytes = 0;
@@ -571,13 +571,52 @@ pub fn wal_recover(_offsets_db: Arc<Offsets>) -> io::Result<()> {
 pub async fn drain_all_partitions(shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>, offsets: Arc<Offsets>) {
     // Flush any remaining in-memory segments to WAL before compaction
     let _ = flush_all_segments(offsets.clone()).await;
-    for item in WAL_INDEX.iter() {
-        if let Some(entry) = WAL_INDEX.get(item.key()) {
-            if let Ok(mut part) = entry.try_lock() {
-                while part.len() > 0 {
-                    let _ = part.compact_batches_to_parquet(offsets.clone(), shared_output.clone()).await;
+
+    // Collect partition arcs
+    let mut parts: Vec<Arc<tokio::sync::Mutex<WalPartition>>> = Vec::with_capacity(WAL_INDEX.len());
+    for item in WAL_INDEX.iter() { parts.push(item.value().clone()); }
+
+    // Bounded parallel compaction across partitions (single-threaded per partition via the mutex)
+    let concurrency = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .clamp(1, 64);
+
+    let mut in_flight: futures::stream::FuturesUnordered<Pin<Box<dyn Future<Output = ()> + Send>>> = futures::stream::FuturesUnordered::new();
+    let mut iter = parts.into_iter();
+
+    for _ in 0..concurrency {
+        if let Some(part_arc) = iter.next() {
+            let offsets_db = offsets.clone();
+            let out = shared_output.clone();
+            in_flight.push(Box::pin(async move {
+                loop {
+                    // Lock this partition and compact until empty
+                    if let Ok(mut p) = part_arc.try_lock() {
+                        if p.len() == 0 { break; }
+                        let _ = p.compact_batches_to_parquet(offsets_db.clone(), out.clone()).await;
+                        // loop continues until queue empty
+                    } else {
+                        tokio_sleep(TokioDuration::from_millis(10)).await;
+                    }
                 }
-            }
+            }));
+        }
+    }
+
+    while let Some(_) = in_flight.next().await {
+        if let Some(part_arc) = iter.next() {
+            let offsets_db = offsets.clone();
+            let out = shared_output.clone();
+            in_flight.push(Box::pin(async move {
+                loop {
+                    if let Ok(mut p) = part_arc.try_lock() {
+                        if p.len() == 0 { break; }
+                        let _ = p.compact_batches_to_parquet(offsets_db.clone(), out.clone()).await;
+                    } else {
+                        tokio_sleep(TokioDuration::from_millis(10)).await;
+                    }
+                }
+            }));
         }
     }
 }
@@ -886,7 +925,7 @@ impl WalPartition {
                 metrics_hot::add_wal_compacted_files(wal_compacted_files_total);
 
                 // On successful compaction, mark offsets as Closed
-                for wal_entry in segment_files.iter() {
+                        for wal_entry in segment_files.iter() {
                     let WalEntry::Disk { offsets, .. } = wal_entry;
                     for (offset, position) in offsets.iter() {
                         let offset_key = OffsetKey { namespace: offset.namespace.clone(), partition: offset.partition.clone() };
@@ -894,7 +933,7 @@ impl WalPartition {
                     }
                 }
 
-                        for wal_entry in segment_files.iter() {
+                    for wal_entry in segment_files.iter() {
                     let WalEntry::Disk { wal, .. } = wal_entry;
                         let tombstone_path = format!("{}/ingest_buffer/done/{}.tombstone", data_dir, Helpers::random_str(32));
                     if let Err(e) = fs::rename(&wal.path, tombstone_path) { println!("Failed to tombstone WAL file: {}, Error: {}", wal.path.to_string_lossy(), e); }
