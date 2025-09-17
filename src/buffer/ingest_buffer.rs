@@ -758,18 +758,29 @@ pub async fn flush_all_segments(offsets_db: Arc<Offsets>) -> Result<(), ArrowErr
         if guard.batches.is_empty() { (HashMap::new(), HashMap::new()) } else { guard.flushed_at = SystemTime::now(); let (b, o, _bytes) = guard.take(); (b, o) }
     };
 
-    for ((namespace, partition, time, shard), batches) in to_flush_batches.into_iter() {
-        if batches.is_empty() { continue; }
-        let mut per_partition_offsets: HashMap<OffsetKey, u64> = HashMap::new();
-        for (ok, pos) in to_flush_offsets.iter() { if ok.namespace == namespace && ok.partition == partition { per_partition_offsets.insert(ok.clone(), *pos); } }
-        // No live-segment write here anymore
-    }
-
-    // Persist offsets Position atomically across the flushed segment
-    for (offset, position) in to_flush_offsets.iter() {
-        let offset_key = OffsetKey { namespace: offset.namespace.clone(), partition: offset.partition.clone() };
-        offsets_db.insert(&offset_key, OffsetTypes::Position, *position);
-        offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
+    if !to_flush_batches.is_empty() {
+        // Write the remaining live segment to a new .seg file so shutdown can compact it
+        let snapshot_id = Helpers::random_str(16);
+        let seg_dir = PathBuf::from(format!("{}/segment_buffer/segs", Config::get_data_dir()));
+        let seg_file = SegmentFile::new(&seg_dir, &snapshot_id).map_err(|e| ArrowError::from_external_error(Box::new(e)))?;
+        // Build per-partition meta
+        let mut partitions_meta: HashMap<PartitionKey, (u64, SystemTime)> = HashMap::new();
+        for (k, v) in to_flush_batches.iter() {
+            let bytes_estimate = v.iter().map(|b| b.get_array_memory_size() as u64).sum();
+            partitions_meta.insert(k.clone(), (bytes_estimate, SystemTime::now()));
+        }
+        let (seg_bytes, seg_rows) = seg_file
+            .write_snapshot(&to_flush_offsets, &to_flush_batches, &partitions_meta)
+            .map_err(|e| ArrowError::from_external_error(Box::new(e)))?;
+        println!("Segment persisted (live): file={} id={} bytes={} rows={} partitions={}", seg_file.path.to_string_lossy(), snapshot_id, seg_bytes, seg_rows, to_flush_batches.len());
+        uploaded_bytes += seg_bytes;
+        rows += seg_rows;
+        // Persist offsets Position/Closed now that live segment is durable
+        for (offset, position) in to_flush_offsets.iter() {
+            let offset_key = OffsetKey { namespace: offset.namespace.clone(), partition: offset.partition.clone() };
+            offsets_db.insert(&offset_key, OffsetTypes::Position, *position);
+            offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
+        }
     }
 
     metrics_hot::add_wal_write_bytes(bytes);
