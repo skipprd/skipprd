@@ -61,7 +61,7 @@ use crate::converters::skippr_arrow::convert_skippr_to_arrow;
 use crate::plugins::DataOutputPlugin;
 use std::collections::VecDeque;
 use rand::{random};
-use crate::buffer::wal_accumulator::{accumulate_map as wal_accumulate_map, ensure_running as wal_ensure_running};
+// wal_accumulator removed
 
 // Single-threaded slow-ingest queue to serialize metadata evolution and value coercion
 #[derive(Debug)]
@@ -1395,13 +1395,20 @@ impl Ingest {
             }
         }
 
-        // Start WAL accumulator once
-        wal_ensure_running(offset_db_clone.clone(), shared_output.clone());
-
-        // Accumulate this task's map into the global accumulator (FireAndForget mode)
-        wal_accumulate_map(buf);
-
-        // No direct flush here; the accumulator will coalesce and flush based on thresholds
+        // Batch write: aggregate all partition batches and flush once to avoid tiny WALs
+        let mut buffers_copy = buffers;
+        let all_batches: Vec<IngestBufferBatch> = buf.into_values().collect();
+        if !all_batches.is_empty() {
+            buffers_copy.write(all_batches);
+            let fut = buffers_copy.flush(offset_db_clone.clone(), shared_output.clone());
+            match tokio::runtime::Handle::try_current() {
+                Ok(h) => { let _ = h.block_on(fut); },
+                Err(_) => {
+                    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                    let _ = rt.block_on(fut);
+                }
+            }
+        }
         
     }
 

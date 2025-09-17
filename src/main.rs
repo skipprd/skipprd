@@ -698,13 +698,6 @@ async fn discover() {
         OUTPUT_RUNNING.write().store(true, Ordering::SeqCst);
     }
 
-    // Deterministic drain: enqueue and compact all remaining WALs in the queue model
-    // Ensure any residual accumulator data is written to WALs before compaction
-    crate::buffer::wal_accumulator::flush_all_now().await;
-    buffer::ingest_buffer::force_drain_all(offsets_db.clone(), shared_output.clone()).await;
-    // Wait for background Glue partition tasks to settle to avoid undercount at end
-    crate::plugins::athena::DataOutputAwsAthenaPlugin::await_partition_tasks_zero().await;
-
     {
         OUTPUT_RUNNING
             .write()
@@ -900,13 +893,17 @@ async fn sync() {
         METRICS.write().status = MetricsStatus::Finishing;
     }
 
-    let shared_output_clone = shared_output.clone();
-    Buffers::compact_all_partitions(true, offsets_db.clone(), shared_output_clone).await;
-    // Second pass: re-index S3 and drain any WALs that appeared late
-    let shared_output_clone = shared_output.clone();
-    Buffers::compact_all_partitions(true, offsets_db.clone(), shared_output_clone).await;
+    // Queue-based model: rely on the explicit drain above; skip legacy compact_all_partitions
 
     println!("All buffers flushed to output plugin");
+
+    // Deterministic drain: compact all remaining WALs via ingest_buffer helper
+    {
+        crate::buffer::ingest_buffer::drain_all_partitions(shared_output.clone(), offsets_db.clone()).await;
+    }
+    // Single-thread model: no background compaction tasks remain here
+    // Wait for background Glue partition tasks to settle to avoid undercount at end
+    crate::plugins::athena::DataOutputAwsAthenaPlugin::await_partition_tasks_zero().await;
 
     {
         METRICS.write().status = MetricsStatus::Completed;

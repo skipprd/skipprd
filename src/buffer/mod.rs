@@ -1,5 +1,5 @@
 pub mod ingest_buffer;
-pub mod wal_accumulator;
+// wal_accumulator removed in simplified model
 
 use chrono::{DateTime, Datelike, TimeZone, Timelike, Utc};
 use url::form_urlencoded;
