@@ -900,6 +900,10 @@ async fn sync() {
     // Deterministic drain: compact all remaining on-disk segments to parquet
     {
         Buffers::compact_all_partitions(true, offsets_db.clone(), shared_output.clone()).await;
+        // Safety loop: if any .seg remain, run another pass (handles late live persist)
+        if Buffers::segs_remaining() > 0 {
+            Buffers::compact_all_partitions(true, offsets_db.clone(), shared_output.clone()).await;
+        }
     }
     // Single-thread model: no background compaction tasks remain here
     // Wait for background Glue partition tasks to settle to avoid undercount at end

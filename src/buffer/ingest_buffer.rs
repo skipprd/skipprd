@@ -445,6 +445,16 @@ impl Buffers {
         }
     }
 
+    pub fn segs_remaining() -> usize {
+        let seg_dir = PathBuf::from(format!("{}/segment_buffer/segs", Config::get_data_dir()));
+        if !seg_dir.exists() { return 0; }
+        let mut count = 0usize;
+        if let Ok(rd) = fs::read_dir(&seg_dir) {
+            for e in rd.flatten() { if e.path().extension().and_then(|s| s.to_str()) == Some("seg") { count += 1; } }
+        }
+        count
+    }
+
     async fn compact_segment_partition(
         seg_path: &PathBuf,
         meta: &SegmentFileMetadata,
@@ -461,11 +471,14 @@ impl Buffers {
             namespace, partition, time.unwrap_or(0), shard, seg_path.to_string_lossy(), idx.bytes, out_key);
 
         // Determine schema by opening and creating a StreamReader once
+        // Read schema from the stream slice; if stream has no batches, skip
         let schema: SchemaRef = {
             let mut file = OpenOptions::new().read(true).open(&seg_path)?;
             file.seek(io::SeekFrom::Start(idx.start))?;
-            let reader = io::BufReader::new(file);
-            let sr = StreamReader::try_new(reader, None)
+            let mut reader = io::BufReader::new(file);
+            use std::io::Read as IoRead;
+            let mut take = reader.take(idx.len);
+            let sr = StreamReader::try_new(&mut take, None)
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e)))?;
             sr.schema()
         };
