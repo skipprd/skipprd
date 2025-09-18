@@ -145,16 +145,14 @@ impl SegmentFile {
             file.read_exact(&mut upd_buf)?;
             let upd_secs = u64::from_le_bytes(upd_buf);
             let start = file.stream_position()?;
-            // We do not know the len; scan stream to find end
-            // Use StreamReader to iterate batches to the end
-            let cur_pos = file.stream_position()?;
-            let mut reader = io::BufReader::new(&file);
-            // Seek back to start for reader
-            reader.seek(io::SeekFrom::Start(start))?;
-            let sr = StreamReader::try_new(reader, None)
+            // Use a dedicated handle to scan the Arrow stream from start and compute exact end
+            let mut scan = OpenOptions::new().read(true).open(&self.path)?;
+            scan.seek(io::SeekFrom::Start(start))?;
+            let mut reader = io::BufReader::new(scan);
+            let sr = StreamReader::try_new(&mut reader, None)
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e)))?;
             for _ in sr { /* drain */ }
-            let end = file.stream_position()?;
+            let end = reader.stream_position()?;
             let len = end - start;
             total_bytes = total_bytes.saturating_add(len as u64);
             index.push(SegmentPartitionIndexEntry { key, bytes: part_bytes, updated_at_secs: upd_secs, start, len });
