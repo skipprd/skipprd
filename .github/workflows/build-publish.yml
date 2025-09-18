@@ -232,12 +232,12 @@ jobs:
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
 
-  chaos_mode:
+  chaos_mode_test:
     needs:
       - cleanup
       - purge_dynamodb
       - linux_x86
-    name: test build (linux x86)
+    name: Chaos Mode (linux x86)
     runs-on:
       - ubuntu-latest
     steps:
@@ -306,6 +306,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test')
     needs:
       - linux_x86_test
+      - chaos_mode_test
 #      - macos_arm64
 #      - macos_x86
 #      - macos_arm64_test
