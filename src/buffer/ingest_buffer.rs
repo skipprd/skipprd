@@ -276,7 +276,7 @@ impl Buffers {
     ///
     /// Offsets are NOT committed here; they are committed in `Buffers::flush` immediately after
     /// each WAL object is successfully uploaded to S3, making compaction fully decoupled from ingest.
-    fn start_single_consumer(shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>, offsets_db: Arc<Offsets>) {
+    pub fn start_single_consumer(shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>, offsets_db: Arc<Offsets>) {
         use std::sync::atomic::Ordering as AO;
         if CONSUMER_STARTED.compare_exchange(false, true, AO::Relaxed, AO::Relaxed).is_err() { return; }
             tokio::spawn(async move {
@@ -568,8 +568,8 @@ pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
 
         println!("Indexing WAL (.seg)");
 
-        // Only scan the segment buffer directory, not the db dir
-        let seg_dir = PathBuf::from(format!("{}/segment_buffer", Config::get_data_dir()));
+        // Scan the on-disk segment directory for .seg files
+        let seg_dir = PathBuf::from(format!("{}/segment_buffer/segs", Config::get_data_dir()));
         let mut seg_files: Vec<PathBuf> = Vec::new();
         if seg_dir.exists() {
             for entry in fs::read_dir(&seg_dir)? {

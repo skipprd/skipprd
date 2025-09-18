@@ -851,6 +851,9 @@ async fn sync() {
     let output = sync_output_plugin(&output_plugin_name, "output".to_string()).await.unwrap();
     let shared_output = Arc::new(output);
 
+    // Start background WAL compactor consumer after WAL recovery
+    Buffers::start_single_consumer(shared_output.clone(), offsets_db.clone());
+
     let shared_output_clone = shared_output.clone();
 
     // Arm chaos interrupt for sync runs using the old planner (deterministic tick)
