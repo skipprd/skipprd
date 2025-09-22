@@ -1490,6 +1490,17 @@ impl Ingest {
                     rt.spawn(async move { crate::helpers::configuration::Config::sync_schema(&md_clone).await; });
                 }
             }
+
+            // Persist full pipeline metadata to Skippr state bucket whenever schema updates
+            let pipeline_md = METADATA.load().as_ref().clone();
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move { Config::set_metadata(&pipeline_md, false).await; });
+            } else {
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                    rt.block_on(async move { Config::set_metadata(&pipeline_md, false).await; });
+                });
+            }
         }
 
         // Bump schema version for this namespace AFTER updating schema and template

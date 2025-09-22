@@ -1588,9 +1588,6 @@ impl Config {
             }
         }
 
-        if changed_namespaces.is_empty() {
-            return;
-        }
 
         if Config::debug_enabled() {
             println!("set_metadata: {} namespaces changed: {}", changed_namespaces.len(), changed_namespaces.join(","));
@@ -1628,10 +1625,10 @@ impl Config {
 
         if evolved {
             METADATA.store(Arc::new(pipeline_metadata.clone()));
-            // Only enqueue namespaces that changed
+            // Enforce consistency: update all namespaces, not just changed ones
             let tx = Config::ensure_schema_worker();
-            for ns in changed_namespaces.into_iter() {
-                let _ = tx.send(ns);
+            for ns in pipeline_metadata.metadata.keys() {
+                let _ = tx.send(ns.clone());
             }
         }
     }
