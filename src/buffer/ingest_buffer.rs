@@ -1040,7 +1040,7 @@ impl WalPartition {
                 metrics_hot::add_wal_compacted_files(wal_compacted_files_total);
 
                 // On successful compaction, mark offsets as Closed
-                        for wal_entry in segment_files.iter() {
+                for wal_entry in segment_files.iter() {
                     let WalEntry::Segment { offsets, .. } = wal_entry;
                     for (offset, position) in offsets.iter() {
                         let offset_key = OffsetKey { namespace: offset.namespace.clone(), partition: offset.partition.clone() };

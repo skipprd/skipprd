@@ -229,35 +229,35 @@ impl DataOutputAwsAthenaPlugin {
                 Some(if flatten { OutputMetadata::from_flatterened_metadata(ns_md) } else { OutputMetadata::from_metadata(ns_md) })
             } else { None };
 
-            // Kick off partition creation in background to avoid gating uploads
-            match partition_metadata_opt {
-                Some(partition_metadata) => {
-                    let namespace_bg = namespace.to_string();
-                    let full_key_bg = full_key.clone();
-                    let mut cache_bg = partition_cache.clone();
-                    PARTITION_TASKS_IN_FLIGHT.fetch_add(1, AO::Relaxed);
-                    tokio::spawn(async move {
-                        if let Err(err) = AwsAthena::glue_create_partition(
-                            &namespace_bg,
-                            partition_values,
-                            &full_key_bg,
-                            &mut cache_bg,
-                    &partition_metadata,
-                ).await {
-                            println!("Warning: Failed to create partition: {}", err);
-                        }
-                        PARTITION_TASKS_IN_FLIGHT.fetch_sub(1, AO::Relaxed);
-                        PARTITIONS_NOTIFY.notify_waiters();
-                    });
-                }
+            // Require metadata and partition creation before upload
+            let partition_metadata = match partition_metadata_opt {
+                Some(pm) => pm,
                 None => {
-                println!("Warning: no metadata for namespace '{}' when creating partition for key '{}'; skipping partition creation.", namespace, full_key);
+                    return Err(io::Error::new(io::ErrorKind::Other, format!(
+                        "Missing metadata for namespace '{}' while creating partition '{}'",
+                        namespace, full_key
+                    )));
                 }
+            };
+
+            if let Err(err) = AwsAthena::glue_create_partition(
+                &namespace,
+                partition_values,
+                &full_key,
+                &mut partition_cache,
+                &partition_metadata,
+            ).await {
+                return Err(io::Error::new(io::ErrorKind::Other, format!(
+                    "Failed to create partition for '{}': {}",
+                    full_key, err
+                )));
             }
         }
 
-        // Use deterministic segment-suffixed filename from compactor; no extra digest
-        let final_key = format!("{}/{}", full_key, filename);
+        // Use deterministic hashed filename to avoid leaking internal encodings
+        let md5_digest = md5::compute(&filename);
+        let md5_string = hex::encode(&md5_digest.0);
+        let final_key = format!("{}/{}.parquet", full_key, md5_string);
 
         // Prepare S3 tagging string
         let tags_str = tags.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<String>>().join("&");
