@@ -1662,7 +1662,9 @@ impl Config {
 
             // Coalesce pending namespaces
             let pending: DashMap<String, ()> = DashMap::new();
-            tokio::spawn(async move {
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                rt.block_on(async move {
                 while let Some(ns) = rx.recv().await {
                     if pending.insert(ns.clone(), ()).is_some() { continue; }
                     // small debounce window (increase to curb churn)
@@ -1687,6 +1689,7 @@ impl Config {
                     }
                     pending.remove(&ns);
                 }
+                });
             });
             return tx;
         }
