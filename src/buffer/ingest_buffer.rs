@@ -470,14 +470,21 @@ impl Buffers {
         println!("Compactor: start ns={} part={} time={} shard={} seg={} bytes={} out_key={}",
             namespace, partition, time.unwrap_or(0), shard, seg_path.to_string_lossy(), idx.bytes, out_key);
 
-        // Determine schema by opening and creating a StreamReader once
-        // Read schema from the stream slice; if stream has no batches, skip
+        // Validate and clamp partition bounds to avoid corrupt reads
+        let file_len = OpenOptions::new().read(true).open(&seg_path)?.metadata()?.len();
+        if idx.start >= file_len {
+            println!("Compactor: partition start beyond file end for {} start={} len={} file_len={}", seg_path.to_string_lossy(), idx.start, idx.len, file_len);
+            return Ok(());
+        }
+        let safe_len = std::cmp::min(idx.len, file_len.saturating_sub(idx.start));
+
+        // Determine schema by opening and creating a StreamReader once (bounded to safe_len)
         let schema: SchemaRef = {
             let mut file = OpenOptions::new().read(true).open(&seg_path)?;
             file.seek(io::SeekFrom::Start(idx.start))?;
             let mut reader = io::BufReader::new(file);
             use std::io::Read as IoRead;
-            let mut take = reader.take(idx.len);
+            let mut take = reader.take(safe_len);
             let sr = StreamReader::try_new(&mut take, None)
                 .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e)))?;
             sr.schema()
@@ -486,7 +493,7 @@ impl Buffers {
         let (tx, rx) = mpsc::channel::<Result<RecordBatch, DataFusionError>>(8);
         let seg_path_clone = seg_path.clone();
         let start_pos = idx.start;
-        let part_len = idx.len;
+        let part_len = safe_len;
         tokio::spawn(async move {
             match OpenOptions::new().read(true).open(&seg_path_clone) {
                 Ok(mut file) => {
@@ -556,7 +563,11 @@ impl Buffers {
                     }
                 }
             }
-            Err(e) => { println!("Failed to re-read segment metadata for cleanup {}: {}", seg_path.to_string_lossy(), e); }
+            Err(e) => {
+                if e.kind() != io::ErrorKind::NotFound {
+                    println!("Failed to re-read segment metadata for cleanup {}: {}", seg_path.to_string_lossy(), e);
+                }
+            }
         }
         Ok(())
     }
