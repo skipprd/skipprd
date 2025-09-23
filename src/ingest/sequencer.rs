@@ -76,6 +76,18 @@ fn apply_evolutions(namespace: &str, proposals: &Vec<EvolutionProposal>) {
     if let Ok(_) = Ingest::prepare_arrow_schema_with_metadata(namespace, &pm.metadata, flatten) {
         // version bumped in prepare if schema changed
     }
+
+    // Persist updated metadata to S3 to ensure downstream consistency
+    if let Ok(h) = tokio::runtime::Handle::try_current() {
+        let md_clone = pm.clone();
+        h.spawn(async move { Config::set_metadata(&md_clone, false).await; });
+    } else {
+        let md_clone = pm.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            rt.block_on(async move { Config::set_metadata(&md_clone, false).await; });
+        });
+    }
 }
 
 pub async fn propose_and_wait(namespace: &str, proposal: EvolutionProposal, timeout_ms: u64) -> Option<u64> {

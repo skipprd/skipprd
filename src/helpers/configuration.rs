@@ -1549,6 +1549,7 @@ impl Config {
         use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
         static LAST_NAMESPACE_HASH: OnceLazy<DashMap<String, String>> = OnceLazy::new(|| DashMap::new());
         static META_INFLIGHT: OnceLazy<DashMap<String, AtomicBool>> = OnceLazy::new(|| DashMap::new());
+        static META_PENDING: OnceLazy<DashMap<String, AtomicBool>> = OnceLazy::new(|| DashMap::new());
  
         let tenant = Self::get_tenant();
         let workspace = Self::get_workspace_name();
@@ -1593,33 +1594,49 @@ impl Config {
             println!("set_metadata: {} namespaces changed: {}", changed_namespaces.len(), changed_namespaces.join(","));
         }
 
-        // Clobber local file once
-        {
-            let file = OpenOptions::new()
-                .write(true)
-                .truncate(true)
-                .create(true)
-                .open(&metadata_path)
-                .unwrap();
-            let mut writer = BufWriter::new(file);
-            writer.write_all(serde_json::to_string(&pipeline_metadata).unwrap().as_bytes()).unwrap();
-        }
-
-        // Single-flight upload (pipeline wide) via inflight flag
+        // Mark pending update and coalesce uploads to never drop a write
         let key = "__pipeline__".to_string();
+        let pending = META_PENDING.entry(key.clone()).or_insert_with(|| AtomicBool::new(false));
+        pending.store(true, AtomicOrdering::SeqCst);
+
+        // Single-flight uploader (pipeline wide)
         let inflight = META_INFLIGHT.entry(key.clone()).or_insert_with(|| AtomicBool::new(false));
         if inflight.compare_exchange(false, true, AtomicOrdering::SeqCst, AtomicOrdering::SeqCst).is_err() {
-            // Another upload is in-flight, skip
+            // Another upload is in-flight; it will observe pending=true and perform a follow-up upload
             return;
         }
 
-        // Upload to S3 (no blocking locks held across await)
+        // We are the uploader: drain pending flag(s) and always write the latest snapshot
         let s3_key = format!("{}/{}/{}/metadata/metadata.json", tenant, workspace, pipeline);
-        let json_value = serde_json::to_value(pipeline_metadata).unwrap();
-        let res = s3::put_json(&s3_key, &json_value).await;
-        match res {
-            Ok(_) => { println!("Updated pipeline metadata in S3: {}", s3_key); }
-            Err(err) => { println!("Failed to upload metadata to S3: {:?}", err); }
+        loop {
+            // Clear pending and take the latest snapshot available
+            pending.store(false, AtomicOrdering::SeqCst);
+            let latest = METADATA.load().as_ref().clone();
+            // Prefer non-empty snapshot; fall back to provided value if global is empty
+            let to_upload = if latest.metadata.is_empty() { pipeline_metadata.clone() } else { latest.clone() };
+
+            // Update local cache file first
+            {
+                let file = OpenOptions::new()
+                    .write(true)
+                    .truncate(true)
+                    .create(true)
+                    .open(&metadata_path)
+                    .unwrap();
+                let mut writer = BufWriter::new(file);
+                writer.write_all(serde_json::to_string(&to_upload).unwrap().as_bytes()).unwrap();
+            }
+
+            // Upload to S3 (no blocking locks held across await)
+            let json_value = serde_json::to_value(&to_upload).unwrap();
+            let res = s3::put_json(&s3_key, &json_value).await;
+            match res {
+                Ok(_) => { println!("Updated pipeline metadata in S3: {}", s3_key); }
+                Err(err) => { println!("Failed to upload metadata to S3: {:?}", err); }
+            }
+
+            // If new updates landed during upload, loop to upload again; else release inflight
+            if pending.load(AtomicOrdering::SeqCst) == false { break; }
         }
         inflight.store(false, AtomicOrdering::SeqCst);
 

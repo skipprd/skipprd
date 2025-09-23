@@ -1185,8 +1185,18 @@ impl Ingest {
                     if METADATA.load().metadata.get(&skpr_namespace).is_none() {
                         let mut new_pm = METADATA.load().as_ref().clone();
                         new_pm.metadata.insert(skpr_namespace.clone(), Metadata::new().unwrap());
-                        METADATA.store(Arc::new(new_pm));
+                        METADATA.store(Arc::new(new_pm.clone()));
                         println!("Discovered new namespace: {}", skpr_namespace);
+                        // Persist immediately to ensure output plugins see new namespace
+                        if let Ok(h) = runtime::Handle::try_current() {
+                            h.spawn(async move { Config::set_metadata(&new_pm, false).await; });
+                        } else {
+                            let md_clone = new_pm.clone();
+                            std::thread::spawn(move || {
+                                let rt = runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                                rt.block_on(async move { Config::set_metadata(&md_clone, false).await; });
+                            });
+                        }
                     }
 
                     let msg = match METADATA.load().metadata.get(&skpr_namespace) {
