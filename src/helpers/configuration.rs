@@ -1508,29 +1508,7 @@ impl Config {
         let workspace = Self::get_workspace_name();
         let pipeline = Self::get_pipeline_name();
 
-        // Compute changed namespaces by hashing per-namespace metadata
-        let mut changed_namespaces: Vec<String> = Vec::new();
-        for (ns, meta) in pipeline_metadata.metadata.iter() {
-            {
-                let hash = Config::compute_namespace_md5(meta);
-                let prev = LAST_NAMESPACE_HASH.get(ns).map(|e| e.value().clone());
-                if prev.as_deref() != Some(hash.as_str()) {
-                    if Config::debug_enabled() {
-                        match prev {
-                            Some(ph) => println!("Metadata change detected for namespace {}: {} -> {}", ns, ph, hash),
-                            None => println!("Metadata initialized for namespace {}: {}", ns, hash),
-                        }
-                    }
-                    LAST_NAMESPACE_HASH.insert(ns.clone(), hash);
-                    changed_namespaces.push(ns.clone());
-                }
-            }
-        }
-
-
-        if Config::debug_enabled() {
-            println!("set_metadata: {} namespaces changed: {}", changed_namespaces.len(), changed_namespaces.join(","));
-        }
+        // No per-namespace diffing: we upload the full snapshot each time
 
         // Mark pending update and coalesce uploads to never drop a write
         let key = "__pipeline__".to_string();
@@ -1552,31 +1530,8 @@ impl Config {
             let latest = METADATA.load().as_ref().clone();
             // Prefer non-empty snapshot; fall back to provided value if global is empty
             let to_upload = if latest.metadata.is_empty() { pipeline_metadata.clone() } else { latest.clone() };
-            // Merge with existing S3 metadata to avoid clobbering unrelated namespaces
-            let merged: PipelineMetadata = {
-                // Try fetch current S3 snapshot; on 404 use empty
-                let base = match crate::helpers::s3::get_json(&s3_key).await {
-                    Ok(val) => serde_json::from_value::<PipelineMetadata>(val).unwrap_or_else(|_| to_upload.clone()),
-                    Err(e) => {
-                        if let SdkError::ServiceError(se) = &e { if se.err().is_no_such_key() { PipelineMetadata::new() } else { to_upload.clone() } }
-                        else { to_upload.clone() }
-                    }
-                };
-                // Union of namespaces; override only those present in to_upload
-                let mut merged_pm = base.clone();
-                for (ns, meta) in to_upload.metadata.iter() {
-                    merged_pm.metadata.insert(ns.clone(), meta.clone());
-                }
-                // Top-level fields from to_upload take precedence
-                merged_pm.name = to_upload.name.clone();
-                merged_pm.sql = to_upload.sql.clone();
-                merged_pm.enabled = to_upload.enabled;
-                merged_pm.flattened = to_upload.flattened;
-                merged_pm
-            };
-
-            // Upload to S3 (no blocking locks held across await)
-            let json_value = serde_json::to_value(&merged).unwrap();
+            // Upload full snapshot to S3 (overwrite existing)
+            let json_value = serde_json::to_value(&to_upload).unwrap();
             let res = s3::put_json(&s3_key, &json_value).await;
             match res {
                 Ok(_) => { println!("Updated pipeline metadata in S3: {}", s3_key); }
