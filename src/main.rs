@@ -816,10 +816,10 @@ async fn sync() {
             pipeline_metadata
         }
         Err(_e) => {
-            println!("No existing Skippr metadata, skipping pipeline '{}'. Init the pipeline with 'skippr discover' to create metadata.", pipeline_name);
+            // println!("No existing Skippr metadata, skipping pipeline '{}'. Init the pipeline with 'skippr discover' to create metadata.", pipeline_name);
 
-            return;
-            // PipelineMetadata::new()
+            // return;
+            PipelineMetadata::new()
         }
     };
 
