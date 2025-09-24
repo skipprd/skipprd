@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::fmt::{Debug};
 use std::fs;
-use std::fs::{File, OpenOptions};
-use std::io::{BufReader, BufWriter, Read, Write};
+use aws_sdk_s3::error::SdkError;
+use std::fs::File;
+use std::io::Read;
 
 use std::path::Path;
 
@@ -1422,82 +1423,34 @@ impl Config {
         let pipeline = Self::get_pipeline_name();
         let env = Config::get_pipeline_env();
 
-        let metadata_dir = format!("{}/metadata/skippr_{}/workspace_{}/pipeline_{}", data_dir, env, workspace, pipeline);
-        let metadata_path = format!("{}/metadata.json", metadata_dir);
-
-        // Try S3 first, then fallback to local metadata if S3 is empty
+        // Always use S3 as the source of truth
         let s3_key = format!("{}/{}/{}/metadata/metadata.json", tenant, workspace, pipeline);
         
         let pipeline_metadata: Result<PipelineMetadata, bool> = match s3::get_json(&s3_key).await {
             Ok(json_value) => {
                 match serde_json::from_value::<PipelineMetadata>(json_value) {
-                    Ok(pipeline_metadata) => {
+                    Ok(mut pipeline_metadata) => {
                         println!("Loaded metadata from S3");
-                        // Cache to local file
-                        Config::set_metadata(&pipeline_metadata, false).await;
+                        // Inject flatten flag based on current config
+                        match &Config::get_transform_config().flatten_events {
+                            Some(val) => { pipeline_metadata.flattened = Config::truth_value(val); }
+                            None => { pipeline_metadata.flattened = false; }
+                        }
                         Ok(pipeline_metadata)
                     },
-                    Err(_) => {
-                        println!("Failed to parse metadata from S3, trying local cache");
-                        // Fallback to local metadata
-                        match fs::metadata(&metadata_path) {
-                            Ok(local_metadata) => {
-                                if local_metadata.is_file() {
-                                    let file = File::open(&metadata_path).unwrap();
-                                    let reader = BufReader::new(file);
-                                    match serde_json::from_reader::<_, PipelineMetadata>(reader) {
-                                        Ok(metadata) => {
-                                            println!("Loaded metadata from local cache, uploading to S3");
-                                            // Upload local metadata to S3 for future use
-                                            Config::set_metadata(&metadata, false).await;
-                                            Ok(metadata)
-                                        }
-                                        Err(e) => {
-                                            println!("Failed to parse local metadata ({}), recreating new metadata", e);
-                                            Err(false)
-                                        }
-                                    }
-                                } else {
-                                    Err(false)
-                                }
-                            },
-                            Err(_) => {
-                                println!("No local metadata found either, creating new metadata");
-                                Err(false)
-                            }
-                        }
+                    Err(e) => {
+                        println!("Failed to parse metadata from S3: {}", e);
+                        std::process::exit(1);
                     }
                 }
             },
-            Err(_) => {
-                println!("Metadata not found in S3, checking local cache");
-                // Fallback to local metadata
-                match fs::metadata(&metadata_path) {
-                    Ok(local_metadata) => {
-                        if local_metadata.is_file() {
-                            let file = File::open(&metadata_path).unwrap();
-                            let reader = BufReader::new(file);
-                            match serde_json::from_reader::<_, PipelineMetadata>(reader) {
-                                Ok(metadata) => {
-                                    println!("Loaded metadata from local cache, uploading to S3");
-                                    // Upload local metadata to S3 for future use
-                                    Config::set_metadata(&metadata, false).await;
-                                    Ok(metadata)
-                                }
-                                Err(e) => {
-                                    println!("Failed to parse local metadata ({}), creating new metadata", e);
-                                    Err(false)
-                                }
-                            }
-                        } else {
-                            Err(false)
-                        }
-                    },
-                    Err(_) => {
-                        println!("No metadata found locally or in S3, creating new metadata");
-                        Err(false)
-                    }
+            Err(e) => {
+                // If 404 (NoSuchKey), report no metadata; otherwise fatal
+                if let SdkError::ServiceError(se) = &e {
+                    if se.err().is_no_such_key() { return Err(false); }
                 }
+                println!("Failed to fetch metadata from S3: {:?}", e);
+                std::process::exit(1);
             }
         };
 
@@ -1555,21 +1508,6 @@ impl Config {
         let workspace = Self::get_workspace_name();
         let pipeline = Self::get_pipeline_name();
 
-        let data_dir = Config::get_data_dir();
-        let env = Config::get_pipeline_env();
-
-        let metadata_dir = format!("{}/metadata/skippr_{}/workspace_{}/pipeline_{}", data_dir, env, workspace, pipeline);
-        let metadata_path = format!("{}/metadata.json", metadata_dir);
-        
-        // ensure directory exists
-        match fs::create_dir_all(&metadata_dir) {
-            Ok(_g) => {}
-            Err(err) => panic!(
-                "Error creating metadata dir {}, does the host path exist? {:?}",
-                metadata_dir, err
-            ),
-        }
-
         // Compute changed namespaces by hashing per-namespace metadata
         let mut changed_namespaces: Vec<String> = Vec::new();
         for (ns, meta) in pipeline_metadata.metadata.iter() {
@@ -1614,18 +1552,6 @@ impl Config {
             let latest = METADATA.load().as_ref().clone();
             // Prefer non-empty snapshot; fall back to provided value if global is empty
             let to_upload = if latest.metadata.is_empty() { pipeline_metadata.clone() } else { latest.clone() };
-
-            // Update local cache file first
-            {
-                let file = OpenOptions::new()
-                    .write(true)
-                    .truncate(true)
-                    .create(true)
-                    .open(&metadata_path)
-                    .unwrap();
-                let mut writer = BufWriter::new(file);
-                writer.write_all(serde_json::to_string(&to_upload).unwrap().as_bytes()).unwrap();
-            }
 
             // Upload to S3 (no blocking locks held across await)
             let json_value = serde_json::to_value(&to_upload).unwrap();

@@ -61,10 +61,32 @@ pub async fn put_json(key: &str, value: &Value) -> Result<(), S3Error> {
 pub async fn get_json(key: &str) -> Result<Value, SdkError<GetObjectError>> {
     let client = get_s3_client().await;
     let bucket = get_bucket();
-    let resp = client.get_object().bucket(bucket).key(key).send().await?;
-    let bytes = resp.body.collect().await.unwrap().into_bytes();
-    let value: Value = serde_json::from_slice(&bytes).unwrap();
-    Ok(value)
+
+    // Retry non-404 errors with backoff; return 404 immediately
+    let mut attempt: u32 = 0;
+    let max_attempts: u32 = 6;
+    loop {
+        let res = client.get_object().bucket(&bucket).key(key).send().await;
+        match res {
+            Ok(resp) => {
+                let bytes = resp.body.collect().await.unwrap().into_bytes();
+                let value: Value = serde_json::from_slice(&bytes).unwrap();
+                return Ok(value);
+            }
+            Err(e) => {
+                // If the error is a 404, return immediately
+                if let SdkError::ServiceError(se) = &e {
+                    if se.err().is_no_such_key() { return Err(e); }
+                }
+                attempt += 1;
+                if attempt >= max_attempts { return Err(e); }
+                let base = 200u64.saturating_mul(1u64 << attempt.min(10));
+                let jitter: u64 = thread_rng().gen_range(0..100);
+                let sleep_ms = (base + jitter).min(5_000);
+                tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+            }
+        }
+    }
 }
 
 pub async fn delete_object(key: &str) -> Result<(), SdkError<DeleteObjectError>> {
