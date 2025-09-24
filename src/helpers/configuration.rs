@@ -1499,52 +1499,23 @@ impl Config {
     pub async fn set_metadata(pipeline_metadata: &PipelineMetadata, evolved: bool) {
 
         use once_cell::sync::Lazy as OnceLazy;
-        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-        static LAST_NAMESPACE_HASH: OnceLazy<DashMap<String, String>> = OnceLazy::new(|| DashMap::new());
-        static META_INFLIGHT: OnceLazy<DashMap<String, AtomicBool>> = OnceLazy::new(|| DashMap::new());
-        static META_PENDING: OnceLazy<DashMap<String, AtomicBool>> = OnceLazy::new(|| DashMap::new());
+        static UPLOAD_LOCK: OnceLazy<tokio::sync::Mutex<()>> = OnceLazy::new(|| tokio::sync::Mutex::new(()));
  
         let tenant = Self::get_tenant();
         let workspace = Self::get_workspace_name();
         let pipeline = Self::get_pipeline_name();
 
-        // No per-namespace diffing: we upload the full snapshot each time
-
-        // Mark pending update and coalesce uploads to never drop a write
-        let key = "__pipeline__".to_string();
-        let pending = META_PENDING.entry(key.clone()).or_insert_with(|| AtomicBool::new(false));
-        pending.store(true, AtomicOrdering::SeqCst);
-
-        // Single-flight uploader (pipeline wide)
-        let inflight = META_INFLIGHT.entry(key.clone()).or_insert_with(|| AtomicBool::new(false));
-        if inflight.compare_exchange(false, true, AtomicOrdering::SeqCst, AtomicOrdering::SeqCst).is_err() {
-            // Another upload is in-flight; it will observe pending=true and perform a follow-up upload
-            return;
-        }
-
-        // We are the uploader: drain pending flag(s) and always write the latest snapshot
+        // No per-namespace diffing: upload the provided snapshot each time, single-writer
+        METADATA.store(Arc::new(pipeline_metadata.clone()));
         let s3_key = format!("{}/{}/{}/metadata/metadata.json", tenant, workspace, pipeline);
-        loop {
-            // Clear pending and take the latest snapshot available
-            pending.store(false, AtomicOrdering::SeqCst);
-            let latest = METADATA.load().as_ref().clone();
-            // Prefer non-empty snapshot; fall back to provided value if global is empty
-            let to_upload = if latest.metadata.is_empty() { pipeline_metadata.clone() } else { latest.clone() };
-            // Upload full snapshot to S3 (overwrite existing)
-            let json_value = serde_json::to_value(&to_upload).unwrap();
-            let res = s3::put_json(&s3_key, &json_value).await;
-            match res {
-                Ok(_) => { println!("Updated pipeline metadata in S3: {}", s3_key); }
-                Err(err) => { println!("Failed to upload metadata to S3: {:?}", err); }
-            }
-
-            // If new updates landed during upload, loop to upload again; else release inflight
-            if pending.load(AtomicOrdering::SeqCst) == false { break; }
+        let json_value = match serde_json::to_value(pipeline_metadata) { Ok(v) => v, Err(e) => { println!("Failed to serialize metadata: {}", e); return; } };
+        let _guard = UPLOAD_LOCK.lock().await;
+        match s3::put_json(&s3_key, &json_value).await {
+            Ok(_) => { println!("Updated pipeline metadata in S3: {}", s3_key); }
+            Err(err) => { println!("Failed to upload metadata to S3: {:?}", err); }
         }
-        inflight.store(false, AtomicOrdering::SeqCst);
 
         if evolved {
-            METADATA.store(Arc::new(pipeline_metadata.clone()));
             // Enforce consistency: update all namespaces, not just changed ones
             let tx = Config::ensure_schema_worker();
             for ns in pipeline_metadata.metadata.keys() {
