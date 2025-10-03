@@ -485,9 +485,23 @@ impl Buffers {
             let mut reader = io::BufReader::new(file);
             use std::io::Read as IoRead;
             let mut take = reader.take(safe_len);
-            let sr = StreamReader::try_new(&mut take, None)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e)))?;
-            sr.schema()
+            match StreamReader::try_new(&mut take, None) {
+                Ok(sr) => sr.schema(),
+                Err(e) => {
+                    let es = e.to_string();
+                    if es.contains("failed to fill whole buffer") || es.contains("UnexpectedEof") {
+                        // Retry without length limiting in case the computed len is slightly short
+                        let mut file2 = OpenOptions::new().read(true).open(&seg_path)?;
+                        file2.seek(io::SeekFrom::Start(idx.start))?;
+                        let reader2 = io::BufReader::new(file2);
+                        let sr2 = StreamReader::try_new(reader2, None)
+                            .map_err(|e2| io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e2)))?;
+                        sr2.schema()
+                    } else {
+                        return Err(io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e)));
+                    }
+                }
+            }
         };
 
         let (tx, rx) = mpsc::channel::<Result<RecordBatch, DataFusionError>>(8);
@@ -504,9 +518,39 @@ impl Buffers {
                     let mut take = reader.take(part_len);
                     match StreamReader::try_new(&mut take, None) {
                         Ok(sr) => {
-                            for item in sr { match item { Ok(batch) => { if tx.send(Ok(batch)).await.is_err() { break; } }, Err(e) => { let _ = tx.send(Err(DataFusionError::ArrowError(e, None))).await; break; } } }
+                            for item in sr {
+                                match item {
+                                    Ok(batch) => { if tx.send(Ok(batch)).await.is_err() { break; } },
+                                    Err(e) => { let _ = tx.send(Err(DataFusionError::ArrowError(e, None))).await; break; }
+                                }
+                            }
                         }
-                        Err(e) => { let _ = tx.send(Err(DataFusionError::ArrowError(e, None))).await; }
+                        Err(e) => {
+                            // Fallback: if the limited reader fails due to truncated buffer, retry without the limit
+                            let es = e.to_string();
+                            if es.contains("failed to fill whole buffer") || es.contains("UnexpectedEof") {
+                                match OpenOptions::new().read(true).open(&seg_path_clone) {
+                                    Ok(mut f2) => {
+                                        if let Err(e) = f2.seek(io::SeekFrom::Start(start_pos)) { let _ = tx.send(Err(DataFusionError::IoError(e))); return; }
+                                        let reader2 = io::BufReader::new(f2);
+                                        match StreamReader::try_new(reader2, None) {
+                                            Ok(sr2) => {
+                                                for item in sr2 {
+                                                    match item {
+                                                        Ok(batch) => { if tx.send(Ok(batch)).await.is_err() { break; } },
+                                                        Err(e) => { let _ = tx.send(Err(DataFusionError::ArrowError(e, None))).await; break; }
+                                                    }
+                                                }
+                                            }
+                                            Err(e2) => { let _ = tx.send(Err(DataFusionError::ArrowError(e2, None))).await; }
+                                        }
+                                    }
+                                    Err(eopen) => { let _ = tx.send(Err(DataFusionError::IoError(eopen))); }
+                                }
+                            } else {
+                                let _ = tx.send(Err(DataFusionError::ArrowError(e, None))).await;
+                            }
+                        }
                     }
                 }
                 Err(e) => { let _ = tx.send(Err(DataFusionError::IoError(e))); }

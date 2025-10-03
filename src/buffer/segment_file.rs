@@ -156,6 +156,8 @@ impl SegmentFile {
             let len = end - start;
             total_bytes = total_bytes.saturating_add(len as u64);
             index.push(SegmentPartitionIndexEntry { key, bytes: part_bytes, updated_at_secs: upd_secs, start, len });
+            // Advance the primary file handle to the end of this partition so we can read the next PART header
+            file.seek(io::SeekFrom::Start(end))?;
         }
 
         Ok(SegmentFileMetadata { created_at_secs, total_bytes, num_partitions: index.len() as u32, offsets, index })
