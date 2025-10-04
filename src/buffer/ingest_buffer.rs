@@ -477,6 +477,13 @@ impl Buffers {
             return Ok(());
         }
         let safe_len = std::cmp::min(idx.len, file_len.saturating_sub(idx.start));
+        if Config::debug_enabled() || Config::log_wal_enabled() {
+            let end_hint = idx.start.saturating_add(safe_len);
+            println!(
+                "Compactor: bounds seg={} file_len={} start={} idx_len={} safe_len={} end_hint={}",
+                seg_path.to_string_lossy(), file_len, idx.start, idx.len, safe_len, end_hint
+            );
+        }
 
         // Determine schema by opening and creating a StreamReader once (bounded to safe_len)
         let schema: SchemaRef = {
@@ -518,12 +525,41 @@ impl Buffers {
                     let mut take = reader.take(part_len);
                     match StreamReader::try_new(&mut take, None) {
                         Ok(sr) => {
+                            let mut had_iter_error = false;
                             for item in sr {
                                 match item {
                                     Ok(batch) => { if tx.send(Ok(batch)).await.is_err() { break; } },
-                                    Err(e) => { let _ = tx.send(Err(DataFusionError::ArrowError(e, None))).await; break; }
+                                    Err(e) => {
+                                        let es = e.to_string();
+                                        had_iter_error = true;
+                                        if es.contains("failed to fill whole buffer") || es.contains("UnexpectedEof") {
+                                            // Retry reading unbounded from start once
+                                            match OpenOptions::new().read(true).open(&seg_path_clone) {
+                                                Ok(mut f2) => {
+                                                    if let Err(e) = f2.seek(io::SeekFrom::Start(start_pos)) { let _ = tx.send(Err(DataFusionError::IoError(e))); break; }
+                                                    let reader2 = io::BufReader::new(f2);
+                                                    match StreamReader::try_new(reader2, None) {
+                                                        Ok(sr2) => {
+                                                            for item2 in sr2 {
+                                                                match item2 {
+                                                                    Ok(batch) => { if tx.send(Ok(batch)).await.is_err() { break; } },
+                                                                    Err(e2) => { let _ = tx.send(Err(DataFusionError::ArrowError(e2, None))).await; break; }
+                                                                }
+                                                            }
+                                                        }
+                                                        Err(e2) => { let _ = tx.send(Err(DataFusionError::ArrowError(e2, None))).await; }
+                                                    }
+                                                }
+                                                Err(eopen) => { let _ = tx.send(Err(DataFusionError::IoError(eopen))); }
+                                            }
+                                        } else {
+                                            let _ = tx.send(Err(DataFusionError::ArrowError(e, None))).await;
+                                        }
+                                        break;
+                                    }
                                 }
                             }
+                            if had_iter_error { /* already handled fallback or sent error */ }
                         }
                         Err(e) => {
                             // Fallback: if the limited reader fails due to truncated buffer, retry without the limit
@@ -575,7 +611,22 @@ impl Buffers {
 
         let batch_stream: SendableRecordBatchStream = Box::pin(SegRecordBatchStream { schema: schema.clone(), rx });
         if let Err(e) = shared_output.sync(batch_stream, out_key.clone()).await {
-            println!("Compactor upload failed for {}: {}", out_key, e);
+            let err_str = e.to_string();
+            println!("Compactor upload failed for {}: {}", out_key, err_str);
+            // Diagnostics and quarantine for truncated streams to ensure forward progress
+            if err_str.contains("failed to fill whole buffer") || err_str.contains("UnexpectedEof") {
+                let file_len2 = OpenOptions::new().read(true).open(&seg_path)?.metadata()?.len();
+                let safe_len2 = std::cmp::min(idx.len, file_len2.saturating_sub(idx.start));
+                let diag = format!(
+                    "Compactor diagnostic: seg_path={} file_len={} start={} idx_len={} safe_len={} out_key={} error={}",
+                    seg_path.to_string_lossy(), file_len2, idx.start, idx.len, safe_len2, out_key, err_str
+                );
+                println!("Compactor: truncated-stream quarantine -> {}", diag);
+                let tdir = Buffers::tombstone_dir(); let _ = fs::create_dir_all(&tdir);
+                let tpath = Buffers::partition_tombstone_path(seg_path, &idx.key);
+                // Write tombstone with diagnostic content to skip future attempts on this partition
+                if let Err(werr) = fs::write(&tpath, diag.as_bytes()) { println!("Failed to write tombstone {:?}: {}", tpath, werr); }
+            }
             return Ok(());
         }
 
@@ -598,7 +649,7 @@ impl Buffers {
                     if let Err(e) = fs::remove_file(seg_path) {
                         println!("Failed to remove fully-compacted segment {}: {}", seg_path.to_string_lossy(), e);
                     } else {
-                        println!("Removed fully-compacted segment {}", seg_path.to_string_lossy());
+                        // println!("Removed fully-compacted segment {}", seg_path.to_string_lossy());
                         // remove all tombstones for this segment
                         for part in m.index.iter() {
                             let tp = Buffers::partition_tombstone_path(seg_path, &part.key);
