@@ -17,6 +17,7 @@ pub static PARQUET_PERSISTED_BYTES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU
 pub static PARQUET_PERSISTED_ROWS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static PARQUET_PERSISTED_OBJECTS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static LATEST_TIMESTAMP: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static QUARANTINED_PARTITIONS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 
 // Dynamic tuning targets (self-tuned by ingest; read by components)
 pub static UPLOAD_CONCURRENCY_TARGET: Lazy<std::sync::atomic::AtomicUsize> = Lazy::new(|| std::sync::atomic::AtomicUsize::new(16));
@@ -58,6 +59,8 @@ pub fn add_parquet_bytes(n: u64) { PARQUET_PERSISTED_BYTES_TOTAL.fetch_add(n, Or
 pub fn add_parquet_rows(n: u64) { PARQUET_PERSISTED_ROWS_TOTAL.fetch_add(n, Ordering::Relaxed); }
 #[inline]
 pub fn add_parquet_objects(n: u64) { PARQUET_PERSISTED_OBJECTS_TOTAL.fetch_add(n, Ordering::Relaxed); }
+#[inline]
+pub fn add_quarantined_partitions(n: u64) { QUARANTINED_PARTITIONS_TOTAL.fetch_add(n, Ordering::Relaxed); }
 
 #[inline]
 pub fn update_latest_timestamp_max(ts: u64) {

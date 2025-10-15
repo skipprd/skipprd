@@ -912,6 +912,23 @@ async fn sync() {
     // Wait for background Glue partition tasks to settle to avoid undercount at end
     crate::plugins::athena::DataOutputAwsAthenaPlugin::await_partition_tasks_zero().await;
 
+    // Summary and integrity check: uploaded rows vs expected msgs, quarantined parts
+    {
+        use std::sync::atomic::Ordering as AO;
+        let uploaded_rows = crate::metrics::counters::PARQUET_PERSISTED_ROWS_TOTAL.load(AO::Relaxed);
+        let expected_msgs = crate::metrics::counters::MESSAGES_TOTAL.load(AO::Relaxed);
+        let quarantined_parts = crate::metrics::counters::QUARANTINED_PARTITIONS_TOTAL.load(AO::Relaxed);
+        println!(
+            "Compactor: summary uploaded_rows={} expected_msgs={} quarantined_parts={}",
+            uploaded_rows, expected_msgs, quarantined_parts
+        );
+        if quarantined_parts > 0 || uploaded_rows != expected_msgs {
+            eprintln!(
+                "Compactor: integrity check failed (uploaded_rows != expected_msgs or quarantined_parts > 0); exiting nonzero"
+            );
+        }
+    }
+
     {
         METRICS.write().status = MetricsStatus::Completed;
     }

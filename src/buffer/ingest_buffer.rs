@@ -42,6 +42,7 @@ use sha2::{Sha256, Digest};
 use hex;
 use std::os::fd::AsRawFd;
 use crate::buffer::segment_file::{SegmentFile, SegmentFileMetadata};
+use once_cell::sync::Lazy as OnceLazy;
 
 type PartitionKey = (String, String, Option<i64>, String);
 use tokio::sync::mpsc;
@@ -84,6 +85,8 @@ impl SegmentSnapshot {
 
 // Queue of snapshots produced by rotation in write()
 static SEGMENT_SNAPSHOTS: Lazy<std::sync::Mutex<std::collections::VecDeque<Arc<std::sync::Mutex<SegmentSnapshot>>>>> = Lazy::new(|| std::sync::Mutex::new(std::collections::VecDeque::with_capacity(8)));
+// Global single-flight guard to avoid double compaction of the same partition region
+static COMPACTION_IN_FLIGHT: OnceLazy<DashMap<(String, u64, u64), ()>> = OnceLazy::new(|| DashMap::new());
 
 // lazy_static! {
 //     pub static ref WAL_INDEX: TimedRwLock<WalIndex> = TimedRwLock::new("wal_index".to_string(), WalIndex::new());
@@ -353,7 +356,9 @@ impl Buffers {
         }
         if let Some((path, meta, idx)) = best {
             let (ns, part, time, shard) = (&idx.key.0, &idx.key.1, idx.key.2.unwrap_or(0), &idx.key.3);
-            println!("Compactor: candidate ns={} part={} time={} shard={} bytes={} updated_at={}", ns, part, time, shard, idx.bytes, idx.updated_at_secs);
+            if Config::debug_enabled() || Config::log_wal_enabled() {
+                println!("Compactor: candidate ns={} part={} time={} shard={} bytes={} updated_at={}", ns, part, time, shard, idx.bytes, idx.updated_at_secs);
+            }
             Buffers::compact_segment_partition(&path, &meta, &idx, shared_output.clone(), offsets_db.clone()).await.ok();
             return Ok(true);
         }
@@ -467,9 +472,24 @@ impl Buffers {
         let compaction_id = Buffers::compute_compaction_id(seg_path, idx);
         out_key = format!("{}-c={}", out_key, compaction_id);
 
-        println!("Compactor: start ns={} part={} time={} shard={} seg={} bytes={} out_key={}",
-            namespace, partition, time.unwrap_or(0), shard, seg_path.to_string_lossy(), idx.bytes, out_key);
+        if Config::debug_enabled() || Config::log_wal_enabled() {
+            println!("Compactor: start ns={} part={} time={} shard={} seg={} bytes={} out_key={}",
+                namespace, partition, time.unwrap_or(0), shard, seg_path.to_string_lossy(), idx.bytes, out_key);
+        }
 
+        // Single-flight guard (keyed by seg_path + start + len)
+        let inflight_key = (seg_path.to_string_lossy().to_string(), idx.start, idx.len);
+        if COMPACTION_IN_FLIGHT.insert(inflight_key.clone(), ()).is_some() {
+            if Config::debug_enabled() || Config::log_wal_enabled() {
+                println!("Compactor: skip duplicate in-flight seg={} start={} len={}", seg_path.to_string_lossy(), idx.start, idx.len);
+            }
+            return Ok(());
+        }
+        struct InflightGuard((String, u64, u64));
+        impl Drop for InflightGuard {
+            fn drop(&mut self) { COMPACTION_IN_FLIGHT.remove(&self.0); }
+        }
+        let _guard = InflightGuard(inflight_key.clone());
         // Validate and clamp partition bounds to avoid corrupt reads
         let file_len = OpenOptions::new().read(true).open(&seg_path)?.metadata()?.len();
         if idx.start >= file_len {
@@ -612,20 +632,25 @@ impl Buffers {
         let batch_stream: SendableRecordBatchStream = Box::pin(SegRecordBatchStream { schema: schema.clone(), rx });
         if let Err(e) = shared_output.sync(batch_stream, out_key.clone()).await {
             let err_str = e.to_string();
-            println!("Compactor upload failed for {}: {}", out_key, err_str);
+            println!("Compactor: compact failed seg={} key={:?} out_key={} error={}", seg_path.to_string_lossy(), idx.key, out_key, err_str);
             // Diagnostics and quarantine for truncated streams to ensure forward progress
             if err_str.contains("failed to fill whole buffer") || err_str.contains("UnexpectedEof") {
                 let file_len2 = OpenOptions::new().read(true).open(&seg_path)?.metadata()?.len();
                 let safe_len2 = std::cmp::min(idx.len, file_len2.saturating_sub(idx.start));
-                let diag = format!(
-                    "Compactor diagnostic: seg_path={} file_len={} start={} idx_len={} safe_len={} out_key={} error={}",
-                    seg_path.to_string_lossy(), file_len2, idx.start, idx.len, safe_len2, out_key, err_str
-                );
-                println!("Compactor: truncated-stream quarantine -> {}", diag);
-                let tdir = Buffers::tombstone_dir(); let _ = fs::create_dir_all(&tdir);
-                let tpath = Buffers::partition_tombstone_path(seg_path, &idx.key);
-                // Write tombstone with diagnostic content to skip future attempts on this partition
-                if let Err(werr) = fs::write(&tpath, diag.as_bytes()) { println!("Failed to write tombstone {:?}: {}", tpath, werr); }
+                let diag = format!("seg_path={} file_len={} start={} idx_len={} safe_len={} out_key={} error={}", seg_path.to_string_lossy(), file_len2, idx.start, idx.len, safe_len2, out_key, err_str);
+                // Quarantine the entire segment for inspection
+                let qdir = PathBuf::from(format!("{}/segment_buffer/quarantine", Config::get_data_dir()));
+                let _ = fs::create_dir_all(&qdir);
+                let ts = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
+                let base = seg_path.file_name().and_then(|s| s.to_str()).unwrap_or("unknown");
+                let qseg = qdir.join(format!("{}.{}.seg", base, ts));
+                let qdiag = qdir.join(format!("{}.{}.diag.txt", base, ts));
+                if !qseg.exists() {
+                    if let Err(e) = fs::copy(&seg_path, &qseg) { println!("Compactor: quarantine copy failed seg={} to={} err={}", seg_path.to_string_lossy(), qseg.to_string_lossy(), e); }
+                }
+                if let Err(e) = fs::write(&qdiag, diag.as_bytes()) { println!("Compactor: quarantine diag write failed path={} err={}", qdiag.to_string_lossy(), e); }
+                println!("Compactor: truncated-stream quarantine seg={} qseg={} qdiag={}", seg_path.to_string_lossy(), qseg.to_string_lossy(), qdiag.to_string_lossy());
+                crate::metrics::counters::add_quarantined_partitions(1);
             }
             return Ok(());
         }
@@ -636,7 +661,7 @@ impl Buffers {
         let tdir = Buffers::tombstone_dir(); let _ = fs::create_dir_all(&tdir);
         let tpath = Buffers::partition_tombstone_path(seg_path, &idx.key);
         if let Err(e) = fs::write(&tpath, b"") { println!("Failed to write tombstone {:?}: {}", tpath, e); }
-        println!("Compactor: finished out_key={} tombstone={}", out_key, tpath.to_string_lossy());
+        // println!("Compactor: compact success seg={} key={:?} out_key={} tombstone={}", seg_path.to_string_lossy(), idx.key, out_key, tpath.to_string_lossy());
 
         // If all partitions in this segment are tombstoned, delete the .seg file
         let segf = SegmentFile { path: seg_path.clone() };

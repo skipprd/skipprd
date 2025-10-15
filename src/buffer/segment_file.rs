@@ -13,7 +13,7 @@ use bincode;
 
 const MAGIC: &[u8; 4] = b"SEGF";
 const PART: &[u8; 4] = b"PART";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 #[derive(Clone, Debug)]
 pub struct SegmentPartitionIndexEntry {
@@ -40,9 +40,9 @@ pub struct SegmentFile {
 impl SegmentFile {
     pub fn new(dir: &Path, snapshot_id: &str) -> io::Result<Self> {
         fs::create_dir_all(dir)?;
-        let p = dir.join(format!("{}.seg", snapshot_id));
-        let _ = OpenOptions::new().create(true).write(true).truncate(true).open(&p)?;
-        Ok(SegmentFile { path: p })
+        // Record the final path; we will write to a temporary and rename atomically
+        let p_final = dir.join(format!("{}.seg", snapshot_id));
+        Ok(SegmentFile { path: p_final })
     }
 
     pub fn write_snapshot(
@@ -51,7 +51,9 @@ impl SegmentFile {
         batches: &std::collections::HashMap<PartitionKey, Vec<RecordBatch>>,
         partitions_meta: &std::collections::HashMap<PartitionKey, (u64 /*bytes*/, SystemTime /*updated*/ )>,
     ) -> io::Result<(u64 /*bytes*/, u64 /*rows*/)> {
-        let mut file = OpenOptions::new().write(true).read(true).open(&self.path)?;
+        // Open a temporary file for atomic write, then rename to final path
+        let tmp_path = self.path.with_extension("seg.tmp");
+        let mut file = OpenOptions::new().create(true).write(true).read(true).truncate(true).open(&tmp_path)?;
         file.seek(io::SeekFrom::Start(0))?;
 
         // Header MAGIC + VERSION
@@ -83,7 +85,11 @@ impl SegmentFile {
             file.write_all(&p_bytes.to_le_bytes())?;
             file.write_all(&updated_secs.to_le_bytes())?;
 
-            // Record start pos
+            // VERSION=2: reserve space for data_len (u64), then write stream, then backfill
+            let data_len_pos = file.stream_position()?;
+            file.write_all(&0u64.to_le_bytes())?; // placeholder
+
+            // Record start pos (immediately after the placeholder)
             let start = file.stream_position()?;
             {
                 // Write Arrow stream (scope to drop writer before querying file position)
@@ -99,10 +105,20 @@ impl SegmentFile {
             let end = file.stream_position()?;
             let len = end - start;
             total_bytes = total_bytes.saturating_add(len as u64);
-            // For now we do not write a trailing index; we rely on scanning PART blocks for reading
+
+            // Backfill data_len
+            let cur = end;
+            file.seek(io::SeekFrom::Start(data_len_pos))?;
+            file.write_all(&(len as u64).to_le_bytes())?;
+            file.seek(io::SeekFrom::Start(cur))?;
+            // Continue to next partition
         }
 
         file.sync_all()?;
+
+        // Atomically rename temp -> final
+        fs::rename(&tmp_path, &self.path)?;
+
         Ok((total_bytes, total_rows))
     }
 
@@ -110,10 +126,16 @@ impl SegmentFile {
         let mut file = OpenOptions::new().read(true).open(&self.path)?;
         let mut magic = [0u8; 4];
         file.read_exact(&mut magic)?;
-        if &magic != MAGIC { return Err(io::Error::new(io::ErrorKind::InvalidData, "bad segment magic")); }
+        if &magic != MAGIC { return Err(io::Error::new(io::ErrorKind::InvalidData, "Compactor: bad segment magic")); }
         let mut ver = [0u8; 4];
         file.read_exact(&mut ver)?;
-        let _version = u32::from_le_bytes(ver);
+        let version = u32::from_le_bytes(ver);
+        if version != VERSION {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, format!(
+                "Compactor: read refused seg={} version={}",
+                self.path.to_string_lossy(), version
+            )));
+        }
         let mut created = [0u8; 8];
         file.read_exact(&mut created)?;
         let created_at_secs = u64::from_le_bytes(created);
@@ -144,20 +166,23 @@ impl SegmentFile {
             let mut upd_buf = [0u8; 8];
             file.read_exact(&mut upd_buf)?;
             let upd_secs = u64::from_le_bytes(upd_buf);
+            // VERSION=2: read explicit data_len and skip forward by that length
+            let mut len_buf = [0u8; 8];
+            file.read_exact(&mut len_buf)?;
+            let data_len = u64::from_le_bytes(len_buf);
             let start = file.stream_position()?;
-            // Use a dedicated handle to scan the Arrow stream from start and compute exact end
-            let mut scan = OpenOptions::new().read(true).open(&self.path)?;
-            scan.seek(io::SeekFrom::Start(start))?;
-            let mut reader = io::BufReader::new(scan);
-            let sr = StreamReader::try_new(&mut reader, None)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e)))?;
-            for _ in sr { /* drain */ }
-            let end = reader.stream_position()?;
-            let len = end - start;
-            total_bytes = total_bytes.saturating_add(len as u64);
-            index.push(SegmentPartitionIndexEntry { key, bytes: part_bytes, updated_at_secs: upd_secs, start, len });
-            // Advance the primary file handle to the end of this partition so we can read the next PART header
-            file.seek(io::SeekFrom::Start(end))?;
+            // Validate: don't go beyond file
+            let file_len = file.metadata()?.len();
+            if start.saturating_add(data_len) > file_len {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, format!(
+                    "Compactor: partition length beyond file end for {} start={} len={} file_len={}",
+                    self.path.to_string_lossy(), start, data_len, file_len
+                )));
+            }
+            total_bytes = total_bytes.saturating_add(data_len);
+            index.push(SegmentPartitionIndexEntry { key, bytes: part_bytes, updated_at_secs: upd_secs, start, len: data_len });
+            // Seek over the Arrow stream to the next PART header
+            file.seek(io::SeekFrom::Current(data_len as i64))?;
         }
 
         Ok(SegmentFileMetadata { created_at_secs, total_bytes, num_partitions: index.len() as u32, offsets, index })
