@@ -510,6 +510,23 @@ impl Helpers {
 
     #[inline(always)]
     pub fn parse_date_from_string(date_str: &str, format: &str) -> Result<DateTime<Utc>, String> {
+        // Data-driven normalization and parsing that does not rely on the provided format
+        // - Handles: space vs 'T', lowercase 'z', UTC/GMT tokens, comma fractions,
+        //   non-colon offsets (+HHMM, +HH), Unicode minus, extra whitespace/quotes/BOM
+        let normalized = Self::normalize_datetime_input(date_str);
+        // Fast path for Z without fractional seconds with either 'T' or space separator
+        if normalized.len() == 20 && normalized.ends_with('Z') {
+            let sep = normalized.as_bytes()[10] as char;
+            if sep == 'T' || sep == ' ' {
+                if let Some(dt) = Self::fast_parse_z_no_millis(&normalized, sep) {
+                    return Ok(dt);
+                }
+            }
+        }
+        // RFC3339/ISO8601 attempt on normalized input (covers Z and offsets with/without space)
+        if normalized.contains('Z') || normalized.rfind('+').map(|i| i > 10).unwrap_or(false) || normalized.rfind('-').map(|i| i > 10).unwrap_or(false) {
+            if let Some(date) = Self::slow_parse_rfc3339_utc(&normalized) { return Ok(date); }
+        }
         // Fast paths for common Z formats without fractional seconds
         // %Y-%m-%dT%H:%M:%SZ and %Y-%m-%d %H:%M:%SZ
         if (format == "%Y-%m-%dT%H:%M:%SZ" || format == "%Y-%m-%d %H:%M:%SZ")
@@ -519,7 +536,7 @@ impl Helpers {
                 return Ok(dt);
             }
         }
-        // First try RFC3339 parsing if this looks like an ISO8601 format
+        // First try RFC3339 parsing if this looks like an ISO8601 format (original string)
         if date_str.contains('T') && (date_str.contains('Z') || date_str.contains('+')) {
             if let Some(date) = Self::slow_parse_rfc3339_utc(date_str) { return Ok(date); }
         }
@@ -543,6 +560,21 @@ impl Helpers {
 
     #[inline(always)]
     pub fn parse_date_from_string_with_tz(date_str: &str, format: &str) -> Result<chrono::DateTime<FixedOffset>, String> {
+        // Data-driven normalization and parsing that does not rely on the provided format
+        let normalized = Self::normalize_datetime_input(date_str);
+        // Fast path for Z without fractional seconds; promote to +00:00
+        if normalized.len() == 20 && normalized.ends_with('Z') {
+            let sep = normalized.as_bytes()[10] as char;
+            if sep == 'T' || sep == ' ' {
+                if let Some(dt) = Self::fast_parse_z_no_millis(&normalized, sep) {
+                    return Ok(dt.with_timezone(&FixedOffset::east_opt(0).unwrap()));
+                }
+            }
+        }
+        // Prefer RFC3339 on normalized input (covers offsets and Z)
+        if normalized.contains('Z') || normalized.rfind('+').map(|i| i > 10).unwrap_or(false) || normalized.rfind('-').map(|i| i > 10).unwrap_or(false) {
+            if let Some(date) = Self::slow_parse_rfc3339_fixed(&normalized) { return Ok(date); }
+        }
         // Fast paths for common offset-bearing formats without fractional seconds
         // %Y-%m-%dT%H:%M:%S%z and %Y-%m-%d %H:%M:%S%z where %z is like +HH:MM
         if (format == "%Y-%m-%dT%H:%M:%S%z" || format == "%Y-%m-%d %H:%M:%S%z")
@@ -584,6 +616,99 @@ impl Helpers {
         }
 
         Err(format!("Could not parse date {} with format {}", date_str, format))
+    }
+
+    #[inline(always)]
+    fn normalize_datetime_input(input: &str) -> String {
+        // Trim whitespace
+        let mut s = input.trim().to_string();
+        // Strip wrapping quotes/backticks if present
+        if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) || (s.starts_with('`') && s.ends_with('`')) {
+            s = s[1..s.len()-1].to_string();
+        }
+        // Remove BOM and zero-width space
+        s = s.replace('\u{FEFF}', "").replace('\u{200B}', "");
+        // Normalize Unicode minus to ASCII hyphen in offsets
+        s = s.replace('−', "-");
+        // Collapse multiple spaces
+        if s.contains("  ") {
+            let mut collapsed = String::with_capacity(s.len());
+            let mut last_space = false;
+            for ch in s.chars() {
+                if ch.is_whitespace() {
+                    if !last_space { collapsed.push(' '); }
+                    last_space = true;
+                } else {
+                    collapsed.push(ch);
+                    last_space = false;
+                }
+            }
+            s = collapsed.trim().to_string();
+        }
+        let lower = s.to_ascii_lowercase();
+        // Convert trailing UTC/GMT token to Z
+        if lower.ends_with(" utc") || lower.ends_with(" gmt") {
+            s.truncate(s.len() - 4);
+            s.push('Z');
+        }
+        // Normalize lowercase trailing 'z' to 'Z'
+        if s.ends_with('z') { s.pop(); s.push('Z'); }
+        // Replace comma fractional separator with dot
+        if s.contains(',') { s = s.replace(',', "."); }
+        // If space separator between date and time, use 'T' to satisfy RFC3339
+        if s.len() > 10 {
+            let bytes = s.as_bytes();
+            if bytes.len() > 10 && bytes[10] == b' ' {
+                let mut chars: Vec<char> = s.chars().collect();
+                chars[10] = 'T';
+                s = chars.into_iter().collect();
+            }
+        }
+        // Normalize offsets: +HHMM -> +HH:MM, +HH -> +HH:00
+        // Find last '+' or '-' after position 10 (to avoid date hyphens)
+        let mut last_sign_idx: Option<usize> = None;
+        for (i, ch) in s.char_indices() {
+            if i > 10 && (ch == '+' || ch == '-') { last_sign_idx = Some(i); }
+        }
+        if let Some(idx) = last_sign_idx {
+            if !s.ends_with('Z') {
+                let (head, tail) = s.split_at(idx + 1);
+                let mut digits: String = tail.chars().take_while(|c| c.is_ascii_digit() || *c == ':').collect();
+                if digits.chars().all(|c| c.is_ascii_digit()) {
+                    if digits.len() == 2 {
+                        // +HH -> +HH:00
+                        s = format!("{}{}:00{}", &s[..idx+1], digits, &s[idx+1+digits.len()..]);
+                    } else if digits.len() == 4 {
+                        // +HHMM -> +HH:MM
+                        s = format!("{}{}:{}{}", &s[..idx+1], &digits[0..2], &digits[2..4], &s[idx+1+digits.len()..]);
+                    }
+                }
+            }
+        }
+        // Truncate excessive fractional seconds to 6 for chrono compatibility
+        if let Some(t_idx) = s.find('T') {
+            // Look for a '.' following seconds
+            if let Some(dot_idx) = s[t_idx..].find('.') {
+                let abs_dot = t_idx + dot_idx;
+                // Find end of fraction (before 'Z', '+', or '-')
+                let mut end = abs_dot + 1;
+                while end < s.len() {
+                    let ch = s.as_bytes()[end] as char;
+                    if ch.is_ascii_digit() { end += 1; } else { break; }
+                }
+                let frac_len = end - (abs_dot + 1);
+                if frac_len > 9 {
+                    // Truncate to 6 to keep parsing fast and sufficient precision
+                    let keep = 6usize;
+                    let mut new_s = String::with_capacity(s.len());
+                    new_s.push_str(&s[..abs_dot+1]);
+                    new_s.push_str(&s[abs_dot+1..abs_dot+1+keep]);
+                    new_s.push_str(&s[end..]);
+                    s = new_s;
+                }
+            }
+        }
+        s
     }
 
     pub fn apply_timezone_to_naive(datetime: NaiveDateTime, timezone: &str) -> Result<DateTime<Utc>, String> {
@@ -836,6 +961,54 @@ mod date_timezones {
         let parsed = Helpers::parse_date_from_string("2022-02-22T22:22:22", "%Y-%m-%dT%H:%M:%S").unwrap();
         let expected = Utc.with_ymd_and_hms(2022, 2, 22, 22, 22, 22).unwrap(); // Assumed to already be in UTC
         assert_eq!(parsed, expected);
+    }
+}
+
+#[cfg(test)]
+mod parse_date_normalization_tests {
+    use super::*;
+    use chrono::{TimeZone};
+
+    #[test]
+    fn parses_space_z_without_fraction() {
+        let dt = Helpers::parse_date_from_string_with_tz("2025-09-25 14:31:23Z", "%Y-%m-%d %H:%M:%SZ").unwrap();
+        let expected = chrono::Utc.with_ymd_and_hms(2025, 9, 25, 14, 31, 23).unwrap();
+        assert_eq!(dt.with_timezone(&chrono::Utc), expected);
+    }
+
+    #[test]
+    fn parses_space_z_with_fraction() {
+        let dt = Helpers::parse_date_from_string_with_tz("2025-09-25 14:31:23.123Z", "%Y-%m-%d %H:%M:%S.%fZ").unwrap();
+        let expected = chrono::Utc.with_ymd_and_hms(2025, 9, 25, 14, 31, 23).unwrap();
+        assert_eq!(dt.with_timezone(&chrono::Utc).timestamp(), expected.timestamp());
+    }
+
+    #[test]
+    fn parses_offset_no_colon() {
+        let dt = Helpers::parse_date_from_string_with_tz("2025-09-25 14:31:23+0000", "%Y-%m-%d %H:%M:%S%z").unwrap();
+        let expected = chrono::Utc.with_ymd_and_hms(2025, 9, 25, 14, 31, 23).unwrap();
+        assert_eq!(dt.with_timezone(&chrono::Utc), expected);
+    }
+
+    #[test]
+    fn parses_offset_with_colon() {
+        let dt = Helpers::parse_date_from_string_with_tz("2025-09-25 14:31:23+00:00", "%Y-%m-%d %H:%M:%S%z").unwrap();
+        let expected = chrono::Utc.with_ymd_and_hms(2025, 9, 25, 14, 31, 23).unwrap();
+        assert_eq!(dt.with_timezone(&chrono::Utc), expected);
+    }
+
+    #[test]
+    fn parses_with_utc_token() {
+        let dt = Helpers::parse_date_from_string_with_tz("2025-09-25 14:31:23 UTC", "%Y-%m-%d %H:%M:%S").unwrap();
+        let expected = chrono::Utc.with_ymd_and_hms(2025, 9, 25, 14, 31, 23).unwrap();
+        assert_eq!(dt.with_timezone(&chrono::Utc), expected);
+    }
+
+    #[test]
+    fn parses_comma_fraction_z() {
+        let dt = Helpers::parse_date_from_string_with_tz("2025-09-25 14:31:23,123Z", "%Y-%m-%d %H:%M:%S.%fZ").unwrap();
+        let expected = chrono::Utc.with_ymd_and_hms(2025, 9, 25, 14, 31, 23).unwrap();
+        assert_eq!(dt.with_timezone(&chrono::Utc).timestamp(), expected.timestamp());
     }
 }
 

@@ -514,8 +514,14 @@ pub fn fast_set_date(field: &str, value: &Value, metadata: &HashMap<String, Meta
                     let millis = match (kind, tz) {
                         (Some(crate::discover::DateParserKind::ZNoMsT), true) => Helpers::fast_parse_z_no_millis(val, 'T').map(|d| d.timestamp()*1000),
                         (Some(crate::discover::DateParserKind::ZNoMsSpace), true) => Helpers::fast_parse_z_no_millis(val, ' ').map(|d| d.timestamp()*1000),
+                        // Handle Z with milliseconds (T or space)
+                        (Some(crate::discover::DateParserKind::ZMsT), true) => Helpers::parse_date_from_string_with_tz(val, "%Y-%m-%dT%H:%M:%S.%fZ").ok().map(|d| d.timestamp()*1000),
+                        (Some(crate::discover::DateParserKind::ZMsSpace), true) => Helpers::parse_date_from_string_with_tz(val, "%Y-%m-%d %H:%M:%S.%fZ").ok().map(|d| d.timestamp()*1000),
                         (Some(crate::discover::DateParserKind::OffNoMsT), true) => Helpers::fast_parse_offset_no_millis(val, 'T').map(|d| d.timestamp()*1000),
                         (Some(crate::discover::DateParserKind::OffNoMsSpace), true) => Helpers::fast_parse_offset_no_millis(val, ' ').map(|d| d.timestamp()*1000),
+                        // Handle offset with milliseconds (T or space)
+                        (Some(crate::discover::DateParserKind::OffMsT), true) => Helpers::parse_date_from_string_with_tz(val, "%Y-%m-%dT%H:%M:%S.%f%z").ok().map(|d| d.timestamp()*1000),
+                        (Some(crate::discover::DateParserKind::OffMsSpace), true) => Helpers::parse_date_from_string_with_tz(val, "%Y-%m-%d %H:%M:%S.%f%z").ok().map(|d| d.timestamp()*1000),
                         (Some(crate::discover::DateParserKind::NaiveMysql), false) => Helpers::slow_parse_naive_dt(val, f.as_str()).map(|d| DateTime::<Utc>::from_naive_utc_and_offset(d, Utc).timestamp()*1000),
                         (Some(crate::discover::DateParserKind::NaiveDateOnly), false) => Helpers::slow_parse_naive_date(val, "%Y-%m-%d").map(|d| DateTime::<Utc>::from_naive_utc_and_offset(d.and_hms_opt(0,0,0).unwrap_or_default(), Utc).timestamp()*1000),
                         // Fallbacks
