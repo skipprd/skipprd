@@ -232,7 +232,7 @@ impl DataOutputAwsAthenaPlugin {
 
             // Require metadata present to proceed; if missing, log and proceed without partition
             let partition_metadata = match partition_metadata_opt {
-                Some(pm) => pm,
+                Some(pm) => Some(pm),
                 None => {
                     println!("Missing metadata for namespace '{}' while creating partition '{}'; proceeding without Glue partition", namespace, full_key);
                     None
