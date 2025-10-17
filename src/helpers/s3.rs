@@ -95,3 +95,30 @@ pub async fn delete_object(key: &str) -> Result<(), SdkError<DeleteObjectError>>
     client.delete_object().bucket(bucket).key(key).send().await?;
     Ok(())
 }
+
+/// List up to `max` Parquet object keys under the given bucket+prefix, ordered by LastModified ascending
+pub async fn list_parquet_keys(bucket: &str, prefix: &str, max: usize) -> Vec<String> {
+    let client = get_s3_client().await;
+    let mut out: Vec<(String, i64)> = Vec::new();
+    let mut token: Option<String> = None;
+    loop {
+        let mut req = client.list_objects_v2().bucket(bucket).prefix(prefix).max_keys(1000);
+        if let Some(t) = token.as_ref() { req = req.continuation_token(t); }
+        match req.send().await {
+            Ok(resp) => {
+                let contents = resp.contents();
+                for obj in contents {
+                    if let Some(k) = obj.key() {
+                        if k.ends_with(".parquet") { out.push((k.to_string(), obj.last_modified().map(|t| t.secs()).unwrap_or_default())); }
+                    }
+                }
+                if resp.next_continuation_token().is_none() { break; }
+                token = resp.next_continuation_token().map(|s| s.to_string());
+            }
+            Err(_) => { break; }
+        }
+        if out.len() >= max { break; }
+    }
+    out.sort_by_key(|(_, ts)| *ts);
+    out.into_iter().map(|(k, _)| k).take(max).collect()
+}

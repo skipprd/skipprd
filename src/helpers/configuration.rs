@@ -1383,6 +1383,119 @@ impl Config {
         }
     }
 
+    // Returns s3://bucket/prefix/{namespace}/ (trailing slash so DF treats as dir)
+    pub fn get_output_parquet_s3_location(namespace: &str) -> Option<String> {
+        match Self::get_pipline_plugin_config("output") {
+            Ok(plugin) => {
+                match plugin {
+                    PluginConfig::Athena(conf) => {
+                        let mut prefix = conf.s3_prefix.trim_matches('/').to_string();
+                        if !prefix.is_empty() { prefix = format!("{}/{}/", prefix, namespace); } else { prefix = format!("{}/", namespace); }
+                        Some(format!("s3://{}/{}", conf.s3_bucket, prefix))
+                    }
+                    _ => None
+                }
+            }
+            Err(_) => None
+        }
+    }
+
+    // Manifest paths and cache helpers
+    pub fn get_manifest_s3_key(namespace: &str) -> Option<(String, String)> {
+        match Self::get_pipline_plugin_config("output") {
+            Ok(plugin) => {
+                match plugin {
+                    PluginConfig::Athena(conf) => {
+                        let bucket = conf.s3_bucket.clone();
+                        let base = conf.s3_prefix.trim_matches('/').to_string();
+                        let key = if base.is_empty() { format!("_skippr/manifest.json") } else { format!("{}/_skippr/manifest.json", base) };
+                        Some((bucket, key))
+                    }
+                    _ => None
+                }
+            }
+            Err(_) => None
+        }
+    }
+
+    pub fn get_manifest_local_path(namespace: &str) -> String {
+        let data_dir = Self::get_data_dir();
+        let cache_dir = format!("{}/catalog_cache", data_dir);
+        let _ = std::fs::create_dir_all(&cache_dir);
+        format!("{}/{}.json", cache_dir, namespace)
+    }
+
+    pub async fn read_manifest(namespace: &str) -> Option<serde_json::Value> {
+        // Try local cache first
+        let local_path = Self::get_manifest_local_path(namespace);
+        if let Ok(s) = std::fs::read_to_string(&local_path) {
+            if let Ok(v) = serde_json::from_str(&s) { return Some(v); }
+        }
+
+        // Fetch from S3
+        if let Some((_bucket, key)) = Self::get_manifest_s3_key(namespace) {
+            if let Ok(val) = crate::helpers::s3::get_json(&key).await {
+                let _ = std::fs::write(&local_path, serde_json::to_string(&val).unwrap_or_default());
+                return Some(val);
+            }
+        }
+        None
+    }
+
+    pub async fn get_manifest_epoch(namespace: &str) -> Option<u64> {
+        if let Some(root) = Self::read_manifest(namespace).await {
+            if let Some(tables) = root.get("tables").and_then(|t| t.as_object()) {
+                if let Some(ns) = tables.get(namespace).and_then(|v| v.as_object()) {
+                    return ns.get("last_updated_epoch").and_then(|v| v.as_u64());
+                }
+            }
+        }
+        None
+    }
+
+    pub fn get_registry_local_path(namespace: &str) -> String {
+        let data_dir = Self::get_data_dir();
+        let cache_dir = format!("{}/catalog_cache", data_dir);
+        let _ = std::fs::create_dir_all(&cache_dir);
+        format!("{}/{}_s3_registry.json", cache_dir, namespace)
+    }
+
+    pub async fn read_registry(namespace: &str) -> Option<serde_json::Value> {
+        let path = Self::get_registry_local_path(namespace);
+        if let Ok(s) = std::fs::read_to_string(&path) {
+            if let Ok(v) = serde_json::from_str(&s) { return Some(v); }
+        }
+        None
+    }
+
+    pub async fn write_registry(namespace: &str, value: &serde_json::Value) {
+        let path = Self::get_registry_local_path(namespace);
+        let _ = std::fs::write(&path, serde_json::to_string(value).unwrap_or_default());
+    }
+
+    pub async fn update_manifest_with_prefix(namespace: &str, dir_prefix: &str) {
+        let (_bucket, key) = match Self::get_manifest_s3_key(namespace) { Some(t) => t, None => return };
+        // Load existing manifest (best-effort)
+        let mut root = match crate::helpers::s3::get_json(&format!("{}/{}", Self::get_tenant(), "" /*unused*/)).await { _ => serde_json::json!({}) };
+        // If direct fetch fails, try helper
+        if root.is_null() {
+            if let Ok(val) = crate::helpers::s3::get_json(&key).await { root = val; }
+        }
+        if !root.is_object() { root = serde_json::json!({}); }
+        let tables = root.as_object_mut().unwrap().entry("tables").or_insert(serde_json::json!({}));
+        if !tables.is_object() { *tables = serde_json::json!({}); }
+        let table = tables.as_object_mut().unwrap().entry(namespace.to_string()).or_insert(serde_json::json!({ "prefixes": [], "last_updated_epoch": 0 }));
+        let obj = table.as_object_mut().unwrap();
+        let prefixes = obj.entry("prefixes").or_insert(serde_json::json!([]));
+        let arr = prefixes.as_array_mut().unwrap();
+        if !arr.iter().any(|v| v.as_str() == Some(dir_prefix)) { arr.push(serde_json::json!(dir_prefix)); }
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+        obj.insert("last_updated_epoch".to_string(), serde_json::json!(now));
+        // Write back to S3 and expire local cache
+        let _ = crate::helpers::s3::put_json(&key, &root).await;
+        let _ = std::fs::remove_file(Self::get_manifest_local_path(namespace));
+    }
+
     pub fn get_full_namespace_name() -> String {
         // let mut helpers = Helpers { CLEAN_FIELD_CACHE: Default::default() };
 
@@ -1425,12 +1538,15 @@ impl Config {
 
         // Always use S3 as the source of truth
         let s3_key = format!("{}/{}/{}/metadata/metadata.json", tenant, workspace, pipeline);
+        println!("get_metadata: tenant='{}' workspace='{}' pipeline='{}' s3_key='{}'", tenant, workspace, pipeline, s3_key);
         
         let pipeline_metadata: Result<PipelineMetadata, bool> = match s3::get_json(&s3_key).await {
             Ok(json_value) => {
                 match serde_json::from_value::<PipelineMetadata>(json_value) {
                     Ok(mut pipeline_metadata) => {
-                        println!("Loaded metadata from S3");
+                        let num_entries = pipeline_metadata.metadata.len();
+                        let keys: Vec<String> = pipeline_metadata.metadata.keys().cloned().collect();
+                        println!("Loaded metadata from S3 (entries={}, keys={:?})", num_entries, keys);
                         // Inject flatten flag based on current config
                         match &Config::get_transform_config().flatten_events {
                             Some(val) => { pipeline_metadata.flattened = Config::truth_value(val); }

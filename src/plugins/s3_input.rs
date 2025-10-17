@@ -519,19 +519,3 @@ impl DataSourceS3Plugin {
         }
     }
 }
-
-/// Helper struct to track a downloaded S3 object
-struct Download {
-    key: String,
-    response: GetObjectOutput,
-}
-
-
-// Items used in new bounded pipeline
-struct DownloadedItem {
-    key: String,
-    data: Vec<u8>,
-    is_gz: bool,
-    permit: OwnedSemaphorePermit,
-}
-

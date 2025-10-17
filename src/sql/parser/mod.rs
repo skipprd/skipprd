@@ -385,8 +385,13 @@ impl<'a> SParser<'a> {
                                         match self.parser.peek_token().token {
                                             Token::Word(w) => {
                                                 match w.keyword {
+                                                    // Support both ALTER SCHEMA ... and ALTER TABLE ... as aliases
+                                                    // Hard-disable SCHEMA keyword and instruct to use TABLE
                                                     Keyword::SCHEMA => {
-                                                        self.parser.next_token(); // SCHEMA
+                                                        return Err(ParserError::ParserError("Use TABLE instead of SCHEMA".to_string()));
+                                                    }
+                                                    Keyword::TABLE => {
+                                                        self.parser.next_token(); // SCHEMA/TABLE
                                                         self.parse_alter_schema()
                                                     }
                                                     _ => {
@@ -606,9 +611,9 @@ impl<'a> SParser<'a> {
         return match self.parser.peek_token().token {
             Token::Word(w) => {
                 match SkipprKeyword::from_str(&w.value) {
-                    Some(SkipprKeyword::SCHEMA) => {
+                    Some(SkipprKeyword::TABLE) => {
                         
-                        self.parser.next_token(); // SCHEMA
+                        self.parser.next_token(); // TABLE
                         
                         let pipeline = self.parser.next_token().token.to_string();
 
@@ -640,6 +645,7 @@ impl<'a> SParser<'a> {
                         }))
 
                     }
+                    Some(SkipprKeyword::SCHEMA) => { Err(ParserError::ParserError("Use TABLE instead of SCHEMA".to_string())) }
                     _ => {
                         Err(ParserError::ParserError("Not implemented".to_string()))
                     }
@@ -683,9 +689,10 @@ impl<'a> SParser<'a> {
         return match self.parser.peek_token().token {
             Token::Word(w) => {
                 match SkipprKeyword::from_str(&w.value) {
-                    Some(SkipprKeyword::SCHEMA) => {
+                    // Support both DUMP SCHEMA ... and DUMP TABLE ...
+                    Some(SkipprKeyword::TABLE) => {
 
-                        self.parser.next_token(); // SCHEMA
+                        self.parser.next_token(); // SCHEMA/TABLE
 
                         let pipeline = self.parser.next_token().token.to_string();
 
@@ -700,9 +707,9 @@ impl<'a> SParser<'a> {
                             }
                         };
 
-                        Ok(Statement::SchemaDrop(SchemaDropStatement {
-                            pipeline: ObjectName(vec![Ident::new(pipeline)]),
-                            schema: schema.map(|s| ObjectName(vec![Ident::new(s)]))
+                        Ok(Statement::TableDrop(TableDropStatement {
+                            schema: schema.map(|s| ObjectName(vec![Ident::new(s)])),
+                            table: ObjectName(vec![Ident::new(pipeline)])
                         }))
                         // }
 
@@ -728,28 +735,9 @@ impl<'a> SParser<'a> {
                             database
                         }))
                     }
-                    Some(SkipprKeyword::TABLE) => {
-                        self.parser.next_token(); // TABLE
-
-                        // Parse table name which might be in the format schema.table
-                        let object_name = self.parser.parse_object_name(false)?;
-                        
-                        // If the object name has multiple parts, it's in the format schema.table
-                        if object_name.0.len() > 1 {
-                            let schema = ObjectName(vec![object_name.0[0].clone()]);
-                            let table = ObjectName(vec![object_name.0[1].clone()]);
-                            
-                            Ok(Statement::TableDrop(TableDropStatement {
-                                schema: Some(schema),
-                                table
-                            }))
-                        } else {
-                            // No schema specified
-                            Ok(Statement::TableDrop(TableDropStatement {
-                                schema: None,
-                                table: object_name
-                            }))
-                        }
+                    // SCHEMA keyword is deprecated; instruct users
+                    Some(SkipprKeyword::SCHEMA) => {
+                        Err(ParserError::ParserError("Use TABLE instead of SCHEMA".to_string()))
                     }
                     _ => {
                         Err(ParserError::ParserError("Not implemented".to_string()))

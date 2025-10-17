@@ -1,6 +1,7 @@
 use std::{fs, process};
 use std::fs::OpenOptions;
 use std::io::{BufReader};
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,6 +22,57 @@ use crate::sql::parser::{PipelineToggle, SParser, Statement};
 use chrono::{DateTime};
 use datafusion::error::DataFusionError;
 use crate::sql::{SqlDocParser, SqlStatementDoc};
+use datafusion::prelude::{SessionConfig, ParquetReadOptions};
+use datafusion::logical_expr::Volatility;
+use datafusion::scalar::ScalarValue;
+use datafusion::arrow::array::{Float64Array, RecordBatch};
+use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
+use datafusion::execution::FunctionRegistry;
+use object_store::aws::AmazonS3Builder;
+use url::Url;
+use datafusion::datasource::MemTable;
+use datafusion::datasource::view::ViewTable;
+use arrow::ipc::reader::StreamReader;
+use arrow::util::pretty::pretty_format_batches;
+use crate::buffer::segment_file::SegmentFile;
+use std::io::{Seek, Read};
+use crate::ingest_work::Ingest;
+use crate::ARROW_SCHEMA;
+use arc_swap::ArcSwap;
+use sqlparser::dialect::GenericDialect;
+use sqlparser::parser::Parser as StdSqlParser;
+use sqlparser::ast::{Statement as StdStatement, SetExpr, TableFactor, Query as StdQuery, Select as StdSelect, SelectItem as StdSelectItem, Expr as StdExpr, Ident, DataType as StdDataType, ObjectName, Function, FunctionArg, FunctionArgExpr, ObjectName as SqlObjectName, OrderByExpr, GroupByExpr};
+use std::collections::HashSet;
+use aws_credential_types::provider::ProvideCredentials;
+
+async fn register_s3_object_store(ctx: &SessionContext, s3_loc: &str) {
+    if let Ok(u) = Url::parse(s3_loc) {
+        if u.scheme() == "s3" {
+            if let Some(bucket) = u.host_str() {
+                // Resolve credentials from AWS profiles/env via aws-config
+                let conf = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
+                let region = conf.region().map(|r| r.as_ref().to_string()).unwrap_or_else(|| std::env::var("AWS_REGION").unwrap_or_default());
+                let creds_opt = conf.credentials_provider();
+                let (ak, sk, tk) = if let Some(p) = creds_opt {
+                    match p.provide_credentials().await {
+                        Ok(c) => (c.access_key_id().to_string(), c.secret_access_key().to_string(), c.session_token().map(|t| t.to_string())),
+                        Err(_) => (String::new(), String::new(), None)
+                    }
+                } else { (String::new(), String::new(), None) };
+
+                let mut b = AmazonS3Builder::new().with_bucket_name(bucket);
+                if !region.is_empty() { b = b.with_region(region); }
+                if !ak.is_empty() && !sk.is_empty() { b = b.with_access_key_id(ak).with_secret_access_key(sk); }
+                if let Some(t) = tk { b = b.with_token(t); }
+                if let Ok(store) = b.build() {
+                    let base = Url::parse(&format!("s3://{}/", bucket)).unwrap_or(u.clone());
+                    let _ = ctx.runtime_env().register_object_store(&base, Arc::new(store));
+                }
+            }
+        }
+    }
+}
+// no SQL AST parsing needed; we will register union views for all pipelines
 
 #[allow(dead_code)]
 fn datediff(args: &[ArrayRef]) -> Result<ArrayRef, DataFusionError> {
@@ -103,6 +155,153 @@ pub async fn explain_query(sql_str: &str) -> String {
 }
 
 pub async fn query(sql_str: &str) {
+
+    let sql_trim = sql_str.trim();
+    // STREAM: WAL-only, 2s refresh, table name equals pipeline name
+    if sql_trim.to_uppercase().starts_with("STREAM ") {
+        // Support optional WINDOW <seconds> anywhere after the projection; remove just that clause
+        let mut raw_after = sql_trim[7..].trim().to_string();
+        let mut window_secs_opt: Option<i64> = None;
+        {
+            let upper = raw_after.to_uppercase();
+            if let Some(idx) = upper.find(" WINDOW ") {
+                let start = idx + 8; // after ' WINDOW '
+                let bytes = raw_after.as_bytes();
+                let mut j = start;
+                while j < bytes.len() && bytes[j].is_ascii_whitespace() { j += 1; }
+                let num_start = j;
+                while j < bytes.len() && bytes[j].is_ascii_digit() { j += 1; }
+                if j > num_start {
+                    if let Ok(sec) = raw_after[num_start..j].parse::<i64>() { window_secs_opt = Some(sec); }
+                    // remove the WINDOW <n> segment only, preserving a space boundary
+                    let left = raw_after[..idx].trim_end();
+                    let right = raw_after[j..].trim_start();
+                    raw_after = if right.is_empty() { left.to_string() } else { format!("{} {}", left, right) };
+                }
+            }
+        }
+        let mut select_sql = format!("SELECT {}", raw_after);
+        let dialect = GenericDialect {};
+        let mut table_opt: Option<String> = None;
+        if let Ok(ast) = StdSqlParser::parse_sql(&dialect, &select_sql) {
+            for stmt in ast {
+                if let StdStatement::Query(q) = stmt {
+                    match &*q.body {
+                        SetExpr::Select(sel) => {
+                            if let Some(twj) = sel.from.get(0) {
+                                if let TableFactor::Table { name, .. } = &twj.relation { table_opt = Some(name.to_string()); }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        // Fallback: simple FROM parser if sqlparser fails on WINDOW syntax
+        if table_opt.is_none() {
+            let up = select_sql.to_uppercase();
+            if let Some(fi) = up.find(" FROM ") {
+                let rest = &select_sql[fi + 6..];
+                let mut name = String::new();
+                for ch in rest.chars() {
+                    if ch.is_alphanumeric() || ch == '_' || ch == '-' { name.push(ch); } else { break; }
+                }
+                if !name.is_empty() { table_opt = Some(name); }
+            }
+        }
+        let pipeline = match table_opt { Some(t) => t, None => { println!("STREAM requires a FROM <pipeline_name>"); return; } };
+
+        // If WINDOW provided, append a time predicate using best-known time column
+        if let Some(win_s) = window_secs_opt {
+            // Determine time column: prefer event_date; else metadata.prcd_micro_time
+            let mut time_col = "event_date".to_string();
+            if let Some(swap) = ARROW_SCHEMA.get(&pipeline) {
+                let schema = swap.load();
+                let has_event = schema.fields().iter().any(|f| f.name() == "event_date");
+                if !has_event { time_col = "metadata.prcd_micro_time".to_string(); }
+            }
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let lower_ms = now_ms.saturating_sub(win_s.saturating_mul(1000));
+            // naive append; if existing WHERE present, add AND; else add WHERE
+            let upper = select_sql.to_uppercase();
+            if upper.contains(" WHERE ") {
+                select_sql = format!("{} AND {} >= to_timestamp_millis({})", select_sql, time_col, lower_ms);
+            } else {
+                // place predicate before ORDER/GROUP/LIMIT if present
+                let mut insert_idx = select_sql.len();
+                for kw in [" GROUP BY ", " ORDER BY ", " LIMIT "] { if let Some(i) = upper.find(kw) { insert_idx = insert_idx.min(i); } }
+                if insert_idx < select_sql.len() {
+                    let (head, tail) = select_sql.split_at(insert_idx);
+                    select_sql = format!("{} WHERE {} >= to_timestamp_millis({}){}", head, time_col, lower_ms, tail);
+                } else {
+                    select_sql = format!("{} WHERE {} >= to_timestamp_millis({})", select_sql, time_col, lower_ms);
+                }
+            }
+            println!("STREAM window={}s using time_col='{}'", win_s, time_col);
+        }
+
+        // loop forever with 2s refresh
+        loop {
+            let mut session_config = SessionConfig::new();
+            session_config = session_config.set("datafusion.catalog.information_schema", "true".into());
+            session_config = session_config.set("datafusion.execution.collect_statistics", "true".into());
+            let ctx = SessionContext::new_with_config(session_config);
+
+            // Prepare WAL memtable for this pipeline
+            PIPELINE_NAME.write().clear();
+            PIPELINE_NAME.write().push_str(&pipeline);
+            Config::init().await;
+            let seg_dir = format!("{}/segment_buffer/segs", Config::get_data_dir());
+            let mut wal_batches: Vec<RecordBatch> = Vec::new();
+            if std::path::Path::new(&seg_dir).exists() {
+                for entry in std::fs::read_dir(&seg_dir).unwrap_or_else(|_| std::fs::read_dir("/").unwrap()) {
+                    if let Ok(ent) = entry { let path = ent.path(); if path.extension().and_then(|s| s.to_str()) != Some("seg") { continue; }
+                        let seg = SegmentFile { path: path.clone() };
+                        if let Ok(meta) = seg.read_metadata() {
+                            for idx in meta.index.iter() {
+                                if idx.key.0 != pipeline { continue; }
+                                if let Ok(mut file) = std::fs::OpenOptions::new().read(true).open(&path) {
+                                    if file.seek(std::io::SeekFrom::Start(idx.start)).is_ok() {
+                                        let mut reader = std::io::BufReader::new(file);
+                                        let mut take = reader.take(idx.len);
+                                        if let Ok(sr) = StreamReader::try_new(&mut take, None) { for it in sr { if let Ok(b) = it { wal_batches.push(b); } } }
+                                    }
+                                }
+                            }
+                        }
+                    } }
+            }
+            // refreshing output in-place: clear screen and redraw
+            print!("\x1b[H\x1b[2J");
+            let _ = std::io::stdout().flush();
+
+            if wal_batches.is_empty() {
+                println!("stream: waiting for WAL ({})...", pipeline);
+            } else {
+                let schema = wal_batches[0].schema();
+                let filtered: Vec<RecordBatch> = wal_batches.into_iter().filter(|b| b.schema().as_ref() == schema.as_ref()).collect();
+                if !filtered.is_empty() {
+                    let mem = MemTable::try_new(schema.clone(), vec![filtered]).map_err(|e| DataFusionError::Internal(e.to_string())).unwrap();
+                    ctx.register_table(&pipeline, Arc::new(mem)).unwrap();
+                    match ctx.sql(&select_sql).await {
+                        Ok(df) => {
+                            let df_clone = df.clone();
+                            match df.collect().await {
+                                Ok(batches) => {
+                                    if let Ok(s) = pretty_format_batches(&batches) { println!("{}", s); } else { let _ = df_clone.show().await; }
+                                }
+                                Err(e) => { println!("STREAM execution error: {}", e); }
+                            }
+                        }
+                        Err(e) => { println!("STREAM execution error: {}", e); }
+                    }
+                } else {
+                    println!("stream: waiting for WAL ({})...", pipeline);
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    }
 
     let mut parser = SParser::new(sql_str).unwrap();
 
@@ -545,12 +744,440 @@ pub async fn query(sql_str: &str) {
         //     println!("Unknown SQL Dialect. {}", e);
         // },
         _ => {
+            // Fall back to DataFusion for standard SQL (e.g., SELECT ...)
+            // Build a context and register available pipeline table from current data dir
+            let mut session_config = SessionConfig::new();
+            session_config = session_config.set("datafusion.catalog.information_schema", "true".into());
+            session_config = session_config.set("datafusion.execution.collect_statistics", "true".into());
 
-            // Print the sql parser.parse_statement() and exit
+            let ctx = SessionContext::new_with_config(session_config);
+
+            // Register UDFs
+            // lateness(ts, ref_ts) -> seconds late (f64)
+            let lateness_udf = datafusion::logical_expr::create_udf(
+                "lateness",
+                vec![ArrowDataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, None), ArrowDataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, None)],
+                Arc::new(ArrowDataType::Float64),
+                Volatility::Immutable,
+                datafusion::physical_plan::functions::make_scalar_function(|args| {
+                    let ts = args[0].as_any().downcast_ref::<datafusion::arrow::array::TimestampMillisecondArray>().unwrap();
+                    let ref_ts = args[1].as_any().downcast_ref::<datafusion::arrow::array::TimestampMillisecondArray>().unwrap();
+                    let mut builder = Float64Array::builder(ts.len());
+                    for i in 0..ts.len() {
+                        if ts.is_null(i) || ref_ts.is_null(i) { builder.append_null(); } else {
+                            let v = (ref_ts.value(i) - ts.value(i)) as f64 / 1000.0;
+                            builder.append_value(v);
+                        }
+                    }
+                    Ok(Arc::new(builder.finish()) as ArrayRef)
+                })
+            );
+            ctx.register_udf(lateness_udf);
+
+            // new_session(ts, prev_ts, gap_ms) -> bool (true if ts - prev_ts > gap_ms)
+            let new_session_udf = datafusion::logical_expr::create_udf(
+                "new_session",
+                vec![
+                    ArrowDataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, None),
+                    ArrowDataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, None),
+                    ArrowDataType::Int64,
+                ],
+                Arc::new(ArrowDataType::Boolean),
+                Volatility::Immutable,
+                datafusion::physical_plan::functions::make_scalar_function(|args| {
+                    let ts = args[0].as_any().downcast_ref::<datafusion::arrow::array::TimestampMillisecondArray>().unwrap();
+                    let prev = args[1].as_any().downcast_ref::<datafusion::arrow::array::TimestampMillisecondArray>().unwrap();
+                    let gap = args[2].as_any().downcast_ref::<datafusion::arrow::array::Int64Array>().unwrap();
+                    let mut builder = datafusion::arrow::array::BooleanBuilder::new();
+                    for i in 0..ts.len() {
+                        if ts.is_null(i) || prev.is_null(i) || gap.is_null(i) {
+                            builder.append_value(true); // treat null prev as new session
+                        } else {
+                            let d = ts.value(i) - prev.value(i);
+                            builder.append_value(d > gap.value(i));
+                        }
+                    }
+                    Ok(Arc::new(builder.finish()) as ArrayRef)
+                })
+            );
+            ctx.register_udf(new_session_udf);
+
+            // zscore(val, mean, std) -> f64; is_outlier_z(val, mean, std, threshold) -> bool
+            let zscore_udf = datafusion::logical_expr::create_udf(
+                "zscore",
+                vec![ArrowDataType::Float64, ArrowDataType::Float64, ArrowDataType::Float64],
+                Arc::new(ArrowDataType::Float64),
+                Volatility::Immutable,
+                datafusion::physical_plan::functions::make_scalar_function(|args| {
+                    let v = args[0].as_any().downcast_ref::<Float64Array>().unwrap();
+                    let m = args[1].as_any().downcast_ref::<Float64Array>().unwrap();
+                    let s = args[2].as_any().downcast_ref::<Float64Array>().unwrap();
+                    let mut out = Float64Array::builder(v.len());
+                    for i in 0..v.len() {
+                        if v.is_null(i) || m.is_null(i) || s.is_null(i) || s.value(i) == 0.0 {
+                            out.append_null();
+                        } else {
+                            out.append_value((v.value(i) - m.value(i)) / s.value(i));
+                        }
+                    }
+                    Ok(Arc::new(out.finish()) as ArrayRef)
+                })
+            );
+            ctx.register_udf(zscore_udf);
+
+            let is_outlier_z_udf = datafusion::logical_expr::create_udf(
+                "is_outlier_z",
+                vec![ArrowDataType::Float64, ArrowDataType::Float64, ArrowDataType::Float64, ArrowDataType::Float64],
+                Arc::new(ArrowDataType::Boolean),
+                Volatility::Immutable,
+                datafusion::physical_plan::functions::make_scalar_function(|args| {
+                    let v = args[0].as_any().downcast_ref::<Float64Array>().unwrap();
+                    let m = args[1].as_any().downcast_ref::<Float64Array>().unwrap();
+                    let s = args[2].as_any().downcast_ref::<Float64Array>().unwrap();
+                    let t = args[3].as_any().downcast_ref::<Float64Array>().unwrap();
+                    let mut out = datafusion::arrow::array::BooleanBuilder::new();
+                    for i in 0..v.len() {
+                        if v.is_null(i) || m.is_null(i) || s.is_null(i) || t.is_null(i) || s.value(i) == 0.0 {
+                            out.append_value(false);
+                        } else {
+                            let z = (v.value(i) - m.value(i)) / s.value(i);
+                            out.append_value(z.abs() > t.value(i));
+                        }
+                    }
+                    Ok(Arc::new(out.finish()) as ArrayRef)
+                })
+            );
+            ctx.register_udf(is_outlier_z_udf);
+
+            // Build union views ONLY for tables referenced in this SQL
+            let original_pipeline = Config::get_pipeline_name();
+            let dialect = GenericDialect {};
+            let mut table_names: Vec<String> = Vec::new();
+            if let Ok(ast) = StdSqlParser::parse_sql(&dialect, sql_str) {
+                for stmt in ast {
+                    if let StdStatement::Query(q) = stmt {
+                        match &*q.body {
+                            SetExpr::Select(sel) => {
+                                for twj in &sel.from {
+                                    if let TableFactor::Table { name, .. } = &twj.relation { table_names.push(name.to_string()); }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            if table_names.is_empty() { println!("Could not infer table name from query; expected FROM <pipeline_name>"); process::exit(1); }
+            table_names.sort(); table_names.dedup();
+            for pipeline in table_names {
+                // Switch pipeline context for correct local WAL dir and config resolution
+                PIPELINE_NAME.write().clear();
+                PIPELINE_NAME.write().push_str(&pipeline);
+                Config::init().await;
+
+                // Bootstrap METADATA and ARROW_SCHEMA like main sync
+                match Config::get_metadata().await {
+                    Ok(pm) => {
+                        println!("Found existing Skippr metadata for pipeline '{}' (namespaces={})", pipeline, pm.metadata.len());
+                        let keys: Vec<String> = pm.metadata.keys().cloned().collect();
+                        println!("Metadata namespaces: {:?}", keys);
+                        METADATA.store(Arc::new(pm.clone()));
+                        let flatten = Config::get_transform_flatten_events();
+                        if pm.metadata.contains_key(&pipeline) {
+                            match Ingest::prepare_arrow_schema_with_metadata(&pipeline, &pm.metadata, flatten) {
+                                Ok(schema) => {
+                                    ARROW_SCHEMA.insert(pipeline.clone(), ArcSwap::from(schema.clone()));
+                                    let field_list: Vec<String> = schema.fields().iter().map(|f| format!("{}:{:?}", f.name(), f.data_type())).collect();
+                                    println!("Published ARROW_SCHEMA for '{}' (fields={}, {:?})", pipeline, schema.fields().len(), field_list);
+                                },
+                                Err(e) => {
+                                    println!("Failed to build Arrow schema for '{}': {}", pipeline, e);
+                                }
+                            }
+                        } else {
+                            println!("WARN: metadata has no namespace '{}' (keys={:?})", pipeline, keys);
+                        }
+                    },
+                    Err(_) => {
+                        println!("No existing Skippr metadata for pipeline '{}' (using empty PipelineMetadata)", pipeline);
+                        METADATA.store(Arc::new(PipelineMetadata::new()));
+                    }
+                }
+
+                // WAL → MemTable
+                let seg_dir = format!("{}/segment_buffer/segs", Config::get_data_dir());
+                let mut wal_batches: Vec<RecordBatch> = Vec::new();
+                let mut wal_seg_files: usize = 0;
+                if std::path::Path::new(&seg_dir).exists() {
+                    for entry in std::fs::read_dir(&seg_dir).unwrap_or_else(|_| std::fs::read_dir("/").unwrap()) {
+                        if let Ok(ent) = entry { let path = ent.path(); if path.extension().and_then(|s| s.to_str()) != Some("seg") { continue; }
+                            let seg = SegmentFile { path: path.clone() };
+                            if let Ok(meta) = seg.read_metadata() {
+                                for idx in meta.index.iter() {
+                                    if idx.key.0 != pipeline { continue; }
+                                    if let Ok(mut file) = std::fs::OpenOptions::new().read(true).open(&path) {
+                                        if file.seek(std::io::SeekFrom::Start(idx.start)).is_ok() {
+                                            let mut reader = std::io::BufReader::new(file);
+                                            let mut take = reader.take(idx.len);
+                                            if let Ok(sr) = StreamReader::try_new(&mut take, None) { for it in sr { if let Ok(b) = it { wal_batches.push(b); } } }
+                                            wal_seg_files += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        } }
+                }
+                let wal_rows: usize = wal_batches.iter().map(|b| b.num_rows()).sum();
+                println!("WAL scan: dir={} seg_files={} batches={} rows={}", seg_dir, wal_seg_files, wal_batches.len(), wal_rows);
+                if !wal_batches.is_empty() { let schema = wal_batches[0].schema(); let filtered: Vec<RecordBatch> = wal_batches.into_iter().filter(|b| b.schema().as_ref() == schema.as_ref()).collect(); if !filtered.is_empty() { let mem = MemTable::try_new(schema.clone(), vec![filtered]).map_err(|e| DataFusionError::Internal(e.to_string())).unwrap(); ctx.register_table(&format!("{}_wal", &pipeline), Arc::new(mem)).unwrap(); println!("Registered WAL table: {}_wal", pipeline); } }
+
+                // S3 parquet (required)
+                let s3_loc = match Config::get_output_parquet_s3_location(&pipeline) { Some(loc) => loc, None => { println!("No S3 output configured for pipeline '{}'; SELECT requires S3 + WAL", pipeline); process::exit(1); } };
+                println!("S3 register: table={} path={}", pipeline, s3_loc);
+                register_s3_object_store(&ctx, &s3_loc).await;
+                // Prepare Parquet registration paths: prefer latest manifest prefix(es) to avoid schema merge conflicts
+                let mut s3_paths: Vec<String> = Vec::new();
+                if let Some(man) = Config::read_manifest(&pipeline).await {
+                    if let Some(tables) = man.get("tables").and_then(|t| t.as_object()) {
+                        if let Some(ns) = tables.get(&pipeline).and_then(|v| v.as_object()) {
+                            if let Some(prefixes) = ns.get("prefixes").and_then(|p| p.as_array()) {
+                                if let Some(last) = prefixes.last().and_then(|v| v.as_str()) {
+                                    if let Ok(u) = Url::parse(&s3_loc) { if let Some(bucket) = u.host_str() {
+                                        let mut dir = last.trim_matches('/').to_string();
+                                        if !dir.ends_with('/') { dir.push('/'); }
+                                        s3_paths.push(format!("s3://{}/{}", bucket, dir));
+                                    } }
+                                }
+                            }
+                        }
+                    }
+                }
+                if s3_paths.is_empty() { s3_paths.push(s3_loc.clone()); }
+                // Cache: registry of already registered S3 object tables per (namespace, manifest_epoch)
+                let manifest_epoch = Config::get_manifest_epoch(&pipeline).await.unwrap_or(0);
+                let mut registry = Config::read_registry(&pipeline).await.unwrap_or(serde_json::json!({"epoch": 0u64, "sources": []}));
+                let reg_epoch = registry.get("epoch").and_then(|v| v.as_u64()).unwrap_or(0);
+                if reg_epoch != manifest_epoch { registry = serde_json::json!({"epoch": manifest_epoch, "sources": []}); }
+                let mut sources_cached: Vec<(String, String)> = registry
+                    .get("sources")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|v| {
+                        let name = v.get("name").and_then(|s| s.as_str()).map(|s| s.to_string());
+                        let url = v.get("url").and_then(|s| s.as_str()).map(|s| s.to_string());
+                        match (name, url) { (Some(n), Some(u)) => Some((n, u)), _ => None }
+                    })
+                    .collect();
+
+                // If cached sources exist, register them quickly and skip listing
+                if !sources_cached.is_empty() {
+                    for (name, url) in &sources_cached {
+                        let opts = ParquetReadOptions { schema: None, file_extension: "parquet", table_partition_cols: vec![], parquet_pruning: None, skip_metadata: Some(true), file_sort_order: vec![] };
+                        let _ = ctx.register_parquet(name, url, opts).await;
+                    }
+                }
+
+                // If cache empty, build minimal table set and persist
+                if sources_cached.is_empty() {
+                    let mut registered: usize = 0;
+                    let mut new_sources: Vec<(String, String)> = Vec::new();
+                    for (idx, path) in s3_paths.iter().enumerate() {
+                    if let Ok(u) = Url::parse(path) { if let Some(bucket) = u.host_str() { let prefix = u.path().trim_start_matches('/');
+                        // fetch up to 8 parquet files under this prefix
+                        let files = crate::helpers::s3::list_parquet_keys(bucket, prefix, 8).await;
+                        if !files.is_empty() {
+                            for (j, key) in files.iter().enumerate() {
+                                let tname = format!("{}_s3_{}_{}", &pipeline, idx, j);
+                                let file_url = format!("s3://{}/{}", bucket, key);
+                                let opts = ParquetReadOptions { schema: None, file_extension: "parquet", table_partition_cols: vec![], parquet_pruning: None, skip_metadata: Some(true), file_sort_order: vec![] };
+                                if let Err(e) = ctx.register_parquet(&tname, &file_url, opts).await { println!("Failed to register S3 object='{}' for '{}': {}", file_url, pipeline, e); process::exit(1); }
+                                registered += 1;
+                                println!("Registered S3 object table: {}", tname);
+                                    new_sources.push((tname, file_url));
+                            }
+                            continue;
+                        }
+                    } }
+                    // fallback: register the path (dir) directly
+                    let opts = ParquetReadOptions { schema: None, file_extension: "parquet", table_partition_cols: vec![], parquet_pruning: None, skip_metadata: Some(true), file_sort_order: vec![] };
+                    let tname = format!("{}_s3_{}", &pipeline, idx);
+                    if let Err(e) = ctx.register_parquet(&tname, path, opts).await { println!("Failed to register S3 table path='{}' for '{}': {}", path, pipeline, e); process::exit(1); }
+                    println!("Registered S3 table: {}", tname);
+                    registered += 1;
+                        new_sources.push((tname, path.clone()));
+                }
+                    // persist cache
+                    let sources_json: Vec<serde_json::Value> = new_sources.iter().map(|(n, u)| serde_json::json!({"name": n, "url": u})).collect();
+                    registry = serde_json::json!({"epoch": manifest_epoch, "sources": sources_json});
+                    Config::write_registry(&pipeline, &registry).await;
+                    sources_cached = new_sources;
+                }
+                // Debug: count rows on each side (first path)
+                if let Ok(df) = ctx.table(&format!("{}_s3_{}", &pipeline, 0)).await { let df_preview = df.clone().limit(0, Some(1000)).unwrap_or(df); if let Ok(batches) = df_preview.collect().await { let s3_preview_rows: usize = batches.iter().map(|b| b.num_rows()).sum(); println!("S3 preview rows (up to 1000): {}", s3_preview_rows); } }
+
+                // Union view as pipeline name with projection to cast known top-level timestamp fields
+                // Build base DF by unioning all registered S3 path tables
+                // Build base DF by unioning all registered S3 object tables
+                // Build base DF by unioning cached tables in registry
+                let table_names: Vec<String> = sources_cached.iter().map(|(n, _)| n.clone()).collect();
+                let mut df_s3_base = ctx.table(&table_names[0]).await.expect("S3 table missing");
+                for t in table_names.iter().skip(1) { if let Ok(df_next) = ctx.table(t).await { df_s3_base = df_s3_base.union(df_next).expect("union s3 objs"); } }
+                let s3_fields: Vec<String> = df_s3_base.schema().fields().iter().map(|f| f.name().clone()).collect();
+                println!("S3 table schema fields={} names={:?}", df_s3_base.schema().fields().len(), s3_fields);
+                let df_s3 = {
+                    if let Some(swap) = ARROW_SCHEMA.get(&pipeline) {
+                        let arrow_schema = swap.load();
+                        use datafusion::logical_expr::{col, Expr, lit};
+                        // Builder: for each top-level field, rebuild struct fields recursively casting int64 to timestamp where ARROW_SCHEMA says timestamp
+                        fn build_expr_for_field(name: &str, dt: &ArrowDataType) -> Expr {
+                            match dt {
+                                ArrowDataType::Timestamp(_, _) => Expr::Cast(datafusion::logical_expr::expr::Cast { expr: Box::new(col(name)), data_type: ArrowDataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, None) }).alias(name),
+                                ArrowDataType::Struct(fields) => {
+                                    // For structs, recursively cast child leafs but keep struct unchanged (DataFusion lacks struct builder in SELECT)
+                                    // Use the original column; nested leaf access in user queries will be cast on projection below when referenced
+                                    col(name)
+                                }
+                                ArrowDataType::List(field) => {
+                                    // Lists of structs/timestamps: leave as-is for now (casting within lists requires explode/transform)
+                                    col(name)
+                                }
+                                _ => col(name),
+                            }
+                        }
+                        let mut exprs: Vec<Expr> = Vec::with_capacity(arrow_schema.fields().len());
+                        for f in arrow_schema.fields() {
+                            exprs.push(build_expr_for_field(f.name(), f.data_type()));
+                        }
+                        match df_s3_base.clone().select(exprs) { Ok(dfp) => dfp, Err(_) => df_s3_base.clone() }
+                    } else { df_s3_base.clone() }
+                };
+                let df_wal = match ctx.table(&format!("{}_wal", &pipeline)).await { Ok(df) => df, Err(_) => df_s3.clone().filter(datafusion::logical_expr::lit(false)).unwrap() };
+                let df_union = df_s3.union(df_wal).expect("Failed to build union view");
+                let view = ViewTable::try_new(df_union.into_optimized_plan().expect("optimize"), Some(pipeline.clone())).expect("view");
+                ctx.register_table(&pipeline, Arc::new(view)).expect("register union view");
+                println!("Registered UNION view: {} (S3 + WAL)", pipeline);
+            }
+            // Restore original pipeline context
+            PIPELINE_NAME.write().clear();
+            PIPELINE_NAME.write().push_str(&original_pipeline);
+
+            // Execute the query
+            // Build whitelist of timestamp paths from ARROW_SCHEMA for all referenced tables
+            fn collect_ts_paths(dt: &ArrowDataType, prefix: &str, out: &mut std::collections::HashSet<String>) {
+                match dt {
+                    ArrowDataType::Timestamp(_, _) => { if !prefix.is_empty() { out.insert(prefix.to_string()); } }
+                    ArrowDataType::Struct(fields) => {
+                        for f in fields.iter() {
+                            let p = if prefix.is_empty() { f.name().to_string() } else { format!("{}.{}", prefix, f.name()) };
+                            collect_ts_paths(f.data_type(), &p, out);
+                        }
+                    }
+                    ArrowDataType::List(field) => {
+                        // Skip lists for now; safe and avoids complex per-element rewrites
+                        let _ = field;
+                    }
+                    _ => {}
+                }
+            }
+            let mut ts_whitelist: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for entry in ARROW_SCHEMA.iter() {
+                let schema = entry.value().load();
+                for f in schema.fields() { collect_ts_paths(f.data_type(), f.name(), &mut ts_whitelist); }
+            }
+
+            // Rewrite SQL: wrap referenced dotted paths in to_timestamp_millis where in whitelist
+            fn needs_cast_path(idents: &Vec<Ident>, whitelist: &std::collections::HashSet<String>) -> bool {
+                if idents.is_empty() { return false; }
+                let path = idents.iter().map(|i| i.value.clone()).collect::<Vec<String>>().join(".");
+                whitelist.contains(&path)
+            }
+            fn rewrite_expr(expr: &mut StdExpr, whitelist: &std::collections::HashSet<String>) {
+                match expr {
+                    StdExpr::CompoundIdentifier(idents) => {
+                        if needs_cast_path(idents, whitelist) {
+                            let arg = StdExpr::CompoundIdentifier(idents.clone());
+                            *expr = StdExpr::Function(Function {
+                                name: SqlObjectName(vec![Ident::new("to_timestamp_millis")]),
+                                args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(arg))],
+                                over: None,
+                                distinct: false,
+                                special: false,
+                                order_by: vec![],
+                                null_treatment: None,
+                                filter: None,
+                            });
+                        }
+                    }
+                    StdExpr::Identifier(_)
+                    | StdExpr::Value(_)
+                    | StdExpr::Wildcard => {}
+                    StdExpr::BinaryOp { left, right, .. } => { rewrite_expr(left, whitelist); rewrite_expr(right, whitelist); }
+                    StdExpr::UnaryOp { expr: inner, .. } => { rewrite_expr(inner, whitelist); }
+                    StdExpr::Nested(inner) => { rewrite_expr(inner, whitelist); }
+                    StdExpr::Function(f) => {
+                        for a in f.args.iter_mut() {
+                            if let FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) = a { rewrite_expr(e, whitelist); }
+                        }
+                    }
+                    StdExpr::Cast { expr: inner, .. } => { rewrite_expr(inner, whitelist); }
+                    _ => {}
+                }
+            }
+            fn rewrite_statement(stmt: &mut StdStatement, whitelist: &std::collections::HashSet<String>) {
+                if let StdStatement::Query(q) = stmt {
+                    if let StdQuery { body, order_by, limit, .. } = q.as_mut() {
+                        match &mut **body {
+                            SetExpr::Select(sel) => {
+                                let StdSelect { projection, selection, group_by, having, .. } = sel.as_mut();
+                                for item in projection.iter_mut() {
+                                    match item {
+                                        StdSelectItem::UnnamedExpr(e) => rewrite_expr(e, whitelist),
+                                        StdSelectItem::ExprWithAlias { expr, .. } => rewrite_expr(expr, whitelist),
+                                        _ => {}
+                                    }
+                                }
+                                if let Some(e) = selection.as_mut() { rewrite_expr(e, whitelist); }
+                                // group by
+                                match group_by {
+                                    GroupByExpr::Expressions(exprs) => {
+                                        for e in exprs.iter_mut() { rewrite_expr(e, whitelist); }
+                                    }
+                                    _ => {}
+                                }
+                                if let Some(h) = having.as_mut() { rewrite_expr(h, whitelist); }
+                            }
+                            _ => {}
+                        }
+                        for ob in order_by.iter_mut() { rewrite_expr(&mut ob.expr, whitelist); }
+                        // limit is an Expr in this parser version; nothing to rewrite here
+                    }
+                }
+            }
+            let dialect = GenericDialect {};
+            let rewritten_sql = if let Ok(mut ast) = StdSqlParser::parse_sql(&dialect, sql_str) {
+                for stmt in ast.iter_mut() { rewrite_statement(stmt, &ts_whitelist); }
+                let s = ast.into_iter().map(|s| s.to_string()).collect::<Vec<String>>().join("; ");
+                s
+            } else { sql_str.to_string() };
+
+            match ctx.sql(&rewritten_sql).await {
+                Ok(df) => {
+                    match df.show().await {
+                        Ok(_) => {}
+                        Err(e) => {
+                            println!("Execution error: {}", e);
+                            process::exit(1);
+                        }
+                    }
+                }
+                Err(e) => {
             println!("SQL syntax not found: {:?}", parser.parse_statement());
+                    println!("DataFusion error: {}", e);
             process::exit(1);
-            
-            // Unreachable code below - removing
+                }
+            }
         }
     }
 }

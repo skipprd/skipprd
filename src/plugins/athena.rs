@@ -550,6 +550,17 @@ impl DataOutputAwsAthenaPlugin {
                 crate::metrics::counters::add_upload(1);
                 crate::metrics::counters::add_upload_latency_ns(upload_start.elapsed().as_nanos() as u64);
                 crate::metrics::counters::dec_uploads_in_flight();
+                // Update manifest with the directory prefix we just wrote under
+                let ns_dir = full_key.split('/').next().unwrap_or("").to_string();
+                let dir_prefix = if ns_dir.is_empty() { final_key.clone() } else { full_key.clone() };
+                // best-effort manifest update (async fire-and-forget)
+                {
+                    let ns = namespace.to_string();
+                    let prefix_for_manifest = dir_prefix.clone();
+                    tokio::spawn(async move {
+                        crate::helpers::configuration::Config::update_manifest_with_prefix(&ns, &prefix_for_manifest).await;
+                    });
+                }
                 Ok(())
             }
 

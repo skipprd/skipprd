@@ -4277,6 +4277,7 @@ dependencies = [
  "async-trait",
  "avro-rs",
  "aws-config",
+ "aws-credential-types",
  "aws-sdk-athena",
  "aws-sdk-glue",
  "aws-sdk-s3",
