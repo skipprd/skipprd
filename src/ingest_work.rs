@@ -854,8 +854,11 @@ impl Ingest {
 
                     // Spawn the task and ensure it's executed
                     self.thread_pool.execute(move || {
-                        Ingest::process_batch(&datas_clone, &offset_db_clone, &mut schema_hashes, handle, shared_output_clone);
-                        tx.send(0).unwrap();
+                        // Ensure panics do not wedge queue accounting; always signal completion
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            Ingest::process_batch(&datas_clone, &offset_db_clone, &mut schema_hashes, handle, shared_output_clone);
+                        }));
+                        let _ = tx.send(0);
                     });
 
                     // Update throughput metrics

@@ -221,7 +221,8 @@ impl DataOutputAwsAthenaPlugin {
             }
         }
 
-        if !partition_values.is_empty() {
+        // Spawn Glue partition creation concurrently; await later before upload completion
+        let glue_task: Option<tokio::task::JoinHandle<Result<bool, Error>>> = if !partition_values.is_empty() {
             let flatten = Config::get_transform_flatten_events();
             let metadata: PipelineMetadata = METADATA.load().as_ref().clone();
             let ns_md_opt = metadata.metadata.get(&namespace);
@@ -229,30 +230,26 @@ impl DataOutputAwsAthenaPlugin {
                 Some(if flatten { OutputMetadata::from_flatterened_metadata(ns_md) } else { OutputMetadata::from_metadata(ns_md) })
             } else { None };
 
-            // Require metadata and partition creation before upload
+            // Require metadata present to proceed; if missing, log and proceed without partition
             let partition_metadata = match partition_metadata_opt {
                 Some(pm) => pm,
                 None => {
-                    return Err(io::Error::new(io::ErrorKind::Other, format!(
-                        "Missing metadata for namespace '{}' while creating partition '{}'",
-                        namespace, full_key
-                    )));
+                    println!("Missing metadata for namespace '{}' while creating partition '{}'; proceeding without Glue partition", namespace, full_key);
+                    None
                 }
             };
 
-            if let Err(err) = AwsAthena::glue_create_partition(
-                &namespace,
-                partition_values,
-                &full_key,
-                &mut partition_cache,
-                &partition_metadata,
-            ).await {
-                return Err(io::Error::new(io::ErrorKind::Other, format!(
-                    "Failed to create partition for '{}': {}",
-                    full_key, err
-                )));
-            }
-        }
+            if let Some(pm) = partition_metadata {
+                let ns_clone = namespace.clone();
+                let key_clone = full_key.clone();
+                let pvals = partition_values.clone();
+                // Use a fresh cache in the task scope (single partition)
+                Some(tokio::spawn(async move {
+                    let mut cache_local: Vec<String> = Vec::with_capacity(1);
+                    AwsAthena::glue_create_partition(&ns_clone, pvals, &key_clone, &mut cache_local, &pm).await
+                }))
+            } else { None }
+        } else { None };
 
         // Use deterministic hashed filename to avoid leaking internal encodings
         let md5_digest = md5::compute(&filename);
@@ -291,8 +288,10 @@ impl DataOutputAwsAthenaPlugin {
 
         let key_for_upload = final_key.clone();
 
-        // Initiate multipart upload
-        let create_out = self
+        // Initiate multipart upload with timeout
+        let create_out = match tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            self
             .s3_client
             .create_multipart_upload()
             .bucket(&bucket)
@@ -300,8 +299,17 @@ impl DataOutputAwsAthenaPlugin {
             .content_type("application/octet-stream")
             .tagging(tags_str)
             .send()
-            .await
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to initiate multipart upload: {}", e.into_service_error())))?;
+        ).await {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => {
+                crate::metrics::counters::dec_uploads_in_flight();
+                return Err(io::Error::new(io::ErrorKind::Other, format!("Failed to initiate multipart upload: {}", e.into_service_error())));
+            }
+            Err(_) => {
+                crate::metrics::counters::dec_uploads_in_flight();
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "Timeout initiating multipart upload"));
+            }
+        };
         let upload_id = create_out.upload_id().unwrap_or("").to_string();
         if upload_id.is_empty() {
             crate::metrics::counters::dec_uploads_in_flight();
@@ -354,24 +362,28 @@ impl DataOutputAwsAthenaPlugin {
                 block_in_place(|| {
                     let body = ByteStream::from(Bytes::from(chunk));
                     let fut = async move {
-                        client
-                            .upload_part()
-                            .bucket(bucket)
-                            .key(key)
-                            .upload_id(upload_id)
-                            .part_number(part_number)
-                            .body(body)
-                            .send()
-                            .await
+                        tokio::time::timeout(
+                            std::time::Duration::from_secs(300),
+                            client
+                                .upload_part()
+                                .bucket(bucket)
+                                .key(key)
+                                .upload_id(upload_id)
+                                .part_number(part_number)
+                                .body(body)
+                                .send()
+                        )
+                        .await
                     };
                     match tokio::runtime::Handle::current().block_on(fut) {
-                        Ok(resp) => {
+                        Ok(Ok(resp)) => {
                             let etag = resp.e_tag().unwrap_or("").to_string();
                             let part = CompletedPart::builder().e_tag(etag).part_number(part_number).build();
                             self.parts.push(part);
                             Ok(())
                         }
-                        Err(e) => Err(io::Error::new(io::ErrorKind::Other, format!("upload_part failed: {}", e.into_service_error()))),
+                        Ok(Err(e)) => Err(io::Error::new(io::ErrorKind::Other, format!("upload_part failed: {}", e.into_service_error()))),
+                        Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "upload_part timed out")),
                     }
                 })
             }
@@ -406,22 +418,26 @@ impl DataOutputAwsAthenaPlugin {
                 }
                 block_in_place(|| {
                     let fut = async move {
-                        client
-                            .complete_multipart_upload()
-                            .bucket(bucket)
-                            .key(key)
-                            .upload_id(upload_id)
-                            .multipart_upload(
-                                CompletedMultipartUpload::builder()
-                                    .set_parts(Some(parts))
-                                    .build(),
-                            )
-                            .send()
-                            .await
+                        tokio::time::timeout(
+                            std::time::Duration::from_secs(600),
+                            client
+                                .complete_multipart_upload()
+                                .bucket(bucket)
+                                .key(key)
+                                .upload_id(upload_id)
+                                .multipart_upload(
+                                    CompletedMultipartUpload::builder()
+                                        .set_parts(Some(parts))
+                                        .build(),
+                                )
+                                .send()
+                        )
+                        .await
                     };
                     match tokio::runtime::Handle::current().block_on(fut) {
-                        Ok(_) => Ok(()),
-                        Err(e) => Err(io::Error::new(io::ErrorKind::Other, format!("complete_multipart_upload failed: {}", e.into_service_error()))),
+                        Ok(Ok(_)) => Ok(()),
+                        Ok(Err(e)) => Err(io::Error::new(io::ErrorKind::Other, format!("complete_multipart_upload failed: {}", e.into_service_error()))),
+                        Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "complete_multipart_upload timed out")),
                     }
                 })?;
                 Ok(self.total_bytes)
@@ -496,6 +512,22 @@ impl DataOutputAwsAthenaPlugin {
         }
 
         let _meta = parquet_writer.close().map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Parquet close error: {}", e)))?;
+        // Await Glue partition creation before completing upload; proceed on failure
+        if let Some(task) = glue_task {
+            match tokio::time::timeout(std::time::Duration::from_secs(300), task).await {
+                Ok(Ok(Ok(_))) => { /* success */ }
+                Ok(Ok(Err(e))) => {
+                    println!("WARN: Glue partition creation failed for {}: {}", final_key, e);
+                }
+                Ok(Err(join_err)) => {
+                    println!("WARN: Glue partition task join error for {}: {}", final_key, join_err);
+                }
+                Err(_) => {
+                    println!("WARN: Glue partition creation timed out for {}", final_key);
+                }
+            }
+        }
+
         let uploaded_bytes = match writer.complete() {
             Ok(sz) => sz,
             Err(e) => {

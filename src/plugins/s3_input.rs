@@ -350,7 +350,11 @@ impl DataSourceS3Plugin {
                 // Acquire permits for estimated decompressed MiB (min 1)
                 let est_uncompressed_bytes: u64 = (std::cmp::max(1i64, size_bytes) as u64).saturating_mul(inflate_ratio as u64);
                 let permits: u32 = ((est_uncompressed_bytes + 1_048_575) / 1_048_576) as u32;
-                let p = mem.clone().acquire_many_owned(permits.max(1)).await.ok();
+                // Retain memory permits for the lifetime of this task to avoid premature drop
+                let mut mem_permits: Vec<OwnedSemaphorePermit> = Vec::with_capacity(2);
+                if let Ok(p0) = mem.clone().acquire_many_owned(permits.max(1)).await {
+                    mem_permits.push(p0);
+                }
                 let p_dl = dl_ctrl.acquire_owned().await.ok();
                 let res = DataSourceS3Plugin::download_s3_object_with_backoff(&s3, &bucket, &key).await;
                 let out = match res {
@@ -372,7 +376,12 @@ impl DataSourceS3Plugin {
                                     let actual_bytes = s.len() as u64;
                                     if actual_bytes > est_uncompressed_bytes {
                                         let extra = ((actual_bytes - est_uncompressed_bytes) + 1_048_575) / 1_048_576;
-                                        let _ = mem.clone().acquire_many_owned(extra as u32).await.ok();
+                                        if extra > 0 {
+                                            if let Ok(p1) = mem.clone().acquire_many_owned(extra as u32).await {
+                                                // retain until function end
+                                                mem_permits.push(p1);
+                                            }
+                                        }
                                     }
                                     Some(s)
                                 },
@@ -385,7 +394,6 @@ impl DataSourceS3Plugin {
                     }
                     Err(_) => None,
                 };
-                if let Some(perm) = p { drop(perm); }
                 if let Some(perm_dl) = p_dl { drop(perm_dl); }
                 out
             }
