@@ -262,11 +262,29 @@ async fn main() {
         }
         Mode::Query(options) => {
             Config::build_config();
-            // Track and report query runtime in seconds
-            let now = Instant::now();
-            query(&options.sql).await;
-            let elapsed = now.elapsed();
-            println!("Query time: {} seconds", elapsed.as_secs());
+            if let Some(sql) = options.sql {
+                let now = Instant::now();
+                query(&sql).await;
+                let elapsed = now.elapsed();
+                println!("Query time: {} seconds", elapsed.as_secs());
+            } else {
+                // Simple interactive REPL
+                use std::io::{self, Write};
+                println!("Skippr SQL REPL. Type SQL and press Enter. Type :q to quit.");
+                loop {
+                    print!("sql> ");
+                    let _ = io::stdout().flush();
+                    let mut line = String::new();
+                    if io::stdin().read_line(&mut line).is_err() { break; }
+                    let stmt = line.trim();
+                    if stmt.is_empty() { continue; }
+                    if stmt == ":q" || stmt == ":quit" || stmt.eq_ignore_ascii_case("exit") { break; }
+                    let now = Instant::now();
+                    query(stmt).await;
+                    let elapsed = now.elapsed();
+                    println!("Query time: {} seconds", elapsed.as_secs());
+                }
+            }
         }
         Mode::Schema(options) => {
             Config::build_config();

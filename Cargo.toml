@@ -81,6 +81,8 @@ arc-swap = "1.6"
 tokio-util = { version = "0.7", features = ["io", "io-util"], default-features = false }
 sha2 = "0.10"
 aws-credential-types = "1.2.0"
+ratatui = { version = "0.26" }
+crossterm = { version = "0.27" }
 
 [dev-dependencies]
 serial_test = "1.0.0"

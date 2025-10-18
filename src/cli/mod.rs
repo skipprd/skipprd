@@ -42,7 +42,10 @@ pub struct DisocverOptions {
 pub struct QueryOptions {
     /// The SQL query to run
     #[arg(short, long)]
-    pub sql: String,
+    pub sql: Option<String>,
+    /// Watch interval in seconds for live SELECT (optional)
+    #[arg(long)]
+    pub watch: Option<u64>,
 }
 
 #[derive(Parser, Clone, PartialEq)]

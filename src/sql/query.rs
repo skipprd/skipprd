@@ -34,6 +34,8 @@ use datafusion::datasource::MemTable;
 use datafusion::datasource::view::ViewTable;
 use arrow::ipc::reader::StreamReader;
 use arrow::util::pretty::pretty_format_batches;
+use crate::sql::tui::{LiveTableView, LiveTableViewConfig, QueryEditorView, QueryEditorConfig};
+use std::sync::mpsc;
 use crate::buffer::segment_file::SegmentFile;
 use std::io::{Seek, Read};
 use crate::ingest_work::Ingest;
@@ -237,70 +239,84 @@ pub async fn query(sql_str: &str) {
                     select_sql = format!("{} WHERE {} >= to_timestamp_millis({})", select_sql, time_col, lower_ms);
                 }
             }
-            println!("STREAM window={}s using time_col='{}'", win_s, time_col);
+            // window applied; results may be empty if no recent data
         }
 
-        // loop forever with 2s refresh
-        loop {
-            let mut session_config = SessionConfig::new();
-            session_config = session_config.set("datafusion.catalog.information_schema", "true".into());
-            session_config = session_config.set("datafusion.execution.collect_statistics", "true".into());
-            let ctx = SessionContext::new_with_config(session_config);
+        // STREAM editor: editable SQL (STREAM ... or SELECT ...), background refresher pulls WAL-only
+        let (tx_req, rx_req) = mpsc::channel::<String>();
+        let (tx_res, rx_res) = mpsc::channel::<Vec<RecordBatch>>();
+        let initial_stream_sql = select_sql.clone();
+        tokio::spawn(async move {
+            // helper to build (pipeline, select_sql) from either STREAM ... or SELECT ...
+            let build_plan = |input: &str| -> Option<(String, String)> {
+                let s = input.trim();
+                if s.to_uppercase().starts_with("STREAM ") {
+                    // derive FROM and optional WINDOW, then build SELECT
+                    let mut raw_after = s[7..].trim().to_string();
+                    // WINDOW parsing
+                    let upper = raw_after.to_uppercase();
+                    if let Some(idx) = upper.find(" WINDOW ") {
+                        // remove just the WINDOW clause (value used only to filter by now)
+                        let start = idx + 8; let bytes = raw_after.as_bytes(); let mut j = start; while j < bytes.len() && bytes[j].is_ascii_whitespace() { j += 1; }
+                        let num_start = j; while j < bytes.len() && bytes[j].is_ascii_digit() { j += 1; }
+                        if j > num_start { let left = raw_after[..idx].trim_end().to_string(); let right = raw_after[j..].trim_start().to_string(); raw_after = if right.is_empty() { left } else { format!("{} {}", left, right) }; }
+                    }
+                    let select_sql = format!("SELECT {}", raw_after);
+                    let dialect = GenericDialect {}; let mut table_opt: Option<String> = None;
+                    if let Ok(ast) = StdSqlParser::parse_sql(&dialect, &select_sql) { for stmt in ast { if let StdStatement::Query(q) = stmt { if let SetExpr::Select(sel) = &*q.body { if let Some(twj) = sel.from.get(0) { if let TableFactor::Table { name, .. } = &twj.relation { table_opt = Some(name.to_string()); } } } } } }
+                    table_opt.map(|p| (p, select_sql))
+                } else {
+                    // SELECT ...; extract table for WAL scope
+                    let dialect = GenericDialect {}; let mut table_opt: Option<String> = None; if let Ok(ast) = StdSqlParser::parse_sql(&dialect, s) { for stmt in ast { if let StdStatement::Query(q) = stmt { if let SetExpr::Select(sel) = &*q.body { if let Some(twj) = sel.from.get(0) { if let TableFactor::Table { name, .. } = &twj.relation { table_opt = Some(name.to_string()); } } } } } }
+                    table_opt.map(|p| (p, s.to_string()))
+                }
+            };
 
-            // Prepare WAL memtable for this pipeline
-            PIPELINE_NAME.write().clear();
-            PIPELINE_NAME.write().push_str(&pipeline);
-            Config::init().await;
-            let seg_dir = format!("{}/segment_buffer/segs", Config::get_data_dir());
-            let mut wal_batches: Vec<RecordBatch> = Vec::new();
-            if std::path::Path::new(&seg_dir).exists() {
-                for entry in std::fs::read_dir(&seg_dir).unwrap_or_else(|_| std::fs::read_dir("/").unwrap()) {
-                    if let Ok(ent) = entry { let path = ent.path(); if path.extension().and_then(|s| s.to_str()) != Some("seg") { continue; }
-                        let seg = SegmentFile { path: path.clone() };
-                        if let Ok(meta) = seg.read_metadata() {
-                            for idx in meta.index.iter() {
-                                if idx.key.0 != pipeline { continue; }
-                                if let Ok(mut file) = std::fs::OpenOptions::new().read(true).open(&path) {
-                                    if file.seek(std::io::SeekFrom::Start(idx.start)).is_ok() {
-                                        let mut reader = std::io::BufReader::new(file);
-                                        let mut take = reader.take(idx.len);
-                                        if let Ok(sr) = StreamReader::try_new(&mut take, None) { for it in sr { if let Ok(b) = it { wal_batches.push(b); } } }
+            let mut current_sql = initial_stream_sql.clone();
+            loop {
+                if let Some((pipeline_name, run_sql)) = build_plan(&current_sql) {
+                    let mut session_config = SessionConfig::new();
+                    session_config = session_config.set("datafusion.catalog.information_schema", "true".into());
+                    session_config = session_config.set("datafusion.execution.collect_statistics", "true".into());
+                    let ctx = SessionContext::new_with_config(session_config);
+                    PIPELINE_NAME.write().clear(); PIPELINE_NAME.write().push_str(&pipeline_name); Config::init().await;
+                    let seg_dir = format!("{}/segment_buffer/segs", Config::get_data_dir());
+                    let mut wal_batches: Vec<RecordBatch> = Vec::new();
+                    if std::path::Path::new(&seg_dir).exists() {
+                        for entry in std::fs::read_dir(&seg_dir).unwrap_or_else(|_| std::fs::read_dir("/").unwrap()) {
+                            if let Ok(ent) = entry { let path = ent.path(); if path.extension().and_then(|s| s.to_str()) != Some("seg") { continue; }
+                                let seg = SegmentFile { path: path.clone() };
+                                if let Ok(meta) = seg.read_metadata() {
+                                    for idx in meta.index.iter() {
+                                        if idx.key.0 != pipeline_name { continue; }
+                                        if let Ok(mut file) = std::fs::OpenOptions::new().read(true).open(&path) {
+                                            if file.seek(std::io::SeekFrom::Start(idx.start)).is_ok() {
+                                                let mut reader = std::io::BufReader::new(file);
+                                                let mut take = reader.take(idx.len);
+                                                if let Ok(sr) = StreamReader::try_new(&mut take, None) { for it in sr { if let Ok(b) = it { wal_batches.push(b); } } }
+                                            }
+                                        }
                                     }
                                 }
-                            }
-                        }
-                    } }
-            }
-            // refreshing output in-place: clear screen and redraw
-            print!("\x1b[H\x1b[2J");
-            let _ = std::io::stdout().flush();
-
-            if wal_batches.is_empty() {
-                println!("stream: waiting for WAL ({})...", pipeline);
-            } else {
-                let schema = wal_batches[0].schema();
-                let filtered: Vec<RecordBatch> = wal_batches.into_iter().filter(|b| b.schema().as_ref() == schema.as_ref()).collect();
-                if !filtered.is_empty() {
-                    let mem = MemTable::try_new(schema.clone(), vec![filtered]).map_err(|e| DataFusionError::Internal(e.to_string())).unwrap();
-                    ctx.register_table(&pipeline, Arc::new(mem)).unwrap();
-                    match ctx.sql(&select_sql).await {
-                        Ok(df) => {
-                            let df_clone = df.clone();
-                            match df.collect().await {
-                                Ok(batches) => {
-                                    if let Ok(s) = pretty_format_batches(&batches) { println!("{}", s); } else { let _ = df_clone.show().await; }
-                                }
-                                Err(e) => { println!("STREAM execution error: {}", e); }
-                            }
-                        }
-                        Err(e) => { println!("STREAM execution error: {}", e); }
+                            } }
                     }
-                } else {
-                    println!("stream: waiting for WAL ({})...", pipeline);
-                }
+                    if !wal_batches.is_empty() {
+                        let schema = wal_batches[0].schema();
+                        let filtered: Vec<RecordBatch> = wal_batches.into_iter().filter(|b| b.schema().as_ref() == schema.as_ref()).collect();
+                        if let Ok(mem) = MemTable::try_new(schema.clone(), vec![filtered]).map_err(|e| DataFusionError::Internal(e.to_string())) {
+                            let _ = ctx.register_table(&pipeline_name, Arc::new(mem));
+                            if let Ok(df) = ctx.sql(&run_sql).await { if let Ok(b) = df.collect().await { let _ = tx_res.send(b); } }
+                        }
+                    } else { let _ = tx_res.send(Vec::new()); }
+                } else { let _ = tx_res.send(Vec::new()); }
+
+                // poll for updated SQL (user edits)
+                let mut waited = 0u64; while waited < 2000 { if let Ok(new_sql) = rx_req.try_recv() { current_sql = new_sql; break; } tokio::time::sleep(std::time::Duration::from_millis(200)).await; waited += 200; }
             }
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        }
+        });
+
+        QueryEditorView::new(&select_sql).run(QueryEditorConfig { title: &format!("STREAM {}", pipeline), footer: Some("Enter:run q:quit"), initial_sql: &select_sql }, rx_res, tx_req);
+        return;
     }
 
     let mut parser = SParser::new(sql_str).unwrap();
@@ -878,9 +894,7 @@ pub async fn query(sql_str: &str) {
                 // Bootstrap METADATA and ARROW_SCHEMA like main sync
                 match Config::get_metadata().await {
                     Ok(pm) => {
-                        println!("Found existing Skippr metadata for pipeline '{}' (namespaces={})", pipeline, pm.metadata.len());
-                        let keys: Vec<String> = pm.metadata.keys().cloned().collect();
-                        println!("Metadata namespaces: {:?}", keys);
+                        let _keys: Vec<String> = pm.metadata.keys().cloned().collect();
                         METADATA.store(Arc::new(pm.clone()));
                         let flatten = Config::get_transform_flatten_events();
                         if pm.metadata.contains_key(&pipeline) {
@@ -895,11 +909,11 @@ pub async fn query(sql_str: &str) {
                                 }
                             }
                         } else {
-                            println!("WARN: metadata has no namespace '{}' (keys={:?})", pipeline, keys);
+                            // missing namespace; proceed without schema
                         }
                     },
                     Err(_) => {
-                        println!("No existing Skippr metadata for pipeline '{}' (using empty PipelineMetadata)", pipeline);
+                        // no metadata; proceed
                         METADATA.store(Arc::new(PipelineMetadata::new()));
                     }
                 }
@@ -928,12 +942,10 @@ pub async fn query(sql_str: &str) {
                         } }
                 }
                 let wal_rows: usize = wal_batches.iter().map(|b| b.num_rows()).sum();
-                println!("WAL scan: dir={} seg_files={} batches={} rows={}", seg_dir, wal_seg_files, wal_batches.len(), wal_rows);
-                if !wal_batches.is_empty() { let schema = wal_batches[0].schema(); let filtered: Vec<RecordBatch> = wal_batches.into_iter().filter(|b| b.schema().as_ref() == schema.as_ref()).collect(); if !filtered.is_empty() { let mem = MemTable::try_new(schema.clone(), vec![filtered]).map_err(|e| DataFusionError::Internal(e.to_string())).unwrap(); ctx.register_table(&format!("{}_wal", &pipeline), Arc::new(mem)).unwrap(); println!("Registered WAL table: {}_wal", pipeline); } }
+                if !wal_batches.is_empty() { let schema = wal_batches[0].schema(); let filtered: Vec<RecordBatch> = wal_batches.into_iter().filter(|b| b.schema().as_ref() == schema.as_ref()).collect(); if !filtered.is_empty() { let mem = MemTable::try_new(schema.clone(), vec![filtered]).map_err(|e| DataFusionError::Internal(e.to_string())).unwrap(); let _ = ctx.register_table(&format!("{}_wal", &pipeline), Arc::new(mem)); } }
 
                 // S3 parquet (required)
                 let s3_loc = match Config::get_output_parquet_s3_location(&pipeline) { Some(loc) => loc, None => { println!("No S3 output configured for pipeline '{}'; SELECT requires S3 + WAL", pipeline); process::exit(1); } };
-                println!("S3 register: table={} path={}", pipeline, s3_loc);
                 register_s3_object_store(&ctx, &s3_loc).await;
                 // Prepare Parquet registration paths: prefer latest manifest prefix(es) to avoid schema merge conflicts
                 let mut s3_paths: Vec<String> = Vec::new();
@@ -994,7 +1006,6 @@ pub async fn query(sql_str: &str) {
                                 let opts = ParquetReadOptions { schema: None, file_extension: "parquet", table_partition_cols: vec![], parquet_pruning: None, skip_metadata: Some(true), file_sort_order: vec![] };
                                 if let Err(e) = ctx.register_parquet(&tname, &file_url, opts).await { println!("Failed to register S3 object='{}' for '{}': {}", file_url, pipeline, e); process::exit(1); }
                                 registered += 1;
-                                println!("Registered S3 object table: {}", tname);
                                     new_sources.push((tname, file_url));
                             }
                             continue;
@@ -1004,7 +1015,6 @@ pub async fn query(sql_str: &str) {
                     let opts = ParquetReadOptions { schema: None, file_extension: "parquet", table_partition_cols: vec![], parquet_pruning: None, skip_metadata: Some(true), file_sort_order: vec![] };
                     let tname = format!("{}_s3_{}", &pipeline, idx);
                     if let Err(e) = ctx.register_parquet(&tname, path, opts).await { println!("Failed to register S3 table path='{}' for '{}': {}", path, pipeline, e); process::exit(1); }
-                    println!("Registered S3 table: {}", tname);
                     registered += 1;
                         new_sources.push((tname, path.clone()));
                 }
@@ -1014,8 +1024,7 @@ pub async fn query(sql_str: &str) {
                     Config::write_registry(&pipeline, &registry).await;
                     sources_cached = new_sources;
                 }
-                // Debug: count rows on each side (first path)
-                if let Ok(df) = ctx.table(&format!("{}_s3_{}", &pipeline, 0)).await { let df_preview = df.clone().limit(0, Some(1000)).unwrap_or(df); if let Ok(batches) = df_preview.collect().await { let s3_preview_rows: usize = batches.iter().map(|b| b.num_rows()).sum(); println!("S3 preview rows (up to 1000): {}", s3_preview_rows); } }
+                // optional preview removed to reduce noise
 
                 // Union view as pipeline name with projection to cast known top-level timestamp fields
                 // Build base DF by unioning all registered S3 path tables
@@ -1024,12 +1033,12 @@ pub async fn query(sql_str: &str) {
                 let table_names: Vec<String> = sources_cached.iter().map(|(n, _)| n.clone()).collect();
                 let mut df_s3_base = ctx.table(&table_names[0]).await.expect("S3 table missing");
                 for t in table_names.iter().skip(1) { if let Ok(df_next) = ctx.table(t).await { df_s3_base = df_s3_base.union(df_next).expect("union s3 objs"); } }
-                let s3_fields: Vec<String> = df_s3_base.schema().fields().iter().map(|f| f.name().clone()).collect();
-                println!("S3 table schema fields={} names={:?}", df_s3_base.schema().fields().len(), s3_fields);
+                let _s3_fields: Vec<String> = df_s3_base.schema().fields().iter().map(|f| f.name().clone()).collect();
                 let df_s3 = {
                     if let Some(swap) = ARROW_SCHEMA.get(&pipeline) {
                         let arrow_schema = swap.load();
                         use datafusion::logical_expr::{col, Expr, lit};
+                        if arrow_schema.fields().is_empty() { df_s3_base.clone() } else {
                         // Builder: for each top-level field, rebuild struct fields recursively casting int64 to timestamp where ARROW_SCHEMA says timestamp
                         fn build_expr_for_field(name: &str, dt: &ArrowDataType) -> Expr {
                             match dt {
@@ -1050,14 +1059,41 @@ pub async fn query(sql_str: &str) {
                         for f in arrow_schema.fields() {
                             exprs.push(build_expr_for_field(f.name(), f.data_type()));
                         }
-                        match df_s3_base.clone().select(exprs) { Ok(dfp) => dfp, Err(_) => df_s3_base.clone() }
+                        if exprs.is_empty() { df_s3_base.clone() } else { match df_s3_base.clone().select(exprs) { Ok(dfp) => dfp, Err(_) => df_s3_base.clone() } }
+                        }
                     } else { df_s3_base.clone() }
                 };
+                // Ensure WAL side matches S3 columns count/order: project WAL to S3's schema if present
                 let df_wal = match ctx.table(&format!("{}_wal", &pipeline)).await { Ok(df) => df, Err(_) => df_s3.clone().filter(datafusion::logical_expr::lit(false)).unwrap() };
-                let df_union = df_s3.union(df_wal).expect("Failed to build union view");
+                let df_union = {
+                    let left_schema = df_s3.schema();
+                    let right_schema = df_wal.schema();
+                    let left_cols = left_schema.fields().len();
+                    let right_cols = right_schema.fields().len();
+                    if left_cols == 0 && right_cols == 0 {
+                        // nothing to union; keep S3 side (empty)
+                        df_s3.clone()
+                    } else if left_cols == 0 {
+                        // only WAL has data
+                        df_wal.clone()
+                    } else if right_cols == 0 {
+                        // only S3 has data
+                        df_s3.clone()
+                    } else if left_cols != right_cols {
+                        // try to project WAL to S3's column set
+                        use datafusion::logical_expr::col;
+                        let mut exprs: Vec<datafusion::logical_expr::Expr> = Vec::new();
+                        for f in left_schema.fields() { exprs.push(col(f.name())); }
+                        if !exprs.is_empty() {
+                            if let Ok(projected) = df_wal.clone().select(exprs) { df_s3.union(projected).expect("union") } else { df_s3.union(df_wal).expect("union") }
+                        } else { df_s3.union(df_wal).expect("union") }
+                    } else {
+                        df_s3.union(df_wal).expect("union")
+                    }
+                };
                 let view = ViewTable::try_new(df_union.into_optimized_plan().expect("optimize"), Some(pipeline.clone())).expect("view");
                 ctx.register_table(&pipeline, Arc::new(view)).expect("register union view");
-                println!("Registered UNION view: {} (S3 + WAL)", pipeline);
+                // union view registered
             }
             // Restore original pipeline context
             PIPELINE_NAME.write().clear();
@@ -1162,22 +1198,84 @@ pub async fn query(sql_str: &str) {
                 s
             } else { sql_str.to_string() };
 
-            match ctx.sql(&rewritten_sql).await {
-                Ok(df) => {
-                    match df.show().await {
-                        Ok(_) => {}
-                        Err(e) => {
-                            println!("Execution error: {}", e);
-                            process::exit(1);
+            // SELECT execution: support --watch for live TUI; else one-shot
+            let watch_secs = match CLI_MODE.read().clone() { Mode::Query(opts) => opts.watch, _ => None };
+            // Unified SELECT TUI editor: editable SQL, runs on Enter or r; if --watch set, periodic refresh
+            let initial_sql = rewritten_sql.clone();
+            let (tx_req, rx_req) = mpsc::channel::<String>();
+            let (tx_res, rx_res) = mpsc::channel::<Vec<RecordBatch>>();
+            let ctx_clone = ctx.clone();
+            tokio::spawn(async move {
+                let mut current = initial_sql.clone();
+                loop {
+                    // Decide between STREAM (WAL-only) and SELECT (ctx_clone)
+                    let trimmed = current.trim();
+                    if trimmed.to_uppercase().starts_with("STREAM ") {
+                        // Build SELECT from STREAM and execute against WAL-only context
+                        let mut raw_after = trimmed[7..].trim().to_string();
+                        // Strip optional WINDOW <n>
+                        let upper = raw_after.to_uppercase();
+                        if let Some(idx) = upper.find(" WINDOW ") {
+                            let start = idx + 8; let bytes = raw_after.as_bytes(); let mut j = start; while j < bytes.len() && bytes[j].is_ascii_whitespace() { j += 1; }
+                            let num_start = j; while j < bytes.len() && bytes[j].is_ascii_digit() { j += 1; }
+                            if j > num_start { let left = raw_after[..idx].trim_end().to_string(); let right = raw_after[j..].trim_start().to_string(); raw_after = if right.is_empty() { left } else { format!("{} {}", left, right) }; }
                         }
+                        let select_sql = format!("SELECT {}", raw_after);
+                        // Extract pipeline name
+                        let dialect = GenericDialect {}; let mut table_opt: Option<String> = None;
+                        if let Ok(ast) = StdSqlParser::parse_sql(&dialect, &select_sql) { for stmt in ast { if let StdStatement::Query(q) = stmt { if let SetExpr::Select(sel) = &*q.body { if let Some(twj) = sel.from.get(0) { if let TableFactor::Table { name, .. } = &twj.relation { table_opt = Some(name.to_string()); } } } } } }
+                        if let Some(pipeline_name) = table_opt {
+                            let mut session_config = SessionConfig::new();
+                            session_config = session_config.set("datafusion.catalog.information_schema", "true".into());
+                            session_config = session_config.set("datafusion.execution.collect_statistics", "true".into());
+                            let ctx = SessionContext::new_with_config(session_config);
+                            PIPELINE_NAME.write().clear(); PIPELINE_NAME.write().push_str(&pipeline_name); Config::init().await;
+                            let seg_dir = format!("{}/segment_buffer/segs", Config::get_data_dir());
+                            let mut wal_batches: Vec<RecordBatch> = Vec::new();
+                            if std::path::Path::new(&seg_dir).exists() {
+                                for entry in std::fs::read_dir(&seg_dir).unwrap_or_else(|_| std::fs::read_dir("/").unwrap()) {
+                                    if let Ok(ent) = entry { let path = ent.path(); if path.extension().and_then(|s| s.to_str()) != Some("seg") { continue; }
+                                        let seg = SegmentFile { path: path.clone() };
+                                        if let Ok(meta) = seg.read_metadata() {
+                                            for idx in meta.index.iter() {
+                                                if idx.key.0 != pipeline_name { continue; }
+                                                if let Ok(mut file) = std::fs::OpenOptions::new().read(true).open(&path) {
+                                                    if file.seek(std::io::SeekFrom::Start(idx.start)).is_ok() {
+                                                        let mut reader = std::io::BufReader::new(file);
+                                                        let mut take = reader.take(idx.len);
+                                                        if let Ok(sr) = StreamReader::try_new(&mut take, None) { for it in sr { if let Ok(b) = it { wal_batches.push(b); } } }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if !wal_batches.is_empty() {
+                                let schema = wal_batches[0].schema();
+                                let filtered: Vec<RecordBatch> = wal_batches.into_iter().filter(|b| b.schema().as_ref() == schema.as_ref()).collect();
+                                if let Ok(mem) = MemTable::try_new(schema.clone(), vec![filtered]).map_err(|e| DataFusionError::Internal(e.to_string())) {
+                                    let _ = ctx.register_table(&pipeline_name, Arc::new(mem));
+                                    if let Ok(df) = ctx.sql(&select_sql).await { if let Ok(b) = df.collect().await { let _ = tx_res.send(b); } }
+                                } else { let _ = tx_res.send(Vec::new()); }
+                            } else { let _ = tx_res.send(Vec::new()); }
+                        } else { let _ = tx_res.send(Vec::new()); }
+                    } else {
+                        // SELECT: run against prepared context (S3/union already registered earlier)
+                        if let Ok(df) = ctx_clone.sql(&current).await { if let Ok(b) = df.collect().await { let _ = tx_res.send(b); } }
+                    }
+
+                    // wait for either watch tick or new request
+                    if let Some(w) = watch_secs {
+                        let mut waited_ms: u64 = 0; let step = 200u64; let total = w.saturating_mul(1000);
+                        while waited_ms < total { if let Ok(new_sql) = rx_req.try_recv() { current = new_sql; break; } tokio::time::sleep(std::time::Duration::from_millis(step)).await; waited_ms = waited_ms.saturating_add(step); }
+                    } else {
+                        loop { if let Ok(new_sql) = rx_req.try_recv() { current = new_sql; break; } tokio::time::sleep(std::time::Duration::from_millis(200)).await; }
                     }
                 }
-                Err(e) => {
-            println!("SQL syntax not found: {:?}", parser.parse_statement());
-                    println!("DataFusion error: {}", e);
-            process::exit(1);
-                }
-            }
+            });
+            let footer = if let Some(w) = watch_secs { format!("select --watch={}s | Enter:run q:quit", w) } else { "Enter:run q:quit".to_string() };
+            QueryEditorView::new(&rewritten_sql).run(QueryEditorConfig { title: "SELECT", footer: Some(&footer), initial_sql: &rewritten_sql }, rx_res, tx_req);
         }
     }
 }

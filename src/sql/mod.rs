@@ -1,5 +1,6 @@
 pub mod parser;
 pub mod query;
+pub mod tui;
 pub mod operators;
 pub mod docs;
 pub mod doc_parser;
