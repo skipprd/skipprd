@@ -49,6 +49,9 @@ pub struct QueryOptions {
     /// Watch interval in seconds for live SELECT (optional)
     #[arg(long)]
     pub watch: Option<u64>,
+    /// Print plain results to stdout instead of TUI (non-interactive)
+    #[arg(long, default_value_t = false)]
+    pub plain: bool,
 }
 
 #[derive(Parser, Clone, PartialEq)]

@@ -49,6 +49,12 @@ impl SqlDocParser {
             Statement::AlterSchemaAlterColumnType(_) => docs.get("ALTER SCHEMA ALTER COLUMN").unwrap().clone(),
             Statement::TableDrop(_) => docs.get("DROP TABLE").unwrap().clone(),
             Statement::ShowDocs => docs.get("SHOW DOCS").unwrap().clone(),
+            Statement::ShowStats { .. } => SqlStatementDoc {
+                name: "SHOW STATS".to_string(),
+                description: "Show per-field statistics JSON for a pipeline".to_string(),
+                syntax: "SHOW STATS FOR <pipeline>".to_string(),
+                example: "SHOW STATS FOR bike_hire".to_string(),
+            },
         }
     }
 

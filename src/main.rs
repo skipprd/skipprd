@@ -276,7 +276,9 @@ async fn main() {
                 let now = Instant::now();
                 query(&sql).await;
                 let elapsed = now.elapsed();
-                println!("Query time: {} seconds", elapsed.as_secs());
+                if !options.plain {
+                    println!("Query time: {} seconds", elapsed.as_secs());
+                }
             } else {
                 // Simple interactive REPL
                 use std::io::{self, Write};

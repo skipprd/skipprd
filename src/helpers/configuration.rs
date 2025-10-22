@@ -68,6 +68,14 @@ pub struct Transform {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+pub struct Stats {
+    pub enabled: Option<String>,
+    pub hll_precision: Option<u8>,
+    pub histogram_enabled: Option<String>,
+    pub flush_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
 pub enum PluginConfig {
     S3(DataSourceS3PluginConfig),
     // s3_inventory(DataSourceS3InventoryPluginConfig),
@@ -115,6 +123,8 @@ impl PluginConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Pipeline {
+    #[serde(rename = "type")]
+    pub r#type: Option<String>,
     #[allow(dead_code)]
     pub reset_offsets: Option<String>,
     #[allow(dead_code)]
@@ -133,6 +143,7 @@ pub struct Pipeline {
     pub output: Option<String>,
     pub schema: Option<String>,
     pub deadletter: Option<String>,
+    pub stats: Option<Stats>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -720,6 +731,7 @@ impl Config {
             }
             None => {
                 return Pipeline {
+                    r#type: None,
                     reset_offsets: None,
                     reset_metadata: None,
                     auto_approve: None,
@@ -735,6 +747,7 @@ impl Config {
                     output: None,
                     schema: None,
                     deadletter: None,
+                    stats: None,
                 }
             }
         };
@@ -764,6 +777,27 @@ impl Config {
                     enable_unicode_parsing: None,
                 }
             }
+        }
+    }
+
+    pub fn get_pipeline_type() -> String {
+        if Config::get_envcache("PIPELINE_TYPE") != "" {
+            if Config::get_envcache("PIPELINE_TYPE") == DEFAULT_CONFIG { return "INGEST".to_string(); }
+            return Config::get_envcache("PIPELINE_TYPE")
+        } else {
+            let pipeline = Config::get_pipeline_config();
+            let default_type = &Config::getenv("PIPELINE_TYPE", "INGEST");
+            let v = pipeline.r#type.as_ref().unwrap_or(default_type);
+            Config::set_evncache("PIPELINE_TYPE", &v.clone());
+            v.to_string()
+        }
+    }
+
+    pub fn get_stats_config() -> Stats {
+        let pipeline = Config::get_pipeline_config();
+        match pipeline.stats.as_ref() {
+            Some(stats) => stats.clone(),
+            None => Stats { enabled: None, hll_precision: None, histogram_enabled: None, flush_seconds: None }
         }
     }
 
@@ -1641,6 +1675,92 @@ impl Config {
                 let _ = tx.send(ns.clone());
             }
         }
+    }
+
+    // Stats configuration toggles (env-based defaults)
+    pub fn stats_enabled() -> bool {
+        if Config::get_envcache("STATS_ENABLED") != "" {
+            if Config::get_envcache("STATS_ENABLED") == DEFAULT_CONFIG { return true; }
+            return Config::truth_value(&Config::get_envcache("STATS_ENABLED"))
+        } else {
+            let pipeline = Config::get_pipeline_config();
+            let default = Config::getenv("STATS_ENABLED", "true");
+            let v = match pipeline.stats.as_ref() { Some(s) => s.enabled.as_ref().unwrap_or(&default), None => &default };
+            Config::set_evncache("STATS_ENABLED", &v.clone());
+            Config::truth_value(v)
+        }
+    }
+
+    pub fn stats_hll_precision() -> u8 {
+        if Config::get_envcache("STATS_HLL_PRECISION") != "" {
+            return Config::get_envcache("STATS_HLL_PRECISION").parse::<u8>().unwrap_or(12)
+        } else {
+            let pipeline = Config::get_pipeline_config();
+            let default = Config::getenv("STATS_HLL_PRECISION", "12");
+            let v: String = match pipeline.stats.as_ref() { Some(s) => s.hll_precision.map(|x| x.to_string()).unwrap_or(default), None => default };
+            Config::set_evncache("STATS_HLL_PRECISION", &v.clone());
+            v.parse::<u8>().unwrap_or(12)
+        }
+    }
+
+    pub fn stats_histogram_enabled() -> bool {
+        if Config::get_envcache("STATS_HISTOGRAM_ENABLED") != "" {
+            if Config::get_envcache("STATS_HISTOGRAM_ENABLED") == DEFAULT_CONFIG { return true; }
+            return Config::truth_value(&Config::get_envcache("STATS_HISTOGRAM_ENABLED"))
+        } else {
+            let pipeline = Config::get_pipeline_config();
+            let default = Config::getenv("STATS_HISTOGRAM_ENABLED", "true");
+            let v = match pipeline.stats.as_ref() { Some(s) => s.histogram_enabled.as_ref().unwrap_or(&default), None => &default };
+            Config::set_evncache("STATS_HISTOGRAM_ENABLED", &v.clone());
+            Config::truth_value(v)
+        }
+    }
+
+    // Persist per-namespace stats to S3 under: <tenant>/<workspace>/<pipeline>/stats/<ns>.json
+    pub async fn write_namespace_stats_async(namespace: &str, stats: &crate::discover::stats::NamespaceStats) {
+        let tenant = Self::get_tenant();
+        let workspace = Self::get_workspace_name();
+        let pipeline = Self::get_pipeline_name();
+        let s3_key = format!("{}/{}/{}/stats/{}.json", tenant, workspace, pipeline, namespace);
+        let json_value = match serde_json::to_value(stats) { Ok(v) => v, Err(e) => { println!("Failed to serialize stats: {}", e); return; } };
+        // Skip S3 upload when offline testing
+        if Self::truth_value(&Self::getenv("SKIPPR_OFFLINE", "false")) == false {
+            match crate::helpers::s3::put_json(&s3_key, &json_value).await {
+                Ok(_) => { if Self::debug_enabled() { println!("Updated stats in S3: {}", s3_key); } }
+                Err(err) => { println!("Failed to upload stats to S3: {:?}", err); }
+            }
+        }
+        // Always write local cache copy for tests and offline inspection
+        let path = Self::get_stats_local_path(namespace);
+        let _ = std::fs::write(&path, serde_json::to_string(&json_value).unwrap_or_default());
+    }
+
+    pub fn write_namespace_stats_sync(namespace: &str, stats: &crate::discover::stats::NamespaceStats) {
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.block_on(Self::write_namespace_stats_async(namespace, stats));
+        } else {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            rt.block_on(Self::write_namespace_stats_async(namespace, stats));
+        }
+    }
+
+    pub fn stats_flush_seconds() -> u64 {
+        if Config::get_envcache("STATS_FLUSH_SECONDS") != "" {
+            return Config::get_envcache("STATS_FLUSH_SECONDS").parse::<u64>().unwrap_or(5)
+        } else {
+            let pipeline = Config::get_pipeline_config();
+            let default = Config::getenv("STATS_FLUSH_SECONDS", "5");
+            let v: String = match pipeline.stats.as_ref() { Some(s) => s.flush_seconds.map(|x| x.to_string()).unwrap_or(default), None => default };
+            Config::set_evncache("STATS_FLUSH_SECONDS", &v.clone());
+            v.parse::<u64>().unwrap_or(5)
+        }
+    }
+
+    pub fn get_stats_local_path(namespace: &str) -> String {
+        let data_dir = Self::get_data_dir();
+        let cache_dir = format!("{}/catalog_cache", data_dir);
+        let _ = std::fs::create_dir_all(&cache_dir);
+        format!("{}/{}_stats.json", cache_dir, namespace)
     }
 
     // Schema update worker

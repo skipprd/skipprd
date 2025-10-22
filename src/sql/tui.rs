@@ -192,7 +192,7 @@ fn build_timeseries_data(batches: &Vec<RecordBatch>, max_points: usize) -> Vec<(
     pts
 }
 
-fn value_to_string(arr: &dyn datafusion::arrow::array::Array, row: usize) -> String {
+pub(crate) fn value_to_string(arr: &dyn datafusion::arrow::array::Array, row: usize) -> String {
     if arr.is_null(row) { return "".to_string(); }
     use datafusion::arrow::array::*;
     match arr.data_type() {

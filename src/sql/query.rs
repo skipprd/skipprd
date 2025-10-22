@@ -8,7 +8,7 @@ use std::time::Duration;
 use arrow::array::{Array, ArrayRef, Int32Array, StringArray};
 use arrow_schema::DataType;
 use datafusion::prelude::{SessionContext};
-use crate::cli::{CLI_MODE, Mode};
+use crate::cli::{CLI_MODE, Mode, QueryOptions};
 use crate::discover::{Metadata, PipelineMetadata};
 use crate::helpers::configuration::{Config, PIPELINE_NAME};
 use crate::METADATA;
@@ -385,6 +385,30 @@ pub async fn query(sql_str: &str) {
                 }
             }
         }
+        Ok(Statement::ShowStats { pipeline }) => {
+            // Resolve namespace and print stats JSON
+            let ns = pipeline;
+            // Switch context for correct data dir
+            let original = Config::get_pipeline_name();
+            PIPELINE_NAME.write().clear();
+            PIPELINE_NAME.write().push_str(&ns);
+            Config::init().await;
+            let path = Config::get_stats_local_path(&ns);
+            if let Ok(contents) = std::fs::read_to_string(&path) {
+                println!("{}", contents);
+            } else {
+                // Try S3
+                let key = format!("{}/{}/{}/stats/{}.json", Config::get_tenant(), Config::get_workspace_name(), Config::get_pipeline_name(), ns);
+                if let Ok(val) = crate::helpers::s3::get_json(&key).await {
+                    println!("{}", serde_json::to_string_pretty(&val).unwrap_or_default());
+                } else {
+                    println!("{}", "{}");
+                }
+            }
+            // restore original pipeline
+            PIPELINE_NAME.write().clear();
+            PIPELINE_NAME.write().push_str(&original);
+        }
         Ok(Statement::PipelineDrop(stmt)) => {
 
             PIPELINE_NAME.write().clear();
@@ -751,6 +775,29 @@ pub async fn query(sql_str: &str) {
             session_config = session_config.set("datafusion.catalog.information_schema", "true".into());
             session_config = session_config.set("datafusion.execution.collect_statistics", "true".into());
 
+            // Special-case: SHOW STATS FOR <pipeline>
+            {
+                let trimmed = sql_str.trim();
+                let upper = trimmed.to_uppercase();
+                if upper.starts_with("SHOW STATS FOR ") {
+                    let name = trimmed["SHOW STATS FOR ".len()..].trim();
+                    let ns = name.trim_matches('`').trim_matches('"');
+                    // Prefer local cache file, fallback to S3 if present
+                    let path = Config::get_stats_local_path(ns);
+                    if let Ok(contents) = std::fs::read_to_string(&path) {
+                        println!("{}", contents);
+                        return;
+                    }
+                    let s3_key = format!("{}/{}/{}/stats/{}.json", Config::get_tenant(), Config::get_workspace_name(), Config::get_pipeline_name(), ns);
+                    if let Ok(val) = crate::helpers::s3::get_json(&s3_key).await {
+                        println!("{}", serde_json::to_string_pretty(&val).unwrap_or_default());
+                        return;
+                    }
+                    println!("{}", "{}");
+                    return;
+                }
+            }
+
             let ctx = SessionContext::new_with_config(session_config);
 
             // Register UDFs
@@ -942,7 +989,7 @@ pub async fn query(sql_str: &str) {
                                 Ok(schema) => {
                                     ARROW_SCHEMA.insert(pipeline.clone(), ArcSwap::from(schema.clone()));
                                     let field_list: Vec<String> = schema.fields().iter().map(|f| format!("{}:{:?}", f.name(), f.data_type())).collect();
-                                    println!("Published ARROW_SCHEMA for '{}' (fields={}, {:?})", pipeline, schema.fields().len(), field_list);
+                                    // println!("Published ARROW_SCHEMA for '{}' (fields={}, {:?})", pipeline, schema.fields().len(), field_list);
                                 },
                                 Err(e) => {
                                     println!("Failed to build Arrow schema for '{}': {}", pipeline, e);
@@ -1021,34 +1068,15 @@ pub async fn query(sql_str: &str) {
                     }
                 }
 
-                // If cache empty, build minimal table set and persist
+                // If cache empty, register each prefix path (directory) and persist
                 if sources_cached.is_empty() {
-                    let mut registered: usize = 0;
                     let mut new_sources: Vec<(String, String)> = Vec::new();
                     for (idx, path) in s3_paths.iter().enumerate() {
-                    if let Ok(u) = Url::parse(path) { if let Some(bucket) = u.host_str() { let prefix = u.path().trim_start_matches('/');
-                        // fetch up to 8 parquet files under this prefix
-                        let files = crate::helpers::s3::list_parquet_keys(bucket, prefix, 8).await;
-                        if !files.is_empty() {
-                            for (j, key) in files.iter().enumerate() {
-                                let tname = format!("{}_s3_{}_{}", &pipeline, idx, j);
-                                let file_url = format!("s3://{}/{}", bucket, key);
-                                let opts = ParquetReadOptions { schema: None, file_extension: "parquet", table_partition_cols: vec![], parquet_pruning: None, skip_metadata: Some(true), file_sort_order: vec![] };
-                                if let Err(e) = ctx.register_parquet(&tname, &file_url, opts).await { println!("Failed to register S3 object='{}' for '{}': {}", file_url, pipeline, e); process::exit(1); }
-                                registered += 1;
-                                    new_sources.push((tname, file_url));
-                            }
-                            continue;
-                        }
-                    } }
-                    // fallback: register the path (dir) directly
-                    let opts = ParquetReadOptions { schema: None, file_extension: "parquet", table_partition_cols: vec![], parquet_pruning: None, skip_metadata: Some(true), file_sort_order: vec![] };
-                    let tname = format!("{}_s3_{}", &pipeline, idx);
-                    if let Err(e) = ctx.register_parquet(&tname, path, opts).await { println!("Failed to register S3 table path='{}' for '{}': {}", path, pipeline, e); process::exit(1); }
-                    registered += 1;
+                        let opts = ParquetReadOptions { schema: None, file_extension: "parquet", table_partition_cols: vec![], parquet_pruning: None, skip_metadata: Some(true), file_sort_order: vec![] };
+                        let tname = format!("{}_s3_{}", &pipeline, idx);
+                        if let Err(e) = ctx.register_parquet(&tname, path, opts).await { println!("Failed to register S3 table path='{}' for '{}': {}", path, pipeline, e); process::exit(1); }
                         new_sources.push((tname, path.clone()));
-                }
-                    // persist cache
+                    }
                     let sources_json: Vec<serde_json::Value> = new_sources.iter().map(|(n, u)| serde_json::json!({"name": n, "url": u})).collect();
                     registry = serde_json::json!({"epoch": manifest_epoch, "sources": sources_json});
                     Config::write_registry(&pipeline, &registry).await;
@@ -1228,6 +1256,27 @@ pub async fn query(sql_str: &str) {
                 s
             } else { sql_str.to_string() };
 
+            // Short-circuit for non-TUI plain mode
+            let plain = match CLI_MODE.read().clone() { Mode::Query(QueryOptions { plain, .. }) => plain, _ => false };
+            if plain {
+                let df = ctx.sql(&rewritten_sql).await.unwrap();
+                let res = df.collect().await.unwrap();
+                for batch in &res {
+                    let schema = batch.schema();
+                    let headers: Vec<String> = schema.fields().iter().map(|f| f.name().to_string()).collect();
+                    println!("{}", headers.join(","));
+                    let cols = batch.columns().len();
+                    for row in 0..batch.num_rows() {
+                        let mut parts: Vec<String> = Vec::with_capacity(cols);
+                        for col in 0..cols {
+                            parts.push(crate::sql::tui::value_to_string(batch.column(col).as_ref(), row));
+                        }
+                        println!("{}", parts.join(","));
+                    }
+                }
+                return;
+            }
+
             // SELECT execution: support --watch for live TUI; else one-shot
             let watch_secs = match CLI_MODE.read().clone() { Mode::Query(opts) => opts.watch, _ => None };
             // Unified SELECT TUI editor: editable SQL, runs on Enter or r; if --watch set, periodic refresh
@@ -1306,6 +1355,9 @@ pub async fn query(sql_str: &str) {
             });
             let footer = if let Some(w) = watch_secs { format!("select --watch={}s | Enter:run q:quit", w) } else { "Enter:run q:quit".to_string() };
             QueryEditorView::new(&rewritten_sql).run(QueryEditorConfig { title: "SELECT", footer: Some(&footer), initial_sql: &rewritten_sql }, rx_res, tx_req);
+
+            // TUI mode already handled earlier when --watch/editor is active; here we simply pretty print if not plain
+            // Nothing else to do; run already printed results in TUI
         }
     }
 }

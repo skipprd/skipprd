@@ -39,6 +39,7 @@ use std::sync::atomic::Ordering::AcqRel;
 // use dashmap::{DashMap};
 
 use crate::ingest::fast_ingest::{create_default_nested_message, DEFAULT_NESTED_MESSAGE, fast_path_ingest};
+use crate::discover::stats_tailer::{ensure_stats_worker, emit_observation};
 use crate::ingest::sequencer::propose_and_wait;
 use crate::discover::evolution::{EvolutionProposal, infer_specs_for_record};
 
@@ -399,6 +400,11 @@ impl Ingest {
             let ci = Config::getenv("CI", "");
             ga.eq_ignore_ascii_case("true") || ci == "1" || ci.eq_ignore_ascii_case("true")
         };
+
+        // Start stats worker if enabled
+        if crate::helpers::configuration::Config::stats_enabled() {
+            ensure_stats_worker();
+        }
 
         // Upload concurrency override/cap
         if let Ok(v) = Config::getenv("UPLOAD_CONCURRENCY", "").parse::<usize>() { if v > 0 {
@@ -1783,6 +1789,108 @@ impl Ingest {
         Ok(_schema_ref)
     }
     
+}
+
+#[cfg(test)]
+mod stats_integration_tests {
+	use super::*;
+	use crate::discover::stats_tailer::{ensure_stats_worker, emit_observation};
+	use crate::helpers::configuration::Config;
+	use serde_json::json;
+
+	#[test]
+	fn emits_and_flushes_stats_locally() {
+		// Force offline so we don't hit S3 in tests
+		std::env::set_var("SKIPPR_OFFLINE", "true");
+		// Ensure worker started
+		ensure_stats_worker();
+		// Emit observations for a test namespace
+		let ns = "__test_ns__";
+		for v in [3,1,5] { emit_observation(ns, "a", &json!(v)); }
+		emit_observation(ns, "s", &json!("hi"));
+		emit_observation(ns, "s", &json!("hello"));
+		// Wait longer than default flush (5s) shortened here by setting env
+		std::env::set_var("STATS_FLUSH_SECONDS", "1");
+		std::thread::sleep(std::time::Duration::from_millis(1500));
+		// Read local stats cache
+		let path = Config::get_stats_local_path(ns);
+		let contents = std::fs::read_to_string(&path).expect("missing local stats");
+		let v: serde_json::Value = serde_json::from_str(&contents).expect("bad json");
+		let fields = v.get("fields").and_then(|x| x.as_object()).expect("no fields");
+		let a = fields.get("a").and_then(|x| x.as_object()).expect("no field a");
+		assert_eq!(a.get("total").and_then(|x| x.as_u64()).unwrap(), 3);
+		assert_eq!(a.get("nulls").and_then(|x| x.as_u64()).unwrap(), 0);
+		assert_eq!(a.get("min_numeric").and_then(|x| x.as_f64()).unwrap(), 1.0);
+		assert_eq!(a.get("max_numeric").and_then(|x| x.as_f64()).unwrap(), 5.0);
+		let s = fields.get("s").and_then(|x| x.as_object()).expect("no field s");
+		assert_eq!(s.get("min_len").and_then(|x| x.as_u64()).unwrap(), 2);
+		assert_eq!(s.get("max_len").and_then(|x| x.as_u64()).unwrap(), 5);
+	}
+
+	#[test]
+	fn mixed_types_emit_and_validate_json() {
+		std::env::set_var("SKIPPR_OFFLINE", "true");
+		std::env::set_var("STATS_FLUSH_SECONDS", "1");
+		ensure_stats_worker();
+		let ns = "__test_ns_mixed__";
+		// numeric int + float
+		emit_observation(ns, "num", &json!(10));
+		emit_observation(ns, "num", &json!(3.5));
+		emit_observation(ns, "num", &json!(7));
+		// strings
+		emit_observation(ns, "str", &json!("a"));
+		emit_observation(ns, "str", &json!("abcdef"));
+		// bools
+		emit_observation(ns, "flag", &json!(true));
+		emit_observation(ns, "flag", &json!(false));
+		// nulls
+		emit_observation(ns, "only_nulls", &json!(null));
+		emit_observation(ns, "only_nulls", &json!(null));
+		// arrays/objects (ignored for bounds)
+		emit_observation(ns, "complex", &json!([1,2,3]));
+		emit_observation(ns, "complex", &json!({"k":"v"}));
+
+		std::thread::sleep(std::time::Duration::from_millis(1500));
+
+		let path = Config::get_stats_local_path(ns);
+		let contents = std::fs::read_to_string(&path).expect("missing local stats");
+		let v: serde_json::Value = serde_json::from_str(&contents).expect("bad json");
+		assert_eq!(v.get("namespace").and_then(|x| x.as_str()).unwrap(), ns);
+		let fields = v.get("fields").and_then(|x| x.as_object()).expect("no fields");
+
+		let num = fields.get("num").and_then(|x| x.as_object()).expect("no num");
+		// min/max should reflect 3.5 .. 10
+		let min_n = num.get("min_numeric").and_then(|x| x.as_f64()).unwrap();
+		let max_n = num.get("max_numeric").and_then(|x| x.as_f64()).unwrap();
+		assert!((min_n - 3.5).abs() < 1e-9, "min_numeric={min_n}");
+		assert!((max_n - 10.0).abs() < 1e-9, "max_numeric={max_n}");
+		assert_eq!(num.get("total").and_then(|x| x.as_u64()).unwrap(), 3);
+
+		let st = fields.get("str").and_then(|x| x.as_object()).expect("no str");
+		assert_eq!(st.get("min_len").and_then(|x| x.as_u64()).unwrap(), 1);
+		assert_eq!(st.get("max_len").and_then(|x| x.as_u64()).unwrap(), 6);
+		assert_eq!(st.get("total").and_then(|x| x.as_u64()).unwrap(), 2);
+
+		let fl = fields.get("flag").and_then(|x| x.as_object()).expect("no flag");
+		let approx = fl.get("approx_distinct").and_then(|x| x.as_u64()).unwrap_or(0);
+		assert!(approx >= 1);
+		assert_eq!(fl.get("total").and_then(|x| x.as_u64()).unwrap(), 2);
+
+		let on = fields.get("only_nulls").and_then(|x| x.as_object()).expect("no only_nulls");
+		assert_eq!(on.get("total").and_then(|x| x.as_u64()).unwrap(), 2);
+		assert_eq!(on.get("nulls").and_then(|x| x.as_u64()).unwrap(), 2);
+		assert!(on.get("min_numeric").unwrap().is_null());
+		assert!(on.get("max_numeric").unwrap().is_null());
+		assert!(on.get("min_len").unwrap().is_null());
+		assert!(on.get("max_len").unwrap().is_null());
+
+		let cx = fields.get("complex").and_then(|x| x.as_object()).expect("no complex");
+		assert_eq!(cx.get("total").and_then(|x| x.as_u64()).unwrap(), 2);
+		assert!(cx.get("min_numeric").unwrap().is_null());
+		assert!(cx.get("max_numeric").unwrap().is_null());
+		assert!(cx.get("min_len").unwrap().is_null());
+		assert!(cx.get("max_len").unwrap().is_null());
+	}
 }
 
 

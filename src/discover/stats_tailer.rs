@@ -1,4 +1,5 @@
 use crate::discover::stats::NamespaceStats;
+use crate::helpers::configuration::Config;
 use once_cell::sync::OnceCell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -19,6 +20,7 @@ pub fn ensure_stats_worker() {
     std::thread::spawn(move || {
         let mut by_ns: HashMap<String, NamespaceStats> = HashMap::new();
         let mut last_flush = std::time::Instant::now();
+        let flush_secs = Config::stats_flush_seconds();
         loop {
             match rx.recv_timeout(std::time::Duration::from_millis(500)) {
                 Ok(obs) => {
@@ -28,7 +30,7 @@ pub fn ensure_stats_worker() {
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
             }
-            if last_flush.elapsed().as_secs() >= 5 {
+            if last_flush.elapsed().as_secs() >= flush_secs {
                 flush_all(&mut by_ns);
                 last_flush = std::time::Instant::now();
             }
@@ -38,15 +40,12 @@ pub fn ensure_stats_worker() {
 }
 
 fn flush_all(by_ns: &mut HashMap<String, NamespaceStats>) {
-    for (ns, stats) in by_ns.iter() {
-        let _ = write_stats(ns, stats);
+    for (ns, stats) in by_ns.iter_mut() {
+        // finalize approximate distinct estimates before writing
+        for (_k, fs) in stats.fields.iter_mut() { fs.finalize(); }
+        // Best-effort synchronous upload to avoid unbounded buffer growth
+        Config::write_namespace_stats_sync(ns, stats);
     }
-}
-
-pub fn write_stats(namespace: &str, stats: &NamespaceStats) -> Result<(), String> {
-    // Placeholder: integrate with Config to write JSON to s3://<state>/stats/<ns>.json
-    let _ = (namespace, stats);
-    Ok(())
 }
 
 pub fn emit_observation(namespace: &str, field: &str, value: &serde_json::Value) {

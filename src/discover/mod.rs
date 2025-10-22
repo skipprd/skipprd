@@ -15,6 +15,8 @@ pub(crate) mod date_formats;
 use crate::discover::date_formats::DateFormats;
 
 pub mod evolution;
+pub mod stats;
+pub mod stats_tailer;
 mod filter_float;
 
 mod filter_bool;

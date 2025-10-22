@@ -49,12 +49,14 @@ impl SkipprKeyword {
 // After the SkipprKeyword enum, add another enum
 enum SkipprShowCommand {
     DOCS,
+    STATS,
 }
 
 impl SkipprShowCommand {
     fn from_str(s: &str) -> Option<SkipprShowCommand> {
         match s.to_uppercase().as_str() {
             "DOCS" => Some(SkipprShowCommand::DOCS),
+            "STATS" => Some(SkipprShowCommand::STATS),
             _ => None
         }
     }
@@ -256,6 +258,8 @@ pub enum Statement {
     TableDrop(TableDropStatement),
     /// Extension: `SHOW DOCS`
     ShowDocs,
+    /// Extension: `SHOW STATS FOR <pipeline>`
+    ShowStats { pipeline: String },
 }
 
 
@@ -336,6 +340,14 @@ impl<'a> SParser<'a> {
                             Some(SkipprShowCommand::DOCS) => {
                                 self.parser.next_token(); // DOCS
                                 return Ok(Statement::ShowDocs);
+                            },
+                            Some(SkipprShowCommand::STATS) => {
+                                self.parser.next_token(); // STATS
+                                // Expect FOR <pipeline>
+                                self.parser.expect_keyword(Keyword::FOR)?;
+                                let name = self.parser.parse_object_name(true)?;
+                                let pipeline = name.to_string();
+                                return Ok(Statement::ShowStats { pipeline });
                             },
                             _ => {
                                 return Err(ParserError::ParserError("Unrecognized SHOW command".to_string()));
