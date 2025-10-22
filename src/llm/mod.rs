@@ -54,6 +54,23 @@ pub fn create_llm(cfg: &LlmConfig) -> Arc<dyn LargeLanguageModel> {
     }
 }
 
+pub fn config_from_env() -> LlmConfig {
+    let prov = crate::helpers::configuration::Config::llm_provider().to_uppercase();
+    let provider = match prov.as_str() {
+        "OPENAI" | "OPENAI_COMPAT" | "HTTP" => LlmProviderType::OpenAICompat,
+        _ => LlmProviderType::Local,
+    };
+    LlmConfig {
+        provider,
+        chat_model: crate::helpers::configuration::Config::llm_chat_model(),
+        embed_model: crate::helpers::configuration::Config::llm_embed_model(),
+        base_url: crate::helpers::configuration::Config::llm_base_url(),
+        api_key: crate::helpers::configuration::Config::llm_api_key(),
+        gpu_layers: crate::helpers::configuration::Config::llm_gpu_layers(),
+        context_length: Some(crate::helpers::configuration::Config::llm_context_length()),
+    }
+}
+
 /// Placeholder model that always errors. Used when provider backends are not wired yet.
 pub struct NullModel {}
 
@@ -72,5 +89,25 @@ impl LargeLanguageModel for NullModel {
 
 pub mod llama_cpp;
 pub mod openai_compat;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_defaults() {
+        let cfg = super::config_from_env();
+        assert!(matches!(cfg.provider, LlmProviderType::Local) || matches!(cfg.provider, LlmProviderType::OpenAICompat));
+        assert_eq!(cfg.context_length.unwrap_or(0) > 0, true);
+    }
+
+    #[test]
+    fn factory_provider_selection() {
+        std::env::set_var("LLM_PROVIDER", "OPENAI");
+        let cfg = super::config_from_env();
+        let _llm = create_llm(&cfg);
+        std::env::remove_var("LLM_PROVIDER");
+    }
+}
 
 

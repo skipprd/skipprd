@@ -60,6 +60,7 @@ mod serdes;
 
 mod plugins;
 mod sql;
+mod llm;
 mod benchmark;
 
 use crate::helpers::configuration::{Config, PIPELINE_NAME};
@@ -466,6 +467,20 @@ async fn main() {
                     println!("Failed to create benchmark data: {}", e);
                     process::exit(1);
                 }
+            }
+        }
+        Mode::Llm(options) => {
+            let cfg = llm::config_from_env();
+            let llm = llm::create_llm(&cfg);
+            if let Some(p) = options.chat {
+                let out = llm.chat(&[llm::ChatMessage { role: "user".into(), content: p }]);
+                match out { Ok(s) => println!("{}", s), Err(e) => { eprintln!("ERROR: {}", e); std::process::exit(1); } }
+            }
+            if !options.embed.is_empty() {
+                let out = llm.embed(&options.embed);
+                match out { Ok(v) => {
+                    for (i, emb) in v.iter().enumerate() { println!("{}:{}", i, emb.len()); }
+                }, Err(e) => { eprintln!("ERROR: {}", e); std::process::exit(1); } }
             }
         }
     }

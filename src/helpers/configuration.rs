@@ -188,6 +188,37 @@ impl Config {
             }
         }
     }
+
+    // LLM configuration accessors
+    pub fn llm_provider() -> String {
+        // env > default("LOCAL")
+        let v = Self::getenv("LLM_PROVIDER", "LOCAL");
+        v
+    }
+
+    pub fn llm_chat_model() -> Option<String> {
+        let v = Self::getenv("LLM_CHAT_MODEL", ""); if v.is_empty() { None } else { Some(v) }
+    }
+
+    pub fn llm_embed_model() -> Option<String> {
+        let v = Self::getenv("LLM_EMBED_MODEL", ""); if v.is_empty() { None } else { Some(v) }
+    }
+
+    pub fn llm_base_url() -> Option<String> {
+        let v = Self::getenv("LLM_BASE_URL", ""); if v.is_empty() { None } else { Some(v) }
+    }
+
+    pub fn llm_api_key() -> Option<String> {
+        let v = Self::getenv("LLM_API_KEY", ""); if v.is_empty() { None } else { Some(v) }
+    }
+
+    pub fn llm_gpu_layers() -> Option<usize> {
+        let v = Self::getenv("LLM_GPU_LAYERS", ""); v.parse::<usize>().ok()
+    }
+
+    pub fn llm_context_length() -> usize {
+        let v = Self::getenv("LLM_CONTEXT_LENGTH", "4096"); v.parse::<usize>().unwrap_or(4096)
+    }
     pub fn log_wal_enabled() -> bool {
         // Unified flag overrides
         if Self::truth_value(&Self::getenv("LOG_WAL", "")) { return true; }

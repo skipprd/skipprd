@@ -86,5 +86,9 @@ crossterm = { version = "0.27" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 
+[features]
+llama_cpp = []
+
 [dev-dependencies]
 serial_test = "1.0.0"
+httpmock = "0.7"

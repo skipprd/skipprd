@@ -25,6 +25,7 @@ pub enum Mode {
     Schema(SchemaOptions),
     SqlHelp(SqlHelpOptions),
     Benchmark(BenchmarkOptions),
+    Llm(LlmOptions),
 }
 
 #[derive(Parser, Clone, PartialEq)]
@@ -97,4 +98,14 @@ pub struct BenchmarkOptions {
     /// Description of what's being benchmarked (e.g., specific optimization)
     #[arg(short = 'd', long)]
     pub description: Option<String>,
+}
+
+#[derive(Parser, Clone, PartialEq, Default)]
+pub struct LlmOptions {
+    /// Chat prompt to send (uses configured chat model)
+    #[arg(long)]
+    pub chat: Option<String>,
+    /// Embedding inputs (repeat flag to add multiple)
+    #[arg(long)]
+    pub embed: Vec<String>,
 }
