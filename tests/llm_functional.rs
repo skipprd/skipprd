@@ -22,7 +22,7 @@ fn llm_embed_local_provider_returns_vectors() {
     cmd.arg("llm").arg("--embed").arg("alpha").arg("--embed").arg("beta");
     let assert = cmd.assert().success();
     let out = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
-    // Expect lines like "0:768" "1:768" (stub or real should be >=1 dims)
+    // Expect lines like "0:NNN" "1:NNN" (dimension depends on model)
     assert!(out.contains("0:"), "expected index prefix");
 }
 

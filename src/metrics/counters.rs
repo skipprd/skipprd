@@ -22,6 +22,13 @@ pub static PARQUET_PERSISTED_OBJECTS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| Atomi
 pub static LATEST_TIMESTAMP: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static QUARANTINED_PARTITIONS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 
+// Semantic/LLM observability
+pub static LLM_ENRICH_SUCCESS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static LLM_ENRICH_FAILURE_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static LLM_ENRICH_LATENCY_NS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static SEMANTIC_WRITE_SUCCESS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static SEMANTIC_WRITE_FAILURE_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+
 // Dynamic tuning targets (self-tuned by ingest; read by components)
 pub static UPLOAD_CONCURRENCY_TARGET: Lazy<std::sync::atomic::AtomicUsize> = Lazy::new(|| std::sync::atomic::AtomicUsize::new(16));
 pub static WAL_COMPACTION_CONCURRENCY_TARGET: Lazy<std::sync::atomic::AtomicUsize> = Lazy::new(|| std::sync::atomic::AtomicUsize::new(16));
@@ -96,5 +103,16 @@ pub fn dec_uploads_in_flight() { UPLOADS_IN_FLIGHT.fetch_sub(1, Ordering::Relaxe
 pub fn set_active_threads(n: usize) { ACTIVE_THREADS.store(n, Ordering::Relaxed); }
 #[inline]
 pub fn set_queue_length(n: usize) { QUEUE_LENGTH.store(n, Ordering::Relaxed); }
+
+#[inline]
+pub fn add_llm_enrich_success(n: u64) { LLM_ENRICH_SUCCESS_TOTAL.fetch_add(n, Ordering::Relaxed); }
+#[inline]
+pub fn add_llm_enrich_failure(n: u64) { LLM_ENRICH_FAILURE_TOTAL.fetch_add(n, Ordering::Relaxed); }
+#[inline]
+pub fn add_llm_enrich_latency_ns(n: u64) { LLM_ENRICH_LATENCY_NS_TOTAL.fetch_add(n, Ordering::Relaxed); }
+#[inline]
+pub fn add_semantic_write_success(n: u64) { SEMANTIC_WRITE_SUCCESS_TOTAL.fetch_add(n, Ordering::Relaxed); }
+#[inline]
+pub fn add_semantic_write_failure(n: u64) { SEMANTIC_WRITE_FAILURE_TOTAL.fetch_add(n, Ordering::Relaxed); }
 
 

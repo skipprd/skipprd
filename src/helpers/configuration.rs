@@ -69,10 +69,16 @@ pub struct Transform {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Stats {
-    pub enabled: Option<String>,
+    pub enabled: Option<bool>,
     pub hll_precision: Option<u8>,
-    pub histogram_enabled: Option<String>,
+    pub histogram_enabled: Option<bool>,
     pub flush_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct SemanticLayerSettings {
+    pub llm_enabled: Option<bool>,
+    pub llm_debounce_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -144,6 +150,7 @@ pub struct Pipeline {
     pub schema: Option<String>,
     pub deadletter: Option<String>,
     pub stats: Option<Stats>,
+    pub semantic_layer: Option<SemanticLayerSettings>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -779,6 +786,7 @@ impl Config {
                     schema: None,
                     deadletter: None,
                     stats: None,
+                    semantic_layer: None,
                 }
             }
         };
@@ -1715,10 +1723,11 @@ impl Config {
             return Config::truth_value(&Config::get_envcache("STATS_ENABLED"))
         } else {
             let pipeline = Config::get_pipeline_config();
-            let default = Config::getenv("STATS_ENABLED", "true");
-            let v = match pipeline.stats.as_ref() { Some(s) => s.enabled.as_ref().unwrap_or(&default), None => &default };
-            Config::set_evncache("STATS_ENABLED", &v.clone());
-            Config::truth_value(v)
+            let default_bool = Config::truth_value(&Config::getenv("STATS_ENABLED", "true"));
+            let v_bool = match pipeline.stats.as_ref() { Some(s) => s.enabled.unwrap_or(default_bool), None => default_bool };
+            let v = if v_bool { "true" } else { "false" };
+            Config::set_evncache("STATS_ENABLED", v);
+            v_bool
         }
     }
 
@@ -1740,10 +1749,11 @@ impl Config {
             return Config::truth_value(&Config::get_envcache("STATS_HISTOGRAM_ENABLED"))
         } else {
             let pipeline = Config::get_pipeline_config();
-            let default = Config::getenv("STATS_HISTOGRAM_ENABLED", "true");
-            let v = match pipeline.stats.as_ref() { Some(s) => s.histogram_enabled.as_ref().unwrap_or(&default), None => &default };
-            Config::set_evncache("STATS_HISTOGRAM_ENABLED", &v.clone());
-            Config::truth_value(v)
+            let default_bool = Config::truth_value(&Config::getenv("STATS_HISTOGRAM_ENABLED", "true"));
+            let v_bool = match pipeline.stats.as_ref() { Some(s) => s.histogram_enabled.unwrap_or(default_bool), None => default_bool };
+            let v = if v_bool { "true" } else { "false" };
+            Config::set_evncache("STATS_HISTOGRAM_ENABLED", v);
+            v_bool
         }
     }
 
@@ -1788,10 +1798,71 @@ impl Config {
     }
 
     pub fn get_stats_local_path(namespace: &str) -> String {
-        let data_dir = Self::get_data_dir();
-        let cache_dir = format!("{}/catalog_cache", data_dir);
+        let cache_dir = Self::get_pipeline_cache_dir();
+        let cache_dir = format!("{}/catalog_cache", cache_dir);
         let _ = std::fs::create_dir_all(&cache_dir);
         format!("{}/{}_stats.json", cache_dir, namespace)
+    }
+
+    pub fn get_semantic_local_path(namespace: &str) -> String {
+        let cache_dir = Self::get_pipeline_cache_dir();
+        let cache_dir = format!("{}/catalog_cache", cache_dir);
+        let _ = std::fs::create_dir_all(&cache_dir);
+        format!("{}/{}_semantic.yaml", cache_dir, namespace)
+    }
+
+    pub fn get_catalog_local_path(namespace: &str) -> String {
+        let cache_dir = Self::get_pipeline_cache_dir();
+        let cache_dir = format!("{}/catalog_cache", cache_dir);
+        let _ = std::fs::create_dir_all(&cache_dir);
+        format!("{}/{}_catalog.yaml", cache_dir, namespace)
+    }
+
+    pub fn catalog_llm_enabled() -> bool {
+        Self::truth_value(&Self::getenv("CATALOG_LLM_ENABLED", "false"))
+    }
+
+    pub async fn write_semantic_async(namespace: &str, semantic: &crate::semantics::model::SemanticModel) {
+        let tenant = Self::get_tenant();
+        let workspace = Self::get_workspace_name();
+        let pipeline = Self::get_pipeline_name();
+        let s3_key = format!("{}/{}/{}/semantic/{}.yaml", tenant, workspace, pipeline, namespace);
+        let yaml = match serde_yaml::to_string(semantic) { Ok(s) => s, Err(e) => { println!("Failed to serialize semantic: {}", e); return; } };
+        if Self::truth_value(&Self::getenv("SKIPPR_OFFLINE", "false")) == false {
+            let value = serde_yaml::from_str::<serde_yaml::Value>(&yaml).unwrap_or(serde_yaml::Value::Null);
+            let json_equiv = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
+            let _ = crate::helpers::s3::put_json(&s3_key, &json_equiv).await;
+        }
+        let _ = std::fs::write(Self::get_semantic_local_path(namespace), yaml);
+    }
+
+    pub async fn write_catalog_async(namespace: &str, catalog: &crate::semantics::model::DataCatalog) {
+        let tenant = Self::get_tenant();
+        let workspace = Self::get_workspace_name();
+        let pipeline = Self::get_pipeline_name();
+        let s3_key = format!("{}/{}/{}/catalog/{}.yaml", tenant, workspace, pipeline, namespace);
+        let yaml = match serde_yaml::to_string(catalog) { Ok(s) => s, Err(e) => { println!("Failed to serialize catalog: {}", e); return; } };
+        if Self::truth_value(&Self::getenv("SKIPPR_OFFLINE", "false")) == false {
+            let value = serde_yaml::from_str::<serde_yaml::Value>(&yaml).unwrap_or(serde_yaml::Value::Null);
+            let json_equiv = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
+            let _ = crate::helpers::s3::put_json(&s3_key, &json_equiv).await;
+        }
+        let _ = std::fs::write(Self::get_catalog_local_path(namespace), yaml);
+    }
+
+    pub fn write_semantic_and_catalog_sync(namespace: &str, semantic: &crate::semantics::model::SemanticModel, catalog: &crate::semantics::model::DataCatalog) {
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.block_on(async {
+                Self::write_semantic_async(namespace, semantic).await;
+                Self::write_catalog_async(namespace, catalog).await;
+            });
+        } else {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            rt.block_on(async {
+                Self::write_semantic_async(namespace, semantic).await;
+                Self::write_catalog_async(namespace, catalog).await;
+            });
+        }
     }
 
     // Schema update worker
@@ -1968,6 +2039,36 @@ impl Config {
     // Deadletter settings
     pub fn get_deadletter_include_normalized_json() -> bool {
         Self::truth_value(&Self::getenv("DEADLETTER_INCLUDE_NORMALIZED_JSON", "yes"))
+    }
+
+    pub fn pipeline_llm_enabled() -> bool {
+        // env override
+        if Self::getenv("LLM_ENABLED", "").len() > 0 { return Self::truth_value(&Self::getenv("LLM_ENABLED", "false")); }
+        // pipeline setting
+        let cfg = Self::get();
+        let pn = PIPELINE_NAME.read();
+        if let Some(p) = cfg.pipelines.get(pn.as_str()) {
+            if let Some(sl) = &p.semantic_layer { return sl.llm_enabled.unwrap_or(false); }
+        }
+        false
+    }
+
+    pub fn pipeline_llm_debounce_ms() -> u64 {
+        if let Ok(v) = Self::getenv("LLM_DEBOUNCE_MS", "").parse::<u64>() { return v; }
+        let cfg = Self::get();
+        let pn = PIPELINE_NAME.read();
+        if let Some(p) = cfg.pipelines.get(pn.as_str()) {
+            if let Some(sl) = &p.semantic_layer { return sl.llm_debounce_ms.unwrap_or(1500); }
+        }
+        1500
+    }
+
+    pub fn get_pipeline_cache_dir() -> String {
+        // get_data_dir() already resolves to ./data/<workspace>_<pipeline>
+        // Use it directly to avoid nested <workspace>_<pipeline>/<workspace>_<pipeline>
+        let path = Self::get_data_dir();
+        let _ = std::fs::create_dir_all(&path);
+        path
     }
 }
 

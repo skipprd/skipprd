@@ -62,6 +62,7 @@ mod plugins;
 mod sql;
 mod llm;
 mod benchmark;
+mod semantics;
 
 use crate::helpers::configuration::{Config, PIPELINE_NAME};
 use crate::helpers::logging::init_logging;

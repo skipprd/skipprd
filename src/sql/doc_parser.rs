@@ -51,9 +51,21 @@ impl SqlDocParser {
             Statement::ShowDocs => docs.get("SHOW DOCS").unwrap().clone(),
             Statement::ShowStats { .. } => SqlStatementDoc {
                 name: "SHOW STATS".to_string(),
-                description: "Show per-field statistics JSON for a pipeline".to_string(),
-                syntax: "SHOW STATS FOR <pipeline>".to_string(),
-                example: "SHOW STATS FOR bike_hire".to_string(),
+                description: "Show per-field statistics JSON for a pipeline (optionally filtered by namespace).".to_string(),
+                syntax: "SHOW STATS FOR <pipeline>[.<namespace>]".to_string(),
+                example: "SHOW STATS FOR bike_hire.ride_start".to_string(),
+            },
+            Statement::ShowSemantic { .. } => SqlStatementDoc {
+                name: "SHOW SEMANTIC".to_string(),
+                description: "Show semantic roles for <pipeline>[.<namespace>]. Falls back to S3 if local cache missing.".to_string(),
+                syntax: "SHOW SEMANTIC FOR <pipeline>[.<namespace>]".to_string(),
+                example: "SHOW SEMANTIC FOR bike_hire.ride_start".to_string(),
+            },
+            Statement::ShowCatalog { .. } => SqlStatementDoc {
+                name: "SHOW CATALOG".to_string(),
+                description: "Show catalog fields for <pipeline>[.<namespace>]. Falls back to S3 if local cache missing.".to_string(),
+                syntax: "SHOW CATALOG FOR <pipeline>[.<namespace>]".to_string(),
+                example: "SHOW CATALOG FOR bike_hire.ride_start".to_string(),
             },
         }
     }

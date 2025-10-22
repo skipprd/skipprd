@@ -50,6 +50,8 @@ impl SkipprKeyword {
 enum SkipprShowCommand {
     DOCS,
     STATS,
+    SEMANTIC,
+    CATALOG,
 }
 
 impl SkipprShowCommand {
@@ -57,6 +59,8 @@ impl SkipprShowCommand {
         match s.to_uppercase().as_str() {
             "DOCS" => Some(SkipprShowCommand::DOCS),
             "STATS" => Some(SkipprShowCommand::STATS),
+            "SEMANTIC" => Some(SkipprShowCommand::SEMANTIC),
+            "CATALOG" => Some(SkipprShowCommand::CATALOG),
             _ => None
         }
     }
@@ -258,8 +262,12 @@ pub enum Statement {
     TableDrop(TableDropStatement),
     /// Extension: `SHOW DOCS`
     ShowDocs,
-    /// Extension: `SHOW STATS FOR <pipeline>`
-    ShowStats { pipeline: String },
+    /// Extension: `SHOW STATS FOR <pipeline>.<namespace>` (namespace optional)
+    ShowStats { pipeline: String, namespace: Option<String> },
+    /// Extension: `SHOW SEMANTIC FOR <pipeline>.<namespace>` (namespace optional)
+    ShowSemantic { pipeline: String, namespace: Option<String> },
+    /// Extension: `SHOW CATALOG FOR <pipeline>.<namespace>` (namespace optional)
+    ShowCatalog { pipeline: String, namespace: Option<String> },
 }
 
 
@@ -325,85 +333,82 @@ impl<'a> SParser<'a> {
     }
 
     pub fn parse_statement(&mut self) -> Result<Statement, ParserError> {
-        // match self.parser.peek_token().token {
-        //     Token::Word(w) => {
-        //         match w.keyword {
-        //             Keyword::DESCRIBE => {
         return match self.parser.peek_token().token {
             Token::Word(w) => {
                 if w.value.to_uppercase() == "SHOW" {
                     self.parser.next_token(); // SHOW
-                    
-                    // Parse the next token to see if it's a recognized show command
                     if let Token::Word(w) = self.parser.peek_token().token {
                         match SkipprShowCommand::from_str(&w.value) {
-                            Some(SkipprShowCommand::DOCS) => {
-                                self.parser.next_token(); // DOCS
-                                return Ok(Statement::ShowDocs);
-                            },
+                            Some(SkipprShowCommand::DOCS) => { self.parser.next_token(); return Ok(Statement::ShowDocs); },
                             Some(SkipprShowCommand::STATS) => {
                                 self.parser.next_token(); // STATS
-                                // Expect FOR <pipeline>
                                 self.parser.expect_keyword(Keyword::FOR)?;
                                 let name = self.parser.parse_object_name(true)?;
-                                let pipeline = name.to_string();
-                                return Ok(Statement::ShowStats { pipeline });
+                                let parts: Vec<String> = name.0.iter().map(|i| i.to_string()).collect();
+                                let (pipeline, namespace) = match parts.len() {
+                                    0 => ("".to_string(), None),
+                                    1 => (parts[0].clone(), None),
+                                    _ => (parts[0].clone(), Some(parts[1..].join("."))),
+                                };
+                                return Ok(Statement::ShowStats { pipeline, namespace });
                             },
-                            _ => {
-                                return Err(ParserError::ParserError("Unrecognized SHOW command".to_string()));
-                            }
+                            Some(SkipprShowCommand::SEMANTIC) => {
+                                self.parser.next_token(); // SEMANTIC
+                                self.parser.expect_keyword(Keyword::FOR)?;
+                                let name = self.parser.parse_object_name(true)?;
+                                let parts: Vec<String> = name.0.iter().map(|i| i.to_string()).collect();
+                                let (pipeline, namespace) = match parts.len() {
+                                    0 => ("".to_string(), None),
+                                    1 => (parts[0].clone(), None),
+                                    _ => (parts[0].clone(), Some(parts[1..].join("."))),
+                                };
+                                return Ok(Statement::ShowSemantic { pipeline, namespace });
+                            },
+                            Some(SkipprShowCommand::CATALOG) => {
+                                self.parser.next_token(); // CATALOG
+                                self.parser.expect_keyword(Keyword::FOR)?;
+                                let name = self.parser.parse_object_name(true)?;
+                                let parts: Vec<String> = name.0.iter().map(|i| i.to_string()).collect();
+                                let (pipeline, namespace) = match parts.len() {
+                                    0 => ("".to_string(), None),
+                                    1 => (parts[0].clone(), None),
+                                    _ => (parts[0].clone(), Some(parts[1..].join("."))),
+                                };
+                                return Ok(Statement::ShowCatalog { pipeline, namespace });
+                            },
+                            _ => { return Err(ParserError::ParserError("Unrecognized SHOW command".to_string())); }
                         }
                     } else {
                         return Err(ParserError::ParserError("Expected command after SHOW".to_string()));
                     }
                 }
-                
                 match SkipprKeyword::from_str(&w.value) {
-                    Some(SkipprKeyword::DUMP) => {
-                        self.parser.next_token(); // DUMP
-                        self.parse_dump()
-                    }
-                    Some(SkipprKeyword::DROP) => {
-                        self.parser.next_token(); // DROP
-                        self.parse_drop()
-                    }
-                    Some(SkipprKeyword::RESET) => {
-                        self.parser.next_token(); // RESET
-                        self.parse_reset()
-                    }
-                    Some(SkipprKeyword::LOAD) => {
-                        self.parser.next_token(); // LOAD
-                        self.parse_load()
-                    }
-                    Some(SkipprKeyword::ENABLE) => {
-                        self.parser.next_token(); // ENABLE
-                        self.parse_enable()
-                    }
-                    Some(SkipprKeyword::DISABLE) => {
-                        self.parser.next_token(); // DISABLE
-                        self.parse_disable()
-                    }
-                    Some(SkipprKeyword::TABLE) => {
-                        self.parser.next_token(); // TABLE
-                        self.parse_drop()
+                    Some(SkipprKeyword::DUMP) => { self.parser.next_token(); self.parse_dump() }
+                    Some(SkipprKeyword::DROP) => { self.parser.next_token(); self.parse_drop() }
+                    Some(SkipprKeyword::RESET) => { self.parser.next_token(); self.parse_reset() }
+                    Some(SkipprKeyword::LOAD) => { self.parser.next_token(); self.parse_load() }
+                    Some(SkipprKeyword::ENABLE) => { self.parser.next_token(); self.parse_enable() }
+                    Some(SkipprKeyword::DISABLE) => { self.parser.next_token(); self.parse_disable() }
+                    Some(SkipprKeyword::TABLE) => { self.parser.next_token(); self.parse_drop() }
+                    Some(SkipprKeyword::SCHEMA) | Some(SkipprKeyword::PIPELINE) | Some(SkipprKeyword::DATABASE) => {
+                        Err(ParserError::ParserError("Not implemented".to_string()))
                     }
                     None => {
+                        // Fallback: handle ALTER TABLE <pipeline>[.<namespace>] ...
                         match self.parser.peek_token().token {
-                            Token::Word(w) => {
-                                match w.keyword {
+                            Token::Word(w2) => {
+                                match w2.keyword {
                                     Keyword::ALTER => {
                                         self.parser.next_token(); // ALTER
-
                                         match self.parser.peek_token().token {
-                                            Token::Word(w) => {
-                                                match w.keyword {
-                                                    // Support both ALTER SCHEMA ... and ALTER TABLE ... as aliases
-                                                    // Hard-disable SCHEMA keyword and instruct to use TABLE
+                                            Token::Word(w3) => {
+                                                match w3.keyword {
+                                                    // Hard-disable SCHEMA and instruct to use TABLE
                                                     Keyword::SCHEMA => {
-                                                        return Err(ParserError::ParserError("Use TABLE instead of SCHEMA".to_string()));
+                                                        Err(ParserError::ParserError("Use TABLE instead of SCHEMA".to_string()))
                                                     }
                                                     Keyword::TABLE => {
-                                                        self.parser.next_token(); // SCHEMA/TABLE
+                                                        self.parser.next_token(); // TABLE
                                                         self.parse_alter_schema()
                                                     }
                                                     _ => {
@@ -417,36 +422,18 @@ impl<'a> SParser<'a> {
                                         }
                                     }
                                     _ => {
-                                        // use sqlparser-rs parser
-                                        // Ok(Statement::Statement(Box::from(
-                                        //     self.parser.parse_statement()?,
-                                        // )))
                                         Err(ParserError::ParserError("Not implemented".to_string()))
                                     }
                                 }
                             }
                             _ => {
-                                // use sqlparser-rs parser
-                                // Ok(Statement::Statement(Box::from(
-                                //     self.parser.parse_statement()?,
-                                // )))
                                 Err(ParserError::ParserError("Not implemented".to_string()))
                             }
                         }
-                    },
-                    _ => {
-                        Err(ParserError::ParserError("Not implemented".to_string()))
                     }
-
                 }
             }
-            _ => {
-                // use the native parser
-                // Ok(Statement::Statement(Box::from(
-                //     self.parser.parse_statement()?,
-                // )))
-                Err(ParserError::ParserError("Not implemented".to_string()))
-            }
+            _ => { Err(ParserError::ParserError("Not implemented".to_string())) }
         }
     }
 
@@ -763,4 +750,5 @@ impl<'a> SParser<'a> {
     }
 
 }
+
 

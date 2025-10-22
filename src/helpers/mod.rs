@@ -471,12 +471,15 @@ impl Helpers {
                         }
                         
                         // Try parsing as millisecond timestamp string
-                        if let Ok(ms) = s.parse::<i64>() {
-                            // Validate millisecond timestamp range
-                            if ms > 999999999999999 || ms < -999999999999999 {
-                                continue; // Invalid millisecond range, try next field
+                        if let Ok(numeric) = s.parse::<i64>() {
+                            // Determine if seconds or milliseconds by magnitude
+                            if Helpers::is_millisecond_timestamp(numeric) {
+                                if numeric <= 999999999999999 && numeric >= -999999999999999 {
+                                    return Some(numeric / 1000);
+                                } else { continue; }
+                            } else {
+                                return Some(numeric);
                             }
-                            return Some(ms / 1000); // Convert ms to seconds
                         }
                         
                         // Try various date formats using parse_date_from_string

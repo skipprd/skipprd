@@ -1802,6 +1802,8 @@ mod stats_integration_tests {
 	fn emits_and_flushes_stats_locally() {
 		// Force offline so we don't hit S3 in tests
 		std::env::set_var("SKIPPR_OFFLINE", "true");
+		// Short flush for test
+		std::env::set_var("STATS_FLUSH_SECONDS", "1");
 		// Ensure worker started
 		ensure_stats_worker();
 		// Emit observations for a test namespace
@@ -1809,8 +1811,7 @@ mod stats_integration_tests {
 		for v in [3,1,5] { emit_observation(ns, "a", &json!(v)); }
 		emit_observation(ns, "s", &json!("hi"));
 		emit_observation(ns, "s", &json!("hello"));
-		// Wait longer than default flush (5s) shortened here by setting env
-		std::env::set_var("STATS_FLUSH_SECONDS", "1");
+		// Wait longer than default flush
 		std::thread::sleep(std::time::Duration::from_millis(1500));
 		// Read local stats cache
 		let path = Config::get_stats_local_path(ns);

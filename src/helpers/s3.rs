@@ -22,11 +22,11 @@ pub async fn get_s3_client() -> Arc<S3Client> {
         .clone()
 }
 
-fn get_bucket() -> String { Config::get_skippr_s3_bucket() }
+fn get_skippr_bucket() -> String { Config::get_skippr_s3_bucket() }
 
 pub async fn put_json(key: &str, value: &Value) -> Result<(), S3Error> {
     let client = get_s3_client().await;
-    let bucket = get_bucket();
+    let bucket = get_skippr_bucket();
     let body = serde_json::to_vec(value).unwrap();
 
     // Simple retry with exponential backoff and jitter for transient throttling
@@ -60,7 +60,7 @@ pub async fn put_json(key: &str, value: &Value) -> Result<(), S3Error> {
 
 pub async fn get_json(key: &str) -> Result<Value, SdkError<GetObjectError>> {
     let client = get_s3_client().await;
-    let bucket = get_bucket();
+    let bucket = get_skippr_bucket();
 
     // Retry non-404 errors with backoff; return 404 immediately
     let mut attempt: u32 = 0;
@@ -91,9 +91,107 @@ pub async fn get_json(key: &str) -> Result<Value, SdkError<GetObjectError>> {
 
 pub async fn delete_object(key: &str) -> Result<(), SdkError<DeleteObjectError>> {
     let client = get_s3_client().await;
-    let bucket = get_bucket();
+    let bucket = get_skippr_bucket();
     client.delete_object().bucket(bucket).key(key).send().await?;
     Ok(())
+}
+
+pub async fn delete_prefix(prefix: &str) -> Result<usize, String> {
+    use aws_sdk_s3::types::{Delete, ObjectIdentifier};
+    let client = get_s3_client().await;
+    let bucket = get_skippr_bucket();
+    // Safety checks
+    if prefix.is_empty() || prefix == "/" || prefix == "." || prefix == ".." {
+        return Err("Refusing to delete unsafe or empty prefix".to_string());
+    }
+    // Disallow top-level bucket wipes
+    if !prefix.contains('/') { return Err("Refusing to delete top-level prefix without '/'".to_string()); }
+    // Cap total deletes per invocation to avoid runaway operations
+    let max_objects: usize = 50_000;
+    let mut token: Option<String> = None;
+    let mut total: usize = 0;
+    loop {
+        let mut req = client.list_objects_v2().bucket(&bucket).prefix(prefix).max_keys(1000);
+        if let Some(t) = token.as_ref() { req = req.continuation_token(t); }
+        let resp = req.send().await.map_err(|e| format!("list_objects_v2 error: {:?}", e))?;
+        let keys: Vec<String> = resp
+            .contents()
+            .iter()
+            .filter_map(|o| o.key().map(|s| s.to_string()))
+            .collect();
+        if keys.is_empty() {
+            if resp.next_continuation_token().is_none() { break; }
+        } else {
+            let mut batch: Vec<ObjectIdentifier> = Vec::new();
+            for k in keys.iter() {
+                if let Ok(obj) = ObjectIdentifier::builder().key(k).build() { batch.push(obj); }
+                if batch.len() == 1000 { // S3 DeleteObjects limit
+                    let del = Delete::builder().set_objects(Some(batch)).build().map_err(|e| format!("delete build error: {:?}", e))?;
+                    client.delete_objects().bucket(&bucket).delete(del).send().await.map_err(|e| format!("delete_objects error: {:?}", e))?;
+                    total += 1000;
+                    batch = Vec::new();
+                    if total >= max_objects { break; }
+                }
+            }
+            if !batch.is_empty() {
+                let del = Delete::builder().set_objects(Some(batch)).build().map_err(|e| format!("delete build error: {:?}", e))?;
+                client.delete_objects().bucket(&bucket).delete(del).send().await.map_err(|e| format!("delete_objects error: {:?}", e))?;
+                total += keys.len() % 1000;
+            }
+        }
+        if total >= max_objects { break; }
+        if resp.next_continuation_token().is_none() { break; }
+        token = resp.next_continuation_token().map(|s| s.to_string());
+    }
+    Ok(total)
+}
+
+pub async fn delete_prefix_in_bucket(bucket: &str, prefix: &str) -> Result<usize, String> {
+    use aws_sdk_s3::types::{Delete, ObjectIdentifier};
+    let client = get_s3_client().await;
+    // Safety checks
+    if bucket.is_empty() { return Err("Bucket required".to_string()); }
+    if prefix.is_empty() || prefix == "/" || prefix == "." || prefix == ".." {
+        return Err("Refusing to delete unsafe or empty prefix".to_string());
+    }
+    if !prefix.contains('/') { return Err("Refusing to delete top-level prefix without '/'".to_string()); }
+    let max_objects: usize = 50_000;
+    let mut token: Option<String> = None;
+    let mut total: usize = 0;
+    loop {
+        let mut req = client.list_objects_v2().bucket(bucket).prefix(prefix).max_keys(1000);
+        if let Some(t) = token.as_ref() { req = req.continuation_token(t); }
+        let resp = req.send().await.map_err(|e| format!("list_objects_v2 error: {:?}", e))?;
+        let keys: Vec<String> = resp
+            .contents()
+            .iter()
+            .filter_map(|o| o.key().map(|s| s.to_string()))
+            .collect();
+        if keys.is_empty() {
+            if resp.next_continuation_token().is_none() { break; }
+        } else {
+            let mut batch: Vec<ObjectIdentifier> = Vec::new();
+            for k in keys.iter() {
+                if let Ok(obj) = ObjectIdentifier::builder().key(k).build() { batch.push(obj); }
+                if batch.len() == 1000 {
+                    let del = Delete::builder().set_objects(Some(batch)).build().map_err(|e| format!("delete build error: {:?}", e))?;
+                    client.delete_objects().bucket(bucket).delete(del).send().await.map_err(|e| format!("delete_objects error: {:?}", e))?;
+                    total += 1000;
+                    batch = Vec::new();
+                    if total >= max_objects { break; }
+                }
+            }
+            if !batch.is_empty() {
+                let del = Delete::builder().set_objects(Some(batch)).build().map_err(|e| format!("delete build error: {:?}", e))?;
+                client.delete_objects().bucket(bucket).delete(del).send().await.map_err(|e| format!("delete_objects error: {:?}", e))?;
+                total += keys.len() % 1000;
+            }
+        }
+        if total >= max_objects { break; }
+        if resp.next_continuation_token().is_none() { break; }
+        token = resp.next_continuation_token().map(|s| s.to_string());
+    }
+    Ok(total)
 }
 
 /// List up to `max` Parquet object keys under the given bucket+prefix, ordered by LastModified ascending
