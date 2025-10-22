@@ -231,28 +231,26 @@ jobs:
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
 
-#  # Chaos mode test with less data
-#  chaos_mode_test:
-#    needs:
-#      - cleanup
-#      - purge_dynamodb
-#      - linux_x86
-#    name: Chaos Mode (linux x86)
-#    runs-on:
-#      - ubuntu-latest
-#    steps:
-#      - uses: actions/checkout@v3
-#
-#      - name: Download Artifacts
-#        uses: actions/download-artifact@v4
-#
-#      - name: Test linux x86 release
-#        uses: ./.github/actions/e2e/chaos_mode
-#        with:
-#          architecture_name: linux_x86
-#          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-#          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-#          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
+     linux_x86_llm_tests:
+     needs:
+       - linux_x86
+     name: LLM functional tests (linux x86)
+     runs-on:
+       - ubuntu-latest
+     steps:
+       - uses: actions/checkout@v3
+       - name: Install system deps
+         run: |
+           sudo apt-get update
+           sudo apt-get install -y cmake
+       - name: Build with local llama feature (no model)
+         run: |
+           cargo build --features llama_cpp
+       - name: Run LLM functional tests
+         env:
+           RUST_BACKTRACE: 1
+         run: |
+           cargo test --tests -- --nocapture llm_
 
   chaos_mode_test:
     needs:

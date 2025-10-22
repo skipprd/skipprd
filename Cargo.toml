@@ -31,6 +31,7 @@ csv = "1.1.6"
 futures = "0.3.25"
 periodic = "0.1.1"
 glob = "0.3.0"
+cc = "1.2.41"
 clap = { version = "4.0.32", features = ["derive"] }
 yaml-rust = "0.4.5"
 once_cell = "1.17.0"
@@ -87,8 +88,16 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 
 [features]
-llama_cpp = []
+llama_cpp = ["llama_cpp_2"]
 
 [dev-dependencies]
 serial_test = "1.0.0"
+assert_cmd = "2"
+predicates = "3"
 httpmock = "0.7"
+
+[dependencies.llama_cpp_2]
+optional = true
+git = "https://github.com/utilityai/llama-cpp-rs.git"
+package = "llama-cpp-2"
+tag = "0.1.122"
