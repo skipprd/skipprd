@@ -23,6 +23,7 @@ use chrono::{DateTime};
 use datafusion::error::DataFusionError;
 use crate::sql::{SqlDocParser, SqlStatementDoc};
 use datafusion::prelude::{SessionConfig, ParquetReadOptions};
+use datafusion::sql::sqlparser::ast::{Ident as SqlIdent};
 use datafusion::logical_expr::Volatility;
 use datafusion::scalar::ScalarValue;
 use datafusion::arrow::array::{Float64Array, RecordBatch};
@@ -48,36 +49,51 @@ use std::collections::HashSet;
 use aws_credential_types::provider::ProvideCredentials;
 use arrow::record_batch::RecordBatch as ArrowRecordBatch;
 use arrow_schema::{Schema as ArrowSchema2, Field as ArrowField};
+use aws_sdk_s3::Client;
 
-async fn register_s3_object_store(ctx: &SessionContext, s3_loc: &str) {
+pub async fn register_s3_object_store(ctx: &SessionContext, s3_loc: &str) {
+    println!("1");
     if let Ok(u) = Url::parse(s3_loc) {
-        if u.scheme() == "s3" {
-            if let Some(bucket) = u.host_str() {
-                // Resolve credentials from AWS profiles/env via aws-config
-                let conf = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
-                let region = conf.region().map(|r| r.as_ref().to_string()).unwrap_or_else(|| std::env::var("AWS_REGION").unwrap_or_default());
-                let creds_opt = conf.credentials_provider();
-                let (ak, sk, tk) = if let Some(p) = creds_opt {
-                    match p.provide_credentials().await {
-                        Ok(c) => (c.access_key_id().to_string(), c.secret_access_key().to_string(), c.session_token().map(|t| t.to_string())),
-                        Err(_) => (String::new(), String::new(), None)
-                    }
-                } else { (String::new(), String::new(), None) };
+        println!("2");
+        if u.scheme() != "s3" { return; }
+        println!("3");
+        if let Some(bucket) = u.host_str() {
+            println!("4");
+            // Match S3 input plugin behavior: use AWS SDK defaults chain
+            let conf = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
+            let region_opt = conf.region().map(|r| r.as_ref().to_string());
+            // let creds_opt = if let Some(p) = conf.credentials_provider() {
+            //     match p.provide_credentials().await { Ok(c) => Some(c), Err(_) => None }
+            // } else { None };
 
-                let mut b = AmazonS3Builder::new().with_bucket_name(bucket);
-                if !region.is_empty() { b = b.with_region(region); }
-                if !ak.is_empty() && !sk.is_empty() { b = b.with_access_key_id(ak).with_secret_access_key(sk); }
-                if let Some(t) = tk { b = b.with_token(t); }
-                if let Ok(store) = b.build() {
-                    let base = Url::parse(&format!("s3://{}/", bucket)).unwrap_or(u.clone());
-                    let _ = ctx.runtime_env().register_object_store(&base, Arc::new(store));
+            // let s3_client = Client::new(&conf);
+
+            let creds_opt = conf.credentials_provider().as_ref().and_then(|p| {
+                match futures::executor::block_on(p.provide_credentials()) {
+                    Ok(c) => Some(c),
+                    Err(_) => None,
                 }
+            });
+
+            println!("Credentials for S3 object store: {}", if creds_opt.is_some() { "found" } else { "not found, using anonymous or role-based access" });
+
+            let mut b = AmazonS3Builder::new().with_bucket_name(bucket);
+            if let Some(region) = region_opt { b = b.with_region(region); }
+            if let Some(c) = creds_opt {
+                b = b.with_access_key_id(c.access_key_id().to_string())
+                     .with_secret_access_key(c.secret_access_key().to_string());
+                if let Some(t) = c.session_token() { b = b.with_token(t.to_string()); }
+            }
+
+            if let Ok(store) = b.build() {
+                let base = Url::parse(&format!("s3://{}/", bucket)).unwrap_or(u.clone());
+                let _ = ctx.runtime_env().register_object_store(&base, Arc::new(store));
             }
         }
     }
 }
 
-async fn register_semantic_and_catalog(ctx: &SessionContext) {
+pub async fn register_semantic_and_catalog(ctx: &SessionContext) {
     // Read semantic and catalog YAML/JSON files from local cache if present
     let data_dir = Config::get_data_dir();
     // let base_dir = Config::get_pipeline_data_dir(); // avoid scanning global base to prevent stray dirs
@@ -90,13 +106,15 @@ async fn register_semantic_and_catalog(ctx: &SessionContext) {
     ]));
     let mut sem_batches: Vec<ArrowRecordBatch> = Vec::new();
 
-    // catalog table schema: namespace, entity, field, description, synonyms
+    // catalog table schema: namespace, entity, field, description, synonyms, pii_sensitivity, units_or_format
     let cat_schema = Arc::new(ArrowSchema2::new(vec![
         ArrowField::new("namespace", ArrowDataType::Utf8, false),
         ArrowField::new("entity", ArrowDataType::Utf8, true),
         ArrowField::new("field", ArrowDataType::Utf8, false),
         ArrowField::new("description", ArrowDataType::Utf8, true),
         ArrowField::new("synonyms", ArrowDataType::Utf8, true),
+        ArrowField::new("pii_sensitivity", ArrowDataType::Utf8, true),
+        ArrowField::new("units_or_format", ArrowDataType::Utf8, true),
     ]));
     let mut cat_batches: Vec<ArrowRecordBatch> = Vec::new();
 
@@ -104,7 +122,7 @@ async fn register_semantic_and_catalog(ctx: &SessionContext) {
     let cache_dirs = vec![format!("{}/catalog_cache", data_dir)];
 
     let mut sem_rows_all: Vec<(String,String,String)> = Vec::new();
-    let mut cat_rows_all: Vec<(String,Option<String>,String,Option<String>,Option<String>)> = Vec::new();
+    let mut cat_rows_all: Vec<(String,Option<String>,String,Option<String>,Option<String>,Option<String>,Option<String>)> = Vec::new();
 
     for cache_dir in cache_dirs {
         let entries = match std::fs::read_dir(&cache_dir) { Ok(rd) => rd, Err(_) => continue };
@@ -113,7 +131,7 @@ async fn register_semantic_and_catalog(ctx: &SessionContext) {
                 let path = e.path();
                 if !(name.ends_with(".yaml") || name.ends_with(".json")) { continue; }
                 let content = match std::fs::read_to_string(&path) { Ok(s) => s, Err(_) => continue };
-                if name.contains("_semantic.") {
+                if name.contains("_semantic.") || name == "semantic.yaml" || name == "semantic.json" {
                     // parse semantic file
                     let mut rows: Vec<(String,String,String)> = Vec::new();
                     if let Ok(v) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
@@ -138,8 +156,8 @@ async fn register_semantic_and_catalog(ctx: &SessionContext) {
                         }
                     }
                     sem_rows_all.extend(rows);
-                } else if name.contains("_catalog.") {
-                    let mut rows: Vec<(String,Option<String>,String,Option<String>,Option<String>)> = Vec::new();
+                } else if name.contains("_catalog.") || name == "catalog.yaml" || name == "catalog.json" {
+                    let mut rows: Vec<(String,Option<String>,String,Option<String>,Option<String>,Option<String>,Option<String>)> = Vec::new();
                     if let Ok(v) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
                         if let Some(ns) = v.get("namespace").and_then(|x| x.as_str()) {
                             if let Some(fields) = v.get("fields").and_then(|x| x.as_sequence()) {
@@ -147,8 +165,10 @@ async fn register_semantic_and_catalog(ctx: &SessionContext) {
                                     let entity = f.get("entity").and_then(|x| x.as_str()).map(|s| s.to_string());
                                     let name = f.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
                                     let desc = f.get("description").and_then(|x| x.as_str()).map(|s| s.to_string());
-                                    let syns = if let Some(arr) = f.get("synonyms").and_then(|x| x.as_sequence()) { Some(arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join("|")) } else { None };
-                                    if !name.is_empty() { rows.push((ns.to_string(), entity, name, desc, syns)); }
+                                    let syns = if let Some(arr) = f.get("synonyms").and_then(|x| x.as_sequence()) { Some(arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect::<Vec<String>>().join(", ")) } else { None };
+                                    let pii = f.get("pii_sensitivity").and_then(|x| x.as_str()).map(|s| s.to_string());
+                                    let units = f.get("units_or_format").and_then(|x| x.as_str()).map(|s| s.to_string());
+                                    if !name.is_empty() { rows.push((ns.to_string(), entity, name, desc, syns, pii, units)); }
                                 }
                             }
                         }
@@ -159,8 +179,10 @@ async fn register_semantic_and_catalog(ctx: &SessionContext) {
                                     let entity = f.get("entity").and_then(|x| x.as_str()).map(|s| s.to_string());
                                     let name = f.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
                                     let desc = f.get("description").and_then(|x| x.as_str()).map(|s| s.to_string());
-                                    let syns = if let Some(arr) = f.get("synonyms").and_then(|x| x.as_array()) { Some(arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join("|")) } else { None };
-                                    if !name.is_empty() { rows.push((ns.to_string(), entity.clone(), name, desc.clone(), syns.clone())); }
+                                    let syns = if let Some(arr) = f.get("synonyms").and_then(|x| x.as_array()) { Some(arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect::<Vec<String>>().join(", ")) } else { None };
+                                    let pii = f.get("pii_sensitivity").and_then(|x| x.as_str()).map(|s| s.to_string());
+                                    let units = f.get("units_or_format").and_then(|x| x.as_str()).map(|s| s.to_string());
+                                    if !name.is_empty() { rows.push((ns.to_string(), entity.clone(), name, desc.clone(), syns.clone(), pii.clone(), units.clone())); }
                                 }
                             }
                         }
@@ -184,7 +206,10 @@ async fn register_semantic_and_catalog(ctx: &SessionContext) {
                 if let Ok(rd) = std::fs::read_dir(&cache_dir) {
                     for e in rd.flatten() {
                         if let Ok(name) = e.file_name().into_string() {
-                            if let Some(ns) = name.strip_suffix("_stats.json") {
+                            // Support both legacy "<ns>_stats.json" and new "stats_<ns>.json"
+                            let ns_opt = if let Some(ns) = name.strip_suffix("_stats.json") { Some(ns.to_string()) }
+                                else if name.starts_with("stats_") && name.ends_with(".json") { Some(name[6..name.len()-5].to_string()) } else { None };
+                            if let Some(ns) = ns_opt {
                                 let key = format!("{}/{}/{}/semantic/{}.yaml", tenant, workspace, pipeline, ns);
                                 if let Ok(val) = crate::helpers::s3::get_json(&key).await {
                                     if let Some(ns2) = val.get("namespace").and_then(|x| x.as_str()) {
@@ -207,7 +232,10 @@ async fn register_semantic_and_catalog(ctx: &SessionContext) {
                 if let Ok(rd) = std::fs::read_dir(&cache_dir) {
                     for e in rd.flatten() {
                         if let Ok(name) = e.file_name().into_string() {
-                            if let Some(ns) = name.strip_suffix("_stats.json") {
+                            // Support both legacy "<ns>_stats.json" and new "stats_<ns>.json"
+                            let ns_opt = if let Some(ns) = name.strip_suffix("_stats.json") { Some(ns.to_string()) }
+                                else if name.starts_with("stats_") && name.ends_with(".json") { Some(name[6..name.len()-5].to_string()) } else { None };
+                            if let Some(ns) = ns_opt {
                                 let key = format!("{}/{}/{}/catalog/{}.yaml", tenant, workspace, pipeline, ns);
                                 if let Ok(val) = crate::helpers::s3::get_json(&key).await {
                                     if let Some(ns2) = val.get("namespace").and_then(|x| x.as_str()) {
@@ -217,7 +245,9 @@ async fn register_semantic_and_catalog(ctx: &SessionContext) {
                                                 let name = f.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
                                                 let desc = f.get("description").and_then(|x| x.as_str()).map(|s| s.to_string());
                                                 let syns = if let Some(arr) = f.get("synonyms").and_then(|x| x.as_array()) { Some(arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join("|")) } else { None };
-                                                if !name.is_empty() { cat_rows_all.push((ns2.to_string(), entity.clone(), name, desc.clone(), syns.clone())); }
+                                                let pii = f.get("pii_sensitivity").and_then(|x| x.as_str()).map(|s| s.to_string());
+                                                let units = f.get("units_or_format").and_then(|x| x.as_str()).map(|s| s.to_string());
+                                                if !name.is_empty() { cat_rows_all.push((ns2.to_string(), entity.clone(), name, desc.clone(), syns.clone(), pii.clone(), units.clone())); }
                                             }
                                         }
                                     }
@@ -244,7 +274,9 @@ async fn register_semantic_and_catalog(ctx: &SessionContext) {
         let field_arr: ArrayRef = Arc::new(StringArray::from(cat_rows_all.iter().map(|r| r.2.clone()).collect::<Vec<_>>()));
         let desc_arr: ArrayRef = Arc::new(StringArray::from(cat_rows_all.iter().map(|r| r.3.clone().unwrap_or_default()).collect::<Vec<_>>()));
         let syn_arr: ArrayRef = Arc::new(StringArray::from(cat_rows_all.iter().map(|r| r.4.clone().unwrap_or_default()).collect::<Vec<_>>()));
-        if let Ok(b) = ArrowRecordBatch::try_new(cat_schema.clone(), vec![ns_arr, entity_arr, field_arr, desc_arr, syn_arr]) { cat_batches.push(b); }
+        let pii_arr: ArrayRef = Arc::new(StringArray::from(cat_rows_all.iter().map(|r| r.5.clone().unwrap_or_default()).collect::<Vec<_>>()));
+        let units_arr: ArrayRef = Arc::new(StringArray::from(cat_rows_all.iter().map(|r| r.6.clone().unwrap_or_default()).collect::<Vec<_>>()));
+        if let Ok(b) = ArrowRecordBatch::try_new(cat_schema.clone(), vec![ns_arr, entity_arr, field_arr, desc_arr, syn_arr, pii_arr, units_arr]) { cat_batches.push(b); }
     }
 
     if !sem_batches.is_empty() { let _ = ctx.register_table("semantic", Arc::new(MemTable::try_new(sem_schema, vec![sem_batches]).unwrap())); }
@@ -302,6 +334,42 @@ fn as_string_array(array: &ArrayRef) -> Result<&StringArray, DataFusionError> {
         Ok(array.as_any().downcast_ref::<StringArray>().unwrap())
     } else {
         Err(DataFusionError::Internal("Expected StringArray".to_string()))
+    }
+}
+
+fn print_sql_error_plain<E: std::fmt::Display>(err: &E) {
+    let msg = err.to_string();
+    // DataFusion commonly reports: SchemaError(FieldNotFound { field: Column { relation: None, name: "time" }, valid_fields: [...] })
+    if msg.contains("FieldNotFound") && msg.contains("valid_fields") {
+        // Try to extract missing field name
+        let missing = if let Some(start) = msg.find("name: \"") { let s = start + 7; if let Some(end) = msg[s..].find("\"") { &msg[s..s+end] } else { "" } } else { "" };
+        // Extract valid field names within brackets
+        let hint = if let Some(vs) = msg.find("valid_fields: [") {
+            let s = vs + 15; if let Some(end) = msg[s..].find("]") { msg[s..s+end].to_string() } else { String::new() }
+        } else { String::new() };
+        if !missing.is_empty() {
+            eprintln!("ERROR: column \"{}\" does not exist", missing);
+        } else {
+            eprintln!("ERROR: column does not exist");
+        }
+        if !hint.is_empty() {
+            // Simplify hint list: pull out names=... substrings
+            let mut cols: Vec<String> = Vec::new();
+            for seg in hint.split("Column ") {
+                if let Some(npos) = seg.find("name: ") {
+                    let part = &seg[npos + 6..];
+                    let trimmed = part.trim();
+                    if trimmed.starts_with("\"") {
+                        if let Some(endq) = trimmed[1..].find("\"") { cols.push(trimmed[1..1+endq].to_string()); }
+                    }
+                }
+            }
+            if !cols.is_empty() {
+                eprintln!("HINT: available columns are: {}", cols.join(", "));
+            }
+        }
+    } else {
+        eprintln!("ERROR: {}", msg);
     }
 }
 
@@ -940,18 +1008,10 @@ pub async fn query(sql_str: &str) {
                 if upper.starts_with("SHOW STATS FOR ") {
                     let name = trimmed["SHOW STATS FOR ".len()..].trim();
                     let ns = name.trim_matches('`').trim_matches('"');
-                    // Prefer local cache file, fallback to S3 if present
-                    let path = Config::get_stats_local_path(ns);
-                    if let Ok(contents) = std::fs::read_to_string(&path) {
-                        println!("{}", contents);
-                        return;
-                    }
-                    let s3_key = format!("{}/{}/{}/stats/{}.json", Config::get_tenant(), Config::get_workspace_name(), Config::get_pipeline_name(), ns);
-                    if let Ok(val) = crate::helpers::s3::get_json(&s3_key).await {
+                    if let Some(val) = Config::read_namespace_stats_async(ns).await {
                         println!("{}", serde_json::to_string_pretty(&val).unwrap_or_default());
                         return;
                     }
-                    println!("{}", "{}");
                     return;
                 }
             }
@@ -1061,11 +1121,30 @@ pub async fn query(sql_str: &str) {
             if let Ok(mut sp) = SParser::new(sql_str) {
                 if let Ok(stmt) = sp.parse_statement() {
                     match stmt {
-                        Statement::ShowSemantic { pipeline: _pl, namespace } => {
-                            let _ = show_semantic(&ctx, Some(namespace.as_deref().unwrap_or(""))).await; return;
+                        Statement::ShowStats { pipeline, namespace } => {
+                            // Establish pipeline context; default namespace to pipeline if not provided
+                            PIPELINE_NAME.write().clear(); PIPELINE_NAME.write().push_str(&pipeline);
+                            Config::init().await;
+                            let ns = namespace.clone().unwrap_or_else(|| pipeline.clone());
+                            if let Some(val) = Config::read_namespace_stats_async(&ns).await {
+                                println!("{}", serde_json::to_string_pretty(&val).unwrap_or_default());
+                            } else {
+                                println!("No stats found for namespace '{}'.", ns);
+                            }
+                            return;
                         }
-                        Statement::ShowCatalog { pipeline: _pl, namespace } => {
-                            let _ = show_catalog(&ctx, Some(namespace.as_deref().unwrap_or(""))).await; return;
+                        Statement::ShowSemantic { pipeline, namespace } => {
+                            // Establish pipeline context (pipeline is the dataset); namespace may further scope
+                            PIPELINE_NAME.write().clear(); PIPELINE_NAME.write().push_str(&pipeline);
+                            Config::init().await;
+                            register_semantic_and_catalog(&ctx).await;
+                            let _ = show_semantic(&ctx, namespace.as_deref()).await; return;
+                        }
+                        Statement::ShowCatalog { pipeline, namespace } => {
+                            PIPELINE_NAME.write().clear(); PIPELINE_NAME.write().push_str(&pipeline);
+                            Config::init().await;
+                            register_semantic_and_catalog(&ctx).await;
+                            let _ = show_catalog(&ctx, namespace.as_deref()).await; return;
                         }
                         _ => {}
                     }
@@ -1435,20 +1514,26 @@ pub async fn query(sql_str: &str) {
             // Short-circuit for non-TUI plain mode
             let plain = match CLI_MODE.read().clone() { Mode::Query(QueryOptions { plain, .. }) => plain, _ => false };
             if plain {
-                let df = ctx.sql(&rewritten_sql).await.unwrap();
-                let res = df.collect().await.unwrap();
-                for batch in &res {
-                    let schema = batch.schema();
-                    let headers: Vec<String> = schema.fields().iter().map(|f| f.name().to_string()).collect();
-                    println!("{}", headers.join(","));
-                    let cols = batch.columns().len();
-                    for row in 0..batch.num_rows() {
-                        let mut parts: Vec<String> = Vec::with_capacity(cols);
-                        for col in 0..cols {
-                            parts.push(crate::sql::tui::value_to_string(batch.column(col).as_ref(), row));
+                match ctx.sql(&rewritten_sql).await {
+                    Ok(df) => match df.collect().await {
+                        Ok(res) => {
+                            for batch in &res {
+                                let schema = batch.schema();
+                                let headers: Vec<String> = schema.fields().iter().map(|f| f.name().to_string()).collect();
+                                println!("{}", headers.join(","));
+                                let cols = batch.columns().len();
+                                for row in 0..batch.num_rows() {
+                                    let mut parts: Vec<String> = Vec::with_capacity(cols);
+                                    for col in 0..cols {
+                                        parts.push(crate::sql::tui::value_to_string(batch.column(col).as_ref(), row));
+                                    }
+                                    println!("{}", parts.join(","));
+                                }
+                            }
                         }
-                        println!("{}", parts.join(","));
-                    }
+                        Err(e) => { print_sql_error_plain(&e); }
+                    },
+                    Err(e) => { print_sql_error_plain(&e); }
                 }
                 return;
             }
@@ -1570,7 +1655,11 @@ async fn show_stats(ctx: &SessionContext, pipeline: &str, namespace: Option<&str
 
 async fn show_semantic(ctx: &SessionContext, namespace: Option<&str>) -> Result<(), DataFusionError> {
     let ns = namespace.unwrap_or("").replace('"', "");
-    let sql = if ns.is_empty() { "SELECT namespace, field, role FROM semantic".to_string() } else { format!("SELECT namespace, field, role FROM semantic WHERE namespace='{}'", ns) };
+    let sql = if ns.is_empty() {
+        "SELECT namespace, field, role FROM semantic ORDER BY namespace, field".to_string()
+    } else {
+        format!("SELECT namespace, field, role FROM semantic WHERE namespace='{}' ORDER BY field", ns)
+    };
     let df = ctx.sql(&sql).await?;
     let batches = df.collect().await?;
     if ns.is_empty() { println!("Semantic data:"); } else { println!("Semantic data for namespace '{}':", ns); }
@@ -1580,7 +1669,21 @@ async fn show_semantic(ctx: &SessionContext, namespace: Option<&str>) -> Result<
 
 async fn show_catalog(ctx: &SessionContext, namespace: Option<&str>) -> Result<(), DataFusionError> {
     let ns = namespace.unwrap_or("").replace('"', "");
-    let sql = if ns.is_empty() { "SELECT namespace, entity, field, description, synonyms FROM catalog".to_string() } else { format!("SELECT namespace, entity, field, description, synonyms FROM catalog WHERE namespace='{}'", ns) };
+    // If a description exists in catalog.yaml, print it first
+    if !ns.is_empty() {
+        let path = Config::get_catalog_local_path(&ns);
+        if let Ok(s) = std::fs::read_to_string(&path) {
+            if let Ok(cat) = serde_yaml::from_str::<crate::semantics::model::DataCatalog>(&s) {
+                if let Some(d) = cat.description.as_ref() { if !d.trim().is_empty() { println!("Description: {}", d); } }
+            }
+        }
+    }
+    // Show dataset description (if present) and fields
+    let sql = if ns.is_empty() {
+        "SELECT namespace, entity, field, coalesce(description,'') AS description, coalesce(synonyms,'') AS synonyms FROM catalog ORDER BY namespace, field".to_string()
+    } else {
+        format!("SELECT namespace, entity, field, coalesce(description,'') AS description, coalesce(synonyms,'') AS synonyms FROM catalog WHERE namespace='{}' ORDER BY field", ns)
+    };
     let df = ctx.sql(&sql).await?;
     let batches = df.collect().await?;
     if ns.is_empty() { println!("Catalog data:"); } else { println!("Catalog data for namespace '{}':", ns); }

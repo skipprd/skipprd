@@ -1778,11 +1778,30 @@ impl Config {
 
     pub fn write_namespace_stats_sync(namespace: &str, stats: &crate::discover::stats::NamespaceStats) {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.block_on(Self::write_namespace_stats_async(namespace, stats));
+            // Already in a runtime: spawn fire-and-forget to avoid blocking
+            let ns = namespace.to_string();
+            let snapshot = stats.clone();
+            handle.spawn(async move { Self::write_namespace_stats_async(&ns, &snapshot).await; });
         } else {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
             rt.block_on(Self::write_namespace_stats_async(namespace, stats));
         }
+    }
+
+    // Unified read helper: S3-first, fallback to local cache, consistent naming
+    pub async fn read_namespace_stats_async(namespace: &str) -> Option<serde_json::Value> {
+        let tenant = Self::get_tenant();
+        let workspace = Self::get_workspace_name();
+        let pipeline = Self::get_pipeline_name();
+        let s3_key = format!("{}/{}/{}/stats/{}.json", tenant, workspace, pipeline, namespace);
+        if Self::truth_value(&Self::getenv("SKIPPR_OFFLINE", "false")) == false {
+            if let Ok(val) = crate::helpers::s3::get_json(&s3_key).await { return Some(val); }
+        }
+        let path = Self::get_stats_local_path(namespace);
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&contents) { return Some(v); }
+        }
+        None
     }
 
     pub fn stats_flush_seconds() -> u64 {
@@ -1801,64 +1820,148 @@ impl Config {
         let cache_dir = Self::get_pipeline_cache_dir();
         let cache_dir = format!("{}/catalog_cache", cache_dir);
         let _ = std::fs::create_dir_all(&cache_dir);
-        format!("{}/{}_stats.json", cache_dir, namespace)
+        format!("{}/stats.json", cache_dir)
     }
 
     pub fn get_semantic_local_path(namespace: &str) -> String {
         let cache_dir = Self::get_pipeline_cache_dir();
         let cache_dir = format!("{}/catalog_cache", cache_dir);
         let _ = std::fs::create_dir_all(&cache_dir);
-        format!("{}/{}_semantic.yaml", cache_dir, namespace)
+        format!("{}/semantic.yaml", cache_dir)
     }
 
     pub fn get_catalog_local_path(namespace: &str) -> String {
         let cache_dir = Self::get_pipeline_cache_dir();
         let cache_dir = format!("{}/catalog_cache", cache_dir);
         let _ = std::fs::create_dir_all(&cache_dir);
-        format!("{}/{}_catalog.yaml", cache_dir, namespace)
+        format!("{}/catalog.yaml", cache_dir)
     }
 
     pub fn catalog_llm_enabled() -> bool {
-        Self::truth_value(&Self::getenv("CATALOG_LLM_ENABLED", "false"))
+        Self::truth_value(&Self::getenv("CATALOG_LLM_ENABLED", "true"))
     }
 
     pub async fn write_semantic_async(namespace: &str, semantic: &crate::semantics::model::SemanticModel) {
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+        use once_cell::sync::Lazy as OnceLazy;
+        static SEMANTIC_LOCKS: OnceLazy<dashmap::DashMap<String, Arc<Mutex<()>>>> = OnceLazy::new(|| dashmap::DashMap::new());
+        let entry = SEMANTIC_LOCKS.entry(namespace.to_string()).or_insert_with(|| Arc::new(Mutex::new(())));
+        let guard = entry.value().clone().lock_owned().await;
+        println!("c");
         let tenant = Self::get_tenant();
         let workspace = Self::get_workspace_name();
         let pipeline = Self::get_pipeline_name();
         let s3_key = format!("{}/{}/{}/semantic/{}.yaml", tenant, workspace, pipeline, namespace);
-        let yaml = match serde_yaml::to_string(semantic) { Ok(s) => s, Err(e) => { println!("Failed to serialize semantic: {}", e); return; } };
+        let yaml = match serde_yaml::to_string(semantic) { Ok(s) => s, Err(e) => {
+            println!("Failed to serialize semantic: {}", e); drop(guard); return; }
+        };
+        println!("c0");
         if Self::truth_value(&Self::getenv("SKIPPR_OFFLINE", "false")) == false {
             let value = serde_yaml::from_str::<serde_yaml::Value>(&yaml).unwrap_or(serde_yaml::Value::Null);
             let json_equiv = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
-            let _ = crate::helpers::s3::put_json(&s3_key, &json_equiv).await;
+            // Best-effort S3 upload with timeout; never block local write
+            let fut = crate::helpers::s3::put_json(&s3_key, &json_equiv);
+            match tokio::time::timeout(std::time::Duration::from_secs(2), fut).await {
+                Ok(Ok(_)) => { /* uploaded */ }
+                Ok(Err(e)) => { if Self::debug_enabled() { println!("semantic S3 upload failed: {:?}", e); } }
+                Err(_) => { if Self::debug_enabled() { println!("semantic S3 upload timed out, continuing to local write"); } }
+            }
         }
+        println!("c1");
         let _ = std::fs::write(Self::get_semantic_local_path(namespace), yaml);
+        drop(guard);
     }
 
     pub async fn write_catalog_async(namespace: &str, catalog: &crate::semantics::model::DataCatalog) {
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+        use once_cell::sync::Lazy as OnceLazy;
+        static CATALOG_LOCKS: OnceLazy<dashmap::DashMap<String, Arc<Mutex<()>>>> = OnceLazy::new(|| dashmap::DashMap::new());
+        let entry = CATALOG_LOCKS.entry(namespace.to_string()).or_insert_with(|| Arc::new(Mutex::new(())));
+        let guard = entry.value().clone().lock_owned().await;
         let tenant = Self::get_tenant();
         let workspace = Self::get_workspace_name();
         let pipeline = Self::get_pipeline_name();
         let s3_key = format!("{}/{}/{}/catalog/{}.yaml", tenant, workspace, pipeline, namespace);
-        let yaml = match serde_yaml::to_string(catalog) { Ok(s) => s, Err(e) => { println!("Failed to serialize catalog: {}", e); return; } };
+        // Merge with existing local or S3 copy to avoid clobbering enriched fields
+        // Prefer local cache; fallback to S3
+        let mut merged = catalog.clone();
+        {
+            let path = Self::get_catalog_local_path(namespace);
+            if let Ok(s) = std::fs::read_to_string(&path) {
+                if let Ok(existing) = serde_yaml::from_str::<crate::semantics::model::DataCatalog>(&s) {
+                    if merged.description.is_none() && existing.description.is_some() { merged.description = existing.description.clone(); }
+                    let mut map_new: std::collections::HashMap<String, crate::semantics::model::CatalogField> = merged.fields.iter().map(|f| (f.name.clone(), f.clone())).collect();
+                    for f in existing.fields.iter() {
+                        if let Some(nf) = map_new.get_mut(&f.name) {
+                            if nf.description.is_none() { nf.description = f.description.clone(); }
+                            if nf.synonyms.is_none() { nf.synonyms = f.synonyms.clone(); }
+                            if nf.pii_sensitivity.is_none() { nf.pii_sensitivity = f.pii_sensitivity.clone(); }
+                            if nf.units_or_format.is_none() { nf.units_or_format = f.units_or_format.clone(); }
+                            if nf.entity.is_empty() { nf.entity = f.entity.clone(); }
+                        } else {
+                            map_new.insert(f.name.clone(), f.clone());
+                        }
+                    }
+                    merged.fields = map_new.into_values().collect();
+                }
+            } else if Self::truth_value(&Self::getenv("SKIPPR_OFFLINE", "false")) == false {
+                if let Ok(val) = crate::helpers::s3::get_json(&s3_key).await {
+                    if let Ok(existing) = serde_json::from_value::<crate::semantics::model::DataCatalog>(val) {
+                        if merged.description.is_none() && existing.description.is_some() { merged.description = existing.description.clone(); }
+                        let mut map_new: std::collections::HashMap<String, crate::semantics::model::CatalogField> = merged.fields.iter().map(|f| (f.name.clone(), f.clone())).collect();
+                        for f in existing.fields.iter() {
+                            if let Some(nf) = map_new.get_mut(&f.name) {
+                                if nf.description.is_none() { nf.description = f.description.clone(); }
+                                if nf.synonyms.is_none() { nf.synonyms = f.synonyms.clone(); }
+                                if nf.pii_sensitivity.is_none() { nf.pii_sensitivity = f.pii_sensitivity.clone(); }
+                                if nf.units_or_format.is_none() { nf.units_or_format = f.units_or_format.clone(); }
+                                if nf.entity.is_empty() { nf.entity = f.entity.clone(); }
+                            } else {
+                                map_new.insert(f.name.clone(), f.clone());
+                            }
+                        }
+                        merged.fields = map_new.into_values().collect();
+                    }
+                }
+            }
+        }
+        let yaml = match serde_yaml::to_string(&merged) { Ok(s) => s, Err(e) => { println!("Failed to serialize catalog: {}", e); drop(guard); return; } };
         if Self::truth_value(&Self::getenv("SKIPPR_OFFLINE", "false")) == false {
             let value = serde_yaml::from_str::<serde_yaml::Value>(&yaml).unwrap_or(serde_yaml::Value::Null);
             let json_equiv = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
-            let _ = crate::helpers::s3::put_json(&s3_key, &json_equiv).await;
+            // Best-effort S3 upload with timeout; never block local write
+            let fut = crate::helpers::s3::put_json(&s3_key, &json_equiv);
+            match tokio::time::timeout(std::time::Duration::from_secs(2), fut).await {
+                Ok(Ok(_)) => { /* uploaded */ }
+                Ok(Err(e)) => { if Self::debug_enabled() { println!("catalog S3 upload failed: {:?}", e); } }
+                Err(_) => { if Self::debug_enabled() { println!("catalog S3 upload timed out, continuing to local write"); } }
+            }
         }
+        println!("d");
+        println!("Writing catalog to local path: {}", Self::get_catalog_local_path(namespace));
+        // println!("File content:\n{}", yaml);
         let _ = std::fs::write(Self::get_catalog_local_path(namespace), yaml);
+        drop(guard);
     }
 
     pub fn write_semantic_and_catalog_sync(namespace: &str, semantic: &crate::semantics::model::SemanticModel, catalog: &crate::semantics::model::DataCatalog) {
+        println!("bbbbb");
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.block_on(async {
-                Self::write_semantic_async(namespace, semantic).await;
-                Self::write_catalog_async(namespace, catalog).await;
+            println!("b1");
+            // If already in a runtime, spawn and return (fire-and-forget) to avoid blocking/panic
+            let ns = namespace.to_string();
+            let sem = semantic.clone();
+            let cat = catalog.clone();
+            handle.spawn(async move {
+                Self::write_semantic_async(&ns, &sem).await;
+                Self::write_catalog_async(&ns, &cat).await;
             });
         } else {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
             rt.block_on(async {
+                println!("b2");
                 Self::write_semantic_async(namespace, semantic).await;
                 Self::write_catalog_async(namespace, catalog).await;
             });
@@ -2043,14 +2146,14 @@ impl Config {
 
     pub fn pipeline_llm_enabled() -> bool {
         // env override
-        if Self::getenv("LLM_ENABLED", "").len() > 0 { return Self::truth_value(&Self::getenv("LLM_ENABLED", "false")); }
+        if Self::getenv("LLM_ENABLED", "").len() > 0 { return Self::truth_value(&Self::getenv("LLM_ENABLED", "true")); }
         // pipeline setting
         let cfg = Self::get();
         let pn = PIPELINE_NAME.read();
         if let Some(p) = cfg.pipelines.get(pn.as_str()) {
-            if let Some(sl) = &p.semantic_layer { return sl.llm_enabled.unwrap_or(false); }
+            if let Some(sl) = &p.semantic_layer { return sl.llm_enabled.unwrap_or(true); }
         }
-        false
+        true
     }
 
     pub fn pipeline_llm_debounce_ms() -> u64 {

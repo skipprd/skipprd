@@ -32,11 +32,14 @@ pub struct CatalogField {
     pub name: String,
     pub description: Option<String>,
     pub synonyms: Option<Vec<String>>,
+    pub pii_sensitivity: Option<String>,
+    pub units_or_format: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DataCatalog {
     pub namespace: String,
+    pub description: Option<String>,
     pub fields: Vec<CatalogField>,
 }
 
@@ -63,7 +66,7 @@ mod tests {
         let cat = DataCatalog {
             namespace: "ns".into(),
             fields: vec![
-                CatalogField { entity: "".into(), name: "id".into(), description: Some("identifier".into()), synonyms: Some(vec!["key".into()]) }
+                CatalogField { entity: "".into(), name: "id".into(), description: Some("identifier".into()), synonyms: Some(vec!["key".into()]), pii_sensitivity: None, units_or_format: None }
             ],
         };
         let y2 = serde_yaml::to_string(&cat).unwrap();
@@ -74,7 +77,7 @@ mod tests {
     #[test]
     fn link_integrity_catalog_fields_exist_in_semantic() {
         let sem = SemanticModel { namespace: "ns".into(), fields: vec![SemanticField { name: "a".into(), role: SemanticFieldRole::Id }], dimensions: vec!["a".into()], metrics: vec![] };
-        let cat = DataCatalog { namespace: "ns".into(), fields: vec![CatalogField { entity: "".into(), name: "a".into(), description: None, synonyms: None }] };
+        let cat = DataCatalog { namespace: "ns".into(), fields: vec![CatalogField { entity: "".into(), name: "a".into(), description: None, synonyms: None, pii_sensitivity: None, units_or_format: None }] };
         let sem_names: std::collections::HashSet<String> = sem.fields.iter().map(|f| f.name.clone()).collect();
         for f in cat.fields.iter() {
             assert!(sem_names.contains(&f.name));

@@ -63,21 +63,39 @@ fn enrich_llm(ns: &str, stats: &NamespaceStats) {
     let semantic = crate::semantics::infer::infer_semantic_model(ns);
     let mut catalog = crate::semantics::model::DataCatalog {
         namespace: ns.to_string(),
+        description: None,
         fields: semantic.fields.iter().map(|f| crate::semantics::model::CatalogField {
             entity: String::new(),
             name: f.name.clone(),
             description: None,
             synonyms: None,
+            pii_sensitivity: None,
+            units_or_format: None,
         }).collect(),
     };
     if Config::pipeline_llm_enabled() && Config::catalog_llm_enabled() {
         let llm = crate::llm::create_llm(&crate::llm::config_from_env());
-        // Build a single prompt batching all fields for this namespace
-        let mut field_names: Vec<String> = catalog.fields.iter().map(|f| f.name.clone()).collect();
-        field_names.sort();
-        let list = field_names.iter().map(|n| format!("- {}", n)).collect::<Vec<_>>().join("\n");
+        // Build a single prompt that includes field names, roles, stats and a few sample values
+        let mut field_lines: Vec<String> = Vec::new();
+        for f in &catalog.fields {
+            let role = semantic.fields.iter().find(|sf| sf.name == f.name).map(|sf| format!("{:?}", sf.role)).unwrap_or_else(|| "Unknown".to_string());
+            let stats_line = if let Some(fs) = snapshot.fields.get(&f.name) {
+                let mut parts: Vec<String> = Vec::new();
+                if let Some(mi) = fs.min_numeric { parts.push(format!("min={}", mi)); }
+                if let Some(ma) = fs.max_numeric { parts.push(format!("max={}", ma)); }
+                if let Some(dl) = fs.min_len { parts.push(format!("min_len={}", dl)); }
+                if let Some(xl) = fs.max_len { parts.push(format!("max_len={}", xl)); }
+                if let Some(d) = fs.approx_distinct { parts.push(format!("approx_distinct={}", d)); }
+                let ex = fs.examples();
+                let examples = if !ex.is_empty() { format!(" examples=[{}]", ex.iter().take(5).map(|e| e.replace('\n', " ")).collect::<Vec<_>>().join(", ")) } else { String::new() };
+                if parts.is_empty() && examples.is_empty() { String::new() } else { format!(" stats: {}{}", parts.join(", "), examples) }
+            } else { String::new() };
+            field_lines.push(format!("- {} role:{}{}", f.name, role, stats_line));
+        }
+        field_lines.sort();
+        let list = field_lines.join("\n");
         let prompt = format!(
-            "You are creating a data catalog. For each field name below, produce one line in the format:\n<field>: description: <short description> | synonyms: a,b,c\nFields:\n{}",
+            "You are creating a data catalog. Using the field name, semantic role, basic stats and a few sample values, write a short, clear description, synonyms, PII sensitivity (none, low, medium, high), and units/format if detectable.\nRespond with one line per field in this exact format:\n<field>: description: <short description> | synonyms: a,b,c | pii: <none|low|medium|high> | units: <units or format>\nFields:\n{}",
             list
         );
         match llm.chat(&[crate::llm::ChatMessage { role: "user".into(), content: prompt }]) {
@@ -93,7 +111,14 @@ fn enrich_llm(ns: &str, stats: &NamespaceStats) {
                     for p in parts {
                         let s = p.trim();
                         if let Some(r) = s.strip_prefix("description:") { cf.description = Some(r.trim().to_string()); }
-                        if let Some(r) = s.strip_prefix("synonyms:") { cf.synonyms = Some(r.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()); }
+                        // Replace escape chars "\" in synonyms as llm seems to add them
+                        if let Some(r) = s.strip_prefix("synonyms:") { cf.synonyms = Some(r.replace('\\', "").split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()); }
+                        if let Some(r) = s.strip_prefix("pii:") { cf.pii_sensitivity = Some(r.trim().to_string()); }
+                        if let Some(r) = s.strip_prefix("units:") { let v = r.trim(); if !v.is_empty() { cf.units_or_format = Some(v.to_string()); } }
+                    }
+                    // Log discovered description for visibility during discovery
+                    if let Some(desc) = cf.description.as_ref() {
+                        if !desc.is_empty() { println!("catalog: {}.{} description: {}", ns, cf.name, desc); }
                     }
                 }
             }
@@ -122,6 +147,44 @@ fn flush_all(by_ns: &mut HashMap<String, NamespaceStats>) {
 pub fn emit_observation(namespace: &str, field: &str, value: &serde_json::Value) {
     if let Some(tx) = OBS_QUEUE.get() {
         let _ = tx.send(FieldObservation { namespace: namespace.to_string(), field: field.to_string(), value: value.clone() });
+    }
+}
+
+/// Recursively emit observations for nested structures using dot-notation paths.
+/// Scalars and nulls are emitted for stats; arrays are traversed, emitting each element under the same field path.
+pub fn emit_observation_deep(namespace: &str, field: &str, value: &serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map.iter() {
+                let next = if field.is_empty() { k.clone() } else { format!("{}.{}", field, k) };
+                emit_observation_deep(namespace, &next, v);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            // Emit each element under the same field path; if elements are objects, they will expand further
+            // Cap traversal to avoid runaway cost
+            let mut count = 0usize;
+            for el in arr {
+                emit_observation_deep(namespace, field, el);
+                count = count.saturating_add(1);
+                if count >= 64 { break; }
+            }
+        }
+        // Scalars and nulls
+        _ => {
+            emit_observation(namespace, field, value);
+        }
+    }
+}
+
+/// Public helper to run LLM enrichment using an existing on-disk stats snapshot, if present.
+pub fn enrich_llm_from_existing(ns: &str) {
+    let path = crate::helpers::configuration::Config::get_stats_local_path(ns);
+    if let Ok(s) = std::fs::read_to_string(&path) {
+        if let Ok(mut stats) = serde_json::from_str::<NamespaceStats>(&s) {
+            for (_k, fs) in stats.fields.iter_mut() { fs.finalize(); }
+            enrich_llm(ns, &stats);
+        }
     }
 }
 

@@ -9,6 +9,7 @@ use datafusion::arrow::datatypes::{Schema as ArrowSchema, DataType as ArrowDataT
 use std::sync::mpsc;
 use crate::ARROW_SCHEMA;
 use crate::helpers::configuration::Config;
+use serde_json::{Value as JsonValue, Map as JsonMap, Number as JsonNumber};
 
 pub struct LiveTableViewConfig<'a> {
     pub title: &'a str,
@@ -195,13 +196,122 @@ fn build_timeseries_data(batches: &Vec<RecordBatch>, max_points: usize) -> Vec<(
 pub(crate) fn value_to_string(arr: &dyn datafusion::arrow::array::Array, row: usize) -> String {
     if arr.is_null(row) { return "".to_string(); }
     use datafusion::arrow::array::*;
+    use datafusion::arrow::datatypes::DataType as ArrowDt;
     match arr.data_type() {
-        datafusion::arrow::datatypes::DataType::Utf8 => arr.as_any().downcast_ref::<StringArray>().map(|a| a.value(row).to_string()).unwrap_or_default(),
-        datafusion::arrow::datatypes::DataType::Int64 => arr.as_any().downcast_ref::<Int64Array>().map(|a| a.value(row).to_string()).unwrap_or_default(),
-        datafusion::arrow::datatypes::DataType::Float64 => arr.as_any().downcast_ref::<Float64Array>().map(|a| a.value(row).to_string()).unwrap_or_default(),
-        datafusion::arrow::datatypes::DataType::Boolean => arr.as_any().downcast_ref::<BooleanArray>().map(|a| a.value(row).to_string()).unwrap_or_default(),
-        datafusion::arrow::datatypes::DataType::Timestamp(unit, _) => arr.as_any().downcast_ref::<TimestampMillisecondArray>().map(|a| format_ts_ms(a.value(row))).unwrap_or_else(|| format!("{:?}", unit)),
+        ArrowDt::Utf8 => arr.as_any().downcast_ref::<StringArray>().map(|a| a.value(row).to_string()).unwrap_or_default(),
+        ArrowDt::Int64 => arr.as_any().downcast_ref::<Int64Array>().map(|a| a.value(row).to_string()).unwrap_or_default(),
+        ArrowDt::Float64 => arr.as_any().downcast_ref::<Float64Array>().map(|a| a.value(row).to_string()).unwrap_or_default(),
+        ArrowDt::Boolean => arr.as_any().downcast_ref::<BooleanArray>().map(|a| a.value(row).to_string()).unwrap_or_default(),
+        ArrowDt::Timestamp(_, _) => arr.as_any().downcast_ref::<TimestampMillisecondArray>().map(|a| format_ts_ms(a.value(row))).unwrap_or_else(|| {
+            // Fallback: use Debug for datatype if downcast failed
+            format!("{:?}", arr)
+        }),
+        // Nested types → JSON serialize compactly
+        ArrowDt::Struct(_)
+        | ArrowDt::List(_)
+        | ArrowDt::LargeList(_)
+        | ArrowDt::FixedSizeList(_, _)
+        | ArrowDt::Map(_, _) => {
+            let v = array_cell_to_json(arr, row);
+            match serde_json::to_string(&v) { Ok(s) => s, Err(_) => String::new() }
+        }
+        // Other numeric primitives we commonly see
+        ArrowDt::Int32 => arr.as_any().downcast_ref::<Int32Array>().map(|a| a.value(row).to_string()).unwrap_or_default(),
+        ArrowDt::Float32 => arr.as_any().downcast_ref::<Float32Array>().map(|a| a.value(row).to_string()).unwrap_or_default(),
+        // Fallback: debug
         _ => format!("{:?}", arr),
+    }
+}
+
+pub(crate) fn array_cell_to_json(arr: &dyn datafusion::arrow::array::Array, row: usize) -> JsonValue {
+    use datafusion::arrow::array::*;
+    use datafusion::arrow::datatypes::DataType as ArrowDt;
+    if arr.is_null(row) { return JsonValue::Null; }
+    match arr.data_type() {
+        ArrowDt::Utf8 => {
+            if let Some(a) = arr.as_any().downcast_ref::<StringArray>() { JsonValue::String(a.value(row).to_string()) } else { JsonValue::Null }
+        }
+        ArrowDt::Boolean => {
+            if let Some(a) = arr.as_any().downcast_ref::<BooleanArray>() { JsonValue::Bool(a.value(row)) } else { JsonValue::Null }
+        }
+        ArrowDt::Int64 => {
+            if let Some(a) = arr.as_any().downcast_ref::<Int64Array>() { JsonValue::Number(JsonNumber::from(a.value(row))) } else { JsonValue::Null }
+        }
+        ArrowDt::Int32 => {
+            if let Some(a) = arr.as_any().downcast_ref::<Int32Array>() { JsonValue::Number(JsonNumber::from(a.value(row))) } else { JsonValue::Null }
+        }
+        ArrowDt::Float64 => {
+            if let Some(a) = arr.as_any().downcast_ref::<Float64Array>() { serde_json::Number::from_f64(a.value(row)).map(JsonValue::Number).unwrap_or(JsonValue::Null) } else { JsonValue::Null }
+        }
+        ArrowDt::Float32 => {
+            if let Some(a) = arr.as_any().downcast_ref::<Float32Array>() { serde_json::Number::from_f64(a.value(row) as f64).map(JsonValue::Number).unwrap_or(JsonValue::Null) } else { JsonValue::Null }
+        }
+        ArrowDt::Timestamp(_, _) => {
+            if let Some(a) = arr.as_any().downcast_ref::<TimestampMillisecondArray>() { JsonValue::String(format_ts_ms(a.value(row))) } else { JsonValue::Null }
+        }
+        ArrowDt::Struct(fields) => {
+            if let Some(sa) = arr.as_any().downcast_ref::<StructArray>() {
+                let mut map = JsonMap::new();
+                for (i, fld) in fields.iter().enumerate() {
+                    let name = fld.name();
+                    let col = sa.column(i).as_ref();
+                    let v = array_cell_to_json(col, row);
+                    map.insert(name.clone(), v);
+                }
+                JsonValue::Object(map)
+            } else {
+                JsonValue::Null
+            }
+        }
+        ArrowDt::List(_) => {
+            if let Some(la) = arr.as_any().downcast_ref::<ListArray>() {
+                let values = la.value(row);
+                let mut out: Vec<JsonValue> = Vec::with_capacity(values.len());
+                for i in 0..values.len() { out.push(array_cell_to_json(values.as_ref(), i)); }
+                JsonValue::Array(out)
+            } else { JsonValue::Null }
+        }
+        ArrowDt::LargeList(_) => {
+            if let Some(lla) = arr.as_any().downcast_ref::<LargeListArray>() {
+                let values = lla.value(row);
+                let mut out: Vec<JsonValue> = Vec::with_capacity(values.len());
+                for i in 0..values.len() { out.push(array_cell_to_json(values.as_ref(), i)); }
+                JsonValue::Array(out)
+            } else { JsonValue::Null }
+        }
+        ArrowDt::FixedSizeList(_, _) => {
+            if let Some(fla) = arr.as_any().downcast_ref::<FixedSizeListArray>() {
+                let values = fla.value(row);
+                let mut out: Vec<JsonValue> = Vec::with_capacity(values.len());
+                for i in 0..values.len() { out.push(array_cell_to_json(values.as_ref(), i)); }
+                JsonValue::Array(out)
+            } else { JsonValue::Null }
+        }
+        ArrowDt::Map(_, _) => {
+            if let Some(ma) = arr.as_any().downcast_ref::<MapArray>() {
+                // Represent as JSON object; Arrow map is a list of struct entries {key, value}
+                let entries = ma.value(row);
+                if let Some(entry_struct) = entries.as_any().downcast_ref::<StructArray>() {
+                    let mut map = JsonMap::new();
+                    if entry_struct.num_columns() >= 2 {
+                        let keys_arr = entry_struct.column(0).as_ref();
+                        let vals_arr = entry_struct.column(1).as_ref();
+                        for i in 0..entry_struct.len() {
+                            let k_json = array_cell_to_json(keys_arr, i);
+                            let key_str = match k_json {
+                                JsonValue::String(s) => s,
+                                other => match serde_json::to_string(&other) { Ok(s) => s, Err(_) => String::new() }
+                            };
+                            let v_json = array_cell_to_json(vals_arr, i);
+                            map.insert(key_str, v_json);
+                        }
+                    }
+                    JsonValue::Object(map)
+                } else { JsonValue::Null }
+            } else { JsonValue::Null }
+        }
+        // Fallback: best-effort string using Debug
+        _ => JsonValue::String(format!("{:?}", arr)),
     }
 }
 

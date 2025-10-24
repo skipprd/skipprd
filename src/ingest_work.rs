@@ -42,6 +42,34 @@ use crate::ingest::fast_ingest::{create_default_nested_message, DEFAULT_NESTED_M
 use crate::discover::stats_tailer::{ensure_stats_worker, emit_observation};
 use crate::ingest::sequencer::propose_and_wait;
 use crate::discover::evolution::{EvolutionProposal, infer_specs_for_record};
+static CATALOG_QUEUE: once_cell::sync::Lazy<dashmap::DashMap<String, std::time::Instant>> = once_cell::sync::Lazy::new(|| dashmap::DashMap::new());
+fn enqueue_catalog_build(ns: &str) {
+    let now = std::time::Instant::now();
+    CATALOG_QUEUE.insert(ns.to_string(), now);
+}
+fn ensure_catalog_worker() {
+    use std::sync::Once;
+    static START: Once = Once::new();
+    START.call_once(|| {
+        std::thread::spawn(|| {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            rt.block_on(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+                    let now = std::time::Instant::now();
+                    let mut due: Vec<String> = Vec::new();
+                    for it in CATALOG_QUEUE.iter() {
+                        if now.duration_since(*it.value()) >= std::time::Duration::from_millis(1500) { due.push(it.key().clone()); }
+                    }
+                    for ns in due {
+                        CATALOG_QUEUE.remove(&ns);
+                        crate::catalog::orchestrator::Orchestrator::build(&ns).await;
+                    }
+                }
+            });
+        });
+    });
+}
 
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::helpers::s3 as s3_helpers;
@@ -1456,6 +1484,9 @@ impl Ingest {
                                 rt.block_on(async move { Config::set_metadata(&md_clone, false).await; });
                             });
                         }
+                        // Trigger catalog/semantic/stats build for new namespace (debounced)
+                        ensure_catalog_worker();
+                        enqueue_catalog_build(&skpr_namespace);
                     }
 
                     let msg = match METADATA.load().metadata.get(&skpr_namespace) {
@@ -1495,7 +1526,14 @@ impl Ingest {
                     }
 
                     enqueue_record(&skpr_namespace, &skpr_partition, &skpr_time_bucket, record_value, &ingest_batch.offset_key, batch_line);
-                    _j += 1;
+                    
+                    j += 1;
+
+                    // Emit stats observations (including nested via dot-notation)
+                    if crate::helpers::configuration::Config::stats_enabled() {
+                        crate::discover::stats_tailer::emit_observation_deep(&skpr_namespace, "", &ingest_record.record);
+                    }
+
                     
                 }
             }

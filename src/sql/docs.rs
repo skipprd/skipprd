@@ -161,6 +161,17 @@ pub fn get_sql_docs() -> HashMap<String, SqlStatementDoc> {
         },
     );
 
+    // STREAM queries
+    docs.insert(
+        "STREAM".to_string(),
+        SqlStatementDoc {
+            name: "STREAM".to_string(),
+            syntax: "STREAM <columns> FROM <table_name> [WHERE <condition>] [ORDER BY <expressions>] [LIMIT <count>]".to_string(),
+            description: "Executes a streaming SQL query against the data currently ingesting into the WAL, continuously returning new results as data arrives.".to_string(),
+            example: "STREAM user_id, event_type FROM user_events WHERE event_time > CURRENT_TIMESTAMP - INTERVAL '1' HOUR ORDER BY event_time LIMIT 100".to_string(),
+        },
+    );
+
     // Date functions
     docs.insert(
         "DATEDIFF".to_string(),

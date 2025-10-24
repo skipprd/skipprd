@@ -5,6 +5,9 @@ use std::collections::HashMap;
 pub struct FieldStats {
     pub total: u64,
     pub nulls: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sample_total: Option<u64>,
+    pub nullable_ratio: Option<f64>,
     pub min_numeric: Option<f64>,
     pub max_numeric: Option<f64>,
     pub min_len: Option<u64>,
@@ -19,11 +22,14 @@ pub struct FieldStats {
     pub histogram_max: Option<f64>,
     #[serde(skip)]
     numeric_samples: Vec<f64>, // transient reservoir sample for histogram
+    #[serde(skip)]
+    examples: Vec<String>, // transient, small set of example scalar values for LLM context
 }
 
 impl FieldStats {
     pub fn update_value(&mut self, value: &serde_json::Value) {
         self.total = self.total.saturating_add(1);
+        self.sample_total = Some(self.total);
         if value.is_null() { self.nulls = self.nulls.saturating_add(1); return; }
         match value {
             serde_json::Value::Number(n) => {
@@ -34,14 +40,16 @@ impl FieldStats {
                     Self::reservoir_push(&mut self.numeric_samples, self.total - self.nulls, f, 2048);
                 }
                 self.observe_hll(&value);
+                self.push_example(n.to_string());
             }
             serde_json::Value::String(s) => {
                 let len = s.len() as u64;
                 self.min_len = Some(self.min_len.map(|v| v.min(len)).unwrap_or(len));
                 self.max_len = Some(self.max_len.map(|v| v.max(len)).unwrap_or(len));
                 self.observe_hll(&value);
+                self.push_example(s.clone());
             }
-            serde_json::Value::Bool(_b) => { self.observe_hll(&value); }
+            serde_json::Value::Bool(b) => { self.observe_hll(&value); self.push_example(b.to_string()); }
             _ => {}
         }
         self.last_updated_epoch_ms = current_millis();
@@ -61,6 +69,9 @@ impl FieldStats {
     }
 
     pub fn finalize(&mut self) {
+        // Compute nullable ratio
+        let denom = self.total.max(1); // avoid div-by-zero
+        self.nullable_ratio = Some((self.nulls as f64) / (denom as f64));
         // Only compute approx distinct if we observed any non-null values
         if self.total.saturating_sub(self.nulls) > 0 {
             // Estimate ~ 2^R / phi, phi≈0.77351; even R=0 yields ~1.29 → 1
@@ -102,6 +113,19 @@ impl FieldStats {
         }
         // Drop samples to avoid any persistence (PII avoidance)
         self.numeric_samples.clear();
+    }
+
+    #[inline]
+    pub fn examples(&self) -> &[String] { &self.examples }
+
+    fn push_example(&mut self, val: String) {
+        // Keep a small, unique set of short examples in-memory only
+        if self.examples.len() >= 8 { return; }
+        let mut v = val;
+        if v.len() > 64 { v.truncate(64); }
+        if !self.examples.iter().any(|e| e == &v) {
+            self.examples.push(v);
+        }
     }
 
     #[inline]

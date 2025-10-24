@@ -63,6 +63,8 @@ mod sql;
 mod llm;
 mod benchmark;
 mod semantics;
+mod qa;
+mod catalog;
 
 use crate::helpers::configuration::{Config, PIPELINE_NAME};
 use crate::helpers::logging::init_logging;
@@ -483,6 +485,21 @@ async fn main() {
                     for (i, emb) in v.iter().enumerate() { println!("{}:{}", i, emb.len()); }
                 }, Err(e) => { eprintln!("ERROR: {}", e); std::process::exit(1); } }
             }
+            if let Some(q) = options.ask {
+                // Establish pipeline context from env or defaults
+                Config::build_config();
+                let pipeline = Config::get_pipeline_name();
+                PIPELINE_NAME.write().clear();
+                PIPELINE_NAME.write().push_str(&pipeline);
+                Config::init().await;
+                let ans = crate::qa::engine::ask(&q, &crate::qa::engine::AskOpts {
+                    namespace: options.namespace.clone(),
+                    top_k: options.top_k,
+                    use_docs: false,
+                    use_sql: true,
+                }).await;
+                match ans { Ok(a) => println!("{}", a.text), Err(e) => { eprintln!("ERROR: {}", e); std::process::exit(1); } }
+            }
         }
     }
 }
@@ -785,6 +802,8 @@ async fn discover() {
     
     info!("Pipeline '{}' sync complete", pipeline_name);
 
+    crate::catalog::orchestrator::Orchestrator::build_all(&pipeline_metadata.metadata).await;
+
     // Final metrics snapshot (same as periodic per-minute print)
     {
         use std::sync::atomic::Ordering as AtomicOrdering;
@@ -1039,7 +1058,12 @@ async fn sync() {
         );
     }
     info!("Pipeline sync complete");
+
+    crate::catalog::orchestrator::Orchestrator::build_all(&pipeline_metadata.metadata).await;
 }
+
+// legacy no-op; replaced by catalog::orchestrator
+async fn build_catalog(_pipeline_metadata: &PipelineMetadata) {}
 
 pub async fn sync_output_plugin(plugin_name: &str, buffer_name: String) -> Result<Box<dyn DataOutputPlugin + Send + Sync>, io::Error> {
 
