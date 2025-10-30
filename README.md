@@ -182,7 +182,7 @@ skippr/skipprd:v3.1.0
 
 ### LLMs
 
-For local and remote LLM setup, auto-tuning, and model guidance, see `docs/LLM.md`.
+For local and remote LLM setup, auto-tuning, and model guidance, see `LLM.md`.
 
 # Performance Analysis
 
