@@ -559,7 +559,13 @@ impl DataOutputAwsAthenaPlugin {
                     let ns = namespace.to_string();
                     let prefix_for_manifest = dir_prefix.clone();
                     tokio::spawn(async move {
-                        crate::helpers::configuration::Config::update_manifest_with_prefix(&ns, &prefix_for_manifest).await;
+                        // Update registry with data prefix
+                        let pipeline = crate::helpers::configuration::Config::get_pipeline_name();
+                        let _ = crate::sql::registry::ensure_ns_entry(&pipeline, &ns, |current| {
+                            let mut e = current.unwrap_or(crate::sql::registry::NamespaceEntry { data_prefixes: vec![], semantic_key: String::new(), catalog_key: String::new(), stats_key: String::new(), last_updated_epoch: 0 });
+                            if !e.data_prefixes.iter().any(|p| p == &prefix_for_manifest) { e.data_prefixes.push(prefix_for_manifest.clone()); }
+                            e
+                        }).await;
                     });
                 }
                 Ok(())

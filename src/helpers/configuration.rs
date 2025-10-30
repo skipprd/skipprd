@@ -1496,40 +1496,11 @@ impl Config {
         Some((bucket, key))
     }
 
-    pub fn get_manifest_local_path(namespace: &str) -> String {
-        let data_dir = Self::get_data_dir();
-        let cache_dir = format!("{}/catalog_cache", data_dir);
-        let _ = std::fs::create_dir_all(&cache_dir);
-        format!("{}/{}.json", cache_dir, namespace)
-    }
+    // Deprecated: manifest local caching removed
+    pub fn get_manifest_local_path(_namespace: &str) -> String { String::new() }
+    pub async fn read_manifest(_namespace: &str) -> Option<serde_json::Value> { None }
 
-    pub async fn read_manifest(namespace: &str) -> Option<serde_json::Value> {
-        // Try local cache first
-        let local_path = Self::get_manifest_local_path(namespace);
-        if let Ok(s) = std::fs::read_to_string(&local_path) {
-            if let Ok(v) = serde_json::from_str(&s) { return Some(v); }
-        }
-
-        // Fetch from S3
-        if let Some((_bucket, key)) = Self::get_manifest_s3_key(namespace) {
-            if let Ok(val) = crate::helpers::s3::get_json(&key).await {
-                let _ = std::fs::write(&local_path, serde_json::to_string(&val).unwrap_or_default());
-                return Some(val);
-            }
-        }
-        None
-    }
-
-    pub async fn get_manifest_epoch(namespace: &str) -> Option<u64> {
-        if let Some(root) = Self::read_manifest(namespace).await {
-            if let Some(tables) = root.get("tables").and_then(|t| t.as_object()) {
-                if let Some(ns) = tables.get(namespace).and_then(|v| v.as_object()) {
-                    return ns.get("last_updated_epoch").and_then(|v| v.as_u64());
-                }
-            }
-        }
-        None
-    }
+    pub async fn get_manifest_epoch(_namespace: &str) -> Option<u64> { None }
 
     pub fn get_registry_local_path(namespace: &str) -> String {
         let data_dir = Self::get_data_dir();
@@ -1538,39 +1509,12 @@ impl Config {
         format!("{}/{}_s3_registry.json", cache_dir, namespace)
     }
 
-    pub async fn read_registry(namespace: &str) -> Option<serde_json::Value> {
-        let path = Self::get_registry_local_path(namespace);
-        if let Ok(s) = std::fs::read_to_string(&path) {
-            if let Ok(v) = serde_json::from_str(&s) { return Some(v); }
-        }
-        None
-    }
+    pub async fn read_registry(_namespace: &str) -> Option<serde_json::Value> { None }
 
-    pub async fn write_registry(namespace: &str, value: &serde_json::Value) {
-        let path = Self::get_registry_local_path(namespace);
-        let _ = std::fs::write(&path, serde_json::to_string(value).unwrap_or_default());
-    }
+    pub async fn write_registry(_namespace: &str, _value: &serde_json::Value) { }
 
-    pub async fn update_manifest_with_prefix(namespace: &str, dir_prefix: &str) {
-        let (_bucket, key) = match Self::get_manifest_s3_key(namespace) { Some(t) => t, None => return };
-        // Load existing manifest (best-effort)
-        let mut root = match crate::helpers::s3::get_json(&key).await { Ok(val) => val, Err(_) => serde_json::json!({}) };
-        if !root.is_object() { root = serde_json::json!({}); }
-        let tables = root.as_object_mut().unwrap().entry("tables").or_insert(serde_json::json!({}));
-        if !tables.is_object() { *tables = serde_json::json!({}); }
-        let table = tables.as_object_mut().unwrap().entry(namespace.to_string()).or_insert(serde_json::json!({ "prefixes": [], "last_updated_epoch": 0 }));
-        let obj = table.as_object_mut().unwrap();
-        let prefixes = obj.entry("prefixes").or_insert(serde_json::json!([]));
-        let arr = prefixes.as_array_mut().unwrap();
-        // Store absolute S3 URL to the directory prefix
-        let abs = format!("s3://{}/{}", Self::get_skippr_s3_bucket(), dir_prefix.trim_start_matches('/'));
-        if !arr.iter().any(|v| v.as_str() == Some(&abs)) { arr.push(serde_json::json!(abs)); }
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-        obj.insert("last_updated_epoch".to_string(), serde_json::json!(now));
-        // Write back to S3 and expire local cache
-        let _ = crate::helpers::s3::put_json(&key, &root).await;
-        let _ = std::fs::remove_file(Self::get_manifest_local_path(namespace));
-    }
+    // Replaced by registry: callers should use sql::registry::ensure_ns_entry
+    pub async fn update_manifest_with_prefix(_namespace: &str, _dir_prefix: &str) { }
 
     pub fn get_full_namespace_name() -> String {
         // let mut helpers = Helpers { CLEAN_FIELD_CACHE: Default::default() };
@@ -1764,16 +1708,20 @@ impl Config {
         let pipeline = Self::get_pipeline_name();
         let s3_key = format!("{}/{}/{}/stats/{}.json", tenant, workspace, pipeline, namespace);
         let json_value = match serde_json::to_value(stats) { Ok(v) => v, Err(e) => { println!("Failed to serialize stats: {}", e); return; } };
-        // Skip S3 upload when offline testing
-        if Self::truth_value(&Self::getenv("SKIPPR_OFFLINE", "false")) == false {
-            match crate::helpers::s3::put_json(&s3_key, &json_value).await {
-                Ok(_) => { if Self::debug_enabled() { println!("Updated stats in S3: {}", s3_key); } }
-                Err(err) => { println!("Failed to upload stats to S3: {:?}", err); }
+        match crate::helpers::s3::put_json(&s3_key, &json_value).await {
+            Ok(_) => {
+                // Debug summary of stats
+                let fields = json_value.get("fields").and_then(|v| v.as_object()).map(|m| m.keys().cloned().collect::<Vec<_>>()).unwrap_or_default();
+                println!("META: wrote stats ns='{}' key='{}' fields={} sample=[{}]", namespace, s3_key, fields.len(), fields.iter().take(8).cloned().collect::<Vec<_>>().join(","));
             }
+            Err(err) => { println!("Failed to upload stats to S3: {:?}", err); }
         }
-        // Always write local cache copy for tests and offline inspection
-        let path = Self::get_stats_local_path(namespace);
-        let _ = std::fs::write(&path, serde_json::to_string(&json_value).unwrap_or_default());
+        // Update registry with stats key
+        let _ = crate::sql::registry::ensure_ns_entry(&pipeline, namespace, |current| {
+            let mut e = current.unwrap_or(crate::sql::registry::NamespaceEntry { data_prefixes: vec![], semantic_key: String::new(), catalog_key: String::new(), stats_key: String::new(), last_updated_epoch: 0 });
+            e.stats_key = s3_key.clone();
+            e
+        }).await;
     }
 
     pub fn write_namespace_stats_sync(namespace: &str, stats: &crate::discover::stats::NamespaceStats) {
@@ -1794,13 +1742,7 @@ impl Config {
         let workspace = Self::get_workspace_name();
         let pipeline = Self::get_pipeline_name();
         let s3_key = format!("{}/{}/{}/stats/{}.json", tenant, workspace, pipeline, namespace);
-        if Self::truth_value(&Self::getenv("SKIPPR_OFFLINE", "false")) == false {
-            if let Ok(val) = crate::helpers::s3::get_json(&s3_key).await { return Some(val); }
-        }
-        let path = Self::get_stats_local_path(namespace);
-        if let Ok(contents) = std::fs::read_to_string(&path) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&contents) { return Some(v); }
-        }
+        if let Ok(val) = crate::helpers::s3::get_json(&s3_key).await { return Some(val); }
         None
     }
 
@@ -1816,32 +1758,17 @@ impl Config {
         }
     }
 
-    pub fn get_stats_local_path(namespace: &str) -> String {
-        let cache_dir = Self::get_pipeline_cache_dir();
-        let cache_dir = format!("{}/catalog_cache", cache_dir);
-        let _ = std::fs::create_dir_all(&cache_dir);
-        format!("{}/stats.json", cache_dir)
-    }
+    pub fn get_stats_local_path(_namespace: &str) -> String { String::new() }
 
-    pub fn get_semantic_local_path(namespace: &str) -> String {
-        let cache_dir = Self::get_pipeline_cache_dir();
-        let cache_dir = format!("{}/catalog_cache", cache_dir);
-        let _ = std::fs::create_dir_all(&cache_dir);
-        format!("{}/semantic.yaml", cache_dir)
-    }
+    pub fn get_semantic_local_path(_namespace: &str) -> String { String::new() }
 
-    pub fn get_catalog_local_path(namespace: &str) -> String {
-        let cache_dir = Self::get_pipeline_cache_dir();
-        let cache_dir = format!("{}/catalog_cache", cache_dir);
-        let _ = std::fs::create_dir_all(&cache_dir);
-        format!("{}/catalog.yaml", cache_dir)
-    }
+    pub fn get_catalog_local_path(_namespace: &str) -> String { String::new() }
 
     pub fn catalog_llm_enabled() -> bool {
         Self::truth_value(&Self::getenv("CATALOG_LLM_ENABLED", "true"))
     }
 
-    pub async fn write_semantic_async(namespace: &str, semantic: &crate::semantics::model::SemanticModel) {
+    pub async fn write_semantic_async(namespace: &str, semantic: &crate::catalog::model::SemanticModel) {
         use std::sync::Arc;
         use tokio::sync::Mutex;
         use once_cell::sync::Lazy as OnceLazy;
@@ -1857,23 +1784,27 @@ impl Config {
             println!("Failed to serialize semantic: {}", e); drop(guard); return; }
         };
         println!("c0");
-        if Self::truth_value(&Self::getenv("SKIPPR_OFFLINE", "false")) == false {
-            let value = serde_yaml::from_str::<serde_yaml::Value>(&yaml).unwrap_or(serde_yaml::Value::Null);
-            let json_equiv = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
-            // Best-effort S3 upload with timeout; never block local write
-            let fut = crate::helpers::s3::put_json(&s3_key, &json_equiv);
-            match tokio::time::timeout(std::time::Duration::from_secs(2), fut).await {
-                Ok(Ok(_)) => { /* uploaded */ }
-                Ok(Err(e)) => { if Self::debug_enabled() { println!("semantic S3 upload failed: {:?}", e); } }
-                Err(_) => { if Self::debug_enabled() { println!("semantic S3 upload timed out, continuing to local write"); } }
-            }
-        }
-        println!("c1");
-        let _ = std::fs::write(Self::get_semantic_local_path(namespace), yaml);
+        let value = serde_yaml::from_str::<serde_yaml::Value>(&yaml).unwrap_or(serde_yaml::Value::Null);
+        let json_equiv = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
+        if let Err(e) = crate::helpers::s3::put_json(&s3_key, &json_equiv).await { println!("Failed to upload semantic to S3: {:?}", e); }
+        // Debug summary of semantic
+        println!("META: wrote semantic ns='{}' key='{}' fields={} sample=[{}]",
+            namespace,
+            s3_key,
+            semantic.fields.len(),
+            semantic.fields.iter().take(8).map(|f| format!("{}:{:?}", f.name, f.role)).collect::<Vec<_>>().join(",")
+        );
+        // Update registry with semantic key
+        let pipeline = Self::get_pipeline_name();
+        let _ = crate::sql::registry::ensure_ns_entry(&pipeline, namespace, |current| {
+            let mut e = current.unwrap_or(crate::sql::registry::NamespaceEntry { data_prefixes: vec![], semantic_key: String::new(), catalog_key: String::new(), stats_key: String::new(), last_updated_epoch: 0 });
+            e.semantic_key = s3_key.clone();
+            e
+        }).await;
         drop(guard);
     }
 
-    pub async fn write_catalog_async(namespace: &str, catalog: &crate::semantics::model::DataCatalog) {
+    pub async fn write_catalog_async(namespace: &str, catalog: &crate::catalog::model::DataCatalog) {
         use std::sync::Arc;
         use tokio::sync::Mutex;
         use once_cell::sync::Lazy as OnceLazy;
@@ -1884,69 +1815,29 @@ impl Config {
         let workspace = Self::get_workspace_name();
         let pipeline = Self::get_pipeline_name();
         let s3_key = format!("{}/{}/{}/catalog/{}.yaml", tenant, workspace, pipeline, namespace);
-        // Merge with existing local or S3 copy to avoid clobbering enriched fields
-        // Prefer local cache; fallback to S3
-        let mut merged = catalog.clone();
-        {
-            let path = Self::get_catalog_local_path(namespace);
-            if let Ok(s) = std::fs::read_to_string(&path) {
-                if let Ok(existing) = serde_yaml::from_str::<crate::semantics::model::DataCatalog>(&s) {
-                    if merged.description.is_none() && existing.description.is_some() { merged.description = existing.description.clone(); }
-                    let mut map_new: std::collections::HashMap<String, crate::semantics::model::CatalogField> = merged.fields.iter().map(|f| (f.name.clone(), f.clone())).collect();
-                    for f in existing.fields.iter() {
-                        if let Some(nf) = map_new.get_mut(&f.name) {
-                            if nf.description.is_none() { nf.description = f.description.clone(); }
-                            if nf.synonyms.is_none() { nf.synonyms = f.synonyms.clone(); }
-                            if nf.pii_sensitivity.is_none() { nf.pii_sensitivity = f.pii_sensitivity.clone(); }
-                            if nf.units_or_format.is_none() { nf.units_or_format = f.units_or_format.clone(); }
-                            if nf.entity.is_empty() { nf.entity = f.entity.clone(); }
-                        } else {
-                            map_new.insert(f.name.clone(), f.clone());
-                        }
-                    }
-                    merged.fields = map_new.into_values().collect();
-                }
-            } else if Self::truth_value(&Self::getenv("SKIPPR_OFFLINE", "false")) == false {
-                if let Ok(val) = crate::helpers::s3::get_json(&s3_key).await {
-                    if let Ok(existing) = serde_json::from_value::<crate::semantics::model::DataCatalog>(val) {
-                        if merged.description.is_none() && existing.description.is_some() { merged.description = existing.description.clone(); }
-                        let mut map_new: std::collections::HashMap<String, crate::semantics::model::CatalogField> = merged.fields.iter().map(|f| (f.name.clone(), f.clone())).collect();
-                        for f in existing.fields.iter() {
-                            if let Some(nf) = map_new.get_mut(&f.name) {
-                                if nf.description.is_none() { nf.description = f.description.clone(); }
-                                if nf.synonyms.is_none() { nf.synonyms = f.synonyms.clone(); }
-                                if nf.pii_sensitivity.is_none() { nf.pii_sensitivity = f.pii_sensitivity.clone(); }
-                                if nf.units_or_format.is_none() { nf.units_or_format = f.units_or_format.clone(); }
-                                if nf.entity.is_empty() { nf.entity = f.entity.clone(); }
-                            } else {
-                                map_new.insert(f.name.clone(), f.clone());
-                            }
-                        }
-                        merged.fields = map_new.into_values().collect();
-                    }
-                }
-            }
-        }
-        let yaml = match serde_yaml::to_string(&merged) { Ok(s) => s, Err(e) => { println!("Failed to serialize catalog: {}", e); drop(guard); return; } };
-        if Self::truth_value(&Self::getenv("SKIPPR_OFFLINE", "false")) == false {
-            let value = serde_yaml::from_str::<serde_yaml::Value>(&yaml).unwrap_or(serde_yaml::Value::Null);
-            let json_equiv = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
-            // Best-effort S3 upload with timeout; never block local write
-            let fut = crate::helpers::s3::put_json(&s3_key, &json_equiv);
-            match tokio::time::timeout(std::time::Duration::from_secs(2), fut).await {
-                Ok(Ok(_)) => { /* uploaded */ }
-                Ok(Err(e)) => { if Self::debug_enabled() { println!("catalog S3 upload failed: {:?}", e); } }
-                Err(_) => { if Self::debug_enabled() { println!("catalog S3 upload timed out, continuing to local write"); } }
-            }
-        }
-        println!("d");
-        println!("Writing catalog to local path: {}", Self::get_catalog_local_path(namespace));
-        // println!("File content:\n{}", yaml);
-        let _ = std::fs::write(Self::get_catalog_local_path(namespace), yaml);
+        // Write catalog directly to S3 (no local merges)
+        let yaml = match serde_yaml::to_string(catalog) { Ok(s) => s, Err(e) => { println!("Failed to serialize catalog: {}", e); drop(guard); return; } };
+        let value = serde_yaml::from_str::<serde_yaml::Value>(&yaml).unwrap_or(serde_yaml::Value::Null);
+        let json_equiv = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
+        if let Err(e) = crate::helpers::s3::put_json(&s3_key, &json_equiv).await { println!("Failed to upload catalog to S3: {:?}", e); }
+        // Debug summary of catalog
+        println!("META: wrote catalog ns='{}' key='{}' fields={} has_description={}",
+            namespace,
+            s3_key,
+            catalog.fields.len(),
+            catalog.description.as_ref().map(|d| !d.trim().is_empty()).unwrap_or(false)
+        );
+        // Update registry with catalog key
+        let pipeline = Self::get_pipeline_name();
+        let _ = crate::sql::registry::ensure_ns_entry(&pipeline, namespace, |current| {
+            let mut e = current.unwrap_or(crate::sql::registry::NamespaceEntry { data_prefixes: vec![], semantic_key: String::new(), catalog_key: String::new(), stats_key: String::new(), last_updated_epoch: 0 });
+            e.catalog_key = s3_key.clone();
+            e
+        }).await;
         drop(guard);
     }
 
-    pub fn write_semantic_and_catalog_sync(namespace: &str, semantic: &crate::semantics::model::SemanticModel, catalog: &crate::semantics::model::DataCatalog) {
+    pub fn write_semantic_and_catalog_sync(namespace: &str, semantic: &crate::catalog::model::SemanticModel, catalog: &crate::catalog::model::DataCatalog) {
         println!("bbbbb");
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             println!("b1");

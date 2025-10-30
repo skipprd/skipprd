@@ -62,7 +62,6 @@ mod plugins;
 mod sql;
 mod llm;
 mod benchmark;
-mod semantics;
 mod qa;
 mod catalog;
 
@@ -473,7 +472,9 @@ async fn main() {
             }
         }
         Mode::Llm(options) => {
+            println!("{} LLM: initializing model config...", chrono::Utc::now().to_rfc3339());
             let cfg = llm::config_from_env();
+            println!("{} LLM: provider={:?} chat_model={:?} base_url={:?}", chrono::Utc::now().to_rfc3339(), cfg.provider, cfg.chat_model, cfg.base_url);
             let llm = llm::create_llm(&cfg);
             if let Some(p) = options.chat {
                 let out = llm.chat(&[llm::ChatMessage { role: "user".into(), content: p }]);
@@ -486,19 +487,42 @@ async fn main() {
                 }, Err(e) => { eprintln!("ERROR: {}", e); std::process::exit(1); } }
             }
             if let Some(q) = options.ask {
-                // Establish pipeline context from env or defaults
+                println!("{} LLM: received ask; preparing pipeline context...", chrono::Utc::now().to_rfc3339());
                 Config::build_config();
                 let pipeline = Config::get_pipeline_name();
                 PIPELINE_NAME.write().clear();
                 PIPELINE_NAME.write().push_str(&pipeline);
                 Config::init().await;
-                let ans = crate::qa::engine::ask(&q, &crate::qa::engine::AskOpts {
-                    namespace: options.namespace.clone(),
-                    top_k: options.top_k,
-                    use_docs: false,
-                    use_sql: true,
-                }).await;
-                match ans { Ok(a) => println!("{}", a.text), Err(e) => { eprintln!("ERROR: {}", e); std::process::exit(1); } }
+                println!("{} LLM: starting ask pipeline...", chrono::Utc::now().to_rfc3339());
+                println!("{} LLM: spawning blocking ask worker...", chrono::Utc::now().to_rfc3339());
+                let ask_q = q.clone();
+                let top_k = options.top_k;
+                let pipeline_name_for_ask = PIPELINE_NAME.read().clone();
+                let handle = tokio::task::spawn_blocking(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                    rt.block_on(async move {
+                        // Ensure the same pipeline name is visible in the worker
+                        crate::helpers::configuration::PIPELINE_NAME.write().clear();
+                        crate::helpers::configuration::PIPELINE_NAME.write().push_str(&pipeline_name_for_ask);
+                        crate::qa::engine::ask(&ask_q, &crate::qa::engine::AskOpts {
+                            top_k,
+                            use_docs: false,
+                            use_sql: true,
+                        }).await
+                    })
+                });
+                println!("{} LLM: awaiting ask worker (timeout=60s)...", chrono::Utc::now().to_rfc3339());
+                let ans = match tokio::time::timeout(std::time::Duration::from_secs(600), handle).await {
+                    Ok(join_res) => match join_res {
+                        Ok(v) => v,
+                        Err(e) => { eprintln!("{} ERROR: ask worker join error: {}", chrono::Utc::now().to_rfc3339(), e); return; }
+                    },
+                    Err(_) => {
+                        eprintln!("{} ERROR: ask timed out after 600s", chrono::Utc::now().to_rfc3339());
+                        std::process::exit(1);
+                    }
+                };
+                match ans { Ok(a) => { println!("{} ASK: answer ready", chrono::Utc::now().to_rfc3339()); println!("{}", a.text) }, Err(e) => { eprintln!("ERROR: {}", e); std::process::exit(1); } }
             }
         }
     }
@@ -562,6 +586,9 @@ async fn discover() {
     let pipeline_name = Config::get_pipeline_name();
 
     info!("Analysing data and generating Skippr metadata for pipeline: {}", pipeline_name);
+
+    // Ensure stats worker is running for discovery lifecycle
+    crate::discover::stats_tailer::ensure_stats_worker();
 
     let _data_dir = Config::get_data_dir();
 
@@ -800,7 +827,13 @@ async fn discover() {
         LOGGER.write().await.flush().await.unwrap();
     }
     
-    info!("Pipeline '{}' sync complete", pipeline_name);
+    println!("Pipeline '{}' sync complete", pipeline_name);
+    // Finalize stats → semantic → catalog for all namespaces
+    crate::discover::stats_tailer::force_flush();
+    // Late rebuild from existing S3 parquet if no new data (bounded)
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(120), crate::catalog::orchestrator::Orchestrator::build_all(&pipeline_metadata.metadata)).await;
+    // Ensure worker performs final flush and exits before process ends
+    crate::discover::stats_tailer::shutdown_and_join(30);
 
     crate::catalog::orchestrator::Orchestrator::build_all(&pipeline_metadata.metadata).await;
 
@@ -894,7 +927,9 @@ async fn sync() {
     };
 
 
-    info!("Syncing pipeline: {}", pipeline_name);
+    println!("Syncing pipeline: {}", pipeline_name);
+    // Ensure stats worker is running for sync lifecycle
+    crate::discover::stats_tailer::ensure_stats_worker();
 
     METADATA.store(Arc::new(pipeline_metadata.clone()));
 
@@ -1057,7 +1092,13 @@ async fn sync() {
             parquet_objects
         );
     }
-    info!("Pipeline sync complete");
+    println!("Pipeline sync complete");
+    // Finalize stats → semantic → catalog for all namespaces
+    crate::discover::stats_tailer::force_flush();
+    // Late rebuild from existing S3 parquet if no new data (bounded)
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(120), crate::catalog::orchestrator::Orchestrator::build_all(&pipeline_metadata.metadata)).await;
+    // Ensure worker performs final flush and exits before process ends
+    crate::discover::stats_tailer::shutdown_and_join(30);
 
     crate::catalog::orchestrator::Orchestrator::build_all(&pipeline_metadata.metadata).await;
 }

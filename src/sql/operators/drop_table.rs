@@ -16,8 +16,8 @@ pub async fn drop_table(pipeline_metadata: &mut PipelineMetadata, stmt: &TableDr
     // Compute local cache file paths
     let ns = &table_str; // namespace typically equals table
     let stats_path = crate::helpers::configuration::Config::get_stats_local_path(ns);
-    let sem_path = crate::helpers::configuration::Config::get_semantic_local_path(ns);
-    let cat_path = crate::helpers::configuration::Config::get_catalog_local_path(ns);
+    let sem_path = String::new();
+    let cat_path = String::new();
 
     // Best-effort local deletions
     let _ = std::fs::remove_file(&stats_path);
@@ -47,7 +47,7 @@ pub async fn drop_table(pipeline_metadata: &mut PipelineMetadata, stmt: &TableDr
     }
 
     // S3 cleanup if online
-    if crate::helpers::configuration::Config::truth_value(&crate::helpers::configuration::Config::getenv("SKIPPR_OFFLINE", "false")) == false {
+    {
         let tenant = crate::helpers::configuration::Config::get_tenant();
         let workspace = crate::helpers::configuration::Config::get_workspace_name();
         let prefix_root = format!("{}/{}/{}", tenant, workspace, pipeline);

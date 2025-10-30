@@ -1,6 +1,6 @@
 use crate::discover::stats::NamespaceStats;
 use crate::helpers::configuration::Config;
-use once_cell::sync::OnceCell;
+use once_cell::sync::{OnceCell, Lazy};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -11,21 +11,27 @@ pub struct FieldObservation {
     pub value: serde_json::Value,
 }
 
-static OBS_QUEUE: OnceCell<crossbeam_channel::Sender<FieldObservation>> = OnceCell::new();
+enum ObservationMsg { Data(FieldObservation), Shutdown }
+
+static OBS_QUEUE: OnceCell<crossbeam_channel::Sender<ObservationMsg>> = OnceCell::new();
+static OBS_MAP: OnceCell<Arc<Mutex<HashMap<String, NamespaceStats>>>> = OnceCell::new();
+static WORKER_HANDLE: Lazy<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>> = Lazy::new(|| std::sync::Mutex::new(None));
 
 pub fn ensure_stats_worker() {
     if OBS_QUEUE.get().is_some() { return; }
-    let (tx, rx) = crossbeam_channel::unbounded::<FieldObservation>();
+    let (tx, rx) = crossbeam_channel::unbounded::<ObservationMsg>();
     let _ = OBS_QUEUE.set(tx);
-    std::thread::spawn(move || {
-        let mut by_ns: HashMap<String, NamespaceStats> = HashMap::new();
+    let map_arc = Arc::new(Mutex::new(HashMap::<String, NamespaceStats>::new()));
+    let _ = OBS_MAP.set(map_arc.clone());
+    let handle = std::thread::spawn(move || {
         let mut last_flush = std::time::Instant::now();
         let flush_secs = Config::stats_flush_seconds();
         // Debounce map per namespace for LLM/catalog enrichment
         let mut last_llm: HashMap<String, std::time::Instant> = HashMap::new();
         loop {
-            match rx.recv_timeout(std::time::Duration::from_millis(500)) {
-                Ok(obs) => {
+            match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+                Ok(ObservationMsg::Data(obs)) => {
+                    let mut by_ns = match map_arc.lock() { Ok(g) => g, Err(poison) => poison.into_inner() };
                     let entry = by_ns.entry(obs.namespace.clone()).or_insert_with(|| NamespaceStats::new(&obs.namespace));
                     entry.update_field(&obs.field, &obs.value);
                     // If LLM enabled, debounce enrichment per namespace
@@ -41,16 +47,26 @@ pub fn ensure_stats_worker() {
                         }
                     }
                 }
+                Ok(ObservationMsg::Shutdown) => {
+                    let mut by_ns = match map_arc.lock() { Ok(g) => g, Err(poison) => poison.into_inner() };
+                    flush_all(&mut by_ns);
+                    break;
+                }
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                    let mut by_ns = match map_arc.lock() { Ok(g) => g, Err(poison) => poison.into_inner() };
+                    flush_all(&mut by_ns);
+                    break;
+                }
             }
             if last_flush.elapsed().as_secs() >= flush_secs {
+                let mut by_ns = match map_arc.lock() { Ok(g) => g, Err(poison) => poison.into_inner() };
                 flush_all(&mut by_ns);
                 last_flush = std::time::Instant::now();
             }
         }
-        flush_all(&mut by_ns);
     });
+    if let Ok(mut g) = WORKER_HANDLE.lock() { *g = Some(handle); }
 }
 
 fn enrich_llm(ns: &str, stats: &NamespaceStats) {
@@ -59,85 +75,60 @@ fn enrich_llm(ns: &str, stats: &NamespaceStats) {
     // finalize view for inference without mutating existing stats
     let mut snapshot = stats.clone();
     for (_k, fs) in snapshot.fields.iter_mut() { fs.finalize(); }
-    // Derive semantic and catalog, optionally LLM-enrich
-    let semantic = crate::semantics::infer::infer_semantic_model(ns);
-    let mut catalog = crate::semantics::model::DataCatalog {
+    // Derive semantic and catalog (S3-based stats), optionally LLM-enrich
+    let semantic = {
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => handle.block_on(crate::catalog::infer::infer_semantic_model_async(ns)),
+            Err(_) => {
+                let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                rt.block_on(crate::catalog::infer::infer_semantic_model_async(ns))
+            }
+        }
+    };
+    let mut catalog = crate::catalog::model::DataCatalog {
         namespace: ns.to_string(),
         description: None,
-        fields: semantic.fields.iter().map(|f| crate::semantics::model::CatalogField {
+        dimensions: semantic.dimensions.clone(),
+        metrics: semantic.metrics.clone(),
+        fields: semantic.fields.iter().map(|f| crate::catalog::model::CatalogField {
             entity: String::new(),
             name: f.name.clone(),
             description: None,
             synonyms: None,
             pii_sensitivity: None,
             units_or_format: None,
+            role: Some(format!("{:?}", f.role)),
         }).collect(),
     };
-    if Config::pipeline_llm_enabled() && Config::catalog_llm_enabled() {
-        let llm = crate::llm::create_llm(&crate::llm::config_from_env());
-        // Build a single prompt that includes field names, roles, stats and a few sample values
-        let mut field_lines: Vec<String> = Vec::new();
-        for f in &catalog.fields {
-            let role = semantic.fields.iter().find(|sf| sf.name == f.name).map(|sf| format!("{:?}", sf.role)).unwrap_or_else(|| "Unknown".to_string());
-            let stats_line = if let Some(fs) = snapshot.fields.get(&f.name) {
-                let mut parts: Vec<String> = Vec::new();
-                if let Some(mi) = fs.min_numeric { parts.push(format!("min={}", mi)); }
-                if let Some(ma) = fs.max_numeric { parts.push(format!("max={}", ma)); }
-                if let Some(dl) = fs.min_len { parts.push(format!("min_len={}", dl)); }
-                if let Some(xl) = fs.max_len { parts.push(format!("max_len={}", xl)); }
-                if let Some(d) = fs.approx_distinct { parts.push(format!("approx_distinct={}", d)); }
-                let ex = fs.examples();
-                let examples = if !ex.is_empty() { format!(" examples=[{}]", ex.iter().take(5).map(|e| e.replace('\n', " ")).collect::<Vec<_>>().join(", ")) } else { String::new() };
-                if parts.is_empty() && examples.is_empty() { String::new() } else { format!(" stats: {}{}", parts.join(", "), examples) }
-            } else { String::new() };
-            field_lines.push(format!("- {} role:{}{}", f.name, role, stats_line));
-        }
-        field_lines.sort();
-        let list = field_lines.join("\n");
-        let prompt = format!(
-            "You are creating a data catalog. Using the field name, semantic role, basic stats and a few sample values, write a short, clear description, synonyms, PII sensitivity (none, low, medium, high), and units/format if detectable.\nRespond with one line per field in this exact format:\n<field>: description: <short description> | synonyms: a,b,c | pii: <none|low|medium|high> | units: <units or format>\nFields:\n{}",
-            list
-        );
-        match llm.chat(&[crate::llm::ChatMessage { role: "user".into(), content: prompt }]) {
-        Ok(text) => {
-            for line in text.lines() {
-                let line = line.trim();
-                if line.is_empty() { continue; }
-                // Expect: name: description: ... | synonyms: ...
-                let (name_part, rest) = match line.split_once(':') { Some(x) => x, None => continue };
-                let name = name_part.trim().trim_start_matches('-').trim();
-                if let Some(cf) = catalog.fields.iter_mut().find(|f| f.name == name) {
-                    let parts: Vec<&str> = rest.split('|').collect();
-                    for p in parts {
-                        let s = p.trim();
-                        if let Some(r) = s.strip_prefix("description:") { cf.description = Some(r.trim().to_string()); }
-                        // Replace escape chars "\" in synonyms as llm seems to add them
-                        if let Some(r) = s.strip_prefix("synonyms:") { cf.synonyms = Some(r.replace('\\', "").split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()); }
-                        if let Some(r) = s.strip_prefix("pii:") { cf.pii_sensitivity = Some(r.trim().to_string()); }
-                        if let Some(r) = s.strip_prefix("units:") { let v = r.trim(); if !v.is_empty() { cf.units_or_format = Some(v.to_string()); } }
-                    }
-                    // Log discovered description for visibility during discovery
-                    if let Some(desc) = cf.description.as_ref() {
-                        if !desc.is_empty() { println!("catalog: {}.{} description: {}", ns, cf.name, desc); }
-                    }
-                }
-            }
-            crate::metrics::counters::add_llm_enrich_success(1);
-            crate::metrics::counters::add_llm_enrich_latency_ns(t0.elapsed().as_nanos() as u64);
-        }
-        Err(_e) => {
-            crate::metrics::counters::add_llm_enrich_failure(1);
-        }
+    // Centralized field-level enrichment (block in this sync context)
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => handle.block_on(crate::catalog::writer::enrich_field_descriptions_with_llm(ns, &semantic, Some(&snapshot), &mut catalog)),
+        Err(_) => {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            rt.block_on(crate::catalog::writer::enrich_field_descriptions_with_llm(ns, &semantic, Some(&snapshot), &mut catalog));
         }
     }
-    Config::write_semantic_and_catalog_sync(ns, &semantic, &catalog);
-    crate::metrics::counters::add_semantic_write_success(1);
+    // Write catalog (unified) to S3; warn if empty
+    if catalog.fields.is_empty() { println!("{} DISCOVER: catalog fields empty for '{}'", chrono::Utc::now().to_rfc3339(), ns); }
+    // Write S3 keys and field count for debugging
+    let tenant = Config::get_tenant();
+    let workspace = Config::get_workspace_name();
+    let pipeline = Config::get_pipeline_name();
+    let stats_key = format!("{}/{}/{}/stats/{}.json", tenant, workspace, pipeline, ns);
+    let cat_key = format!("{}/{}/{}/catalog/{}.yaml", tenant, workspace, pipeline, ns);
+    println!("{} DISCOVER: flush ns='{}' stats='{}' catalog='{}' fields={}", chrono::Utc::now().to_rfc3339(), ns, stats_key, cat_key, catalog.fields.len());
+    // Write catalog asynchronously to S3
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => { handle.block_on(async { Config::write_catalog_async(ns, &catalog).await; }); }
+        Err(_) => { let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap(); rt.block_on(async { Config::write_catalog_async(ns, &catalog).await; }); }
+    }
     if debug { println!("semantic/catalog enriched for '{}' in {}ms (fields={})", ns, t0.elapsed().as_millis(), catalog.fields.len()); }
 }
 
 fn flush_all(by_ns: &mut HashMap<String, NamespaceStats>) {
     for (ns, stats) in by_ns.iter_mut() {
         for (_k, fs) in stats.fields.iter_mut() { fs.finalize(); }
+        // Flush stats to S3 only
         Config::write_namespace_stats_sync(ns, stats);
         // Run enrichment at flush/end to ensure discover mode writes
         enrich_llm(ns, stats);
@@ -146,7 +137,7 @@ fn flush_all(by_ns: &mut HashMap<String, NamespaceStats>) {
 
 pub fn emit_observation(namespace: &str, field: &str, value: &serde_json::Value) {
     if let Some(tx) = OBS_QUEUE.get() {
-        let _ = tx.send(FieldObservation { namespace: namespace.to_string(), field: field.to_string(), value: value.clone() });
+        let _ = tx.send(ObservationMsg::Data(FieldObservation { namespace: namespace.to_string(), field: field.to_string(), value: value.clone() }));
     }
 }
 
@@ -178,13 +169,23 @@ pub fn emit_observation_deep(namespace: &str, field: &str, value: &serde_json::V
 }
 
 /// Public helper to run LLM enrichment using an existing on-disk stats snapshot, if present.
-pub fn enrich_llm_from_existing(ns: &str) {
-    let path = crate::helpers::configuration::Config::get_stats_local_path(ns);
-    if let Ok(s) = std::fs::read_to_string(&path) {
-        if let Ok(mut stats) = serde_json::from_str::<NamespaceStats>(&s) {
-            for (_k, fs) in stats.fields.iter_mut() { fs.finalize(); }
-            enrich_llm(ns, &stats);
-        }
+pub fn enrich_llm_from_existing(_ns: &str) { /* removed local fallback */ }
+
+/// Force a final flush of stats → semantic → catalog for all namespaces.
+pub fn force_flush() {
+    if let Some(map_arc) = OBS_MAP.get() {
+        let mut by_ns = match map_arc.lock() { Ok(g) => g, Err(poison) => poison.into_inner() };
+        flush_all(&mut by_ns);
+    }
+}
+
+pub fn shutdown_and_join(timeout_secs: u64) {
+    if let Some(tx) = OBS_QUEUE.get() { let _ = tx.send(ObservationMsg::Shutdown); }
+    let (jtx, jrx) = std::sync::mpsc::channel::<()>();
+    let handle_opt = { WORKER_HANDLE.lock().ok().and_then(|mut g| g.take()) };
+    if let Some(h) = handle_opt {
+        std::thread::spawn(move || { let _ = h.join(); let _ = jtx.send(()); });
+        let _ = jrx.recv_timeout(std::time::Duration::from_secs(timeout_secs));
     }
 }
 

@@ -4,6 +4,8 @@ pub mod tui;
 pub mod operators;
 pub mod docs;
 pub mod doc_parser;
+pub mod registry;
+pub mod metadata;
 
 // Re-export key components
 pub use docs::{SqlStatementDoc};

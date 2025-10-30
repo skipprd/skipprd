@@ -111,9 +111,6 @@ pub struct LlmOptions {
     /// Ask a question about ingested data (uses semantic & catalog)
     #[arg(long)]
     pub ask: Option<String>,
-    /// Namespace to scope the question (defaults to pipeline name)
-    #[arg(long)]
-    pub namespace: Option<String>,
     /// Top-K rows or docs to consider
     #[arg(long, default_value_t = 5)]
     pub top_k: usize,
