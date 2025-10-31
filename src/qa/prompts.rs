@@ -35,4 +35,138 @@ Data:
 Question: {}"#, context, sql, data, user_q)
 }
 
+pub fn dataset_selection(candidates_ctx: &str, user_q: &str) -> String {
+    format!(r#"You are a data model selector.
+Given the Candidate datasets (with descriptions and field samples) and the Question, choose the single most relevant dataset.
+Respond with STRICT JSON: {{"namespace": string, "rationale": string}}.
+If unsure, still choose the best available namespace.
+
+Candidates:
+{}
+
+Question: {}
+Output JSON:"#, candidates_ctx, user_q)
+}
+
+pub fn field_selection(fields_ctx: &str, schema_ctx: &str, user_q: &str, top_k: usize) -> String {
+    format!(r#"You are a field selector.
+Choose the best grouping field to answer the Question using the fields available in the dataset and actual schema types.
+Optionally choose a time field if it will help provide useful context. Do not invent fields.
+Respond with STRICT JSON: {{"groupField": string, "timeField": string | null, "filters": string[]}}.
+Important:
+- The schema list shows TOP-LEVEL columns only. Nested fields may be referenced using dotted paths (e.g., hardware.model) if present in the catalog fields.
+- Therefore, groupField/timeField MUST exist in the catalog fields; they MAY be dotted and not appear verbatim in the schema list, as long as their top-level segment exists in the schema.
+- Prefer non-Id categorical fields for grouping when applicable.
+- filters may be empty.
+
+Fields (from catalog):
+{}
+
+Schema (top-level name:type):
+{}
+
+Question: {}
+TopK: {}
+Output JSON:"#, fields_ctx, schema_ctx, user_q, top_k)
+}
+
+pub fn sql_generation_json(namespace: &str, user_q: &str, group_field: &str, time_field: Option<&str>, top_k: usize) -> String {
+    let tf = time_field.unwrap_or("");
+    format!(r#"You are a SQL generator.
+Write a single SELECT query to answer the Question using the provided dataset and fields.
+Rules:
+- SELECT only; no DDL/DML
+- Use dataset: {ns}
+- Group by the chosen groupField
+- Return the top {k} values ordered by descending count
+- If timeField is provided, DO NOT filter by it unless asked; it's only for optional context (like computing an earliest value in a separate step)
+- Do not reference fields that are not provided
+Output formatting requirements:
+- The SQL MUST be a single SELECT statement and MUST start with the word SELECT
+- No CTEs unless strictly necessary; no procedural constructs
+- Do NOT include markdown, code fences, or prose
+- Respond with STRICT JSON only: {{"sql": "<YOUR SQL HERE>"}}
+
+Inputs:
+dataset: {ns}
+groupField: {gf}
+timeField: {tf}
+Question: {q}
+Output JSON:"#,
+        ns = namespace,
+        k = top_k,
+        gf = group_field,
+        tf = tf,
+        q = user_q)
+}
+
+pub fn sql_repair(previous_json: &str, error_text: &str, schema_ctx: &str) -> String {
+    format!(r#"You are a SQL fixer.
+The previous SQL failed with an error. Produce a corrected SQL.
+Rules:
+- Keep intent and structure, but fix column names, qualifiers, or syntax
+- Use only columns that exist in the provided schema
+- The SQL MUST be a single SELECT statement and MUST start with the word SELECT
+- Do NOT include markdown, code fences, or prose
+- Respond with STRICT JSON only: {{"sql": string}}
+
+Previous JSON:
+{}
+
+Error:
+{}
+
+Schema (name:type):
+{}
+
+Output JSON:"#, previous_json, error_text, schema_ctx)
+}
+
+pub fn english_synthesis(meta_ctx: &str, sql_json: &str, rows_ctx: &str, extra_ctx: &str, user_q: &str) -> String {
+    format!(r#"You are a data assistant.
+Given the Question, SQL (JSON), result rows, and optional extra context, produce ONE concise English sentence that directly answers the Question.
+You may add obvious, helpful context (e.g., totals or since-earliest), but only if it improves clarity. Avoid jargon. No SQL/code in the answer.
+
+Context:
+{}
+
+SQL (JSON):
+{}
+
+Rows (CSV-like, header on first line):
+{}
+
+Extra:
+{}
+
+Question: {}
+Answer:"#, meta_ctx, sql_json, rows_ctx, extra_ctx, user_q)
+}
+
+pub fn field_selection_with_names(fields_ctx: &str, schema_ctx: &str, field_names_json: &str, user_q: &str, top_k: usize) -> String {
+    format!(r#"You are a field selector.
+Choose the best grouping field to answer the Question using the dataset's catalog fields and actual schema types.
+Also optionally choose a time field if it adds useful context. Do not invent fields.
+Respond with STRICT JSON: {{"groupField": string, "timeField": string | null, "filters": string[]}}.
+Rules:
+- You MUST pick groupField from the provided candidate field names array exactly.
+- Candidate field names may include dotted nested paths (e.g., hardware.model).
+- The schema list shows only top-level columns; dotted paths are valid if their first segment is in the schema.
+- Prefer non-Id categorical fields for grouping where relevant to the Question semantics.
+- filters may be empty.
+
+Candidate field names (JSON array):
+{}
+
+Fields detail (from catalog):
+{}
+
+Schema (top-level name:type):
+{}
+
+Question: {}
+TopK: {}
+Output JSON:"#, field_names_json, fields_ctx, schema_ctx, user_q, top_k)
+}
+
 

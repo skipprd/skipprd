@@ -5,5 +5,6 @@ pub mod orchestrator;
 pub mod model;
 pub mod infer;
 pub mod writer;
+pub mod enrich;
 
 

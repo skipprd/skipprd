@@ -100,14 +100,7 @@ fn enrich_llm(ns: &str, stats: &NamespaceStats) {
             role: Some(format!("{:?}", f.role)),
         }).collect(),
     };
-    // Centralized field-level enrichment (block in this sync context)
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => handle.block_on(crate::catalog::writer::enrich_field_descriptions_with_llm(ns, &semantic, Some(&snapshot), &mut catalog)),
-        Err(_) => {
-            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-            rt.block_on(crate::catalog::writer::enrich_field_descriptions_with_llm(ns, &semantic, Some(&snapshot), &mut catalog));
-        }
-    }
+    // Defer field-level LLM enrichment to end-of-discover pass
     // Write catalog (unified) to S3; warn if empty
     if catalog.fields.is_empty() { println!("{} DISCOVER: catalog fields empty for '{}'", chrono::Utc::now().to_rfc3339(), ns); }
     // Write S3 keys and field count for debugging

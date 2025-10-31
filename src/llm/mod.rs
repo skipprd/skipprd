@@ -67,7 +67,7 @@ pub fn config_from_env() -> LlmConfig {
         base_url: crate::helpers::configuration::Config::llm_base_url(),
         api_key: crate::helpers::configuration::Config::llm_api_key(),
         gpu_layers: crate::helpers::configuration::Config::llm_gpu_layers(),
-        context_length: Some(crate::helpers::configuration::Config::llm_context_length()),
+        context_length: crate::helpers::configuration::Config::llm_context_length_opt(),
     }
 }
 
@@ -98,7 +98,8 @@ mod tests {
     fn config_defaults() {
         let cfg = super::config_from_env();
         assert!(matches!(cfg.provider, LlmProviderType::Local) || matches!(cfg.provider, LlmProviderType::OpenAICompat));
-        assert_eq!(cfg.context_length.unwrap_or(0) > 0, true);
+        // context_length may be None (auto-tune) or a positive value from env
+        assert!(cfg.context_length.is_none() || cfg.context_length.unwrap() > 0);
     }
 
     #[test]

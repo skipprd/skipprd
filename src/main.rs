@@ -268,7 +268,7 @@ async fn main() {
                 PIPELINE_NAME.write().push_str(&options.pipeline.unwrap().clone());
                 Config::init().await;
 
-                discover().await;
+                discover(options.log).await;
             } else {
                 println!("No pipeline name provided, you must provide a pipeline name to discover schemas");
             }
@@ -581,9 +581,10 @@ async fn schema(pipeline: &str) {
     }
 }
 
-async fn discover() {
+async fn discover(log: bool) {
 
     let pipeline_name = Config::get_pipeline_name();
+    let start_time = Instant::now();
 
     info!("Analysing data and generating Skippr metadata for pipeline: {}", pipeline_name);
 
@@ -768,6 +769,16 @@ async fn discover() {
 
     let _offsets_clone = offsets_db.clone();
 
+    if !log {
+        println!("[ ] Sampling Data");
+        println!("[ ] Discovering Schemas");
+        println!("[ ] Building Catalog");
+        println!("[ ] Generating Semantic Layer");
+        println!("[ ] Modelling Warehouse");
+        println!("");
+        println!("→ Sampling Data...");
+    }
+
     let shared_output_clone = shared_output.clone();
     sync_input_plugin(offsets_db.clone(), shared_output_clone).await;
 
@@ -823,22 +834,31 @@ async fn discover() {
         }
     }
 
-    if !LOGGER.read().await.logs.is_empty() {
-        LOGGER.write().await.flush().await.unwrap();
+    if log {
+        if !LOGGER.read().await.logs.is_empty() {
+            LOGGER.write().await.flush().await.unwrap();
+        }
     }
     
-    println!("Pipeline '{}' sync complete", pipeline_name);
+    if !log { println!("→ Discovering Schemas..."); }
+    if !log { println!("✔ Discovering Schemas [##########] 100%"); }
+
+    if !log { println!("→ Generating Semantic Layer..."); }
     // Finalize stats → semantic → catalog for all namespaces
     crate::discover::stats_tailer::force_flush();
+    if !log { println!("✔ Generating Semantic Layer [##########] 100%"); }
+
+    if !log { println!("→ Building Catalog..."); }
     // Late rebuild from existing S3 parquet if no new data (bounded)
     let _ = tokio::time::timeout(std::time::Duration::from_secs(120), crate::catalog::orchestrator::Orchestrator::build_all(&pipeline_metadata.metadata)).await;
     // Ensure worker performs final flush and exits before process ends
     crate::discover::stats_tailer::shutdown_and_join(30);
 
     crate::catalog::orchestrator::Orchestrator::build_all(&pipeline_metadata.metadata).await;
+    if !log { println!("✔ Building Catalog [##########] 100%"); }
 
     // Final metrics snapshot (same as periodic per-minute print)
-    {
+    if log {
         use std::sync::atomic::Ordering as AtomicOrdering;
         let messages_total_counter = crate::metrics::counters::MESSAGES_TOTAL.load(AtomicOrdering::Relaxed);
         let source_bytes_total_counter = crate::metrics::counters::SOURCE_BYTES_TOTAL.load(AtomicOrdering::Relaxed);
@@ -864,6 +884,116 @@ async fn discover() {
         let queue = crate::metrics::counters::QUEUE_LENGTH.load(AtomicOrdering::SeqCst);
         info!("Uploads total: {}, inflight: {}, avg latency: {:.2} ms", up_total, up_inflight, avg_up_ms);
         info!("Targets - upload: {}, wal: {}, s3_download: {} | active: {}, queue: {}", up_target, wal_target, dl_target, active, queue);
+    }
+
+    if !log { println!("→ Generating Semantic Layer..."); }
+
+    // Ensure per-namespace LLM enrichment has run so catalog descriptions exist
+    crate::catalog::enrich::run_llm_enrichment_all(&pipeline_metadata.metadata).await;
+    
+    if !log { println!("✔ Generated Semantic Layer [##########] 100%"); }
+
+    if !log { println!("→ Modelling Warehouse..."); }
+    if !log { println!("✔ Modelling Warehouse [##########] 100% (not implemented yet)"); }
+
+    // Insightful LLM summary based on Catalog Stats (not ingest counters)
+    {
+        use chrono::{TimeZone, Utc};
+        use std::collections::HashMap;
+        // Collect namespaces from registry (preferred) or metadata
+        let pipeline = Config::get_pipeline_name();
+        let mut namespaces = crate::sql::registry::list_namespaces(&pipeline).await;
+        if namespaces.is_empty() { namespaces = pipeline_metadata.metadata.keys().cloned().collect::<Vec<_>>(); }
+
+        // Gather per-namespace stats and descriptions
+        #[derive(Clone, Default)]
+        struct NsSummary { approx_rows: u64, desc: Option<String>, earliest_ts: Option<i64>, latest_ts: Option<i64> }
+        let mut by_ns: HashMap<String, NsSummary> = HashMap::new();
+
+        fn parse_epoch_to_secs(x: f64) -> Option<i64> {
+            let v = x as i64;
+            if v <= 0 { return None; }
+            if v > 1_000_000_000_000_000 { // micros
+                Some(v / 1_000_000)
+            } else if v > 1_000_000_000_000 { // millis
+                Some(v / 1_000)
+            } else if v > 1_000_000_000 { // seconds
+                Some(v)
+            } else { None }
+        }
+
+        for ns in namespaces.iter() {
+            // Stats → approx rows and date range heuristic
+            if let Some(v) = Config::read_namespace_stats_async(ns).await {
+                if let Ok(stats) = serde_json::from_value::<crate::discover::stats::NamespaceStats>(v) {
+                    let mut approx_rows: u64 = 0;
+                    let mut min_ts: Option<i64> = None;
+                    let mut max_ts: Option<i64> = None;
+                    for (fname, fs) in stats.fields.iter() {
+                        approx_rows = approx_rows.max(fs.sample_total.unwrap_or(fs.total));
+                        let lname = fname.to_lowercase();
+                        let looks_time = lname.contains("time") || lname.contains("timestamp") || lname.contains("date");
+                        if looks_time {
+                            if let Some(min_num) = fs.min_numeric { if let Some(s) = parse_epoch_to_secs(min_num) { min_ts = Some(min_ts.map(|m| m.min(s)).unwrap_or(s)); } }
+                            if let Some(max_num) = fs.max_numeric { if let Some(s) = parse_epoch_to_secs(max_num) { max_ts = Some(max_ts.map(|m| m.max(s)).unwrap_or(s)); } }
+                        }
+                    }
+                    by_ns.insert(ns.clone(), NsSummary { approx_rows, desc: None, earliest_ts: min_ts, latest_ts: max_ts });
+                }
+            }
+            // Catalog → description
+            if let Some(entry) = crate::sql::registry::find_entry(&pipeline, ns).await {
+                if !entry.catalog_key.is_empty() {
+                    if let Ok(val) = crate::helpers::s3::get_json(&entry.catalog_key).await {
+                        if let Some(s) = val.get("description").and_then(|x| x.as_str()) { by_ns.entry(ns.clone()).or_default().desc = Some(s.to_string()); }
+                    }
+                }
+            }
+        }
+
+        let tables = namespaces.len();
+        let approx_total: u64 = by_ns.values().map(|s| s.approx_rows).sum();
+        let earliest_any: Option<i64> = by_ns.values().filter_map(|s| s.earliest_ts).min();
+        let latest_any: Option<i64> = by_ns.values().filter_map(|s| s.latest_ts).max();
+        let period_str = match (earliest_any, latest_any) {
+            (Some(a), Some(b)) => {
+                let a_dt = Utc.timestamp_opt(a, 0).single();
+                let b_dt = Utc.timestamp_opt(b, 0).single();
+                match (a_dt, b_dt) { (Some(x), Some(y)) => format!("{} → {}", x.date_naive(), y.date_naive()), _ => String::new() }
+            }
+            (Some(a), None) => Utc.timestamp_opt(a, 0).single().map(|d| d.date_naive().to_string()).unwrap_or_default(),
+            _ => String::new(),
+        };
+
+        // Build a compact digest of namespaces
+        let mut digest_lines: Vec<String> = Vec::new();
+        for ns in namespaces.iter() {
+            let s = by_ns.get(ns).cloned().unwrap_or_default();
+            let d = s.desc.unwrap_or_else(|| String::from(""));
+            let line = if d.is_empty() { format!("{} (≈{} rows)", ns, s.approx_rows) } else { format!("{}: {} (≈{} rows)", ns, d, s.approx_rows) };
+            digest_lines.push(line);
+            if digest_lines.len() >= 6 { break; } // cap prompt size
+        }
+
+        let cfg = llm::config_from_env();
+        let llm = llm::create_llm(&cfg);
+        let prompt = format!(
+            "Summarize a data warehouse snapshot in two insightful sentences. The volume, recency, and high level of what the data represents.\nTables: {}\nApprox total rows: {}\nPeriod: {}\nNamespaces:\n{}\nKeep it factual, avoid bullets, and do not invent values.",
+            tables,
+            approx_total,
+            if period_str.is_empty() { "unknown".to_string() } else { period_str.clone() },
+            digest_lines.join("\n")
+        );
+        match llm.chat(&[llm::ChatMessage { role: "user".into(), content: prompt }]) {
+            Ok(text) => { println!("{} {}", chrono::Utc::now().to_rfc3339(), text.trim()); }
+            Err(_) => {
+                if period_str.is_empty() {
+                    println!("Warehouse spans {} table(s) with ≈{} rows in total.", tables, approx_total);
+                } else {
+                    println!("Warehouse spans {} table(s) with ≈{} rows from {}.", tables, approx_total, period_str);
+                }
+            }
+        }
     }
 
 }
@@ -1093,14 +1223,16 @@ async fn sync() {
         );
     }
     println!("Pipeline sync complete");
-    // Finalize stats → semantic → catalog for all namespaces
+    // Finalize stats → semantic → catalog (no LLM) for all namespaces
     crate::discover::stats_tailer::force_flush();
-    // Late rebuild from existing S3 parquet if no new data (bounded)
+    // Late rebuild from existing S3 parquet if no new data (bounded, no LLM)
     let _ = tokio::time::timeout(std::time::Duration::from_secs(120), crate::catalog::orchestrator::Orchestrator::build_all(&pipeline_metadata.metadata)).await;
     // Ensure worker performs final flush and exits before process ends
     crate::discover::stats_tailer::shutdown_and_join(30);
 
-    crate::catalog::orchestrator::Orchestrator::build_all(&pipeline_metadata.metadata).await;
+    // Deferred LLM enrichment pass across all namespaces
+    crate::catalog::enrich::run_llm_enrichment_all(&pipeline_metadata.metadata).await;
+
 }
 
 // legacy no-op; replaced by catalog::orchestrator

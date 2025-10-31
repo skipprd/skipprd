@@ -73,12 +73,24 @@ pub async fn enrich_field_descriptions_with_llm(namespace: &str, semantic: &Sema
 				r = role,
 				s = stats_snip
 			);
-			let llm_clone = llm.clone();
-			let prompt_clone = prompt.clone();
-			if let Ok(Ok(Ok(text))) = tokio::time::timeout(
-				std::time::Duration::from_secs(3),
-				tokio::task::spawn_blocking(move || llm_clone.chat(&[crate::llm::ChatMessage { role: "user".into(), content: prompt_clone }]))
-			).await {
+            let llm_clone = llm.clone();
+            let prompt_clone = prompt.clone();
+            let timeout_secs = crate::helpers::configuration::Config::catalog_llm_timeout_secs();
+            let text_opt = if timeout_secs == 0 {
+                match tokio::task::spawn_blocking(move || llm_clone.chat(&[crate::llm::ChatMessage { role: "user".into(), content: prompt_clone }])).await {
+                    Ok(Ok(t)) => Some(t),
+                    _ => None,
+                }
+            } else {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(timeout_secs),
+                    tokio::task::spawn_blocking(move || llm_clone.chat(&[crate::llm::ChatMessage { role: "user".into(), content: prompt_clone }]))
+                ).await {
+                    Ok(Ok(Ok(t))) => Some(t),
+                    _ => None,
+                }
+            };
+            if let Some(text) = text_opt {
 				let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
 				let rest = if let Some((_name_part, r)) = line.split_once(':') { r } else { line };
 				for seg in rest.split('|') {

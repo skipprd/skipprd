@@ -7,6 +7,7 @@ use std::path::Path;
 mod inner {
     use super::*;
     use std::num::NonZeroU32;
+    use std::sync::Arc;
     use llama_cpp_2::context::params::LlamaContextParams;
     use llama_cpp_2::llama_backend::LlamaBackend;
     use llama_cpp_2::llama_batch::LlamaBatch;
@@ -14,6 +15,7 @@ mod inner {
     use llama_cpp_2::model::params::LlamaModelParams;
     use llama_cpp_2::sampling::LlamaSampler;
     use llama_cpp_2::{send_logs_to_tracing, LogOptions};
+    use once_cell::sync::OnceCell;
     fn pick_model_path(cfg: &LlmConfig) -> Result<String, String> {
         if let Some(p) = cfg.chat_model.clone() { return Ok(p); }
         let candidates = vec!["./models"]; // search simple default dir
@@ -62,19 +64,87 @@ mod inner {
         }
     }
 
-    pub fn chat(cfg: &LlmConfig, messages: &[ChatMessage]) -> Result<String, String> {
+    struct SharedLocalModel {
+        backend: LlamaBackend,
+        model: LlamaModel,
+        model_path: String,
+        gpu_layers: i32,
+    }
+
+    static SHARED_LOCAL: OnceCell<Arc<SharedLocalModel>> = OnceCell::new();
+
+    fn get_or_load_shared(cfg: &LlmConfig) -> Result<Arc<SharedLocalModel>, String> {
+        if let Some(shared) = SHARED_LOCAL.get() { return Ok(shared.clone()); }
+        // suppress logs to stdout
+        send_logs_to_tracing(LogOptions::default().with_logs_enabled(false));
         println!("{} LLM(llama.cpp): selecting model...", chrono::Utc::now().to_rfc3339());
-        let model_path = match pick_model_path(cfg) { Ok(p) => p, Err(_) => {
+        let model_path = pick_model_path(cfg)?;
+        println!("{} LLM(llama.cpp): initializing backend...", chrono::Utc::now().to_rfc3339());
+        let backend = LlamaBackend::init().map_err(|e| e.to_string())?;
+        println!("{} LLM(llama.cpp): loading model {}...", chrono::Utc::now().to_rfc3339(), model_path);
+        let (model, gpu_layers) = load_with_autotune(&backend, &model_path, cfg.gpu_layers)?;
+        let shared = Arc::new(SharedLocalModel { backend, model, model_path, gpu_layers });
+        let _ = SHARED_LOCAL.set(shared.clone());
+        Ok(shared)
+    }
+
+    fn load_context_with_autotune<'a>(
+        model: &'a LlamaModel,
+        backend: &'a LlamaBackend,
+        model_path: &'a str,
+        hint_ctx: Option<usize>,
+    ) -> Result<(llama_cpp_2::context::LlamaContext<'a>, u32), String> {
+        let cache_path = format!("{}/catalog_cache/llm_tuning.json", Config::get_data_dir());
+        let enable_local_tune_cache = Config::truth_value(&Config::getenv("SKIPPR_ENABLE_LOCAL_LLM_TUNE_CACHE", "false"));
+        let key = Path::new(model_path)
+            .canonicalize()
+            .map_err(|_| "model path".to_string())?
+            .to_string_lossy()
+            .to_string() + "#ctx";
+        let mut saved_ctx: Option<u32> = None;
+        if enable_local_tune_cache {
+            if let Ok(s) = fs::read_to_string(&cache_path) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+                    if let Some(n) = v.get(&key).and_then(|x| x.as_u64()) { saved_ctx = Some(n as u32); }
+                }
+            }
+        }
+        let mut start: u32 = saved_ctx
+            .or_else(|| hint_ctx.map(|x| x as u32))
+            .unwrap_or(4096);
+        let mut attempts = 0;
+        loop {
+            let params = LlamaContextParams::default()
+                .with_n_ctx(Some(NonZeroU32::new(start).unwrap_or(NonZeroU32::new(2048).unwrap())));
+            match model.new_context(backend, params) {
+                Ok(ctx) => {
+                    if enable_local_tune_cache {
+                        let mut obj = serde_json::json!({});
+                        if let Ok(s) = fs::read_to_string(&cache_path) { let _ = serde_json::from_str::<serde_json::Value>(&s).map(|v| obj = v); }
+                        obj.as_object_mut().unwrap().insert(key.clone(), serde_json::json!(start));
+                        let _ = fs::create_dir_all(Path::new(&cache_path).parent().unwrap());
+                        let _ = fs::write(&cache_path, serde_json::to_string_pretty(&obj).unwrap_or_default());
+                    }
+                    return Ok((ctx, start));
+                }
+                Err(_) => {
+                    attempts += 1; if attempts > 6 { return Err("failed to create context after autotune".to_string()); }
+                    // back off conservatively
+                    start = start.saturating_sub(1024).max(1024);
+                }
+            }
+        }
+    }
+
+    pub fn chat(cfg: &LlmConfig, messages: &[ChatMessage]) -> Result<String, String> {
+        // Try to get or load the shared model once; if no local model available, fall back to echo
+        let shared = match get_or_load_shared(cfg) { Ok(s) => s, Err(_) => {
             // Fallback stub when no local model is available
             let prompt = messages.iter().map(|m| format!("{}: {}\n", m.role, m.content)).collect::<String>();
             return Ok(prompt);
         }};
-        // suppress llama.cpp/ggml logs from stdout unless explicitly enabled later
-        send_logs_to_tracing(LogOptions::default().with_logs_enabled(false));
-        println!("{} LLM(llama.cpp): initializing backend...", chrono::Utc::now().to_rfc3339());
-        let backend = LlamaBackend::init().map_err(|e| e.to_string())?;
-        println!("{} LLM(llama.cpp): loading model {}...", chrono::Utc::now().to_rfc3339(), model_path);
-        let (model, _gpu) = load_with_autotune(&backend, &model_path, cfg.gpu_layers)?;
+        let backend = &shared.backend;
+        let model = &shared.model;
 
         // Build prompt using model chat template if available
         let prompt = {
@@ -90,11 +160,9 @@ mod inner {
             }
         };
 
-        let ctx_len = cfg.context_length.unwrap_or(2048) as u32;
-        let mut ctx_params = LlamaContextParams::default()
-            .with_n_ctx(Some(NonZeroU32::new(ctx_len).unwrap_or(NonZeroU32::new(2048).unwrap())));
-        println!("{} LLM(llama.cpp): creating context (n_ctx={})...", chrono::Utc::now().to_rfc3339(), ctx_len);
-        let mut ctx = model.new_context(&backend, ctx_params).map_err(|e| e.to_string())?;
+        println!("{} LLM(llama.cpp): creating context (auto-tune n_ctx)...", chrono::Utc::now().to_rfc3339());
+        let (mut ctx, tuned_ctx_len) = load_context_with_autotune(&model, &backend, &shared.model_path, cfg.context_length)?;
+        println!("{} LLM(llama.cpp): context ready (n_ctx={})", chrono::Utc::now().to_rfc3339(), tuned_ctx_len);
 
         // tokenize prompt
         let tokens = model.str_to_token(&prompt, model::AddBos::Always).map_err(|e| e.to_string())?;
@@ -114,10 +182,7 @@ mod inner {
         // decode bytes to string (lossy fallback for safety)
         let mut n_cur = batch.n_tokens();
         // cap new tokens; if context_length is set, use a conservative portion
-        let max_new_tokens: i32 = cfg
-            .context_length
-            .map(|c| (c as i32 / 4).clamp(64, 512))
-            .unwrap_or(256);
+        let max_new_tokens: i32 = ((tuned_ctx_len as i32) / 4).clamp(64, 512);
         let mut generated: i32 = 0;
         println!("{} LLM(llama.cpp): generating up to {} tokens...", chrono::Utc::now().to_rfc3339(), max_new_tokens);
         while generated < max_new_tokens {
@@ -139,29 +204,54 @@ mod inner {
         if texts.is_empty() { return Ok(Vec::new()); }
         // suppress logs
         send_logs_to_tracing(LogOptions::default().with_logs_enabled(false));
-        let backend = LlamaBackend::init().map_err(|e| e.to_string())?;
-        // prefer embed model if provided, otherwise chat model / auto-discover
-        let mut cfg2 = cfg.clone();
-        if cfg2.chat_model.is_none() { cfg2.chat_model = cfg2.embed_model.clone(); }
-        let model_path = match pick_model_path(&cfg2) {
-            Ok(p) => p,
+        let shared = match get_or_load_shared(cfg) {
+            Ok(s) => s,
             Err(_) => {
-                // fallback stub when no model: return zero vectors of common dim 768
+                // fallback when no model: zeros
                 return Ok(texts.iter().map(|_| vec![0.0f32; 768]).collect());
             }
         };
-        let (model, _gpu) = match load_with_autotune(&backend, &model_path, cfg.gpu_layers) {
-            Ok(m) => m,
-            Err(_) => return Ok(texts.iter().map(|_| vec![0.0f32; 768]).collect()),
-        };
+        let backend = &shared.backend;
+        // prefer embed model if provided, otherwise chat model / auto-discover
+        let mut cfg2 = cfg.clone();
+        if cfg2.chat_model.is_none() { cfg2.chat_model = cfg2.embed_model.clone(); }
+        let model = &shared.model;
 
-        // enable embeddings
+        // enable embeddings with context auto-tune similar to chat
         let threads = std::thread::available_parallelism().map(|n| n.get() as i32).unwrap_or(4);
-        let ctx_params = LlamaContextParams::default()
-            .with_n_threads_batch(threads)
-            .with_embeddings(true)
-            .with_pooling_type(llama_cpp_2::context::params::LlamaPoolingType::Mean);
-        let mut ctx = model.new_context(&backend, ctx_params).map_err(|e| e.to_string())?;
+        // try cached/suggested context length and back off if needed
+        let cache_path = format!("{}/catalog_cache/llm_tuning.json", Config::get_data_dir());
+        let enable_local_tune_cache = Config::truth_value(&Config::getenv("SKIPPR_ENABLE_LOCAL_LLM_TUNE_CACHE", "false"));
+        let key_ctx = Path::new(&shared.model_path).canonicalize().map_err(|_| "model path".to_string())?.to_string_lossy().to_string() + "#ctx";
+        let mut saved_ctx: Option<u32> = None;
+        if enable_local_tune_cache { if let Ok(s) = fs::read_to_string(&cache_path) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) { if let Some(n) = v.get(&key_ctx).and_then(|x| x.as_u64()) { saved_ctx = Some(n as u32); } }
+        } }
+        let mut start_ctx: u32 = saved_ctx.or_else(|| cfg.context_length.map(|x| x as u32)).unwrap_or(4096);
+        let mut attempts = 0;
+        let mut ctx = loop {
+            let params = LlamaContextParams::default()
+                .with_n_threads_batch(threads)
+                .with_embeddings(true)
+                .with_n_ctx(Some(NonZeroU32::new(start_ctx).unwrap_or(NonZeroU32::new(2048).unwrap())))
+                .with_pooling_type(llama_cpp_2::context::params::LlamaPoolingType::Mean);
+            match model.new_context(&backend, params) {
+                Ok(ctx) => {
+                    if enable_local_tune_cache {
+                        let mut obj = serde_json::json!({});
+                        if let Ok(s) = fs::read_to_string(&cache_path) { let _ = serde_json::from_str::<serde_json::Value>(&s).map(|v| obj = v); }
+                        obj.as_object_mut().unwrap().insert(key_ctx.clone(), serde_json::json!(start_ctx));
+                        let _ = fs::create_dir_all(Path::new(&cache_path).parent().unwrap());
+                        let _ = fs::write(&cache_path, serde_json::to_string_pretty(&obj).unwrap_or_default());
+                    }
+                    break ctx;
+                }
+                Err(_) => {
+                    attempts += 1; if attempts > 6 { return Err("failed to create embedding context after autotune".to_string()); }
+                    start_ctx = start_ctx.saturating_sub(1024).max(1024);
+                }
+            }
+        };
 
         let mut out: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
         for text in texts {

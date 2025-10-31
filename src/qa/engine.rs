@@ -59,58 +59,242 @@ pub async fn ask(question: &str, opts: &AskOpts) -> Result<Answer, String> {
         return Ok(Answer { text: "Sorry, I could not find relevant datasets to answer that.".to_string(), followup: None });
     }
 
-    // Fast-path: single candidate, compute deterministically without LLM
-    if candidates.len() == 1 {
-        let mut ns = candidates[0].namespace.clone();
-        println!("{} ASK: single candidate '{}' → deterministic path", chrono::Utc::now().to_rfc3339(), ns);
-        // Ensure pipeline context matches the namespace before registering
-        PIPELINE_NAME.write().clear(); PIPELINE_NAME.write().push_str(&ns);
+    // LLM-chained planning: dataset -> fields -> SQL -> validation/repair -> English answer
+    // 2a) If more than one candidate, ask LLM to choose the dataset; else use the single
+    let chosen_ns = if candidates.len() == 1 {
+        candidates[0].namespace.clone()
+    } else {
+        let mut cand_lines: Vec<String> = Vec::new();
+        for c in &candidates {
+            let mut line = format!("namespace:{}", c.namespace);
+            if let Some(desc) = &c.root_description { if !desc.is_empty() { line.push_str(&format!(" description:{}", desc)); } }
+            if !c.fields.is_empty() { line.push_str(&format!(" fields:{}", c.fields.iter().take(20).cloned().collect::<Vec<_>>().join(","))); }
+            cand_lines.push(line);
+        }
+        let prompt = prompts::dataset_selection(&cand_lines.join("\n"), question);
+        println!("{} ASK: LLM dataset selection...", chrono::Utc::now().to_rfc3339());
+        let resp = model.chat(&[ChatMessage { role: "user".into(), content: prompt }]).unwrap_or_default();
+        let picked = serde_json::from_str::<serde_json::Value>(&resp).ok()
+            .and_then(|v| v.get("namespace").and_then(|x| x.as_str()).map(|s| s.to_string()));
+        let ns = picked.unwrap_or_else(|| candidates[0].namespace.clone());
+        println!("{} ASK: namespace '{}' selected", chrono::Utc::now().to_rfc3339(), ns);
+        ns
+    };
+
+    // 2b) Register the chosen namespace
+    PIPELINE_NAME.write().clear(); PIPELINE_NAME.write().push_str(&chosen_ns);
     Config::init().await;
-        // Try exact namespace only (no local fuzzy logic), with a guard timeout
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), register_namespace_view(&ctx, &ns)).await;
-        // If we have a resolved namespace/table, try deterministic
-        if let Ok(df) = ctx.table(&ns).await {
-            // Discover schema fields
-            let mut fields: Vec<(String, ArrowDataType)> = Vec::new();
-            for f in df.schema().fields() { fields.push((f.name().to_string(), f.data_type().clone())); }
-            println!("{} ASK: namespace '{}' has {} fields", chrono::Utc::now().to_rfc3339(), ns, fields.len());
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), register_namespace_view(&ctx, &chosen_ns)).await;
+    let df = match ctx.table(&chosen_ns).await { Ok(df) => df, Err(e) => { return Ok(Answer { text: format!("Dataset '{}' is not available: {}", chosen_ns, e), followup: None }); } };
 
-            // Pick a grouping column based on question tokens and schema
-            let lower_q = question.to_lowercase();
-            let mut candidates_cols: Vec<String> = vec!["type".into(), "event_type".into(), "bike_type".into(), "category".into(), "kind".into(), "model".into()];
-            if lower_q.contains("type") { for (name, _dt) in &fields { if name.to_lowercase().contains("type") { candidates_cols.push(name.clone()); } } }
-            let string_fields: Vec<String> = fields.iter().filter_map(|(n, dt)| match dt { ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => Some(n.clone()), _ => None }).collect();
-            let mut seen: HashSet<String> = HashSet::new(); candidates_cols.retain(|c| seen.insert(c.to_lowercase()));
-            let mut chosen: Option<String> = None;
-            for c in &candidates_cols { if fields.iter().any(|(n, _)| n.eq_ignore_ascii_case(c)) { chosen = Some(c.clone()); break; } }
-            if chosen.is_none() { for c in &candidates_cols { let lc = c.to_lowercase(); if let Some((n,_)) = fields.iter().find(|(n,_)| n.to_lowercase().contains(&lc)) { chosen = Some(n.clone()); break; } } }
-            if chosen.is_none() { if let Some(sf) = string_fields.first() { chosen = Some(sf.clone()); } }
+    // Collect catalog fields for the namespace
+    let mut fields_ctx: Vec<String> = Vec::new();
+    let mut field_names: Vec<String> = Vec::new();
+    let cat_sql = format!("SELECT field, coalesce(role,''), coalesce(synonyms,''), coalesce(description,'') FROM catalog WHERE namespace='{}' ORDER BY field", chosen_ns.replace("'", "''"));
+    if let Ok(dfc) = ctx.sql(&cat_sql).await { if let Ok(batches) = dfc.collect().await { for b in batches { for r in 0..b.num_rows() {
+        let f = crate::sql::tui::value_to_string(b.column(0).as_ref(), r);
+        let role = crate::sql::tui::value_to_string(b.column(1).as_ref(), r);
+        let syn = crate::sql::tui::value_to_string(b.column(2).as_ref(), r);
+        let desc = crate::sql::tui::value_to_string(b.column(3).as_ref(), r);
+        fields_ctx.push(format!("name={} role={} syn={} desc={}", f, role, syn, desc));
+        field_names.push(f);
+    } } } }
 
-            if let Some(col) = chosen.clone() {
-                println!("{} ASK: selected grouping column '{}'", chrono::Utc::now().to_rfc3339(), col);
-                let sql = format!(
-                    "SELECT {} AS group_value, COUNT(1) AS num_hires FROM {} GROUP BY {} ORDER BY num_hires DESC LIMIT {}",
-                    col, ns, col, opts.top_k.max(1)
-                );
-                println!("{} ASK: deterministic SQL: {}", chrono::Utc::now().to_rfc3339(), sql);
-                match ctx.sql(&sql).await {
-                    Ok(df) => match df.collect().await {
-                        Ok(batches) => {
-                            let mut best_val: Option<String> = None; let mut best_cnt: i64 = -1;
-                            for b in &batches { let rows = b.num_rows(); for r in 0..rows { let val = crate::sql::tui::value_to_string(b.column(0).as_ref(), r); let cnt_s = crate::sql::tui::value_to_string(b.column(1).as_ref(), r); let cnt = cnt_s.parse::<i64>().unwrap_or(0); if cnt > best_cnt { best_cnt = cnt; best_val = Some(val); } } }
-                            if let Some(v) = best_val {
-                                println!("{} ASK: deterministic result: {} ({} hires)", chrono::Utc::now().to_rfc3339(), v, best_cnt);
-                                return Ok(Answer { text: format!("{} ({} hires)", v, best_cnt), followup: None });
-                            }
-                            return Ok(Answer { text: "No results found.".to_string(), followup: None });
+    // Collect schema types for the namespace
+    let mut schema_ctx: Vec<String> = Vec::new();
+    for f in df.schema().fields() { schema_ctx.push(format!("{}:{:?}", f.name(), f.data_type())); }
+
+    // 3) Field selection (group and optional time), via LLM
+    let field_names_json = serde_json::to_string(&field_names).unwrap_or("[]".to_string());
+    let fs_prompt = prompts::field_selection_with_names(&fields_ctx.join("\n"), &schema_ctx.join(", "), &field_names_json, question, opts.top_k);
+    println!("{} ASK: LLM field selection...", chrono::Utc::now().to_rfc3339());
+    let fs_resp = model.chat(&[ChatMessage { role: "user".into(), content: fs_prompt }]).unwrap_or_default();
+    let (group_field, time_field_opt) = {
+        let mut parsed = serde_json::from_str::<serde_json::Value>(&fs_resp).ok();
+        if parsed.is_none() {
+            // one retry: ask for strict JSON only
+            let retry_prompt = format!("Return only STRICT JSON with keys groupField,timeField,filters. Choose groupField from this array exactly: {}. Previous was:\n{}", field_names_json, fs_resp);
+            let retry = model.chat(&[ChatMessage { role: "user".into(), content: retry_prompt }]).unwrap_or_default();
+            parsed = serde_json::from_str::<serde_json::Value>(&retry).ok();
+        }
+        let pf = parsed.unwrap_or(serde_json::json!({}));
+        let gf = pf.get("groupField").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let tf = pf.get("timeField").and_then(|x| if x.is_string() { x.as_str() } else { None }).map(|s| s.to_string());
+        (gf, tf)
+    };
+    if group_field.is_empty() {
+        // final attempt: force a choice from candidate names
+        let must_pick_prompt = format!("You MUST pick a groupField from this array to best answer the question. Respond STRICT JSON only with groupField,timeField,filters. candidates={} question=\"{}\"", field_names_json, question);
+        let forced = model.chat(&[ChatMessage { role: "user".into(), content: must_pick_prompt }]).unwrap_or_default();
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&forced) {
+            if let Some(gf) = v.get("groupField").and_then(|x| x.as_str()) { if !gf.is_empty() {
+                let tf = v.get("timeField").and_then(|x| if x.is_string() { x.as_str() } else { None }).map(|s| s.to_string());
+                // overwrite with forced selection
+                let group_field_forced = gf.to_string();
+                return {
+                    // resume flow using the forced selection by regenerating SQL JSON prompt below
+                    // fall through by reusing variables via a scoped block
+                    let sqlg_prompt = prompts::sql_generation_json(&chosen_ns, question, &group_field_forced, tf.as_deref(), opts.top_k);
+                    println!("{} ASK: LLM SQL generation...", chrono::Utc::now().to_rfc3339());
+                    let mut sql_json = model.chat(&[ChatMessage { role: "user".into(), content: sqlg_prompt }]).unwrap_or_default();
+                    let mut sql_str = serde_json::from_str::<serde_json::Value>(&sql_json).ok()
+                        .and_then(|v| v.get("sql").and_then(|x| x.as_str()).map(|s| s.to_string()))
+                        .unwrap_or_default();
+
+                    // Execute with validation/repair loop (up to 2 retries)
+                    let mut data_rows: Vec<String> = Vec::new();
+                    let mut error_text: Option<String> = None;
+                    for attempt in 0..3 {
+                        println!("{} ASK: executing SQL (attempt {})...", chrono::Utc::now().to_rfc3339(), attempt + 1);
+                        match ctx.sql(&sql_str).await {
+                            Ok(dfout) => match dfout.collect().await {
+                                Ok(batches) => {
+                                    if let Some(first) = batches.first() {
+                                        let headers: Vec<String> = first.schema().fields().iter().map(|f| f.name().to_string()).collect();
+                                        data_rows.push(headers.join(","));
+                                    }
+                                    for b in batches { for row in 0..b.num_rows() { let mut row_vals: Vec<String> = Vec::new(); for col in 0..b.num_columns() { row_vals.push(crate::sql::tui::value_to_string(b.column(col).as_ref(), row)); } data_rows.push(row_vals.join(",")); } }
+                                    error_text = None; break;
+                                }
+                                Err(e) => { error_text = Some(format!("collect_error: {}", e)); }
+                            },
+                            Err(e) => { error_text = Some(format!("compile_error: {}", e)); }
                         }
-                        Err(e) => { println!("{} ASK: deterministic collect error: {}", chrono::Utc::now().to_rfc3339(), e); }
-                    },
-                    Err(e) => { println!("{} ASK: deterministic SQL error: {}", chrono::Utc::now().to_rfc3339(), e); }
+                        if let Some(err) = &error_text {
+                            let repair_prompt = prompts::sql_repair(&sql_json, err, &schema_ctx.join(", "));
+                            sql_json = model.chat(&[ChatMessage { role: "user".into(), content: repair_prompt }]).unwrap_or_default();
+                            sql_str = serde_json::from_str::<serde_json::Value>(&sql_json).ok()
+                                .and_then(|v| v.get("sql").and_then(|x| x.as_str()).map(|s| s.to_string()))
+                                .unwrap_or_default();
+                        }
+                    }
+                    if let Some(err) = error_text { return Ok(Answer { text: format!("SQL failed after retries: {}", err), followup: None }); }
+
+                    let mut extra_ctx = String::new();
+                    if let Some(tf_name) = tf.as_ref() {
+                        if df.schema().fields().iter().any(|f| f.name() == tf_name || tf_name.contains('.')) {
+                            let min_sql = format!("SELECT MIN({}) AS earliest FROM {}", tf_name, chosen_ns);
+                            if let Ok(dft) = ctx.sql(&min_sql).await { if let Ok(bs) = dft.collect().await { if let Some(b) = bs.first() { let v = crate::sql::tui::value_to_string(b.column(0).as_ref(), 0); if !v.is_empty() { extra_ctx = format!("earliest_time={}", v); } } } }
+                        }
+                    }
+
+                    let mut meta_ctx_lines: Vec<String> = Vec::new();
+                    if let Some(c) = candidates.iter().find(|c| c.namespace == chosen_ns) { if let Some(desc) = &c.root_description { if !desc.is_empty() { meta_ctx_lines.push(format!("description:{}", desc)); } } }
+                    meta_ctx_lines.push(format!("namespace:{}", chosen_ns));
+                    let rows_ctx = data_rows.join("\n");
+                    let ans_prompt = prompts::english_synthesis(&meta_ctx_lines.join("\n"), &sql_json, &rows_ctx, &extra_ctx, question);
+                    println!("{} ASK: LLM answer synthesis...", chrono::Utc::now().to_rfc3339());
+                    let answer_text = model.chat(&[ChatMessage { role: "user".into(), content: ans_prompt }]).unwrap_or_default();
+                    println!("{} ASK: done", chrono::Utc::now().to_rfc3339());
+                    Ok(Answer { text: answer_text.trim().to_string(), followup: None })
+                };
+            } }
+        }
+        return Ok(Answer { text: "I could not determine a grouping field from the catalog. Try rephrasing the question.".to_string(), followup: None });
+    }
+
+    // 4) SQL generation (JSON) via LLM
+    let sqlg_prompt = prompts::sql_generation_json(&chosen_ns, question, &group_field, time_field_opt.as_deref(), opts.top_k);
+    println!("{} ASK: LLM SQL generation...", chrono::Utc::now().to_rfc3339());
+    let mut sql_json = model.chat(&[ChatMessage { role: "user".into(), content: sqlg_prompt }]).unwrap_or_default();
+    // sanitize potential code fences and non-JSON wrappers
+    let mut parse_attempts = 0;
+    let mut sql_str = String::new();
+    loop {
+        parse_attempts += 1;
+        let mut s = sql_json.trim().to_string();
+        if s.starts_with("```") {
+            if let Some(pos) = s.find('\n') { s = s[pos+1..].to_string(); }
+            if s.ends_with("```") { s = s.trim_end_matches('`').trim_end_matches('`').trim_end_matches('`').to_string(); }
+        }
+        if s.to_uppercase().starts_with("SELECT ") {
+            // Model returned bare SQL; wrap it
+            sql_str = s;
+            break;
+        }
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+            if let Some(ss) = v.get("sql").and_then(|x| x.as_str()) { sql_str = ss.to_string(); }
+        }
+        if !sql_str.trim().is_empty() && sql_str.trim_start().to_uppercase().starts_with("SELECT ") { break; }
+        if parse_attempts >= 2 {
+            // ask for strict JSON re-emission
+            let tighten = format!("Return STRICT JSON only: {{\"sql\": \"<single SELECT that starts with SELECT>\"}}. No prose. Previous=\n{}", sql_json);
+            sql_json = model.chat(&[ChatMessage { role: "user".into(), content: tighten }]).unwrap_or_default();
+            // one last parse on next loop
+        } else {
+            // retry once immediately with clarifier
+            let clarify = "Respond with STRICT JSON only: {\"sql\": \"...\"}. SQL must start with SELECT.".to_string();
+            sql_json = model.chat(&[ChatMessage { role: "user".into(), content: clarify }]).unwrap_or_default();
+        }
+        if parse_attempts > 3 { break; }
+    }
+    if sql_str.trim().is_empty() {
+        return Ok(Answer { text: "LLM did not return a usable SQL statement. Please rephrase the question and try again.".to_string(), followup: None });
+    }
+
+    // 5) Execute with validation/repair loop (up to 2 retries)
+    let mut data_rows: Vec<String> = Vec::new();
+    let mut error_text: Option<String> = None;
+    for attempt in 0..3 {
+        if !sql_str.to_lowercase().contains(" from ") || !sql_str.contains(&chosen_ns) {
+            // let LLM fix it rather than hardcoding
+        }
+        println!("{} ASK: executing SQL (attempt {})...", chrono::Utc::now().to_rfc3339(), attempt + 1);
+        match ctx.sql(&sql_str).await {
+            Ok(dfout) => match dfout.collect().await {
+                Ok(batches) => {
+                    // Build CSV-like with header
+                    if let Some(first) = batches.first() {
+                        let headers: Vec<String> = first.schema().fields().iter().map(|f| f.name().to_string()).collect();
+                        data_rows.push(headers.join(","));
+                    }
+                    for b in batches {
+                        for row in 0..b.num_rows() {
+                            let mut row_vals: Vec<String> = Vec::new();
+                            for col in 0..b.num_columns() { row_vals.push(crate::sql::tui::value_to_string(b.column(col).as_ref(), row)); }
+                            data_rows.push(row_vals.join(","));
+                        }
+                    }
+                    error_text = None; break;
                 }
-            } else { println!("{} ASK: could not select grouping column; falling back to LLM", chrono::Utc::now().to_rfc3339()); }
+                Err(e) => { error_text = Some(format!("collect_error: {}", e)); }
+            },
+            Err(e) => { error_text = Some(format!("compile_error: {}", e)); }
+        }
+        if let Some(err) = &error_text {
+            let repair_prompt = prompts::sql_repair(&sql_json, err, &schema_ctx.join(", "));
+            sql_json = model.chat(&[ChatMessage { role: "user".into(), content: repair_prompt }]).unwrap_or_default();
+            // re-parse with the same sanitizer
+            let mut s = sql_json.trim().to_string();
+            if s.starts_with("```") { if let Some(pos) = s.find('\n') { s = s[pos+1..].to_string(); } if s.ends_with("```") { s = s.trim_end_matches('`').trim_end_matches('`').trim_end_matches('`').to_string(); } }
+            if s.to_uppercase().starts_with("SELECT ") {
+                sql_str = s;
+            } else if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) { if let Some(ss) = v.get("sql").and_then(|x| x.as_str()) { sql_str = ss.to_string(); } }
+            if sql_str.trim().is_empty() { continue; }
         }
     }
+    if let Some(err) = error_text { return Ok(Answer { text: format!("SQL failed after retries: {}", err), followup: None }); }
+
+    // Optional extra context (e.g., earliest time), only if time_field was selected and exists
+    let mut extra_ctx = String::new();
+    if let Some(tf) = time_field_opt.as_ref() {
+        let exists = df.schema().fields().iter().any(|f| f.name() == tf);
+        if exists {
+            let min_sql = format!("SELECT MIN({}) AS earliest FROM {}", tf, chosen_ns);
+            if let Ok(dft) = ctx.sql(&min_sql).await { if let Ok(bs) = dft.collect().await { if let Some(b) = bs.first() { let v = crate::sql::tui::value_to_string(b.column(0).as_ref(), 0); if !v.is_empty() { extra_ctx = format!("earliest_time={}", v); } } } }
+        }
+    }
+
+    // 6) English synthesis (optional context)
+    let mut meta_ctx_lines: Vec<String> = Vec::new();
+    if let Some(c) = candidates.iter().find(|c| c.namespace == chosen_ns) { if let Some(desc) = &c.root_description { if !desc.is_empty() { meta_ctx_lines.push(format!("description:{}", desc)); } } }
+    meta_ctx_lines.push(format!("namespace:{}", chosen_ns));
+    let rows_ctx = data_rows.join("\n");
+    let ans_prompt = prompts::english_synthesis(&meta_ctx_lines.join("\n"), &sql_json, &rows_ctx, &extra_ctx, question);
+    println!("{} ASK: LLM answer synthesis...", chrono::Utc::now().to_rfc3339());
+    let answer_text = model.chat(&[ChatMessage { role: "user".into(), content: ans_prompt }]).unwrap_or_default();
+    println!("{} ASK: done", chrono::Utc::now().to_rfc3339());
+    return Ok(Answer { text: answer_text.trim().to_string(), followup: None });
 
     // Build ranking context including dataset root descriptions
     let mut ctx_lines: Vec<String> = Vec::new();

@@ -20,12 +20,7 @@ impl CatalogBuilder {
         };
         println!("META: build catalog ns='{}' fields={} sample=[{}]", namespace, catalog.fields.len(), catalog.fields.iter().take(8).map(|f| f.name.clone()).collect::<Vec<_>>().join(","));
 
-        // Optional: Field-level LLM enrichment for descriptions
-        let ns_stats: Option<crate::discover::stats::NamespaceStats> = match crate::helpers::configuration::Config::read_namespace_stats_async(namespace).await {
-            Some(v) => serde_json::from_value::<crate::discover::stats::NamespaceStats>(v).ok(),
-            None => None,
-        };
-        crate::catalog::writer::enrich_field_descriptions_with_llm(namespace, &semantic, ns_stats.as_ref(), &mut catalog).await;
+        // Defer field-level LLM enrichment to end-of-discover pass
 
         crate::helpers::configuration::Config::write_catalog_async(namespace, &catalog).await;
     }

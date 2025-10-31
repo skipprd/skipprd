@@ -226,6 +226,13 @@ impl Config {
     pub fn llm_context_length() -> usize {
         let v = Self::getenv("LLM_CONTEXT_LENGTH", "4096"); v.parse::<usize>().unwrap_or(4096)
     }
+    pub fn llm_context_length_opt() -> Option<usize> {
+        let v = Self::getenv("LLM_CONTEXT_LENGTH", "");
+        if v.is_empty() { None } else { v.parse::<usize>().ok() }
+    }
+    pub fn catalog_llm_timeout_secs() -> u64 {
+        let v = Self::getenv("CATALOG_LLM_TIMEOUT_SECS", "0"); v.parse::<u64>().unwrap_or(0)
+    }
     pub fn log_wal_enabled() -> bool {
         // Unified flag overrides
         if Self::truth_value(&Self::getenv("LOG_WAL", "")) { return true; }
