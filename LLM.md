@@ -8,6 +8,7 @@ This guide explains how to run Skippr with a local llama.cpp model (GGUF) or an 
 - Mistral 7B Instruct: `TheBloke/Mistral-7B-Instruct-v0.2-GGUF`
 - Qwen2 7B Instruct: `Qwen/Qwen2-7B-Instruct-GGUF`
 - Llama 3.1 8B Instruct: `bartowski/Meta-Llama-3.1-8B-Instruct-GGUF`
+- TheBloke/Llama-2-13B-Chat-GGUF
 
 2) Place model in `./models/`, e.g.:
 - `./models/mistral-7b-instruct-v0.2.Q4_K_M.gguf`
@@ -44,18 +45,20 @@ Environment variables (all optional; sensible defaults):
 
 ## Auto-tuning (local llama.cpp)
 
-Skippr auto-tunes GPU offload layers (`n_gpu_layers`) on first run per model and saves the optimal value for next start. Behavior:
-- Starts from an aggressive guess (platform-specific), attempts to load, and backs off (−8 layers each attempt) until successful.
-- On Mac M1/M2 (Metal), starts around 32–40.
-- On Linux CPU-only, starts at 0.
-- On Linux GPU (e.g., L4/A10G), a mid value is tried and reduced as needed.
-- If inference fails due to memory/initialization, Skippr reduces layers and retries; successful values are persisted.
+Skippr auto-tunes both GPU offload layers (`n_gpu_layers`) and context length (`n_ctx`) on first run per model and saves optimal values for next start. Behavior:
+- GPU layers: Starts from an aggressive guess (platform-specific), attempts to load, and backs off (−8 per attempt) until successful.
+- Context length: Tries a reasonable window (default ~4096 if not set), creates a context, and backs off (−1024 per attempt) until successful.
+- On Mac M1/M2 (Metal), GPU offload typically ends up ~20–40 layers with 32 GB, and `n_ctx` ~4096. CPU-only starts with 0 offload.
+- If initialization or allocation fails, Skippr reduces values and retries; successful values are persisted.
 
 Persisted tuning file:
-- Stored under `$(DATA_DIR)/catalog_cache/llm_tuning.json`, keyed by absolute model path.
+- Stored under `$(DATA_DIR)/catalog_cache/llm_tuning.json`.
+- Keys:
+  - `<abs_model_path>` → saved `n_gpu_layers`
+  - `<abs_model_path>#ctx` → saved `n_ctx`
 - If an error occurs in subsequent runs, Skippr reduces the saved value and updates the file.
 
-You can override by setting `LLM_GPU_LAYERS` explicitly.
+You can override by setting `LLM_GPU_LAYERS` and/or `LLM_CONTEXT_LENGTH` explicitly. If unset, Skippr auto-tunes.
 
 ## OpenAI-compatible HTTP
 
