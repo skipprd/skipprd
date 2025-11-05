@@ -179,10 +179,19 @@ mod inner {
         // simple greedy decode up to a reasonable limit
         let mut sampler = LlamaSampler::greedy();
         let mut output = String::new();
-        // decode bytes to string (lossy fallback for safety)
+        // Strict JSON early-stop collector
+        let mut json_started = false;
+        let mut json_depth: i32 = 0;
+        let mut json_buf = String::new();
         let mut n_cur = batch.n_tokens();
-        // cap new tokens; if context_length is set, use a conservative portion
-        let max_new_tokens: i32 = ((tuned_ctx_len as i32) / 4).clamp(64, 512);
+        // cap new tokens; use smaller cap for STRICT JSON prompts
+        let is_strict_json = prompt.contains("STRICT JSON") || prompt.contains("Output JSON:");
+        let max_new_tokens: i32 = if is_strict_json {
+            // Allow larger responses for STRICT JSON (batched outputs). Scale with context.
+            ((tuned_ctx_len as i32) / 2).clamp(256, 2048)
+        } else {
+            ((tuned_ctx_len as i32) / 4).clamp(64, 1024)
+        };
         let mut generated: i32 = 0;
         println!("{} LLM(llama.cpp): generating up to {} tokens...", chrono::Utc::now().to_rfc3339(), max_new_tokens);
         while generated < max_new_tokens {
@@ -190,12 +199,32 @@ mod inner {
             sampler.accept(token);
             if model.is_eog_token(token) { break; }
             let bytes = model.token_to_bytes(token, model::Special::Tokenize).map_err(|e| e.to_string())?;
-            output.push_str(&String::from_utf8_lossy(&bytes));
+            // Prefer strict UTF-8; skip invalid fragments instead of lossy decode to avoid garbage
+            if let Ok(piece) = std::str::from_utf8(&bytes) {
+                if is_strict_json {
+                    for ch in piece.chars() {
+                        if !json_started {
+                            if ch == '{' { json_started = true; json_depth = 1; json_buf.push('{'); }
+                            // ignore any preface before first '{'
+                        } else {
+                            json_buf.push(ch);
+                            if ch == '{' { json_depth += 1; }
+                            else if ch == '}' { json_depth -= 1; if json_depth == 0 { output = json_buf.clone(); break; } }
+                        }
+                    }
+                } else {
+                    output.push_str(piece);
+                }
+            } else {
+                // Skip non-UTF8 token to avoid injecting replacement chars
+            }
             batch.clear();
             batch.add(token, n_cur as i32, &[0], true).map_err(|e| e.to_string())?;
             n_cur += 1;
             generated += 1;
             ctx.decode(&mut batch).map_err(|e| e.to_string())?;
+            // Early stop if strict JSON object was completed
+            if is_strict_json && json_started && json_depth == 0 && !output.is_empty() { break; }
         }
         println!("{} LLM(llama.cpp): generation done ({} tokens)", chrono::Utc::now().to_rfc3339(), generated);
         Ok(output.trim().to_string())

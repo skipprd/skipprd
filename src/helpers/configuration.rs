@@ -224,11 +224,15 @@ impl Config {
     }
 
     pub fn llm_context_length() -> usize {
-        let v = Self::getenv("LLM_CONTEXT_LENGTH", "4096"); v.parse::<usize>().unwrap_or(4096)
+        // Default to 4x typical context length
+        let v = Self::getenv("LLM_CONTEXT_LENGTH", "16384"); v.parse::<usize>().unwrap_or(16384)
     }
     pub fn llm_context_length_opt() -> Option<usize> {
         let v = Self::getenv("LLM_CONTEXT_LENGTH", "");
         if v.is_empty() { None } else { v.parse::<usize>().ok() }
+    }
+    pub fn catalog_llm_batch_size() -> usize {
+        let v = Self::getenv("CATALOG_LLM_BATCH_SIZE", "4"); v.parse::<usize>().unwrap_or(4)
     }
     pub fn catalog_llm_timeout_secs() -> u64 {
         let v = Self::getenv("CATALOG_LLM_TIMEOUT_SECS", "0"); v.parse::<u64>().unwrap_or(0)
@@ -1714,6 +1718,8 @@ impl Config {
         let workspace = Self::get_workspace_name();
         let pipeline = Self::get_pipeline_name();
         let s3_key = format!("{}/{}/{}/stats/{}.json", tenant, workspace, pipeline, namespace);
+        let bucket = Self::get_skippr_s3_bucket();
+        println!("{} META: writing stats to s3://{}/{}", chrono::Utc::now().to_rfc3339(), bucket, s3_key);
         let json_value = match serde_json::to_value(stats) { Ok(v) => v, Err(e) => { println!("Failed to serialize stats: {}", e); return; } };
         match crate::helpers::s3::put_json(&s3_key, &json_value).await {
             Ok(_) => {
@@ -1823,9 +1829,16 @@ impl Config {
         let pipeline = Self::get_pipeline_name();
         let s3_key = format!("{}/{}/{}/catalog/{}.yaml", tenant, workspace, pipeline, namespace);
         // Write catalog directly to S3 (no local merges)
+        let bucket = Self::get_skippr_s3_bucket();
+        println!("{} META: writing catalog to s3://{}/{}", chrono::Utc::now().to_rfc3339(), bucket, s3_key);
         let yaml = match serde_yaml::to_string(catalog) { Ok(s) => s, Err(e) => { println!("Failed to serialize catalog: {}", e); drop(guard); return; } };
         let value = serde_yaml::from_str::<serde_yaml::Value>(&yaml).unwrap_or(serde_yaml::Value::Null);
         let json_equiv = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
+        // Debug: print full catalog payload being uploaded
+        // match serde_json::to_string_pretty(&json_equiv) {
+        //     Ok(pretty) => println!("{} META: catalog payload ns='{}':\n{}", chrono::Utc::now().to_rfc3339(), namespace, pretty),
+        //     Err(_) => println!("{} META: catalog payload ns='{}': <failed to stringify>", chrono::Utc::now().to_rfc3339(), namespace),
+        // }
         if let Err(e) = crate::helpers::s3::put_json(&s3_key, &json_equiv).await { println!("Failed to upload catalog to S3: {:?}", e); }
         // Debug summary of catalog
         println!("META: wrote catalog ns='{}' key='{}' fields={} has_description={}",

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use crate::catalog::model::{DataCatalog, SemanticModel, SemanticFieldRole};
 use crate::discover::stats::FieldStats;
+use serde_json;
 
 /// Enrich field descriptions, synonyms, PII and units in-place using LLM with stats and prior catalog context.
 /// No-ops if pipeline/catalog LLM is disabled.
@@ -62,51 +63,131 @@ pub async fn enrich_field_descriptions_with_llm(namespace: &str, semantic: &Sema
 			}
 			parts.join("; ")
 		};
-		// LLM enrichment (description + optional synonyms/pii)
-		if fld.description.is_none() || fld.synonyms.is_none() || fld.pii_sensitivity.is_none() {
+		// LLM enrichment (separate prompts): description
+		if fld.description.is_none() {
 			let prompt = format!(
-				"You are documenting a data field for analysts.\nDataset: {ns}\nTable description: {td}\nOther fields: {ofs}\nField: {f}\nRole: {r}\nStats: {s}\nRespond in one line: description: <≤20 words> | synonyms: a,b,c | pii: <none|low|medium|high> | units: <units or format>",
+				"You are documenting a data field for analysts.\nReturn STRICT JSON only: {{\"description\": \"<≤20 words>\"}}.\nRules: one sentence, ≤20 words; JSON only; no labels or explanations.\n\nDataset: {ns}\nTable description: {td}\nOther fields: {ofs}\nField: {f}\nRole: {r}\nStats: {s}\n\nOutput JSON:",
 				ns = namespace,
 				td = table_description.clone().unwrap_or_else(|| "N/A".to_string()),
-				ofs = if others_ctx.is_empty() { "N/A".to_string() } else { others_ctx },
+				ofs = if others_ctx.is_empty() { "N/A".to_string() } else { others_ctx.clone() },
 				f = fld.name,
 				r = role,
 				s = stats_snip
 			);
-            let llm_clone = llm.clone();
-            let prompt_clone = prompt.clone();
-            let timeout_secs = crate::helpers::configuration::Config::catalog_llm_timeout_secs();
-            let text_opt = if timeout_secs == 0 {
-                match tokio::task::spawn_blocking(move || llm_clone.chat(&[crate::llm::ChatMessage { role: "user".into(), content: prompt_clone }])).await {
-                    Ok(Ok(t)) => Some(t),
-                    _ => None,
-                }
-            } else {
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(timeout_secs),
-                    tokio::task::spawn_blocking(move || llm_clone.chat(&[crate::llm::ChatMessage { role: "user".into(), content: prompt_clone }]))
-                ).await {
-                    Ok(Ok(Ok(t))) => Some(t),
-                    _ => None,
-                }
-            };
-            if let Some(text) = text_opt {
-				let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
-				let rest = if let Some((_name_part, r)) = line.split_once(':') { r } else { line };
-				for seg in rest.split('|') {
-					let s = seg.trim();
-					if let Some(r) = s.strip_prefix("description:") { let cleaned = r.trim().to_string(); if !cleaned.is_empty() { fld.description.get_or_insert(cleaned.clone()); enriched_desc.insert(fld.name.clone(), cleaned); } }
-					if let Some(r) = s.strip_prefix("synonyms:") { let v = r.replace('\\', "").split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect::<Vec<String>>(); if !v.is_empty() { fld.synonyms.get_or_insert(v); } }
-					if let Some(r) = s.strip_prefix("pii:") { let v = r.trim(); if !v.is_empty() { fld.pii_sensitivity.get_or_insert(v.to_string()); } }
-					if let Some(r) = s.strip_prefix("units:") { let v = r.trim(); if !v.is_empty() { fld.units_or_format.get_or_insert(v.to_string()); } }
+			let llm_clone = llm.clone();
+			let prompt_clone = prompt.clone();
+			let timeout_secs = crate::helpers::configuration::Config::catalog_llm_timeout_secs();
+			let text_opt = if timeout_secs == 0 {
+				match tokio::task::spawn_blocking(move || llm_clone.chat(&[crate::llm::ChatMessage { role: "user".into(), content: prompt_clone }])).await {
+					Ok(Ok(t)) => Some(t),
+					_ => None,
+				}
+			} else {
+				match tokio::time::timeout(
+					std::time::Duration::from_secs(timeout_secs),
+					tokio::task::spawn_blocking(move || llm_clone.chat(&[crate::llm::ChatMessage { role: "user".into(), content: prompt }]))
+				).await {
+					Ok(Ok(Ok(t))) => Some(t),
+					_ => None,
+				}
+			};
+			if let Some(text) = text_opt {
+				let desc_json = extract_json_value(&text).and_then(|v| v.get("description").and_then(|x| x.as_str()).map(|s| s.to_string()));
+				let cleaned = desc_json.unwrap_or_else(|| {
+					let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+					line.trim_start_matches("Answer:").trim_start_matches("Description:").trim().to_string()
+				});
+				if !cleaned.is_empty() { fld.description.get_or_insert(cleaned.clone()); enriched_desc.insert(fld.name.clone(), cleaned); }
+			}
+		}
+
+		// LLM enrichment (separate prompts): synonyms
+		if fld.synonyms.is_none() {
+			let prompt = format!(
+				"Return STRICT JSON only: {{\"synonyms\": [\"a\", \"b\", \"c\"]}}.\nRules: 3–6 single-word synonyms, lowercase, no explanations, JSON only.\n\nDataset: {ns}\nField: {f}\nRole: {r}\n\nOutput JSON:",
+				ns = namespace,
+				f = fld.name,
+				r = role
+			);
+			let llm_clone = llm.clone();
+			let prompt_clone = prompt.clone();
+			let timeout_secs = crate::helpers::configuration::Config::catalog_llm_timeout_secs();
+			let text_opt = if timeout_secs == 0 {
+				match tokio::task::spawn_blocking(move || llm_clone.chat(&[crate::llm::ChatMessage { role: "user".into(), content: prompt_clone }])).await {
+					Ok(Ok(t)) => Some(t),
+					_ => None,
+				}
+			} else {
+				match tokio::time::timeout(
+					std::time::Duration::from_secs(timeout_secs),
+					tokio::task::spawn_blocking(move || llm_clone.chat(&[crate::llm::ChatMessage { role: "user".into(), content: prompt }]))
+				).await {
+					Ok(Ok(Ok(t))) => Some(t),
+					_ => None,
+				}
+			};
+			if let Some(text) = text_opt {
+				let parsed = extract_json_value(&text).and_then(|v| v.get("synonyms").and_then(|a| a.as_array().cloned()));
+				let mut v = match parsed {
+					Some(arr) => arr.into_iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect::<Vec<String>>(),
+					None => text.split(',').map(|x| x.trim().to_lowercase()).filter(|x| !x.is_empty()).collect::<Vec<String>>()
+				};
+				v.retain(|s| !s.starts_with("answer:") && !s.contains('\n'));
+				v.dedup();
+				if !v.is_empty() { fld.synonyms.get_or_insert(v); }
+			}
+		}
+
+		// LLM enrichment (strict JSON): pii_sensitivity and units_or_format
+		if fld.pii_sensitivity.is_none() || fld.units_or_format.is_none() {
+			let prompt = format!(
+				"Return STRICT JSON only: {{\"pii\": \"none|low|medium|high\", \"units\": \"<units or format>\"}}.\nRules:\n- pii must be one of: none, low, medium, high\n- units: short label like 'Celsius', 'ms', 'ISO8601', or use null if N/A\n- JSON only; no prose.\n\nDataset: {ns}\nField: {f}\nRole: {r}\nStats: {s}\n\nOutput JSON:",
+				ns = namespace,
+				f = fld.name,
+				r = role,
+				s = stats_snip
+			);
+			let llm_clone = llm.clone();
+			let prompt_clone = prompt.clone();
+			let timeout_secs = crate::helpers::configuration::Config::catalog_llm_timeout_secs();
+			let text_opt = if timeout_secs == 0 {
+				match tokio::task::spawn_blocking(move || llm_clone.chat(&[crate::llm::ChatMessage { role: "user".into(), content: prompt_clone }])).await {
+					Ok(Ok(t)) => Some(t),
+					_ => None,
+				}
+			} else {
+				match tokio::time::timeout(
+					std::time::Duration::from_secs(timeout_secs),
+					tokio::task::spawn_blocking(move || llm_clone.chat(&[crate::llm::ChatMessage { role: "user".into(), content: prompt }]))
+				).await {
+					Ok(Ok(Ok(t))) => Some(t),
+					_ => None,
+				}
+			};
+			if let Some(text) = text_opt {
+				if let Some(v) = extract_json_value(&text) {
+					if fld.pii_sensitivity.is_none() {
+						if let Some(s) = v.get("pii").and_then(|x| x.as_str()) {
+							let s_l = s.to_lowercase();
+							if matches!(s_l.as_str(), "none" | "low" | "medium" | "high") {
+								fld.pii_sensitivity = Some(s_l);
+							}
+						}
+					}
+					if fld.units_or_format.is_none() {
+						if let Some(u) = v.get("units").and_then(|x| x.as_str()) {
+							let trimmed = u.trim();
+							if !trimmed.is_empty() { fld.units_or_format = Some(trimmed.to_string()); }
+						}
+					}
 				}
 			}
 		}
 		// Heuristic fallback for synonyms and PII if still missing
-		if fld.synonyms.is_none() { let syns = infer_synonyms(&fld.name, roles.get(&fld.name)); if !syns.is_empty() { fld.synonyms = Some(syns); } }
-		if fld.pii_sensitivity.is_none() { fld.pii_sensitivity = Some(infer_pii(&fld.name, stats_for)); }
+		// if fld.synonyms.is_none() { let syns = infer_synonyms(&fld.name, roles.get(&fld.name)); if !syns.is_empty() { fld.synonyms = Some(syns); } }
+		// if fld.pii_sensitivity.is_none() { fld.pii_sensitivity = Some(infer_pii(&fld.name, stats_for)); }
 		// Heuristic fallback for description if still missing
-		if fld.description.is_none() { let d = generate_field_description(&fld.name, roles.get(&fld.name), stats_for); if !d.is_empty() { fld.description = Some(d); } }
+		// if fld.description.is_none() { let d = generate_field_description(&fld.name, roles.get(&fld.name), stats_for); if !d.is_empty() { fld.description = Some(d); } }
 	}
 
 	// Root-level description if missing
@@ -114,6 +195,30 @@ pub async fn enrich_field_descriptions_with_llm(namespace: &str, semantic: &Sema
 		let desc = generate_root_description(namespace, catalog);
 		if !desc.is_empty() { catalog.description = Some(desc); }
 	}
+}
+
+fn extract_json_value(text: &str) -> Option<serde_json::Value> {
+    // Direct parse
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) { return Some(v); }
+    // Try to extract first balanced JSON object
+    let bytes = text.as_bytes();
+    let mut depth: i32 = 0;
+    let mut start: Option<usize> = None;
+    for (i, b) in bytes.iter().enumerate() {
+        if *b == b'{' {
+            if depth == 0 { start = Some(i); }
+            depth += 1;
+        } else if *b == b'}' {
+            if depth > 0 { depth -= 1; }
+            if depth == 0 {
+                if let Some(s) = start {
+                    let slice = &text[s..=i];
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(slice) { return Some(v); }
+                }
+            }
+        }
+    }
+    None
 }
 
 fn infer_synonyms(name: &str, role_opt: Option<&SemanticFieldRole>) -> Vec<String> {

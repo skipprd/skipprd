@@ -60,6 +60,8 @@ pub fn config_from_env() -> LlmConfig {
         "OPENAI" | "OPENAI_COMPAT" | "HTTP" => LlmProviderType::OpenAICompat,
         _ => LlmProviderType::Local,
     };
+    let ctx_len_opt = crate::helpers::configuration::Config::llm_context_length_opt();
+    let ctx_len = match ctx_len_opt { Some(v) => Some(v), None => Some(crate::helpers::configuration::Config::llm_context_length()) };
     LlmConfig {
         provider,
         chat_model: crate::helpers::configuration::Config::llm_chat_model(),
@@ -67,7 +69,7 @@ pub fn config_from_env() -> LlmConfig {
         base_url: crate::helpers::configuration::Config::llm_base_url(),
         api_key: crate::helpers::configuration::Config::llm_api_key(),
         gpu_layers: crate::helpers::configuration::Config::llm_gpu_layers(),
-        context_length: crate::helpers::configuration::Config::llm_context_length_opt(),
+        context_length: ctx_len,
     }
 }
 
@@ -89,6 +91,7 @@ impl LargeLanguageModel for NullModel {
 
 pub mod llama_cpp;
 pub mod openai_compat;
+pub mod session;
 
 #[cfg(test)]
 mod tests {
