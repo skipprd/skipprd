@@ -23,6 +23,7 @@ use std::fs::{File, OpenOptions};
 
 
 use std::io::{BufWriter};
+use std::io::BufRead as _;
 
 use std::process::exit;
 use std::string::ToString;
@@ -269,6 +270,7 @@ pub struct Ingest {
     max_queue_length: usize, // Maximum number of tasks to queue
     optimal_chunk_size: Arc<AtomicUsize>,
     throughput_history: Arc<RwLock<VecDeque<(Instant, u64)>>>, // Track throughput over time
+    max_chunk_size: usize, // Upper bound for adaptive chunking to limit memory
     // last_adjustment: Arc<RwLock<Instant>>, // Track when we last adjusted chunk size
     // adjustment_cooldown: Duration, // Minimum time between adjustments
 }
@@ -282,6 +284,21 @@ impl Drop for Ingest {
 }
 
 impl Ingest {
+    // Lightweight Linux memory readers; on non-Linux fall back to None
+    fn read_meminfo_kib(key: &str) -> Option<u64> {
+        if let Ok(file) = std::fs::File::open("/proc/meminfo") {
+            let reader = std::io::BufReader::new(file);
+            for line in reader.lines().flatten() {
+                if line.starts_with(key) {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 2 { if let Ok(v) = parts[1].parse::<u64>() { return Some(v); } }
+                }
+            }
+        }
+        None
+    }
+    fn read_mem_total_mib() -> Option<u64> { Self::read_meminfo_kib("MemTotal:").map(|kib| kib / 1024) }
+    fn read_mem_available_mib() -> Option<u64> { Self::read_meminfo_kib("MemAvailable:").map(|kib| kib / 1024) }
     fn infer_required_type(value: &serde_json::Value) -> (String, Option<String>) {
         use serde_json::Value as V;
         match value {
@@ -426,7 +443,23 @@ impl Ingest {
         let start_chunk: usize = Config::getenv("INGEST_START_CHUNK_BYTES", "5000000")
             .parse::<usize>()
             .unwrap_or(5_000_000);
-        let optimal_chunk_size = Arc::new(AtomicUsize::new(start_chunk));
+        // Auto-tune maximum adaptive chunk size from system memory (no flag)
+        let total_mib_opt = Self::read_mem_total_mib();
+        // Reserve ~20% of total memory for ingest payloads across active tasks (num_cpus) and Arrow overhead (~2x)
+        let denom = (num_cpus * 2).max(2);
+        let mut max_chunk_size: usize = match total_mib_opt {
+            Some(mib) => {
+                let budget_bytes = ((mib as usize).saturating_mul(1024 * 1024)) / 5; // 20%
+                let per_task = budget_bytes / denom;
+                per_task
+            },
+            None => 64 * 1024 * 1024, // Fallback 64 MiB if memory unknown
+        };
+        // Clamp to a sane range [4 MiB, 128 MiB]
+        if max_chunk_size < 4 * 1024 * 1024 { max_chunk_size = 4 * 1024 * 1024; }
+        if max_chunk_size > 128 * 1024 * 1024 { max_chunk_size = 128 * 1024 * 1024; }
+        let initial_chunk = std::cmp::min(start_chunk, max_chunk_size);
+        let optimal_chunk_size = Arc::new(AtomicUsize::new(initial_chunk));
         let queue_length_clone = queue_length.clone();
         let task_queue: Arc<RwLock<VecDeque<IngestTask>>> = Arc::new(RwLock::new(VecDeque::new()));
         let task_queue_clone = task_queue.clone();
@@ -565,6 +598,7 @@ impl Ingest {
             max_queue_length,
             optimal_chunk_size,
             throughput_history,
+            max_chunk_size,
             // last_adjustment,
             // adjustment_cooldown,
         }
@@ -710,6 +744,18 @@ impl Ingest {
 
         if optimal_chunk_size < optimal_chunk_size_min {
             optimal_chunk_size = optimal_chunk_size_min;
+        }
+        // Dynamically clamp by available memory in addition to the baseline cap
+        let denom = (self.num_cpus * 2).max(2);
+        if let Some(avail_mib) = Self::read_mem_available_mib() {
+            // Use at most 20% of available for in-flight payloads; leave headroom for Arrow/WAL
+            let budget_bytes = ((avail_mib as usize).saturating_mul(1024 * 1024)) / 5;
+            let dyn_cap = (budget_bytes / denom).max(optimal_chunk_size_min);
+            let dyn_cap = std::cmp::min(dyn_cap, self.max_chunk_size);
+            if optimal_chunk_size > dyn_cap { optimal_chunk_size = dyn_cap; }
+        } else {
+            // Fallback to baseline cap
+            if optimal_chunk_size > self.max_chunk_size { optimal_chunk_size = self.max_chunk_size; }
         }
 
         if current_chunk_size != optimal_chunk_size {
