@@ -4,6 +4,37 @@
 
 Skippr is a tool for data ingestion and transformation. It is designed to ingest data from a source and transform it into a destination datalake/warehouse.
 
+### Product Roadmap
+
+These are planned features; scope and sequence may evolve.
+
+- [ ] External datasets (zero-copy)
+  - Discover external tables/files in situ and query them without ingestion.
+  - Support pushdown where possible; treat as first-class queryable sources.
+- [ ] Datasets abstraction
+  - Formalize `datasets`: internal (ingested/managed) and external (discovered/zero-copy).
+  - Central metadata/catalog entries for schemas, partitions, retention, and ownership.
+- [ ] Views and virtual views
+  - Non-destructive, query-backed views for cleansing and data modeling.
+  - Allow value-level transformations while reading from underlying sources.
+- [ ] Field-level attribute-based access control (ABAC)
+  - Enforce per-field policies on source data; propagate through views, transforms, and SQL.
+  - Policy evaluation integrated into planning/pushdown phases.
+- [ ] Apache Iceberg tables
+  - Replace existing Hive table format with Iceberg for ACID, schema evolution, and time travel.
+- [ ] End-to-end data lineage
+  - Track lineage from source data through views, transformations, and SQL queries.
+- [ ] Source/dataset derivation lineage
+  - Model which datasets are derived from which sources/datasets for provenance graphs.
+- [ ] LLM-based document indexing
+  - Index document and external datasets via tokenization/embeddings for semantic search.
+ - [ ] S3-backed offset database (replace sled)
+  - Custom S3-backed KV store optimized for append-heavy writes and very fast reads.
+  - Efficient batch key lookups; favor sequential ranges but resilient to slight shuffles.
+ - [ ] S3-backed WAL segments
+  - Refactor write-ahead log segments to reside in S3 rather than local disk.
+  - Design for durability with buffering, compaction, and concurrent readers.
+
 ### Project Structure
 
 - `src/` - Source code for the Skippr CLI and library

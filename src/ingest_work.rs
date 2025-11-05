@@ -1214,7 +1214,7 @@ impl Ingest {
                             match slow_ingest_blocking(&skpr_namespace, &record, flatten) {
                                 Ok(v) => v,
                                 Err(e) => {
-                                    if Config::log_wal_enabled() { println!("Ingest: slow-path failed ns={} err={}", skpr_namespace, e); }
+                                    if Config::debug_enabled() { println!("Ingest: slow-path failed ns={} err={}", skpr_namespace, e); }
                                     let dl = Deadletter { namespace: skpr_namespace.clone(), partition: skpr_partition.clone(), time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(), error: e.to_string(), records: record.to_string() };
                                     Self::deadletter(dl);
                                     Value::Null
@@ -1395,7 +1395,7 @@ impl Ingest {
                 let joined = values_ref2.iter().map(|r| r.to_string()).collect::<Vec<String>>().join("\n");
                 let dl = Deadletter { namespace: skpr_namespace.clone(), partition: entry._partition.clone(), time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(), error: "Arrow serialization failed after schema evolution".to_string(), records: joined };
                 Self::deadletter(dl);
-                if Config::log_wal_enabled() { println!("Batch serialize failed after retry: ns={} deadlettered", entry._namespace); }
+                if Config::debug_enabled() { println!("Batch serialize failed after retry: ns={} deadlettered", entry._namespace); }
             }
         }
 

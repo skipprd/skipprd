@@ -76,7 +76,7 @@ pub fn ingest(
         message = match DEFAULT_NESTED_MESSAGE.read().get(namespace) {
             Some(m) => m.clone(),
             None => {
-                if Config::log_wal_enabled() { println!("ingest: no DEFAULT_NESTED_MESSAGE for ns={}, starting with empty object", namespace); }
+                if Config::debug_enabled() { println!("ingest: no DEFAULT_NESTED_MESSAGE for ns={}, starting with empty object", namespace); }
                 Value::Object(Map::new())
             }
         };
@@ -91,7 +91,7 @@ pub fn ingest(
     let obj = match unwrapped_message.as_object() {
         Some(o) => o,
         None => {
-            if Config::log_wal_enabled() { println!("ingest: input was not an object for ns={}", namespace); }
+            if Config::debug_enabled() { println!("ingest: input was not an object for ns={}", namespace); }
             return Err(Box::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "ingest expects a JSON object record"
