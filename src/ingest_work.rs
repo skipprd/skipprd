@@ -662,7 +662,7 @@ impl Ingest {
         let queue_length = self.queue_length.load(Ordering::Acquire);
         let current_throughput = self.get_current_throughput();
         let current_chunk_size = self.optimal_chunk_size.load(Ordering::Acquire);
-        let optimal_chunk_size_min = 1_000_000;
+        let optimal_chunk_size_min = 4_000_000;
 
         // Update throughput history
         {
@@ -694,23 +694,14 @@ impl Ingest {
 
         let mut adjustment_factor = 1.0; // Default to no change
 
-        // Only adjust if we're at capacity
-        if active_cores >= self.num_cpus && queue_length >= self.max_queue_length {
-
-            // Randomly check throughput trend to avoid oscillation to avoid oscillation
-            if random::<u64>() % (self.num_cpus as u64 * 2) == 0 {
-
-                if throughput_trend > 0.0 {
-                    // Throughput is increasing, continue increasing chunk size
-                    adjustment_factor = 1.1;
-                } else if throughput_trend < 0.0 {
-                    // Throughput is decreasing, reduce chunk size
-                    adjustment_factor = 0.9;
-                }
-
-            }
-        } else if active_cores < self.num_cpus && queue_length < ( self.max_queue_length as f32 / 0.2) as  usize {
-            // Reduce chunk size if we have capacity
+        // Queue occupancy guidance: shrink when occupancy is low and CPUs are underutilized;
+        // grow when CPUs are saturated and occupancy is high.
+        let occupancy = if self.max_queue_length == 0 { 0.0 } else { (queue_length as f32) / (self.max_queue_length as f32) };
+        if active_cores >= self.num_cpus && occupancy >= 0.9 {
+            // High pressure and full CPU: nudge chunk size up to reduce per-task overhead
+            adjustment_factor = 1.1;
+        } else if active_cores < self.num_cpus && occupancy < 0.8 {
+            // Plenty of headroom and spare CPU: nudge chunk size down to increase task parallelism
             adjustment_factor = 0.9;
         }
 
