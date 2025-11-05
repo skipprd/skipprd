@@ -1236,7 +1236,7 @@ impl Ingest {
 
                     // Skip records that failed both fast-path and slow-path evolution
                     if record_value.is_null() {
-                        if Config::log_wal_enabled() { println!("Ingest: record dropped after evolution ns={} (null)", skpr_namespace); }
+                        if Config::debug_enabled() { println!("Ingest: record dropped after evolution ns={} (null)", skpr_namespace); }
                         continue;
                     }
 

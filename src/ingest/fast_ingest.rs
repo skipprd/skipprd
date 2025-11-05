@@ -149,7 +149,7 @@ pub fn fast_path_ingest(
             fields_to_process.push((field, value, meta_data.data_type()));
         } else {
             // Propose evolution for missing field under root
-            if crate::helpers::configuration::Config::log_wal_enabled() { println!("fast_path_ingest: missing field in metadata: '{}' ns={}", field, namespace); }
+            if crate::helpers::configuration::Config::debug_enabled() { println!("fast_path_ingest: missing field in metadata: '{}' ns={}", field, namespace); }
             return Err(format!("Field '{}' not found in metadata", field).into());
         }
     }
