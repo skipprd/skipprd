@@ -1038,8 +1038,38 @@ impl Ingest {
         let mut buf: HashMap<(String, String, Option<i64>, String), IngestBufferBatch> = HashMap::with_capacity(32);
         // Temporary storage for raw JSON records prior to Arrow batch building
         let mut raw_values: HashMap<(String, String, Option<i64>, String), Vec<IngestRecord>> = HashMap::with_capacity(32);
+        // Defer most slow-path records: evolve schema using a small primer, then retry fast-path for the rest
+        let slow_primer_limit: usize = Config::getenv("SLOW_INGEST_PRIMER_RECORDS", "16").parse::<usize>().unwrap_or(16);
+        let mut slow_used_by_namespace: HashMap<String, usize> = HashMap::new();
+        // namespace, partition, time, record, offset_key, position
+        let mut deferred_records: Vec<(String, String, Option<i64>, Value, OffsetKey, u64)> = Vec::with_capacity(1024);
 
         let pipeline_name_cached = Config::get_pipeline_name();
+        // Helper to enqueue a single record into current buffers using latest stable schema
+        let mut enqueue_record = |ns: &String, part: &String, time_b: &Option<i64>, rec_val: Value, ok: &OffsetKey, pos: u64| {
+            let md_snapshot = METADATA.load();
+            let schema_hash = Ingest::load_stable_schema_hash(ns, &md_snapshot.metadata, flatten);
+            drop(md_snapshot);
+            let key = (
+                ns.clone(),
+                part.clone(),
+                time_b.clone(),
+                schema_hash.hash
+            );
+            let buf_entry = buf.entry(key.clone()).or_insert_with(|| {
+                IngestBufferBatch {
+                    offsets: HashMap::new(),
+                    _namespace: ns.clone(),
+                    _partition: part.clone(),
+                    _time: time_b.clone(),
+                    _shard: "".to_string(),
+                    schema: schema_hash.schema,
+                    record_batches: None,
+                }
+            });
+            buf_entry.offsets.insert(ok.clone(), pos);
+            raw_values.entry(key).or_insert_with(|| Vec::with_capacity(1024)).push(IngestRecord { record: rec_val, _namespace: ns.clone(), _partition: part.clone(), _time: time_b.clone() });
+        };
         for ingest_batch in datas.iter() {
             bytes += ingest_batch.data.len() as u64;
             
@@ -1210,15 +1240,24 @@ impl Ingest {
                     let record_value = match msg {
                         Ok(msg) => msg,
                         Err(_err) => {
-                            // Route to single-threaded slow-ingest queue to serialize evolution
-                            match slow_ingest_blocking(&skpr_namespace, &record, flatten) {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    if Config::debug_enabled() { println!("Ingest: slow-path failed ns={} err={}", skpr_namespace, e); }
-                                    let dl = Deadletter { namespace: skpr_namespace.clone(), partition: skpr_partition.clone(), time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(), error: e.to_string(), records: record.to_string() };
-                                    Self::deadletter(dl);
-                                    Value::Null
+                            // Use a small primer of slow-path records per namespace to evolve schema,
+                            // then defer the rest to retry via fast-path once schema is ready.
+                            let used = slow_used_by_namespace.entry(skpr_namespace.clone()).or_insert(0);
+                            if *used < slow_primer_limit {
+                                *used += 1;
+                                match slow_ingest_blocking(&skpr_namespace, &record, flatten) {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        if Config::debug_enabled() { println!("Ingest: slow-path failed ns={} err={}", skpr_namespace, e); }
+                                        let dl = Deadletter { namespace: skpr_namespace.clone(), partition: skpr_partition.clone(), time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(), error: e.to_string(), records: record.to_string() };
+                                        Self::deadletter(dl);
+                                        Value::Null
+                                    }
                                 }
+                            } else {
+                                // Defer for fast-path retry after schema evolves
+                                deferred_records.push((skpr_namespace.clone(), skpr_partition.clone(), skpr_time_bucket.clone(), record.clone(), ingest_batch.offset_key.clone(), batch_line));
+                                Value::Null // will be retried later; skip adding now
                             }
                         }
                     };
@@ -1231,56 +1270,54 @@ impl Ingest {
                         continue;
                     }
 
-                    let ingest_record = IngestRecord {
-                        record: record_value,
-                        _namespace: skpr_namespace.clone(),
-                        _partition: skpr_partition.clone(),
-                        _time: skpr_time_bucket.clone(),
-                    };
-
-                    // Load schema and hash using a stable version snapshot to avoid races
-                    let md = METADATA.load();
-                    let schema_hash = Ingest::load_stable_schema_hash(&skpr_namespace, &md.metadata, flatten);
-
-                    let key = (
-                        skpr_namespace.clone(),
-                        skpr_partition.clone(),
-                        skpr_time_bucket.clone(),
-                        schema_hash.hash
-                    );
-                    let buf_entry = buf.entry(key.clone()).or_insert_with(|| {
-
-                        // Ensure schema is prepared and visible before creating first batch for this namespace
-                        {
-                            // If schema not marked ready yet, block briefly until it is
-                            const MAX_WAIT_ITERS: u32 = 50; // ~5s total
-                            let mut iters: u32 = 0;
-                            loop {
-                                let ready = SCHEMA_READY.get(&skpr_namespace).map(|f| f.load(Ordering::Relaxed)).unwrap_or(false);
-                                if ready { break; }
-                                if iters >= MAX_WAIT_ITERS { break; }
-                                std::thread::sleep(std::time::Duration::from_millis(100));
-                                iters += 1;
-                            }
+                    // Ensure schema is prepared and visible before creating first batch for this namespace
+                    {
+                        // If schema not marked ready yet, block briefly until it is
+                        const MAX_WAIT_ITERS: u32 = 50; // ~5s total
+                        let mut iters: u32 = 0;
+                        loop {
+                            let ready = SCHEMA_READY.get(&skpr_namespace).map(|f| f.load(Ordering::Relaxed)).unwrap_or(false);
+                            if ready { break; }
+                            if iters >= MAX_WAIT_ITERS { break; }
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                            iters += 1;
                         }
-                        IngestBufferBatch {
-                            offsets: HashMap::new(),
-                            _namespace: skpr_namespace.clone(),
-                            _partition: skpr_partition.clone(),
-                            _time: skpr_time_bucket,
-                            _shard: "".to_string(),
-                            schema: schema_hash.schema,
-                            record_batches: None,
-                        }
-                    });
-                    
-                    // an ingest batch consist of many small files/queue messages, etc. Each will need its offset committed in the WAL.
-                    buf_entry.offsets.insert(ingest_batch.offset_key.clone(), batch_line);
-                    raw_values.entry(key).or_insert_with(|| Vec::with_capacity(1024)).push(ingest_record);
-
+                    }
+                    enqueue_record(&skpr_namespace, &skpr_partition, &skpr_time_bucket, record_value, &ingest_batch.offset_key, batch_line);
                     _j += 1;
                     
                 }
+            }
+        }
+
+        // Retry any deferred records with evolved schema using fast-path only
+        if !deferred_records.is_empty() {
+            // Allow brief time for schema to publish if needed
+            for (ns, _part, _time_opt, _rec, _ok, _pos) in deferred_records.iter() {
+                // Wait until schema ready flag is true or short timeout
+                const MAX_WAIT_ITERS: u32 = 30; // ~3s
+                let mut iters: u32 = 0;
+                loop {
+                    let ready = SCHEMA_READY.get(ns).map(|f| f.load(Ordering::Relaxed)).unwrap_or(false);
+                    if ready { break; }
+                    if iters >= MAX_WAIT_ITERS { break; }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    iters += 1;
+                }
+            }
+
+            for (skpr_namespace, skpr_partition, skpr_time_bucket, record, offset_key, batch_pos) in deferred_records.into_iter() {
+                // Attempt fast-path with updated schema
+                let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.or(Some("no".to_string())).unwrap());
+                let md_snapshot = METADATA.load();
+                let record_value = match md_snapshot.metadata.get(&skpr_namespace) {
+                    Some(metadata) => fast_path_ingest(&record, metadata.fields.as_ref(), &skpr_namespace, flatten).unwrap_or(Value::Null),
+                    None => Value::Null,
+                };
+                if record_value.is_null() { continue; }
+
+                drop(md_snapshot);
+                enqueue_record(&skpr_namespace, &skpr_partition, &skpr_time_bucket, record_value, &offset_key, batch_pos);
             }
         }
         
