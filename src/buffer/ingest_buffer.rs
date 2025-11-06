@@ -355,6 +355,9 @@ impl Buffers {
                 let now_secs = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
                 for idx in meta.index.iter() {
                     if Buffers::is_partition_tombstoned(&path, &idx.key) { continue; }
+                    // Skip partitions already in-flight
+                    let inflight_key = (path.to_string_lossy().to_string(), idx.start, idx.len);
+                    if COMPACTION_IN_FLIGHT.contains_key(&inflight_key) { continue; }
                     let should = Buffers::should_compact(idx.bytes, idx.updated_at_secs, now_secs, force);
                     if should {
                         best = Some((path.clone(), meta.clone(), idx.clone()));
@@ -369,8 +372,10 @@ impl Buffers {
             if Config::debug_enabled() || Config::log_wal_enabled() {
                 println!("Compactor: candidate ns={} part={} time={} shard={} bytes={} updated_at={}", ns, part, time, shard, idx.bytes, idx.updated_at_secs);
             }
-            Buffers::compact_segment_partition(&path, &meta, &idx, shared_output.clone(), offsets_db.clone()).await.ok();
-            return Ok(true);
+            let started = Buffers::compact_segment_partition(&path, &meta, &idx, shared_output.clone(), offsets_db.clone())
+                .await
+                .unwrap_or(false);
+            return Ok(started);
         }
         Ok(false)
     }
@@ -420,6 +425,8 @@ impl Buffers {
                     let now_secs = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
                     for idx in meta.index.iter() {
                         if Buffers::is_partition_tombstoned(&path, &idx.key) { continue; }
+                        let inflight_key = (path.to_string_lossy().to_string(), idx.start, idx.len);
+                        if COMPACTION_IN_FLIGHT.contains_key(&inflight_key) { continue; }
                         if Buffers::should_compact(idx.bytes, idx.updated_at_secs, now_secs, force) {
                             out.push((path.clone(), meta.clone(), idx.clone()));
                             if out.len() >= limit { break; }
@@ -476,16 +483,11 @@ impl Buffers {
         idx: &crate::buffer::segment_file::SegmentPartitionIndexEntry,
         shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>,
         offsets_db: Arc<Offsets>,
-    ) -> io::Result<()> {
+    ) -> io::Result<bool> {
         let (namespace, partition, time, shard) = (idx.key.0.clone(), idx.key.1.clone(), idx.key.2, idx.key.3.clone());
         let mut out_key = BufferChunker::encode_chunk_name("output", Some(&namespace), Some(&partition), time, Some(&shard));
         let compaction_id = Buffers::compute_compaction_id(seg_path, idx);
         out_key = format!("{}-c={}", out_key, compaction_id);
-
-        if Config::debug_enabled() || Config::log_wal_enabled() {
-            println!("Compactor: start ns={} part={} time={} shard={} seg={} bytes={} out_key={}",
-                namespace, partition, time.unwrap_or(0), shard, seg_path.to_string_lossy(), idx.bytes, out_key);
-        }
 
         // Single-flight guard (keyed by seg_path + start + len)
         let inflight_key = (seg_path.to_string_lossy().to_string(), idx.start, idx.len);
@@ -493,18 +495,22 @@ impl Buffers {
             if Config::debug_enabled() || Config::log_wal_enabled() {
                 println!("Compactor: skip duplicate in-flight seg={} start={} len={}", seg_path.to_string_lossy(), idx.start, idx.len);
             }
-            return Ok(());
+            return Ok(false);
         }
         struct InflightGuard((String, u64, u64));
         impl Drop for InflightGuard {
             fn drop(&mut self) { COMPACTION_IN_FLIGHT.remove(&self.0); }
         }
         let _guard = InflightGuard(inflight_key.clone());
+        if Config::debug_enabled() || Config::log_wal_enabled() {
+            println!("Compactor: start ns={} part={} time={} shard={} seg={} start={} len={} bytes={} out_key={}",
+                namespace, partition, time.unwrap_or(0), shard, seg_path.to_string_lossy(), idx.start, idx.len, idx.bytes, out_key);
+        }
         // Validate and clamp partition bounds to avoid corrupt reads
         let file_len = OpenOptions::new().read(true).open(&seg_path)?.metadata()?.len();
         if idx.start >= file_len {
             println!("Compactor: partition start beyond file end for {} start={} len={} file_len={}", seg_path.to_string_lossy(), idx.start, idx.len, file_len);
-            return Ok(());
+            return Ok(false);
         }
         let safe_len = std::cmp::min(idx.len, file_len.saturating_sub(idx.start));
         if Config::debug_enabled() || Config::log_wal_enabled() {
@@ -662,7 +668,7 @@ impl Buffers {
                 println!("Compactor: truncated-stream quarantine seg={} qseg={} qdiag={}", seg_path.to_string_lossy(), qseg.to_string_lossy(), qdiag.to_string_lossy());
                 crate::metrics::counters::add_quarantined_partitions(1);
             }
-            return Ok(());
+            return Ok(false);
         }
 
         // Do not commit offsets here; they are committed upon persisting .seg in flush()
@@ -699,7 +705,7 @@ impl Buffers {
                 }
             }
         }
-        Ok(())
+        Ok(true)
     }
 
 pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
