@@ -1132,8 +1132,10 @@ mod clean_field_name_tests {
 mod parse_time_field_tests {
     use super::*;
     use serde_json::json;
+    use serial_test::serial;
 
     #[test]
+    #[serial]
     fn test_parse_time_field_with_invalid_millisecond_timestamp() {
         // Set up the environment
         Config::setenv("TRANSFORM_BATCH_TIME_FIELDS", "time2");
@@ -1147,6 +1149,7 @@ mod parse_time_field_tests {
     }
 
     #[test]
+    #[serial]
     fn test_parse_time_field_with_valid_millisecond_timestamp() {
         Config::setenv("TRANSFORM_BATCH_TIME_FIELDS", "time1");
         
@@ -1157,6 +1160,7 @@ mod parse_time_field_tests {
     }
 
     #[test]
+    #[serial]
     fn test_parse_time_field_with_valid_second_timestamp() {
         Config::setenv("TRANSFORM_BATCH_TIME_FIELDS", "time3");
 
@@ -1167,6 +1171,7 @@ mod parse_time_field_tests {
     }
 
     #[test]
+    #[serial]
     fn test_parse_time_field_with_empty_config() {
         Config::setenv("TRANSFORM_BATCH_TIME_FIELDS", "");
 
@@ -1178,6 +1183,7 @@ mod parse_time_field_tests {
     }
 
     #[test]
+    #[serial]
     fn test_parse_time_field_with_string_timestamp() {
         Config::setenv("TRANSFORM_BATCH_TIME_FIELDS", "time");
 
@@ -1189,6 +1195,7 @@ mod parse_time_field_tests {
     }
 
     #[test]
+    #[serial]
     fn test_parse_time_field_with_invalid_field() {
         Config::setenv("TRANSFORM_BATCH_TIME_FIELDS", "nonexistent");
 

@@ -274,7 +274,8 @@ pub fn match_scalar_value_optimized(
                     value: Value::String(b.to_string()),
                 });
             } else if apply_evolution {
-                match Evolution::apply_evolution_factory(field, value, metadata, flatten) {
+                let mut _meta_ev = metadata.clone();
+                match Evolution::apply_evolution_factory(field, value, &mut _meta_ev, flatten) {
                     Ok(v) => return Ok(v),
                     Err(_) => {}
                 }
@@ -300,7 +301,8 @@ pub fn match_scalar_value_optimized(
             }
             
             if apply_evolution {
-                match Evolution::apply_evolution_factory(field, value, metadata, flatten) {
+                let mut _meta_ev = metadata.clone();
+                match Evolution::apply_evolution_factory(field, value, &mut _meta_ev, flatten) {
                     Ok(v) => return Ok(v),
                     Err(_) => {}
                 }
@@ -342,7 +344,8 @@ pub fn match_scalar_value_optimized(
             }
             
             if apply_evolution {
-                match Evolution::apply_evolution_factory(field, value, metadata, flatten) {
+                let mut _meta_ev = metadata.clone();
+                match Evolution::apply_evolution_factory(field, value, &mut _meta_ev, flatten) {
                     Ok(v) => return Ok(v),
                     Err(_) => {}
                 }
@@ -374,7 +377,8 @@ pub fn match_scalar_value_optimized(
             }
             
             if apply_evolution {
-                match Evolution::apply_evolution_factory(field, value, metadata, flatten) {
+                let mut _meta_ev = metadata.clone();
+                match Evolution::apply_evolution_factory(field, value, &mut _meta_ev, flatten) {
                     Ok(v) => return Ok(v),
                     Err(_) => {}
                 }
@@ -402,7 +406,8 @@ pub fn match_scalar_value_optimized(
             }
             
             if apply_evolution {
-                match Evolution::apply_evolution_factory(field, value, metadata, flatten) {
+                let mut _meta_ev = metadata.clone();
+                match Evolution::apply_evolution_factory(field, value, &mut _meta_ev, flatten) {
                     Ok(v) => return Ok(v),
                     Err(_) => {}
                 }
@@ -446,7 +451,8 @@ pub fn match_scalar_value_optimized(
             }
             
             if apply_evolution {
-                match Evolution::apply_evolution_factory(field, value, metadata, flatten) {
+                let mut _meta_ev = metadata.clone();
+                match Evolution::apply_evolution_factory(field, value, &mut _meta_ev, flatten) {
                     Ok(v) => return Ok(v),
                     Err(_) => {}
                 }
