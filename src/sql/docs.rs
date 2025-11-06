@@ -139,6 +139,17 @@ pub fn get_sql_docs() -> HashMap<String, SqlStatementDoc> {
         },
     );
 
+    // Deadletters Table (Querying)
+    docs.insert(
+        "DEADLETTERS TABLE".to_string(),
+        SqlStatementDoc {
+            name: "DEADLETTERS TABLE".to_string(),
+            syntax: "SELECT <columns> FROM deadletters [WHERE namespace = '<ns>'] [AND dt BETWEEN 'YYYY-MM-DD' AND 'YYYY-MM-DD']".to_string(),
+            description: "Query deadletter events uploaded directly to the Skippr state bucket under deadletters/. Supports JSON extraction via json_extract_scalar(record.raw_json, '$.<path>').".to_string(),
+            example: "SELECT id, namespace, failure.error_messages[1] AS err FROM deadletters WHERE namespace = 'bike_hire' AND dt BETWEEN '2025-11-05' AND '2025-11-07'".to_string(),
+        },
+    );
+
     // Standard SQL queries
     docs.insert(
         "SELECT".to_string(),

@@ -203,7 +203,8 @@ impl DataSourceLocalFilePlugin {
                                     current_batch.push(IngestBatch {
                                         offset_key: offset_key.clone(),
                                         data: ingest_data,
-                                        bytes: _batch_bytes as usize
+                                        bytes: _batch_bytes as usize,
+                                        source_uri: "".to_string()
                                     });
 
                                     if !current_batch.is_empty() {
@@ -234,7 +235,8 @@ impl DataSourceLocalFilePlugin {
                                             current_batch.push(IngestBatch {
                                                 offset_key: offset_key.clone(),
                                                 data: ingest_data,
-                                                bytes: _batch_bytes as usize
+                                                bytes: _batch_bytes as usize,
+                                                source_uri: "".to_string()
                                             });
                                         }
 
@@ -268,7 +270,8 @@ impl DataSourceLocalFilePlugin {
                                             current_batch.push(IngestBatch {
                                                 offset_key: offset_key.clone(),
                                                 data: ingest_data,
-                                                bytes: _batch_bytes as usize
+                                                bytes: _batch_bytes as usize,
+                                                source_uri: "".to_string()
                                             });
                                         }
 
@@ -317,7 +320,8 @@ impl DataSourceLocalFilePlugin {
                                                 current_batch.push(IngestBatch {
                                                     offset_key: offset_key.clone(),
                                                     data: ingest_data,
-                                                    bytes: _batch_bytes as usize
+                                                    bytes: _batch_bytes as usize,
+                                                    source_uri: "".to_string()
                                                 });
 
                                                 tx.unbounded_send(vec![current_batch.clone()]).unwrap();
@@ -360,7 +364,8 @@ impl DataSourceLocalFilePlugin {
                                             let batch = IngestBatch {
                                                 offset_key: offset_key.clone(),
                                                 data: ingest_data.clone(),
-                                                bytes: _batch_bytes as usize
+                                                bytes: _batch_bytes as usize,
+                                                source_uri: "".to_string()
                                             };
                                             let current_batch: Vec<IngestBatch> = vec![batch];
                                             tx.unbounded_send(vec![current_batch]).unwrap();
@@ -373,7 +378,8 @@ impl DataSourceLocalFilePlugin {
                                         let batch = IngestBatch {
                                             offset_key: offset_key.clone(),
                                             data: ingest_data,
-                                            bytes: _batch_bytes as usize
+                                            bytes: _batch_bytes as usize,
+                                            source_uri: "".to_string()
                                         };
                                         let current_batch: Vec<IngestBatch> = vec![batch];
                                         tx.unbounded_send(vec![current_batch]).unwrap();

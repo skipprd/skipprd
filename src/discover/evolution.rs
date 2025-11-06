@@ -298,16 +298,16 @@ impl Evolution {
                     let mut s: i32 = 0;
                     match evolution.type_string.as_str() {
                         "timestamp_milli" => {
-                            s += 40;
+                            // Prefer millis when the numeric magnitude suggests ms (>= 1e12)
                             if let Some(i) = value.as_i64() {
-                                if i >= 1_000_000_000_000 { s += 30; }
-                            }
+                                if i >= 1_000_000_000_000 { s += 70; } else { s += 10; }
+                            } else { s += 30; }
                         },
                         "timestamp" => {
-                            s += 20;
+                            // Prefer seconds when the numeric magnitude suggests seconds (< 1e12)
                             if let Some(i) = value.as_i64() {
-                                if i < 1_000_000_000_000 { s += 10; }
-                            }
+                                if i < 1_000_000_000_000 { s += 70; } else { s += 10; }
+                            } else { s += 30; }
                         },
                         "double" => {
                             s += 25;

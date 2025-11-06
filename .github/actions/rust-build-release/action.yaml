@@ -39,6 +39,11 @@ runs:
       env:
         # do not produce debug symbols to keep memory usage down
         RUSTFLAGS: "-C debuginfo=0"
+    - name: Cargo Test
+      shell: bash
+      run: |
+          cargo test --release --all --all-features -- --nocapture
+
 #    - name: Verify release
 #      shell: bash
 #      run: |

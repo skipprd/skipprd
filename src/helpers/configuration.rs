@@ -35,6 +35,7 @@ use crate::ingest_work::Ingest;
 use tokio::sync::mpsc::{UnboundedSender, UnboundedReceiver, unbounded_channel};
 use crate::plugins::file_input::{DataSourceLocalFilePluginConfig};
 use crate::plugins::s3_input::DataSourceS3PluginConfig;
+use crate::helpers::Helpers;
 // use crate::plugins::s3_inventory::{DataSourceS3InventoryPluginConfig};
 
 lazy_static! {
@@ -148,6 +149,32 @@ pub static PIPELINE_NAME: Lazy<Arc<TimedRwLock<String>>> = Lazy::new(|| Arc::new
 
 #[allow(dead_code)]
 impl Config {
+    // Reserved pipeline/table names that cannot be used
+    pub fn reserved_pipeline_names() -> &'static [&'static str] {
+        &[
+            "deadletters",
+            "wal",
+            "_skippr",
+            "skippr",
+            "metadata"
+        ]
+    }
+
+    // Validate current pipeline name against reserved list
+    pub fn assert_pipeline_not_reserved() {
+        let name = Self::get_pipeline_name();
+        let cleaned = Helpers::clean_field_name(name.clone());
+        for r in Self::reserved_pipeline_names().iter() {
+            if name.eq_ignore_ascii_case(r) || cleaned.eq_ignore_ascii_case(r) {
+                println!(
+                    "Invalid pipeline name '{}': reserved. Choose a different name. Reserved: {:?}",
+                    name,
+                    Self::reserved_pipeline_names()
+                );
+                std::process::exit(1);
+            }
+        }
+    }
     pub fn log_wal_enabled() -> bool {
         // Unified flag overrides
         if Self::truth_value(&Self::getenv("LOG_WAL", "")) { return true; }
@@ -1696,6 +1723,8 @@ impl Config {
 
     pub async fn init() {
 
+        // Enforce reserved name policy early
+        Self::assert_pipeline_not_reserved();
 
         
         let data_dir = Config::get_data_dir();
@@ -1807,6 +1836,11 @@ impl Config {
         let v = build_schema_view(meta);
         let s = serde_json::to_string(&v).unwrap_or_default();
         format!("{:?}", md5::compute(s))
+    }
+
+    // Deadletter settings
+    pub fn get_deadletter_include_normalized_json() -> bool {
+        Self::truth_value(&Self::getenv("DEADLETTER_INCLUDE_NORMALIZED_JSON", "yes"))
     }
 }
 

@@ -71,10 +71,8 @@ impl DataSourceHttpPlugin {
             fs::read_to_string(&temp_file_path).unwrap()
         };
 
-        let batch = IngestBatch {
-            offset_key,
-            data,
-        };
+        let bytes = data.len();
+        let batch = IngestBatch { offset_key, data: data.clone(), bytes, source_uri: "".to_string() };
 
         self.ingest.ingest_file(
             vec![batch],

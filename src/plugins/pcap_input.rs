@@ -88,7 +88,9 @@ impl DataSourcePcapPlugin {
                             namespace: "stdin".to_string(),
                             partition: Helpers::random_str(10), // no partition for stdin
                         },
-                        data,
+                        data: data.clone(),
+                        bytes: data.len(),
+                        source_uri: "".to_string(),
                     };
 
                     // Spawn a new task in the runtime for each batch received.

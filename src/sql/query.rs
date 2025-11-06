@@ -883,8 +883,63 @@ pub async fn query(sql_str: &str) {
                     }
                 }
             }
-            if table_names.is_empty() { println!("Could not infer table name from query; expected FROM <pipeline_name>"); process::exit(1); }
+            if table_names.is_empty() { println!("Could not infer table name from query; expected FROM <pipeline_name> or 'deadletters'"); process::exit(1); }
             table_names.sort(); table_names.dedup();
+
+            // Special-case: register 'deadletters' table (Parquet over S3 state bucket)
+            let has_deadletters = table_names.iter().any(|t| t == "deadletters");
+            if has_deadletters {
+                // Ensure configuration is initialized so state bucket is resolved from SKIPPR_CONFIG_FILE
+                Config::init().await;
+                // Prefer scanning within tenant/workspace to include all pipelines while staying precise
+                let bucket = Config::get_skippr_s3_bucket();
+                let tenant = Config::get_tenant();
+                let workspace = Config::get_workspace_name();
+                let pipeline = Config::get_pipeline_name();
+                // Writer layout: deadletters/<tenant>/<workspace>/<pipeline>/namespace=<ns>/p_year=.../p_month=.../p_day=.../*.parquet
+                // Register at deadletters/<tenant>/<workspace>/ so recursive listing finds all pipelines
+                let dl_url = format!("s3://{}/deadletters/{}/{}/{}/", bucket, tenant, workspace, pipeline);
+                register_s3_object_store(&ctx, &dl_url).await;
+                // Optional debug: verify access and show a few sample objects under the prefix
+                // if Config::debug_enabled() {
+                    println!("Registering deadletters table at URL: {}", dl_url);
+                    let prefix = format!("deadletters/{}/{}/", tenant, workspace);
+                    let sample = crate::helpers::s3::list_parquet_keys(&bucket, &prefix, 8).await;
+                    if sample.is_empty() {
+                        println!("Deadletters debug: No parquet files found under s3://{}/{}", bucket, prefix);
+                    } else {
+                        println!("Deadletters debug: Found {} parquet objects (showing up to 8):", sample.len());
+                        for k in sample.iter().take(8) {
+                            println!("  s3://{}/{}", bucket, k);
+                        }
+                    }
+                // }
+                // Register as Parquet listing with partition columns for pruning
+                let opts = ParquetReadOptions {
+                    schema: None,
+                    file_extension: "parquet",
+                    table_partition_cols: vec![
+                        ("namespace".to_string(), ArrowDataType::Utf8),
+                        ("p_year".to_string(), ArrowDataType::Utf8),
+                        ("p_month".to_string(), ArrowDataType::Utf8),
+                        ("p_day".to_string(), ArrowDataType::Utf8),
+                    ],
+                    parquet_pruning: None,
+                    skip_metadata: Some(true),
+                    file_sort_order: vec![]
+                };
+                if let Err(e) = ctx.register_parquet("deadletters", &dl_url, opts).await { println!("Failed to register deadletters at {}: {}", dl_url, e); }
+            }
+
+            // Remove 'deadletters' from pipeline tables to avoid pipeline processing below
+            let mut table_names: Vec<String> = table_names.into_iter().filter(|t| t != "deadletters").collect();
+            if table_names.is_empty() {
+                // Only deadletters requested; execute query directly
+                if let Ok(df) = ctx.sql(sql_str).await { if let Ok(b) = df.collect().await {
+                    match pretty_format_batches(&b) { Ok(s) => println!("{}", s), Err(_) => {} }
+                    return;
+                } }
+            }
             for pipeline in table_names {
                 // Switch pipeline context for correct local WAL dir and config resolution
                 PIPELINE_NAME.write().clear();

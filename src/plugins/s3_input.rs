@@ -170,6 +170,7 @@ impl DataSourceS3Plugin {
         let s3_bucket = self.config.s3_bucket.clone();
         let s3_bucket_filter = s3_bucket.clone();
         let s3_bucket_dl = s3_bucket.clone();
+        let s3_bucket_outer = s3_bucket_dl.clone();
         let s3_bucket_ns = s3_bucket.clone();
         let delimiter = "/".to_string();
         let inventory_prefix = self.config.s3_prefix.clone();
@@ -423,7 +424,8 @@ impl DataSourceS3Plugin {
             if let Some((key, str_data)) = opt {
                 let bytes = str_data.len();
                 current_bytes += bytes;
-                current_batch.push(IngestBatch { offset_key: OffsetKey { namespace: s3_bucket_ns.clone(), partition: key }, data: str_data, bytes });
+                let source_uri = format!("s3://{}/{}", s3_bucket_outer, key);
+                current_batch.push(IngestBatch { offset_key: OffsetKey { namespace: s3_bucket_ns.clone(), partition: key }, data: str_data, bytes, source_uri });
                 if current_bytes >= self.optimal_chunk_size {
                     let batch_bytes = current_bytes;
                     let batch = std::mem::take(&mut current_batch);

@@ -35,9 +35,9 @@ jobs:
 #          repository: ${{ github.repository }}
 #          retain_days: 30
 #          keep_minimum_runs: 30
-  # Check crate compiles
-#  cargo_check:
-#    name: cargo check
+
+#  cargo_test:
+#    name: cargo test
 #    runs-on: ubuntu-latest
 #    container:
 #      image: amd64/rust
@@ -55,8 +55,8 @@ jobs:
 #        with:
 #          rust-version: stable
 #
-#      - name: Check workspace in debug mode
-#        run: cargo check
+#      - name: Run tests
+#        run: cargo test
 
   cleanup:
     runs-on: ubuntu-latest
@@ -188,7 +188,6 @@ jobs:
           rust-version: stable
           architecture_name: linux_x86
 
-
 #  linux_x86_heaptrack:
 #    needs:
 #      - linux_x86
@@ -232,34 +231,35 @@ jobs:
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
 
+#  # Chaos mode test with less data
+#  chaos_mode_test:
+#    needs:
+#      - cleanup
+#      - purge_dynamodb
+#      - linux_x86
+#    name: Chaos Mode (linux x86)
+#    runs-on:
+#      - ubuntu-latest
+#    steps:
+#      - uses: actions/checkout@v3
+#
+#      - name: Download Artifacts
+#        uses: actions/download-artifact@v4
+#
+#      - name: Test linux x86 release
+#        uses: ./.github/actions/e2e/chaos_mode
+#        with:
+#          architecture_name: linux_x86
+#          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+#          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+#          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
+
   chaos_mode_test:
     needs:
       - cleanup
       - purge_dynamodb
       - linux_x86
     name: Chaos Mode (linux x86)
-    runs-on:
-      - ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Download Artifacts
-        uses: actions/download-artifact@v4
-
-      - name: Test linux x86 release
-        uses: ./.github/actions/e2e/chaos_mode
-        with:
-          architecture_name: linux_x86
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
-
-  linux_x86_many_test:
-    needs:
-      - cleanup
-      - purge_dynamodb
-      - linux_x86
-    name: Test Many Objects (linux x86)
     runs-on:
       - ubuntu-latest-32-cores
     #      - ubuntu-latest
@@ -271,6 +271,28 @@ jobs:
 
       - name: Test linux x86 release
         uses: ./.github/actions/e2e/bike_hire_many
+        with:
+          architecture_name: linux_x86
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
+
+  deadletters_test:
+    needs:
+      - cleanup
+      - purge_dynamodb
+      - linux_x86
+    name: Deadletters Test
+    runs-on:
+      - ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Test linux x86 release
+        uses: ./.github/actions/e2e/deadletters
         with:
           architecture_name: linux_x86
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -302,11 +324,13 @@ jobs:
 #          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
 
 
-  release:
+  publish:
+    name: Publish Release
     if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test')
     needs:
       - linux_x86_test
       - chaos_mode_test
+      - deadletters_test
 #      - macos_arm64
 #      - macos_x86
 #      - macos_arm64_test
@@ -346,7 +370,7 @@ jobs:
   dockerize:
     if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test')
     needs:
-      - release
+      - publish
 #      - macos_arm64
 #      - macos_x86
 #      - linux_x86
@@ -382,23 +406,25 @@ jobs:
           docker push ${{ env.DOCKER_HUB_REPO }}/skippr:stable
 
 
-  linux_x86_test_many:
-    needs:
-      - dockerize
-    name: test (many) build (linux x86)
-    runs-on:
-      - ubuntu-latest-32-cores
-    steps:
-      - uses: actions/checkout@v3
+#  linux_x86_test_many:
+#    needs:
+#      - dockerize
+#    name: test (many) build (linux x86)
+#    runs-on:
+#      - ubuntu-latest-32-cores
+#    steps:
+#      - uses: actions/checkout@v3
+#
+#      - name: Download Artifacts
+#        uses: actions/download-artifact@v4
+#
+#      - name: Test (many) linux x86 release
+#        uses: ./.github/actions/e2e-docker/bike_hire_many
+#        with:
+#          architecture_name: linux_x86
+#          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+#          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+#          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
 
-      - name: Download Artifacts
-        uses: actions/download-artifact@v4
 
-      - name: Test (many) linux x86 release
-        uses: ./.github/actions/e2e-docker/bike_hire_many
-        with:
-          architecture_name: linux_x86
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
 

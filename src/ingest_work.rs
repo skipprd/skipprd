@@ -43,6 +43,15 @@ use crate::ingest::sequencer::propose_and_wait;
 use crate::discover::evolution::{EvolutionProposal, infer_specs_for_record};
 
 use crate::helpers::timed_rwlock::TimedRwLock;
+use crate::helpers::s3 as s3_helpers;
+use chrono::{Utc, TimeZone};
+use serde_json::json;
+use parquet::arrow::ArrowWriter;
+use parquet::basic::Compression;
+use parquet::file::properties::WriterProperties;
+use std::io::Cursor;
+use arrow::array::{StringArray, Int64Array, Int32Array, ListBuilder, StringBuilder, ArrayRef};
+use arrow_schema::{Field as ArrowField, DataType as ArrowDataType, Schema as ArrowSchema};
 use crate::buffer::ingest_buffer::{Buffers, IngestBufferBatch, IngestRecord};
 use crate::serdes::csv::SerderCsv;
 
@@ -147,6 +156,11 @@ pub struct Deadletter {
     pub(crate) time: u64,
     pub(crate) error: String,
     pub(crate) records: String,
+    pub(crate) failure_code: String,
+    pub(crate) source_uri: String,
+    pub(crate) offset_namespace: String,
+    pub(crate) offset_partition: String,
+    pub(crate) offset_pos: u64,
 }
 
 
@@ -199,6 +213,7 @@ pub struct IngestBatch {
     pub(crate) offset_key: OffsetKey,
     pub(crate) data: String,
     pub(crate) bytes: usize,
+    pub(crate) source_uri: String,
 }
 
 #[derive(Clone)]
@@ -1005,17 +1020,177 @@ impl Ingest {
     }
 
     pub(crate) fn deadletter(_dl: Deadletter) {
+        let (key, buf, id) = Self::build_deadletter_parquet_and_key(&_dl);
 
-        // let mut deadletter_file = DEADLETTER_FILE.write();
-        //
-        // let lines = serde_json::to_string(&dl).or(Err("Could not serialize deadletter")).unwrap();
-        //
-        // deadletter_file.write(lines.as_bytes()).or(Err("Could not write to deadletter file")).unwrap();
-        // deadletter_file.write("\n".as_bytes()).or(Err("Could not write to deadletter file")).unwrap();
-        //
-        // deadletter_file.flush().or(Err("Could not flush deadletter file")).unwrap();
+        // Print concise stdout line incl. S3 key
+        let bucket = Config::get_skippr_s3_bucket();
+        println!("Deadletter id={} ns={} key=s3://{}/{} err={}", id, _dl.namespace, bucket, key, _dl.error);
 
+        // Upload asynchronously; if no runtime, spawn a temporary one
+        let upload = async move {
+            let client = s3_helpers::get_s3_client().await;
+            let bucket = Config::get_skippr_s3_bucket();
+            use aws_sdk_s3::primitives::ByteStream;
+            if let Err(e) = client
+                .put_object()
+                .bucket(bucket)
+                .key(&key)
+                .body(ByteStream::from(buf))
+                .content_type("application/octet-stream")
+                .send()
+                .await
+            {
+                println!("Failed to upload deadletter to S3 key={} err={:?}", key, e);
+            }
+        };
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(upload);
+        } else {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.spawn(upload);
+        }
     }
+
+    pub(crate) fn build_deadletter_parquet_and_key(_dl: &Deadletter) -> (String, Vec<u8>, String) {
+        let ns = _dl.namespace.clone();
+        let part = _dl.partition.clone();
+        let ingest_ts = _dl.time as i64;
+        let err_msg = _dl.error.clone();
+        let raw_json = _dl.records.clone();
+
+        // Stable id: md5(namespace + offset_key + offset_pos)
+        let id = format!(
+            "{:x}",
+            md5::compute(format!(
+                "{}:{}:{}",
+                &ns,
+                format!("{}:{}", _dl.offset_namespace, _dl.offset_partition),
+                _dl.offset_pos
+            ))
+        );
+        let dt = Utc.timestamp_opt(ingest_ts as i64, 0).single().unwrap_or_else(|| Utc::now());
+        let year = dt.format("%Y").to_string();
+        let month = dt.format("%m").to_string();
+        let day = dt.format("%d").to_string();
+
+        // Multi-tenant S3 key layout using Hive-style partitions
+        let tenant = Config::get_tenant();
+        let workspace = Config::get_workspace_name();
+        let pipeline = Config::get_pipeline_name();
+        let key = format!(
+            "deadletters/{}/{}/namespace={}/p_year={}/p_month={}/p_day={}/{}.parquet",
+            tenant,
+            workspace,
+            Helpers::clean_field_name(ns.clone()),
+            year,
+            month,
+            day,
+            id
+        );
+
+        // Snapshot namespace metadata
+        let meta_snapshot = {
+            let md = METADATA.load();
+            md.metadata.get(&ns).cloned()
+        };
+
+        // Optional normalized json (feature default on)
+        let include_norm = Config::get_deadletter_include_normalized_json();
+        let normalized_json: Option<String> = if include_norm { Some(raw_json.clone()) } else { None };
+
+        // Build Arrow schema and a single-row RecordBatch for Parquet
+        let schema = Arc::new(ArrowSchema::new(vec![
+            ArrowField::new("id", ArrowDataType::Utf8, false),
+            ArrowField::new("tenant", ArrowDataType::Utf8, false),
+            ArrowField::new("workspace", ArrowDataType::Utf8, false),
+            ArrowField::new("pipeline", ArrowDataType::Utf8, false),
+            ArrowField::new("pipeline_run_id", ArrowDataType::Utf8, false),
+            ArrowField::new("partition", ArrowDataType::Utf8, true),
+            ArrowField::new("time_bucket", ArrowDataType::Int64, false),
+            ArrowField::new("source_uri", ArrowDataType::Utf8, true),
+            ArrowField::new("offset_namespace", ArrowDataType::Utf8, true),
+            ArrowField::new("offset_partition", ArrowDataType::Utf8, true),
+            ArrowField::new("offset_pos", ArrowDataType::Int64, true),
+            ArrowField::new("failure_code", ArrowDataType::Utf8, true),
+            ArrowField::new(
+                "failure_error_messages",
+                ArrowDataType::List(Arc::new(ArrowField::new("item", ArrowDataType::Utf8, true))),
+                true,
+            ),
+            ArrowField::new(
+                "failure_error_kinds",
+                ArrowDataType::List(Arc::new(ArrowField::new("item", ArrowDataType::Utf8, true))),
+                true,
+            ),
+            ArrowField::new("component", ArrowDataType::Utf8, true),
+            ArrowField::new("backtrace", ArrowDataType::Utf8, true),
+            ArrowField::new("record_raw_json", ArrowDataType::Utf8, true),
+            ArrowField::new("record_normalized_json", ArrowDataType::Utf8, true),
+            ArrowField::new("schema_hash", ArrowDataType::Utf8, true),
+            ArrowField::new("schema_version", ArrowDataType::Int32, true),
+            ArrowField::new("metadata_snapshot", ArrowDataType::Utf8, true),
+            ArrowField::new("ingest_time_millis", ArrowDataType::Int64, false),
+        ]));
+
+        // Prepare arrays (single row)
+        static PIPELINE_RUN_ID: once_cell::sync::Lazy<String> = once_cell::sync::Lazy::new(|| Helpers::random_str(16));
+        let id_arr = Arc::new(StringArray::from(vec![id.clone()])) as ArrayRef;
+        let tenant_arr = Arc::new(StringArray::from(vec![tenant.clone()])) as ArrayRef;
+        let workspace_arr = Arc::new(StringArray::from(vec![workspace.clone()])) as ArrayRef;
+        let pipeline_arr = Arc::new(StringArray::from(vec![pipeline.clone()])) as ArrayRef;
+        let run_id_arr = Arc::new(StringArray::from(vec![PIPELINE_RUN_ID.clone()])) as ArrayRef;
+        let part_arr = Arc::new(StringArray::from(vec![part.clone()])) as ArrayRef;
+        let tb_arr = Arc::new(Int64Array::from(vec![ingest_ts])) as ArrayRef;
+        let src_uri_arr = Arc::new(StringArray::from(vec![_dl.source_uri.clone()])) as ArrayRef;
+        let off_ns_arr = Arc::new(StringArray::from(vec![_dl.offset_namespace.clone()])) as ArrayRef;
+        let off_part_arr = Arc::new(StringArray::from(vec![_dl.offset_partition.clone()])) as ArrayRef;
+        let off_pos_arr = Arc::new(Int64Array::from(vec![_dl.offset_pos as i64])) as ArrayRef;
+        let failure_code_arr = Arc::new(StringArray::from(vec![_dl.failure_code.clone()])) as ArrayRef;
+
+        // Build lists
+        let mut lm = ListBuilder::new(StringBuilder::new());
+        lm.values().append_value(err_msg.clone());
+        lm.append(true);
+        let err_msgs_arr = Arc::new(lm.finish()) as ArrayRef;
+        let mut lk = ListBuilder::new(StringBuilder::new());
+        lk.values().append_value("ingest");
+        lk.append(true);
+        let err_kinds_arr = Arc::new(lk.finish()) as ArrayRef;
+
+        let comp_arr = Arc::new(StringArray::from(vec!["ingest"])) as ArrayRef;
+        let backtrace_arr = Arc::new(StringArray::from(vec![""])) as ArrayRef;
+        let raw_arr = Arc::new(StringArray::from(vec![raw_json])) as ArrayRef;
+        let norm_arr = Arc::new(StringArray::from(vec![normalized_json.unwrap_or_default()])) as ArrayRef;
+        let sch_hash_arr = Arc::new(StringArray::from(vec![""])) as ArrayRef;
+        let sch_ver_arr = Arc::new(Int32Array::from(vec![0])) as ArrayRef;
+        let meta_str = meta_snapshot.as_ref().and_then(|m| serde_json::to_string(m).ok()).unwrap_or_default();
+        let meta_arr = Arc::new(StringArray::from(vec![meta_str])) as ArrayRef;
+        let ts_ms = dt.timestamp_millis();
+        let ts_arr = Arc::new(Int64Array::from(vec![ts_ms])) as ArrayRef;
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                id_arr, tenant_arr, workspace_arr, pipeline_arr, run_id_arr,
+                part_arr, tb_arr, src_uri_arr, off_ns_arr, off_part_arr, off_pos_arr,
+                failure_code_arr, err_msgs_arr, err_kinds_arr, comp_arr, backtrace_arr,
+                raw_arr, norm_arr, sch_hash_arr, sch_ver_arr, meta_arr, ts_arr,
+            ],
+        ).expect("deadletter batch");
+
+        // Parquet write to memory
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let props = WriterProperties::builder().set_compression(Compression::SNAPPY).build();
+            let mut writer = ArrowWriter::try_new(Cursor::new(&mut buf), schema.clone(), Some(props)).expect("parquet writer");
+            writer.write(&batch).expect("write deadletter batch");
+            writer.close().expect("close parquet");
+        }
+
+        (key, buf, id)
+    }
+
+    
 
     fn process_batch(
         datas: &Arc<Vec<IngestBatch>>,
@@ -1161,11 +1336,16 @@ impl Ingest {
                                 };
 
                                 let dl = Deadletter {
-                                    namespace: ingest_batch.offset_key.namespace.clone(),
+                                    namespace: Config::get_pipeline_name(),
                                     partition: ingest_batch.offset_key.partition.clone(),
                                     time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(),
                                     error: "Source data is not an object or array".to_string(),
                                     records: line_str.to_string(),
+                                    failure_code: "INPUT_FORMAT".to_string(),
+                                    source_uri: "".to_string(),
+                                    offset_namespace: ingest_batch.offset_key.namespace.clone(),
+                                    offset_partition: ingest_batch.offset_key.partition.clone(),
+                                    offset_pos: batch_line,
                                 };
 
                                 Self::deadletter(dl);
@@ -1197,11 +1377,16 @@ impl Ingest {
                     };
 
                     let dl = Deadletter {
-                        namespace: ingest_batch.offset_key.namespace.clone(),
+                        namespace: Config::get_pipeline_name(),
                         partition: ingest_batch.offset_key.partition.clone(),
                         time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(),
                         error: "Source data is empty".to_string(),
                         records: line_str.to_string(),
+                        failure_code: "EMPTY_RECORD".to_string(),
+                        source_uri: "".to_string(),
+                        offset_namespace: ingest_batch.offset_key.namespace.clone(),
+                        offset_partition: ingest_batch.offset_key.partition.clone(),
+                        offset_pos: batch_line,
                     };
 
                     Self::deadletter(dl);
@@ -1286,7 +1471,7 @@ impl Ingest {
                                 Ok(v) => v,
                                 Err(e) => {
                                     if Config::debug_enabled() { println!("Ingest: slow-path failed ns={} err={}", skpr_namespace, e); }
-                                    let dl = Deadletter { namespace: skpr_namespace.clone(), partition: skpr_partition.clone(), time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(), error: e.to_string(), records: record.to_string() };
+                                    let dl = Deadletter { namespace: skpr_namespace.clone(), partition: skpr_partition.clone(), time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(), error: e.to_string(), records: record.to_string(), failure_code: "EVOLUTION_SLOW_PATH".to_string(), source_uri: "".to_string(), offset_namespace: ingest_batch.offset_key.namespace.clone(), offset_partition: ingest_batch.offset_key.partition.clone(), offset_pos: batch_line };
                                     Self::deadletter(dl);
                                     Value::Null
                                 }
@@ -1423,7 +1608,9 @@ impl Ingest {
 
             if let Some(err) = persistent_error {
                 let joined = values_ref.iter().map(|r| r.to_string()).collect::<Vec<String>>().join("\n");
-                let dl = Deadletter { namespace: skpr_namespace.clone(), partition: entry._partition.clone(), time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(), error: err, records: joined };
+                // Pick one offset as representative for idempotency
+                let (off_ns, off_part, off_pos) = match entry.offsets.iter().next() { Some((k, p)) => (k.namespace.clone(), k.partition.clone(), *p), None => (entry._namespace.clone(), entry._partition.clone(), 0) };
+                let dl = Deadletter { namespace: skpr_namespace.clone(), partition: entry._partition.clone(), time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(), error: err, records: joined, failure_code: "EVOLUTION_PERSISTENT".to_string(), source_uri: "".to_string(), offset_namespace: off_ns, offset_partition: off_part, offset_pos: off_pos };
                 Self::deadletter(dl);
                 // Commit offsets for this entry to avoid reprocessing
                 for (ok, pos) in entry.offsets.iter() {
@@ -1449,7 +1636,8 @@ impl Ingest {
             } else {
                 // Deadletter entire batch if still failing
                 let joined = values_ref2.iter().map(|r| r.to_string()).collect::<Vec<String>>().join("\n");
-                let dl = Deadletter { namespace: skpr_namespace.clone(), partition: entry._partition.clone(), time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(), error: "Arrow serialization failed after schema evolution".to_string(), records: joined };
+                let (off_ns, off_part, off_pos) = match entry.offsets.iter().next() { Some((k, p)) => (k.namespace.clone(), k.partition.clone(), *p), None => (entry._namespace.clone(), entry._partition.clone(), 0) };
+                let dl = Deadletter { namespace: skpr_namespace.clone(), partition: entry._partition.clone(), time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(), error: "Arrow serialization failed after schema evolution".to_string(), records: joined, failure_code: "ARROW_SERIALIZE".to_string(), source_uri: "".to_string(), offset_namespace: off_ns, offset_partition: off_part, offset_pos: off_pos };
                 Self::deadletter(dl);
                 // Commit offsets for this entry to avoid reprocessing
                 for (ok, pos) in entry.offsets.iter() {
