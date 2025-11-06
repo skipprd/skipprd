@@ -1084,11 +1084,6 @@ impl Ingest {
         let mut buf: HashMap<(String, String, Option<i64>, String), IngestBufferBatch> = HashMap::with_capacity(32);
         // Temporary storage for raw JSON records prior to Arrow batch building
         let mut raw_values: HashMap<(String, String, Option<i64>, String), Vec<IngestRecord>> = HashMap::with_capacity(32);
-        // Defer most slow-path records: evolve schema using a small primer, then retry fast-path for the rest
-        let slow_primer_limit: usize = Config::getenv("SLOW_INGEST_PRIMER_RECORDS", "16").parse::<usize>().unwrap_or(16);
-        let mut slow_used_by_namespace: HashMap<String, usize> = HashMap::new();
-        // namespace, partition, time, record, offset_key, position
-        let mut deferred_records: Vec<(String, String, Option<i64>, Value, OffsetKey, u64)> = Vec::with_capacity(1024);
 
         let pipeline_name_cached = Config::get_pipeline_name();
         // Helper to enqueue a single record into current buffers using latest stable schema
@@ -1286,29 +1281,18 @@ impl Ingest {
                     let record_value = match msg {
                         Ok(msg) => msg,
                         Err(_err) => {
-                            // Use a small primer of slow-path records per namespace to evolve schema,
-                            // then defer the rest to retry via fast-path once schema is ready.
-                            let used = slow_used_by_namespace.entry(skpr_namespace.clone()).or_insert(0);
-                            if *used < slow_primer_limit {
-                                *used += 1;
-                                match slow_ingest_blocking(&skpr_namespace, &record, flatten) {
-                                    Ok(v) => v,
-                                    Err(e) => {
-                                        if Config::debug_enabled() { println!("Ingest: slow-path failed ns={} err={}", skpr_namespace, e); }
-                                        let dl = Deadletter { namespace: skpr_namespace.clone(), partition: skpr_partition.clone(), time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(), error: e.to_string(), records: record.to_string() };
-                                        Self::deadletter(dl);
-                                        Value::Null
-                                    }
+                            // Simple fallback: single-record slow path
+                            match slow_ingest_blocking(&skpr_namespace, &record, flatten) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    if Config::debug_enabled() { println!("Ingest: slow-path failed ns={} err={}", skpr_namespace, e); }
+                                    let dl = Deadletter { namespace: skpr_namespace.clone(), partition: skpr_partition.clone(), time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(), error: e.to_string(), records: record.to_string() };
+                                    Self::deadletter(dl);
+                                    Value::Null
                                 }
-                            } else {
-                                // Defer for fast-path retry after schema evolves
-                                deferred_records.push((skpr_namespace.clone(), skpr_partition.clone(), skpr_time_bucket.clone(), record.clone(), ingest_batch.offset_key.clone(), batch_line));
-                                Value::Null // will be retried later; skip adding now
                             }
                         }
                     };
-
-                    // Per-record Arrow pre-validation removed; batch-level serialization handles fallback
 
                     // Skip records that failed both fast-path and slow-path evolution
                     if record_value.is_null() {
@@ -1316,19 +1300,6 @@ impl Ingest {
                         continue;
                     }
 
-                    // Ensure schema is prepared and visible before creating first batch for this namespace
-                    {
-                        // If schema not marked ready yet, block briefly until it is
-                        const MAX_WAIT_ITERS: u32 = 50; // ~5s total
-                        let mut iters: u32 = 0;
-                        loop {
-                            let ready = SCHEMA_READY.get(&skpr_namespace).map(|f| f.load(Ordering::Relaxed)).unwrap_or(false);
-                            if ready { break; }
-                            if iters >= MAX_WAIT_ITERS { break; }
-                            std::thread::sleep(std::time::Duration::from_millis(100));
-                            iters += 1;
-                        }
-                    }
                     enqueue_record(&skpr_namespace, &skpr_partition, &skpr_time_bucket, record_value, &ingest_batch.offset_key, batch_line);
                     _j += 1;
                     
@@ -1336,48 +1307,6 @@ impl Ingest {
             }
         }
 
-        // Retry any deferred records with evolved schema using fast-path only
-        if !deferred_records.is_empty() {
-            // Allow brief time for schema to publish if needed
-            for (ns, _part, _time_opt, _rec, _ok, _pos) in deferred_records.iter() {
-                // Wait until schema ready flag is true or short timeout
-                const MAX_WAIT_ITERS: u32 = 30; // ~3s
-                let mut iters: u32 = 0;
-                loop {
-                    let ready = SCHEMA_READY.get(ns).map(|f| f.load(Ordering::Relaxed)).unwrap_or(false);
-                    if ready { break; }
-                    if iters >= MAX_WAIT_ITERS { break; }
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                    iters += 1;
-                }
-            }
-
-            for (skpr_namespace, skpr_partition, skpr_time_bucket, record, offset_key, batch_pos) in deferred_records.into_iter() {
-                // Attempt fast-path with updated schema
-                let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.or(Some("no".to_string())).unwrap());
-                let md_snapshot = METADATA.load();
-                let mut record_value = match md_snapshot.metadata.get(&skpr_namespace) {
-                    Some(metadata) => fast_path_ingest(&record, metadata.fields.as_ref(), &skpr_namespace, flatten).unwrap_or(Value::Null),
-                    None => Value::Null,
-                };
-                drop(md_snapshot);
-
-                if record_value.is_null() {
-                    // Fallback to slow-path to avoid silent drops
-                    match slow_ingest_blocking(&skpr_namespace, &record, flatten) {
-                        Ok(v) => { record_value = v; },
-                        Err(e) => {
-                            println!("Ingest: deferred slow-path failed ns={} err={}", skpr_namespace, e);
-                            let dl = Deadletter { namespace: skpr_namespace.clone(), partition: skpr_partition.clone(), time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(), error: e.to_string(), records: record.to_string() };
-                            Self::deadletter(dl);
-                            continue;
-                        }
-                    }
-                }
-
-                enqueue_record(&skpr_namespace, &skpr_partition, &skpr_time_bucket, record_value, &offset_key, batch_pos);
-            }
-        }
         
         // Update metrics early to reflect decode throughput before WAL flush
         let update_result = std::panic::catch_unwind(|| {
@@ -1401,44 +1330,44 @@ impl Ingest {
             let md_snapshot = METADATA.load();
             let is_empty_ns = md_snapshot.metadata.get(&ns).map(|m| m.fields.is_empty()).unwrap_or(true);
             drop(md_snapshot);
-            if is_empty_ns {
-                let ns_md = METADATA.load().metadata.get(&ns).cloned().unwrap_or(Metadata::new().unwrap());
-                let mut specs = Vec::new();
-                let values_ref_seed: Vec<&serde_json::Value> = records_vec.iter().map(|r| &r.record).collect();
-                for v in values_ref_seed.into_iter() { specs.extend(infer_specs_for_record(v, ns_md.fields.as_ref())); }
-                if !specs.is_empty() {
-                    let proposal = EvolutionProposal { namespace: ns.clone(), fields: specs };
-                    let _vb = match runtime::Handle::try_current() {
-                        Ok(h) => h.block_on(async { propose_and_wait(&ns, proposal, 3000).await }),
-                        Err(_) => {
-                            let rt = runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
-                            rt.block_on(async { propose_and_wait(&ns, proposal, 3000).await })
-                        }
-                    };
-                    if let Some(swap) = ARROW_SCHEMA.get(&ns) {
-                        entry.schema = Arc::clone(&swap.value().load());
-                    }
-                    // Persist updated metadata and kick schema sync for this namespace
-                    let md_snapshot2 = METADATA.load().as_ref().clone();
-                    if let Ok(h) = runtime::Handle::try_current() {
-                        let md_clone2 = md_snapshot2.clone();
-                        h.spawn(async move { Config::set_metadata(&md_clone2, false).await; });
-                        let md_clone3 = md_snapshot2.clone();
-                        h.spawn(async move { Config::sync_schema(&md_clone3.metadata).await; });
-                    } else {
-                        let md_clone2 = md_snapshot2.clone();
-                        std::thread::spawn(move || {
-                            let rt = runtime::Builder::new_current_thread().enable_all().build().unwrap();
-                            rt.block_on(async move { Config::set_metadata(&md_clone2, false).await; });
-                        });
-                        let md_clone3 = md_snapshot2.clone();
-                        std::thread::spawn(move || {
-                            let rt2 = runtime::Builder::new_current_thread().enable_all().build().unwrap();
-                            rt2.block_on(async move { Config::sync_schema(&md_clone3.metadata).await; });
-                        });
-                    }
-                }
-            }
+            // if is_empty_ns {
+            //     let ns_md = METADATA.load().metadata.get(&ns).cloned().unwrap_or(Metadata::new().unwrap());
+            //     let mut specs = Vec::new();
+            //     let values_ref_seed: Vec<&serde_json::Value> = records_vec.iter().map(|r| &r.record).collect();
+            //     for v in values_ref_seed.into_iter() { specs.extend(infer_specs_for_record(v, ns_md.fields.as_ref())); }
+            //     if !specs.is_empty() {
+            //         let proposal = EvolutionProposal { namespace: ns.clone(), fields: specs };
+            //         let _vb = match runtime::Handle::try_current() {
+            //             Ok(h) => h.block_on(async { propose_and_wait(&ns, proposal, 3000).await }),
+            //             Err(_) => {
+            //                 let rt = runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+            //                 rt.block_on(async { propose_and_wait(&ns, proposal, 3000).await })
+            //             }
+            //         };
+            //         if let Some(swap) = ARROW_SCHEMA.get(&ns) {
+            //             entry.schema = Arc::clone(&swap.value().load());
+            //         }
+            //         // Persist updated metadata and kick schema sync for this namespace
+            //         let md_snapshot2 = METADATA.load().as_ref().clone();
+            //         if let Ok(h) = runtime::Handle::try_current() {
+            //             let md_clone2 = md_snapshot2.clone();
+            //             h.spawn(async move { Config::set_metadata(&md_clone2, false).await; });
+            //             let md_clone3 = md_snapshot2.clone();
+            //             h.spawn(async move { Config::sync_schema(&md_clone3.metadata).await; });
+            //         } else {
+            //             let md_clone2 = md_snapshot2.clone();
+            //             std::thread::spawn(move || {
+            //                 let rt = runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            //                 rt.block_on(async move { Config::set_metadata(&md_clone2, false).await; });
+            //             });
+            //             let md_clone3 = md_snapshot2.clone();
+            //             std::thread::spawn(move || {
+            //                 let rt2 = runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            //                 rt2.block_on(async move { Config::sync_schema(&md_clone3.metadata).await; });
+            //             });
+            //         }
+            //     }
+            // }
             let try_serialize = |schema: SchemaRef, values: &Vec<&serde_json::Value>| -> Option<Vec<RecordBatch>> {
                 let mut decoder = ArrowJsonReaderBuilder::new(schema).build_decoder().ok()?;
                 if decoder.serialize(values).is_err() { return None; }
@@ -1460,16 +1389,48 @@ impl Ingest {
             let mut persistent_error: Option<String> = None;
             let mut fixed_records: Vec<serde_json::Value> = Vec::with_capacity(values_ref.len());
             for rec in records_vec.iter() {
-                match slow_ingest_blocking(&skpr_namespace, &rec.record, flatten) {
-                    Ok(v) => { fixed_records.push(v); },
-                    Err(e) => { persistent_error = Some(e); break; }
-                }
+
+                // Try fast-path again now that schema may have evolved
+                let md_snapshot = METADATA.load();
+                let msg = match md_snapshot.metadata.get(&skpr_namespace) {
+                    Some(metadata) => {
+                        fast_path_ingest(
+                            &rec.record,
+                            metadata.fields.as_ref(),
+                            &skpr_namespace,
+                            flatten,
+                        )
+                    }
+                    None => {
+                        Err(format!("Failed to find metadata for namespace: {}", skpr_namespace).into())
+                    }
+                };
+                let record_value = match msg {
+                    Ok(msg) => msg,
+                    Err(_err) => {
+                        // Final attempt via slow-path
+                        match slow_ingest_blocking(&skpr_namespace, &rec.record, flatten) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                if Config::debug_enabled() { println!("Ingest: record retry failed ns={} err={}", skpr_namespace, e); }
+                                persistent_error = Some(e.to_string());
+                                Value::Null
+                            }
+                        }
+                    }
+                };
             }
 
             if let Some(err) = persistent_error {
                 let joined = values_ref.iter().map(|r| r.to_string()).collect::<Vec<String>>().join("\n");
                 let dl = Deadletter { namespace: skpr_namespace.clone(), partition: entry._partition.clone(), time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(), error: err, records: joined };
                 Self::deadletter(dl);
+                // Commit offsets for this entry to avoid reprocessing
+                for (ok, pos) in entry.offsets.iter() {
+                    let offset_key = OffsetKey { namespace: ok.namespace.clone(), partition: ok.partition.clone() };
+                    offset_db_clone.insert(&offset_key, OffsetTypes::Position, *pos);
+                    offset_db_clone.insert(&offset_key, OffsetTypes::Closed, 1);
+                }
                 continue;
             }
 
@@ -1490,6 +1451,12 @@ impl Ingest {
                 let joined = values_ref2.iter().map(|r| r.to_string()).collect::<Vec<String>>().join("\n");
                 let dl = Deadletter { namespace: skpr_namespace.clone(), partition: entry._partition.clone(), time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(), error: "Arrow serialization failed after schema evolution".to_string(), records: joined };
                 Self::deadletter(dl);
+                // Commit offsets for this entry to avoid reprocessing
+                for (ok, pos) in entry.offsets.iter() {
+                    let offset_key = OffsetKey { namespace: ok.namespace.clone(), partition: ok.partition.clone() };
+                    offset_db_clone.insert(&offset_key, OffsetTypes::Position, *pos);
+                    offset_db_clone.insert(&offset_key, OffsetTypes::Closed, 1);
+                }
                 if Config::debug_enabled() { println!("Batch serialize failed after retry: ns={} deadlettered", entry._namespace); }
             }
         }
