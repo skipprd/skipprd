@@ -178,7 +178,17 @@ impl Buffers {
             let key: PartitionKey = (namespace, partition, time, shard);
 
             let mut batches_vec = ingest_buffer_batch.record_batches.take().unwrap_or_default();
-            if batches_vec.is_empty() { continue; }
+            if batches_vec.is_empty() {
+                if Config::log_wal_enabled() {
+                    println!(
+                        "WAL: skipped write ns={} part={} time={:?} (no record batches)",
+                        ingest_buffer_batch._namespace,
+                        ingest_buffer_batch._partition,
+                        ingest_buffer_batch._time
+                    );
+                }
+                continue;
+            }
 
             // Thresholds (apply in write): 4MB or 60s elapsed since last flush or update
             let byte_threshold = 4 * 1024 * 1024u64;

@@ -1356,13 +1356,25 @@ impl Ingest {
                 // Attempt fast-path with updated schema
                 let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.or(Some("no".to_string())).unwrap());
                 let md_snapshot = METADATA.load();
-                let record_value = match md_snapshot.metadata.get(&skpr_namespace) {
+                let mut record_value = match md_snapshot.metadata.get(&skpr_namespace) {
                     Some(metadata) => fast_path_ingest(&record, metadata.fields.as_ref(), &skpr_namespace, flatten).unwrap_or(Value::Null),
                     None => Value::Null,
                 };
-                if record_value.is_null() { continue; }
-
                 drop(md_snapshot);
+
+                if record_value.is_null() {
+                    // Fallback to slow-path to avoid silent drops
+                    match slow_ingest_blocking(&skpr_namespace, &record, flatten) {
+                        Ok(v) => { record_value = v; },
+                        Err(e) => {
+                            println!("Ingest: deferred slow-path failed ns={} err={}", skpr_namespace, e);
+                            let dl = Deadletter { namespace: skpr_namespace.clone(), partition: skpr_partition.clone(), time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(), error: e.to_string(), records: record.to_string() };
+                            Self::deadletter(dl);
+                            continue;
+                        }
+                    }
+                }
+
                 enqueue_record(&skpr_namespace, &skpr_partition, &skpr_time_bucket, record_value, &offset_key, batch_pos);
             }
         }
@@ -1486,6 +1498,17 @@ impl Ingest {
         let mut buffers_copy = buffers;
         let all_batches: Vec<IngestBufferBatch> = buf.into_values().collect();
         if !all_batches.is_empty() {
+            if Config::log_wal_enabled() {
+                let total_batches: usize = all_batches
+                    .iter()
+                    .map(|e| e.record_batches.as_ref().map(|v| v.len()).unwrap_or(0))
+                    .sum();
+                println!(
+                    "Ingest: produced {} record batches across {} partitions",
+                    total_batches,
+                    all_batches.len()
+                );
+            }
             buffers_copy.write(all_batches);
             let fut = buffers_copy.flush(offset_db_clone.clone(), shared_output.clone());
             match tokio::runtime::Handle::try_current() {
