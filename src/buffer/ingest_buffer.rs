@@ -280,6 +280,45 @@ impl Buffers {
         Ok(())
     }
 
+    /// Recover orphaned temporary segment files (.seg.tmp) left by interrupted writes.
+    /// Rules:
+    /// - zero-length: remove
+    /// - non-zero and invalid: remove
+    /// - valid (MAGIC/Version ok and partitions within bounds): rename to final .seg
+    pub fn recover_orphan_tmp_segments() {
+        use std::io::{Read, Seek};
+        let seg_dir = PathBuf::from(format!("{}/segment_buffer/segs", Config::get_data_dir()));
+        if !seg_dir.exists() { return; }
+        for entry in fs::read_dir(&seg_dir).unwrap_or_else(|_| fs::read_dir("/").unwrap()) {
+            if let Ok(ent) = entry {
+                let p = ent.path();
+                let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                if !name.ends_with(".seg.tmp") { continue; }
+                // zero-length -> delete
+                match fs::metadata(&p) {
+                    Ok(m) if m.len() == 0 => { let _ = fs::remove_file(&p); continue; },
+                    Ok(_) => {},
+                    Err(_) => continue,
+                }
+                // Attempt validation by reusing SegmentFile::read_metadata
+                let segf = crate::buffer::segment_file::SegmentFile { path: p.clone() };
+                let valid = segf.read_metadata().is_ok();
+                if valid {
+                    let final_path = p.with_extension("seg"); // replace .tmp with .seg
+                    if let Err(e) = fs::rename(&p, &final_path) {
+                        println!("Recovery: failed to finalize {:?} -> {:?}: {}", p, final_path, e);
+                        // if rename fails, fall back to delete to avoid reuse
+                        let _ = fs::remove_file(&p);
+                    } else {
+                        println!("Recovery: finalized orphan segment {:?}", final_path.file_name().and_then(|s| s.to_str()).unwrap_or("<unknown>"));
+                    }
+                } else {
+                    let _ = fs::remove_file(&p);
+                }
+            }
+        }
+    }
+
     /// Ensure a single background compactor is running.
     ///
     /// The compactor watches `WAL_PARTITION_INDEX` and, when partitions exceed
@@ -292,19 +331,19 @@ impl Buffers {
     pub fn start_single_consumer(shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>, offsets_db: Arc<Offsets>) {
         use std::sync::atomic::Ordering as AO;
         if CONSUMER_STARTED.compare_exchange(false, true, AO::Relaxed, AO::Relaxed).is_err() { return; }
-            tokio::spawn(async move {
-                loop {
-                    match Buffers::compact_one_partition(false, shared_output.clone(), offsets_db.clone()).await {
-                        Ok(did_work) => {
-                            if !did_work { tokio_sleep(TokioDuration::from_millis(500)).await; }
-                        }
-                        Err(e) => {
-                            println!("Compactor error: {}", e);
-                            tokio_sleep(TokioDuration::from_millis(1000)).await;
-                        }
+        tokio::spawn(async move {
+            loop {
+                match Buffers::compact_one_partition(false, shared_output.clone(), offsets_db.clone()).await {
+                    Ok(did_work) => {
+                        if !did_work { tokio_sleep(TokioDuration::from_millis(500)).await; }
+                    }
+                    Err(e) => {
+                        println!("Compactor error: {}", e);
+                        tokio_sleep(TokioDuration::from_millis(1000)).await;
                     }
                 }
-            });
+            }
+        });
     }
 
     // Removed compaction dispatch; replaced by single-thread consumer
