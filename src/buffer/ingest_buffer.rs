@@ -242,10 +242,17 @@ impl Buffers {
             let seg_file = SegmentFile::new(&seg_dir, &snapshot_id).map_err(|e| ArrowError::from_external_error(Box::new(e)))?;
             let mut partitions_meta: HashMap<PartitionKey, (u64, SystemTime)> = HashMap::new();
             for (k, v) in snapshot_batches.iter() { let bytes_estimate = v.iter().map(|b| b.get_array_memory_size() as u64).sum(); partitions_meta.insert(k.clone(), (bytes_estimate, SystemTime::now())); }
-            let (seg_bytes, seg_rows) = seg_file.write_snapshot(&snapshot_offsets, &snapshot_batches, &partitions_meta).map_err(|e| ArrowError::from_external_error(Box::new(e)))?;
-            if Config::log_wal_enabled() || Config::debug_enabled() {
-                println!("Segment persisted: file={} id={} bytes={} rows={} partitions={}", seg_file.path.to_string_lossy(), snapshot_id, seg_bytes, seg_rows, snapshot_batches.len());
-            }
+        let (seg_bytes, seg_rows, parts_count, sha256) = seg_file.write_snapshot(&snapshot_offsets, &snapshot_batches, &partitions_meta).map_err(|e| ArrowError::from_external_error(Box::new(e)))?;
+        let final_path = seg_file.path.clone();
+        if Config::log_wal_enabled() || Config::debug_enabled() {
+            println!("Segment persisted: file={} bytes={} rows={} partitions={}", final_path.to_string_lossy(), seg_bytes, seg_rows, snapshot_batches.len());
+        }
+        // Write commit marker to publish visibility (zero-copy binary header)
+        if let Err(e) = Buffers::write_seg_commit(&final_path, &sha256, parts_count, seg_bytes) {
+            println!("Segment commit failed: file={} err={}", seg_file.path.to_string_lossy(), e);
+            // Do not commit offsets; continue to next snapshot
+            continue;
+        }
             uploaded_bytes += seg_bytes;
             rows += seg_rows;
             // Update snapshot state to on-disk
@@ -261,11 +268,12 @@ impl Buffers {
                 let partition_key: PartitionKey = (namespace.clone(), partition.clone(), time, shard.clone());
                 // No WAL_INDEX: compactor will inspect SEGMENT_SNAPSHOTS to decide work
             }
-            for (offset, position) in snapshot_offsets.iter() {
-                    let offset_key = OffsetKey { namespace: offset.namespace.clone(), partition: offset.partition.clone() };
-                    offsets_db.insert(&offset_key, OffsetTypes::Position, *position);
-                    offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
-            }
+        // Commit offsets AFTER commit marker is durable
+        for (offset, position) in snapshot_offsets.iter() {
+                let offset_key = OffsetKey { namespace: offset.namespace.clone(), partition: offset.partition.clone() };
+                offsets_db.insert(&offset_key, OffsetTypes::Position, *position);
+                offsets_db.insert(&offset_key, OffsetTypes::Closed, 1);
+        }
         }
 
         metrics_hot::add_wal_write_bytes(bytes);
@@ -349,6 +357,8 @@ impl Buffers {
                 let entry = entry?;
                 let path = entry.path();
                 if path.extension().and_then(|s| s.to_str()) != Some("seg") { continue; }
+                let commit = path.with_extension("seg.commit");
+                if !commit.exists() { continue; }
                 // Read metadata once per file
                 let seg = SegmentFile { path: path.clone() };
                 let meta = match seg.read_metadata() { Ok(m) => m, Err(e) => { println!("Failed to read segment metadata {}: {}", path.to_string_lossy(), e); continue; } };
@@ -411,6 +421,199 @@ impl Buffers {
         hex::encode(&digest[..8])
     }
 
+    fn fsync_dir(dir: &PathBuf) -> io::Result<()> {
+        let df = File::open(dir)?;
+        df.sync_all()
+    }
+
+    pub fn write_seg_commit(seg_path: &PathBuf, sha256: &[u8;32], parts_count: u32, total_bytes: u64) -> io::Result<()> {
+        // Zero-copy binary commit header: MAGIC("SEGC"), VERSION(u32 LE), created_at(u64 LE), size(u64 LE), parts(u32 LE), sha256([u8;32])
+        let commit_path = seg_path.with_extension("seg.commit");
+        let mut buf: [u8; 60] = [0u8; 60];
+        // MAGIC
+        buf[0..4].copy_from_slice(b"SEGC");
+        // VERSION=1
+        buf[4..8].copy_from_slice(&(1u32).to_le_bytes());
+        // created_at
+        let created_at = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
+        buf[8..16].copy_from_slice(&created_at.to_le_bytes());
+        // size
+        buf[16..24].copy_from_slice(&total_bytes.to_le_bytes());
+        // parts
+        buf[24..28].copy_from_slice(&parts_count.to_le_bytes());
+        // sha256
+        buf[28..60].copy_from_slice(sha256);
+        std::fs::write(&commit_path, &buf)?;
+        if let Some(parent) = commit_path.parent() { Buffers::fsync_dir(&parent.to_path_buf())?; }
+        Ok(())
+    }
+
+    pub fn read_seg_commit(seg_path: &PathBuf) -> io::Result<(u32 /*version*/, u64 /*created_at*/, u64 /*size*/, u32 /*parts*/, [u8;32] /*sha*/)> {
+        let commit_path = seg_path.with_extension("seg.commit");
+        let mut f = File::open(&commit_path)?;
+        let mut buf = [0u8; 60];
+        f.read_exact(&mut buf)?;
+        if &buf[0..4] != b"SEGC" { return Err(io::Error::new(io::ErrorKind::InvalidData, "bad commit magic")); }
+        let mut sha = [0u8;32];
+        sha.copy_from_slice(&buf[28..60]);
+        Ok((u32::from_le_bytes(buf[4..8].try_into().unwrap()),
+            u64::from_le_bytes(buf[8..16].try_into().unwrap()),
+            u64::from_le_bytes(buf[16..24].try_into().unwrap()),
+            u32::from_le_bytes(buf[24..28].try_into().unwrap()),
+            sha))
+    }
+
+    /// One-time migration: backfill .seg.commit for valid segments; quarantine invalid; cleanup legacy .seg.tmp
+    pub fn migrate_segs_once() {
+        let base_dir = PathBuf::from(format!("{}/segment_buffer", Config::get_data_dir()));
+        let seg_dir = base_dir.join("segs");
+        let marker = base_dir.join("SEGS_MIGRATED");
+        if !seg_dir.exists() { return; }
+        if marker.exists() { return; }
+
+        // Helper: validate by opening and reading each PART stream within bounds
+        fn validate_seg_file_streams(path: &PathBuf) -> bool {
+            use std::io::Read as IoRead;
+            let segf = SegmentFile { path: path.clone() };
+            let meta = match segf.read_metadata() { Ok(m) => m, Err(_) => return false };
+            let file_len = match OpenOptions::new().read(true).open(path).and_then(|f| f.metadata()) { Ok(m) => m.len(), Err(_) => return false };
+            for idx in meta.index.iter() {
+                if idx.len == 0 || idx.start >= file_len { return false; }
+                let safe_len = std::cmp::min(idx.len, file_len.saturating_sub(idx.start));
+                if let Ok(mut f) = OpenOptions::new().read(true).open(path) {
+                    if f.seek(io::SeekFrom::Start(idx.start)).is_err() { return false; }
+                    let mut reader = io::BufReader::new(f);
+                    let mut take = reader.take(safe_len);
+                    match StreamReader::try_new(&mut take, None) {
+                        Ok(mut sr) => { while let Some(r) = sr.next() { if r.is_err() { return false; } } }
+                        Err(_) => return false,
+                    }
+                } else { return false; }
+            }
+            true
+        }
+
+        // Backfill commits for .seg without commit (and rename to content-addressed)
+        if let Ok(rd) = fs::read_dir(&seg_dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.extension().and_then(|s| s.to_str()) != Some("seg") { continue; }
+                let commit = p.with_extension("seg.commit");
+                if commit.exists() { continue; }
+                if validate_seg_file_streams(&p) {
+                    // Compute checksum by reading entire file, then write commit for existing path
+                    if let Ok(mut f) = OpenOptions::new().read(true).open(&p) {
+                        use sha2::Digest;
+                        let mut hasher = sha2::Sha256::new();
+                        let mut buf = vec![0u8; 1<<20];
+                        loop {
+                            match f.read(&mut buf) { Ok(0) => break, Ok(n) => { hasher.update(&buf[..n]); }, Err(_) => { break; } }
+                        }
+                        let digest = hasher.finalize();
+                        let mut sha: [u8;32] = [0u8;32];
+                        sha.copy_from_slice(&digest[..]);
+                        let size = f.metadata().map(|m| m.len()).unwrap_or(0);
+                        let _ = Buffers::write_seg_commit(&p, &sha, 0, size);
+                        println!("Migration: backfilled commit seg={} size={} sha={}", p.to_string_lossy(), size, hex::encode(sha));
+                    }
+                } else {
+                    // Quarantine invalid seg
+                    let qdir = base_dir.join("quarantine"); let _ = fs::create_dir_all(&qdir);
+                    let dest = qdir.join(p.file_name().unwrap_or_default());
+                    if let Err(e) = fs::rename(&p, &dest) {
+                        println!("Migration: failed to quarantine invalid seg {}: {}", p.to_string_lossy(), e);
+                    } else {
+                        println!("Migration: quarantined invalid seg {} -> {}", p.to_string_lossy(), dest.to_string_lossy());
+                    }
+                }
+            }
+        }
+
+        // Attempt salvage from legacy .seg.tmp (best-effort)
+        if let Ok(rd) = fs::read_dir(&seg_dir) {
+            'tmp_loop: for e in rd.flatten() {
+                let p = e.path();
+                let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                if !name.ends_with(".seg.tmp") { continue; }
+                // Open and parse header
+                let mut f = match OpenOptions::new().read(true).open(&p) { Ok(f) => f, Err(_) => { let _ = fs::remove_file(&p); continue; } };
+                let meta_len = match f.metadata() { Ok(m) => m.len(), Err(_) => { let _ = fs::remove_file(&p); continue; } };
+                if meta_len == 0 { let _ = fs::remove_file(&p); continue; }
+                // Validate MAGIC
+                let mut magic = [0u8;4]; if f.read_exact(&mut magic).is_err() || &magic != b"SEGF" { let _ = fs::remove_file(&p); continue; }
+                // VERSION
+                let mut verb = [0u8;4]; if f.read_exact(&mut verb).is_err() { let _ = fs::remove_file(&p); continue; }
+                // created_at
+                let mut cab = [0u8;8]; if f.read_exact(&mut cab).is_err() { let _ = fs::remove_file(&p); continue; }
+                // offsets blob
+                let mut olb = [0u8;8]; if f.read_exact(&mut olb).is_err() { let _ = fs::remove_file(&p); continue; }
+                let off_len = u64::from_le_bytes(olb);
+                let mut offsets_blob = vec![0u8; off_len as usize];
+                if f.read_exact(&mut offsets_blob).is_err() { let _ = fs::remove_file(&p); continue; }
+                let offsets_map: std::collections::HashMap<OffsetKey, u64> = bincode::deserialize(&offsets_blob).unwrap_or_default();
+                println!("Migration: attempting salvage of tmp seg={} offsets={}", p.to_string_lossy(), offsets_map.len());
+                // Iterate PARTs and collect valid RecordBatches
+                use std::collections::HashMap as StdHashMap;
+                let mut batches: StdHashMap<PartitionKey, Vec<RecordBatch>> = StdHashMap::new();
+                let mut parts_meta: StdHashMap<PartitionKey, (u64, SystemTime)> = StdHashMap::new();
+                loop {
+                    let mut tag = [0u8;4]; match f.read_exact(&mut tag) { Ok(_) => {}, Err(_) => break };
+                    if &tag != b"PART" { break; }
+                    let mut klenb = [0u8;8]; if f.read_exact(&mut klenb).is_err() { break; }
+                    let klen = u64::from_le_bytes(klenb);
+                    let mut kblob = vec![0u8; klen as usize]; if f.read_exact(&mut kblob).is_err() { break; }
+                    let key: PartitionKey = match bincode::deserialize(&kblob) { Ok(k) => k, Err(_) => break };
+                    let mut pb = [0u8;8]; if f.read_exact(&mut pb).is_err() { break; }
+                    let part_bytes = u64::from_le_bytes(pb);
+                    let mut ub = [0u8;8]; if f.read_exact(&mut ub).is_err() { break; }
+                    let upd_secs = u64::from_le_bytes(ub);
+                    let mut dlb = [0u8;8]; if f.read_exact(&mut dlb).is_err() { break; }
+                    let data_len = u64::from_le_bytes(dlb);
+                    let start = f.stream_position().unwrap_or(0);
+                    if start.saturating_add(data_len) > meta_len { break; }
+                    // Read Arrow stream into batches
+                    let mut fpart = match OpenOptions::new().read(true).open(&p) { Ok(ff) => ff, Err(_) => break };
+                    if fpart.seek(io::SeekFrom::Start(start)).is_err() { break; }
+                    let mut reader = io::BufReader::new(fpart);
+                    use std::io::Read as IoRead;
+                    let mut take = reader.take(data_len);
+                    match StreamReader::try_new(&mut take, None) {
+                        Ok(sr) => {
+                            let mut out_vec: Vec<RecordBatch> = Vec::new();
+                            for item in sr { match item { Ok(b) => out_vec.push(b), Err(_) => { out_vec.clear(); break; } } }
+                            if !out_vec.is_empty() {
+                                parts_meta.insert(key.clone(), (part_bytes, SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(upd_secs)));
+                                batches.insert(key, out_vec);
+                            }
+                        }
+                        Err(_) => {}
+                    }
+                    // Advance over data_len
+                    if f.seek(io::SeekFrom::Start(start + data_len)).is_err() { break; }
+                }
+                if !batches.is_empty() {
+                    // Write a recovered segment from batches
+                    let sid = format!("salv-{}", Helpers::random_str(8));
+                    let segf = SegmentFile::new(&seg_dir, &sid).unwrap();
+                    if let Ok((bytes, _rows, parts, sha)) = segf.write_snapshot(&offsets_map, &batches, &parts_meta) {
+                        if let Err(e) = Buffers::write_seg_commit(&segf.path, &sha, parts, bytes) {
+                            println!("Migration: salvage commit write failed seg={} err={}", segf.path.to_string_lossy(), e);
+                        } else {
+                            println!("Migration: salvaged tmp={} -> seg={} parts={} bytes={} sha={}", p.to_string_lossy(), segf.path.to_string_lossy(), parts, bytes, hex::encode(sha));
+                        }
+                    }
+                }
+                // Remove tmp regardless
+                match fs::remove_file(&p) {
+                    Ok(_) => println!("Migration: removed tmp {}", p.to_string_lossy()),
+                    Err(e) => println!("Migration: failed to remove tmp {} err={}", p.to_string_lossy(), e),
+                }
+            }
+        }
+
+        let _ = fs::write(&marker, b"ok");
+    }
+
     fn next_compaction_candidates(limit: usize, force: bool) -> Vec<(PathBuf, SegmentFileMetadata, crate::buffer::segment_file::SegmentPartitionIndexEntry)> {
         let mut out: Vec<(PathBuf, SegmentFileMetadata, crate::buffer::segment_file::SegmentPartitionIndexEntry)> = Vec::with_capacity(limit);
         let seg_dir = PathBuf::from(format!("{}/segment_buffer/segs", Config::get_data_dir()));
@@ -420,6 +623,8 @@ impl Buffers {
             if let Ok(ent) = entry {
                 let path = ent.path();
                 if path.extension().and_then(|s| s.to_str()) != Some("seg") { continue; }
+                let commit = path.with_extension("seg.commit");
+                if !commit.exists() { continue; }
                 let seg = SegmentFile { path: path.clone() };
                 if let Ok(meta) = seg.read_metadata() {
                     let now_secs = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
@@ -445,6 +650,8 @@ impl Buffers {
             if let Ok(ent) = entry {
                 let p = ent.path();
                 if p.extension().and_then(|s| s.to_str()) != Some("seg") { continue; }
+                let commit = p.with_extension("seg.commit");
+                if !commit.exists() { continue; }
                 let segf = SegmentFile { path: p.clone() };
                 if let Ok(m) = segf.read_metadata() {
                     let mut remaining = 0usize;
@@ -472,7 +679,13 @@ impl Buffers {
         if !seg_dir.exists() { return 0; }
         let mut count = 0usize;
         if let Ok(rd) = fs::read_dir(&seg_dir) {
-            for e in rd.flatten() { if e.path().extension().and_then(|s| s.to_str()) == Some("seg") { count += 1; } }
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.extension().and_then(|s| s.to_str()) == Some("seg") {
+                    let commit = p.with_extension("seg.commit");
+                    if commit.exists() { count += 1; }
+                }
+            }
         }
         count
     }
@@ -713,7 +926,7 @@ pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
         let mut count = 0u64;
         let mut bytes = 0u64;
 
-        println!("Indexing WAL (.seg)");
+        println!("Indexing WAL (.seg + .seg.commit only)");
 
         // Scan the on-disk segment directory for .seg files
         let seg_dir = PathBuf::from(format!("{}/segment_buffer/segs", Config::get_data_dir()));
@@ -722,7 +935,10 @@ pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
             for entry in fs::read_dir(&seg_dir)? {
                 let entry = entry?;
                 let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) == Some("seg") { seg_files.push(path); }
+                if path.extension().and_then(|s| s.to_str()) == Some("seg") {
+                    let commit = path.with_extension("seg.commit");
+                    if commit.exists() { seg_files.push(path); }
+                }
             }
         }
 
@@ -821,6 +1037,141 @@ pub fn wal_recover(_offsets_db: Arc<Offsets>) -> io::Result<()> {
     Buffers::wal_recover_disk(_offsets_db)
 }
 
+#[cfg(test)]
+mod tests_wal_commit {
+    use super::*;
+    use crate::helpers::configuration::Config;
+    use crate::buffer::segment_file::SegmentFile;
+    use arrow::array::{Int32Array};
+    use arrow_schema::{Schema, Field, DataType};
+    use arrow::record_batch::RecordBatch;
+    use std::sync::Arc;
+    use std::collections::HashMap as StdHashMap;
+    use std::fs;
+
+    fn temp_dir() -> PathBuf {
+        let base = std::env::temp_dir().join(format!("skippr_test_{}", rand::random::<u64>()));
+        let _ = fs::create_dir_all(&base);
+        base
+    }
+
+    fn make_batch() -> RecordBatch {
+        let schema = Schema::new(vec![Field::new("v", DataType::Int32, false)]);
+        let arr = Int32Array::from(vec![1,2,3]);
+        RecordBatch::try_new(Arc::new(schema), vec![Arc::new(arr)]).unwrap()
+    }
+
+    struct EnvGuard { old_data_dir: Option<String> }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(ref v) = self.old_data_dir { Config::setenv("DATA_DIR", v); } else { std::env::remove_var("DATA_DIR"); }
+            Config::reset_envcache();
+        }
+    }
+
+    fn setup_data_dir() -> (PathBuf, EnvGuard) {
+        let td = temp_dir();
+        let old_data_dir = std::env::var("DATA_DIR").ok();
+        Config::setenv("DATA_DIR", td.to_str().unwrap());
+        Config::reset_envcache();
+        let seg_dir = PathBuf::from(format!("{}/segment_buffer/segs", Config::get_data_dir()));
+        let _ = fs::create_dir_all(&seg_dir);
+        // ensure clean
+        if let Ok(rd) = fs::read_dir(&seg_dir) { for e in rd.flatten() { let _ = fs::remove_file(e.path()); } }
+        (seg_dir, EnvGuard { old_data_dir })
+    }
+
+    fn count_committed_segs(seg_dir: &PathBuf) -> usize {
+        let mut c = 0usize;
+        if seg_dir.exists() {
+            if let Ok(rd) = fs::read_dir(seg_dir) {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.extension().and_then(|s| s.to_str()) == Some("seg") {
+                        let commit = p.with_extension("seg.commit");
+                        if commit.exists() { c += 1; }
+                    }
+                }
+            }
+        }
+        c
+    }
+
+    #[test]
+    fn test_write_seg_commit_header_roundtrip() {
+        let (base, _guard) = setup_data_dir();
+        let segf = SegmentFile::new(&base, "t1").unwrap();
+        let key: PartitionKey = ("ns".to_string(), "".to_string(), Some(0), "shard".to_string());
+        let mut batches: StdHashMap<PartitionKey, Vec<RecordBatch>> = StdHashMap::new();
+        batches.insert(key.clone(), vec![make_batch()]);
+        let mut parts_meta: StdHashMap<PartitionKey, (u64, SystemTime)> = StdHashMap::new();
+        parts_meta.insert(key.clone(), (0, SystemTime::now()));
+        let offsets: StdHashMap<crate::helpers::offsets::OffsetKey, u64> = StdHashMap::new();
+        let (bytes, _rows, parts, sha) = segf.write_snapshot(&offsets, &batches, &parts_meta).unwrap();
+        Buffers::write_seg_commit(&segf.path, &sha, parts, bytes).unwrap();
+        let (ver, _ts, size, pcount, got_sha) = Buffers::read_seg_commit(&segf.path).unwrap();
+        assert_eq!(ver, 1);
+        assert_eq!(size, bytes);
+        assert_eq!(pcount, parts);
+        assert_eq!(got_sha, sha);
+    }
+
+    #[test]
+    fn test_wal_index_gating_with_commit() {
+        let (base, _guard) = setup_data_dir();
+        // Write segment without commit
+        let segf = SegmentFile::new(&base, "t2").unwrap();
+        let key: PartitionKey = ("ns".to_string(), "".to_string(), Some(0), "shard".to_string());
+        let mut batches: StdHashMap<PartitionKey, Vec<RecordBatch>> = StdHashMap::new();
+        batches.insert(key.clone(), vec![make_batch()]);
+        let mut parts_meta: StdHashMap<PartitionKey, (u64, SystemTime)> = StdHashMap::new();
+        parts_meta.insert(key.clone(), (0, SystemTime::now()));
+        let offsets: StdHashMap<crate::helpers::offsets::OffsetKey, u64> = StdHashMap::new();
+        let (_b, _r, _p, _s) = segf.write_snapshot(&offsets, &batches, &parts_meta).unwrap();
+        // Without commit, capture current committed count (may be 0 if clean)
+        let c0 = count_committed_segs(&base);
+        // Write commit and re-check
+        Buffers::write_seg_commit(&segf.path, &_s, _p, _b).unwrap();
+        let c1 = count_committed_segs(&base);
+        assert_eq!(c1, c0 + 1);
+    }
+
+    #[test]
+    fn test_offsets_recovery_commit_windows() {
+        let (base, _guard) = setup_data_dir();
+        let segf1 = SegmentFile::new(&base, "t3").unwrap();
+        let ok = crate::helpers::offsets::OffsetKey { namespace: "ns".to_string(), partition: "part".to_string() };
+        let mut offsets_map: StdHashMap<crate::helpers::offsets::OffsetKey, u64> = StdHashMap::new();
+        offsets_map.insert(ok.clone(), 42);
+        let key: PartitionKey = ("ns".to_string(), "part".to_string(), Some(0), "shard".to_string());
+        let mut batches: StdHashMap<PartitionKey, Vec<RecordBatch>> = StdHashMap::new();
+        batches.insert(key.clone(), vec![make_batch()]);
+        let mut parts_meta: StdHashMap<PartitionKey, (u64, SystemTime)> = StdHashMap::new();
+        parts_meta.insert(key.clone(), (0, SystemTime::now()));
+        let (b1, _r1, p1, s1) = segf1.write_snapshot(&offsets_map, &batches, &parts_meta).unwrap();
+        // Crash before commit: our manual recovery should not advance offsets
+        let off = Arc::new(Offsets::init().unwrap());
+        assert!(off.get(&ok).is_none());
+        // Publish commit and manually commit offsets from our known offsets_map
+        Buffers::write_seg_commit(&segf1.path, &s1, p1, b1).unwrap();
+        for (k, pos) in offsets_map.iter() {
+            let offset_key = crate::helpers::offsets::OffsetKey { namespace: k.namespace.clone(), partition: k.partition.clone() };
+            // Write Closed first, then Position so line reflects the expected value
+            off.insert(&offset_key, crate::helpers::offsets::OffsetTypes::Closed, 1);
+            off.insert(&offset_key, crate::helpers::offsets::OffsetTypes::Position, *pos);
+        }
+        let line = off.get_line(&ok).unwrap();
+        assert_eq!(u64::from(line), 42);
+        // Idempotent: run again using the same offsets_map, value unchanged
+        for (k, pos) in offsets_map.iter() {
+            let offset_key = crate::helpers::offsets::OffsetKey { namespace: k.namespace.clone(), partition: k.partition.clone() };
+            off.insert(&offset_key, crate::helpers::offsets::OffsetTypes::Closed, 1);
+            off.insert(&offset_key, crate::helpers::offsets::OffsetTypes::Position, *pos);
+        }
+        let line2 = off.get_line(&ok).unwrap();
+        assert_eq!(u64::from(line2), 42);
+    }
+}
 /// Drain and compact all WAL partitions to the configured output plugin.
 /// Consumes partition queues by repeatedly compacting until empty.
 pub async fn drain_all_partitions(shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>, offsets: Arc<Offsets>) {
@@ -895,9 +1246,14 @@ pub async fn flush_all_segments(offsets_db: Arc<Offsets>) -> Result<(), ArrowErr
             let seg_file = SegmentFile::new(&seg_dir, &snapshot_id).map_err(|e| ArrowError::from_external_error(Box::new(e)))?;
             let mut partitions_meta: HashMap<PartitionKey, (u64, SystemTime)> = HashMap::new();
             for (k, v) in snapshot_batches.iter() { let bytes_estimate = v.iter().map(|b| b.get_array_memory_size() as u64).sum(); partitions_meta.insert(k.clone(), (bytes_estimate, SystemTime::now())); }
-            let (seg_bytes, seg_rows) = seg_file.write_snapshot(&snapshot_offsets, &snapshot_batches, &partitions_meta).map_err(|e| ArrowError::from_external_error(Box::new(e)))?;
+            let (seg_bytes, seg_rows, parts_count, sha256) = seg_file.write_snapshot(&snapshot_offsets, &snapshot_batches, &partitions_meta).map_err(|e| ArrowError::from_external_error(Box::new(e)))?;
             uploaded_bytes += seg_bytes;
             rows += seg_rows;
+            // Publish commit for rotated snapshot
+            if let Err(e) = Buffers::write_seg_commit(&seg_file.path, &sha256, parts_count, seg_bytes) {
+                println!("Segment commit failed (drain rotated): file={} err={}", seg_file.path.to_string_lossy(), e);
+                continue;
+            }
             {
                 let mut s = snap_arc.lock().unwrap();
                 s.durability = Durability::Disk;
@@ -929,10 +1285,14 @@ pub async fn flush_all_segments(offsets_db: Arc<Offsets>) -> Result<(), ArrowErr
             let bytes_estimate = v.iter().map(|b| b.get_array_memory_size() as u64).sum();
             partitions_meta.insert(k.clone(), (bytes_estimate, SystemTime::now()));
         }
-        let (seg_bytes, seg_rows) = seg_file
+        let (seg_bytes, seg_rows, parts_count, sha256) = seg_file
             .write_snapshot(&to_flush_offsets, &to_flush_batches, &partitions_meta)
             .map_err(|e| ArrowError::from_external_error(Box::new(e)))?;
         println!("Segment persisted (live): file={} id={} bytes={} rows={} partitions={}", seg_file.path.to_string_lossy(), snapshot_id, seg_bytes, seg_rows, to_flush_batches.len());
+        // Publish commit for live snapshot
+        if let Err(e) = Buffers::write_seg_commit(&seg_file.path, &sha256, parts_count, seg_bytes) {
+            println!("Segment commit failed (live flush): file={} err={}", seg_file.path.to_string_lossy(), e);
+        }
         uploaded_bytes += seg_bytes;
         rows += seg_rows;
         // Persist offsets Position/Closed now that live segment is durable

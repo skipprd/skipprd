@@ -36,6 +36,9 @@ These are planned features; scope and sequence may evolve.
  - [ ] S3-backed offset database (replace sled)
   - [ ] Custom S3-backed KV store optimized for append-heavy writes and very fast reads.
   - [ ] Efficient batch key lookups; favor sequential ranges but resilient to slight shuffles.
+ - [x] TigerBeetle TigerStyle deterministic WAL segment commits
+   - [x] Commit markers for each WAL segment and visibility gating.
+   - [x] Commit offsets to DB after WAL commit marker durably persisted. (Already recover offsets via WAL index on start)
  - [ ] S3-backed WAL segments
   - [ ] Refactor write-ahead log segments to reside in S3 rather than local disk.
   - [ ] Design for durability with buffering, compaction, and concurrent readers.

@@ -285,6 +285,7 @@ pub async fn query(sql_str: &str) {
                     if std::path::Path::new(&seg_dir).exists() {
                         for entry in std::fs::read_dir(&seg_dir).unwrap_or_else(|_| std::fs::read_dir("/").unwrap()) {
                             if let Ok(ent) = entry { let path = ent.path(); if path.extension().and_then(|s| s.to_str()) != Some("seg") { continue; }
+                                let commit = path.with_extension("seg.commit"); if !commit.exists() { continue; }
                                 let seg = SegmentFile { path: path.clone() };
                                 if let Ok(meta) = seg.read_metadata() {
                                     for idx in meta.index.iter() {
@@ -980,6 +981,7 @@ pub async fn query(sql_str: &str) {
                 if std::path::Path::new(&seg_dir).exists() {
                     for entry in std::fs::read_dir(&seg_dir).unwrap_or_else(|_| std::fs::read_dir("/").unwrap()) {
                         if let Ok(ent) = entry { let path = ent.path(); if path.extension().and_then(|s| s.to_str()) != Some("seg") { continue; }
+                            let commit = path.with_extension("seg.commit"); if !commit.exists() { continue; }
                             let seg = SegmentFile { path: path.clone() };
                             if let Ok(meta) = seg.read_metadata() {
                                 for idx in meta.index.iter() {

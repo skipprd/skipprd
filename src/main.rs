@@ -547,8 +547,6 @@ async fn discover() {
 
     let _offsets_clone = offsets_db.clone();
 
-    wal_recover(offsets_db.clone()).expect("Failed to recover WAL index");
-    
     // let output = DataOutputAwsAthenaPlugin::new("output".to_string()).await;
     // let output_plugin_name = Config::get_pipeline_output_plugin_name();
     // let output = sync_output_plugin(&output_plugin_name, "output".to_string()).await.unwrap();
@@ -858,6 +856,9 @@ async fn sync() {
     let offsets_db = Arc::new(offsets_db);
 
     let _offsets_clone = offsets_db.clone();
+
+    // One-time migration: backfill .seg.commit and cleanup legacy segs before WAL recovery
+    Buffers::migrate_segs_once();
 
     wal_recover(offsets_db.clone()).expect("Failed to recover WAL index");
     
