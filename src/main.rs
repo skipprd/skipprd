@@ -547,8 +547,6 @@ async fn discover() {
 
     let _offsets_clone = offsets_db.clone();
 
-    // Recover any orphaned .seg.tmp before WAL indexing
-    Buffers::recover_orphan_tmp_segments();
     wal_recover(offsets_db.clone()).expect("Failed to recover WAL index");
     
     // let output = DataOutputAwsAthenaPlugin::new("output".to_string()).await;
@@ -861,8 +859,6 @@ async fn sync() {
 
     let _offsets_clone = offsets_db.clone();
 
-    // Recover any orphaned .seg.tmp before WAL indexing
-    Buffers::recover_orphan_tmp_segments();
     wal_recover(offsets_db.clone()).expect("Failed to recover WAL index");
     
     {

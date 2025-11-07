@@ -330,7 +330,7 @@ jobs:
     needs:
       - linux_x86_test
       - chaos_mode_test
-#      - deadletters_test
+      - deadletters_test
 #      - macos_arm64
 #      - macos_x86
 #      - macos_arm64_test
