@@ -1065,7 +1065,6 @@ mod tests_wal_commit {
     impl Drop for EnvGuard {
         fn drop(&mut self) {
             if let Some(ref v) = self.old_data_dir { Config::setenv("DATA_DIR", v); } else { std::env::remove_var("DATA_DIR"); }
-            Config::reset_envcache();
         }
     }
 
@@ -1073,7 +1072,6 @@ mod tests_wal_commit {
         let td = temp_dir();
         let old_data_dir = std::env::var("DATA_DIR").ok();
         Config::setenv("DATA_DIR", td.to_str().unwrap());
-        Config::reset_envcache();
         let seg_dir = PathBuf::from(format!("{}/segment_buffer/segs", Config::get_data_dir()));
         let _ = fs::create_dir_all(&seg_dir);
         // ensure clean
@@ -1128,12 +1126,11 @@ mod tests_wal_commit {
         parts_meta.insert(key.clone(), (0, SystemTime::now()));
         let offsets: StdHashMap<crate::helpers::offsets::OffsetKey, u64> = StdHashMap::new();
         let (_b, _r, _p, _s) = segf.write_snapshot(&offsets, &batches, &parts_meta).unwrap();
-        // Without commit, capture current committed count (may be 0 if clean)
-        let c0 = count_committed_segs(&base);
-        // Write commit and re-check
+        // Without commit, verify this segment's commit does not exist
+        assert!(!commit_exists(&segf.path));
+        // Write commit and verify
         Buffers::write_seg_commit(&segf.path, &_s, _p, _b).unwrap();
-        let c1 = count_committed_segs(&base);
-        assert_eq!(c1, c0 + 1);
+        assert!(commit_exists(&segf.path));
     }
 
     #[test]
