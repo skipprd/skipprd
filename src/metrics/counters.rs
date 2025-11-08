@@ -12,6 +12,9 @@ pub static WAL_WRITE_ROWS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0
 pub static WAL_COMPACTED_BYTES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static WAL_COMPACTED_FILES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static WAL_COMPACTED_ROWS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static WAL_COMPACTIONS_STARTED: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static WAL_COMPACTIONS_COMPLETED: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static WAL_COMPACTIONS_IN_FLIGHT: Lazy<std::sync::atomic::AtomicUsize> = Lazy::new(|| std::sync::atomic::AtomicUsize::new(0));
 
 pub static PARQUET_PERSISTED_BYTES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static PARQUET_PERSISTED_ROWS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
@@ -52,6 +55,14 @@ pub fn add_wal_compacted_bytes(n: u64) { WAL_COMPACTED_BYTES_TOTAL.fetch_add(n, 
 pub fn add_wal_compacted_files(n: u64) { WAL_COMPACTED_FILES_TOTAL.fetch_add(n, Ordering::Relaxed); }
 #[inline]
 pub fn add_wal_compacted_rows(n: u64) { WAL_COMPACTED_ROWS_TOTAL.fetch_add(n, Ordering::Relaxed); }
+#[inline]
+pub fn add_wal_compaction_started(n: u64) { WAL_COMPACTIONS_STARTED.fetch_add(n, Ordering::Relaxed); }
+#[inline]
+pub fn add_wal_compaction_completed(n: u64) { WAL_COMPACTIONS_COMPLETED.fetch_add(n, Ordering::Relaxed); }
+#[inline]
+pub fn inc_wal_compactions_in_flight() { WAL_COMPACTIONS_IN_FLIGHT.fetch_add(1, Ordering::Relaxed); }
+#[inline]
+pub fn dec_wal_compactions_in_flight() { WAL_COMPACTIONS_IN_FLIGHT.fetch_sub(1, Ordering::Relaxed); }
 
 #[inline]
 pub fn add_parquet_bytes(n: u64) { PARQUET_PERSISTED_BYTES_TOTAL.fetch_add(n, Ordering::Relaxed); }

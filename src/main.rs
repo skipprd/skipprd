@@ -870,7 +870,7 @@ async fn sync() {
     let output = sync_output_plugin(&output_plugin_name, "output".to_string()).await.unwrap();
     let shared_output = Arc::new(output);
 
-    // Start background WAL compactor consumer after WAL recovery
+    // Start background WAL compactor pool after WAL recovery
     Buffers::start_single_consumer(shared_output.clone(), offsets_db.clone());
 
     let shared_output_clone = shared_output.clone();
@@ -921,6 +921,14 @@ async fn sync() {
 
     // Deterministic drain: compact all remaining on-disk segments to parquet
     {
+        // Stop background compactor pool and wait for in-flight to drain
+        Buffers::request_compactor_stop();
+        // Wait for in-flight to reach zero (bounded wait)
+        for _ in 0..40 {
+            let inflight = crate::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT.load(std::sync::atomic::Ordering::Relaxed);
+            if inflight == 0 { break; }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
         Buffers::compact_all_partitions(true, offsets_db.clone(), shared_output.clone()).await;
         // Safety loop: if any .seg remain, run another pass (handles late live persist)
         if Buffers::segs_remaining() > 0 {

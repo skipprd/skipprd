@@ -54,6 +54,7 @@ pub static TOTAL_ROWS: Lazy<TimedRwLock<AtomicU64>> =
 // Lock-free WAL index and counters
 pub static WAL_BYTES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 static CONSUMER_STARTED: Lazy<std::sync::atomic::AtomicBool> = Lazy::new(|| std::sync::atomic::AtomicBool::new(false));
+static CONSUMER_STOP: Lazy<std::sync::atomic::AtomicBool> = Lazy::new(|| std::sync::atomic::AtomicBool::new(false));
 
 // Per-partition notify for quick wakeups
 static PARTITION_NOTIFIES: Lazy<DashMap<PartitionKey, Arc<tokio::sync::Notify>>> = Lazy::new(|| DashMap::new());
@@ -302,14 +303,29 @@ impl Buffers {
         if CONSUMER_STARTED.compare_exchange(false, true, AO::Relaxed, AO::Relaxed).is_err() { return; }
             tokio::spawn(async move {
                 loop {
-                    match Buffers::compact_one_partition(false, shared_output.clone(), offsets_db.clone()).await {
-                        Ok(did_work) => {
-                            if !did_work { tokio_sleep(TokioDuration::from_millis(500)).await; }
-                        }
-                        Err(e) => {
-                            println!("Compactor error: {}", e);
-                            tokio_sleep(TokioDuration::from_millis(1000)).await;
-                        }
+                    // Fetch up to concurrency candidates and compact them concurrently
+                    let concurrency = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                        .clamp(1, 64) as usize;
+                    let candidates = Buffers::next_compaction_candidates(concurrency, false);
+                    let stop = CONSUMER_STOP.load(std::sync::atomic::Ordering::Relaxed);
+                    if candidates.is_empty() {
+                        if stop { break; }
+                        tokio_sleep(TokioDuration::from_millis(500)).await;
+                        continue;
+                    }
+                    use futures::stream::StreamExt;
+                    let mut in_flight: futures::stream::FuturesUnordered<Pin<Box<dyn Future<Output = ()> + Send>>> = futures::stream::FuturesUnordered::new();
+                    for (path, meta, idx) in candidates.into_iter() {
+                        let out = shared_output.clone();
+                        let off = offsets_db.clone();
+                        in_flight.push(Box::pin(async move {
+                            let _ = Buffers::compact_segment_partition(&path, &meta, &idx, out, off).await;
+                        }));
+                    }
+                    while let Some(_) = in_flight.next().await {}
+                    if stop {
+                        if Buffers::next_compaction_candidates(1, false).is_empty() { break; }
                     }
                 }
             });
@@ -346,6 +362,11 @@ impl Buffers {
 
         // Sweep: remove any fully-tombstoned segments left behind
         Buffers::sweep_segment_cleanup();
+    }
+
+    /// Signal the background compactor pool to stop after current work completes.
+    pub fn request_compactor_stop() {
+        CONSUMER_STOP.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     async fn compact_one_partition(force: bool, shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>, offsets_db: Arc<Offsets>) -> io::Result<bool> {
@@ -702,17 +723,25 @@ impl Buffers {
         let compaction_id = Buffers::compute_compaction_id(seg_path, idx);
         out_key = format!("{}-c={}", out_key, compaction_id);
 
+        // Metrics: started + in-flight
+        crate::metrics::counters::add_wal_compaction_started(1);
+        crate::metrics::counters::inc_wal_compactions_in_flight();
+
         // Single-flight guard (keyed by seg_path + start + len)
         let inflight_key = (seg_path.to_string_lossy().to_string(), idx.start, idx.len);
         if COMPACTION_IN_FLIGHT.insert(inflight_key.clone(), ()).is_some() {
             if Config::debug_enabled() || Config::log_wal_enabled() {
                 println!("Compactor: skip duplicate in-flight seg={} start={} len={}", seg_path.to_string_lossy(), idx.start, idx.len);
             }
+            crate::metrics::counters::dec_wal_compactions_in_flight();
             return Ok(false);
         }
         struct InflightGuard((String, u64, u64));
         impl Drop for InflightGuard {
-            fn drop(&mut self) { COMPACTION_IN_FLIGHT.remove(&self.0); }
+            fn drop(&mut self) {
+                COMPACTION_IN_FLIGHT.remove(&self.0);
+                crate::metrics::counters::dec_wal_compactions_in_flight();
+            }
         }
         let _guard = InflightGuard(inflight_key.clone());
         if Config::debug_enabled() || Config::log_wal_enabled() {
@@ -884,6 +913,9 @@ impl Buffers {
             return Ok(false);
         }
 
+        // Metrics: completed
+        crate::metrics::counters::add_wal_compaction_completed(1);
+
         // Do not commit offsets here; they are committed upon persisting .seg in flush()
 
         // Write tombstone to avoid reprocessing this partition from this segment
@@ -926,7 +958,7 @@ pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
         let mut count = 0u64;
         let mut bytes = 0u64;
 
-        println!("Indexing WAL (.seg + .seg.commit only)");
+        println!("Indexing commited WAL Segments");
 
         // Scan the on-disk segment directory for .seg files
         let seg_dir = PathBuf::from(format!("{}/segment_buffer/segs", Config::get_data_dir()));
@@ -1079,21 +1111,7 @@ mod tests_wal_commit {
         (seg_dir, EnvGuard { old_data_dir })
     }
 
-    fn count_committed_segs(seg_dir: &PathBuf) -> usize {
-        let mut c = 0usize;
-        if seg_dir.exists() {
-            if let Ok(rd) = fs::read_dir(seg_dir) {
-                for e in rd.flatten() {
-                    let p = e.path();
-                    if p.extension().and_then(|s| s.to_str()) == Some("seg") {
-                        let commit = p.with_extension("seg.commit");
-                        if commit.exists() { c += 1; }
-                    }
-                }
-            }
-        }
-        c
-    }
+    fn commit_exists(seg_path: &PathBuf) -> bool { seg_path.with_extension("seg.commit").exists() }
 
     #[test]
     fn test_write_seg_commit_header_roundtrip() {
