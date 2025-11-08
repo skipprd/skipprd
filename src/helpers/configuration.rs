@@ -137,6 +137,7 @@ pub struct Pipeline {
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     pub skippr: Option<Skippr>,
+    #[serde(default)]
     pub pipelines: HashMap<String, Pipeline>,
     pub data_inputs: Option<HashMap<String, PluginConfig>>,
     pub data_outputs: Option<HashMap<String, PluginConfig>>,
@@ -1410,39 +1411,15 @@ impl Config {
         }
     }
 
-    // Returns s3://bucket/prefix/{namespace}/ (trailing slash so DF treats as dir)
-    pub fn get_output_parquet_s3_location(namespace: &str) -> Option<String> {
-        match Self::get_pipline_plugin_config("output") {
-            Ok(plugin) => {
-                match plugin {
-                    PluginConfig::Athena(conf) => {
-                        let mut prefix = conf.s3_prefix.trim_matches('/').to_string();
-                        if !prefix.is_empty() { prefix = format!("{}/{}/", prefix, namespace); } else { prefix = format!("{}/", namespace); }
-                        Some(format!("s3://{}/{}", conf.s3_bucket, prefix))
-                    }
-                    _ => None
-                }
-            }
-            Err(_) => None
-        }
-    }
+    // Legacy output-derived locations removed: manifest is the single source of truth for querying
 
-    // Manifest paths and cache helpers
+    // Manifest paths and cache helpers (manifest is a sibling of config/metadata/metrics)
     pub fn get_manifest_s3_key(namespace: &str) -> Option<(String, String)> {
-        match Self::get_pipline_plugin_config("output") {
-            Ok(plugin) => {
-                match plugin {
-                    PluginConfig::Athena(conf) => {
-                        let bucket = conf.s3_bucket.clone();
-                        let base = conf.s3_prefix.trim_matches('/').to_string();
-                        let key = if base.is_empty() { format!("_skippr/manifest.json") } else { format!("{}/_skippr/manifest.json", base) };
-                        Some((bucket, key))
-                    }
-                    _ => None
-                }
-            }
-            Err(_) => None
-        }
+        let tenant = Self::get_tenant();
+        let workspace = Self::get_workspace_name();
+        let bucket = Self::get_skippr_s3_bucket();
+        let key = format!("{}/{}/{}/manifest/manifest.json", tenant, workspace, namespace);
+        Some((bucket, key))
     }
 
     pub fn get_manifest_local_path(namespace: &str) -> String {
@@ -1503,11 +1480,7 @@ impl Config {
     pub async fn update_manifest_with_prefix(namespace: &str, dir_prefix: &str) {
         let (_bucket, key) = match Self::get_manifest_s3_key(namespace) { Some(t) => t, None => return };
         // Load existing manifest (best-effort)
-        let mut root = match crate::helpers::s3::get_json(&format!("{}/{}", Self::get_tenant(), "" /*unused*/)).await { _ => serde_json::json!({}) };
-        // If direct fetch fails, try helper
-        if root.is_null() {
-            if let Ok(val) = crate::helpers::s3::get_json(&key).await { root = val; }
-        }
+        let mut root = match crate::helpers::s3::get_json(&key).await { Ok(val) => val, Err(_) => serde_json::json!({}) };
         if !root.is_object() { root = serde_json::json!({}); }
         let tables = root.as_object_mut().unwrap().entry("tables").or_insert(serde_json::json!({}));
         if !tables.is_object() { *tables = serde_json::json!({}); }
@@ -1515,7 +1488,9 @@ impl Config {
         let obj = table.as_object_mut().unwrap();
         let prefixes = obj.entry("prefixes").or_insert(serde_json::json!([]));
         let arr = prefixes.as_array_mut().unwrap();
-        if !arr.iter().any(|v| v.as_str() == Some(dir_prefix)) { arr.push(serde_json::json!(dir_prefix)); }
+        // Store absolute S3 URL to the directory prefix
+        let abs = format!("s3://{}/{}", Self::get_skippr_s3_bucket(), dir_prefix.trim_start_matches('/'));
+        if !arr.iter().any(|v| v.as_str() == Some(&abs)) { arr.push(serde_json::json!(abs)); }
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
         obj.insert("last_updated_epoch".to_string(), serde_json::json!(now));
         // Write back to S3 and expire local cache

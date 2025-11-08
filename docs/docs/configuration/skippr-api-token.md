@@ -2,7 +2,7 @@
 
 ## Description
 
-This configuration specifies the S3 bucket where Skippr will store metadata, logs, and metrics. All persistence operations are now handled through S3 instead of external APIs.
+This configuration specifies the S3 bucket where Skippr will store metadata, logs, metrics, and the query manifest. All persistence operations are handled through S3.
 
 ## Default Value
 
@@ -14,10 +14,11 @@ Let's consider an example where you want to use a bucket named "my-skippr-data".
 
 - SKIPPR_S3_BUCKET=my-skippr-data
 
-In this example, Skippr will store all data at paths like:
-- `s3://my-skippr-data/skippr/{workspace}/{pipeline}/metadata/metadata.json`
-- `s3://my-skippr-data/skippr/{workspace}/{pipeline}/logs/{timestamp}_{run_id}.json`
-- `s3://my-skippr-data/skippr/{workspace}/{pipeline}/metrics/{timestamp}_{run_id}.json`
+In this example, Skippr will store data at paths like:
+- `s3://my-skippr-data/{tenant}/{workspace}/{pipeline}/metadata/metadata.json`
+- `s3://my-skippr-data/{tenant}/{workspace}/{pipeline}/logs/{timestamp}_{run_id}.json`
+- `s3://my-skippr-data/{tenant}/{workspace}/{pipeline}/metrics/{timestamp}_{run_id}.json`
+- `s3://my-skippr-data/{tenant}/{workspace}/{pipeline}/manifest/manifest.json` (contains absolute `s3://...` URLs for DataFusion)
 
 ## Detailed Description
 
@@ -27,6 +28,7 @@ The SKIPPR_S3_BUCKET configuration defines the S3 bucket used for all Skippr per
 - **Logs**: Application logs with structured JSON format
 - **Metrics**: Performance and operational metrics
 - **Config**: Pipeline configuration snapshots
+- **Manifest**: Query catalog with absolute S3 paths used to build DataFusion tables
 
 All data is organized by workspace and pipeline name within the bucket for easy management and access control.
 

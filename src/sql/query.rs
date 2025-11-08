@@ -1001,27 +1001,37 @@ pub async fn query(sql_str: &str) {
                 let wal_rows: usize = wal_batches.iter().map(|b| b.num_rows()).sum();
                 if !wal_batches.is_empty() { let schema = wal_batches[0].schema(); let filtered: Vec<RecordBatch> = wal_batches.into_iter().filter(|b| b.schema().as_ref() == schema.as_ref()).collect(); if !filtered.is_empty() { let mem = MemTable::try_new(schema.clone(), vec![filtered]).map_err(|e| DataFusionError::Internal(e.to_string())).unwrap(); let _ = ctx.register_table(&format!("{}_wal", &pipeline), Arc::new(mem)); } }
 
-                // S3 parquet (required)
-                let s3_loc = match Config::get_output_parquet_s3_location(&pipeline) { Some(loc) => loc, None => { println!("No S3 output configured for pipeline '{}'; SELECT requires S3 + WAL", pipeline); process::exit(1); } };
-                register_s3_object_store(&ctx, &s3_loc).await;
-                // Prepare Parquet registration paths: prefer latest manifest prefix(es) to avoid schema merge conflicts
+                // S3 parquet: use manifest-only mode (absolute S3 URLs)
+                // Prepare Parquet registration paths from manifest prefixes
                 let mut s3_paths: Vec<String> = Vec::new();
                 if let Some(man) = Config::read_manifest(&pipeline).await {
                     if let Some(tables) = man.get("tables").and_then(|t| t.as_object()) {
                         if let Some(ns) = tables.get(&pipeline).and_then(|v| v.as_object()) {
                             if let Some(prefixes) = ns.get("prefixes").and_then(|p| p.as_array()) {
-                                if let Some(last) = prefixes.last().and_then(|v| v.as_str()) {
-                                    if let Ok(u) = Url::parse(&s3_loc) { if let Some(bucket) = u.host_str() {
-                                        let mut dir = last.trim_matches('/').to_string();
-                                        if !dir.ends_with('/') { dir.push('/'); }
-                                        s3_paths.push(format!("s3://{}/{}", bucket, dir));
-                                    } }
+                                for p in prefixes {
+                                    if let Some(pref) = p.as_str() {
+                                        if pref.starts_with("s3://") {
+                                            // ensure trailing slash so DF treats as dir
+                                            let mut v = pref.trim().to_string();
+                                            if !v.ends_with('/') { v.push('/'); }
+                                            s3_paths.push(v);
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
                 }
-                if s3_paths.is_empty() { s3_paths.push(s3_loc.clone()); }
+                if s3_paths.is_empty() { println!("Manifest missing or contains no absolute S3 prefixes for '{}'. Run ingest to publish manifest.", pipeline); process::exit(1); }
+                // Register object store per unique bucket
+                {
+                    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                    for path in &s3_paths {
+                        if let Ok(u) = Url::parse(path) { if let Some(bucket) = u.host_str() {
+                            if seen.insert(bucket.to_string()) { register_s3_object_store(&ctx, path).await; }
+                        } }
+                    }
+                }
                 // Cache: registry of already registered S3 object tables per (namespace, manifest_epoch)
                 let manifest_epoch = Config::get_manifest_epoch(&pipeline).await.unwrap_or(0);
                 let mut registry = Config::read_registry(&pipeline).await.unwrap_or(serde_json::json!({"epoch": 0u64, "sources": []}));
