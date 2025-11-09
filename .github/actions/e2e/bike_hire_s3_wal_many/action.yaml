@@ -22,13 +22,26 @@ runs:
         
         ls -la ./
         
+        run_allow_137() {
+          set +e
+          "$@"
+          rc=$?
+          set -e
+          if [ "$rc" -eq 137 ]; then
+            echo "Chaos SIGKILL (exit 137) observed; continuing as expected"
+            return 0
+          fi
+          return "$rc"
+        }
+        
         AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-${{ inputs.architecture_name }}/skippr discover --pipeline bike_hire_s3_wal_many
         
-        RUST_BACKTRACE=1 SKIPPR_CHAOS_MODE=yes AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-${{ inputs.architecture_name }}/skippr sync --pipeline bike_hire_s3_wal_many
-        RUST_BACKTRACE=1 SKIPPR_CHAOS_MODE=yes AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-${{ inputs.architecture_name }}/skippr sync --pipeline bike_hire_s3_wal_many
-        RUST_BACKTRACE=1 SKIPPR_CHAOS_MODE=yes AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-${{ inputs.architecture_name }}/skippr sync --pipeline bike_hire_s3_wal_many
-        RUST_BACKTRACE=1 SKIPPR_CHAOS_MODE=yes AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-${{ inputs.architecture_name }}/skippr sync --pipeline bike_hire_s3_wal_many
-        RUST_BACKTRACE=1 SKIPPR_CHAOS_MODE=no AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-${{ inputs.architecture_name }}/skippr sync --pipeline bike_hire_s3_wal_many
+        RUST_BACKTRACE=1 WAL_STORAGE=s3 SKIPPR_CHAOS_MODE=yes AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 run_allow_137 ./skippr-${{ inputs.architecture_name }}/skippr sync --pipeline bike_hire_s3_wal_many
+        RUST_BACKTRACE=1 WAL_STORAGE=s3 SKIPPR_CHAOS_MODE=yes AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 run_allow_137 ./skippr-${{ inputs.architecture_name }}/skippr sync --pipeline bike_hire_s3_wal_many
+        RUST_BACKTRACE=1 WAL_STORAGE=s3 SKIPPR_CHAOS_MODE=yes AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 run_allow_137 ./skippr-${{ inputs.architecture_name }}/skippr sync --pipeline bike_hire_s3_wal_many
+        RUST_BACKTRACE=1 WAL_STORAGE=s3 SKIPPR_CHAOS_MODE=yes AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 run_allow_137 ./skippr-${{ inputs.architecture_name }}/skippr sync --pipeline bike_hire_s3_wal_many
+        RUST_BACKTRACE=1 WAL_STORAGE=s3 SKIPPR_CHAOS_MODE=yes AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 run_allow_137 ./skippr-${{ inputs.architecture_name }}/skippr sync --pipeline bike_hire_s3_wal_many
+        RUST_BACKTRACE=1 WAL_STORAGE=s3 SKIPPR_CHAOS_MODE=no AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skippr-${{ inputs.architecture_name }}/skippr sync --pipeline bike_hire_s3_wal_many
 
 
     - name: Asset Athena

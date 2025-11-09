@@ -176,7 +176,7 @@ jobs:
 
   linux_x86:
 #    needs: smoke_test
-    name: cargo build (linux x86)
+    name: cargo build and test (linux x86)
     runs-on:
       - ubuntu-latest-32-cores
 #      - ubuntu-latest
@@ -277,6 +277,29 @@ jobs:
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
 
+  s3_wal_test:
+    needs:
+      - cleanup
+      - purge_dynamodb
+      - linux_x86
+    name: S3 WAL (linux x86)
+    runs-on:
+      - ubuntu-latest-32-cores
+    #      - ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Test linux x86 release
+        uses: ./.github/actions/e2e/bike_hire_s3_wal_many
+        with:
+          architecture_name: linux_x86
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          docker_hub_pass: ${{ secrets.DOCKER_HUB_PASS }}
+
   deadletters_test:
     needs:
       - cleanup
@@ -331,6 +354,7 @@ jobs:
       - linux_x86_test
       - chaos_mode_test
 #      - deadletters_test
+      - s3_wal_test
 #      - macos_arm64
 #      - macos_x86
 #      - macos_arm64_test

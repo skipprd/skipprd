@@ -686,7 +686,8 @@ async fn discover() {
             move || {
                 if RUNNING.read().load(Ordering::SeqCst) {
                     println!("Chaos mode throwing a random exit. You can disable this test mode buy removing CHAOS_MODE flag or setting to 'no'");
-                    std::process::exit(1);
+                    let pid = process::id() as i32;
+                    let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
                 }
             },
             periodic::Every::new(Duration::from_secs(rand::thread_rng().gen_range(60..90))),
@@ -882,7 +883,8 @@ async fn sync() {
             move || {
                 if RUNNING.read().load(Ordering::SeqCst) {
                     println!("Chaos mode throwing a random exit. You can disable this test mode buy removing CHAOS_MODE flag or setting to 'no'");
-                    std::process::exit(0);
+                    let pid = process::id() as i32;
+                    let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
                 }
             },
             periodic::Every::new(Duration::from_secs(rand::thread_rng().gen_range(60..90))),
