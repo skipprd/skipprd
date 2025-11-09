@@ -76,6 +76,8 @@ async fn register_s3_object_store(ctx: &SessionContext, s3_loc: &str) {
 }
 // no SQL AST parsing needed; we will register union views for all pipelines
 
+// WalReader abstraction handles WAL batch loading; helpers removed.
+
 #[allow(dead_code)]
 fn datediff(args: &[ArrayRef]) -> Result<ArrayRef, DataFusionError> {
     let start = as_string_array(&args[0])?;
@@ -280,27 +282,9 @@ pub async fn query(sql_str: &str) {
                     session_config = session_config.set("datafusion.execution.collect_statistics", "true".into());
                     let ctx = SessionContext::new_with_config(session_config);
                     PIPELINE_NAME.write().clear(); PIPELINE_NAME.write().push_str(&pipeline_name); Config::init().await;
-                    let seg_dir = format!("{}/segment_buffer/segs", Config::get_data_dir());
-                    let mut wal_batches: Vec<RecordBatch> = Vec::new();
-                    if std::path::Path::new(&seg_dir).exists() {
-                        for entry in std::fs::read_dir(&seg_dir).unwrap_or_else(|_| std::fs::read_dir("/").unwrap()) {
-                            if let Ok(ent) = entry { let path = ent.path(); if path.extension().and_then(|s| s.to_str()) != Some("seg") { continue; }
-                                let commit = path.with_extension("seg.commit"); if !commit.exists() { continue; }
-                                let seg = SegmentFile { path: path.clone() };
-                                if let Ok(meta) = seg.read_metadata() {
-                                    for idx in meta.index.iter() {
-                                        if idx.key.0 != pipeline_name { continue; }
-                                        if let Ok(mut file) = std::fs::OpenOptions::new().read(true).open(&path) {
-                                            if file.seek(std::io::SeekFrom::Start(idx.start)).is_ok() {
-                                                let mut reader = std::io::BufReader::new(file);
-                                                let mut take = reader.take(idx.len);
-                                                if let Ok(sr) = StreamReader::try_new(&mut take, None) { for it in sr { if let Ok(b) = it { wal_batches.push(b); } } }
-                                            }
-                                        }
-                                    }
-                                }
-                            } }
-                    }
+                        // Unified WAL reader (local disk or S3 based on manifest/env)
+                        let reader = crate::buffer::wal_store::WalReaderFactory::for_pipeline_async(&pipeline_name).await;
+                        let wal_batches: Vec<RecordBatch> = reader.load_committed_batches(&pipeline_name, 64).unwrap_or_default();
                     if !wal_batches.is_empty() {
                         let schema = wal_batches[0].schema();
                         let filtered: Vec<RecordBatch> = wal_batches.into_iter().filter(|b| b.schema().as_ref() == schema.as_ref()).collect();
@@ -974,30 +958,9 @@ pub async fn query(sql_str: &str) {
                     }
                 }
 
-                // WAL → MemTable
-                let seg_dir = format!("{}/segment_buffer/segs", Config::get_data_dir());
-                let mut wal_batches: Vec<RecordBatch> = Vec::new();
-                let mut wal_seg_files: usize = 0;
-                if std::path::Path::new(&seg_dir).exists() {
-                    for entry in std::fs::read_dir(&seg_dir).unwrap_or_else(|_| std::fs::read_dir("/").unwrap()) {
-                        if let Ok(ent) = entry { let path = ent.path(); if path.extension().and_then(|s| s.to_str()) != Some("seg") { continue; }
-                            let commit = path.with_extension("seg.commit"); if !commit.exists() { continue; }
-                            let seg = SegmentFile { path: path.clone() };
-                            if let Ok(meta) = seg.read_metadata() {
-                                for idx in meta.index.iter() {
-                                    if idx.key.0 != pipeline { continue; }
-                                    if let Ok(mut file) = std::fs::OpenOptions::new().read(true).open(&path) {
-                                        if file.seek(std::io::SeekFrom::Start(idx.start)).is_ok() {
-                                            let mut reader = std::io::BufReader::new(file);
-                                            let mut take = reader.take(idx.len);
-                                            if let Ok(sr) = StreamReader::try_new(&mut take, None) { for it in sr { if let Ok(b) = it { wal_batches.push(b); } } }
-                                            wal_seg_files += 1;
-                                        }
-                                    }
-                                }
-                            }
-                        } }
-                }
+                // WAL → MemTable via WalReader
+                let reader = crate::buffer::wal_store::WalReaderFactory::for_pipeline_async(&pipeline).await;
+                let wal_batches: Vec<RecordBatch> = reader.load_committed_batches(&pipeline, 64).unwrap_or_default();
                 let wal_rows: usize = wal_batches.iter().map(|b| b.num_rows()).sum();
                 if !wal_batches.is_empty() { let schema = wal_batches[0].schema(); let filtered: Vec<RecordBatch> = wal_batches.into_iter().filter(|b| b.schema().as_ref() == schema.as_ref()).collect(); if !filtered.is_empty() { let mem = MemTable::try_new(schema.clone(), vec![filtered]).map_err(|e| DataFusionError::Internal(e.to_string())).unwrap(); let _ = ctx.register_table(&format!("{}_wal", &pipeline), Arc::new(mem)); } }
 

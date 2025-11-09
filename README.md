@@ -40,8 +40,9 @@ These are planned features; scope and sequence may evolve.
    - [x] Commit markers for each WAL segment and visibility gating.
    - [x] Commit offsets to DB after WAL commit marker durably persisted. (Already recover offsets via WAL index on start)
  - [ ] S3-backed WAL segments
-  - [ ] Refactor write-ahead log segments to reside in S3 rather than local disk.
-  - [ ] Design for durability with buffering, compaction, and concurrent readers.
+   - [ ] Refactor write-ahead log segments to configurable persists to S3 (default to local disk).
+   - [ ] Design for determinisium and consistency
+   - [ ] Update `query.rs` to be able to query the WAL from S3
 
 ### Project Structure
 

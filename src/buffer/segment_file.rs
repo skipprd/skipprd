@@ -15,6 +15,7 @@ const MAGIC: &[u8; 4] = b"SEGF";
 const PART: &[u8; 4] = b"PART";
 const FOOT: &[u8; 4] = b"FOOT";
 const VERSION: u32 = 2;
+const COMMIT_HEADER_VERSION: u32 = 1;
 
 #[derive(Clone, Debug)]
 pub struct SegmentPartitionIndexEntry {
@@ -39,6 +40,115 @@ pub struct SegmentFile {
 }
 
 impl SegmentFile {
+    /// Build the 60-byte commit header used to gate visibility of a segment file.
+    /// Layout: MAGIC("SEGC"), VERSION(u32 LE), created_at(u64 LE), size(u64 LE), parts(u32 LE), sha256([u8;32])
+    pub fn build_commit_header_bytes(parts_count: u32, total_bytes: u64, sha256: &[u8;32]) -> [u8;60] {
+        let mut buf: [u8; 60] = [0u8; 60];
+        // MAGIC
+        buf[0..4].copy_from_slice(b"SEGC");
+        // VERSION=1
+        buf[4..8].copy_from_slice(&(COMMIT_HEADER_VERSION).to_le_bytes());
+        // created_at
+        let created_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+        buf[8..16].copy_from_slice(&created_at.to_le_bytes());
+        // size
+        buf[16..24].copy_from_slice(&total_bytes.to_le_bytes());
+        // parts
+        buf[24..28].copy_from_slice(&parts_count.to_le_bytes());
+        // sha256
+        buf[28..60].copy_from_slice(sha256);
+        buf
+    }
+    /// Read segment metadata from an in-memory buffer.
+    /// This mirrors `read_metadata`, but operates on bytes, allowing S3-backed reads.
+    pub fn read_metadata_from_bytes(bytes: &[u8]) -> io::Result<SegmentFileMetadata> {
+        use std::io::Cursor;
+        Self::read_metadata_from_reader(&mut Cursor::new(bytes))
+    }
+
+    /// Read segment metadata from any reader that implements Read+Seek.
+    /// Used by `read_metadata_from_bytes`, and can also be used by external callers for S3 streaming.
+    pub fn read_metadata_from_reader<R: Read + Seek>(reader: &mut R) -> io::Result<SegmentFileMetadata> {
+        let mut magic = [0u8; 4];
+        reader.read_exact(&mut magic)?;
+        if &magic != MAGIC {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "Compactor: bad segment magic"));
+        }
+        let mut ver = [0u8; 4];
+        reader.read_exact(&mut ver)?;
+        let version = u32::from_le_bytes(ver);
+        if version != VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Compactor: read refused version={}", version),
+            ));
+        }
+        let mut created = [0u8; 8];
+        reader.read_exact(&mut created)?;
+        let created_at_secs = u64::from_le_bytes(created);
+        let mut off_len_buf = [0u8; 8];
+        reader.read_exact(&mut off_len_buf)?;
+        let offsets_len = u64::from_le_bytes(off_len_buf);
+        let mut offsets_blob = vec![0u8; offsets_len as usize];
+        reader.read_exact(&mut offsets_blob)?;
+        let offsets: std::collections::HashMap<OffsetKey, u64> =
+            bincode::deserialize(&offsets_blob).unwrap_or_default();
+
+        let mut index: Vec<SegmentPartitionIndexEntry> = Vec::new();
+        let mut total_bytes: u64 = 0;
+        loop {
+            let mut tag = [0u8; 4];
+            match reader.read_exact(&mut tag) {
+                Ok(()) => {}
+                Err(e) => {
+                    if e.kind() == io::ErrorKind::UnexpectedEof {
+                        break;
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+            if &tag != PART {
+                break;
+            }
+            let mut key_len_buf = [0u8; 8];
+            reader.read_exact(&mut key_len_buf)?;
+            let key_len = u64::from_le_bytes(key_len_buf);
+            let mut key_blob = vec![0u8; key_len as usize];
+            reader.read_exact(&mut key_blob)?;
+            let key: PartitionKey = bincode::deserialize(&key_blob).unwrap();
+            let mut bytes_buf = [0u8; 8];
+            reader.read_exact(&mut bytes_buf)?;
+            let part_bytes = u64::from_le_bytes(bytes_buf);
+            let mut upd_buf = [0u8; 8];
+            reader.read_exact(&mut upd_buf)?;
+            let upd_secs = u64::from_le_bytes(upd_buf);
+            // VERSION=2: read explicit data_len and skip forward by that length
+            let mut len_buf = [0u8; 8];
+            reader.read_exact(&mut len_buf)?;
+            let data_len = u64::from_le_bytes(len_buf);
+            let start = reader.stream_position()?;
+            total_bytes = total_bytes.saturating_add(data_len);
+            index.push(SegmentPartitionIndexEntry {
+                key,
+                bytes: part_bytes,
+                updated_at_secs: upd_secs,
+                start,
+                len: data_len,
+            });
+            // Seek over the Arrow stream to the next PART header
+            reader.seek(io::SeekFrom::Current(data_len as i64))?;
+        }
+
+        Ok(SegmentFileMetadata {
+            created_at_secs,
+            total_bytes,
+            num_partitions: index.len() as u32,
+            offsets,
+            index,
+        })
+    }
+
     pub fn new(dir: &Path, snapshot_id: &str) -> io::Result<Self> {
         fs::create_dir_all(dir)?;
         // Record the final path; we write directly and publish via a sibling .seg.commit

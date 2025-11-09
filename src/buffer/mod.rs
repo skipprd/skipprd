@@ -1,5 +1,7 @@
 pub mod ingest_buffer;
 pub mod segment_file;
+pub mod wal_store;
+pub mod segment_object;
 // wal_accumulator removed in simplified model
 
 use chrono::{DateTime, Datelike, TimeZone, Timelike, Utc};
