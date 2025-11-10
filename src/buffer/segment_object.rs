@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io;
+use std::time::Duration;
 use std::time::SystemTime;
 use arrow::array::RecordBatch;
 use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
@@ -8,6 +9,7 @@ use aws_sdk_s3::types::CompletedPart;
 use sha2::{Sha256, Digest};
 use url::Url;
 use crate::buffer::segment_file::{PartitionKey, SegmentFile};
+use rand::{thread_rng, Rng};
 
 const MPU_PART_SIZE: usize = 8 * 1024 * 1024;
 
@@ -26,11 +28,31 @@ struct S3MultipartWriter {
 
 impl S3MultipartWriter {
     async fn begin(client: aws_sdk_s3::Client, bucket: String, key: String) -> io::Result<Self> {
-        let resp = client.create_multipart_upload()
-            .bucket(&bucket)
-            .key(&key)
-            .content_type("application/octet-stream")
-            .send().await.map_err(|e| io::Error::new(io::ErrorKind::Other, format!("s3 mpu create: {}", e)))?;
+        // Retry MPU create to handle transient dispatch/network issues
+        let resp = {
+            let mut attempts: u32 = 0;
+            loop {
+                let res = client.create_multipart_upload()
+                    .bucket(&bucket)
+                    .key(&key)
+                    .content_type("application/octet-stream")
+                    .send()
+                    .await;
+                match res {
+                    Ok(v) => break v,
+                    Err(e) => {
+                        attempts = attempts.saturating_add(1);
+                        if attempts >= 5 {
+                            return Err(io::Error::new(io::ErrorKind::Other, format!("s3 mpu create: {}", e)));
+                        }
+                        let base = 200u64.saturating_mul(1u64 << attempts.min(10));
+                        let jitter: u64 = thread_rng().gen_range(0..100);
+                        tokio::time::sleep(Duration::from_millis((base + jitter).min(5_000))).await;
+                        continue;
+                    }
+                }
+            }
+        };
         let upload_id = resp.upload_id().unwrap_or_default().to_string();
         Ok(S3MultipartWriter {
             bucket, key, upload_id, client,
@@ -47,13 +69,33 @@ impl S3MultipartWriter {
         if self.buf.is_empty() { return Ok(()); }
         let body = std::mem::take(&mut self.buf);
         let pn = self.part_number;
-        let out = self.client.upload_part()
-            .bucket(&self.bucket)
-            .key(&self.key)
-            .upload_id(&self.upload_id)
-            .part_number(pn)
-            .body(ByteStream::from(body))
-            .send().await.map_err(|e| io::Error::new(io::ErrorKind::Other, format!("s3 upload part {}: {}", pn, e)))?;
+        // Retry part upload to mitigate transient dispatch/socket errors
+        let out = {
+            let mut attempts: u32 = 0;
+            loop {
+                let res = self.client.upload_part()
+                    .bucket(&self.bucket)
+                    .key(&self.key)
+                    .upload_id(&self.upload_id)
+                    .part_number(pn)
+                    .body(ByteStream::from(body.clone()))
+                    .send()
+                    .await;
+                match res {
+                    Ok(v) => break v,
+                    Err(e) => {
+                        attempts = attempts.saturating_add(1);
+                        if attempts >= 5 {
+                            return Err(io::Error::new(io::ErrorKind::Other, format!("s3 upload part {}: {}", pn, e)));
+                        }
+                        let base = 200u64.saturating_mul(1u64 << attempts.min(10));
+                        let jitter: u64 = thread_rng().gen_range(0..100);
+                        tokio::time::sleep(Duration::from_millis((base + jitter).min(5_000))).await;
+                        continue;
+                    }
+                }
+            }
+        };
         let etag = out.e_tag().unwrap_or_default().to_string();
         self.parts.push(CompletedPart::builder().set_e_tag(Some(etag)).part_number(pn).build());
         self.part_number += 1;
@@ -84,15 +126,33 @@ impl S3MultipartWriter {
 
     async fn complete(mut self) -> io::Result<()> {
         self.flush_part().await?;
-        let comp = aws_sdk_s3::types::CompletedMultipartUpload::builder()
-            .set_parts(Some(self.parts))
-            .build();
-        self.client.complete_multipart_upload()
-            .bucket(&self.bucket)
-            .key(&self.key)
-            .upload_id(&self.upload_id)
-            .multipart_upload(comp)
-            .send().await.map_err(|e| io::Error::new(io::ErrorKind::Other, format!("s3 mpu complete: {}", e)))?;
+        // Retry MPU complete for transient issues
+        let mut attempts: u32 = 0;
+        loop {
+            let comp = aws_sdk_s3::types::CompletedMultipartUpload::builder()
+                .set_parts(Some(self.parts.clone()))
+                .build();
+            let res = self.client.complete_multipart_upload()
+                .bucket(&self.bucket)
+                .key(&self.key)
+                .upload_id(&self.upload_id)
+                .multipart_upload(comp)
+                .send()
+                .await;
+            match res {
+                Ok(_) => break,
+                Err(e) => {
+                    attempts = attempts.saturating_add(1);
+                    if attempts >= 5 {
+                        return Err(io::Error::new(io::ErrorKind::Other, format!("s3 mpu complete: {}", e)));
+                    }
+                    let base = 200u64.saturating_mul(1u64 << attempts.min(10));
+                    let jitter: u64 = thread_rng().gen_range(0..100);
+                    tokio::time::sleep(Duration::from_millis((base + jitter).min(5_000))).await;
+                    continue;
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -184,10 +244,29 @@ impl SegmentObject {
 
         // Upload .seg.commit marker
         let commit_bytes = SegmentFile::build_commit_header_bytes(parts_count, total_bytes, &sha);
-        client.put_object().bucket(&bucket).key(&commit_key)
-            .body(ByteStream::from(commit_bytes.to_vec()))
-            .content_type("application/octet-stream")
-            .send().await.map_err(|e| io::Error::new(io::ErrorKind::Other, format!("s3 put commit: {}", e)))?;
+        // Retry commit marker upload to ensure visibility gating is durable
+        {
+            let mut attempts: u32 = 0;
+            loop {
+                let res = client.put_object().bucket(&bucket).key(&commit_key)
+                    .body(ByteStream::from(commit_bytes.clone().to_vec()))
+                    .content_type("application/octet-stream")
+                    .send().await;
+                match res {
+                    Ok(_) => break,
+                    Err(e) => {
+                        attempts = attempts.saturating_add(1);
+                        if attempts >= 5 {
+                            return Err(io::Error::new(io::ErrorKind::Other, format!("s3 put commit: {}", e)));
+                        }
+                        let base = 200u64.saturating_mul(1u64 << attempts.min(10));
+                        let jitter: u64 = thread_rng().gen_range(0..100);
+                        tokio::time::sleep(Duration::from_millis((base + jitter).min(5_000))).await;
+                        continue;
+                    }
+                }
+            }
+        }
 
         Ok((total_bytes, total_rows, parts_count, sha))
     }

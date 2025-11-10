@@ -699,12 +699,12 @@ impl Config {
         }
     }
 
-    // WAL storage selection: "s3" (default) or "disk"
+    // WAL storage selection: "disk" (default) or "s3"
     pub fn get_wal_storage() -> String {
         if Config::get_envcache("WAL_STORAGE") != "" {
             return Config::get_envcache("WAL_STORAGE")
         } else {
-            let val = Config::getenv("WAL_STORAGE", "s3");
+            let val = Config::getenv("WAL_STORAGE", "disk");
             Config::set_evncache("WAL_STORAGE", &val);
             val
         }
@@ -714,16 +714,10 @@ impl Config {
         Config::setenv("WAL_STORAGE", value);
     }
 
-    // WAL S3 bucket (fallback to SKIPPR_S3_BUCKET)
+    // WAL S3 bucket (always use SKIPPR_S3_BUCKET; no separate WAL_S3_BUCKET)
     pub fn get_wal_s3_bucket() -> String {
-        if Config::get_envcache("WAL_S3_BUCKET") != "" {
-            return Config::get_envcache("WAL_S3_BUCKET")
-        } else {
-            let fallback = Config::get_skippr_s3_bucket();
-            let bucket = Config::getenv("WAL_S3_BUCKET", &fallback);
-            Config::set_evncache("WAL_S3_BUCKET", &bucket);
-            bucket
-        }
+        // Intentionally ignore any WAL_S3_BUCKET environment variables; standardize on SKIPPR_S3_BUCKET
+        Config::get_skippr_s3_bucket()
     }
 
     // WAL prefix (default derived: {tenant}/{workspace}/{pipeline}/segments)
