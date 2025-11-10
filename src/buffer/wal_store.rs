@@ -11,6 +11,8 @@ use std::fs;
 use std::path::PathBuf;
 use arrow::ipc::reader::StreamReader;
 use std::io::{Read, Seek};
+use tokio::runtime::Handle;
+use std::thread;
 
 /// Minimal WAL store interface (synchronous facade).
 pub trait WalStore {
@@ -45,12 +47,29 @@ impl WalStore for S3WalStore {
         batches: &HashMap<PartitionKey, Vec<RecordBatch>>,
         partitions_meta: &HashMap<PartitionKey, (u64 /*bytes*/, SystemTime /*updated*/ )>,
     ) -> io::Result<(u64, u64, u32, [u8;32])> {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("runtime: {}", e)))?;
-        rt.block_on(async {
+        // Make owned clones to satisfy 'static for spawned thread
+        let prefix = self.prefix_url.clone();
+        let sid = snapshot_id.to_string();
+        let offs = offsets.clone();
+        let batches_owned = batches.clone();
+        let parts_owned = partitions_meta.clone();
+        let fut = async move {
             let client = crate::helpers::s3::get_s3_client().await;
-            SegmentObject::stream_snapshot_to_s3(&client, &self.prefix_url, snapshot_id, offsets, batches, partitions_meta).await
-        })
+            SegmentObject::stream_snapshot_to_s3(&client, &prefix, &sid, &offs, &batches_owned, &parts_owned).await
+        };
+        if Handle::try_current().is_ok() {
+            // Inside a runtime: run the async work on a dedicated thread with its own small runtime
+            let join = thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build()
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("runtime: {}", e)))?;
+                rt.block_on(fut)
+            });
+            join.join().map_err(|_| io::Error::new(io::ErrorKind::Other, "join panic"))?
+        } else {
+            let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build()
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("runtime: {}", e)))?;
+            rt.block_on(fut)
+        }
     }
 }
 
@@ -78,41 +97,13 @@ impl WalStore for DiskWalStore {
 pub struct WalStoreFactory;
 
 impl WalStoreFactory {
-    fn resolve_wal_prefix_for_namespace(ns: &str) -> Option<String> {
-        // If already in a Tokio runtime, avoid blocking; use async variant or fall back
-        if tokio::runtime::Handle::try_current().is_ok() {
-            return None;
-        }
-        // No runtime: perform a small async read synchronously
-        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-            Ok(rt) => rt,
-            Err(_) => return None,
-        };
-        rt.block_on(async {
-            if let Some(man) = Config::read_manifest(ns).await {
-                if let Some(v) = man.get("wal_segments_prefix").and_then(|s| s.as_str()) {
-                    if v.starts_with("s3://") { return Some(v.to_string()); }
-                }
-                if let Some(tables) = man.get("tables").and_then(|t| t.as_object()) {
-                    if let Some(nsobj) = tables.get(ns).and_then(|v| v.as_object()) {
-                        if let Some(pfx) = nsobj.get("wal_segments_prefix").and_then(|s| s.as_str()) {
-                            if pfx.starts_with("s3://") { return Some(pfx.to_string()); }
-                        }
-                    }
-                }
-            }
-            None
-        })
-    }
-
     pub fn for_batches(batches: &HashMap<PartitionKey, Vec<RecordBatch>>) -> Box<dyn WalStore + Send + Sync> {
-        let storage = Config::getenv("WAL_STORAGE", "local");
-        if storage.eq_ignore_ascii_case("s3") {
-            if let Some(((ns, _p, _t, _s), _)) = batches.iter().next() {
-                if let Some(pfx) = Self::resolve_wal_prefix_for_namespace(ns) {
-                    return Box::new(S3WalStore::new(&pfx));
-                }
-            }
+        let _ = batches; // unused; selection via root-level storage
+        if Config::get_wal_storage().eq_ignore_ascii_case("s3") {
+            let bucket = Config::get_wal_s3_bucket();
+            let base = Config::get_wal_s3_prefix();
+            let prefix_url = format!("s3://{}/{}", bucket, base.trim_start_matches('/'));
+            return Box::new(S3WalStore::new(&prefix_url));
         }
         Box::new(DiskWalStore)
     }
@@ -165,11 +156,11 @@ pub struct S3WalReader {
 
 impl WalReader for S3WalReader {
     fn load_committed_batches(&self, pipeline: &str, limit_files: usize) -> io::Result<Vec<RecordBatch>> {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("runtime: {}", e)))?;
-        rt.block_on(async {
+        let prefix = self.prefix_url.clone();
+        let pipe = pipeline.to_string();
+        let fut = async move {
             let mut out: Vec<RecordBatch> = Vec::new();
-            let u = match Url::parse(&self.prefix_url) { Ok(u) => u, Err(_) => return Ok(out) };
+            let u = match Url::parse(&prefix) { Ok(u) => u, Err(_) => return Ok(out) };
             if u.scheme() != "s3" { return Ok(out); }
             let bucket = match u.host_str() { Some(b) => b.to_string(), None => return Ok(out) };
             let base = u.path().trim_start_matches('/').trim_end_matches('/').to_string();
@@ -207,7 +198,7 @@ impl WalReader for S3WalReader {
                                 let bytes = agg.into_bytes().to_vec();
                                 if let Ok(meta) = SegmentFile::read_metadata_from_bytes(&bytes) {
                                     for idx in meta.index.iter() {
-                                        if idx.key.0 != pipeline { continue; }
+                                        if idx.key.0 != pipe { continue; }
                                         let start = idx.start as usize;
                                         let end = start.saturating_add(idx.len as usize);
                                         if end > bytes.len() { continue; }
@@ -229,33 +220,41 @@ impl WalReader for S3WalReader {
                 }
             }
             Ok(out)
-        })
+        };
+        if Handle::try_current().is_ok() {
+            let join = thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build()
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("runtime: {}", e)))?;
+                rt.block_on(fut)
+            });
+            join.join().map_err(|_| io::Error::new(io::ErrorKind::Other, "join panic"))?
+        } else {
+            let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build()
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("runtime: {}", e)))?;
+            rt.block_on(fut)
+        }
     }
 }
 
 pub struct WalReaderFactory;
 
 impl WalReaderFactory {
-    pub fn for_pipeline(pipeline: &str) -> Box<dyn WalReader + Send + Sync> {
-        if let Some(pfx) = WalStoreFactory::resolve_wal_prefix_for_namespace(pipeline) {
-            return Box::new(S3WalReader { prefix_url: pfx });
+    pub fn for_pipeline(_pipeline: &str) -> Box<dyn WalReader + Send + Sync> {
+        if Config::get_wal_storage().eq_ignore_ascii_case("s3") {
+            let bucket = Config::get_wal_s3_bucket();
+            let base = Config::get_wal_s3_prefix();
+            let prefix_url = format!("s3://{}/{}", bucket, base.trim_start_matches('/'));
+            return Box::new(S3WalReader { prefix_url });
         }
         Box::new(DiskWalReader)
     }
 
-    pub async fn for_pipeline_async(pipeline: &str) -> Box<dyn WalReader + Send + Sync> {
-        // Manifest-based resolution asynchronously (faithful to current implementation)
-        if let Some(man) = Config::read_manifest(pipeline).await {
-            if let Some(v) = man.get("wal_segments_prefix").and_then(|s| s.as_str()) {
-                if v.starts_with("s3://") { return Box::new(S3WalReader { prefix_url: v.to_string() }); }
-            }
-            if let Some(tables) = man.get("tables").and_then(|t| t.as_object()) {
-                if let Some(nsobj) = tables.get(pipeline).and_then(|v| v.as_object()) {
-                    if let Some(pfx) = nsobj.get("wal_segments_prefix").and_then(|s| s.as_str()) {
-                        if pfx.starts_with("s3://") { return Box::new(S3WalReader { prefix_url: pfx.to_string() }); }
-                    }
-                }
-            }
+    pub async fn for_pipeline_async(_pipeline: &str) -> Box<dyn WalReader + Send + Sync> {
+        if Config::get_wal_storage().eq_ignore_ascii_case("s3") {
+            let bucket = Config::get_wal_s3_bucket();
+            let base = Config::get_wal_s3_prefix();
+            let prefix_url = format!("s3://{}/{}", bucket, base.trim_start_matches('/'));
+            return Box::new(S3WalReader { prefix_url });
         }
         Box::new(DiskWalReader)
     }

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use tracing::debug;
 
 pub struct Orchestrator;
 
@@ -7,30 +8,18 @@ impl Orchestrator {
         let ctx = crate::catalog::session::SessionFactory::new_context().await;
         crate::catalog::session::SessionFactory::register_s3_and_wal(&ctx, namespace).await;
 
-        // Register S3 tables using registry prefixes; fallback to configured output parquet location
+        // Register S3 tables using manifest-backed registry prefixes
         let pipeline = crate::helpers::configuration::Config::get_pipeline_name();
-        let mut prefixes: Vec<String> = Vec::new();
         if let Some(entry) = crate::sql::registry::find_entry(&pipeline, namespace).await {
-            prefixes.extend(entry.data_prefixes);
-        }
-        // Fallback: use the configured s3 parquet base for this namespace/pipeline
-        let s3_loc = crate::helpers::configuration::Config::get_output_parquet_s3_location(&pipeline).unwrap_or_default();
-        if prefixes.is_empty() && !s3_loc.is_empty() { prefixes.push(s3_loc.clone()); }
-        // Normalize to s3://bucket/dir/
-        let bucket = url::Url::parse(&s3_loc).ok().and_then(|u| u.host_str().map(|s| s.to_string())).unwrap_or_default();
-        println!("META: orchestrator ns='{}' prefixes_before_norm={}", namespace, prefixes.len());
-        for p in prefixes.iter_mut() {
-            if !p.starts_with("s3://") {
-                let mut dir = p.trim_matches('/').to_string();
-                if !dir.ends_with('/') { dir.push('/'); }
-                *p = format!("s3://{}/{}", bucket, dir);
+            let prefixes = entry.data_prefixes;
+            for (idx, path) in prefixes.iter().enumerate() {
+                let tname = format!("{}_s3_{}", namespace, idx);
+                let _ = ctx.register_parquet(&tname, path, datafusion::prelude::ParquetReadOptions::default()).await;
             }
+            debug!("META: orchestrator ns='{}' registered_sources={}", namespace, prefixes.len());
+        } else {
+            debug!("META: orchestrator ns='{}' no registry prefixes found", namespace);
         }
-        for (idx, path) in prefixes.iter().enumerate() {
-            let tname = format!("{}_s3_{}", namespace, idx);
-            let _ = ctx.register_parquet(&tname, path, datafusion::prelude::ParquetReadOptions::default()).await;
-        }
-        println!("META: orchestrator ns='{}' registered_sources={}", namespace, prefixes.len());
 
         // Stats → Catalog (+LLM in build_catalog tail)
         // Full S3 scan for authoritative stats (0 => no limit). For now, apply a small limit for fast runs.

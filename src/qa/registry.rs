@@ -70,23 +70,7 @@ pub async fn register_namespace_view(ctx: &SessionContext, ns: &str) -> Result<(
     if let Some(entry) = find_entry(&pipeline, ns).await {
         // gather and normalize prefixes
         let mut s3_paths: Vec<String> = entry.data_prefixes.clone();
-        // fallback: use configured output parquet base if registry has no prefixes
-        if s3_paths.is_empty() {
-            if let Some(loc) = Config::get_output_parquet_s3_location(ns) { s3_paths.push(loc); }
-        }
-        // normalize relative-like prefixes to full s3 URLs using configured output bucket (if any)
-        if let Some(s3_loc) = Config::get_output_parquet_s3_location(ns) {
-            if let Ok(u) = Url::parse(&s3_loc) {
-                if let Some(bucket) = u.host_str() {
-                    for p in s3_paths.iter_mut() {
-                        if !p.starts_with("s3://") {
-                            let mut dir = p.trim_matches('/').to_string(); if !dir.ends_with('/') { dir.push('/'); }
-                            *p = format!("s3://{}/{}", bucket, dir);
-                        }
-                    }
-                }
-            }
-        }
+        // Prefixes should already be absolute s3:// URLs from the manifest-backed registry
         // dedupe after normalization and register object stores
         s3_paths.sort(); s3_paths.dedup();
         // For responsiveness in Ask, cap to first prefix for now

@@ -16,7 +16,7 @@ schemars = "0.7.0"
 regex = "1.7.0"
 memory-stats = "1.0.0"
 rand = "0.8.5"
-chrono = "0.4.23"
+chrono = "0.4.34"
 chrono-tz = "0.8"
 icu = "1.0.0"
 array-init = "2.1.0"
@@ -86,6 +86,7 @@ ratatui = { version = "0.26" }
 crossterm = { version = "0.27" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+crossbeam-channel = "0.5.15"
 
 [features]
 llama_cpp = ["llama_cpp_2"]

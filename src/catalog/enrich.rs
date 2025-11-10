@@ -1,3 +1,4 @@
+use tracing::debug;
 use crate::catalog::model::{DataCatalog, CatalogField};
 
 /// Run dataset-level and field-level LLM enrichment for a namespace.
@@ -36,7 +37,7 @@ pub async fn enrich_namespace_with_llm(namespace: &str) {
             }
         };
         if let Some(text) = text_opt {
-            println!("{} LLM Enrich: dataset description raw for ns='{}': {}", chrono::Utc::now().to_rfc3339(), namespace, text);
+            debug!("{} LLM Enrich: dataset description raw for ns='{}': {}", chrono::Utc::now().to_rfc3339(), namespace, text);
             let summary_raw = super_extract_json_value(&text)
                 .ok()
                 .and_then(|v| v.get("description").and_then(|x| x.as_str()).map(|s| s.to_string()))
@@ -131,7 +132,7 @@ pub async fn enrich_namespace_with_llm(namespace: &str) {
                         items = items
                     );
                     let desc_text = tokio::task::spawn_blocking({ let s = session.clone(); let p = prompt_desc.clone(); move || s.chat_strict(&p) }).await.ok().and_then(|r| r.ok()).unwrap_or_default();
-                    println!("{} LLM Enrich: description batch raw ns='{}' fields=[{}]: {}", chrono::Utc::now().to_rfc3339(), namespace, fields.join(","), desc_text);
+                    debug!("{} LLM Enrich: description batch raw ns='{}' fields=[{}]: {}", chrono::Utc::now().to_rfc3339(), namespace, fields.join(","), desc_text);
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&desc_text).or_else(|_| super::enrich::super_extract_json_value(&desc_text)) {
                         if let Some(map) = v.get("descriptionByField").and_then(|m| m.as_object()) {
                             for (k, val) in map {
@@ -173,7 +174,7 @@ pub async fn enrich_namespace_with_llm(namespace: &str) {
                         items = items2
                     );
                     let syn_text = tokio::task::spawn_blocking({ let s = session.clone(); let p = prompt_syn.clone(); move || s.chat_strict(&p) }).await.ok().and_then(|r| r.ok()).unwrap_or_default();
-                    println!("{} LLM Enrich: synonyms batch raw ns='{}' fields=[{}]: {}", chrono::Utc::now().to_rfc3339(), namespace, fields.join(","), syn_text);
+                    debug!("{} LLM Enrich: synonyms batch raw ns='{}' fields=[{}]: {}", chrono::Utc::now().to_rfc3339(), namespace, fields.join(","), syn_text);
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&syn_text).or_else(|_| super::enrich::super_extract_json_value(&syn_text)) {
                         if let Some(map) = v.get("synonymsByField").and_then(|m| m.as_object()) {
                             for (k, val) in map {
@@ -226,7 +227,7 @@ pub async fn enrich_namespace_with_llm(namespace: &str) {
                         items = items3
                     );
                     let pu_text = tokio::task::spawn_blocking({ let s = session.clone(); let p = prompt_pu.clone(); move || s.chat_strict(&p) }).await.ok().and_then(|r| r.ok()).unwrap_or_default();
-                    println!("{} LLM Enrich: pii/units batch raw ns='{}' fields=[{}]: {}", chrono::Utc::now().to_rfc3339(), namespace, fields.join(","), pu_text);
+                    debug!("{} LLM Enrich: pii/units batch raw ns='{}' fields=[{}]: {}", chrono::Utc::now().to_rfc3339(), namespace, fields.join(","), pu_text);
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&pu_text).or_else(|_| super::enrich::super_extract_json_value(&pu_text)) {
                         if let Some(map) = v.get("piiUnitsByField").and_then(|m| m.as_object()) {
                             for (k, val) in map {
@@ -279,7 +280,7 @@ pub async fn enrich_namespace_with_llm(namespace: &str) {
                 for (k, _) in syn_map_all.iter() { if catalog.fields.iter().any(|f| f.name == *k && f.synonyms.is_some()) { num_syn_added += 1; } }
                 for (k, _) in pii_map_all.iter() { if catalog.fields.iter().any(|f| f.name == *k && f.pii_sensitivity.is_some()) { num_pii_added += 1; } }
                 for (k, _) in units_map_all.iter() { if catalog.fields.iter().any(|f| f.name == *k && f.units_or_format.is_some()) { num_units_added += 1; } }
-                println!("{} LLM Enrich: ns='{}' updates -> desc={}, syn={}, pii={}, units={}", chrono::Utc::now().to_rfc3339(), namespace, num_desc_added, num_syn_added, num_pii_added, num_units_added);
+                debug!("{} LLM Enrich: ns='{}' updates -> desc={}, syn={}, pii={}, units={}", chrono::Utc::now().to_rfc3339(), namespace, num_desc_added, num_syn_added, num_pii_added, num_units_added);
 
                 crate::helpers::configuration::Config::write_catalog_async(namespace, &catalog).await;
             }

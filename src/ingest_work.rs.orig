@@ -1525,15 +1525,63 @@ impl Ingest {
                         continue;
                     }
 
-                    enqueue_record(&skpr_namespace, &skpr_partition, &skpr_time_bucket, record_value.clone(), &ingest_batch.offset_key, batch_line);
-                    
-                    _j += 1;
+<<<<<<< HEAD
+                    enqueue_record(&skpr_namespace, &skpr_partition, &skpr_time_bucket, record_value, &ingest_batch.offset_key, batch_line);
+=======
+                    let ingest_record = IngestRecord {
+                        record: record_value,
+                        _namespace: skpr_namespace.clone(),
+                        _partition: skpr_partition.clone(),
+                        _time: skpr_time_bucket.clone(),
+                    };
 
                     // Emit stats observations (including nested via dot-notation)
                     if crate::helpers::configuration::Config::stats_enabled() {
-                        crate::discover::stats_tailer::emit_observation_deep(&skpr_namespace, "", &record_value);
+                        crate::discover::stats_tailer::emit_observation_deep(&skpr_namespace, "", &ingest_record.record);
                     }
 
+                    // Load schema and hash using a stable version snapshot to avoid races
+                    let md = METADATA.load();
+                    let schema_hash = Ingest::load_stable_schema_hash(&skpr_namespace, &md.metadata, flatten);
+
+                    let key = (
+                        skpr_namespace.clone(),
+                        skpr_partition.clone(),
+                        skpr_time_bucket.clone(),
+                        schema_hash.hash
+                    );
+                    let buf_entry = buf.entry(key.clone()).or_insert_with(|| {
+
+                        // Ensure schema is prepared and visible before creating first batch for this namespace
+                        {
+                            // If schema not marked ready yet, block briefly until it is
+                            const MAX_WAIT_ITERS: u32 = 50; // ~5s total
+                            let mut iters: u32 = 0;
+                            loop {
+                                let ready = SCHEMA_READY.get(&skpr_namespace).map(|f| f.load(Ordering::Relaxed)).unwrap_or(false);
+                                if ready { break; }
+                                if iters >= MAX_WAIT_ITERS { break; }
+                                std::thread::sleep(std::time::Duration::from_millis(100));
+                                iters += 1;
+                            }
+                        }
+                        IngestBufferBatch {
+                            offsets: HashMap::new(),
+                            _namespace: skpr_namespace.clone(),
+                            _partition: skpr_partition.clone(),
+                            _time: skpr_time_bucket,
+                            _shard: "".to_string(),
+                            schema: schema_hash.schema,
+                            record_batches: None,
+                        }
+                    });
+                    
+                    // an ingest batch consist of many small files/queue messages, etc. Each will need its offset committed in the WAL.
+                    buf_entry.offsets.insert(ingest_batch.offset_key.clone(), batch_line);
+                    raw_values.entry(key).or_insert_with(|| Vec::with_capacity(1024)).push(ingest_record);
+
+>>>>>>> 4e06e04 (add rag to question ingested structural data)
+                    _j += 1;
                     
                 }
             }
@@ -1833,7 +1881,7 @@ impl Ingest {
 mod stats_integration_tests {
 	use super::*;
 	use crate::discover::stats_tailer::{ensure_stats_worker, emit_observation};
-	use crate::helpers::configuration::{Config, PIPELINE_NAME};
+	use crate::helpers::configuration::Config;
 	use serde_json::json;
 
 	#[test]
@@ -1852,7 +1900,6 @@ mod stats_integration_tests {
 		// Wait longer than default flush
 		std::thread::sleep(std::time::Duration::from_millis(1500));
 		// Read local stats cache
-        PIPELINE_NAME.write().clear(); PIPELINE_NAME.write().push_str(ns);
 		let path = Config::get_stats_local_path(ns);
 		let contents = std::fs::read_to_string(&path).expect("missing local stats");
 		let v: serde_json::Value = serde_json::from_str(&contents).expect("bad json");

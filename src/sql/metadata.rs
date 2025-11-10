@@ -5,11 +5,11 @@ use datafusion::datasource::MemTable;
 use datafusion::prelude::SessionContext;
 use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField};
 use datafusion::arrow::datatypes::Schema as ArrowSchema2;
-
+use tracing::debug;
 use crate::sql::registry::{get_registry_cached, load_registry};
 
 pub async fn register_catalog(ctx: &SessionContext) {
-    println!("{} META: begin register_semantic_and_catalog (unified catalog, S3-only)", chrono::Utc::now().to_rfc3339());
+    debug!("{} META: begin register_semantic_and_catalog (unified catalog, S3-only)", chrono::Utc::now().to_rfc3339());
     let cat_schema = Arc::new(ArrowSchema2::new(vec![
         ArrowField::new("namespace", ArrowDataType::Utf8, false),
         ArrowField::new("entity", ArrowDataType::Utf8, true),
@@ -26,14 +26,14 @@ pub async fn register_catalog(ctx: &SessionContext) {
     // Load registry across all pipelines and accumulate rows
     let mut reg = get_registry_cached().await;
     if reg.is_empty() { let _ = load_registry().await; reg = get_registry_cached().await; }
-    println!("{} META: registry pipelines loaded: {}", chrono::Utc::now().to_rfc3339(), reg.len());
-    for p in &reg { println!("{} META: pipeline='{}' namespaces={} ", chrono::Utc::now().to_rfc3339(), p.pipeline, p.namespaces.len()); }
+    debug!("{} META: registry pipelines loaded: {}", chrono::Utc::now().to_rfc3339(), reg.len());
+    for p in &reg { debug!("{} META: pipeline='{}' namespaces={} ", chrono::Utc::now().to_rfc3339(), p.pipeline, p.namespaces.len()); }
 
     let mut cat_rows: Vec<(String, Option<String>, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>)> = Vec::new();
 
     for pipe in &reg {
         for (ns, entry) in pipe.namespaces.iter() {
-            println!("{} META: ns='{}' catalog_key='{}'", chrono::Utc::now().to_rfc3339(), ns, entry.catalog_key);
+            debug!("{} META: ns='{}' catalog_key='{}'", chrono::Utc::now().to_rfc3339(), ns, entry.catalog_key);
             if let Ok(val) = crate::helpers::s3::get_json(&entry.catalog_key).await {
                 let dims_str = if let Some(arr) = val.get("dimensions").and_then(|x| x.as_array()) { Some(arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect::<Vec<String>>().join(", ")) } else { None };
                 let mets_str = if let Some(arr) = val.get("metrics").and_then(|x| x.as_array()) { Some(arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect::<Vec<String>>().join(", ")) } else { None };
@@ -51,12 +51,12 @@ pub async fn register_catalog(ctx: &SessionContext) {
                     }
                 }
             } else {
-                println!("{} META: failed to fetch catalog_key for ns='{}'", chrono::Utc::now().to_rfc3339(), ns);
+                debug!("{} META: failed to fetch catalog_key for ns='{}'", chrono::Utc::now().to_rfc3339(), ns);
             }
         }
     }
 
-    println!("{} META: catalog rows total: {}", chrono::Utc::now().to_rfc3339(), cat_rows.len());
+    debug!("{} META: catalog rows total: {}", chrono::Utc::now().to_rfc3339(), cat_rows.len());
     if !cat_rows.is_empty() {
         let ns_arr: ArrayRef = Arc::new(StringArray::from(cat_rows.iter().map(|r| r.0.clone()).collect::<Vec<_>>()));
         let entity_arr: ArrayRef = Arc::new(StringArray::from(cat_rows.iter().map(|r| r.1.clone().unwrap_or_default()).collect::<Vec<_>>()));
@@ -70,10 +70,10 @@ pub async fn register_catalog(ctx: &SessionContext) {
         let mets_arr: ArrayRef = Arc::new(StringArray::from(cat_rows.iter().map(|r| r.9.clone().unwrap_or_default()).collect::<Vec<_>>()));
         if let Ok(batch) = ArrowRecordBatch::try_new(cat_schema.clone(), vec![ns_arr, entity_arr, field_arr, desc_arr, syn_arr, pii_arr, units_arr, role_arr, dims_arr, mets_arr]) {
             let _ = ctx.register_table("catalog", Arc::new(MemTable::try_new(cat_schema.clone(), vec![vec![batch]]).unwrap()));
-            println!("{} META: catalog table registered", chrono::Utc::now().to_rfc3339());
+            debug!("{} META: catalog table registered", chrono::Utc::now().to_rfc3339());
         }
     }
-    println!("{} META: end register_semantic_and_catalog", chrono::Utc::now().to_rfc3339());
+    debug!("{} META: end register_semantic_and_catalog", chrono::Utc::now().to_rfc3339());
 }
 
 

@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use std::cell::RefCell;
+use tracing::{debug, info};
 
 thread_local! {
     static CURRENT_NAMESPACE: RefCell<String> = RefCell::new(String::new());
@@ -76,7 +77,7 @@ pub fn ingest(
         message = match DEFAULT_NESTED_MESSAGE.read().get(namespace) {
             Some(m) => m.clone(),
             None => {
-                if Config::debug_enabled() { println!("ingest: no DEFAULT_NESTED_MESSAGE for ns={}, starting with empty object", namespace); }
+                debug!("ingest: no DEFAULT_NESTED_MESSAGE for ns={}, starting with empty object", namespace);
                 Value::Object(Map::new())
             }
         };
@@ -91,7 +92,7 @@ pub fn ingest(
     let obj = match unwrapped_message.as_object() {
         Some(o) => o,
         None => {
-            if Config::debug_enabled() { println!("ingest: input was not an object for ns={}", namespace); }
+            debug!("ingest: input was not an object for ns={}", namespace);
             return Err(Box::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "ingest expects a JSON object record"
@@ -1001,7 +1002,7 @@ pub fn discover_ingest(
         // Suppress detailed logs after a small threshold; keep summaries
         const DETAIL_LIMIT: usize = 50;
         if entry.0 <= DETAIL_LIMIT {
-            println!(
+            info!(
                 "Discovered new field: {} of type: {}{}{}",
                 field,
                 metadata.get(field).unwrap().determined_type,
@@ -1012,7 +1013,7 @@ pub fn discover_ingest(
 
         let elapsed_ns = entry.1.elapsed();
         if entry.0 % 100 == 0 || elapsed_ns >= Duration::from_secs(10) {
-            println!("Discovered {} new fields so far on namespace '{}'", entry.0, ns);
+            info!("Discovered {} new fields so far on namespace '{}'", entry.0, ns);
             entry.1 = Instant::now();
         }
     }
@@ -1082,7 +1083,7 @@ pub fn set_date(
                     }
                 },
                 Err(err) => {
-                    println!("Error date: {}", err);
+                    info!("Error date: {}", err);
                     Ok(ResolvedFieldValue::new(output_field_name, Value::Null))
                 }
             }

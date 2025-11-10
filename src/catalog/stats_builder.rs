@@ -1,4 +1,5 @@
 use datafusion::prelude::SessionContext;
+use tracing::debug;
 
 pub struct StatsBuilder;
 
@@ -12,7 +13,7 @@ impl StatsBuilder {
             let t = format!("{}_s3_{}", namespace, i);
             if ctx.table(&t).await.is_ok() { sources.push(t); } else { break; }
         }
-        println!("META: stats_builder ns='{}' found_s3_tables={}", namespace, sources.len());
+        debug!("META: stats_builder ns='{}' found_s3_tables={}", namespace, sources.len());
         if sources.is_empty() {
             // try single path registration fallback: namespace table already registered by caller
             // noop here; sampling may fail gracefully
@@ -35,7 +36,7 @@ impl StatsBuilder {
         }
         // Fall back to authoritative row streaming with deep recursion for all nested structures
         let max_rows: usize = if limit_n > 0 { limit_n as usize } else { usize::MAX };
-        if max_rows != usize::MAX { println!("META: stats row_limit applied ns='{}' limit_n={}", namespace, max_rows); }
+        if max_rows != usize::MAX { debug!("META: stats row_limit applied ns='{}' limit_n={}", namespace, max_rows); }
         let mut ns_stats = crate::discover::stats::NamespaceStats::new(namespace);
         let mut stream = df_union.execute_stream().await.map_err(|e| e.to_string())?;
         use futures::StreamExt;
@@ -48,7 +49,7 @@ impl StatsBuilder {
             let take_rows = std::cmp::min(b.num_rows(), remaining);
             for (i, f) in schema.fields().iter().enumerate() {
                 let top = f.name().clone();
-                println!("META: stats processing ns='{}' field='{}' dtype='{:?}' rows={}", namespace, top, f.data_type(), b.num_rows());
+                debug!("META: stats processing ns='{}' field='{}' dtype='{:?}' rows={}", namespace, top, f.data_type(), b.num_rows());
                 let col = b.column(i);
                 for r in 0..take_rows {
                     let cell = crate::sql::tui::array_cell_to_json(col.as_ref(), r);
@@ -70,7 +71,7 @@ impl StatsBuilder {
             if processed_rows >= max_rows { break 'batches; }
         }
         let mut fields_vec: Vec<String> = ns_stats.fields.keys().cloned().collect(); fields_vec.sort();
-        println!("META: stats built ns='{}' fields={} sample=[{}]", namespace, fields_vec.len(), fields_vec.iter().take(12).cloned().collect::<Vec<_>>().join(","));
+        debug!("META: stats built ns='{}' fields={} sample=[{}]", namespace, fields_vec.len(), fields_vec.iter().take(12).cloned().collect::<Vec<_>>().join(","));
         for (_k, fs) in ns_stats.fields.iter_mut() { fs.finalize(); }
         crate::helpers::configuration::Config::write_namespace_stats_async(namespace, &ns_stats).await;
         Ok(())

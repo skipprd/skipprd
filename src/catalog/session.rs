@@ -40,9 +40,12 @@ impl SessionFactory {
         // }
         // if !wal_batches.is_empty() { let schema = wal_batches[0].schema(); let filtered: Vec<RecordBatch> = wal_batches.into_iter().filter(|b| b.schema().as_ref() == schema.as_ref()).collect(); if !filtered.is_empty() { let mem = datafusion::datasource::MemTable::try_new(schema.clone(), vec![filtered]).map_err(|e| datafusion::error::DataFusionError::Internal(e.to_string())).unwrap(); let _ = ctx.register_table(&format!("{}_wal", &namespace), Arc::new(mem)); } }
 
-        // Register S3 object store for namespace
-        if let Some(s3_loc) = crate::helpers::configuration::Config::get_output_parquet_s3_location(namespace) {
-            crate::sql::query::register_s3_object_store(ctx, &s3_loc).await;
+        // Register S3 object store(s) for namespace based on registry prefixes
+        let pipeline = crate::helpers::configuration::Config::get_pipeline_name();
+        if let Some(entry) = crate::sql::registry::find_entry(&pipeline, namespace).await {
+            for p in entry.data_prefixes.iter() {
+                crate::sql::query::register_s3_object_store(ctx, p).await;
+            }
         }
     }
 }

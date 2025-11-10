@@ -1,3 +1,5 @@
+use tracing::debug;
+
 pub struct CatalogBuilder;
 
 impl CatalogBuilder {
@@ -18,7 +20,7 @@ impl CatalogBuilder {
                 role: Some(format!("{:?}", f.role)),
             }).collect(),
         };
-        println!("META: build catalog ns='{}' fields={} sample=[{}]", namespace, catalog.fields.len(), catalog.fields.iter().take(8).map(|f| f.name.clone()).collect::<Vec<_>>().join(","));
+        debug!("META: build catalog ns='{}' fields={} sample=[{}]", namespace, catalog.fields.len(), catalog.fields.iter().take(8).map(|f| f.name.clone()).collect::<Vec<_>>().join(","));
 
         // Defer field-level LLM enrichment to end-of-discover pass
 

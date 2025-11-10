@@ -4,7 +4,7 @@ impl SemanticInfer {
     pub async fn infer_and_write(namespace: &str) {
         let semantic = crate::semantics::infer::infer_semantic_model_async(namespace).await;
         // Debug-print semantic before write
-        println!(
+        debug!(
             "META: build semantic ns='{}' fields={} sample=[{}]",
             namespace,
             semantic.fields.len(),

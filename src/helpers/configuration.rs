@@ -186,7 +186,7 @@ impl Config {
         let cleaned = Helpers::clean_field_name(name.clone());
         for r in Self::reserved_pipeline_names().iter() {
             if name.eq_ignore_ascii_case(r) || cleaned.eq_ignore_ascii_case(r) {
-                println!(
+                debug!(
                     "Invalid pipeline name '{}': reserved. Choose a different name. Reserved: {:?}",
                     name,
                     Self::reserved_pipeline_names()
@@ -726,10 +726,10 @@ impl Config {
         }
     }
 
-    // WAL prefix (default derived: {tenant}/{workspace}/{pipeline}/wal)
+    // WAL prefix (default derived: {tenant}/{workspace}/{pipeline}/segments)
     pub fn get_wal_s3_prefix() -> String {
         let default_prefix = format!(
-            "{}/{}/{}/wal",
+            "{}/{}/{}/segments",
             Config::get_tenant(),
             Config::get_workspace_name(),
             Config::get_pipeline_name()
@@ -1719,15 +1719,33 @@ impl Config {
         let pipeline = Self::get_pipeline_name();
         let s3_key = format!("{}/{}/{}/stats/{}.json", tenant, workspace, pipeline, namespace);
         let bucket = Self::get_skippr_s3_bucket();
-        println!("{} META: writing stats to s3://{}/{}", chrono::Utc::now().to_rfc3339(), bucket, s3_key);
-        let json_value = match serde_json::to_value(stats) { Ok(v) => v, Err(e) => { println!("Failed to serialize stats: {}", e); return; } };
+        debug!("{} META: writing stats to s3://{}/{}", chrono::Utc::now().to_rfc3339(), bucket, s3_key);
+        let json_value = match serde_json::to_value(stats) { Ok(v) => v, Err(e) => { error!("Failed to serialize stats: {}", e); return; } };
+        // Offline mode: skip S3 and write local cache only (used by tests)
+        let offline = Self::truth_value(&Self::getenv("SKIPPR_OFFLINE", "false"));
+        if offline {
+            let path = Self::get_stats_local_path(namespace);
+            if !path.is_empty() {
+                if let Some(dir) = std::path::Path::new(&path).parent() { let _ = std::fs::create_dir_all(dir); }
+                let _ = std::fs::write(&path, serde_json::to_string(&json_value).unwrap_or_default());
+            }
+            return;
+        }
         match crate::helpers::s3::put_json(&s3_key, &json_value).await {
             Ok(_) => {
                 // Debug summary of stats
                 let fields = json_value.get("fields").and_then(|v| v.as_object()).map(|m| m.keys().cloned().collect::<Vec<_>>()).unwrap_or_default();
-                println!("META: wrote stats ns='{}' key='{}' fields={} sample=[{}]", namespace, s3_key, fields.len(), fields.iter().take(8).cloned().collect::<Vec<_>>().join(","));
+                debug!("META: wrote stats ns='{}' key='{}' fields={} sample=[{}]", namespace, s3_key, fields.len(), fields.iter().take(8).cloned().collect::<Vec<_>>().join(","));
             }
-            Err(err) => { println!("Failed to upload stats to S3: {:?}", err); }
+            Err(err) => { error!("Failed to upload stats to S3: {:?}", err); }
+        }
+        // Always write local cache copy for tests and offline inspection
+        let path = Self::get_stats_local_path(namespace);
+        if !path.is_empty() {
+            if let Some(dir) = std::path::Path::new(&path).parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(&path, serde_json::to_string(&json_value).unwrap_or_default());
         }
         // Update registry with stats key
         let _ = crate::sql::registry::ensure_ns_entry(&pipeline, namespace, |current| {
@@ -1771,7 +1789,12 @@ impl Config {
         }
     }
 
-    pub fn get_stats_local_path(_namespace: &str) -> String { String::new() }
+    pub fn get_stats_local_path(namespace: &str) -> String {
+        let data_dir = Self::get_data_dir();
+        let cache_dir = format!("{}/catalog_cache", data_dir);
+        let _ = std::fs::create_dir_all(&cache_dir);
+        format!("{}/{}_stats.json", cache_dir, namespace)
+    }
 
     pub fn get_semantic_local_path(_namespace: &str) -> String { String::new() }
 
@@ -1788,20 +1811,20 @@ impl Config {
         static SEMANTIC_LOCKS: OnceLazy<dashmap::DashMap<String, Arc<Mutex<()>>>> = OnceLazy::new(|| dashmap::DashMap::new());
         let entry = SEMANTIC_LOCKS.entry(namespace.to_string()).or_insert_with(|| Arc::new(Mutex::new(())));
         let guard = entry.value().clone().lock_owned().await;
-        println!("c");
+        debug!("c");
         let tenant = Self::get_tenant();
         let workspace = Self::get_workspace_name();
         let pipeline = Self::get_pipeline_name();
         let s3_key = format!("{}/{}/{}/semantic/{}.yaml", tenant, workspace, pipeline, namespace);
         let yaml = match serde_yaml::to_string(semantic) { Ok(s) => s, Err(e) => {
-            println!("Failed to serialize semantic: {}", e); drop(guard); return; }
+            error!("Failed to serialize semantic: {}", e); drop(guard); return; }
         };
-        println!("c0");
+        debug!("c0");
         let value = serde_yaml::from_str::<serde_yaml::Value>(&yaml).unwrap_or(serde_yaml::Value::Null);
         let json_equiv = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
-        if let Err(e) = crate::helpers::s3::put_json(&s3_key, &json_equiv).await { println!("Failed to upload semantic to S3: {:?}", e); }
+        if let Err(e) = crate::helpers::s3::put_json(&s3_key, &json_equiv).await { error!("Failed to upload semantic to S3: {:?}", e); }
         // Debug summary of semantic
-        println!("META: wrote semantic ns='{}' key='{}' fields={} sample=[{}]",
+        debug!("META: wrote semantic ns='{}' key='{}' fields={} sample=[{}]",
             namespace,
             s3_key,
             semantic.fields.len(),
@@ -1830,8 +1853,8 @@ impl Config {
         let s3_key = format!("{}/{}/{}/catalog/{}.yaml", tenant, workspace, pipeline, namespace);
         // Write catalog directly to S3 (no local merges)
         let bucket = Self::get_skippr_s3_bucket();
-        println!("{} META: writing catalog to s3://{}/{}", chrono::Utc::now().to_rfc3339(), bucket, s3_key);
-        let yaml = match serde_yaml::to_string(catalog) { Ok(s) => s, Err(e) => { println!("Failed to serialize catalog: {}", e); drop(guard); return; } };
+        debug!("{} META: writing catalog to s3://{}/{}", chrono::Utc::now().to_rfc3339(), bucket, s3_key);
+        let yaml = match serde_yaml::to_string(catalog) { Ok(s) => s, Err(e) => { error!("Failed to serialize catalog: {}", e); drop(guard); return; } };
         let value = serde_yaml::from_str::<serde_yaml::Value>(&yaml).unwrap_or(serde_yaml::Value::Null);
         let json_equiv = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
         // Debug: print full catalog payload being uploaded
@@ -1839,9 +1862,9 @@ impl Config {
         //     Ok(pretty) => println!("{} META: catalog payload ns='{}':\n{}", chrono::Utc::now().to_rfc3339(), namespace, pretty),
         //     Err(_) => println!("{} META: catalog payload ns='{}': <failed to stringify>", chrono::Utc::now().to_rfc3339(), namespace),
         // }
-        if let Err(e) = crate::helpers::s3::put_json(&s3_key, &json_equiv).await { println!("Failed to upload catalog to S3: {:?}", e); }
+        if let Err(e) = crate::helpers::s3::put_json(&s3_key, &json_equiv).await { error!("Failed to upload catalog to S3: {:?}", e); }
         // Debug summary of catalog
-        println!("META: wrote catalog ns='{}' key='{}' fields={} has_description={}",
+        debug!("META: wrote catalog ns='{}' key='{}' fields={} has_description={}",
             namespace,
             s3_key,
             catalog.fields.len(),
@@ -1858,9 +1881,9 @@ impl Config {
     }
 
     pub fn write_semantic_and_catalog_sync(namespace: &str, semantic: &crate::catalog::model::SemanticModel, catalog: &crate::catalog::model::DataCatalog) {
-        println!("bbbbb");
+        debug!("bbbbb");
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            println!("b1");
+            debug!("b1");
             // If already in a runtime, spawn and return (fire-and-forget) to avoid blocking/panic
             let ns = namespace.to_string();
             let sem = semantic.clone();
@@ -1872,7 +1895,7 @@ impl Config {
         } else {
             let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
             rt.block_on(async {
-                println!("b2");
+                debug!("b2");
                 Self::write_semantic_async(namespace, semantic).await;
                 Self::write_catalog_async(namespace, catalog).await;
             });

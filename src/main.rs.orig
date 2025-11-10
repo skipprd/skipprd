@@ -270,7 +270,7 @@ async fn main() {
 
                 discover(options.log).await;
             } else {
-                error!("No pipeline name provided, you must provide a pipeline name to discover schemas");
+                println!("No pipeline name provided, you must provide a pipeline name to discover schemas");
             }
         }
         Mode::Query(options) => {
@@ -586,7 +586,11 @@ async fn discover(log: bool) {
     let pipeline_name = Config::get_pipeline_name();
     let start_time = Instant::now();
 
+<<<<<<< HEAD
     info!("Analysing data and generating Skippr metadata for pipeline: {}", pipeline_name);
+=======
+    if log { println!("Analysing data and generating Skippr metadata for pipeline: {}", pipeline_name); }
+>>>>>>> 2706029 (more efficient reuse of tokens and model backend)
 
     // Ensure stats worker is running for discovery lifecycle
     crate::discover::stats_tailer::ensure_stats_worker();
@@ -595,6 +599,7 @@ async fn discover(log: bool) {
 
     let pipeline_metadata = match Config::get_metadata().await {
         Ok(pipeline_metadata) => {
+<<<<<<< HEAD
             info!("Found existing Skippr metadata, will update with schema discovered from sampled data");
             
             pipeline_metadata
@@ -602,6 +607,13 @@ async fn discover(log: bool) {
         Err(_e) => {
             info!("No existing Skippr metadata, will discover schemas");
 
+=======
+            if log { println!("Found existing Skippr metadata, will update with schema discovered from sampled data"); }
+            pipeline_metadata
+        }
+        Err(_e) => {
+            if log { println!("No existing Skippr metadata, will discover schemas"); }
+>>>>>>> 2706029 (more efficient reuse of tokens and model backend)
             PipelineMetadata::new()
         }
     };
@@ -782,6 +794,7 @@ async fn discover(log: bool) {
     let shared_output_clone = shared_output.clone();
     sync_input_plugin(offsets_db.clone(), shared_output_clone).await;
 
+<<<<<<< HEAD
     info!("Reached end of source data");
     info!(
         "Ingest completed, flushing remaining buffers to output plugin {}",
@@ -790,6 +803,12 @@ async fn discover(log: bool) {
             .or(Some("".to_string()))
             .unwrap()
     );
+=======
+    if !log { println!("✔ Sampling Data [##########] 100%"); }
+
+    if log { println!("Reached end of source data"); }
+    if log { println!("Ingest completed, flushing remaining buffers to output plugin {}", Config::get_pipeline_config().output.or(Some("".to_string())).unwrap()); }
+>>>>>>> 2706029 (more efficient reuse of tokens and model backend)
 
     {
         let mut counter_lock = METRICS.write();
@@ -816,12 +835,18 @@ async fn discover(log: bool) {
 
     }
 
-    {
+    if log {
         let counter_lock = METRICS.write();
+<<<<<<< HEAD
         
         info!("Messages Fixed: {}", counter_lock.ingeted_slow_total);
         info!("Deadletter Total: {}", counter_lock.deadletters_total);
         info!("Ingested Total: {}", counter_lock.messages_total);
+=======
+        println!("Messages Fixed: {}", counter_lock.ingeted_slow_total);
+        println!("Deadletter Total: {}", counter_lock.deadletters_total);
+        println!("Ingested Total: {}", counter_lock.messages_total);
+>>>>>>> 2706029 (more efficient reuse of tokens and model backend)
     }
 
     match Metrics::send_metrics(Some(0)).await {
@@ -1057,7 +1082,7 @@ async fn sync() {
     };
 
 
-    info!("Syncing pipeline: {}", pipeline_name);
+    println!("Syncing pipeline: {}", pipeline_name);
     // Ensure stats worker is running for sync lifecycle
     crate::discover::stats_tailer::ensure_stats_worker();
 
@@ -1067,7 +1092,7 @@ async fn sync() {
     let offsets_db = match Offsets::init() {
         Ok(offsets) => offsets,
         Err(e) => {
-            error!("Skipping: {}", e);
+            println!("Skipping: {}", e);
             return;
         }
     };
@@ -1222,7 +1247,7 @@ async fn sync() {
             parquet_objects
         );
     }
-    info!("Pipeline sync complete");
+    println!("Pipeline sync complete");
     // Finalize stats → semantic → catalog (no LLM) for all namespaces
     crate::discover::stats_tailer::force_flush();
     // Late rebuild from existing S3 parquet if no new data (bounded, no LLM)
@@ -1230,9 +1255,13 @@ async fn sync() {
     // Ensure worker performs final flush and exits before process ends
     crate::discover::stats_tailer::shutdown_and_join(30);
 
+<<<<<<< HEAD
+    crate::catalog::orchestrator::Orchestrator::build_all(&pipeline_metadata.metadata).await;
+=======
     // Deferred LLM enrichment pass across all namespaces
     crate::catalog::enrich::run_llm_enrichment_all(&pipeline_metadata.metadata).await;
 
+>>>>>>> 2706029 (more efficient reuse of tokens and model backend)
 }
 
 // legacy no-op; replaced by catalog::orchestrator

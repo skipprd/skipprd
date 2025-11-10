@@ -58,14 +58,15 @@ pub async fn drop_table(pipeline_metadata: &mut PipelineMetadata, stmt: &TableDr
                 let _ = crate::helpers::s3::delete_prefix(&format!("{}/stats/{}", prefix_root, ns)).await;
                 let _ = crate::helpers::s3::delete_prefix(&format!("{}/semantic/{}", prefix_root, ns)).await;
                 let _ = crate::helpers::s3::delete_prefix(&format!("{}/catalog/{}", prefix_root, ns)).await;
-                // Delete parquet data under data_outputs (Athena) bucket/prefix for this namespace
-                if let Some(s3_url) = crate::helpers::configuration::Config::get_output_parquet_s3_location(ns) {
-                    if let Some(rest) = s3_url.strip_prefix("s3://") {
-                        if let Some((bucket, prefix)) = rest.split_once('/') {
-                            let mut p = prefix.to_string();
-                            // Ensure we only delete the namespace directory within the prefix
-                            if !p.ends_with('/') { p.push('/'); }
-                            let _ = crate::helpers::s3::delete_prefix_in_bucket(bucket, &p).await;
+                // Delete parquet data under registry-defined prefixes for this namespace
+                if let Some(entry) = crate::sql::registry::find_entry(&crate::helpers::configuration::Config::get_pipeline_name(), ns).await {
+                    for s3_url in entry.data_prefixes.iter() {
+                        if let Some(rest) = s3_url.strip_prefix("s3://") {
+                            if let Some((bucket, prefix)) = rest.split_once('/') {
+                                let mut p = prefix.to_string();
+                                if !p.ends_with('/') { p.push('/'); }
+                                let _ = crate::helpers::s3::delete_prefix_in_bucket(bucket, &p).await;
+                            }
                         }
                     }
                 }

@@ -6,6 +6,7 @@ use crate::ingest::fast_ingest::fast_set_value;
 use std::str::FromStr;
 use std::borrow::BorrowMut;
 use serde_derive::{Deserialize, Serialize};
+use tracing::info;
 use crate::ingest::ingest::{discover_ingest, ResolvedFieldValue};
 use crate::discover::PipelineMetadata;
 
@@ -161,7 +162,7 @@ impl Evolution {
                         return Ok(ResolvedFieldValue::new(new_feild_name.clone(), value.clone()));
                     }
 
-                    println!("Creating new evolution for field: '{}' to type: '{}'", field, discoverd_data_type);
+                    info!("Creating new evolution for field: '{}' to type: '{}'", field, discoverd_data_type);
 
                     *updated_schema = "yes".to_string();
 

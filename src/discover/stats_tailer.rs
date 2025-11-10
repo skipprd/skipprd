@@ -3,6 +3,7 @@ use crate::helpers::configuration::Config;
 use once_cell::sync::{OnceCell, Lazy};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use tracing::debug;
 
 #[derive(Clone, Debug)]
 pub struct FieldObservation {
@@ -78,9 +79,15 @@ fn enrich_llm(ns: &str, stats: &NamespaceStats) {
     // Derive semantic and catalog (S3-based stats), optionally LLM-enrich
     let semantic = {
         match tokio::runtime::Handle::try_current() {
-            Ok(handle) => handle.block_on(crate::catalog::infer::infer_semantic_model_async(ns)),
+            Ok(_) => {
+                let ns_owned = ns.to_string();
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+                    rt.block_on(crate::catalog::infer::infer_semantic_model_async(&ns_owned))
+                }).join().unwrap()
+            }
             Err(_) => {
-                let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
                 rt.block_on(crate::catalog::infer::infer_semantic_model_async(ns))
             }
         }
@@ -102,20 +109,30 @@ fn enrich_llm(ns: &str, stats: &NamespaceStats) {
     };
     // Defer field-level LLM enrichment to end-of-discover pass
     // Write catalog (unified) to S3; warn if empty
-    if catalog.fields.is_empty() { println!("{} DISCOVER: catalog fields empty for '{}'", chrono::Utc::now().to_rfc3339(), ns); }
+    if catalog.fields.is_empty() { debug!("{} DISCOVER: catalog fields empty for '{}'", chrono::Utc::now().to_rfc3339(), ns); }
     // Write S3 keys and field count for debugging
     let tenant = Config::get_tenant();
     let workspace = Config::get_workspace_name();
     let pipeline = Config::get_pipeline_name();
     let stats_key = format!("{}/{}/{}/stats/{}.json", tenant, workspace, pipeline, ns);
     let cat_key = format!("{}/{}/{}/catalog/{}.yaml", tenant, workspace, pipeline, ns);
-    println!("{} DISCOVER: flush ns='{}' stats='{}' catalog='{}' fields={}", chrono::Utc::now().to_rfc3339(), ns, stats_key, cat_key, catalog.fields.len());
+    debug!("{} DISCOVER: flush ns='{}' stats='{}' catalog='{}' fields={}", chrono::Utc::now().to_rfc3339(), ns, stats_key, cat_key, catalog.fields.len());
     // Write catalog asynchronously to S3
     match tokio::runtime::Handle::try_current() {
-        Ok(handle) => { handle.block_on(async { Config::write_catalog_async(ns, &catalog).await; }); }
-        Err(_) => { let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap(); rt.block_on(async { Config::write_catalog_async(ns, &catalog).await; }); }
+        Ok(_) => {
+            let ns_owned = ns.to_string();
+            let cat_owned = catalog.clone();
+            let _ = std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+                rt.block_on(async { Config::write_catalog_async(&ns_owned, &cat_owned).await; });
+            }).join();
+        }
+        Err(_) => {
+            let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+            rt.block_on(async { Config::write_catalog_async(ns, &catalog).await; });
+        }
     }
-    if debug { println!("semantic/catalog enriched for '{}' in {}ms (fields={})", ns, t0.elapsed().as_millis(), catalog.fields.len()); }
+    debug!("semantic/catalog enriched for '{}' in {}ms (fields={})", ns, t0.elapsed().as_millis(), catalog.fields.len());
 }
 
 fn flush_all(by_ns: &mut HashMap<String, NamespaceStats>) {
