@@ -14,6 +14,7 @@ use std::fs;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
+use tracing::{error, info};
 
 pub struct DataOutputS3Plugin {
     s3_client: S3Client,
@@ -139,7 +140,7 @@ impl DataOutputS3Plugin {
                     .await
                 {
                     Ok(_resp) => {
-                        println!("Uploaded to S3: {}", key);
+                        info!("Uploaded to S3: {}", key);
                         match fs::remove_file(Path::new(&filename)) {
                             Ok(_) => {}
                             Err(_) => {
@@ -148,8 +149,8 @@ impl DataOutputS3Plugin {
                         };
                     }
                     Err(err) => {
-                        println!("Failed to upload file: {} to bucket {}, will retry later.", filename, bucket);
-                        println!("{}", err);
+                        error!("Failed to upload file: {} to bucket {}, will retry later.", filename, bucket);
+                        error!("{}", err);
 
                         // LOGGER
                         //     .write()
@@ -174,8 +175,8 @@ impl DataOutputS3Plugin {
                 // println!("data: {:?}", data.unwrap().into_bytes());
             }
             Err(e) => {
-                println!("Failed to read file before uploading: {}, will retry later.", filename);
-                println!("{}", e);
+                error!("Failed to read file before uploading: {}, will retry later.", filename);
+                error!("{}", e);
                 // println!("{}", e);
             }
         }

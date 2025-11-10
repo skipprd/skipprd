@@ -13,6 +13,7 @@ use datafusion::execution::SendableRecordBatchStream;
 use crate::ingest::partition_time::TimePartitioner;
 use crate::plugins::athena::DataOutputAwsAthenaPlugin;
 use crate::plugins::DataOutputPlugin;
+use tracing::error;
 
 
 pub struct DataOutputFilePlugin {
@@ -41,7 +42,7 @@ impl DataOutputFilePlugin {
         match fs::create_dir_all(&output_dir) {
             Ok(_) => {}
             Err(_) => {
-                println!("Failed to create output directory: {}", output_dir);
+                error!("Failed to create output directory: {}", output_dir);
             }
         }
 

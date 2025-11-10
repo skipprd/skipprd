@@ -24,6 +24,9 @@ skippr sync DATA_SOURCE DATA_DEST
 	--schema 
 	--data 
 
+Global options:
+- `--log` Enable diagnostic logs (disabled by default). Respect `RUST_LOG` for level (e.g., `RUST_LOG=debug`).
+
 
 skippr validate DATA_SOURCE
 	--schema-version		- Validate source data against schema version (defaults to latest approved schema)

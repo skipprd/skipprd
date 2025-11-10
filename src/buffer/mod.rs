@@ -16,6 +16,7 @@ use std::string::ToString;
 
 use crate::helpers::configuration::Config;
 use crate::helpers::Helpers;
+use tracing::warn;
 
 pub struct BufferChunker {}
 
@@ -25,7 +26,7 @@ impl BufferChunker {
         let mut result = false;
 
         if Helpers::mem_limit_reached() {
-            println!("Rotating buffer as memory limit has low headroom");
+            warn!("Rotating buffer as memory limit has low headroom");
             result = true;
         }
 
@@ -217,7 +218,7 @@ impl BufferChunker {
                 .filter_map(Result::ok)
                 .collect::<Vec<_>>(),
             Err(e) => {
-                println!("Error globbing for next buffer file, Error: {}", e);
+                warn!("Error globbing for next buffer file, Error: {}", e);
                 return None;
             }
         };
@@ -228,7 +229,7 @@ impl BufferChunker {
                     continue;
                 }
                 Err(e) => {
-                    println!("Error opening file {}: {}", filename.to_str().unwrap(), e);
+                    warn!("Error opening file {}: {}", filename.to_str().unwrap(), e);
                     continue;
                 }
                 Ok(_file) => {

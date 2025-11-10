@@ -290,9 +290,11 @@ pub struct Ingest {
     // adjustment_cooldown: Duration, // Minimum time between adjustments
 }
 
+use tracing::{debug, error, info, warn};
+
 impl Drop for Ingest {
     fn drop(&mut self) {
-        println!("Completing, waiting for {} ingest tasks to finish", self.active_count.load(Ordering::SeqCst));
+        info!("Completing, waiting for {} ingest tasks to finish", self.active_count.load(Ordering::SeqCst));
 
         self.wait_for_completion();
     }
@@ -360,7 +362,7 @@ impl Ingest {
                 let shard_version = ARROW_SCHEMA_VERSION.get(skpr_namespace).map(|v| v.value().load(Ordering::Relaxed)).unwrap_or(0);
                 let hash = format!("{}", shard_version);
                 if iters > 0 {
-                    println!("Schema for namespace {} changed during stable read, proceeding with latest version", skpr_namespace);
+                    warn!("Schema for namespace {} changed during stable read, proceeding with latest version", skpr_namespace);
                 }
                 return SchemaHash { schema, hash };
             }
@@ -389,7 +391,7 @@ impl Ingest {
             .filter(|v| *v > 0)
             .unwrap_or(default_threads);
         
-        println!("Starting with {} optimized threads for ingest", num_cpus);
+        info!("Starting with {} optimized threads for ingest", num_cpus);
 
         // Optional: cap hot-path concurrencies via env, and auto-cap on CI
         let is_ci = {
@@ -402,7 +404,7 @@ impl Ingest {
         if let Ok(v) = Config::getenv("UPLOAD_CONCURRENCY", "").parse::<usize>() { if v > 0 {
             crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.store(v, std::sync::atomic::Ordering::Relaxed);
             if Config::log_wal_enabled() {
-                println!("tune: upload_concurrency set by env={}", v);
+                info!("tune: upload_concurrency set by env={}", v);
             }
         }} else if is_ci {
             let cap = 8usize;
@@ -410,7 +412,7 @@ impl Ingest {
             if cur > cap {
                 crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.store(cap, std::sync::atomic::Ordering::Relaxed);
                 if Config::log_wal_enabled() {
-                    println!("tune: upload_concurrency capped for CI to {}", cap);
+                    info!("tune: upload_concurrency capped for CI to {}", cap);
                 }
             }
         }
@@ -419,7 +421,7 @@ impl Ingest {
         if let Ok(v) = Config::getenv("WAL_COMPACTION_CONCURRENCY", "").parse::<usize>() { if v > 0 {
             crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.store(v, std::sync::atomic::Ordering::Relaxed);
             if Config::log_wal_enabled() {
-                println!("tune: wal_compaction set by env={}", v);
+                info!("tune: wal_compaction set by env={}", v);
             }
         }} else if is_ci {
             let cap = 4usize;
@@ -427,7 +429,7 @@ impl Ingest {
             if cur > cap {
                 crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.store(cap, std::sync::atomic::Ordering::Relaxed);
                 if Config::log_wal_enabled() {
-                    println!("tune: wal_compaction capped for CI to {}", cap);
+                    info!("tune: wal_compaction capped for CI to {}", cap);
                 }
             }
         }
@@ -437,7 +439,7 @@ impl Ingest {
             let clamped = v.clamp(8, 512);
             crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.store(clamped, std::sync::atomic::Ordering::Relaxed);
             if Config::log_wal_enabled() {
-                println!("tune: s3_download set by env={} (clamped)", clamped);
+                info!("tune: s3_download set by env={} (clamped)", clamped);
             }
         }} else if is_ci {
             let cap = 128usize;
@@ -445,7 +447,7 @@ impl Ingest {
             if cur > cap {
                 crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.store(cap, std::sync::atomic::Ordering::Relaxed);
                 if Config::log_wal_enabled() {
-                    println!("tune: s3_download capped for CI to {}", cap);
+                    info!("tune: s3_download capped for CI to {}", cap);
                 }
             }
         }
@@ -524,7 +526,7 @@ impl Ingest {
                     let _lock = match queue_lock_clone.write() {
                         Ok(lock) => lock,
                         Err(e) => {
-                            println!("Failed to acquire queue lock: {:?}", e);
+                            error!("Failed to acquire queue lock: {:?}", e);
                             continue;
                         }
                     };
@@ -532,7 +534,7 @@ impl Ingest {
                     let mut task_queue = match task_queue_clone.write() {
                         Ok(queue) => queue,
                         Err(e) => {
-                            println!("Failed to acquire task queue: {:?}", e);
+                            error!("Failed to acquire task queue: {:?}", e);
                             continue;
                         }
                     };
@@ -572,7 +574,7 @@ impl Ingest {
                     }
                 }
             }
-            println!("Monitoring thread exited");
+            debug!("Monitoring thread exited");
         });
 
         // Schema hashes
@@ -626,14 +628,14 @@ impl Ingest {
         let mut current_active_count = self.active_count.load(Ordering::SeqCst);
         let mut last_report_time = Instant::now();
 
-        println!("Waiting for {} ingest tasks to finish, signaling shutdown...", current_active_count);
+        info!("Waiting for {} ingest tasks to finish, signaling shutdown...", current_active_count);
 
         // Give tasks a chance to complete gracefully
         let timeout = Instant::now() + Duration::from_secs(60); // 1 minute timeout
         
         while self.active_count.load(Ordering::SeqCst) > 0 && Instant::now() < timeout {
             if current_active_count != self.active_count.load(Ordering::SeqCst) || last_report_time.elapsed() > Duration::from_secs(5) {
-                println!("Waiting for {} ingest tasks to finish", self.active_count.load(Ordering::SeqCst));
+                info!("Waiting for {} ingest tasks to finish", self.active_count.load(Ordering::SeqCst));
                 current_active_count = self.active_count.load(Ordering::SeqCst);
                 last_report_time = Instant::now();
             }
@@ -648,7 +650,7 @@ impl Ingest {
 
         // If we still have active threads after timeout, force decrement them
         if self.active_count.load(Ordering::SeqCst) > 0 {
-            println!("Forcing completion of {} remaining tasks after timeout", self.active_count.load(Ordering::SeqCst));
+            warn!("Forcing completion of {} remaining tasks after timeout", self.active_count.load(Ordering::SeqCst));
             self.active_count.store(0, Ordering::SeqCst);
             self.queue_length.store(0, Ordering::SeqCst);
             // Clear the task queue
@@ -657,7 +659,7 @@ impl Ingest {
             }
         }
 
-        println!("All ingest tasks finished or timed out");
+        info!("All ingest tasks finished or timed out");
     }
 
     fn update_throughput(&self, bytes: u64) {
@@ -774,7 +776,7 @@ impl Ingest {
         }
 
         if current_chunk_size != optimal_chunk_size {
-            println!("Optimising chunk size: active_cores: {}, active_tasks: {}, throughput: {}/s, trend: {:.2}, optimal_chunk_size: {} from {}, adjustment_factor: {}",
+            info!("Optimising chunk size: active_cores: {}, active_tasks: {}, throughput: {}/s, trend: {:.2}, optimal_chunk_size: {} from {}, adjustment_factor: {}",
                      active_cores,
                      queue_length,
                      Helpers::human_readable_size(current_throughput),
@@ -804,7 +806,7 @@ impl Ingest {
     ) -> ThroughputMetrics {
         // If we're not running, exit after current threads finish.
         if !RUNNING.read().load(Ordering::SeqCst) {
-            println!("Waiting for remaining threads to complete");
+            info!("Waiting for remaining threads to complete");
             self.wait_for_completion();
             exit(0);
         } else {
@@ -843,7 +845,7 @@ impl Ingest {
                         let mut pipeline_metadata = METADATA.load().as_ref().clone();
 
                         if pipeline_metadata.metadata.len() == 0 {
-                            println!("No data found in data source, skipping schema discovery");
+                            warn!("No data found in data source, skipping schema discovery");
                             std::process::exit(0);
                         }
 
@@ -853,7 +855,7 @@ impl Ingest {
                             AnalyseSchema::determine_field_types(&mut metadata.fields, None, flatten);
                         }
 
-                        println!("Schema discovery complete, writing metadata to Skippr");
+                        info!("Schema discovery complete, writing metadata to Skippr");
 
                         tokio::spawn(async move {
                             pipeline_metadata.enabled = true;
@@ -862,7 +864,7 @@ impl Ingest {
                         });
                     }
 
-                    println!("Analysed schema for {} -> {}/{} records", count, *NUM_ANALYSED_RECORDS.read(), max_records);
+                    info!("Analysed schema for {} -> {}/{} records", count, *NUM_ANALYSED_RECORDS.read(), max_records);
 
                     return ThroughputMetrics {
                         bytes_per_second: self.get_current_throughput(),
@@ -964,7 +966,7 @@ impl Ingest {
                 if upload_next != upload_cur {
                     crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.store(upload_next, Ordering::Relaxed);
                     if Config::log_wal_enabled() {
-                        println!("tune: upload_concurrency {} -> {} (active={}/{} queue={} pressure={:.2})", upload_cur, upload_next, active, capacity, queued, pressure);
+                        debug!("tune: upload_concurrency {} -> {} (active={}/{} queue={} pressure={:.2})", upload_cur, upload_next, active, capacity, queued, pressure);
                     }
                 }
 
@@ -975,7 +977,7 @@ impl Ingest {
                 if wal_next != wal_cur {
                     crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.store(wal_next, Ordering::Relaxed);
                     if Config::log_wal_enabled() {
-                        println!("tune: wal_compaction {} -> {} (active={}/{} queue={} pressure={:.2})", wal_cur, wal_next, active, capacity, queued, pressure);
+                        debug!("tune: wal_compaction {} -> {} (active={}/{} queue={} pressure={:.2})", wal_cur, wal_next, active, capacity, queued, pressure);
                     }
                 }
 
@@ -986,7 +988,7 @@ impl Ingest {
                 if dl_next != dl_cur {
                     crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.store(dl_next, Ordering::Relaxed);
                     if Config::log_wal_enabled() {
-                        println!("tune: s3_download {} -> {} (active={}/{} queue={} pressure={:.2})", dl_cur, dl_next, active, capacity, queued, pressure);
+                        debug!("tune: s3_download {} -> {} (active={}/{} queue={} pressure={:.2})", dl_cur, dl_next, active, capacity, queued, pressure);
                     }
                 }
             }
@@ -1000,7 +1002,7 @@ impl Ingest {
             crate::metrics::counters::set_active_threads(current_active_threads);
             crate::metrics::counters::set_queue_length(current_queue_length);
 
-            println!("Queueing {} ingest tasks of {} ({} tasks in queue, {}/{} active threads, {} tasks waiting)",
+            info!("Queueing {} ingest tasks of {} ({} tasks in queue, {}/{} active threads, {} tasks waiting)",
                 ingest_batches.tasks.len(),
                 Helpers::human_readable_size(batch_bytes as u64),
                 current_queue_length,
@@ -1024,7 +1026,7 @@ impl Ingest {
 
         // Print concise stdout line incl. S3 key
         let bucket = Config::get_skippr_s3_bucket();
-        println!("Deadletter id={} ns={} key=s3://{}/{} err={}", id, _dl.namespace, bucket, key, _dl.error);
+        warn!("Deadletter id={} ns={} key=s3://{}/{} err={}", id, _dl.namespace, bucket, key, _dl.error);
 
         // Upload asynchronously; if no runtime, spawn a temporary one
         let upload = async move {
@@ -1040,14 +1042,15 @@ impl Ingest {
                 .send()
                 .await
             {
-                println!("Failed to upload deadletter to S3 key={} err={:?}", key, e);
+                error!("Failed to upload deadletter to S3 key={} err={:?}", key, e);
             }
         };
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(upload);
         } else {
             let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.spawn(upload);
+            // Ensure the task runs to completion before the runtime drops
+            rt.block_on(upload);
         }
     }
 
@@ -1436,7 +1439,7 @@ impl Ingest {
                         let mut new_pm = METADATA.load().as_ref().clone();
                         new_pm.metadata.insert(skpr_namespace.clone(), Metadata::new().unwrap());
                         METADATA.store(Arc::new(new_pm.clone()));
-                        println!("Discovered new namespace: {}", skpr_namespace);
+                        info!("Discovered new namespace: {}", skpr_namespace);
                         // Persist immediately to ensure output plugins see new namespace
                         if let Ok(h) = runtime::Handle::try_current() {
                             h.spawn(async move { Config::set_metadata(&new_pm, false).await; });
@@ -1470,7 +1473,7 @@ impl Ingest {
                             match slow_ingest_blocking(&skpr_namespace, &record, flatten) {
                                 Ok(v) => v,
                                 Err(e) => {
-                                    if Config::debug_enabled() { println!("Ingest: slow-path failed ns={} err={}", skpr_namespace, e); }
+                                    if Config::debug_enabled() { debug!("Ingest: slow-path failed ns={} err={}", skpr_namespace, e); }
                                     let dl = Deadletter { namespace: skpr_namespace.clone(), partition: skpr_partition.clone(), time: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(), error: e.to_string(), records: record.to_string(), failure_code: "EVOLUTION_SLOW_PATH".to_string(), source_uri: "".to_string(), offset_namespace: ingest_batch.offset_key.namespace.clone(), offset_partition: ingest_batch.offset_key.partition.clone(), offset_pos: batch_line };
                                     Self::deadletter(dl);
                                     Value::Null
@@ -1481,7 +1484,7 @@ impl Ingest {
 
                     // Skip records that failed both fast-path and slow-path evolution
                     if record_value.is_null() {
-                        if Config::debug_enabled() { println!("Ingest: record dropped after evolution ns={} (null)", skpr_namespace); }
+                        if Config::debug_enabled() { debug!("Ingest: record dropped after evolution ns={} (null)", skpr_namespace); }
                         continue;
                     }
 
@@ -1503,7 +1506,7 @@ impl Ingest {
         });
         
         if let Err(e) = update_result {
-            println!("Warning: Could not update metrics - {:?}", e);
+            warn!("Warning: Could not update metrics - {:?}", e);
         }
 
         // Serialize each entry's normalized JSON into Arrow RecordBatches eagerly (all-or-nothing per batch)
@@ -1597,7 +1600,7 @@ impl Ingest {
                         match slow_ingest_blocking(&skpr_namespace, &rec.record, flatten) {
                             Ok(v) => v,
                             Err(e) => {
-                                if Config::debug_enabled() { println!("Ingest: record retry failed ns={} err={}", skpr_namespace, e); }
+                                if Config::debug_enabled() { debug!("Ingest: record retry failed ns={} err={}", skpr_namespace, e); }
                                 persistent_error = Some(e.to_string());
                                 Value::Null
                             }
@@ -1645,7 +1648,7 @@ impl Ingest {
                     offset_db_clone.insert(&offset_key, OffsetTypes::Position, *pos);
                     offset_db_clone.insert(&offset_key, OffsetTypes::Closed, 1);
                 }
-                if Config::debug_enabled() { println!("Batch serialize failed after retry: ns={} deadlettered", entry._namespace); }
+                if Config::debug_enabled() { debug!("Batch serialize failed after retry: ns={} deadlettered", entry._namespace); }
             }
         }
 
@@ -1658,7 +1661,7 @@ impl Ingest {
                     .iter()
                     .map(|e| e.record_batches.as_ref().map(|v| v.len()).unwrap_or(0))
                     .sum();
-                println!(
+                debug!(
                     "Ingest: produced {} record batches across {} partitions",
                     total_batches,
                     all_batches.len()
@@ -1721,20 +1724,20 @@ impl Ingest {
                         o.get().store(_schema_ref.clone());
                         did_update_schema = true;
                         if Config::debug_enabled() {
-                            println!("Arrow schema updated for namespace {}: {} -> {}", skpr_namespace, prev_hash, new_hash);
+                            debug!("Arrow schema updated for namespace {}: {} -> {}", skpr_namespace, prev_hash, new_hash);
                         }
                     } else if Config::debug_enabled() {
-                        println!("Arrow schema change rejected (non-superset) for namespace {}: {} !-> {}", skpr_namespace, prev_hash, new_hash);
+                        warn!("Arrow schema change rejected (non-superset) for namespace {}: {} !-> {}", skpr_namespace, prev_hash, new_hash);
                     }
                 } else if Config::debug_enabled() {
-                    println!("Arrow schema unchanged for namespace {}: {}", skpr_namespace, new_hash);
+                    debug!("Arrow schema unchanged for namespace {}: {}", skpr_namespace, new_hash);
                 }
             },
             Entry::Vacant(v) => {
                 v.insert(arc_swap::ArcSwap::from(_schema_ref.clone()));
                 did_update_schema = true;
                 if Config::debug_enabled() {
-                    println!("Arrow schema initialized for namespace {}: {}", skpr_namespace, new_hash);
+                    debug!("Arrow schema initialized for namespace {}: {}", skpr_namespace, new_hash);
                 }
             },
         }

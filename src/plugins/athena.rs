@@ -37,6 +37,7 @@ use tokio::time::{sleep as tokio_sleep, Duration as TokioDuration};
 use dashmap::DashMap;
 use rand::Rng;
 use std::sync::atomic::{AtomicUsize, Ordering as AO};
+use tracing::{debug, error, info, warn};
 
 // Global control-plane throttling and serialization
 static GLUE_MAX_CONCURRENCY: Lazy<usize> = Lazy::new(|| {
@@ -216,7 +217,7 @@ impl DataOutputAwsAthenaPlugin {
                     });
                 },
                 Err(e) => {
-                    println!("Warning: failed to derive time partitions from filename '{}': {}. Proceeding without time partitions.", filename, e);
+                    warn!("Failed to derive time partitions from filename '{}': {}. Proceeding without time partitions.", filename, e);
                 }
             }
         }
@@ -234,7 +235,7 @@ impl DataOutputAwsAthenaPlugin {
             let partition_metadata = match partition_metadata_opt {
                 Some(pm) => Some(pm),
                 None => {
-                    println!("Missing metadata for namespace '{}' while creating partition '{}'; proceeding without Glue partition", namespace, full_key);
+                    warn!("Missing metadata for namespace '{}' while creating partition '{}'; proceeding without Glue partition", namespace, full_key);
                     None
                 }
             };
@@ -268,7 +269,7 @@ impl DataOutputAwsAthenaPlugin {
             if target as usize != current {
                 if target as usize > current { self.upload_sem.add_permits(target as usize - current); }
                 if Config::log_wal_enabled() {
-                println!("tune: upload_sem target={} available={} (approx)", target, self.upload_sem.available_permits());
+                    info!("tune: upload_sem target={} available={} (approx)", target, self.upload_sem.available_permits());
                 }
             }
         }
@@ -280,7 +281,7 @@ impl DataOutputAwsAthenaPlugin {
 
         // Stream Parquet to S3 via multipart upload
         if Config::debug_enabled() || Config::log_wal_enabled() {
-            println!(
+            debug!(
                 "Uploader: start ns={} key_base={} filename={} bucket={}",
                 namespace, full_key, filename, bucket
             );
@@ -409,7 +410,7 @@ impl DataOutputAwsAthenaPlugin {
                 let upload_id = self.upload_id.clone();
                 let parts = self.parts.clone();
                 if Config::log_wal_enabled() {
-                    println!(
+                    debug!(
                         "completing multipart upload for {} (parts={}, total={})",
                         key,
                         parts.len(),
@@ -504,7 +505,7 @@ impl DataOutputAwsAthenaPlugin {
             rows_written += batch.num_rows() as u64;
             parquet_writer.write(&batch).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Parquet write error: {}", e)))?;
             if Config::debug_enabled() {
-                println!("Uploader: wrote batch idx={} rows={} key={}", batch_index, batch.num_rows(), key_for_upload);
+                debug!("Uploader: wrote batch idx={} rows={} key={}", batch_index, batch.num_rows(), key_for_upload);
             }
             batch_index += 1;
             // Cooperative yield for fairness among concurrent tasks
@@ -517,13 +518,13 @@ impl DataOutputAwsAthenaPlugin {
             match tokio::time::timeout(std::time::Duration::from_secs(300), task).await {
                 Ok(Ok(Ok(_))) => { /* success */ }
                 Ok(Ok(Err(e))) => {
-                    println!("WARN: Glue partition creation failed for {}: {}", final_key, e);
+                    warn!("Glue partition creation failed for {}: {}", final_key, e);
                 }
                 Ok(Err(join_err)) => {
-                    println!("WARN: Glue partition task join error for {}: {}", final_key, join_err);
+                    warn!("Glue partition task join error for {}: {}", final_key, join_err);
                 }
                 Err(_) => {
-                    println!("WARN: Glue partition creation timed out for {}", final_key);
+                    warn!("Glue partition creation timed out for {}", final_key);
                 }
             }
         }
@@ -537,9 +538,9 @@ impl DataOutputAwsAthenaPlugin {
                 return Err(e);
             }
         };
-        println!("Uploaded {} to S3 (rows={}, bytes={})", final_key, rows_written, uploaded_bytes);
+        info!("Uploaded {} to S3 (rows={}, bytes={})", final_key, rows_written, uploaded_bytes);
         if Config::debug_enabled() || Config::log_wal_enabled() {
-            println!(
+            debug!(
                 "Uploader: complete key={} upload_id={} parts={} total_bytes={} rows={}",
                 key_for_upload, upload_id, writer.parts.len(), uploaded_bytes, rows_written
             );
@@ -661,7 +662,7 @@ impl AwsAthena {
                         let base = 200u64 * (1u64 << attempt.min(6));
                         let jitter: u64 = rand::thread_rng().gen_range(0..100);
                         let delay_ms = base + jitter;
-                        println!("Glue/Athena {} retry {} in {}ms: {}", op_name, attempt, delay_ms, s);
+                        warn!("Glue/Athena {} retry {} in {}ms: {}", op_name, attempt, delay_ms, s);
                         tokio_sleep(TokioDuration::from_millis(delay_ms)).await;
                         continue;
                     }
@@ -678,15 +679,15 @@ impl AwsAthena {
             Ok(false) => {}
             Err(_err) => match AwsAthena::create_workgroup().await {
                 Ok(_) => {
-                    println!("Created Athena Workgroup");
+                    info!("Created Athena Workgroup");
                 }
                 Err(_err) => {
                     match AwsAthena::update_workgroup().await {
                         Ok(_) => {
-                            println!("Updated Athena Workgroup");
+                            info!("Updated Athena Workgroup");
                         }
                         Err(err) => {
-                            println!("ERROR creating/updating Athena Workgroup: {}", err);
+                            error!("creating/updating Athena Workgroup: {}", err);
                         }
                     }
                 }
@@ -707,7 +708,7 @@ impl AwsAthena {
             Err(_err) => {
                 // Create database with backoff; AlreadyExists => success
                 if let Err(err) = AwsAthena::backoff_retry(|| AwsAthena::glue_create_database(), "create_database").await {
-                    println!("ERROR creating Glue database: {}", err);
+                    error!("creating Glue database: {}", err);
                 }
             }
         }
@@ -715,13 +716,13 @@ impl AwsAthena {
         match AwsAthena::glue_get_table(namespace).await {
             Ok(table) => {
                 if let Err(err) = AwsAthena::backoff_retry(|| AwsAthena::glue_update_table(namespace, schema, table.clone()), "update_table").await {
-                    println!("ERROR updating Glue table: {}", err);
+                    error!("updating Glue table: {}", err);
                 }
             }
             Err(_err) => {
                 // Create table with backoff; AlreadyExists => success
                 if let Err(err) = AwsAthena::backoff_retry(|| AwsAthena::glue_create_table(namespace, schema), "create_table").await {
-                    println!("ERROR creating glue table: {}", err);
+                    error!("creating glue table: {}", err);
                 }
                 // println!("Create Hive Table Error: {}", err.into_service_error().to_string())
             }
@@ -1544,7 +1545,7 @@ impl AwsAthena {
                                 partition_cache.push(md5_digest);
                                 return Ok(true);
                             }
-                            println!("Created Glue table '{}.{}'", database, namespace);
+                            info!("Created Glue table '{}.{}'", database, namespace);
                             // Fallthrough to partition create/update below
                         }
                     }
@@ -1577,7 +1578,7 @@ impl AwsAthena {
                     }, "update_partition").await.map(|_| ());
 
                     if let Err(err) = update_res {
-                        println!("Failed to update Athena partition: {}", err);
+                        error!("Failed to update Athena partition: {}", err);
                     } else {
                         partition_cache.push(md5_digest);
                     }
@@ -1602,11 +1603,11 @@ impl AwsAthena {
 
                     match create_res {
                         Ok(_) => {
-                            println!("Created new Athena partition");
+                            info!("Created new Athena partition");
                         }
                         Err(err) => {
-                            println!("Failed to create new Athena partition: {}", err);
-                            println!("Database: {}, Table: {}, Values: {:?}", database, namespace, partition_values);
+                            error!("Failed to create new Athena partition: {}", err);
+                            error!("Database: {}, Table: {}, Values: {:?}", database, namespace, partition_values);
                         }
                     }
                 }

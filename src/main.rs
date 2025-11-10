@@ -63,6 +63,8 @@ mod sql;
 mod benchmark;
 
 use crate::helpers::configuration::{Config, PIPELINE_NAME};
+use crate::helpers::logging::init_logging;
+use tracing::{error, info, warn};
 
 use crate::helpers::logger::{Logger, LogLevel};
 use crate::helpers::offsets::Offsets;
@@ -177,6 +179,9 @@ async fn main() {
 
     let cli: Cli = Cli::parse();
 
+    // Initialize logging only if explicitly enabled
+    init_logging(cli.log);
+
     CLI_MODE.write().clone_from(&cli.mode);
 
     match cli.mode {
@@ -206,7 +211,7 @@ async fn main() {
                     sync().await;
 
                 } else {
-                    println!("Syncing all pipelines");
+                    info!("Syncing all pipelines");
                     let pipelines = Config::get_pipelines();
                     // loop {
                     for pipeline_name in pipelines {
@@ -221,7 +226,12 @@ async fn main() {
 
                         if !PipelineCache::last_ran_is_elapsed() {
                             let remaining = Config::get_sync_frequency() - PipelineCache::get_last_ran_elapsed();
-                            println!("Pipeline '{}' last ran {} seconds ago, skipping for {} seconds.", &pipeline_name, PipelineCache::get_last_ran_elapsed(), remaining);
+                            info!(
+                                "Pipeline '{}' last ran {} seconds ago, skipping for {} seconds.",
+                                &pipeline_name,
+                                PipelineCache::get_last_ran_elapsed(),
+                                remaining
+                            );
                             continue;
                         }
 
@@ -486,12 +496,12 @@ async fn schema(pipeline: &str) {
     let data_dir = Config::get_data_dir();
     let output_dir = format!("{}/output_buffer", data_dir);
 
-    println!("Querying data dir: {}", output_dir);
+    info!("Querying data dir: {}", output_dir);
 
     match ctx.register_parquet(&pipeline, &output_dir, ParquetReadOptions::default()).await {
         Ok(_) => {}
         Err(_e) => {
-            println!("Can't find data for table: {} in dir: {}", pipeline, output_dir);
+            error!("Can't find data for table: {} in dir: {}", pipeline, output_dir);
             process::exit(1);
         }
     }
@@ -516,18 +526,18 @@ async fn discover() {
 
     let pipeline_name = Config::get_pipeline_name();
 
-    println!("Analysing data and generating Skippr metadata for pipeline: {}", pipeline_name);
+    info!("Analysing data and generating Skippr metadata for pipeline: {}", pipeline_name);
 
     let _data_dir = Config::get_data_dir();
 
     let pipeline_metadata = match Config::get_metadata().await {
         Ok(pipeline_metadata) => {
-            println!("Found existing Skippr metadata, will update with schema discovered from sampled data");
+            info!("Found existing Skippr metadata, will update with schema discovered from sampled data");
             
             pipeline_metadata
         }
         Err(_e) => {
-            println!("No existing Skippr metadata, will discover schemas");
+            info!("No existing Skippr metadata, will discover schemas");
 
             PipelineMetadata::new()
         }
@@ -538,7 +548,7 @@ async fn discover() {
     let offsets = match Offsets::init() {
         Ok(offsets) => offsets,
         Err(e) => {
-            println!("Skipping: {}", e);
+            error!("Skipping: {}", e);
             return;
         }
     };
@@ -565,7 +575,7 @@ async fn discover() {
             match Ingest::prepare_arrow_schema_with_metadata(&namespace, &pipeline_metadata.metadata, flatten) {
                 Ok(_t) => {}
                 Err(e) => {
-                    println!("Failed to prepare arrow schema: {}", e);
+                    error!("Failed to prepare arrow schema: {}", e);
                     return;
                 }
             }
@@ -608,7 +618,7 @@ async fn discover() {
         }).join().unwrap();
 
         if !RUNNING.read().load(Ordering::SeqCst) {
-            println!("Received another panic - already gracefully shutting down");
+            error!("Received another panic - already gracefully shutting down");
         } else {
 
             let pid = process::id() as i32; // or replace with the PID of the target process
@@ -644,7 +654,7 @@ async fn discover() {
             }).join().unwrap();
 
             if !RUNNING.read().load(Ordering::SeqCst) {
-                println!("Received another Ctrl+C signal - terminating immediately, this may result in data loss...");
+                warn!("Received another Ctrl+C signal - terminating immediately, this may result in data loss...");
                 _offsets_clone.flush();
                 std::process::exit(0);
             }
@@ -656,7 +666,7 @@ async fn discover() {
             let _offsets_clone = _offsets_clone.clone();
 
             thread::spawn(move || {
-                println!("Received SIG: {} - Gracefully shutting down", sig.to_string());
+                info!("Received SIG: {} - Gracefully shutting down", sig.to_string());
 
                 while
                     OUTPUT_RUNNING
@@ -671,7 +681,7 @@ async fn discover() {
 
                 _offsets_clone.flush();
 
-                println!("Graceful shutdown complete... bye");
+                info!("Graceful shutdown complete... bye");
                 std::process::exit(0);
             });
         }
@@ -685,7 +695,7 @@ async fn discover() {
         out_pnanner.add(
             move || {
                 if RUNNING.read().load(Ordering::SeqCst) {
-                    println!("Chaos mode throwing a random exit. You can disable this test mode buy removing CHAOS_MODE flag or setting to 'no'");
+                    warn!("Chaos mode throwing a random exit. You can disable this test mode buy removing CHAOS_MODE flag or setting to 'no'");
                     let pid = process::id() as i32;
                     let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
                 }
@@ -699,8 +709,14 @@ async fn discover() {
     let shared_output_clone = shared_output.clone();
     sync_input_plugin(offsets_db.clone(), shared_output_clone).await;
 
-    println!("Reached end of source data");
-    println!("Ingest completed, flushing remaining buffers to output plugin {}", Config::get_pipeline_config().output.or(Some("".to_string())).unwrap());
+    info!("Reached end of source data");
+    info!(
+        "Ingest completed, flushing remaining buffers to output plugin {}",
+        Config::get_pipeline_config()
+            .output
+            .or(Some("".to_string()))
+            .unwrap()
+    );
 
     {
         let mut counter_lock = METRICS.write();
@@ -730,9 +746,9 @@ async fn discover() {
     {
         let counter_lock = METRICS.write();
         
-        println!("Messages Fixed: {}", counter_lock.ingeted_slow_total);
-        println!("Deadletter Total: {}", counter_lock.deadletters_total);
-        println!("Ingested Total: {}", counter_lock.messages_total);
+        info!("Messages Fixed: {}", counter_lock.ingeted_slow_total);
+        info!("Deadletter Total: {}", counter_lock.deadletters_total);
+        info!("Ingested Total: {}", counter_lock.messages_total);
     }
 
     match Metrics::send_metrics(Some(0)).await {
@@ -749,7 +765,7 @@ async fn discover() {
         LOGGER.write().await.flush().await.unwrap();
     }
     
-    println!("Pipeline '{}' sync complete", pipeline_name);
+    info!("Pipeline '{}' sync complete", pipeline_name);
 
     // Final metrics snapshot (same as periodic per-minute print)
     {
@@ -759,14 +775,14 @@ async fn discover() {
         let deadletters_total_counter = crate::metrics::counters::DEADLETTERS_TOTAL.load(AtomicOrdering::Relaxed);
         let _ingested_slow_total_counter = crate::metrics::counters::INGESTED_SLOW_TOTAL.load(AtomicOrdering::Relaxed);
         let human_bytes = crate::helpers::Helpers::human_readable_size(source_bytes_total_counter);
-        println!("Messages per Min: {}", 0);
-        println!("Messages Fixed per Min: {}", 0);
-        println!("Bytes Total: {}", human_bytes);
-        println!("Messages Total: {}", messages_total_counter);
-        println!("Deadletters per Min: {}", 0);
-        println!("Deadletter Total: {}", deadletters_total_counter);
+        info!("Messages per Min: {}", 0);
+        info!("Messages Fixed per Min: {}", 0);
+        info!("Bytes Total: {}", human_bytes);
+        info!("Messages Total: {}", messages_total_counter);
+        info!("Deadletters per Min: {}", 0);
+        info!("Deadletter Total: {}", deadletters_total_counter);
         // Runtime not directly accessible here; print 0 to keep format consistent
-        println!("Runtime: {} seconds", 0);
+        info!("Runtime: {} seconds", 0);
         let up_total = crate::metrics::counters::UPLOADS_TOTAL.load(AtomicOrdering::SeqCst);
         let up_inflight = crate::metrics::counters::UPLOADS_IN_FLIGHT.load(AtomicOrdering::SeqCst);
         let up_lat_ns_total = crate::metrics::counters::UPLOAD_LATENCY_NS_TOTAL.load(AtomicOrdering::SeqCst);
@@ -776,8 +792,8 @@ async fn discover() {
         let dl_target = crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.load(AtomicOrdering::SeqCst);
         let active = crate::metrics::counters::ACTIVE_THREADS.load(AtomicOrdering::SeqCst);
         let queue = crate::metrics::counters::QUEUE_LENGTH.load(AtomicOrdering::SeqCst);
-        println!("Uploads total: {}, inflight: {}, avg latency: {:.2} ms", up_total, up_inflight, avg_up_ms);
-        println!("Targets - upload: {}, wal: {}, s3_download: {} | active: {}, queue: {}", up_target, wal_target, dl_target, active, queue);
+        info!("Uploads total: {}, inflight: {}, avg latency: {:.2} ms", up_total, up_inflight, avg_up_ms);
+        info!("Targets - upload: {}, wal: {}, s3_download: {} | active: {}, queue: {}", up_target, wal_target, dl_target, active, queue);
     }
 
 }
@@ -809,12 +825,12 @@ async fn sync() {
     //         Refactor to accept SQL directly via database connection
     pipeline_metadata = match Config::get_metadata().await {
         Ok(pipeline_metadata) => {
-            println!("Found existing Skippr metadata");
+            info!("Found existing Skippr metadata");
 
             match pipeline_metadata.sql {
                 Some(sql) => {
                     for stmt in sql {
-                        println!("Recieved SQL statement: '{}'", stmt);
+                        info!("Recieved SQL statement: '{}'", stmt);
 
                         // Important to exec the SQL before saving metadata, as the SQL may drop or otherwise alter the metadata
                         query(&stmt).await;
@@ -826,7 +842,7 @@ async fn sync() {
             }
 
             if !pipeline_metadata.enabled {
-                println!("Pipeline '{}' disabled, skipping.", pipeline_name);
+                info!("Pipeline '{}' disabled, skipping.", pipeline_name);
                 return;
             }
 
@@ -841,7 +857,7 @@ async fn sync() {
     };
 
 
-    println!("Syncing pipeline: {}", pipeline_name);
+    info!("Syncing pipeline: {}", pipeline_name);
 
     METADATA.store(Arc::new(pipeline_metadata.clone()));
 
@@ -882,7 +898,7 @@ async fn sync() {
         out_pnanner.add(
             move || {
                 if RUNNING.read().load(Ordering::SeqCst) {
-                    println!("Chaos mode throwing a random exit. You can disable this test mode buy removing CHAOS_MODE flag or setting to 'no'");
+                    warn!("Chaos mode throwing a random exit. You can disable this test mode buy removing CHAOS_MODE flag or setting to 'no'");
                     let pid = process::id() as i32;
                     let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
                 }
@@ -901,7 +917,7 @@ async fn sync() {
             match Ingest::prepare_arrow_schema_with_metadata(&namespace, &pipeline_metadata.metadata, flatten) {
                 Ok(_t) => {}
                 Err(e) => {
-                    println!("Failed to prepare arrow schema: {}", e);
+                    error!("Failed to prepare arrow schema: {}", e);
                     return;
                 }
             }
@@ -910,8 +926,14 @@ async fn sync() {
 
     sync_input_plugin(offsets_db.clone(), shared_output_clone).await;
 
-    println!("Reached end of source data");
-    println!("Ingest completed, flushing remaining buffers to output plugin {}", Config::get_pipeline_config().output.or(Some("".to_string())).unwrap());
+    info!("Reached end of source data");
+    info!(
+        "Ingest completed, flushing remaining buffers to output plugin {}",
+        Config::get_pipeline_config()
+            .output
+            .or(Some("".to_string()))
+            .unwrap()
+    );
 
     {
         METRICS.write().status = MetricsStatus::Finishing;
@@ -919,7 +941,7 @@ async fn sync() {
 
     // Queue-based model: rely on the explicit drain above; skip legacy compact_all_partitions
 
-    println!("All buffers flushed to output plugin");
+    info!("All buffers flushed to output plugin");
 
     // Deterministic drain: compact all remaining on-disk segments to parquet
     {
@@ -947,14 +969,12 @@ async fn sync() {
         let uploaded_rows = crate::metrics::counters::PARQUET_PERSISTED_ROWS_TOTAL.load(AO::Relaxed);
         let expected_msgs = crate::metrics::counters::MESSAGES_TOTAL.load(AO::Relaxed);
         let quarantined_parts = crate::metrics::counters::QUARANTINED_PARTITIONS_TOTAL.load(AO::Relaxed);
-        println!(
+        info!(
             "Compactor: summary uploaded_rows={} expected_msgs={} quarantined_parts={}",
             uploaded_rows, expected_msgs, quarantined_parts
         );
         if quarantined_parts > 0 || uploaded_rows != expected_msgs {
-            eprintln!(
-                "Compactor: integrity check failed (uploaded_rows != expected_msgs or quarantined_parts > 0); exiting nonzero"
-            );
+            error!("Compactor: integrity check failed (uploaded_rows != expected_msgs or quarantined_parts > 0); exiting nonzero");
         }
     }
 
@@ -991,7 +1011,7 @@ async fn sync() {
         let parquet_objects = m.parquet_persisted_objects_total + counters::PARQUET_PERSISTED_OBJECTS_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
         let parquet_rows = m.parquet_persisted_rows_total + counters::PARQUET_PERSISTED_ROWS_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
         let parquet_bytes = m.parquet_persisted_bytes_total + counters::PARQUET_PERSISTED_BYTES_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
-        println!(
+        info!(
             "Final metrics: msgs_total={} src_bytes_total={} parquet_rows_total={} parquet_bytes_total={} parquet_objects_total={}",
             messages_total,
             source_bytes_total,
@@ -1000,12 +1020,12 @@ async fn sync() {
             parquet_objects
         );
     }
-    println!("Pipeline sync complete");
+    info!("Pipeline sync complete");
 }
 
 pub async fn sync_output_plugin(plugin_name: &str, buffer_name: String) -> Result<Box<dyn DataOutputPlugin + Send + Sync>, io::Error> {
 
-    println!("Output plugin: {}", plugin_name);
+    info!("Output plugin: {}", plugin_name);
     
     match plugin_name {
         // "stdout" => {
@@ -1035,7 +1055,7 @@ pub async fn sync_output_plugin(plugin_name: &str, buffer_name: String) -> Resul
             Ok(Box::new(plugin) as Box<dyn DataOutputPlugin + Send + Sync>)
         }
         "" => {
-            println!("No Data {} plugin specified, defaulting to local file", buffer_name);
+            info!("No Data {} plugin specified, defaulting to local file", buffer_name);
             let plugin = DataOutputFilePlugin::new(buffer_name).await;
             Ok(Box::new(plugin) as Box<dyn DataOutputPlugin + Send + Sync>)
         }
@@ -1089,10 +1109,10 @@ pub async fn sync_input_plugin(offsets_clone: Arc<Offsets>, shared_output: Arc<B
         //     }
         // }
         "" => {
-            println!("No Data Source plugin specified. You must specify a data source plugin, see documentation for the DATA_SOURCE_PLUGIN_NAME environment variable.");
+            error!("No Data Source plugin specified. You must specify a data source plugin, see documentation for the DATA_SOURCE_PLUGIN_NAME environment variable.");
         }
         unknown => {
-            println!("Data Source Plugin {} not supported", unknown);
+            error!("Data Source Plugin {} not supported", unknown);
         }
     }
 }

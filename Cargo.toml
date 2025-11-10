@@ -83,6 +83,8 @@ sha2 = "0.10"
 aws-credential-types = "1.2.0"
 ratatui = { version = "0.26" }
 crossterm = { version = "0.27" }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 
 [dev-dependencies]
 serial_test = "1.0.0"

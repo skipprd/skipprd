@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 pub mod configuration;
 pub mod logger;
+pub mod logging;
 pub mod offsets;
 pub mod s3;
 pub mod timed_rwlock;

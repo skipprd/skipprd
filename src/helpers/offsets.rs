@@ -13,6 +13,7 @@ use {
 use crate::helpers::Helpers;
 use crate::helpers::offsets::OffsetsError::VacuumError;
 use crate::METRICS;
+use tracing::{error, info, warn};
 
 pub const SLED_NAME: &str = "db";
 
@@ -99,11 +100,11 @@ impl Offsets {
         let tree = db.open_tree("offsets").expect("Could not open offset tree");
 
         let total_size_bytes = db.size_on_disk().unwrap_or_else(|err| {
-            println!("Failed getting size of offsets DB, Error: {:?}", err);
+            error!("Failed getting size of offsets DB, Error: {:?}", err);
             0
         });
         
-        println!("Offset DB size: {}", Helpers::human_readable_size(total_size_bytes));
+        info!("Offset DB size: {}", Helpers::human_readable_size(total_size_bytes));
         
         let mut metrics_lock = METRICS.write();
         metrics_lock.offset_db_size = total_size_bytes;

@@ -30,6 +30,7 @@ use futures::stream::{self, StreamExt};
 use std::sync::atomic::AtomicUsize;
 use std::io::BufRead as _;
 use std::sync::atomic::Ordering as AtomicOrdering;
+use tracing::{error, info};
 
 fn read_meminfo_kib(key: &str) -> Option<u64> {
     if let Ok(file) = std::fs::File::open("/proc/meminfo") {
@@ -134,7 +135,7 @@ impl DataSourceS3Plugin {
     fn save_continuation_token(token: &str) {
         if let Ok(mut file) = fs::File::create(&*CONTINUATION_TOKEN_FILE) {
             if let Err(e) = file.write_all(token.as_bytes()) {
-                println!("Failed to save continuation token: {}", e);
+                error!("Failed to save continuation token: {}", e);
             }
         }
     }
@@ -176,7 +177,7 @@ impl DataSourceS3Plugin {
         let inventory_prefix = self.config.s3_prefix.clone();
         let total_cpus = num_cpus::get();
 
-        println!("Syncing bucket: {}, prefix: {}", s3_bucket, inventory_prefix);
+        info!("Syncing bucket: {}, prefix: {}", s3_bucket, inventory_prefix);
 
         let chunk_size = self.config.batch_size_bytes.unwrap_or(10_000_000) as usize;
         self.optimal_chunk_size = chunk_size;
@@ -199,7 +200,7 @@ impl DataSourceS3Plugin {
         let inflate_ratio: u32 = inflate_ratio_env.parse::<u32>().unwrap_or(4).clamp(1, 32);
         let mem_sem = Arc::new(Semaphore::new(mem_budget_mb as usize));
 
-        println!("Starting stream pipeline (cpus={}, dl_mem={} MiB, init_chunk={})", total_cpus, mem_budget_mb, Helpers::human_readable_size(chunk_size as u64));
+        info!("Starting stream pipeline (cpus={}, dl_mem={} MiB, init_chunk={})", total_cpus, mem_budget_mb, Helpers::human_readable_size(chunk_size as u64));
 
         let offsets_clone = offsets.clone();
         // Build keys iterator by pulling pages manually (compatible with SDK stream type)
@@ -243,7 +244,7 @@ impl DataSourceS3Plugin {
         let tuned_dl = crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.load(std::sync::atomic::Ordering::Relaxed);
         let dl_concurrency = env_dl.unwrap_or_else(|| tuned_dl.clamp(8, 512));
         if Config::log_wal_enabled() {
-            println!("tune: s3_download_concurrency={} (env_override={:?})", dl_concurrency, env_dl);
+            info!("tune: s3_download_concurrency={} (env_override={:?})", dl_concurrency, env_dl);
         }
         let dl_sem = Arc::new(Semaphore::new(dl_concurrency));
 
@@ -458,7 +459,7 @@ impl DataSourceS3Plugin {
         }
 
         self.ingest.wait_for_completion();
-        println!("S3 stream pipeline complete; ingest completed");
+        info!("S3 stream pipeline complete; ingest completed");
     }
 
     /// Download an S3 object with exponential backoff retry logic
@@ -488,7 +489,7 @@ impl DataSourceS3Plugin {
                     tokio::time::sleep(Duration::from_secs_f64(backoff_duration.as_secs_f64())).await;
 
                     if retries >= max_retries {
-                        println!("Max retries reached for object {}", key);
+                        error!("Max retries reached for object {}", key);
                         return Err(err.into_service_error());
                     }
                 }

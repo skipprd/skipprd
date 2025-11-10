@@ -9,6 +9,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc};
 use std::thread;
 use std::time::Instant;
+use tracing::error;
 // use async_trait::async_trait;
 use tokio::time::Duration;
 use crate::buffer::BufferChunker;
@@ -70,7 +71,7 @@ impl DataSourceStdinPlugin {
 
                         if buffer.len() >= buffer_size || last_flush.elapsed() >= buffer_timeout {
                             if let Err(e) = tx.send(buffer.clone()) {
-                                eprintln!("Error sending to buffer channel: {}", e);
+                                error!("Error sending to buffer channel: {}", e);
                                 break;
                             }
                             buffer.clear();
@@ -78,7 +79,7 @@ impl DataSourceStdinPlugin {
                         }
                     }
                     Err(e) => {
-                        eprintln!("Error reading from stdin: {}", e);
+                        error!("Error reading from stdin: {}", e);
                         break;
                     }
                 }
@@ -87,7 +88,7 @@ impl DataSourceStdinPlugin {
             // Send any remaining data
             if !buffer.is_empty() {
                 if let Err(e) = tx.send(buffer) {
-                    eprintln!("Error sending to buffer channel: {}", e);
+                    error!("Error sending to buffer channel: {}", e);
                 }
             }
         });
@@ -120,7 +121,7 @@ impl DataSourceStdinPlugin {
                         // BufferChunker::rotate_buffers(true);
                     }
                     mpsc::RecvTimeoutError::Disconnected => {
-                        eprintln!("Error receiving from buffer channel: {}", e);
+                        error!("Error receiving from buffer channel: {}", e);
                         break;
                     }
                 },

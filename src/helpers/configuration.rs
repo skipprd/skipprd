@@ -37,6 +37,7 @@ use crate::plugins::file_input::{DataSourceLocalFilePluginConfig};
 use crate::plugins::s3_input::DataSourceS3PluginConfig;
 use crate::helpers::Helpers;
 // use crate::plugins::s3_inventory::{DataSourceS3InventoryPluginConfig};
+use tracing::{debug, error, info, warn};
 
 lazy_static! {
     static ref ENV_CACHE: TimedRwLock<DashMap<String, String>> = TimedRwLock::new("env_cache".to_string(), DashMap::new());
@@ -241,7 +242,7 @@ impl Config {
         let credentials_file_contents = fs::read_to_string(&credentials_file_path).unwrap_or(String::new());
 
         if credentials_file_contents.is_empty() {
-            println!("No credentials file found at {}", credentials_file_path);
+            warn!("No credentials file found at {}", credentials_file_path);
             return;
         }
 
@@ -254,7 +255,7 @@ impl Config {
             if profile_name != "default" {
                 panic!("Profile '{}' not found in credentials file {}", profile_name, credentials_file_path);
             } else { // support local work without a profile if user has not set SKIPPR_PROFILE
-                println!("Profile '{}' not found in credentials file {}", profile_name, credentials_file_path);
+                warn!("Profile '{}' not found in credentials file {}", profile_name, credentials_file_path);
             }
             return;
         }
@@ -1314,11 +1315,11 @@ impl Config {
                 let entry = entry_result?;
                 let path = entry.path();
                 if path.is_dir() {
-                    println!("Directory: {}", path.display());
+                    debug!("Directory: {}", path.display());
                     Config::list_dir_contents(path.clone())
                         .expect(format!("Couldn't list dir {}", path.display()).as_str());
                 } else {
-                    println!("File: {}", path.display());
+                    debug!("File: {}", path.display());
                 }
             }
         }
@@ -1528,7 +1529,7 @@ impl Config {
         if Config::get_transform_batch_time_unit() != ""
             && Config::get_transform_batch_time_fields() == ""
         {
-            println!("ERROR: Config: 'TRANSFORM_BATCH_TIME_FIELDS' must be since you've set: 'TRANSFORM_BATCH_TIME_UNIT'.");
+            error!("Config: 'TRANSFORM_BATCH_TIME_FIELDS' must be since you've set: 'TRANSFORM_BATCH_TIME_UNIT'.");
         }
 
         let data_dir = Config::get_data_dir();
@@ -1540,7 +1541,7 @@ impl Config {
 
         // Always use S3 as the source of truth
         let s3_key = format!("{}/{}/{}/metadata/metadata.json", tenant, workspace, pipeline);
-        println!("get_metadata: tenant='{}' workspace='{}' pipeline='{}' s3_key='{}'", tenant, workspace, pipeline, s3_key);
+        info!("get_metadata: tenant='{}' workspace='{}' pipeline='{}' s3_key='{}'", tenant, workspace, pipeline, s3_key);
         
         let pipeline_metadata: Result<PipelineMetadata, bool> = match s3::get_json(&s3_key).await {
             Ok(json_value) => {
@@ -1548,7 +1549,7 @@ impl Config {
                     Ok(mut pipeline_metadata) => {
                         let num_entries = pipeline_metadata.metadata.len();
                         let keys: Vec<String> = pipeline_metadata.metadata.keys().cloned().collect();
-                        println!("Loaded metadata from S3 (entries={}, keys={:?})", num_entries, keys);
+                        info!("Loaded metadata from S3 (entries={}, keys={:?})", num_entries, keys);
                         // Inject flatten flag based on current config
                         match &Config::get_transform_config().flatten_events {
                             Some(val) => { pipeline_metadata.flattened = Config::truth_value(val); }
@@ -1557,7 +1558,7 @@ impl Config {
                         Ok(pipeline_metadata)
                     },
                     Err(e) => {
-                        println!("Failed to parse metadata from S3: {}", e);
+                        error!("Failed to parse metadata from S3: {}", e);
                         std::process::exit(1);
                     }
                 }
@@ -1567,7 +1568,7 @@ impl Config {
                 if let SdkError::ServiceError(se) = &e {
                     if se.err().is_no_such_key() { return Err(false); }
                 }
-                println!("Failed to fetch metadata from S3: {:?}", e);
+                error!("Failed to fetch metadata from S3: {:?}", e);
                 std::process::exit(1);
             }
         };
@@ -1606,10 +1607,10 @@ impl Config {
 
         match s3::delete_object(&s3_key).await {
             Ok(_) => {
-                println!("Deleted pipeline metadata from S3: {}", s3_key);
+                info!("Deleted pipeline metadata from S3: {}", s3_key);
             }
             Err(err) => {
-                println!("Failed to delete metadata from S3: {:?}", err);
+                error!("Failed to delete metadata from S3: {:?}", err);
             }
         }
     }
@@ -1626,11 +1627,11 @@ impl Config {
         // No per-namespace diffing: upload the provided snapshot each time, single-writer
         METADATA.store(Arc::new(pipeline_metadata.clone()));
         let s3_key = format!("{}/{}/{}/metadata/metadata.json", tenant, workspace, pipeline);
-        let json_value = match serde_json::to_value(pipeline_metadata) { Ok(v) => v, Err(e) => { println!("Failed to serialize metadata: {}", e); return; } };
+        let json_value = match serde_json::to_value(pipeline_metadata) { Ok(v) => v, Err(e) => { error!("Failed to serialize metadata: {}", e); return; } };
         let _guard = UPLOAD_LOCK.lock().await;
         match s3::put_json(&s3_key, &json_value).await {
-            Ok(_) => { println!("Updated pipeline metadata in S3: {}", s3_key); }
-            Err(err) => { println!("Failed to upload metadata to S3: {:?}", err); }
+            Ok(_) => { info!("Updated pipeline metadata in S3: {}", s3_key); }
+            Err(err) => { error!("Failed to upload metadata to S3: {:?}", err); }
         }
 
         if evolved {

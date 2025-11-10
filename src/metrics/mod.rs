@@ -17,6 +17,7 @@ use crate::helpers::Helpers;
 use crate::helpers::s3;
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::{METRICS, RUNNING};
+use tracing::{error, info, warn};
 
 pub mod counters;
 
@@ -405,14 +406,14 @@ impl Metrics {
 
         match s3::put_json(&s3_key, &data).await {
             Ok(_) => {
-                // Only print on exit or error to reduce noise
+                // Only log on exit to reduce noise
                 if exit_code.is_some() {
-                    println!("Uploaded metrics to S3: {}", s3_key);
+                    info!("Uploaded metrics to S3: {}", s3_key);
                 }
             }
             Err(err) => {
-                println!("Failed to upload metrics to S3: {:?}", err);
-                println!("Hint: ensure AWS region is set (AWS_REGION or AWS_DEFAULT_REGION) and metrics bucket is configured.");
+                error!("Failed to upload metrics to S3: {:?}", err);
+                error!("Hint: ensure AWS region is set (AWS_REGION or AWS_DEFAULT_REGION) and metrics bucket is configured.");
             }
         }
 
@@ -459,10 +460,10 @@ impl Metrics {
 
         match s3::put_json(&s3_key, &data).await {
             Ok(_) => {
-                println!("Uploaded config to S3: {}", s3_key);
+                info!("Uploaded config to S3: {}", s3_key);
             }
             Err(err) => {
-                println!("Failed to upload config to S3: {:?}", err);
+                error!("Failed to upload config to S3: {:?}", err);
             }
         }
 
@@ -502,17 +503,17 @@ impl Metrics {
                     let dead_current = deadletters_total_counter.saturating_sub(last_dead);
 
                     if ingested_current > 0 {
-                        println!("Messages per Min: {}", ingested_current);
-                        println!("Messages Fixed per Min: {}", fixed_current);
+                        info!("Messages per Min: {}", ingested_current);
+                        info!("Messages Fixed per Min: {}", fixed_current);
                         // println!("Bytes per Min: {}", metrics.bytes_current);
 
                         let human_bytes = Helpers::human_readable_size(source_bytes_total_counter);
 
-                        println!("Bytes Total: {}", human_bytes);
-                        println!("Messages Total: {}", messages_total_counter);
-                        println!("Deadletters per Min: {}", dead_current);
-                        println!("Deadletter Total: {}", deadletters_total_counter);
-                        println!("Runtime: {} seconds", now_lock.elapsed().as_secs());
+                        info!("Bytes Total: {}", human_bytes);
+                        info!("Messages Total: {}", messages_total_counter);
+                        info!("Deadletters per Min: {}", dead_current);
+                        info!("Deadletter Total: {}", deadletters_total_counter);
+                        info!("Runtime: {} seconds", now_lock.elapsed().as_secs());
 
                         // Upload/throughput summary
                         let up_total = crate::metrics::counters::UPLOADS_TOTAL.load(Ordering::SeqCst);
@@ -525,8 +526,8 @@ impl Metrics {
                         let active = crate::metrics::counters::ACTIVE_THREADS.load(Ordering::SeqCst);
                         let queue = crate::metrics::counters::QUEUE_LENGTH.load(Ordering::SeqCst);
 
-                        println!("Uploads total: {}, inflight: {}, avg latency: {:.2} ms", up_total, up_inflight, avg_up_ms);
-                        println!("Targets - upload: {}, wal: {}, s3_download: {} | active: {}, queue: {}", up_target, wal_target, dl_target, active, queue);
+                        info!("Uploads total: {}, inflight: {}, avg latency: {:.2} ms", up_total, up_inflight, avg_up_ms);
+                        info!("Targets - upload: {}, wal: {}, s3_download: {} | active: {}, queue: {}", up_target, wal_target, dl_target, active, queue);
 
                         // let total_times: Vec<(String, Duration)> = TimedRwLock::<()>::get_total_wait_times();
                         // for (key, value) in total_times.iter() {

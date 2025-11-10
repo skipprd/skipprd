@@ -4,6 +4,15 @@
 
 Skippr is a tool for data ingestion and transformation. It is designed to ingest data from a source and transform it into a destination datalake/warehouse.
 
+### Logging
+- By default, diagnostic logs are disabled; only user-facing output is printed.
+- Enable logs with the global flag:
+  - `--log` to print INFO-level logs (configurable via `RUST_LOG`, e.g., `RUST_LOG=debug`).
+- Example:
+```bash
+cargo run -- --log sync
+```
+
 ### Product Roadmap
 
 These are planned features; scope and sequence may evolve.
@@ -39,10 +48,13 @@ These are planned features; scope and sequence may evolve.
  - [x] TigerBeetle TigerStyle deterministic WAL segment commits
    - [x] Commit markers for each WAL segment and visibility gating.
    - [x] Commit offsets to DB after WAL commit marker durably persisted. (Already recover offsets via WAL index on start)
- - [ ] S3-backed WAL segments
-   - [ ] Refactor write-ahead log segments to configurable persists to S3 (default to local disk).
-   - [ ] Design for determinisium and consistency
-   - [ ] Update `query.rs` to be able to query the WAL from S3
+ - [x] S3-backed WAL segments
+   - [x] Refactor write-ahead log segments to configurable persists to S3 (default to local disk).
+   - [x] Design for determinisium and consistency
+   - [x] Update `query.rs` to be able to query the WAL from S3
+ - [x] Refacotor println to tracing
+   - [x] Replace all `println!` calls with `tracing` macros for structured logging.
+   - [x] Configure logging levels and formats via environment variables or config files.
 
 ### Project Structure
 

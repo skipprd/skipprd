@@ -11,6 +11,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Instant;
 use tokio::time::Duration;
+use tracing::error;
 use crate::helpers::Helpers;
 
 
@@ -63,7 +64,7 @@ impl DataSourcePcapPlugin {
 
                 if buffer.len() >= buffer_size || last_flush.elapsed() >= buffer_timeout {
                     if let Err(e) = tx.send(buffer.clone()) {
-                        eprintln!("Error sending to buffer channel: {}", e);
+                        error!("Error sending to buffer channel: {}", e);
                         break;
                     }
                     buffer.clear();
@@ -74,7 +75,7 @@ impl DataSourcePcapPlugin {
             // Send any remaining data
             if !buffer.is_empty() {
                 if let Err(e) = tx.send(buffer) {
-                    eprintln!("Error sending to buffer channel: {}", e);
+                    error!("Error sending to buffer channel: {}", e);
                 }
             }
         });
@@ -108,7 +109,7 @@ impl DataSourcePcapPlugin {
                         Ingest::flush_buffers(true, &mut output_files);
                     }
                     mpsc::RecvTimeoutError::Disconnected => {
-                        eprintln!("Error receiving from buffer channel: {}", e);
+                        error!("Error receiving from buffer channel: {}", e);
                         // break;
                     }
                 },

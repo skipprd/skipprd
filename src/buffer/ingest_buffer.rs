@@ -43,6 +43,7 @@ use hex;
 use std::os::fd::AsRawFd;
 use crate::buffer::segment_file::{SegmentFile, SegmentFileMetadata};
 use once_cell::sync::Lazy as OnceLazy;
+use tracing::{debug, error, info, warn};
 
 type PartitionKey = (String, String, Option<i64>, String);
 use tokio::sync::mpsc;
@@ -186,7 +187,7 @@ impl Buffers {
             let mut batches_vec = ingest_buffer_batch.record_batches.take().unwrap_or_default();
             if batches_vec.is_empty() {
                 if Config::log_wal_enabled() {
-                    println!(
+                    debug!(
                         "WAL: skipped write ns={} part={} time={:?} (no record batches)",
                         ingest_buffer_batch._namespace,
                         ingest_buffer_batch._partition,
@@ -217,7 +218,7 @@ impl Buffers {
                 if Config::log_wal_enabled() || Config::debug_enabled() {
                     let part_count = snapshot.meta.len();
                     let reason = if seg.bytes >= byte_threshold { "size" } else { "time" };
-                    println!("Segment rotated: id={} reason={} total_bytes={} partitions={}", snapshot.id, reason, snapshot.total_bytes, part_count);
+                    info!("Segment rotated: id={} reason={} total_bytes={} partitions={}", snapshot.id, reason, snapshot.total_bytes, part_count);
                 }
                 if let Ok(mut q) = SEGMENT_SNAPSHOTS.lock() { q.push_back(Arc::new(std::sync::Mutex::new(snapshot))); }
             }
@@ -252,7 +253,7 @@ impl Buffers {
             let store = crate::buffer::wal_store::WalStoreFactory::for_batches(&snapshot_batches);
             let (seg_bytes, seg_rows, parts_count, sha256) = match store.write_snapshot_and_commit(&snapshot_id, &snapshot_offsets, &snapshot_batches, &partitions_meta) {
                 Ok(t) => t,
-                Err(e) => { println!("Segment write failed: id={} err={}", snapshot_id, e); continue; }
+                Err(e) => { error!("Segment write failed: id={} err={}", snapshot_id, e); continue; }
             };
             let s3_ok = true;
             uploaded_bytes += seg_bytes;
@@ -382,7 +383,7 @@ impl Buffers {
                 if !commit.exists() { continue; }
                 // Read metadata once per file
                 let seg = SegmentFile { path: path.clone() };
-                let meta = match seg.read_metadata() { Ok(m) => m, Err(e) => { println!("Failed to read segment metadata {}: {}", path.to_string_lossy(), e); continue; } };
+                let meta = match seg.read_metadata() { Ok(m) => m, Err(e) => { error!("Failed to read segment metadata {}: {}", path.to_string_lossy(), e); continue; } };
                 let now_secs = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
                 for idx in meta.index.iter() {
                     if Self::is_partition_tombstoned(&path, &idx.key) { continue; }
@@ -401,7 +402,7 @@ impl Buffers {
         if let Some((path, meta, idx)) = best {
             let (ns, part, time, shard) = (&idx.key.0, &idx.key.1, idx.key.2.unwrap_or(0), &idx.key.3);
             if Config::debug_enabled() || Config::log_wal_enabled() {
-                println!("Compactor: candidate ns={} part={} time={} shard={} bytes={} updated_at={}", ns, part, time, shard, idx.bytes, idx.updated_at_secs);
+                debug!("Compactor: candidate ns={} part={} time={} shard={} bytes={} updated_at={}", ns, part, time, shard, idx.bytes, idx.updated_at_secs);
             }
             let started = Self::compact_segment_partition(&path, &meta, &idx, shared_output.clone(), offsets_db.clone())
                 .await
@@ -522,16 +523,16 @@ impl Buffers {
                         sha.copy_from_slice(&digest[..]);
                         let size = f.metadata().map(|m| m.len()).unwrap_or(0);
                         let _ = Buffers::write_seg_commit(&p, &sha, 0, size);
-                        println!("Migration: backfilled commit seg={} size={} sha={}", p.to_string_lossy(), size, hex::encode(sha));
+                        info!("Migration: backfilled commit seg={} size={} sha={}", p.to_string_lossy(), size, hex::encode(sha));
                     }
                 } else {
                     // Quarantine invalid seg
                     let qdir = base_dir.join("quarantine"); let _ = fs::create_dir_all(&qdir);
                     let dest = qdir.join(p.file_name().unwrap_or_default());
                     if let Err(e) = fs::rename(&p, &dest) {
-                        println!("Migration: failed to quarantine invalid seg {}: {}", p.to_string_lossy(), e);
+                        error!("Migration: failed to quarantine invalid seg {}: {}", p.to_string_lossy(), e);
                     } else {
-                        println!("Migration: quarantined invalid seg {} -> {}", p.to_string_lossy(), dest.to_string_lossy());
+                        warn!("Migration: quarantined invalid seg {} -> {}", p.to_string_lossy(), dest.to_string_lossy());
                     }
                 }
             }
@@ -559,7 +560,7 @@ impl Buffers {
                 let mut offsets_blob = vec![0u8; off_len as usize];
                 if f.read_exact(&mut offsets_blob).is_err() { let _ = fs::remove_file(&p); continue; }
                 let offsets_map: std::collections::HashMap<OffsetKey, u64> = bincode::deserialize(&offsets_blob).unwrap_or_default();
-                println!("Migration: attempting salvage of tmp seg={} offsets={}", p.to_string_lossy(), offsets_map.len());
+                info!("Migration: attempting salvage of tmp seg={} offsets={}", p.to_string_lossy(), offsets_map.len());
                 // Iterate PARTs and collect valid RecordBatches
                 use std::collections::HashMap as StdHashMap;
                 let mut batches: StdHashMap<PartitionKey, Vec<RecordBatch>> = StdHashMap::new();
@@ -605,16 +606,16 @@ impl Buffers {
                     let segf = SegmentFile::new(&seg_dir, &sid).unwrap();
                     if let Ok((bytes, _rows, parts, sha)) = segf.write_snapshot(&offsets_map, &batches, &parts_meta) {
                         if let Err(e) = Buffers::write_seg_commit(&segf.path, &sha, parts, bytes) {
-                            println!("Migration: salvage commit write failed seg={} err={}", segf.path.to_string_lossy(), e);
+                            error!("Migration: salvage commit write failed seg={} err={}", segf.path.to_string_lossy(), e);
                         } else {
-                            println!("Migration: salvaged tmp={} -> seg={} parts={} bytes={} sha={}", p.to_string_lossy(), segf.path.to_string_lossy(), parts, bytes, hex::encode(sha));
+                            info!("Migration: salvaged tmp={} -> seg={} parts={} bytes={} sha={}", p.to_string_lossy(), segf.path.to_string_lossy(), parts, bytes, hex::encode(sha));
                         }
                     }
                 }
                 // Remove tmp regardless
                 match fs::remove_file(&p) {
-                    Ok(_) => println!("Migration: removed tmp {}", p.to_string_lossy()),
-                    Err(e) => println!("Migration: failed to remove tmp {} err={}", p.to_string_lossy(), e),
+                    Ok(_) => info!("Migration: removed tmp {}", p.to_string_lossy()),
+                    Err(e) => warn!("Migration: failed to remove tmp {} err={}", p.to_string_lossy(), e),
                 }
             }
         }
@@ -667,14 +668,14 @@ impl Buffers {
                     if remaining == 0 {
                         match fs::remove_file(&p) {
                             Ok(_) => {
-                                println!("Removed fully-compacted segment {}", p.to_string_lossy());
+                                info!("Removed fully-compacted segment {}", p.to_string_lossy());
                                 // remove all tombstones for this segment
                                 for part in m.index.iter() {
                                     let tp = Self::partition_tombstone_path(&p, &part.key);
-                                    if tp.exists() { if let Err(e) = fs::remove_file(&tp) { println!("Failed to remove tombstone {:?}: {}", tp, e); } }
+                                    if tp.exists() { if let Err(e) = fs::remove_file(&tp) { error!("Failed to remove tombstone {:?}: {}", tp, e); } }
                                 }
                             },
-                            Err(e) => println!("Failed to remove fully-compacted segment {}: {}", p.to_string_lossy(), e),
+                            Err(e) => error!("Failed to remove fully-compacted segment {}: {}", p.to_string_lossy(), e),
                         }
                     }
                 }
@@ -718,7 +719,7 @@ impl Buffers {
         let inflight_key = (seg_path.to_string_lossy().to_string(), idx.start, idx.len);
         if COMPACTION_IN_FLIGHT.insert(inflight_key.clone(), ()).is_some() {
             if Config::debug_enabled() || Config::log_wal_enabled() {
-                println!("Compactor: skip duplicate in-flight seg={} start={} len={}", seg_path.to_string_lossy(), idx.start, idx.len);
+                debug!("Compactor: skip duplicate in-flight seg={} start={} len={}", seg_path.to_string_lossy(), idx.start, idx.len);
             }
             crate::metrics::counters::dec_wal_compactions_in_flight();
             return Ok(false);
@@ -732,19 +733,19 @@ impl Buffers {
         }
         let _guard = InflightGuard(inflight_key.clone());
         if Config::debug_enabled() || Config::log_wal_enabled() {
-            println!("Compactor: start ns={} part={} time={} shard={} seg={} start={} len={} bytes={} out_key={}",
+            debug!("Compactor: start ns={} part={} time={} shard={} seg={} start={} len={} bytes={} out_key={}",
                 namespace, partition, time.unwrap_or(0), shard, seg_path.to_string_lossy(), idx.start, idx.len, idx.bytes, out_key);
         }
         // Validate and clamp partition bounds to avoid corrupt reads
         let file_len = OpenOptions::new().read(true).open(&seg_path)?.metadata()?.len();
         if idx.start >= file_len {
-            println!("Compactor: partition start beyond file end for {} start={} len={} file_len={}", seg_path.to_string_lossy(), idx.start, idx.len, file_len);
+            error!("Compactor: partition start beyond file end for {} start={} len={} file_len={}", seg_path.to_string_lossy(), idx.start, idx.len, file_len);
             return Ok(false);
         }
         let safe_len = std::cmp::min(idx.len, file_len.saturating_sub(idx.start));
         if Config::debug_enabled() || Config::log_wal_enabled() {
             let end_hint = idx.start.saturating_add(safe_len);
-            println!(
+            debug!(
                 "Compactor: bounds seg={} file_len={} start={} idx_len={} safe_len={} end_hint={}",
                 seg_path.to_string_lossy(), file_len, idx.start, idx.len, safe_len, end_hint
             );
@@ -877,7 +878,7 @@ impl Buffers {
         let batch_stream: SendableRecordBatchStream = Box::pin(SegRecordBatchStream { schema: schema.clone(), rx });
         if let Err(e) = shared_output.sync(batch_stream, out_key.clone()).await {
             let err_str = e.to_string();
-            println!("Compactor: compact failed seg={} key={:?} out_key={} error={}", seg_path.to_string_lossy(), idx.key, out_key, err_str);
+            error!("Compactor: compact failed seg={} key={:?} out_key={} error={}", seg_path.to_string_lossy(), idx.key, out_key, err_str);
             // Diagnostics and quarantine for truncated streams to ensure forward progress
             if err_str.contains("failed to fill whole buffer") || err_str.contains("UnexpectedEof") {
                 let file_len2 = OpenOptions::new().read(true).open(&seg_path)?.metadata()?.len();
@@ -891,10 +892,10 @@ impl Buffers {
                 let qseg = qdir.join(format!("{}.{}.seg", base, ts));
                 let qdiag = qdir.join(format!("{}.{}.diag.txt", base, ts));
                 if !qseg.exists() {
-                    if let Err(e) = fs::copy(&seg_path, &qseg) { println!("Compactor: quarantine copy failed seg={} to={} err={}", seg_path.to_string_lossy(), qseg.to_string_lossy(), e); }
+                    if let Err(e) = fs::copy(&seg_path, &qseg) { error!("Compactor: quarantine copy failed seg={} to={} err={}", seg_path.to_string_lossy(), qseg.to_string_lossy(), e); }
                 }
-                if let Err(e) = fs::write(&qdiag, diag.as_bytes()) { println!("Compactor: quarantine diag write failed path={} err={}", qdiag.to_string_lossy(), e); }
-                println!("Compactor: truncated-stream quarantine seg={} qseg={} qdiag={}", seg_path.to_string_lossy(), qseg.to_string_lossy(), qdiag.to_string_lossy());
+                if let Err(e) = fs::write(&qdiag, diag.as_bytes()) { error!("Compactor: quarantine diag write failed path={} err={}", qdiag.to_string_lossy(), e); }
+                warn!("Compactor: truncated-stream quarantine seg={} qseg={} qdiag={}", seg_path.to_string_lossy(), qseg.to_string_lossy(), qdiag.to_string_lossy());
                 crate::metrics::counters::add_quarantined_partitions(1);
             }
             return Ok(false);
@@ -908,8 +909,8 @@ impl Buffers {
         // Write tombstone to avoid reprocessing this partition from this segment
         let tdir = Self::tombstone_dir(); let _ = fs::create_dir_all(&tdir);
         let tpath = Self::partition_tombstone_path(seg_path, &idx.key);
-        if let Err(e) = fs::write(&tpath, b"") { println!("Failed to write tombstone {:?}: {}", tpath, e); }
-        // println!("Compactor: compact success seg={} key={:?} out_key={} tombstone={}", seg_path.to_string_lossy(), idx.key, out_key, tpath.to_string_lossy());
+        if let Err(e) = fs::write(&tpath, b"") { error!("Failed to write tombstone {:?}: {}", tpath, e); }
+        // debug!("Compactor: compact success seg={} key={:?} out_key={} tombstone={}", seg_path.to_string_lossy(), idx.key, out_key, tpath.to_string_lossy());
 
         // If all partitions in this segment are tombstoned, delete the .seg file
         let segf = SegmentFile { path: seg_path.clone() };
@@ -920,20 +921,20 @@ impl Buffers {
                 if remaining == 0 {
                     // remove segment file
                     if let Err(e) = fs::remove_file(seg_path) {
-                        println!("Failed to remove fully-compacted segment {}: {}", seg_path.to_string_lossy(), e);
+                        warn!("Failed to remove fully-compacted segment {}: {}", seg_path.to_string_lossy(), e);
                     } else {
                         // println!("Removed fully-compacted segment {}", seg_path.to_string_lossy());
                         // remove all tombstones for this segment
                         for part in m.index.iter() {
                             let tp = Self::partition_tombstone_path(seg_path, &part.key);
-                            if tp.exists() { if let Err(e) = fs::remove_file(&tp) { println!("Failed to remove tombstone {:?}: {}", tp, e); } }
+                            if tp.exists() { if let Err(e) = fs::remove_file(&tp) { warn!("Failed to remove tombstone {:?}: {}", tp, e); } }
                         }
                     }
                 }
             }
             Err(e) => {
                 if e.kind() != io::ErrorKind::NotFound {
-                    println!("Failed to re-read segment metadata for cleanup {}: {}", seg_path.to_string_lossy(), e);
+                    warn!("Failed to re-read segment metadata for cleanup {}: {}", seg_path.to_string_lossy(), e);
                 }
             }
         }
@@ -947,7 +948,7 @@ pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
     let mut count = 0u64;
     let mut bytes = 0u64;
 
-    println!("Indexing commited WAL Segments");
+    info!("Indexing commited WAL Segments");
 
     // Scan the on-disk segment directory for .seg files
     let seg_dir = PathBuf::from(format!("{}/segment_buffer/segs", Config::get_data_dir()));
@@ -991,14 +992,14 @@ pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
                     committed_offsets = committed_offsets.saturating_add(1);
                 }
             }
-            Err(e) => { println!("Failed to read segment metadata {}: {}", file_path.to_string_lossy(), e); }
+            Err(e) => { warn!("Failed to read segment metadata {}: {}", file_path.to_string_lossy(), e); }
         }
     }
 
     let elapsed = started.elapsed().as_secs_f64();
-    println!("Indexed {} of {} Segment files for {} namespaces", count, seg_files_count, namespaces.len());
-    if elapsed > 0.0 { let rate = (count as f64 / elapsed) as u64; println!("WAL indexing took {:.2}s ~ {} files/s, {} total bytes", elapsed, rate, Helpers::human_readable_size(bytes as u64)); }
-    println!("Committed {} offsets from .seg files", committed_offsets);
+    info!("Indexed {} of {} Segment files for {} namespaces", count, seg_files_count, namespaces.len());
+    if elapsed > 0.0 { let rate = (count as f64 / elapsed) as u64; info!("WAL indexing took {:.2}s ~ {} files/s, {} total bytes", elapsed, rate, Helpers::human_readable_size(bytes as u64)); }
+    info!("Committed {} offsets from .seg files", committed_offsets);
 
     let mut wal_index_metrics: WalIndexMetrics = WalIndexMetrics { metrics: Vec::new() };
     for ((ns, _part, _time, _shard), file_count) in namespace_partition_files.iter() {
@@ -1058,7 +1059,7 @@ pub fn wal_recover_s3(offsets_db: Arc<Offsets>) -> io::Result<()> {
     rt.block_on(async {
         let u = match url::Url::parse(&prefix_url) {
             Ok(u) => u,
-            Err(e) => { println!("wal_recover_s3: bad prefix {}: {}", prefix_url, e); return; }
+            Err(e) => { error!("wal_recover_s3: bad prefix {}: {}", prefix_url, e); return; }
         };
         if u.scheme() != "s3" { return; }
         let bucket = match u.host_str() { Some(b) => b.to_string(), None => return };
@@ -1083,7 +1084,7 @@ pub fn wal_recover_s3(offsets_db: Arc<Offsets>) -> io::Result<()> {
                     }
                     if resp.is_truncated.unwrap_or(false) { token = resp.next_continuation_token; } else { break; }
                 }
-                Err(e) => { println!("wal_recover_s3: list error: {}", e); break; }
+                Err(e) => { error!("wal_recover_s3: list error: {}", e); break; }
             }
         }
         let mut processed: u64 = 0;
@@ -1109,15 +1110,15 @@ pub fn wal_recover_s3(offsets_db: Arc<Offsets>) -> io::Result<()> {
                                 processed = processed.saturating_add(1);
                             }
                         }
-                        Err(e) => { println!("wal_recover_s3: get body error {}: {}", seg_key, e); }
+                        Err(e) => { error!("wal_recover_s3: get body error {}: {}", seg_key, e); }
                     }
                 }
-                Err(e) => { println!("wal_recover_s3: get error {}: {}", seg_key, e); }
+                Err(e) => { error!("wal_recover_s3: get error {}: {}", seg_key, e); }
             }
         }
         if processed > 0 {
-            println!("Indexed {} S3 WAL segments under {}", processed, prefix_url);
-            println!("Committed {} offsets from S3 WAL (.seg with commit)", committed_offsets);
+            info!("Indexed {} S3 WAL segments under {}", processed, prefix_url);
+            info!("Committed {} offsets from S3 WAL (.seg with commit)", committed_offsets);
             let mut w = METRICS.write();
             w.wal_index_namespaces_total = namespaces.len() as u64;
             w.wal_index_files_total = processed as u64;
@@ -1356,7 +1357,7 @@ pub async fn flush_all_segments(offsets_db: Arc<Offsets>) -> Result<(), ArrowErr
         let store = crate::buffer::wal_store::WalStoreFactory::for_batches(&snapshot_batches);
         let (seg_bytes, seg_rows, parts_count, sha256) = match store.write_snapshot_and_commit(&snapshot_id, &snapshot_offsets, &snapshot_batches, &partitions_meta) {
             Ok(t) => t,
-            Err(e) => { println!("Segment write failed (drain rotated): id={} err={}", snapshot_id, e); continue; }
+            Err(e) => { error!("Segment write failed (drain rotated): id={} err={}", snapshot_id, e); continue; }
         };
             uploaded_bytes += seg_bytes;
             rows += seg_rows;
@@ -1396,7 +1397,7 @@ pub async fn flush_all_segments(offsets_db: Arc<Offsets>) -> Result<(), ArrowErr
         let store = crate::buffer::wal_store::WalStoreFactory::for_batches(&to_flush_batches);
         let (seg_bytes, seg_rows, parts_count, sha256) = match store.write_snapshot_and_commit(&snapshot_id, &to_flush_offsets, &to_flush_batches, &partitions_meta) {
             Ok(t) => t,
-            Err(e) => { println!("Segment commit failed (live flush): id={} err={}", snapshot_id, e); (0, 0, 0, [0u8;32]) }
+            Err(e) => { error!("Segment commit failed (live flush): id={} err={}", snapshot_id, e); (0, 0, 0, [0u8;32]) }
         };
         uploaded_bytes += seg_bytes;
         rows += seg_rows;
@@ -1496,9 +1497,9 @@ impl WalPartition {
 
     pub fn check_wal_rotate(&self, force_compact: bool) -> bool {
         if force_compact || self.is_file_size_exceeded() || self.is_file_time_exceeded() {
-            // println!("Compacting WAL: {} Bytes: {}, Segment Files: {}", self.namespace, self.bytes, self.files.len());
+            // debug!("Compacting WAL: {} Bytes: {}, Segment Files: {}", self.namespace, self.bytes, self.files.len());
             let elapsed = SystemTime::now().duration_since(self.updated_at).unwrap().as_secs();
-            println!(
+            info!(
                 "Compacting WAL partition Namespace: {}, Partition: {}, Time: {}, of Bytes: {}, Elapsed Secs: {}, Queue Len: {}",
                 self.namespace,
                 self.partition,
@@ -1544,7 +1545,7 @@ impl WalPartition {
         // Choose a slice from the front of the queue up to byte threshold
         let mut segment_files: Vec<WalEntry> = Vec::new();
         if self.queue.is_empty() {
-                println!("No WAL files to compact for partition: {} {}", self.namespace, self.partition);
+                info!("No WAL files to compact for partition: {} {}", self.namespace, self.partition);
                 return wal_compacted_bytes_total;
             }
         let mut acc_bytes: u64 = 0;
@@ -1561,7 +1562,7 @@ impl WalPartition {
             // Keep returning an error if none found
             match schema_opt {
                 Some(s) => s,
-                None => { println!("Failed to read schema from local WALs for namespace: {}", self.namespace); return wal_compacted_bytes_total; }
+                None => { error!("Failed to read schema from local WALs for namespace: {}", self.namespace); return wal_compacted_bytes_total; }
             }
         };
 
@@ -1582,7 +1583,7 @@ impl WalPartition {
         let batch_mismatch_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let batch_error_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
         if Config::debug_enabled() || Config::log_wal_enabled() {
-            println!(
+            debug!(
                 "Compactor: start ns={} part={} shard={} time={} files={} out_key={}",
                 self.namespace, self.partition, self.shard, self.time.unwrap_or(0), files.len(), output_file_name
             );
@@ -1596,22 +1597,22 @@ impl WalPartition {
                             Ok(file) => {
                                 let mut reader = io::BufReader::new(file);
                             let mut offset_size = [0u8; 8];
-                                if let Err(e) = reader.read_exact(&mut offset_size) { println!("ERROR: Failed to read segment header for {}: {}", path.to_string_lossy(), e); continue; }
+                                if let Err(e) = reader.read_exact(&mut offset_size) { error!("ERROR: Failed to read segment header for {}: {}", path.to_string_lossy(), e); continue; }
                             let skip = u64::from_le_bytes(offset_size);
-                                if let Err(e) = reader.seek(io::SeekFrom::Current(skip as i64)) { println!("ERROR: Failed to seek segment stream {}: {}", path.to_string_lossy(), e); continue; }
+                                if let Err(e) = reader.seek(io::SeekFrom::Current(skip as i64)) { error!("ERROR: Failed to seek segment stream {}: {}", path.to_string_lossy(), e); continue; }
                                 match StreamReader::try_new(reader, None) {
                                     Ok(sr) => {
                                         for item in sr { match item { Ok(batch) => {
-                                            if !WalPartition::schemas_equivalent(&batch.schema(), &schema_clone) { println!("ERROR: Skipping WAL batch due to schema mismatch for ns={} part={} time={}", namespace, partition, time_val.unwrap_or(0)); batch_mismatch_counter.fetch_add(1, AtomicOrdering::Relaxed); continue; }
+                                            if !WalPartition::schemas_equivalent(&batch.schema(), &schema_clone) { error!("ERROR: Skipping WAL batch due to schema mismatch for ns={} part={} time={}", namespace, partition, time_val.unwrap_or(0)); batch_mismatch_counter.fetch_add(1, AtomicOrdering::Relaxed); continue; }
                                             row_counter_task.fetch_add(batch.num_rows() as u64, AtomicOrdering::Relaxed);
                                             batch_ok_counter.fetch_add(1, AtomicOrdering::Relaxed);
                                             if tx.send(Ok(batch)).await.is_err() { break; }
                                         }, Err(e) => { batch_error_counter.fetch_add(1, AtomicOrdering::Relaxed); let _ = tx.send(Err(DataFusionError::ArrowError(e, None))).await; break; } } }
                                     }
-                                    Err(e) => { println!("Failed to init Arrow stream for local segment {}: {}", path.to_string_lossy(), e); }
+                                    Err(e) => { error!("Failed to init Arrow stream for local segment {}: {}", path.to_string_lossy(), e); }
                                 }
                             }
-                            Err(e) => { println!("Failed to open segment file {}: {}", path.to_string_lossy(), e); }
+                            Err(e) => { error!("Failed to open segment file {}: {}", path.to_string_lossy(), e); }
                         }
                     }
                 }
@@ -1665,7 +1666,7 @@ impl WalPartition {
                     for wal_entry in segment_files.iter() {
                     let WalEntry::Segment { path, .. } = wal_entry;
                         let tombstone_path = format!("{}/ingest_buffer/done/{}.tombstone", data_dir, Helpers::random_str(32));
-                    if let Err(e) = fs::rename(&path, tombstone_path) { println!("Failed to tombstone segment file: {}, Error: {}", path.to_string_lossy(), e); }
+                    if let Err(e) = fs::rename(&path, tombstone_path) { error!("Failed to tombstone segment file: {}, Error: {}", path.to_string_lossy(), e); }
                     }
                     self.prune_tombstone_wals();
                 // Remove exactly the entries we compacted from the front of the queue
@@ -1677,7 +1678,7 @@ impl WalPartition {
             },
             Err(e) => {
                 let output_plugin_name = Config::get_pipeline_output_plugin_name();
-                println!("Failed to sync WAL partition to output plugin: {}, Namespace {}, Partition {}, Error {}", output_plugin_name, self.namespace, self.partition, e);
+                error!("Failed to sync WAL partition to output plugin: {}, Namespace {}, Partition {}, Error {}", output_plugin_name, self.namespace, self.partition, e);
             }
         }
 

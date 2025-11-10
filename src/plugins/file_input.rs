@@ -26,6 +26,7 @@ use futures::stream::StreamExt;
 
 use serde_derive::Deserialize;
 use crate::plugins::DataOutputPlugin;
+use tracing::{debug, error};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSourceLocalFilePluginConfig {
@@ -163,7 +164,7 @@ impl DataSourceLocalFilePlugin {
                         if Some(true) != has_offsets {
                             let file = match File::open(&path) {
                                 Err(why) => {
-                                    println!("couldn't open {}: {}", path.display(), why);
+                                    error!("couldn't open {}: {}", path.display(), why);
                                     continue;
                                 },
                                 Ok(file) => file,
@@ -394,12 +395,12 @@ impl DataSourceLocalFilePlugin {
                             }
                         }
                     },
-                    Err(e) => println!("{:?}", e),
+                    Err(e) => error!("{:?}", e),
                 }
             };
 
             if !current_batch.is_empty() {
-                println!("Sending last batch {:?}", current_batch);
+                debug!("Sending last batch {:?}", current_batch);
                 tx.unbounded_send(vec![current_batch.clone()]).unwrap();
                 current_batch.clear();
                 _batch_bytes = 0;

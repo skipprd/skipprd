@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::{RwLock};
 use crate::METRICS;
+use tracing::{error, info};
 
 #[derive(Debug, Clone, Serialize, Hash, PartialEq, Eq)]
 pub enum LogLevel {
@@ -65,13 +66,13 @@ impl Logger {
         if !self.logs.is_empty() {
             match self.log_api(self.logs.clone(), None).await {
                 Ok(_) => {
-                    println!("Successfully sent logs to API");
+                    info!("Successfully sent logs to API");
 
                     self.logs.clear();
                     Ok(())
                 }
                 Err(err) => {
-                    println!("Error sending logs to API: {:?}", err);
+                    error!("Error sending logs to API: {:?}", err);
                     Err(err)
                 }
             }
@@ -119,10 +120,10 @@ impl Logger {
 
         match s3::put_json(&s3_key, &data).await {
             Ok(_) => {
-                println!("Uploaded logs to S3: {}", s3_key);
+                info!("Uploaded logs to S3: {}", s3_key);
             }
             Err(err) => {
-                println!("Failed to upload logs to S3: {:?}", err);
+                error!("Failed to upload logs to S3: {:?}", err);
             }
         }
         
