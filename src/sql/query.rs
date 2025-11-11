@@ -73,11 +73,11 @@ pub async fn register_s3_object_store(ctx: &SessionContext, s3_loc: &str) {
                 }
             } else { None };
 
-            println!("Credentials for S3 object store: {}", if creds_opt.is_some() { "found" } else { "not found, using anonymous or role-based access" });
-            println!("Credentials Provider: {:?}", conf.credentials_provider());
-            println!("Region: {:?}", region_opt);
-            println!("Access Key ID: {:?}", creds_opt.as_ref().map(|c| c.access_key_id()));
-            println!("Session Token: {:?}", creds_opt.as_ref().and_then(|c| c.session_token()));
+            // println!("Credentials for S3 object store: {}", if creds_opt.is_some() { "found" } else { "not found, using anonymous or role-based access" });
+            // println!("Credentials Provider: {:?}", conf.credentials_provider());
+            // println!("Region: {:?}", region_opt);
+            // println!("Access Key ID: {:?}", creds_opt.as_ref().map(|c| c.access_key_id()));
+            // println!("Session Token: {:?}", creds_opt.as_ref().and_then(|c| c.session_token()));
 
             let mut b = AmazonS3Builder::new().with_bucket_name(bucket);
             if let Some(region) = region_opt { b = b.with_region(region); }

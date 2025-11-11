@@ -434,57 +434,8 @@ impl Ingest {
             ensure_stats_worker();
         }
 
-        // Upload concurrency override/cap
-        if let Ok(v) = Config::getenv("UPLOAD_CONCURRENCY", "").parse::<usize>() { if v > 0 {
-            crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.store(v, std::sync::atomic::Ordering::Relaxed);
-            if Config::log_wal_enabled() {
-                info!("tune: upload_concurrency set by env={}", v);
-            }
-        }} else if is_ci {
-            let cap = 8usize;
-            let cur = crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.load(std::sync::atomic::Ordering::Relaxed);
-            if cur > cap {
-                crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.store(cap, std::sync::atomic::Ordering::Relaxed);
-                if Config::log_wal_enabled() {
-                    info!("tune: upload_concurrency capped for CI to {}", cap);
-                }
-            }
-        }
-
-        // WAL compaction concurrency override/cap
-        if let Ok(v) = Config::getenv("WAL_COMPACTION_CONCURRENCY", "").parse::<usize>() { if v > 0 {
-            crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.store(v, std::sync::atomic::Ordering::Relaxed);
-            if Config::log_wal_enabled() {
-                info!("tune: wal_compaction set by env={}", v);
-            }
-        }} else if is_ci {
-            let cap = 4usize;
-            let cur = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.load(std::sync::atomic::Ordering::Relaxed);
-            if cur > cap {
-                crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.store(cap, std::sync::atomic::Ordering::Relaxed);
-                if Config::log_wal_enabled() {
-                    info!("tune: wal_compaction capped for CI to {}", cap);
-                }
-            }
-        }
-
-        // S3 download concurrency override/cap (global target). Per-plugin may still clamp via memory semaphore
-        if let Ok(v) = Config::getenv("S3_DOWNLOAD_CONCURRENCY", "").parse::<usize>() { if v > 0 {
-            let clamped = v.clamp(8, 512);
-            crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.store(clamped, std::sync::atomic::Ordering::Relaxed);
-            if Config::log_wal_enabled() {
-                info!("tune: s3_download set by env={} (clamped)", clamped);
-            }
-        }} else if is_ci {
-            let cap = 128usize;
-            let cur = crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.load(std::sync::atomic::Ordering::Relaxed);
-            if cur > cap {
-                crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.store(cap, std::sync::atomic::Ordering::Relaxed);
-                if Config::log_wal_enabled() {
-                    info!("tune: s3_download capped for CI to {}", cap);
-                }
-            }
-        }
+        // Apply one-time environment overrides and CI caps via tuner
+        crate::ingest::tuner::apply_env_caps();
 
         let (tx, rx) = channel();
         let tx_clone = tx.clone();
@@ -734,96 +685,7 @@ impl Ingest {
         (total_bytes as f64 / duration) as u64
     }
 
-    /**
-     * Optimise the IngestTask chunk size to keep all CPU cores busy and ensure we're queueing the right amount of tasks.
-     * Reduce the chunk size if we have lest active_tasks than cores or the queue isn't full.
-     * Increase the chunk size if we have more active_tasks than cores and a full queue.
-     */
-    fn get_optmial_chunk_size(&self) {
-
-        let now= Instant::now();
-
-        let active_cores = self.active_count.load(Ordering::Acquire);
-        let queue_length = self.queue_length.load(Ordering::Acquire);
-        let current_throughput = self.get_current_throughput();
-        let current_chunk_size = self.optimal_chunk_size.load(Ordering::Acquire);
-        let optimal_chunk_size_min = 4_000_000;
-
-        // Update throughput history
-        {
-            let mut history = self.throughput_history.write().unwrap();
-            history.push_back((now, current_throughput));
-            
-            // Keep only last 10 measurements
-            while history.len() > 10 {
-                history.pop_front();
-            }
-        }
-
-        // Calculate throughput trend
-        let throughput_trend = {
-            let history = self.throughput_history.read().unwrap();
-            if history.len() < 2 {
-                0.0
-            } else {
-                let oldest = history.front().unwrap();
-                let newest = history.back().unwrap();
-                let time_diff = newest.0.duration_since(oldest.0).as_secs_f64();
-                if time_diff == 0.0 {
-                    0.0
-                } else {
-                    (newest.1 as f64 - oldest.1 as f64) / time_diff
-                }
-            }
-        };
-
-        let mut adjustment_factor = 1.0; // Default to no change
-
-        // Queue occupancy guidance: shrink when occupancy is low and CPUs are underutilized;
-        // grow when CPUs are saturated and occupancy is high.
-        let occupancy = if self.max_queue_length == 0 { 0.0 } else { (queue_length as f32) / (self.max_queue_length as f32) };
-        if active_cores >= self.num_cpus && occupancy >= 0.9 {
-            // High pressure and full CPU: nudge chunk size up to reduce per-task overhead
-            adjustment_factor = 1.1;
-        } else if active_cores < self.num_cpus && occupancy < 0.8 {
-            // Plenty of headroom and spare CPU: nudge chunk size down to increase task parallelism
-            adjustment_factor = 0.9;
-        }
-
-
-        let mut optimal_chunk_size = (current_chunk_size as f64 * adjustment_factor) as usize;
-
-        if optimal_chunk_size < optimal_chunk_size_min {
-            optimal_chunk_size = optimal_chunk_size_min;
-        }
-        // Dynamically clamp by available memory in addition to the baseline cap
-        let denom = (self.num_cpus * 2).max(2);
-        if let Some(avail_mib) = Self::read_mem_available_mib() {
-            // Use at most 20% of available for in-flight payloads; leave headroom for Arrow/WAL
-            let budget_bytes = ((avail_mib as usize).saturating_mul(1024 * 1024)) / 5;
-            let dyn_cap = (budget_bytes / denom).max(optimal_chunk_size_min);
-            let dyn_cap = std::cmp::min(dyn_cap, self.max_chunk_size);
-            if optimal_chunk_size > dyn_cap { optimal_chunk_size = dyn_cap; }
-        } else {
-            // Fallback to baseline cap
-            if optimal_chunk_size > self.max_chunk_size { optimal_chunk_size = self.max_chunk_size; }
-        }
-
-        if current_chunk_size != optimal_chunk_size {
-            info!("Optimising chunk size: active_cores: {}, active_tasks: {}, throughput: {}/s, trend: {:.2}, optimal_chunk_size: {} from {}, adjustment_factor: {}",
-                     active_cores,
-                     queue_length,
-                     Helpers::human_readable_size(current_throughput),
-                     throughput_trend,
-                     Helpers::human_readable_size(optimal_chunk_size as u64),
-                     Helpers::human_readable_size(current_chunk_size as u64),
-                     adjustment_factor
-            );
-            
-            self.optimal_chunk_size.store(optimal_chunk_size, Ordering::SeqCst);
-            // *self.last_adjustment.write().unwrap() = now;
-        }
-    }
+    // get_optmial_chunk_size removed: logic moved to tuner and applied inline where invoked
 
     /// Add a file to the ingestion queue
     /// 
@@ -968,7 +830,40 @@ impl Ingest {
                 }
             }
             
-            self.get_optmial_chunk_size();
+            // Chunk-size tuning (delegated to tuner)
+            {
+                let active_cores = self.active_count.load(Ordering::Acquire);
+                let queue_length = self.queue_length.load(Ordering::Acquire);
+                let current_throughput = self.get_current_throughput();
+                let current_chunk_size = self.optimal_chunk_size.load(Ordering::Acquire);
+                let (optimal_chunk_size, throughput_trend) = {
+                    let mut history = self.throughput_history.write().unwrap();
+                    crate::ingest::tuner::tune_chunk_size(
+                        current_chunk_size,
+                        active_cores,
+                        queue_length,
+                        self.num_cpus,
+                        self.max_queue_length,
+                        current_throughput,
+                        self.max_chunk_size,
+                        Self::read_mem_available_mib().map(|v| v as usize),
+                        &mut history,
+                    )
+                };
+                if current_chunk_size != optimal_chunk_size {
+                    info!(
+                        "Optimising chunk size: active_cores: {}, active_tasks: {}, throughput: {}/s, trend: {:.2}, optimal_chunk_size: {} from {}, adjustment_factor: {}",
+                        active_cores,
+                        queue_length,
+                        Helpers::human_readable_size(current_throughput),
+                        throughput_trend,
+                        Helpers::human_readable_size(optimal_chunk_size as u64),
+                        Helpers::human_readable_size(current_chunk_size as u64),
+                        format!("{:.2}", (optimal_chunk_size as f64) / (current_chunk_size as f64))
+                    );
+                    self.optimal_chunk_size.store(optimal_chunk_size, Ordering::SeqCst);
+                }
+            }
 
             // Self-tune concurrency targets based on queue pressure and active cores
             {
@@ -977,54 +872,8 @@ impl Ingest {
                 let capacity = self.num_cpus;
                 let pressure = (queued as f64) / ((self.max_queue_length as f64).max(1.0));
 
-                // Respect CI caps or env-defined maxima to avoid runaway growth
-                let is_ci = {
-                    let ga = Config::getenv("GITHUB_ACTIONS", "");
-                    let ci = Config::getenv("CI", "");
-                    ga.eq_ignore_ascii_case("true") || ci == "1" || ci.eq_ignore_ascii_case("true")
-                };
-                let max_upload = Config::getenv("UPLOAD_CONCURRENCY_MAX", "")
-                    .parse::<usize>().ok().filter(|v| *v > 0)
-                    .unwrap_or_else(|| if is_ci { 8 } else { 32 });
-                let max_wal = Config::getenv("WAL_COMPACTION_CONCURRENCY_MAX", "")
-                    .parse::<usize>().ok().filter(|v| *v > 0)
-                    .unwrap_or_else(|| if is_ci { 4 } else { 16 });
-                let max_dl = Config::getenv("S3_DOWNLOAD_CONCURRENCY_MAX", "")
-                    .parse::<usize>().ok().filter(|v| *v > 0)
-                    .unwrap_or_else(|| if is_ci { 128 } else { 256 });
-
-                // Upload tuning: grow when high pressure and full CPU; shrink when low pressure
-                let upload_cur = crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.load(Ordering::Relaxed);
-                let upload_next = if active >= capacity && pressure > 0.8 { upload_cur.saturating_add(1).min(max_upload) }
-                    else if pressure < 0.4 { upload_cur.saturating_sub(1).max(4) } else { upload_cur };
-                if upload_next != upload_cur {
-                    crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.store(upload_next, Ordering::Relaxed);
-                    if Config::log_wal_enabled() {
-                        debug!("tune: upload_concurrency {} -> {} (active={}/{} queue={} pressure={:.2})", upload_cur, upload_next, active, capacity, queued, pressure);
-                    }
-                }
-
-                // WAL compaction tuning
-                let wal_cur = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.load(Ordering::Relaxed);
-                let wal_next = if active >= capacity && pressure > 0.8 { wal_cur.saturating_add(1).min(max_wal) }
-                    else if pressure < 0.4 { wal_cur.saturating_sub(1).max(2) } else { wal_cur };
-                if wal_next != wal_cur {
-                    crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.store(wal_next, Ordering::Relaxed);
-                    if Config::log_wal_enabled() {
-                        debug!("tune: wal_compaction {} -> {} (active={}/{} queue={} pressure={:.2})", wal_cur, wal_next, active, capacity, queued, pressure);
-                    }
-                }
-
-                // S3 download tuning (upper bound; memory semaphore still applies)
-                let dl_cur = crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.load(Ordering::Relaxed);
-                let dl_next = if active < capacity && pressure < 0.2 { dl_cur.saturating_add(4).min(max_dl) }
-                    else if pressure > 0.8 { dl_cur.saturating_sub(16).max(64) } else { dl_cur };
-                if dl_next != dl_cur {
-                    crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.store(dl_next, Ordering::Relaxed);
-                    if Config::log_wal_enabled() {
-                        debug!("tune: s3_download {} -> {} (active={}/{} queue={} pressure={:.2})", dl_cur, dl_next, active, capacity, queued, pressure);
-                    }
-                }
+                // Delegate periodic tuning to tuner
+                crate::ingest::tuner::tick(active, capacity, queued, pressure);
             }
 
             // Get current metrics for logging

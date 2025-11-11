@@ -10,6 +10,7 @@ use sha2::{Sha256, Digest};
 use url::Url;
 use crate::buffer::segment_file::{PartitionKey, SegmentFile};
 use rand::{thread_rng, Rng};
+use crate::metrics::counters as metrics_counters;
 
 const MPU_PART_SIZE: usize = 8 * 1024 * 1024;
 
@@ -42,7 +43,9 @@ impl S3MultipartWriter {
                     Ok(v) => break v,
                     Err(e) => {
                         attempts = attempts.saturating_add(1);
+                        metrics_counters::add_s3_wal_retry(1);
                         if attempts >= 5 {
+                            metrics_counters::add_s3_wal_error(1);
                             return Err(io::Error::new(io::ErrorKind::Other, format!("s3 mpu create: {}", e)));
                         }
                         let base = 200u64.saturating_mul(1u64 << attempts.min(10));
@@ -85,7 +88,9 @@ impl S3MultipartWriter {
                     Ok(v) => break v,
                     Err(e) => {
                         attempts = attempts.saturating_add(1);
+                        metrics_counters::add_s3_wal_retry(1);
                         if attempts >= 5 {
+                            metrics_counters::add_s3_wal_error(1);
                             return Err(io::Error::new(io::ErrorKind::Other, format!("s3 upload part {}: {}", pn, e)));
                         }
                         let base = 200u64.saturating_mul(1u64 << attempts.min(10));
@@ -143,7 +148,9 @@ impl S3MultipartWriter {
                 Ok(_) => break,
                 Err(e) => {
                     attempts = attempts.saturating_add(1);
+                    metrics_counters::add_s3_wal_retry(1);
                     if attempts >= 5 {
+                        metrics_counters::add_s3_wal_error(1);
                         return Err(io::Error::new(io::ErrorKind::Other, format!("s3 mpu complete: {}", e)));
                     }
                     let base = 200u64.saturating_mul(1u64 << attempts.min(10));
@@ -256,7 +263,9 @@ impl SegmentObject {
                     Ok(_) => break,
                     Err(e) => {
                         attempts = attempts.saturating_add(1);
+                        metrics_counters::add_s3_wal_retry(1);
                         if attempts >= 5 {
+                            metrics_counters::add_s3_wal_error(1);
                             return Err(io::Error::new(io::ErrorKind::Other, format!("s3 put commit: {}", e)));
                         }
                         let base = 200u64.saturating_mul(1u64 << attempts.min(10));

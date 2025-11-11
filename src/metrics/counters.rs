@@ -34,6 +34,12 @@ pub static UPLOAD_CONCURRENCY_TARGET: Lazy<std::sync::atomic::AtomicUsize> = Laz
 pub static WAL_COMPACTION_CONCURRENCY_TARGET: Lazy<std::sync::atomic::AtomicUsize> = Lazy::new(|| std::sync::atomic::AtomicUsize::new(16));
 pub static S3_DOWNLOAD_CONCURRENCY_TARGET: Lazy<std::sync::atomic::AtomicUsize> = Lazy::new(|| std::sync::atomic::AtomicUsize::new(256));
 
+// WAL S3 error telemetry
+pub static S3_WAL_RETRIES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static S3_WAL_ERRORS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+// Exponential moving average of retries per tick, scaled by 100 (for decimals)
+pub static S3_WAL_RETRY_EMA_X100: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+
 // Upload telemetry
 pub static UPLOADS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static UPLOAD_LATENCY_NS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
@@ -103,6 +109,13 @@ pub fn dec_uploads_in_flight() { UPLOADS_IN_FLIGHT.fetch_sub(1, Ordering::Relaxe
 pub fn set_active_threads(n: usize) { ACTIVE_THREADS.store(n, Ordering::Relaxed); }
 #[inline]
 pub fn set_queue_length(n: usize) { QUEUE_LENGTH.store(n, Ordering::Relaxed); }
+
+#[inline]
+pub fn add_s3_wal_retry(n: u64) { S3_WAL_RETRIES_TOTAL.fetch_add(n, Ordering::Relaxed); }
+#[inline]
+pub fn add_s3_wal_error(n: u64) { S3_WAL_ERRORS_TOTAL.fetch_add(n, Ordering::Relaxed); }
+#[inline]
+pub fn set_s3_wal_retry_ema_x100(v: u64) { S3_WAL_RETRY_EMA_X100.store(v, Ordering::Relaxed); }
 
 #[inline]
 pub fn add_llm_enrich_success(n: u64) { LLM_ENRICH_SUCCESS_TOTAL.fetch_add(n, Ordering::Relaxed); }
