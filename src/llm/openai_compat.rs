@@ -51,7 +51,18 @@ use serde::{Deserialize, Serialize};
 struct OaiChatMessage { role: String, content: String }
 
 #[derive(Serialize, Deserialize)]
-struct OaiChatReq { model: String, messages: Vec<OaiChatMessage>, stream: Option<bool> }
+struct OaiChatReq {
+    model: String,
+    messages: Vec<OaiChatMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f32>,
+}
 
 #[derive(Deserialize)]
 struct OaiChatRespChoiceDelta { content: Option<String> }
@@ -71,20 +82,19 @@ struct OaiEmbData { embedding: Vec<f32> }
 #[derive(Deserialize)]
 struct OaiEmbResp { data: Vec<OaiEmbData> }
 
-/// Minimal OpenAI-compatible HTTP provider stub. Returns errors until wired.
+/// Minimal OpenAI-compatible HTTP provider (blocking, no Tokio runtime required).
 pub struct OpenAICompatModel {
     cfg: LlmConfig,
-    client: reqwest::blocking::Client,
+    agent: ureq::Agent,
 }
 
 impl OpenAICompatModel {
     pub fn new(cfg: LlmConfig) -> Self {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .danger_accept_invalid_certs(true)
-            .build()
-            .unwrap();
-        Self { cfg, client }
+        let http_timeout_secs: u64 = crate::helpers::configuration::Config::getenv("LLM_HTTP_TIMEOUT_SECS", "10").parse().unwrap_or(10);
+        let agent = ureq::AgentBuilder::new()
+            .timeout(std::time::Duration::from_secs(http_timeout_secs))
+            .build();
+        Self { cfg, agent }
     }
 }
 
@@ -93,16 +103,23 @@ impl LargeLanguageModel for OpenAICompatModel {
         let base = self.cfg.base_url.clone().ok_or_else(|| "missing base_url".to_string())?;
         let model = self.cfg.chat_model.clone().ok_or_else(|| "missing chat_model".to_string())?;
         let url = format!("{}/v1/chat/completions", base.trim_end_matches('/'));
+        // latency-optimized defaults
+        let max_tokens: u32 = crate::helpers::configuration::Config::getenv("LLM_MAX_TOKENS", "256").parse().unwrap_or(256);
+        let temperature: f32 = crate::helpers::configuration::Config::getenv("LLM_TEMPERATURE", "0.2").parse().unwrap_or(0.2);
+        let top_p: f32 = crate::helpers::configuration::Config::getenv("LLM_TOP_P", "1.0").parse().unwrap_or(1.0);
         let body = OaiChatReq {
             model,
             messages: messages.iter().map(|m| OaiChatMessage { role: m.role.clone(), content: m.content.clone() }).collect(),
             stream: Some(false),
+            max_tokens: Some(max_tokens),
+            temperature: Some(temperature),
+            top_p: Some(top_p),
         };
-        let mut req = self.client.post(&url).json(&body).header("Content-Type", "application/json");
-        if let Some(k) = self.cfg.api_key.as_ref() { req = req.header("Authorization", format!("Bearer {}", k)); }
-        let resp = req.send().map_err(|e| e.to_string())?;
-        if !resp.status().is_success() { return Err(format!("http {}", resp.status())); }
-        let obj: OaiChatResp = resp.json().map_err(|e| e.to_string())?;
+        let mut req = self.agent.request("POST", &url).set("Content-Type", "application/json");
+        if let Some(k) = self.cfg.api_key.as_ref() { req = req.set("Authorization", &format!("Bearer {}", k)); }
+        let resp = req.send_json(serde_json::to_value(&body).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        if !(200..300).contains(&resp.status()) { return Err(format!("http {}", resp.status())); }
+        let obj: OaiChatResp = resp.into_json().map_err(|e| e.to_string())?;
         let mut out = String::new();
         for c in obj.choices.iter() {
             if let Some(m) = &c.message { out.push_str(&m.content); }
@@ -115,11 +132,11 @@ impl LargeLanguageModel for OpenAICompatModel {
         let model = self.cfg.embed_model.clone().ok_or_else(|| "missing embed_model".to_string())?;
         let url = format!("{}/v1/embeddings", base.trim_end_matches('/'));
         let body = OaiEmbReq { model, input: texts.to_vec() };
-        let mut req = self.client.post(&url).json(&body).header("Content-Type", "application/json");
-        if let Some(k) = self.cfg.api_key.as_ref() { req = req.header("Authorization", format!("Bearer {}", k)); }
-        let resp = req.send().map_err(|e| e.to_string())?;
-        if !resp.status().is_success() { return Err(format!("http {}", resp.status())); }
-        let obj: OaiEmbResp = resp.json().map_err(|e| e.to_string())?;
+        let mut req = self.agent.request("POST", &url).set("Content-Type", "application/json");
+        if let Some(k) = self.cfg.api_key.as_ref() { req = req.set("Authorization", &format!("Bearer {}", k)); }
+        let resp = req.send_json(serde_json::to_value(&body).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        if !(200..300).contains(&resp.status()) { return Err(format!("http {}", resp.status())); }
+        let obj: OaiEmbResp = resp.into_json().map_err(|e| e.to_string())?;
         Ok(obj.data.into_iter().map(|d| d.embedding).collect())
     }
 }

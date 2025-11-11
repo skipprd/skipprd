@@ -87,6 +87,7 @@ crossterm = { version = "0.27" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 crossbeam-channel = "0.5.15"
+ureq = { version = "2", features = ["json"] }
 
 [features]
 llama_cpp = ["llama_cpp_2"]

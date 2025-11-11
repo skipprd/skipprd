@@ -5,6 +5,12 @@ pub struct CatalogBuilder;
 impl CatalogBuilder {
     pub async fn build_and_write(namespace: &str) {
         let semantic = crate::catalog::infer::infer_semantic_model_async(namespace).await;
+        fn strip_properties_segments(name: &str) -> String {
+            name.split('.')
+                .filter(|seg| !seg.eq_ignore_ascii_case("properties"))
+                .collect::<Vec<&str>>()
+                .join(".")
+        }
         let mut catalog = crate::catalog::model::DataCatalog {
             namespace: namespace.to_string(),
             description: None,
@@ -12,7 +18,7 @@ impl CatalogBuilder {
             metrics: semantic.metrics.clone(),
             fields: semantic.fields.iter().map(|f| crate::catalog::model::CatalogField {
                 entity: String::new(),
-                name: f.name.clone(),
+                name: strip_properties_segments(&f.name),
                 description: None,
                 synonyms: None,
                 pii_sensitivity: None,

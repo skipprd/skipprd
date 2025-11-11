@@ -56,7 +56,7 @@ Respond with STRICT JSON: {{"groupField": string, "timeField": string | null, "f
 Important:
 - The schema list shows TOP-LEVEL columns only. Nested fields may be referenced using dotted paths (e.g., hardware.model) if present in the catalog fields.
 - Therefore, groupField/timeField MUST exist in the catalog fields; they MAY be dotted and not appear verbatim in the schema list, as long as their top-level segment exists in the schema.
-- Prefer non-Id categorical fields for grouping when applicable.
+- Prefer user-identifying Id fields (e.g., profile_id, user_id, userid, account_id) when the Question is about users, accounts, or DAU/MAU/retention.
 - filters may be empty.
 
 Fields (from catalog):
@@ -70,17 +70,17 @@ TopK: {}
 Output JSON:"#, fields_ctx, schema_ctx, user_q, top_k)
 }
 
-pub fn sql_generation_json(namespace: &str, user_q: &str, group_field: &str, time_field: Option<&str>, top_k: usize) -> String {
-    let tf = time_field.unwrap_or("");
+pub fn sql_generation_json(namespace: &str, user_q: &str, stats_ctx: &str, top_k: usize) -> String {
     format!(r#"You are a SQL generator.
 Write a single SELECT query to answer the Question using the provided dataset and fields.
 Rules:
 - SELECT only; no DDL/DML
 - Use dataset: {ns}
-- Group by the chosen groupField
-- Return the top {k} values ordered by descending count
-- If timeField is provided, DO NOT filter by it unless asked; it's only for optional context (like computing an earliest value in a separate step)
-- Do not reference fields that are not provided
+- Prefer simple, robust aggregations. If grouping is needed, choose an appropriate grouping column based on the Question (e.g., a user/account/profile identifier for user questions).
+- Return at most {k} rows using LIMIT {k}
+- Do not reference columns that do not exist
+- DataFusion constraints: do NOT use range() or generate_series() with timestamps. For daily/weekly results, use date_trunc('day'|'week', timeField) and GROUP BY that.
+- Prefer date_trunc-based grouping over synthetic date series. If you must generate a series, use Int64 range and cast with to_timestamp_millis(), but avoid unless explicitly asked.
 Output formatting requirements:
 - The SQL MUST be a single SELECT statement and MUST start with the word SELECT
 - No CTEs unless strictly necessary; no procedural constructs
@@ -89,15 +89,19 @@ Output formatting requirements:
 
 Inputs:
 dataset: {ns}
-groupField: {gf}
-timeField: {tf}
+Stats (approx): {stats}
+
 Question: {q}
 Output JSON:"#,
         ns = namespace,
         k = top_k,
-        gf = group_field,
-        tf = tf,
+        stats = stats_ctx,
+        // gf = group_field,
+        // tf = tf,
         q = user_q)
+
+    // groupField: {gf}
+    // timeField: {tf}
 }
 
 pub fn sql_repair(previous_json: &str, error_text: &str, schema_ctx: &str) -> String {
@@ -150,9 +154,9 @@ Also optionally choose a time field if it adds useful context. Do not invent fie
 Respond with STRICT JSON: {{"groupField": string, "timeField": string | null, "filters": string[]}}.
 Rules:
 - You MUST pick groupField from the provided candidate field names array exactly.
+- Prefer user-identifying Id fields (e.g., profile_id, user_id, userid, account_id) when the Question is about users, accounts, or DAU/MAU/retention.
 - Candidate field names may include dotted nested paths (e.g., hardware.model).
 - The schema list shows only top-level columns; dotted paths are valid if their first segment is in the schema.
-- Prefer non-Id categorical fields for grouping where relevant to the Question semantics.
 - filters may be empty.
 
 Candidate field names (JSON array):

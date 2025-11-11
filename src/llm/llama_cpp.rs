@@ -40,7 +40,8 @@ mod inner {
         fn load_map() -> serde_json::Value {
             let key = s3_key();
             match tokio::runtime::Handle::try_current() {
-                Ok(h) => h.block_on(async { crate::helpers::s3::get_json(&key).await }).ok().unwrap_or(serde_json::json!({})),
+                // Avoid blocking inside an active runtime; skip remote cache in this case
+                Ok(_h) => serde_json::json!({}),
                 Err(_) => {
                     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
                     rt.block_on(async { crate::helpers::s3::get_json(&key).await }).ok().unwrap_or(serde_json::json!({}))
@@ -51,7 +52,8 @@ mod inner {
             let key = s3_key();
             let val = obj.clone();
             match tokio::runtime::Handle::try_current() {
-                Ok(h) => { let _ = h.block_on(async { crate::helpers::s3::put_json(&key, &val).await }); }
+                // Avoid blocking inside an active runtime; skip remote cache in this case
+                Ok(_h) => { let _ = &val; /* no-op */ }
                 Err(_) => {
                     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
                     let _ = rt.block_on(async { crate::helpers::s3::put_json(&key, &val).await });
@@ -121,7 +123,8 @@ mod inner {
         fn load_map() -> serde_json::Value {
             let key = s3_key();
             match tokio::runtime::Handle::try_current() {
-                Ok(h) => h.block_on(async { crate::helpers::s3::get_json(&key).await }).ok().unwrap_or(serde_json::json!({})),
+                // Avoid blocking inside an active runtime; skip remote cache
+                Ok(_h) => serde_json::json!({}),
                 Err(_) => {
                     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
                     rt.block_on(async { crate::helpers::s3::get_json(&key).await }).ok().unwrap_or(serde_json::json!({}))
@@ -132,7 +135,8 @@ mod inner {
             let key = s3_key();
             let val = obj.clone();
             match tokio::runtime::Handle::try_current() {
-                Ok(h) => { let _ = h.block_on(async { crate::helpers::s3::put_json(&key, &val).await }); }
+                // Avoid blocking inside an active runtime; skip remote cache
+                Ok(_h) => { let _ = &val; /* no-op */ }
                 Err(_) => {
                     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
                     let _ = rt.block_on(async { crate::helpers::s3::put_json(&key, &val).await });

@@ -12,6 +12,37 @@ pub async fn enrich_field_descriptions_with_llm(namespace: &str, semantic: &Sema
 	}
 	let llm = crate::llm::create_llm(&crate::llm::config_from_env());
 
+    fn normalize_base_name(field_name: &str) -> String {
+        field_name.split('.').last().unwrap_or(field_name).to_string()
+    }
+    fn is_placeholder_or_garbage(s: &str) -> bool {
+        let t = s.trim().to_lowercase();
+        t.is_empty() || t.contains('<') || t.contains('≤') || t.contains("placeholder")
+    }
+    fn clean_synonyms(raw: Vec<String>, role: &str) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for s in raw {
+            let t = s.trim().to_lowercase();
+            if t.len() < 3 { continue; }
+            if !t.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') { continue; }
+            if t == "a" || t == "b" || t == "c" { continue; }
+            out.push(t);
+        }
+        out.sort();
+        out.dedup();
+        if role.eq_ignore_ascii_case("id") {
+            let mut id_syn = vec!["id","identifier","uuid","key"].into_iter().map(|s| s.to_string()).collect::<Vec<_>>();
+            out.extend(id_syn);
+            out.sort();
+            out.dedup();
+        }
+        out
+    }
+    fn validate_pii(s: &str) -> Option<String> {
+        let t = s.trim().to_lowercase();
+        match t.as_str() { "none" | "low" | "medium" | "high" => Some(t), _ => None }
+    }
+
 	// Build a quick lookup for semantic roles
 	let mut roles: HashMap<String, SemanticFieldRole> = HashMap::new();
 	for sf in semantic.fields.iter() { roles.insert(sf.name.clone(), sf.role.clone()); }
@@ -63,14 +94,19 @@ pub async fn enrich_field_descriptions_with_llm(namespace: &str, semantic: &Sema
 			}
 			parts.join("; ")
 		};
-		// LLM enrichment (separate prompts): description
+		// LLM enrichment (separate prompts): description (no heuristic fallback)
 		if fld.description.is_none() {
+			let base_name = normalize_base_name(&fld.name);
 			let prompt = format!(
-				"You are documenting a data field for analysts.\nReturn STRICT JSON only: {{\"description\": \"<≤20 words>\"}}.\nRules: one sentence, ≤20 words; JSON only; no labels or explanations.\n\nDataset: {ns}\nTable description: {td}\nOther fields: {ofs}\nField: {f}\nRole: {r}\nStats: {s}\n\nOutput JSON:",
+				"Return STRICT JSON only with a single key 'description'.\
+                Rules: one sentence ≤ 20 words; no placeholders; be specific to the field.\
+                Example: {{\"description\":\"Unique identifier of the content.\"}}\
+                Dataset: {ns}\nTable description: {td}\nOther fields: {ofs}\nField: {f}\nBaseName: {b}\nRole: {r}\nStats: {s}\n\nOutput JSON:",
 				ns = namespace,
 				td = table_description.clone().unwrap_or_else(|| "N/A".to_string()),
 				ofs = if others_ctx.is_empty() { "N/A".to_string() } else { others_ctx.clone() },
 				f = fld.name,
+				b = base_name,
 				r = role,
 				s = stats_snip
 			);
@@ -93,21 +129,23 @@ pub async fn enrich_field_descriptions_with_llm(namespace: &str, semantic: &Sema
 			};
 			if let Some(text) = text_opt {
 				let desc_json = extract_json_value(&text).and_then(|v| v.get("description").and_then(|x| x.as_str()).map(|s| s.to_string()));
-				let cleaned = desc_json.unwrap_or_else(|| {
-					let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
-					line.trim_start_matches("Answer:").trim_start_matches("Description:").trim().to_string()
-				});
-				if !cleaned.is_empty() { fld.description.get_or_insert(cleaned.clone()); enriched_desc.insert(fld.name.clone(), cleaned); }
+				if let Some(mut cleaned) = desc_json {
+					if !is_placeholder_or_garbage(&cleaned) {
+						fld.description.get_or_insert(cleaned.clone());
+						enriched_desc.insert(fld.name.clone(), cleaned);
+					}
+				}
 			}
 		}
 
-		// LLM enrichment (separate prompts): synonyms
+		// LLM enrichment (separate prompts): synonyms (no heuristic fallback)
 		if fld.synonyms.is_none() {
+			let base_name = normalize_base_name(&fld.name);
 			let prompt = format!(
-				"Return STRICT JSON only: {{\"synonyms\": [\"a\", \"b\", \"c\"]}}.\nRules: 3–6 single-word synonyms, lowercase, no explanations, JSON only.\n\nDataset: {ns}\nField: {f}\nRole: {r}\n\nOutput JSON:",
-				ns = namespace,
-				f = fld.name,
-				r = role
+				"Return STRICT JSON only: {{\"synonyms\":[\"word1\",\"word2\",...]}}.\
+                Rules: 3–6 single-word, lowercase, meaningful; no single letters; no placeholders; JSON only.\
+                Dataset: {ns}\nField: {f}\nBaseName: {b}\nRole: {r}\n\nOutput JSON:",
+				ns = namespace, f = fld.name, b = base_name, r = role
 			);
 			let llm_clone = llm.clone();
 			let prompt_clone = prompt.clone();
@@ -128,13 +166,11 @@ pub async fn enrich_field_descriptions_with_llm(namespace: &str, semantic: &Sema
 			};
 			if let Some(text) = text_opt {
 				let parsed = extract_json_value(&text).and_then(|v| v.get("synonyms").and_then(|a| a.as_array().cloned()));
-				let mut v = match parsed {
-					Some(arr) => arr.into_iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect::<Vec<String>>(),
-					None => text.split(',').map(|x| x.trim().to_lowercase()).filter(|x| !x.is_empty()).collect::<Vec<String>>()
-				};
-				v.retain(|s| !s.starts_with("answer:") && !s.contains('\n'));
-				v.dedup();
-				if !v.is_empty() { fld.synonyms.get_or_insert(v); }
+				if let Some(arr) = parsed {
+					let raw = arr.into_iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect::<Vec<String>>();
+					let v = clean_synonyms(raw, &role);
+					if !v.is_empty() { fld.synonyms.get_or_insert(v); }
+				}
 			}
 		}
 
@@ -167,17 +203,14 @@ pub async fn enrich_field_descriptions_with_llm(namespace: &str, semantic: &Sema
 			if let Some(text) = text_opt {
 				if let Some(v) = extract_json_value(&text) {
 					if fld.pii_sensitivity.is_none() {
-						if let Some(s) = v.get("pii").and_then(|x| x.as_str()) {
-							let s_l = s.to_lowercase();
-							if matches!(s_l.as_str(), "none" | "low" | "medium" | "high") {
-								fld.pii_sensitivity = Some(s_l);
-							}
+						if let Some(s) = v.get("pii").and_then(|x| x.as_str()).and_then(|s| validate_pii(s)) {
+							fld.pii_sensitivity = Some(s);
 						}
 					}
 					if fld.units_or_format.is_none() {
 						if let Some(u) = v.get("units").and_then(|x| x.as_str()) {
 							let trimmed = u.trim();
-							if !trimmed.is_empty() { fld.units_or_format = Some(trimmed.to_string()); }
+							if !is_placeholder_or_garbage(trimmed) && !trimmed.is_empty() { fld.units_or_format = Some(trimmed.to_string()); }
 						}
 					}
 				}

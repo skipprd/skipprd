@@ -198,21 +198,21 @@ impl Config {
 
     // LLM configuration accessors
     pub fn llm_provider() -> String {
-        // env > default("LOCAL")
-        let v = Self::getenv("LLM_PROVIDER", "LOCAL");
+        // env > default("OPENAI")
+        let v = Self::getenv("LLM_PROVIDER", "OPENAI");
         v
     }
 
     pub fn llm_chat_model() -> Option<String> {
-        let v = Self::getenv("LLM_CHAT_MODEL", ""); if v.is_empty() { None } else { Some(v) }
+        let v = Self::getenv("LLM_CHAT_MODEL", "gpt-4o-mini"); if v.is_empty() { None } else { Some(v) }
     }
 
     pub fn llm_embed_model() -> Option<String> {
-        let v = Self::getenv("LLM_EMBED_MODEL", ""); if v.is_empty() { None } else { Some(v) }
+        let v = Self::getenv("LLM_EMBED_MODEL", "text-embedding-3-small"); if v.is_empty() { None } else { Some(v) }
     }
 
     pub fn llm_base_url() -> Option<String> {
-        let v = Self::getenv("LLM_BASE_URL", ""); if v.is_empty() { None } else { Some(v) }
+        let v = Self::getenv("LLM_BASE_URL", "https://api.openai.com"); if v.is_empty() { None } else { Some(v) }
     }
 
     pub fn llm_api_key() -> Option<String> {
@@ -224,8 +224,8 @@ impl Config {
     }
 
     pub fn llm_context_length() -> usize {
-        // Default to 4x typical context length
-        let v = Self::getenv("LLM_CONTEXT_LENGTH", "16384"); v.parse::<usize>().unwrap_or(16384)
+        // Default optimized for latency
+        let v = Self::getenv("LLM_CONTEXT_LENGTH", "4096"); v.parse::<usize>().unwrap_or(4096)
     }
     pub fn llm_context_length_opt() -> Option<usize> {
         let v = Self::getenv("LLM_CONTEXT_LENGTH", "");
