@@ -1,3 +1,15 @@
+## Canonical S3 layout
+
+- Data (Parquet): controlled by the output plugin (Athena). Canonical namespace root prefix:
+  `s3://{bucket}/{s3_prefix}/{namespace}/` (with trailing slash).
+- Manifest (query source of truth): `{tenant}/{workspace}/{pipeline}/manifest/{pipeline}.json`
+- Registry (per-pipeline): `{tenant}/{workspace}/{pipeline}/manifest/registry.json`
+  - `data_prefixes`: explicit canonical namespace roots (not used by query to find Parquet)
+  - `catalog_key`: `{tenant}/{workspace}/{pipeline}/catalog/...`
+  - `stats_key`: `{tenant}/{workspace}/{pipeline}/stats/...`
+  - `semantic_key`: `{tenant}/{workspace}/{pipeline}/semantic/...`
+
+Query engine registers Parquet paths from manifest-only (absolute `s3://` URLs). Registry is used by metadata/QA layers to locate catalog, stats and semantic resources.
 # Welcome to Skippr Docs 👋
 
 

@@ -9,7 +9,7 @@ use datafusion::arrow::datatypes::DataType as ArrowDataType;
 use datafusion::logical_expr::{Expr, col};
 
 use crate::helpers::configuration::Config;
-use crate::sql::query::register_s3_object_store;
+use crate::sql::tables::register_s3_object_store;
 use crate::{ARROW_SCHEMA, METADATA};
 use crate::sql::registry::{find_entry};
 
@@ -64,37 +64,35 @@ pub async fn register_namespace_view(ctx: &SessionContext, ns: &str) -> Result<(
         }
     }
 
-    // S3 side: use registry data_prefixes for this namespace
+    // S3 side: use manifest prefixes for this namespace
     let mut df_base_opt: Option<datafusion::prelude::DataFrame> = None;
     let pipeline = Config::get_pipeline_name();
-    if let Some(entry) = find_entry(&pipeline, ns).await {
-        // gather and normalize prefixes
-        let mut s3_paths: Vec<String> = entry.data_prefixes.clone();
-        // Prefixes should already be absolute s3:// URLs from the manifest-backed registry
-        // dedupe after normalization and register object stores
-        s3_paths.sort(); s3_paths.dedup();
-        // For responsiveness in Ask, cap to first prefix for now
-        if s3_paths.len() > 1 { s3_paths.truncate(1); }
-        for p in &s3_paths { register_s3_object_store(ctx, p).await; }
-        let mut sources: Vec<String> = Vec::new();
-        for (idx, path) in s3_paths.iter().enumerate() {
-            let tname = format!("{}_s3_{}", ns, idx);
-            // Guard registration to avoid long stalls when listing huge prefixes
-            let reg = tokio::time::timeout(std::time::Duration::from_secs(5), ctx.register_parquet(&tname, path, ParquetReadOptions::default())).await;
-            if reg.is_ok() { sources.push(tname); }
-        }
-        if !sources.is_empty() {
-            // Table resolution can also stall; guard with a timeout
-            if let Ok(Ok(mut df_s3)) = tokio::time::timeout(std::time::Duration::from_secs(5), ctx.table(&sources[0])).await {
-                for t in sources.iter().skip(1) {
-                    if let Ok(Ok(df_next)) = tokio::time::timeout(std::time::Duration::from_secs(3), ctx.table(t)).await {
-                        match df_s3.clone().union(df_next) {
-                            Ok(un) => df_s3 = un,
-                            Err(_) => {}
+    if let Some(man) = Config::read_manifest(ns).await {
+        if let Some(tables) = man.get("tables").and_then(|t| t.as_object()) {
+            if let Some(ns_obj) = tables.get(ns).and_then(|v| v.as_object()) {
+                if let Some(prefixes) = ns_obj.get("prefixes").and_then(|p| p.as_array()) {
+                    let mut s3_paths: Vec<String> = prefixes.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
+                    s3_paths.retain(|p| p.starts_with("s3://"));
+                    s3_paths.sort(); s3_paths.dedup();
+                    if s3_paths.len() > 1 { s3_paths.truncate(1); }
+                    for p in &s3_paths { register_s3_object_store(ctx, p).await; }
+                    let mut sources: Vec<String> = Vec::new();
+                    for (idx, path) in s3_paths.iter().enumerate() {
+                        let tname = format!("{}_s3_{}", ns, idx);
+                        let reg = tokio::time::timeout(std::time::Duration::from_secs(5), ctx.register_parquet(&tname, path, ParquetReadOptions::default())).await;
+                        if reg.is_ok() { sources.push(tname); }
+                    }
+                    if !sources.is_empty() {
+                        if let Ok(Ok(mut df_s3)) = tokio::time::timeout(std::time::Duration::from_secs(5), ctx.table(&sources[0])).await {
+                            for t in sources.iter().skip(1) {
+                                if let Ok(Ok(df_next)) = tokio::time::timeout(std::time::Duration::from_secs(3), ctx.table(t)).await {
+                                    if let Ok(un) = df_s3.clone().union(df_next) { df_s3 = un; }
+                                }
+                            }
+                            df_base_opt = Some(df_s3);
                         }
                     }
                 }
-                df_base_opt = Some(df_s3);
             }
         }
     }

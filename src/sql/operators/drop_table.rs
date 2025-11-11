@@ -13,38 +13,7 @@ pub async fn drop_table(pipeline_metadata: &mut PipelineMetadata, stmt: &TableDr
     // Remove from in-memory metadata
     pipeline_metadata.metadata.remove(&table_str);
 
-    // Compute local cache file paths
     let ns = &table_str; // namespace typically equals table
-    let stats_path = crate::helpers::configuration::Config::get_stats_local_path(ns);
-    let sem_path = String::new();
-    let cat_path = String::new();
-
-    // Best-effort local deletions
-    let _ = std::fs::remove_file(&stats_path);
-    let _ = std::fs::remove_file(&sem_path);
-    let _ = std::fs::remove_file(&cat_path);
-
-    // Best-effort local data dir deletion: wal and parquet for pipeline
-    let base = crate::helpers::configuration::Config::get_pipeline_data_dir();
-    let wal_dir = format!("{}/wal/{}", base, pipeline);
-    let parquet_dir = format!("{}/parquet/{}", base, pipeline);
-    let _ = std::fs::remove_dir_all(&wal_dir);
-    let _ = std::fs::remove_dir_all(&parquet_dir);
-
-    // Remove the pipeline-scoped local directory ./data/<workspace>_<pipeline>
-    // Compute path without creating it (avoid get_data_dir which ensures creation)
-    let ws_pl = crate::helpers::configuration::Config::get_full_namespace_name();
-    let mut base_clean = base.clone(); while base_clean.ends_with('/') { base_clean.pop(); }
-    if !ws_pl.is_empty() && !base_clean.is_empty() {
-        let local_root = format!("{}/{}", base_clean, ws_pl);
-        // Safety: ensure we don't accidentally delete the base directory itself or root
-        if local_root.starts_with(&base_clean)
-            && local_root.len() > base_clean.len() + 1
-            && local_root != base_clean
-            && local_root != "/" && local_root != "." && local_root != ".." {
-            let _ = std::fs::remove_dir_all(&local_root);
-        }
-    }
 
     // S3 cleanup if online
     {
@@ -58,14 +27,22 @@ pub async fn drop_table(pipeline_metadata: &mut PipelineMetadata, stmt: &TableDr
                 let _ = crate::helpers::s3::delete_prefix(&format!("{}/stats/{}", prefix_root, ns)).await;
                 let _ = crate::helpers::s3::delete_prefix(&format!("{}/semantic/{}", prefix_root, ns)).await;
                 let _ = crate::helpers::s3::delete_prefix(&format!("{}/catalog/{}", prefix_root, ns)).await;
-                // Delete parquet data under registry-defined prefixes for this namespace
-                if let Some(entry) = crate::sql::registry::find_entry(&crate::helpers::configuration::Config::get_pipeline_name(), ns).await {
-                    for s3_url in entry.data_prefixes.iter() {
-                        if let Some(rest) = s3_url.strip_prefix("s3://") {
-                            if let Some((bucket, prefix)) = rest.split_once('/') {
-                                let mut p = prefix.to_string();
-                                if !p.ends_with('/') { p.push('/'); }
-                                let _ = crate::helpers::s3::delete_prefix_in_bucket(bucket, &p).await;
+                // Delete parquet data under manifest-defined prefixes for this namespace
+                if let Some(man) = crate::helpers::configuration::Config::read_manifest(ns).await {
+                    if let Some(tables) = man.get("tables").and_then(|t| t.as_object()) {
+                        if let Some(ns_obj) = tables.get(ns).and_then(|v| v.as_object()) {
+                            if let Some(prefixes) = ns_obj.get("prefixes").and_then(|p| p.as_array()) {
+                                for v in prefixes {
+                                    if let Some(s3_url) = v.as_str() {
+                                        if let Some(rest) = s3_url.strip_prefix("s3://") {
+                                            if let Some((bucket, prefix)) = rest.split_once('/') {
+                                                let mut p = prefix.to_string();
+                                                if !p.ends_with('/') { p.push('/'); }
+                                                let _ = crate::helpers::s3::delete_prefix_in_bucket(bucket, &p).await;
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

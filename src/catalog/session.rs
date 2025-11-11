@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use datafusion::prelude::{SessionConfig, SessionContext};
+use datafusion::datasource::MemTable;
 use arrow::record_batch::RecordBatch;
 
 pub struct SessionFactory;
@@ -13,41 +14,8 @@ impl SessionFactory {
     }
 
     pub async fn register_s3_and_wal(ctx: &SessionContext, namespace: &str) {
-        // Register semantic/catalog tables via S3-only entry point
-        crate::sql::query::register_catalog(ctx).await;
-        // Register WAL memtable for namespace (best-effort)
-        // let seg_dir = format!("{}/segment_buffer/segs", crate::helpers::configuration::Config::get_data_dir());
-        // let mut wal_batches: Vec<RecordBatch> = Vec::new();
-        // if std::path::Path::new(&seg_dir).exists() {
-        //     for entry in std::fs::read_dir(&seg_dir).unwrap_or_else(|_| std::fs::read_dir("/").unwrap()) {
-        //         if let Ok(ent) = entry { let path = ent.path(); if path.extension().and_then(|s| s.to_str()) != Some("seg") { continue; }
-        //             let seg = crate::buffer::segment_file::SegmentFile { path: path.clone() };
-        //             if let Ok(meta) = seg.read_metadata() {
-        //                 for idx in meta.index.iter() {
-        //                     if idx.key.0 != namespace { continue; }
-        //                     if let Ok(mut file) = std::fs::OpenOptions::new().read(true).open(&path) {
-        //                         use std::io::{Seek, Read};
-        //                         if file.seek(std::io::SeekFrom::Start(idx.start)).is_ok() {
-        //                             let mut reader = std::io::BufReader::new(file);
-        //                             let mut take = reader.take(idx.len);
-        //                             if let Ok(sr) = arrow::ipc::reader::StreamReader::try_new(&mut take, None) { for it in sr { if let Ok(b) = it { wal_batches.push(b); } } }
-        //                         }
-        //                     }
-        //                 }
-        //             }
-        //         }
-        //     }
-        // }
-        // if !wal_batches.is_empty() { let schema = wal_batches[0].schema(); let filtered: Vec<RecordBatch> = wal_batches.into_iter().filter(|b| b.schema().as_ref() == schema.as_ref()).collect(); if !filtered.is_empty() { let mem = datafusion::datasource::MemTable::try_new(schema.clone(), vec![filtered]).map_err(|e| datafusion::error::DataFusionError::Internal(e.to_string())).unwrap(); let _ = ctx.register_table(&format!("{}_wal", &namespace), Arc::new(mem)); } }
-
-        // Register S3 object store(s) for namespace based on registry prefixes
         let pipeline = crate::helpers::configuration::Config::get_pipeline_name();
-        if let Some(entry) = crate::sql::registry::find_entry(&pipeline, namespace).await {
-            for p in entry.data_prefixes.iter() {
-                crate::sql::query::register_s3_object_store(ctx, p).await;
-            }
-        }
+        let _ = crate::sql::tables::register_namespace_view(ctx, &pipeline, namespace).await;
     }
 }
-
 

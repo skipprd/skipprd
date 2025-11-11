@@ -6,20 +6,8 @@ pub struct Orchestrator;
 impl Orchestrator {
     pub async fn build(namespace: &str) {
         let ctx = crate::catalog::session::SessionFactory::new_context().await;
-        crate::catalog::session::SessionFactory::register_s3_and_wal(&ctx, namespace).await;
-
-        // Register S3 tables using manifest-backed registry prefixes
         let pipeline = crate::helpers::configuration::Config::get_pipeline_name();
-        if let Some(entry) = crate::sql::registry::find_entry(&pipeline, namespace).await {
-            let prefixes = entry.data_prefixes;
-            for (idx, path) in prefixes.iter().enumerate() {
-                let tname = format!("{}_s3_{}", namespace, idx);
-                let _ = ctx.register_parquet(&tname, path, datafusion::prelude::ParquetReadOptions::default()).await;
-            }
-            debug!("META: orchestrator ns='{}' registered_sources={}", namespace, prefixes.len());
-        } else {
-            debug!("META: orchestrator ns='{}' no registry prefixes found", namespace);
-        }
+        let _ = crate::sql::tables::register_namespace_view(&ctx, &pipeline, namespace).await;
 
         // Stats → Catalog (+LLM in build_catalog tail)
         // Full S3 scan for authoritative stats (0 => no limit). For now, apply a small limit for fast runs.

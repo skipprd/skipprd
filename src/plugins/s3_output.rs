@@ -115,6 +115,17 @@ impl DataOutputS3Plugin {
             )
             .await
             .unwrap();
+
+            // Update manifest for DataFusion queries: absolute s3 URL and database=pipeline
+            if !self.s3_bucket.is_empty() {
+                let ns = namespace.clone();
+                let mut ns_root = full_key.clone();
+                // remove trailing random object name to keep directory prefix
+                if let Some(pos) = ns_root.rfind('/') { ns_root.truncate(pos); }
+                let abs_prefix = format!("s3://{}/{}", self.s3_bucket, ns_root.trim_start_matches('/'));
+                let db = Config::get_pipeline_name();
+                Config::update_manifest_with_prefix_and_db(&ns, &abs_prefix, &db).await;
+            }
         }
     }
 

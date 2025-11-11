@@ -6,7 +6,7 @@ use datafusion::prelude::SessionContext;
 use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField};
 use datafusion::arrow::datatypes::Schema as ArrowSchema2;
 use tracing::debug;
-use crate::sql::registry::{get_registry_cached, load_registry};
+use crate::sql::registry::get_registry_cached;
 
 pub async fn register_catalog(ctx: &SessionContext) {
     debug!("{} META: begin register_semantic_and_catalog (unified catalog, S3-only)", chrono::Utc::now().to_rfc3339());
@@ -23,9 +23,8 @@ pub async fn register_catalog(ctx: &SessionContext) {
         ArrowField::new("metrics", ArrowDataType::Utf8, true),
     ]));
 
-    // Load registry across all pipelines and accumulate rows
-    let mut reg = get_registry_cached().await;
-    if reg.is_empty() { let _ = load_registry().await; reg = get_registry_cached().await; }
+    // Load registry cache (populated by writers like ingest/uploads)
+    let reg = get_registry_cached().await;
     debug!("{} META: registry pipelines loaded: {}", chrono::Utc::now().to_rfc3339(), reg.len());
     for p in &reg { debug!("{} META: pipeline='{}' namespaces={} ", chrono::Utc::now().to_rfc3339(), p.pipeline, p.namespaces.len()); }
 

@@ -30,14 +30,36 @@ mod inner {
     }
 
     fn load_with_autotune(backend: &LlamaBackend, model_path: &str, hint_gpu_layers: Option<usize>) -> Result<(LlamaModel, i32), String> {
-        // Gate local autotune cache behind env; default disabled to avoid local writes
-        let cache_path = format!("{}/catalog_cache/llm_tuning.json", Config::get_data_dir());
-        let enable_local_tune_cache = Config::truth_value(&Config::getenv("SKIPPR_ENABLE_LOCAL_LLM_TUNE_CACHE", "false"));
-        let key = Path::new(model_path).canonicalize().map_err(|_| "model path".to_string())?.to_string_lossy().to_string();
-        let mut saved_layers: Option<i32> = None;
-        if enable_local_tune_cache { if let Ok(s) = fs::read_to_string(&cache_path) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) { if let Some(n) = v.get(&key).and_then(|x| x.as_i64()) { saved_layers = Some(n as i32); } }
-        } }
+        // Remote S3 autotune cache
+        fn s3_key() -> String {
+            let tenant = Config::get_tenant();
+            let workspace = Config::get_workspace_name();
+            let pipeline = Config::get_pipeline_name();
+            format!("{}/{}/{}/llm/llm_tuning.json", tenant, workspace, pipeline)
+        }
+        fn load_map() -> serde_json::Value {
+            let key = s3_key();
+            match tokio::runtime::Handle::try_current() {
+                Ok(h) => h.block_on(async { crate::helpers::s3::get_json(&key).await }).ok().unwrap_or(serde_json::json!({})),
+                Err(_) => {
+                    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                    rt.block_on(async { crate::helpers::s3::get_json(&key).await }).ok().unwrap_or(serde_json::json!({}))
+                }
+            }
+        }
+        fn save_map(obj: &serde_json::Value) {
+            let key = s3_key();
+            let val = obj.clone();
+            match tokio::runtime::Handle::try_current() {
+                Ok(h) => { let _ = h.block_on(async { crate::helpers::s3::put_json(&key, &val).await }); }
+                Err(_) => {
+                    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                    let _ = rt.block_on(async { crate::helpers::s3::put_json(&key, &val).await });
+                }
+            }
+        }
+        let key_model = Path::new(model_path).canonicalize().map_err(|_| "model path".to_string())?.to_string_lossy().to_string();
+        let mut saved_layers: Option<i32> = load_map().get(&key_model).and_then(|x| x.as_i64()).map(|n| n as i32);
         let mut start: i32 = saved_layers
             .or_else(|| hint_gpu_layers.map(|x| x as i32))
             .unwrap_or_else(|| if cfg!(target_os = "macos") { 32 } else { 0 });
@@ -46,14 +68,9 @@ mod inner {
             let params = LlamaModelParams::default().with_n_gpu_layers(start.max(0) as u32);
             match LlamaModel::load_from_file(backend, model_path, &params) {
                 Ok(llm) => {
-                    // persist only if enabled
-                    if enable_local_tune_cache {
-                        let mut obj = serde_json::json!({});
-                        if let Ok(s) = fs::read_to_string(&cache_path) { let _ = serde_json::from_str::<serde_json::Value>(&s).map(|v| obj = v); }
-                        obj.as_object_mut().unwrap().insert(key.clone(), serde_json::json!(start));
-                        let _ = fs::create_dir_all(Path::new(&cache_path).parent().unwrap());
-                        let _ = fs::write(&cache_path, serde_json::to_string_pretty(&obj).unwrap_or_default());
-                    }
+                    let mut obj = load_map();
+                    obj.as_object_mut().unwrap().insert(key_model.clone(), serde_json::json!(start));
+                    save_map(&obj);
                     return Ok((llm, start));
                 }
                 Err(_) => {
@@ -94,21 +111,40 @@ mod inner {
         model_path: &'a str,
         hint_ctx: Option<usize>,
     ) -> Result<(llama_cpp_2::context::LlamaContext<'a>, u32), String> {
-        let cache_path = format!("{}/catalog_cache/llm_tuning.json", Config::get_data_dir());
-        let enable_local_tune_cache = Config::truth_value(&Config::getenv("SKIPPR_ENABLE_LOCAL_LLM_TUNE_CACHE", "false"));
+        // Use S3-based tuning map
+        fn s3_key() -> String {
+            let tenant = Config::get_tenant();
+            let workspace = Config::get_workspace_name();
+            let pipeline = Config::get_pipeline_name();
+            format!("{}/{}/{}/llm/llm_tuning.json", tenant, workspace, pipeline)
+        }
+        fn load_map() -> serde_json::Value {
+            let key = s3_key();
+            match tokio::runtime::Handle::try_current() {
+                Ok(h) => h.block_on(async { crate::helpers::s3::get_json(&key).await }).ok().unwrap_or(serde_json::json!({})),
+                Err(_) => {
+                    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                    rt.block_on(async { crate::helpers::s3::get_json(&key).await }).ok().unwrap_or(serde_json::json!({}))
+                }
+            }
+        }
+        fn save_map(obj: &serde_json::Value) {
+            let key = s3_key();
+            let val = obj.clone();
+            match tokio::runtime::Handle::try_current() {
+                Ok(h) => { let _ = h.block_on(async { crate::helpers::s3::put_json(&key, &val).await }); }
+                Err(_) => {
+                    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                    let _ = rt.block_on(async { crate::helpers::s3::put_json(&key, &val).await });
+                }
+            }
+        }
         let key = Path::new(model_path)
             .canonicalize()
             .map_err(|_| "model path".to_string())?
             .to_string_lossy()
             .to_string() + "#ctx";
-        let mut saved_ctx: Option<u32> = None;
-        if enable_local_tune_cache {
-            if let Ok(s) = fs::read_to_string(&cache_path) {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
-                    if let Some(n) = v.get(&key).and_then(|x| x.as_u64()) { saved_ctx = Some(n as u32); }
-                }
-            }
-        }
+        let mut saved_ctx: Option<u32> = load_map().get(&key).and_then(|x| x.as_u64()).map(|n| n as u32);
         let mut start: u32 = saved_ctx
             .or_else(|| hint_ctx.map(|x| x as u32))
             .unwrap_or(4096);
@@ -118,13 +154,9 @@ mod inner {
                 .with_n_ctx(Some(NonZeroU32::new(start).unwrap_or(NonZeroU32::new(2048).unwrap())));
             match model.new_context(backend, params) {
                 Ok(ctx) => {
-                    if enable_local_tune_cache {
-                        let mut obj = serde_json::json!({});
-                        if let Ok(s) = fs::read_to_string(&cache_path) { let _ = serde_json::from_str::<serde_json::Value>(&s).map(|v| obj = v); }
-                        obj.as_object_mut().unwrap().insert(key.clone(), serde_json::json!(start));
-                        let _ = fs::create_dir_all(Path::new(&cache_path).parent().unwrap());
-                        let _ = fs::write(&cache_path, serde_json::to_string_pretty(&obj).unwrap_or_default());
-                    }
+                    let mut obj = load_map();
+                    obj.as_object_mut().unwrap().insert(key.clone(), serde_json::json!(start));
+                    save_map(&obj);
                     return Ok((ctx, start));
                 }
                 Err(_) => {
@@ -249,13 +281,35 @@ mod inner {
         // enable embeddings with context auto-tune similar to chat
         let threads = std::thread::available_parallelism().map(|n| n.get() as i32).unwrap_or(4);
         // try cached/suggested context length and back off if needed
-        let cache_path = format!("{}/catalog_cache/llm_tuning.json", Config::get_data_dir());
-        let enable_local_tune_cache = Config::truth_value(&Config::getenv("SKIPPR_ENABLE_LOCAL_LLM_TUNE_CACHE", "false"));
+        fn s3_key() -> String {
+            let tenant = Config::get_tenant();
+            let workspace = Config::get_workspace_name();
+            let pipeline = Config::get_pipeline_name();
+            format!("{}/{}/{}/llm/llm_tuning.json", tenant, workspace, pipeline)
+        }
+        fn load_map() -> serde_json::Value {
+            let key = s3_key();
+            match tokio::runtime::Handle::try_current() {
+                Ok(h) => h.block_on(async { crate::helpers::s3::get_json(&key).await }).ok().unwrap_or(serde_json::json!({})),
+                Err(_) => {
+                    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                    rt.block_on(async { crate::helpers::s3::get_json(&key).await }).ok().unwrap_or(serde_json::json!({}))
+                }
+            }
+        }
+        fn save_map(obj: &serde_json::Value) {
+            let key = s3_key();
+            let val = obj.clone();
+            match tokio::runtime::Handle::try_current() {
+                Ok(h) => { let _ = h.block_on(async { crate::helpers::s3::put_json(&key, &val).await }); }
+                Err(_) => {
+                    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                    let _ = rt.block_on(async { crate::helpers::s3::put_json(&key, &val).await });
+                }
+            }
+        }
         let key_ctx = Path::new(&shared.model_path).canonicalize().map_err(|_| "model path".to_string())?.to_string_lossy().to_string() + "#ctx";
-        let mut saved_ctx: Option<u32> = None;
-        if enable_local_tune_cache { if let Ok(s) = fs::read_to_string(&cache_path) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) { if let Some(n) = v.get(&key_ctx).and_then(|x| x.as_u64()) { saved_ctx = Some(n as u32); } }
-        } }
+        let mut saved_ctx: Option<u32> = load_map().get(&key_ctx).and_then(|x| x.as_u64()).map(|n| n as u32);
         let mut start_ctx: u32 = saved_ctx.or_else(|| cfg.context_length.map(|x| x as u32)).unwrap_or(4096);
         let mut attempts = 0;
         let mut ctx = loop {
@@ -266,13 +320,9 @@ mod inner {
                 .with_pooling_type(llama_cpp_2::context::params::LlamaPoolingType::Mean);
             match model.new_context(&backend, params) {
                 Ok(ctx) => {
-                    if enable_local_tune_cache {
-                        let mut obj = serde_json::json!({});
-                        if let Ok(s) = fs::read_to_string(&cache_path) { let _ = serde_json::from_str::<serde_json::Value>(&s).map(|v| obj = v); }
-                        obj.as_object_mut().unwrap().insert(key_ctx.clone(), serde_json::json!(start_ctx));
-                        let _ = fs::create_dir_all(Path::new(&cache_path).parent().unwrap());
-                        let _ = fs::write(&cache_path, serde_json::to_string_pretty(&obj).unwrap_or_default());
-                    }
+                    let mut obj = load_map();
+                    obj.as_object_mut().unwrap().insert(key_ctx.clone(), serde_json::json!(start_ctx));
+                    save_map(&obj);
                     break ctx;
                 }
                 Err(_) => {

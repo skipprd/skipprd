@@ -51,51 +51,7 @@ use arrow::record_batch::RecordBatch as ArrowRecordBatch;
 use arrow_schema::{Schema as ArrowSchema2, Field as ArrowField};
 use aws_sdk_s3::Client;
 
-pub async fn register_s3_object_store(ctx: &SessionContext, s3_loc: &str) {
-    println!("1");
-    if let Ok(u) = Url::parse(s3_loc) {
-        println!("2");
-        if u.scheme() != "s3" { return; }
-        println!("3");
-        if let Some(bucket) = u.host_str() {
-            println!("4");
-            // Match S3 input plugin behavior: use AWS SDK defaults chain
-            let conf = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
-            let region_opt = conf.region().map(|r| r.as_ref().to_string());
-            // let creds_opt = if let Some(p) = conf.credentials_provider() {
-            //     match p.provide_credentials().await { Ok(c) => Some(c), Err(_) => None }
-            // } else { None };
-
-            let creds_opt = if let Some(p) = conf.credentials_provider() {
-                match p.provide_credentials().await {
-                    Ok(c) => Some(c),
-                    Err(_) => None,
-                }
-            } else { None };
-
-            // println!("Credentials for S3 object store: {}", if creds_opt.is_some() { "found" } else { "not found, using anonymous or role-based access" });
-            // println!("Credentials Provider: {:?}", conf.credentials_provider());
-            // println!("Region: {:?}", region_opt);
-            // println!("Access Key ID: {:?}", creds_opt.as_ref().map(|c| c.access_key_id()));
-            // println!("Session Token: {:?}", creds_opt.as_ref().and_then(|c| c.session_token()));
-
-            let mut b = AmazonS3Builder::new().with_bucket_name(bucket);
-            if let Some(region) = region_opt { b = b.with_region(region); }
-            if let Some(c) = creds_opt {
-                b = b.with_access_key_id(c.access_key_id().to_string())
-                     .with_secret_access_key(c.secret_access_key().to_string())
-                    .with_token(c.session_token().unwrap_or("").to_string());
-
-                if let Some(t) = c.session_token() { b = b.with_token(t.to_string()); }
-            }
-
-            if let Ok(store) = b.build() {
-                let base = Url::parse(&format!("s3://{}/", bucket)).unwrap_or(u.clone());
-                let _ = ctx.runtime_env().register_object_store(&base, Arc::new(store));
-            }
-        }
-    }
-}
+// S3 object store registration moved to crate::sql::tables
 
 pub async fn register_catalog(ctx: &SessionContext) {
     // Delegate to S3-only registry-backed builder
@@ -975,14 +931,30 @@ pub async fn query(sql_str: &str) {
             // Build union views ONLY for tables referenced in this SQL
             let original_pipeline = Config::get_pipeline_name();
             let dialect = GenericDialect {};
-            let mut table_names: Vec<String> = Vec::new();
+            #[derive(Clone)]
+            struct TableRef { pipeline: String, namespace: String }
+            fn split_pipeline_ns(name: &sqlparser::ast::ObjectName) -> TableRef {
+                let parts: Vec<String> = name.0.iter().map(|id| id.value.clone()).collect();
+                match parts.as_slice() {
+                    [p, n] => TableRef { pipeline: p.clone(), namespace: n.clone() },
+                    [single] => TableRef { pipeline: single.clone(), namespace: single.clone() },
+                    _ => {
+                        let s = name.to_string();
+                        TableRef { pipeline: s.clone(), namespace: s }
+                    }
+                }
+            }
+            let mut table_refs: Vec<TableRef> = Vec::new();
             if let Ok(ast) = StdSqlParser::parse_sql(&dialect, sql_str) {
                 for stmt in ast {
                     if let StdStatement::Query(q) = stmt {
                         match &*q.body {
                             SetExpr::Select(sel) => {
                                 for twj in &sel.from {
-                                    if let TableFactor::Table { name, .. } = &twj.relation { table_names.push(name.to_string()); }
+                                    if let TableFactor::Table { name, .. } = &twj.relation {
+                                        let t = split_pipeline_ns(name);
+                                        table_refs.push(t);
+                                    }
                                 }
                             }
                             _ => {}
@@ -990,57 +962,26 @@ pub async fn query(sql_str: &str) {
                     }
                 }
             }
-            if table_names.is_empty() { println!("Could not infer table name from query; expected FROM <pipeline_name> or 'deadletters'"); process::exit(1); }
-            table_names.sort(); table_names.dedup();
+            if table_refs.is_empty() { println!("Could not infer table name from query; expected FROM <pipeline>.<namespace> or FROM <namespace> or 'deadletters'"); process::exit(1); }
+            // dedup
+            table_refs.sort_by(|a,b| a.pipeline.cmp(&b.pipeline).then(a.namespace.cmp(&b.namespace)));
+            table_refs.dedup_by(|a,b| a.pipeline==b.pipeline && a.namespace==b.namespace);
+            // Log resolved table refs
+            println!("Resolved table refs: [{}]", table_refs.iter().map(|t| format!("{}.{}", t.pipeline, t.namespace)).collect::<Vec<_>>().join(", "));
 
             // Special-case: register 'deadletters' table (Parquet over S3 state bucket)
-            let has_deadletters = table_names.iter().any(|t| t == "deadletters");
+            let has_deadletters = table_refs.iter().any(|t| t.namespace == "deadletters" || t.pipeline == "deadletters");
             if has_deadletters {
-                // Ensure configuration is initialized so state bucket is resolved from SKIPPR_CONFIG_FILE
-                Config::init().await;
-                // Prefer scanning within tenant/workspace to include all pipelines while staying precise
-                let bucket = Config::get_skippr_s3_bucket();
-                let tenant = Config::get_tenant();
-                let workspace = Config::get_workspace_name();
                 let pipeline = Config::get_pipeline_name();
-                // Writer layout: deadletters/<tenant>/<workspace>/<pipeline>/namespace=<ns>/p_year=.../p_month=.../p_day=.../*.parquet
-                // Register at deadletters/<tenant>/<workspace>/ so recursive listing finds all pipelines
-                let dl_url = format!("s3://{}/deadletters/{}/{}/{}/", bucket, tenant, workspace, pipeline);
-                register_s3_object_store(&ctx, &dl_url).await;
-                // Optional debug: verify access and show a few sample objects under the prefix
-                // if Config::debug_enabled() {
-                    println!("Registering deadletters table at URL: {}", dl_url);
-                    let prefix = format!("deadletters/{}/{}/", tenant, workspace);
-                    let sample = crate::helpers::s3::list_parquet_keys(&bucket, &prefix, 8).await;
-                    if sample.is_empty() {
-                        println!("Deadletters debug: No parquet files found under s3://{}/{}", bucket, prefix);
-                    } else {
-                        println!("Deadletters debug: Found {} parquet objects (showing up to 8):", sample.len());
-                        for k in sample.iter().take(8) {
-                            println!("  s3://{}/{}", bucket, k);
-                        }
-                    }
-                // }
-                // Register as Parquet listing with partition columns for pruning
-                let opts = ParquetReadOptions {
-                    schema: None,
-                    file_extension: "parquet",
-                    table_partition_cols: vec![
-                        ("namespace".to_string(), ArrowDataType::Utf8),
-                        ("p_year".to_string(), ArrowDataType::Utf8),
-                        ("p_month".to_string(), ArrowDataType::Utf8),
-                        ("p_day".to_string(), ArrowDataType::Utf8),
-                    ],
-                    parquet_pruning: None,
-                    skip_metadata: Some(true),
-                    file_sort_order: vec![]
-                };
-                if let Err(e) = ctx.register_parquet("deadletters", &dl_url, opts).await { println!("Failed to register deadletters at {}: {}", dl_url, e); }
+                let _ = crate::sql::tables::register_deadletters(&ctx, &pipeline).await.map_err(|e| {
+                    println!("Failed to register deadletters: {}", e);
+                    e
+                });
             }
 
             // Remove 'deadletters' from pipeline tables to avoid pipeline processing below
-            let mut table_names: Vec<String> = table_names.into_iter().filter(|t| t != "deadletters").collect();
-            if table_names.is_empty() {
+            let mut table_refs: Vec<TableRef> = table_refs.into_iter().filter(|t| t.namespace != "deadletters" && t.pipeline != "deadletters").collect();
+            if table_refs.is_empty() {
                 // Only deadletters requested; execute query directly
                 if let Ok(df) = ctx.sql(sql_str).await { if let Ok(b) = df.collect().await {
                     match pretty_format_batches(&b) { Ok(s) => println!("{}", s), Err(_) => {} }
@@ -1048,11 +989,12 @@ pub async fn query(sql_str: &str) {
                 } }
             }
             let mut first = true;
-            for pipeline in table_names {
+            for TableRef { pipeline, namespace } in table_refs {
                 // Switch pipeline context for correct local WAL dir and config resolution
                 PIPELINE_NAME.write().clear();
                 PIPELINE_NAME.write().push_str(&pipeline);
                 Config::init().await;
+                println!("Context: pipeline='{}' namespace='{}'", pipeline, namespace);
                 if first { register_catalog(&ctx).await; first = false; }
 
                 // Bootstrap METADATA and ARROW_SCHEMA like main sync
@@ -1061,169 +1003,34 @@ pub async fn query(sql_str: &str) {
                         let _keys: Vec<String> = pm.metadata.keys().cloned().collect();
                         METADATA.store(Arc::new(pm.clone()));
                         let flatten = Config::get_transform_flatten_events();
-                        if pm.metadata.contains_key(&pipeline) {
-                            match Ingest::prepare_arrow_schema_with_metadata(&pipeline, &pm.metadata, flatten) {
+                        if pm.metadata.contains_key(&namespace) {
+                            match Ingest::prepare_arrow_schema_with_metadata_for_query(&namespace, &pm.metadata, flatten) {
                                 Ok(schema) => {
-                                    ARROW_SCHEMA.insert(pipeline.clone(), ArcSwap::from(schema.clone()));
+                                    ARROW_SCHEMA.insert(namespace.clone(), ArcSwap::from(schema.clone()));
                                     let field_list: Vec<String> = schema.fields().iter().map(|f| format!("{}:{:?}", f.name(), f.data_type())).collect();
                                     // println!("Published ARROW_SCHEMA for '{}' (fields={}, {:?})", pipeline, schema.fields().len(), field_list);
+                                    println!("Arrow schema ready for namespace='{}' fields={}", namespace, schema.fields().len());
                                 },
                                 Err(e) => {
-                                    println!("Failed to build Arrow schema for '{}': {}", pipeline, e);
+                                    println!("Failed to build Arrow schema for '{}': {}", namespace, e);
                                 }
                             }
                         } else {
                             // missing namespace; proceed without schema
+                            println!("Metadata missing for namespace='{}' (continuing)", namespace);
                         }
                     },
                     Err(_) => {
                         // no metadata; proceed
                         METADATA.store(Arc::new(PipelineMetadata::new()));
+                        println!("No pipeline metadata found; proceeding without schema");
                     }
                 }
 
-                // WAL → MemTable via WalReader
-                let reader = crate::buffer::wal_store::WalReaderFactory::for_pipeline_async(&pipeline).await;
-                let wal_batches: Vec<RecordBatch> = reader.load_committed_batches(&pipeline, 64).unwrap_or_default();
-                let wal_rows: usize = wal_batches.iter().map(|b| b.num_rows()).sum();
-                if !wal_batches.is_empty() { let schema = wal_batches[0].schema(); let filtered: Vec<RecordBatch> = wal_batches.into_iter().filter(|b| b.schema().as_ref() == schema.as_ref()).collect(); if !filtered.is_empty() { let mem = MemTable::try_new(schema.clone(), vec![filtered]).map_err(|e| DataFusionError::Internal(e.to_string())).unwrap(); let _ = ctx.register_table(&format!("{}_wal", &pipeline), Arc::new(mem)); } }
-
-                // S3 parquet: use manifest-only mode (absolute S3 URLs)
-                // Prepare Parquet registration paths from manifest prefixes
-                let mut s3_paths: Vec<String> = Vec::new();
-                if let Some(man) = Config::read_manifest(&pipeline).await {
-                    if let Some(tables) = man.get("tables").and_then(|t| t.as_object()) {
-                        if let Some(ns) = tables.get(&pipeline).and_then(|v| v.as_object()) {
-                            if let Some(prefixes) = ns.get("prefixes").and_then(|p| p.as_array()) {
-                                for p in prefixes {
-                                    if let Some(pref) = p.as_str() {
-                                        if pref.starts_with("s3://") {
-                                            // ensure trailing slash so DF treats as dir
-                                            let mut v = pref.trim().to_string();
-                                            if !v.ends_with('/') { v.push('/'); }
-                                            s3_paths.push(v);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                if s3_paths.is_empty() { println!("Manifest missing or contains no absolute S3 prefixes for '{}'. Run ingest to publish manifest.", pipeline); process::exit(1); }
-                // Register object store per unique bucket
-                {
-                    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-                    for path in &s3_paths {
-                        if let Ok(u) = Url::parse(path) { if let Some(bucket) = u.host_str() {
-                            if seen.insert(bucket.to_string()) { register_s3_object_store(&ctx, path).await; }
-                        } }
-                    }
-                }
-                // Cache: registry of already registered S3 object tables per (namespace, manifest_epoch)
-                let manifest_epoch = Config::get_manifest_epoch(&pipeline).await.unwrap_or(0);
-                let mut registry = Config::read_registry(&pipeline).await.unwrap_or(serde_json::json!({"epoch": 0u64, "sources": []}));
-                let reg_epoch = registry.get("epoch").and_then(|v| v.as_u64()).unwrap_or(0);
-                if reg_epoch != manifest_epoch { registry = serde_json::json!({"epoch": manifest_epoch, "sources": []}); }
-                let mut sources_cached: Vec<(String, String)> = registry
-                    .get("sources")
-                    .and_then(|v| v.as_array())
-                    .cloned()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter_map(|v| {
-                        let name = v.get("name").and_then(|s| s.as_str()).map(|s| s.to_string());
-                        let url = v.get("url").and_then(|s| s.as_str()).map(|s| s.to_string());
-                        match (name, url) { (Some(n), Some(u)) => Some((n, u)), _ => None }
-                    })
-                    .collect();
-
-                // If cached sources exist, register them quickly and skip listing
-                if !sources_cached.is_empty() {
-                    for (name, url) in &sources_cached {
-                        let opts = ParquetReadOptions { schema: None, file_extension: "parquet", table_partition_cols: vec![], parquet_pruning: None, skip_metadata: Some(true), file_sort_order: vec![] };
-                        let _ = ctx.register_parquet(name, url, opts).await;
-                    }
-                }
-
-                // If cache empty, register each prefix path (directory) and persist
-                if sources_cached.is_empty() {
-                    let mut new_sources: Vec<(String, String)> = Vec::new();
-                    for (idx, path) in s3_paths.iter().enumerate() {
-                        let opts = ParquetReadOptions { schema: None, file_extension: "parquet", table_partition_cols: vec![], parquet_pruning: None, skip_metadata: Some(true), file_sort_order: vec![] };
-                        let tname = format!("{}_s3_{}", &pipeline, idx);
-                        if let Err(e) = ctx.register_parquet(&tname, path, opts).await { println!("Failed to register S3 table path='{}' for '{}': {}", path, pipeline, e); process::exit(1); }
-                        new_sources.push((tname, path.clone()));
-                    }
-                    sources_cached = new_sources;
-                }
-                // optional preview removed to reduce noise
-
-                // Union view as pipeline name with projection to cast known top-level timestamp fields
-                // Build base DF by unioning all registered S3 path tables just registered above
-                let table_names: Vec<String> = (0..s3_paths.len()).map(|idx| format!("{}_s3_{}", &pipeline, idx)).collect();
-                let mut df_s3_base = ctx.table(&table_names[0]).await.expect("S3 table missing");
-                for t in table_names.iter().skip(1) { if let Ok(df_next) = ctx.table(t).await { df_s3_base = df_s3_base.union(df_next).expect("union s3 objs"); } }
-                let _s3_fields: Vec<String> = df_s3_base.schema().fields().iter().map(|f| f.name().clone()).collect();
-                let df_s3 = {
-                    if let Some(swap) = ARROW_SCHEMA.get(&pipeline) {
-                        let arrow_schema = swap.load();
-                        use datafusion::logical_expr::{col, Expr, lit};
-                        if arrow_schema.fields().is_empty() { df_s3_base.clone() } else {
-                        // Builder: for each top-level field, rebuild struct fields recursively casting int64 to timestamp where ARROW_SCHEMA says timestamp
-                        fn build_expr_for_field(name: &str, dt: &ArrowDataType) -> Expr {
-                            match dt {
-                                ArrowDataType::Timestamp(_, _) => Expr::Cast(datafusion::logical_expr::expr::Cast { expr: Box::new(col(name)), data_type: ArrowDataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, None) }).alias(name),
-                                ArrowDataType::Struct(fields) => {
-                                    // For structs, recursively cast child leafs but keep struct unchanged (DataFusion lacks struct builder in SELECT)
-                                    // Use the original column; nested leaf access in user queries will be cast on projection below when referenced
-                                    col(name)
-                                }
-                                ArrowDataType::List(field) => {
-                                    // Lists of structs/timestamps: leave as-is for now (casting within lists requires explode/transform)
-                                    col(name)
-                                }
-                                _ => col(name),
-                            }
-                        }
-                        let mut exprs: Vec<Expr> = Vec::with_capacity(arrow_schema.fields().len());
-                        for f in arrow_schema.fields() {
-                            exprs.push(build_expr_for_field(f.name(), f.data_type()));
-                        }
-                        if exprs.is_empty() { df_s3_base.clone() } else { match df_s3_base.clone().select(exprs) { Ok(dfp) => dfp, Err(_) => df_s3_base.clone() } }
-                        }
-                    } else { df_s3_base.clone() }
-                };
-                // Ensure WAL side matches S3 columns count/order: project WAL to S3's schema if present
-                let df_wal = match ctx.table(&format!("{}_wal", &pipeline)).await { Ok(df) => df, Err(_) => df_s3.clone().filter(datafusion::logical_expr::lit(false)).unwrap() };
-                let df_union = {
-                    let left_schema = df_s3.schema();
-                    let right_schema = df_wal.schema();
-                    let left_cols = left_schema.fields().len();
-                    let right_cols = right_schema.fields().len();
-                    if left_cols == 0 && right_cols == 0 {
-                        // nothing to union; keep S3 side (empty)
-                        df_s3.clone()
-                    } else if left_cols == 0 {
-                        // only WAL has data
-                        df_wal.clone()
-                    } else if right_cols == 0 {
-                        // only S3 has data
-                        df_s3.clone()
-                    } else if left_cols != right_cols {
-                        // try to project WAL to S3's column set
-                        use datafusion::logical_expr::col;
-                        let mut exprs: Vec<datafusion::logical_expr::Expr> = Vec::new();
-                        for f in left_schema.fields() { exprs.push(col(f.name())); }
-                        if !exprs.is_empty() {
-                            if let Ok(projected) = df_wal.clone().select(exprs) { df_s3.union(projected).expect("union") } else { df_s3.union(df_wal).expect("union") }
-                        } else { df_s3.union(df_wal).expect("union") }
-                    } else {
-                        df_s3.union(df_wal).expect("union")
-                    }
-                };
-                let view = ViewTable::try_new(df_union.into_optimized_plan().expect("optimize"), Some(pipeline.clone())).expect("view");
-                ctx.register_table(&pipeline, Arc::new(view)).expect("register union view");
-                // union view registered
+                let _ = crate::sql::tables::register_namespace_view(&ctx, &pipeline, &namespace).await.map_err(|e| {
+                    println!("Failed to register namespace view for {}.{}: {}", pipeline, namespace, e);
+                    e
+                });
             }
             // Restore original pipeline context
             PIPELINE_NAME.write().clear();
@@ -1296,7 +1103,17 @@ pub async fn query(sql_str: &str) {
                     if let StdQuery { body, order_by, limit, .. } = q.as_mut() {
                         match &mut **body {
                             SetExpr::Select(sel) => {
-                                let StdSelect { projection, selection, group_by, having, .. } = sel.as_mut();
+                                let StdSelect { projection, selection, group_by, having, from, .. } = sel.as_mut();
+                                // Rewrite two-part table names (pipeline.namespace) -> namespace
+                                for twj in from.iter_mut() {
+                                    if let TableFactor::Table { name, .. } = &mut twj.relation {
+                                        if name.0.len() > 1 {
+                                            if let Some(last) = name.0.last().cloned() {
+                                                name.0 = vec![last];
+                                            }
+                                        }
+                                    }
+                                }
                                 for item in projection.iter_mut() {
                                     match item {
                                         StdSelectItem::UnnamedExpr(e) => rewrite_expr(e, whitelist),
@@ -1420,7 +1237,21 @@ pub async fn query(sql_str: &str) {
                         } else { let _ = tx_res.send(Vec::new()); }
                     } else {
                         // SELECT: run against prepared context (S3/union already registered earlier)
-                        if let Ok(df) = ctx_clone.sql(&current).await { if let Ok(b) = df.collect().await { let _ = tx_res.send(b); } }
+                        if let Ok(df) = ctx_clone.sql(&current).await {
+                            match df.collect().await {
+                                Ok(b) => {
+                                    let rows: usize = b.iter().map(|rb| rb.num_rows()).sum();
+                                    println!("SELECT collected: batches={} rows={}", b.len(), rows);
+                                    let _ = tx_res.send(b);
+                                }
+                                Err(e) => {
+                                    println!("SELECT failed to collect: {}", e);
+                                    let _ = tx_res.send(Vec::new());
+                                }
+                            }
+                        } else {
+                            let _ = tx_res.send(Vec::new());
+                        }
                     }
 
                     // wait for either watch tick or new request

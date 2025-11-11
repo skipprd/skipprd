@@ -551,21 +551,26 @@ impl DataOutputAwsAthenaPlugin {
                 crate::metrics::counters::add_upload(1);
                 crate::metrics::counters::add_upload_latency_ns(upload_start.elapsed().as_nanos() as u64);
                 crate::metrics::counters::dec_uploads_in_flight();
-                // Update manifest with the directory prefix we just wrote under
-                let ns_dir = full_key.split('/').next().unwrap_or("").to_string();
-                let dir_prefix = if ns_dir.is_empty() { final_key.clone() } else { full_key.clone() };
+                // Update manifest with the canonical namespace root prefix (absolute s3:// URL)
+                // Canonical: s3://{bucket}/{s3_prefix}/{namespace}/
+                let trimmed_key_root = key.trim_matches('/').to_string();
+                let ns_root = if !namespace.is_empty() {
+                    if trimmed_key_root.is_empty() { namespace.clone() } else { format!("{}/{}", trimmed_key_root, namespace) }
+                } else {
+                    trimmed_key_root.clone()
+                };
+                let mut abs_prefix = format!("s3://{}/{}", bucket, ns_root.trim_start_matches('/'));
+                if !abs_prefix.ends_with('/') { abs_prefix.push('/'); }
                 // best-effort manifest update (async fire-and-forget)
                 {
                     let ns = namespace.to_string();
-                    let prefix_for_manifest = dir_prefix.clone();
+                    let prefix_for_manifest = abs_prefix.clone();
                     tokio::spawn(async move {
-                        // Update registry with data prefix
-                        let pipeline = crate::helpers::configuration::Config::get_pipeline_name();
-                        let _ = crate::sql::registry::ensure_ns_entry(&pipeline, &ns, |current| {
-                            let mut e = current.unwrap_or(crate::sql::registry::NamespaceEntry { data_prefixes: vec![], semantic_key: String::new(), catalog_key: String::new(), stats_key: String::new(), last_updated_epoch: 0 });
-                            if !e.data_prefixes.iter().any(|p| p == &prefix_for_manifest) { e.data_prefixes.push(prefix_for_manifest.clone()); }
-                            e
-                        }).await;
+                        // Write manifest JSON
+                        crate::helpers::configuration::Config::update_manifest_with_prefix(&ns, &prefix_for_manifest).await;
+                        // Update manifest for DataFusion queries (record prefix and database=pipeline)
+                        let db = crate::helpers::configuration::Config::get_pipeline_name();
+                        crate::helpers::configuration::Config::update_manifest_with_prefix_and_db(&ns, &prefix_for_manifest, &db).await;
                     });
                 }
                 Ok(())

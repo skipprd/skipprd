@@ -1496,30 +1496,106 @@ impl Config {
     pub fn get_manifest_s3_key(namespace: &str) -> Option<(String, String)> {
         let tenant = Self::get_tenant();
         let workspace = Self::get_workspace_name();
+        let pipeline = Self::get_pipeline_name();
         let bucket = Self::get_skippr_s3_bucket();
-        let key = format!("{}/{}/{}/manifest/manifest.json", tenant, workspace, namespace);
+        // Store manifest as <tenant>/<workspace>/<namespace>/manifest/<namespace>.json
+        let filename = format!("{}.json", namespace);
+        let key = format!("{}/{}/{}/manifest/{}", tenant, workspace, pipeline, filename);
         Some((bucket, key))
     }
 
-    // Deprecated: manifest local caching removed
-    pub fn get_manifest_local_path(_namespace: &str) -> String { String::new() }
-    pub async fn read_manifest(_namespace: &str) -> Option<serde_json::Value> { None }
-
-    pub async fn get_manifest_epoch(_namespace: &str) -> Option<u64> { None }
-
-    pub fn get_registry_local_path(namespace: &str) -> String {
-        let data_dir = Self::get_data_dir();
-        let cache_dir = format!("{}/catalog_cache", data_dir);
-        let _ = std::fs::create_dir_all(&cache_dir);
-        format!("{}/{}_s3_registry.json", cache_dir, namespace)
+    // Read manifest JSON for a namespace/pipeline from S3
+    pub async fn read_manifest(namespace: &str) -> Option<serde_json::Value> {
+        if let Some((_bucket, key)) = Self::get_manifest_s3_key(namespace) {
+            if let Ok(v) = crate::helpers::s3::get_json(&key).await { return Some(v); }
+        }
+        None
     }
 
-    pub async fn read_registry(_namespace: &str) -> Option<serde_json::Value> { None }
+    pub async fn get_manifest_epoch(namespace: &str) -> Option<u64> {
+        Self::read_manifest(namespace).await
+            .and_then(|v| v.get("epoch").and_then(|e| e.as_u64()))
+    }
 
-    pub async fn write_registry(_namespace: &str, _value: &serde_json::Value) { }
+    // Deprecated local registry helpers removed (S3 is canonical)
 
     // Replaced by registry: callers should use sql::registry::ensure_ns_entry
-    pub async fn update_manifest_with_prefix(_namespace: &str, _dir_prefix: &str) { }
+    pub async fn update_manifest_with_prefix(namespace: &str, dir_prefix: &str) {
+        // Compose absolute s3 URL
+        let abs_prefix = if dir_prefix.starts_with("s3://") {
+            dir_prefix.trim().to_string()
+        } else {
+            let bucket = Self::get_skippr_s3_bucket();
+            let key = Self::get_manifest_s3_key(namespace);
+            format!("s3://{}/{}{}", bucket, key.unwrap().1, dir_prefix)
+        };
+        // Load current manifest or create new
+        let mut manifest = Self::read_manifest(namespace).await.unwrap_or(serde_json::json!({
+            "epoch": 0u64,
+            "tables": {}
+        }));
+        // tables.namespace.prefixes = unique list
+        {
+            use serde_json::{json, Value};
+            let tables = manifest.as_object_mut().unwrap().entry("tables".to_string()).or_insert(json!({}));
+            if !tables.is_object() { *tables = json!({}); }
+            let ns_entry = tables.as_object_mut().unwrap().entry(namespace.to_string()).or_insert(json!({"prefixes": []}));
+            if !ns_entry.is_object() { *ns_entry = json!({"prefixes": []}); }
+            let arr = ns_entry.as_object_mut().unwrap().entry("prefixes".to_string()).or_insert(json!([]));
+            if !arr.is_array() { *arr = json!([]); }
+            let a = arr.as_array_mut().unwrap();
+            if !a.iter().any(|v| v.as_str() == Some(&abs_prefix)) {
+                a.push(Value::String(abs_prefix.clone()));
+            }
+        }
+        // Bump epoch
+        let now_epoch = chrono::Utc::now().timestamp() as u64;
+        if let Some(obj) = manifest.as_object_mut() { obj.insert("epoch".to_string(), serde_json::json!(now_epoch)); }
+        // Write back to S3
+        if let Some((_bucket, key)) = Self::get_manifest_s3_key(namespace) {
+            let _ = crate::helpers::s3::put_json(&key, &manifest).await;
+        }
+    }
+
+    // Extended helper: update prefix and record database (usually pipeline name)
+    pub async fn update_manifest_with_prefix_and_db(namespace: &str, dir_prefix: &str, database: &str) {
+        // Compose absolute s3 URL
+        let abs_prefix = if dir_prefix.starts_with("s3://") {
+            dir_prefix.trim().to_string()
+        } else {
+            let bucket = Self::get_skippr_s3_bucket();
+            let key = Self::get_manifest_s3_key(namespace);
+            format!("s3://{}/{}{}", bucket, key.unwrap().1, dir_prefix)
+        };
+        // Load current manifest or create new
+        let mut manifest = Self::read_manifest(namespace).await.unwrap_or(serde_json::json!({
+            "epoch": 0u64,
+            "tables": {}
+        }));
+        {
+            use serde_json::{json, Value};
+            let tables = manifest.as_object_mut().unwrap().entry("tables".to_string()).or_insert(json!({}));
+            if !tables.is_object() { *tables = json!({}); }
+            let ns_entry = tables.as_object_mut().unwrap().entry(namespace.to_string()).or_insert(json!({"prefixes": [], "database": ""}));
+            if !ns_entry.is_object() { *ns_entry = json!({"prefixes": [], "database": ""}); }
+            // prefixes
+            let arr = ns_entry.as_object_mut().unwrap().entry("prefixes".to_string()).or_insert(json!([]));
+            if !arr.is_array() { *arr = json!([]); }
+            let a = arr.as_array_mut().unwrap();
+            if !a.iter().any(|v| v.as_str() == Some(&abs_prefix)) {
+                a.push(Value::String(abs_prefix.clone()));
+            }
+            // database
+            ns_entry.as_object_mut().unwrap().insert("database".to_string(), json!(database));
+        }
+        // Bump epoch
+        let now_epoch = chrono::Utc::now().timestamp() as u64;
+        if let Some(obj) = manifest.as_object_mut() { obj.insert("epoch".to_string(), serde_json::json!(now_epoch)); }
+        // Write back to S3
+        if let Some((_bucket, key)) = Self::get_manifest_s3_key(namespace) {
+            let _ = crate::helpers::s3::put_json(&key, &manifest).await;
+        }
+    }
 
     pub fn get_full_namespace_name() -> String {
         // let mut helpers = Helpers { CLEAN_FIELD_CACHE: Default::default() };
@@ -1715,16 +1791,6 @@ impl Config {
         let bucket = Self::get_skippr_s3_bucket();
         debug!("{} META: writing stats to s3://{}/{}", chrono::Utc::now().to_rfc3339(), bucket, s3_key);
         let json_value = match serde_json::to_value(stats) { Ok(v) => v, Err(e) => { error!("Failed to serialize stats: {}", e); return; } };
-        // Offline mode: skip S3 and write local cache only (used by tests)
-        let offline = Self::truth_value(&Self::getenv("SKIPPR_OFFLINE", "false"));
-        if offline {
-            let path = Self::get_stats_local_path(namespace);
-            if !path.is_empty() {
-                if let Some(dir) = std::path::Path::new(&path).parent() { let _ = std::fs::create_dir_all(dir); }
-                let _ = std::fs::write(&path, serde_json::to_string(&json_value).unwrap_or_default());
-            }
-            return;
-        }
         match crate::helpers::s3::put_json(&s3_key, &json_value).await {
             Ok(_) => {
                 // Debug summary of stats
@@ -1733,17 +1799,9 @@ impl Config {
             }
             Err(err) => { error!("Failed to upload stats to S3: {:?}", err); }
         }
-        // Always write local cache copy for tests and offline inspection
-        let path = Self::get_stats_local_path(namespace);
-        if !path.is_empty() {
-            if let Some(dir) = std::path::Path::new(&path).parent() {
-                let _ = std::fs::create_dir_all(dir);
-            }
-            let _ = std::fs::write(&path, serde_json::to_string(&json_value).unwrap_or_default());
-        }
         // Update registry with stats key
         let _ = crate::sql::registry::ensure_ns_entry(&pipeline, namespace, |current| {
-            let mut e = current.unwrap_or(crate::sql::registry::NamespaceEntry { data_prefixes: vec![], semantic_key: String::new(), catalog_key: String::new(), stats_key: String::new(), last_updated_epoch: 0 });
+            let mut e = current.unwrap_or(crate::sql::registry::NamespaceEntry { semantic_key: String::new(), catalog_key: String::new(), stats_key: String::new(), last_updated_epoch: 0 });
             e.stats_key = s3_key.clone();
             e
         }).await;
@@ -1783,16 +1841,7 @@ impl Config {
         }
     }
 
-    pub fn get_stats_local_path(namespace: &str) -> String {
-        let data_dir = Self::get_data_dir();
-        let cache_dir = format!("{}/catalog_cache", data_dir);
-        let _ = std::fs::create_dir_all(&cache_dir);
-        format!("{}/{}_stats.json", cache_dir, namespace)
-    }
-
-    pub fn get_semantic_local_path(_namespace: &str) -> String { String::new() }
-
-    pub fn get_catalog_local_path(_namespace: &str) -> String { String::new() }
+    // Deprecated local cache helpers removed (S3 is canonical)
 
     pub fn catalog_llm_enabled() -> bool {
         Self::truth_value(&Self::getenv("CATALOG_LLM_ENABLED", "true"))
@@ -1827,7 +1876,7 @@ impl Config {
         // Update registry with semantic key
         let pipeline = Self::get_pipeline_name();
         let _ = crate::sql::registry::ensure_ns_entry(&pipeline, namespace, |current| {
-            let mut e = current.unwrap_or(crate::sql::registry::NamespaceEntry { data_prefixes: vec![], semantic_key: String::new(), catalog_key: String::new(), stats_key: String::new(), last_updated_epoch: 0 });
+            let mut e = current.unwrap_or(crate::sql::registry::NamespaceEntry { semantic_key: String::new(), catalog_key: String::new(), stats_key: String::new(), last_updated_epoch: 0 });
             e.semantic_key = s3_key.clone();
             e
         }).await;
@@ -1867,7 +1916,7 @@ impl Config {
         // Update registry with catalog key
         let pipeline = Self::get_pipeline_name();
         let _ = crate::sql::registry::ensure_ns_entry(&pipeline, namespace, |current| {
-            let mut e = current.unwrap_or(crate::sql::registry::NamespaceEntry { data_prefixes: vec![], semantic_key: String::new(), catalog_key: String::new(), stats_key: String::new(), last_updated_epoch: 0 });
+            let mut e = current.unwrap_or(crate::sql::registry::NamespaceEntry { semantic_key: String::new(), catalog_key: String::new(), stats_key: String::new(), last_updated_epoch: 0 });
             e.catalog_key = s3_key.clone();
             e
         }).await;
