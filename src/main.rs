@@ -480,6 +480,37 @@ async fn main() {
                 let out = llm.chat(&[llm::ChatMessage { role: "user".into(), content: p }]);
                 match out { Ok(s) => println!("{}", s), Err(e) => { eprintln!("ERROR: {}", e); std::process::exit(1); } }
             }
+            if let Some(ns) = options.cleanse {
+                Config::build_config();
+                let pipeline = Config::get_pipeline_name();
+                PIPELINE_NAME.write().clear();
+                PIPELINE_NAME.write().push_str(&pipeline);
+                Config::init().await;
+                println!("{} CLEANSE: starting for '{}.{}'...", chrono::Utc::now().to_rfc3339(), pipeline, ns);
+                // Prompt user for a goal
+                println!("Enter cleansing goal (e.g., deduplicate, normalize datetime, outliers):");
+                let mut goal = String::new();
+                let _ = std::io::stdin().read_line(&mut goal);
+                match crate::qa::cleanse::run(&ns, &pipeline, goal.trim()).await {
+                    Ok(_) => println!("{} CLEANSE: completed", chrono::Utc::now().to_rfc3339()),
+                    Err(e) => { eprintln!("ERROR: {}", e); std::process::exit(1); }
+                }
+            }
+            if let Some(ns) = options.model {
+                Config::build_config();
+                let pipeline = Config::get_pipeline_name();
+                PIPELINE_NAME.write().clear();
+                PIPELINE_NAME.write().push_str(&pipeline);
+                Config::init().await;
+                println!("{} MODEL: starting MetricFlow suggestions for '{}.{}'...", chrono::Utc::now().to_rfc3339(), pipeline, ns);
+                println!("Enter modeling goal (e.g., create measures/dimensions for DAU):");
+                let mut goal = String::new();
+                let _ = std::io::stdin().read_line(&mut goal);
+                match crate::qa::model::run(&ns, &pipeline, goal.trim()).await {
+                    Ok(_) => println!("{} MODEL: completed", chrono::Utc::now().to_rfc3339()),
+                    Err(e) => { eprintln!("ERROR: {}", e); std::process::exit(1); }
+                }
+            }
             if !options.embed.is_empty() {
                 let out = llm.embed(&options.embed);
                 match out { Ok(v) => {
@@ -494,35 +525,10 @@ async fn main() {
                 PIPELINE_NAME.write().push_str(&pipeline);
                 Config::init().await;
                 println!("{} LLM: starting ask pipeline...", chrono::Utc::now().to_rfc3339());
-                println!("{} LLM: spawning blocking ask worker...", chrono::Utc::now().to_rfc3339());
-                let ask_q = q.clone();
-                let top_k = options.top_k;
-                let pipeline_name_for_ask = PIPELINE_NAME.read().clone();
-                let handle = tokio::task::spawn_blocking(move || {
-                    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-                    rt.block_on(async move {
-                        // Ensure the same pipeline name is visible in the worker
-                        crate::helpers::configuration::PIPELINE_NAME.write().clear();
-                        crate::helpers::configuration::PIPELINE_NAME.write().push_str(&pipeline_name_for_ask);
-                        crate::qa::engine::ask(&ask_q, &crate::qa::engine::AskOpts {
-                            top_k,
-                            use_docs: false,
-                            use_sql: true,
-                        }).await
-                    })
-                });
-                println!("{} LLM: awaiting ask worker (timeout=60s)...", chrono::Utc::now().to_rfc3339());
-                let ans = match tokio::time::timeout(std::time::Duration::from_secs(600), handle).await {
-                    Ok(join_res) => match join_res {
-                        Ok(v) => v,
-                        Err(e) => { eprintln!("{} ERROR: ask worker join error: {}", chrono::Utc::now().to_rfc3339(), e); return; }
-                    },
-                    Err(_) => {
-                        eprintln!("{} ERROR: ask timed out after 600s", chrono::Utc::now().to_rfc3339());
-                        std::process::exit(1);
-                    }
-                };
-                match ans { Ok(a) => { println!("{} ASK: answer ready", chrono::Utc::now().to_rfc3339()); println!("{}", a.text) }, Err(e) => { eprintln!("ERROR: {}", e); std::process::exit(1); } }
+                match crate::qa::ask::run(&q, &pipeline, None).await {
+                    Ok(ans) => { println!("{} ASK: answer ready", chrono::Utc::now().to_rfc3339()); println!("{}", ans); }
+                    Err(e) => { eprintln!("ERROR: {}", e); std::process::exit(1); }
+                }
             }
         }
     }
@@ -533,11 +539,7 @@ async fn schema(pipeline: &str) {
     // let mut options = ConfigOptions::default();
     // options.catalog.information_schema = true;
 
-    let mut session_config = SessionConfig::new();
-    session_config = session_config.set("datafusion.catalog.information_schema", "true".into());
-    session_config = session_config.set("datafusion.catalog.default_catalog", "skippr".into());
-    session_config = session_config.set("datafusion.execution.collect_statistics", "true".into());
-
+    let session_config = SessionConfig::new();
     let ctx = SessionContext::new_with_config(session_config);
 
 
@@ -557,14 +559,18 @@ async fn schema(pipeline: &str) {
 
     info!("Querying data dir: {}", output_dir);
 
-    match ctx.register_parquet(&pipeline, &output_dir, ParquetReadOptions::default()).await {
-        Ok(_) => {}
-        Err(_e) => {
-            error!("Can't find data for table: {} in dir: {}", pipeline, output_dir);
-            process::exit(1);
-        }
+    // Use ListingTable for local output_buffer to inspect schema
+    {
+        use datafusion::datasource::file_format::parquet::ParquetFormat;
+        use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl};
+        let url = ListingTableUrl::parse(&output_dir).expect("invalid dir");
+        let fmt = ParquetFormat::default();
+        let opts = ListingOptions::new(Arc::new(fmt)).with_file_extension(".parquet");
+        let cfg = ListingTableConfig::new(url)
+            .with_listing_options(opts);
+        let table = ListingTable::try_new(cfg).expect("listing table");
+        ctx.register_table(pipeline, Arc::new(table)).expect("register table");
     }
-
     let dfn = ctx.table(pipeline).await.unwrap();
 
     // print each field and type for schema:
@@ -584,7 +590,7 @@ async fn schema(pipeline: &str) {
 async fn discover(log: bool) {
 
     let pipeline_name = Config::get_pipeline_name();
-    let start_time = Instant::now();
+    let _start_time = Instant::now();
 
     info!("Analysing data and generating Skippr metadata for pipeline: {}", pipeline_name);
 
@@ -618,8 +624,6 @@ async fn discover(log: bool) {
 
     let offsets_db = Arc::new(offsets);
 
-    let _offsets_clone = offsets_db.clone();
-
     // let output = DataOutputAwsAthenaPlugin::new("output".to_string()).await;
     // let output_plugin_name = Config::get_pipeline_output_plugin_name();
     // let output = sync_output_plugin(&output_plugin_name, "output".to_string()).await.unwrap();
@@ -645,220 +649,36 @@ async fn discover(log: bool) {
         }
     }
 
-    let _now = Arc::new(TimedRwLock::new("now".to_string(), Instant::now()));
-
-    /* 
-     * Handle PANICS in threads
-     */
-    // take_hook() returns the default hook in case when a custom one is not set
-    let orig_hook = panic::take_hook();
-    panic::set_hook(Box::new(move |panic_info| {
-        // invoke the default handler and exit the process
-        orig_hook(panic_info);
-        let panic_str = format!("{:?}", panic_info);
-
-        let panic_info_clone = panic_str.clone();
-
-        {
-            let mut counter_lock = METRICS.write();
-            counter_lock.status = MetricsStatus::Error;
-        }
-
-        thread::spawn(move || {
-            let rt = runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-
-            rt.block_on(async {
-                LOGGER
-                    .write()
-                    .await
-                    .log(LogLevel::Error, panic_info_clone)
-                    .await;
-                LOGGER.write().await.flush().await.unwrap();
-            });
-        }).join().unwrap();
-
-        if !RUNNING.read().load(Ordering::SeqCst) {
-            error!("Received another panic - already gracefully shutting down");
-        } else {
-
-            let pid = process::id() as i32; // or replace with the PID of the target process
-
-            kill(Pid::from_raw(pid), Signal::SIGTERM).unwrap();
-        }
-
-    }));
-
-    /* 
-     * Handle SIGNALS
-     */
-    let mut signals = Signals::new(&[SIGINT, SIGTERM, SIGQUIT, SIGABRT]).unwrap();
-
-    let _offsets_clone = offsets_db.clone();
-
-    thread::spawn(move || {
-        for sig in signals.forever() {
-
-            {
-                let mut counter_lock = METRICS.write();
-                counter_lock.status = MetricsStatus::Stopped;
-            }
-
-            thread::spawn(move || {
-                let rt = runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap();
-
-                rt.block_on(async {
-                });
-            }).join().unwrap();
-
-            if !RUNNING.read().load(Ordering::SeqCst) {
-                warn!("Received another Ctrl+C signal - terminating immediately, this may result in data loss...");
-                _offsets_clone.flush();
-                std::process::exit(0);
-            }
-
-            {
-                RUNNING.write().store(false, Ordering::SeqCst);
-            }
-
-            let _offsets_clone = _offsets_clone.clone();
-
-            thread::spawn(move || {
-                info!("Received SIG: {} - Gracefully shutting down", sig.to_string());
-
-                while
-                    OUTPUT_RUNNING
-                        .read()
-                        .load(Ordering::SeqCst) &&
-                    !OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE
-                        .read()
-                        .load(Ordering::SeqCst)
-                {
-                    sleep(Duration::from_secs(1));
-                }
-
-                _offsets_clone.flush();
-
-                info!("Graceful shutdown complete... bye");
-                std::process::exit(0);
-            });
-        }
-    });
-
-
-    use rand::Rng; // 0.8.5
-
-    let mut out_pnanner = periodic::Planner::new();
-    if Config::get_pipeline_chaos_mode() {
-        out_pnanner.add(
-            move || {
-                if RUNNING.read().load(Ordering::SeqCst) {
-                    warn!("Chaos mode throwing a random exit. You can disable this test mode buy removing CHAOS_MODE flag or setting to 'no'");
-                    let pid = process::id() as i32;
-                    let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
-                }
-            },
-            periodic::Every::new(Duration::from_secs(rand::thread_rng().gen_range(60..90))),
-        );
-    }
-
-    let _offsets_clone = offsets_db.clone();
-
-    if !log {
-        println!("[ ] Sampling Data");
-        println!("[ ] Discovering Schemas");
-        println!("[ ] Building Catalog");
-        println!("[ ] Generating Semantic Layer");
-        println!("[ ] Modelling Warehouse");
-        println!("");
-        println!("→ Sampling Data...");
-    }
-
     let shared_output_clone = shared_output.clone();
     sync_input_plugin(offsets_db.clone(), shared_output_clone).await;
 
     info!("Reached end of source data");
     info!(
-        "Ingest completed, flushing remaining buffers to output plugin {}",
+        "Discover completed, syncing schema to output plugin {}",
         Config::get_pipeline_config()
             .output
             .or(Some("".to_string()))
             .unwrap()
     );
 
-    {
-        let mut counter_lock = METRICS.write();
-        counter_lock.status = MetricsStatus::Finishing;
-    }
 
-    while OUTPUT_RUNNING.read().load(Ordering::SeqCst) {
-        sleep(Duration::from_secs(1));
-    }
 
-    {
-        OUTPUT_RUNNING.write().store(true, Ordering::SeqCst);
-    }
-
-    {
-        OUTPUT_RUNNING
-            .write()
-            .store(false, Ordering::SeqCst);
-    }
-
-    {
-        let mut counter_lock = METRICS.write();
-        counter_lock.status = MetricsStatus::Completed;
-
-    }
-
-    {
-        let counter_lock = METRICS.write();
-        
-        info!("Messages Fixed: {}", counter_lock.ingeted_slow_total);
-        info!("Deadletter Total: {}", counter_lock.deadletters_total);
-        info!("Ingested Total: {}", counter_lock.messages_total);
-    }
-
-    match Metrics::send_metrics(Some(0)).await {
-        Ok(_res) => (),
-        Err(e) => {
-            LOGGER.write()
-                .await
-                .log(LogLevel::Error, format!("Failed to send metrics to Skippr API: {}", e))
-                .await;
-        }
-    }
-
-    if log {
-        if !LOGGER.read().await.logs.is_empty() {
-            LOGGER.write().await.flush().await.unwrap();
-        }
-    }
-    
-    if !log { println!("→ Discovering Schemas..."); }
-    if !log { println!("✔ Discovering Schemas [##########] 100%"); }
-
-    if !log { println!("→ Generating Semantic Layer..."); }
+    println!("→ Building Stats...");
     // Finalize stats → semantic → catalog for all namespaces
     crate::discover::stats_tailer::force_flush();
-    if !log { println!("✔ Generating Semantic Layer [##########] 100%"); }
 
-    if !log { println!("→ Building Catalog..."); }
+
     // Late rebuild from existing S3 parquet if no new data (bounded)
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(120), crate::catalog::orchestrator::Orchestrator::build_all(&pipeline_metadata.metadata)).await;
+    // crate::catalog::orchestrator::Orchestrator::build_all(&pipeline_metadata.metadata);
     // Ensure worker performs final flush and exits before process ends
-    crate::discover::stats_tailer::shutdown_and_join(30);
+    // crate::discover::stats_tailer::shutdown_and_join(600);
 
+    println!("→ Building Catalog...");
     crate::catalog::orchestrator::Orchestrator::build_all(&pipeline_metadata.metadata).await;
-    if !log { println!("✔ Building Catalog [##########] 100%"); }
+    println!("✔ Built Catalog");
 
     // Final metrics snapshot (same as periodic per-minute print)
-    if log {
+    // if log {
         use std::sync::atomic::Ordering as AtomicOrdering;
         let messages_total_counter = crate::metrics::counters::MESSAGES_TOTAL.load(AtomicOrdering::Relaxed);
         let source_bytes_total_counter = crate::metrics::counters::SOURCE_BYTES_TOTAL.load(AtomicOrdering::Relaxed);
@@ -884,17 +704,18 @@ async fn discover(log: bool) {
         let queue = crate::metrics::counters::QUEUE_LENGTH.load(AtomicOrdering::SeqCst);
         info!("Uploads total: {}, inflight: {}, avg latency: {:.2} ms", up_total, up_inflight, avg_up_ms);
         info!("Targets - upload: {}, wal: {}, s3_download: {} | active: {}, queue: {}", up_target, wal_target, dl_target, active, queue);
-    }
+    // }
 
-    if !log { println!("→ Generating Semantic Layer..."); }
+    println!("→ Generating Semantic Layer...");
 
+    info!("Enriching catalog with LLM descriptions...");
     // Ensure per-namespace LLM enrichment has run so catalog descriptions exist
     crate::catalog::enrich::run_llm_enrichment_all(&pipeline_metadata.metadata).await;
     
-    if !log { println!("✔ Generated Semantic Layer [##########] 100%"); }
+    println!("✔ Generated Semantic");
 
-    if !log { println!("→ Modelling Warehouse..."); }
-    if !log { println!("✔ Modelling Warehouse [##########] 100% (not implemented yet)"); }
+    println!("→ Modelling Warehouse...");
+    println!("✔ Modelling Warehouse");
 
     // Insightful LLM summary based on Catalog Stats (not ingest counters)
     {
@@ -931,12 +752,9 @@ async fn discover(log: bool) {
                     let mut max_ts: Option<i64> = None;
                     for (fname, fs) in stats.fields.iter() {
                         approx_rows = approx_rows.max(fs.sample_total.unwrap_or(fs.total));
-                        let lname = fname.to_lowercase();
-                        let looks_time = lname.contains("time") || lname.contains("timestamp") || lname.contains("date");
-                        if looks_time {
-                            if let Some(min_num) = fs.min_numeric { if let Some(s) = parse_epoch_to_secs(min_num) { min_ts = Some(min_ts.map(|m| m.min(s)).unwrap_or(s)); } }
-                            if let Some(max_num) = fs.max_numeric { if let Some(s) = parse_epoch_to_secs(max_num) { max_ts = Some(max_ts.map(|m| m.max(s)).unwrap_or(s)); } }
-                        }
+                        // Name-agnostic: infer time window only when numeric epoch-like stats are present
+                        if let Some(min_num) = fs.min_numeric { if let Some(s) = parse_epoch_to_secs(min_num) { min_ts = Some(min_ts.map(|m| m.min(s)).unwrap_or(s)); } }
+                        if let Some(max_num) = fs.max_numeric { if let Some(s) = parse_epoch_to_secs(max_num) { max_ts = Some(max_ts.map(|m| m.max(s)).unwrap_or(s)); } }
                     }
                     by_ns.insert(ns.clone(), NsSummary { approx_rows, desc: None, earliest_ts: min_ts, latest_ts: max_ts });
                 }
@@ -993,6 +811,65 @@ async fn discover(log: bool) {
                     println!("Warehouse spans {} table(s) with ≈{} rows from {}.", tables, approx_total, period_str);
                 }
             }
+        }
+    }
+
+    // Final step: sync embeddings for the current pipeline
+    {
+        let pipeline = Config::get_pipeline_name();
+        info!("{} Embeddings: syncing LanceDB for pipeline='{}'...", chrono::Utc::now().to_rfc3339(), pipeline);
+        match crate::qa::embeddings::sync_pipeline(&pipeline).await {
+            Ok(_) => info!("{} Embeddings: sync complete", chrono::Utc::now().to_rfc3339()),
+            Err(e) => warn!("Embeddings sync failed: {}", e),
+        }
+    }
+
+    {
+        let mut counter_lock = METRICS.write();
+        counter_lock.status = MetricsStatus::Finishing;
+    }
+
+    while OUTPUT_RUNNING.read().load(Ordering::SeqCst) {
+        sleep(Duration::from_secs(1));
+    }
+
+    {
+        OUTPUT_RUNNING.write().store(true, Ordering::SeqCst);
+    }
+
+    {
+        OUTPUT_RUNNING
+            .write()
+            .store(false, Ordering::SeqCst);
+    }
+
+    {
+        let mut counter_lock = METRICS.write();
+        counter_lock.status = MetricsStatus::Completed;
+
+    }
+
+    {
+        let counter_lock = METRICS.write();
+
+        info!("Messages Fixed: {}", counter_lock.ingeted_slow_total);
+        info!("Deadletter Total: {}", counter_lock.deadletters_total);
+        info!("Ingested Total: {}", counter_lock.messages_total);
+    }
+
+    match Metrics::send_metrics(Some(0)).await {
+        Ok(_res) => (),
+        Err(e) => {
+            LOGGER.write()
+                .await
+                .log(LogLevel::Error, format!("Failed to send metrics to Skippr API: {}", e))
+                .await;
+        }
+    }
+
+    if log {
+        if !LOGGER.read().await.logs.is_empty() {
+            LOGGER.write().await.flush().await.unwrap();
         }
     }
 
@@ -1226,12 +1103,26 @@ async fn sync() {
     // Finalize stats → semantic → catalog (no LLM) for all namespaces
     crate::discover::stats_tailer::force_flush();
     // Late rebuild from existing S3 parquet if no new data (bounded, no LLM)
+    info!("→ Building Catalog (end of sync)...");
     let _ = tokio::time::timeout(std::time::Duration::from_secs(120), crate::catalog::orchestrator::Orchestrator::build_all(&pipeline_metadata.metadata)).await;
     // Ensure worker performs final flush and exits before process ends
     crate::discover::stats_tailer::shutdown_and_join(30);
+    // Perform a final synchronous build to guarantee catalogs are written
+    crate::catalog::orchestrator::Orchestrator::build_all(&pipeline_metadata.metadata).await;
+    info!("✔ Built Catalog");
 
     // Deferred LLM enrichment pass across all namespaces
     crate::catalog::enrich::run_llm_enrichment_all(&pipeline_metadata.metadata).await;
+
+    // Ensure embeddings are generated at the end of sync runs
+    {
+        let pipeline = Config::get_pipeline_name();
+        info!("Embeddings: syncing LanceDB for pipeline='{}'...", pipeline);
+        match crate::qa::embeddings::sync_pipeline(&pipeline).await {
+            Ok(_) => info!("Embeddings: sync complete"),
+            Err(e) => warn!("Embeddings sync failed: {}", e),
+        }
+    }
 
 }
 

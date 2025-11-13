@@ -28,6 +28,8 @@ hyper=warn,reqwest=warn,rustls=warn,h2=warn";
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(default_filter));
 
+    // let filter = EnvFilter::new(default_filter);
+
     tracing_subscriber::registry()
         .with(filter)
         .with(fmt_layer)

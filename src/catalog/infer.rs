@@ -2,28 +2,57 @@ use crate::catalog::model::{SemanticField, SemanticFieldRole, SemanticModel};
 use crate::helpers::configuration::Config;
 use crate::discover::stats::NamespaceStats;
 
-fn classify_field(name: &str, stats: Option<&crate::discover::stats::FieldStats>) -> SemanticFieldRole {
-	let n = name.to_lowercase();
-	if n.ends_with("_id") || n == "id" { return SemanticFieldRole::Id; }
-	if n.contains("timestamp") || n.contains("event_time") || n.contains("created_at") { return SemanticFieldRole::Timestamp; }
+fn classify_field(_name: &str, stats: Option<&crate::discover::stats::FieldStats>) -> SemanticFieldRole {
+	// Name-agnostic: rely only on stats
 	if let Some(s) = stats {
 		if s.min_numeric.is_some() || s.max_numeric.is_some() {
-			if let Some(d) = s.approx_distinct { if d <= 32 { return SemanticFieldRole::Categorical; } }
 			return SemanticFieldRole::Metric;
 		}
-		if s.max_len.unwrap_or(0) > 64 { return SemanticFieldRole::FreeText; }
-		if let Some(d) = s.approx_distinct { if d <= 64 { return SemanticFieldRole::Categorical; } }
-		return SemanticFieldRole::FreeText;
+		if s.max_len.unwrap_or(0) > 64 {
+			return SemanticFieldRole::FreeText;
+		}
+		return SemanticFieldRole::Categorical;
 	}
-	if n.contains("name") || n.contains("desc") || n.contains("text") { return SemanticFieldRole::FreeText; }
 	SemanticFieldRole::Categorical
 }
 
 pub async fn infer_semantic_model_async(namespace: &str) -> SemanticModel {
-	// Read stats from S3 (authoritative)
-	let ns_stats: Option<NamespaceStats> = match Config::read_namespace_stats_async(namespace).await {
-		Some(v) => serde_json::from_value::<NamespaceStats>(v).ok(),
-		None => None,
+	// Prefer stats embedded in Catalog; fallback to separate stats object if present
+	let ns_stats: Option<NamespaceStats> = {
+		let pipeline = Config::get_pipeline_name();
+		let mut out: Option<NamespaceStats> = None;
+		if let Some(entry) = crate::sql::registry::find_entry(&pipeline, namespace).await {
+			if !entry.catalog_key.is_empty() {
+				if let Ok(val) = crate::helpers::s3::get_json(&entry.catalog_key).await {
+					// Build NamespaceStats-like from catalog fields[].stats
+					if let Some(fields) = val.get("fields").and_then(|x| x.as_array()) {
+						let mut ns = NamespaceStats::new(namespace);
+						for f in fields {
+							if let Some(name) = f.get("name").and_then(|x| x.as_str()) {
+								if let Some(st) = f.get("stats").and_then(|x| x.as_object()) {
+									let mut fs = crate::discover::stats::FieldStats::default();
+									fs.total = st.get("total").and_then(|x| x.as_u64()).unwrap_or(0);
+									fs.nulls = st.get("nulls").and_then(|x| x.as_u64()).unwrap_or(0);
+									fs.min_numeric = st.get("min_numeric").and_then(|x| x.as_f64());
+									fs.max_numeric = st.get("max_numeric").and_then(|x| x.as_f64());
+									fs.min_len = st.get("min_len").and_then(|x| x.as_u64());
+									fs.max_len = st.get("max_len").and_then(|x| x.as_u64());
+									fs.approx_distinct = st.get("approx_distinct").and_then(|x| x.as_u64());
+									fs.histogram_bins = st.get("histogram_bins").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|v| v.as_u64()).collect());
+									fs.histogram_min = st.get("histogram_min").and_then(|x| x.as_f64());
+									fs.histogram_max = st.get("histogram_max").and_then(|x| x.as_f64());
+									fs.last_updated_epoch_ms = st.get("last_updated_epoch_ms").and_then(|x| x.as_u64()).unwrap_or(0);
+									ns.fields.insert(name.to_string(), fs);
+								}
+							}
+						}
+						out = Some(ns);
+					}
+				}
+			}
+		}
+		// Fallback to separate stats file
+		out
 	};
 	let mut fields: Vec<SemanticField> = Vec::new();
 	if let Some(ns) = ns_stats {
@@ -43,6 +72,7 @@ pub async fn infer_semantic_model_async(namespace: &str) -> SemanticModel {
 	model
 }
 
+#[allow(dead_code)]
 pub fn infer_semantic_model(namespace: &str) -> SemanticModel {
 	// Synchronous wrapper for legacy call sites
 	if tokio::runtime::Handle::try_current().is_ok() {

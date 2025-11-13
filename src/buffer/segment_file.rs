@@ -1,12 +1,10 @@
-use std::fs::{File, OpenOptions};
+use std::fs::{OpenOptions, File};
 use std::{io, fs};
 use std::io::{Seek, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use arrow::array::RecordBatch;
-use arrow_schema::SchemaRef;
 use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
-use arrow::ipc::reader::StreamReader;
 use crate::helpers::offsets::OffsetKey;
 pub type PartitionKey = (String, String, Option<i64>, String);
 use bincode;

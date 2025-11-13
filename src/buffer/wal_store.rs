@@ -6,7 +6,6 @@ use url::Url;
 use crate::helpers::configuration::Config;
 use crate::buffer::segment_file::{PartitionKey, SegmentFile};
 use crate::buffer::segment_object::SegmentObject;
-use crate::helpers::offsets::OffsetKey;
 use std::fs;
 use std::path::PathBuf;
 use arrow::ipc::reader::StreamReader;
@@ -135,7 +134,7 @@ impl WalReader for DiskWalReader {
                 if idx.key.0 != pipeline { continue; }
                 let mut file = match fs::OpenOptions::new().read(true).open(&path) { Ok(f) => f, Err(_) => continue };
                 if file.seek(std::io::SeekFrom::Start(idx.start)).is_err() { continue; }
-                let mut reader = std::io::BufReader::new(file);
+                let reader = std::io::BufReader::new(file);
                 let mut take = reader.take(idx.len);
                 if let Ok(sr) = StreamReader::try_new(&mut take, None) {
                     for it in sr {

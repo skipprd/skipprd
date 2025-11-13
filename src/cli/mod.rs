@@ -108,6 +108,12 @@ pub struct LlmOptions {
     /// Chat prompt to send (uses configured chat model)
     #[arg(long)]
     pub chat: Option<String>,
+    /// Start an interactive cleansing suggestion flow for a namespace
+    #[arg(long)]
+    pub cleanse: Option<String>,
+    /// Start an interactive MetricFlow modeling flow for a namespace
+    #[arg(long)]
+    pub model: Option<String>,
     /// Embedding inputs (repeat flag to add multiple)
     #[arg(long)]
     pub embed: Vec<String>,

@@ -4,29 +4,35 @@ use tracing::debug;
 pub struct StatsBuilder;
 
 impl StatsBuilder {
-    pub async fn compute_and_write(ctx: &SessionContext, namespace: &str, limit_n: i64) -> Result<(), String> {
+    pub async fn compute(ctx: &SessionContext, namespace: &str, limit_n: i64) -> Result<(crate::discover::stats::NamespaceStats, crate::catalog::model::DatasetStats), String> {
         // Build union of S3 and WAL already registered by SessionFactory
         // Prefer registering S3 table names via manifest in caller; fallback use namespace as view
         // Attempt to union all registered S3 tables matching pattern "<ns>_s3_*"
-        let mut sources: Vec<String> = Vec::new();
-        for i in 0..64 {
-            let t = format!("{}_s3_{}", namespace, i);
-            if ctx.table(&t).await.is_ok() { sources.push(t); } else { break; }
-        }
-        debug!("META: stats_builder ns='{}' found_s3_tables={}", namespace, sources.len());
-        if sources.is_empty() {
-            // try single path registration fallback: namespace table already registered by caller
-            // noop here; sampling may fail gracefully
-        }
-        if sources.is_empty() { return Ok(()); }
-        let first = ctx.table(&sources[0]).await.map_err(|e| e.to_string())?;
-        let mut acc = first;
-        for t in sources.iter().skip(1) {
-            if let Ok(df_next) = ctx.table(t).await { if let Ok(u) = acc.clone().union(df_next) { acc = u; } }
-        }
-        // Union with WAL
-        let df_wal = match ctx.table(&format!("{}_wal", &namespace)).await { Ok(df) => df, Err(_) => acc.clone().filter(datafusion::logical_expr::lit(false)).unwrap() };
-        let df_union = acc.union(df_wal).map_err(|e| e.to_string())?;
+        // Prefer pre-registered namespace view (union of S3+WAL) if available
+        let df_union = match ctx.table(namespace).await {
+            Ok(df) => df,
+            Err(_) => {
+                // Legacy path: attempt to union any registered S3 listing tables "<ns>_s3_i"
+                let mut sources: Vec<String> = Vec::new();
+                for i in 0..64 {
+                    let t = format!("{}_s3_{}", namespace, i);
+                    if ctx.table(&t).await.is_ok() { sources.push(t); } else { break; }
+                }
+                debug!("META: stats_builder ns='{}' found_s3_tables={}", namespace, sources.len());
+                if sources.is_empty() {
+                    // Nothing registered; return empty stats snapshot
+                    return Ok((crate::discover::stats::NamespaceStats::new(namespace), crate::catalog::model::DatasetStats::default()));
+                }
+                let first = ctx.table(&sources[0]).await.map_err(|e| e.to_string())?;
+                let mut acc = first;
+                for t in sources.iter().skip(1) {
+                    if let Ok(df_next) = ctx.table(t).await { if let Ok(u) = acc.clone().union(df_next) { acc = u; } }
+                }
+                // Union with WAL if present
+                let df_wal = match ctx.table(&format!("{}_wal", &namespace)).await { Ok(df) => df, Err(_) => acc.clone().filter(datafusion::logical_expr::lit(false)).unwrap() };
+                acc.union(df_wal).map_err(|e| e.to_string())?
+            }
+        };
         // Authoritative stats via aggregate queries (per-column), no row iteration
         // Register union as view under namespace for SQL ease
         if let Ok(plan) = df_union.clone().into_optimized_plan() {
@@ -41,6 +47,8 @@ impl StatsBuilder {
         let mut stream = df_union.execute_stream().await.map_err(|e| e.to_string())?;
         use futures::StreamExt;
         let mut processed_rows: usize = 0;
+        let mut earliest_ts_opt: Option<i64> = None;
+        let mut latest_ts_opt: Option<i64> = None;
         'batches: while let Some(batch_res) = stream.next().await {
             let b = batch_res.map_err(|e| e.to_string())?;
             let schema = b.schema();
@@ -65,6 +73,16 @@ impl StatsBuilder {
                         }
                     }
                     update_recursive(&mut ns_stats, &top, &cell);
+                    // Name-agnostic: attempt to derive dataset time window from any numeric epoch-like values
+                    if let Some(n) = cell.as_f64().or_else(|| cell.as_str().and_then(|s| s.parse::<f64>().ok())) {
+                        // Treat values > 1e12 as millis
+                        let as_i = if n > 1_000_000_000_000.0 { (n / 1000.0) as i64 } else { n as i64 };
+                        // Only accept plausible epoch seconds (1970..=now+5y)
+                        if as_i > 0 && as_i < 4102444800 { // 2100-01-01
+                            earliest_ts_opt = Some(earliest_ts_opt.map(|e| e.min(as_i)).unwrap_or(as_i));
+                            latest_ts_opt = Some(latest_ts_opt.map(|e| e.max(as_i)).unwrap_or(as_i));
+                        }
+                    }
                 }
             }
             processed_rows = processed_rows.saturating_add(take_rows);
@@ -73,8 +91,12 @@ impl StatsBuilder {
         let mut fields_vec: Vec<String> = ns_stats.fields.keys().cloned().collect(); fields_vec.sort();
         debug!("META: stats built ns='{}' fields={} sample=[{}]", namespace, fields_vec.len(), fields_vec.iter().take(12).cloned().collect::<Vec<_>>().join(","));
         for (_k, fs) in ns_stats.fields.iter_mut() { fs.finalize(); }
-        crate::helpers::configuration::Config::write_namespace_stats_async(namespace, &ns_stats).await;
-        Ok(())
+        // Dataset stats snapshot
+        let mut ds = crate::catalog::model::DatasetStats::default();
+        ds.approx_total_rows = processed_rows as u64;
+        ds.earliest_ts = earliest_ts_opt;
+        ds.latest_ts = latest_ts_opt;
+        Ok((ns_stats, ds))
     }
 }
 

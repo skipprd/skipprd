@@ -39,8 +39,7 @@ use std::sync::atomic::Ordering::AcqRel;
 // use dashmap::{DashMap};
 
 use crate::ingest::fast_ingest::{create_default_nested_message, DEFAULT_NESTED_MESSAGE, fast_path_ingest};
-use crate::discover::stats_tailer::{ensure_stats_worker, emit_observation};
-use crate::ingest::sequencer::propose_and_wait;
+use crate::discover::stats_tailer::ensure_stats_worker;
 use crate::discover::evolution::{EvolutionProposal, infer_specs_for_record};
 static CATALOG_QUEUE: once_cell::sync::Lazy<dashmap::DashMap<String, std::time::Instant>> = once_cell::sync::Lazy::new(|| dashmap::DashMap::new());
 fn enqueue_catalog_build(ns: &str) {
@@ -74,7 +73,6 @@ fn ensure_catalog_worker() {
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::helpers::s3 as s3_helpers;
 use chrono::{Utc, TimeZone};
-use serde_json::json;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
@@ -99,7 +97,6 @@ use crate::cli::{CLI_MODE, Mode};
 use crate::converters::skippr_arrow::convert_skippr_to_arrow;
 use crate::plugins::DataOutputPlugin;
 use std::collections::VecDeque;
-use rand::{random};
 // wal_accumulator removed
 
 // Single-threaded slow-ingest queue to serialize metadata evolution and value coercion

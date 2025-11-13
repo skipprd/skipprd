@@ -288,7 +288,6 @@ mod tests {
     use std::io::{Read, Write};
     use std::path::PathBuf;
     use arrow_schema::DataType;
-    use datafusion::prelude::ParquetReadOptions;
     use parquet::column::writer::{ColumnWriter, GenericColumnWriter};
     use parquet::data_type::{ByteArray, ByteArrayType, Int32Type};
     use parquet::errors::ParquetError;
@@ -377,7 +376,6 @@ mod tests {
       
         // get "hello" byte offset
         let rows: Vec<usize> = index.indexes.col_index_offset.offsets.read().unwrap().get("hello").unwrap().iter().map(|x| {
-            let props = ParquetReadOptions::default();
             let reader = SerializedFileReader::new(file).expect("Failed to create reader");
             let row_group_reader = reader.get_row_group(0).expect("Failed to get row group");
             let col_reader = row_group_reader.get_column_reader(1).expect("Failed to get column reader");

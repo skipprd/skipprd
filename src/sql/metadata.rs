@@ -1,6 +1,6 @@
 use std::sync::Arc;
-use arrow::array::{ArrayRef, StringArray};
-use arrow::record_batch::RecordBatch as ArrowRecordBatch;
+use datafusion::arrow::array::{ArrayRef, StringArray};
+use datafusion::arrow::record_batch::RecordBatch as ArrowRecordBatch;
 use datafusion::datasource::MemTable;
 use datafusion::prelude::SessionContext;
 use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField};

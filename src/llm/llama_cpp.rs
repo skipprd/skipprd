@@ -1,7 +1,5 @@
 use super::{ChatMessage, LargeLanguageModel, LlmConfig};
-use crate::helpers::configuration::Config;
-use std::fs;
-use std::path::Path;
+// removed unused imports
 
 #[cfg(feature = "llama_cpp")]
 mod inner {

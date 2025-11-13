@@ -13,7 +13,7 @@ use {
 use crate::helpers::Helpers;
 use crate::helpers::offsets::OffsetsError::VacuumError;
 use crate::METRICS;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 pub const SLED_NAME: &str = "db";
 

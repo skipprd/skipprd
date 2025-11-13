@@ -186,7 +186,7 @@ impl Config {
         let cleaned = Helpers::clean_field_name(name.clone());
         for r in Self::reserved_pipeline_names().iter() {
             if name.eq_ignore_ascii_case(r) || cleaned.eq_ignore_ascii_case(r) {
-                debug!(
+                error!(
                     "Invalid pipeline name '{}': reserved. Choose a different name. Reserved: {:?}",
                     name,
                     Self::reserved_pipeline_names()
@@ -1507,7 +1507,12 @@ impl Config {
     // Read manifest JSON for a namespace/pipeline from S3
     pub async fn read_manifest(namespace: &str) -> Option<serde_json::Value> {
         if let Some((_bucket, key)) = Self::get_manifest_s3_key(namespace) {
-            if let Ok(v) = crate::helpers::s3::get_json(&key).await { return Some(v); }
+            info!("Reading manifest from s3://{}/{}", _bucket, key);
+            if let Ok(v) = crate::helpers::s3::get_json(&key).await {
+                info!("Manifest content: {}", v);
+                return Some(v);
+            }
+            info!("Manifest not found at s3://{}/{}", _bucket, key);
         }
         None
     }
@@ -1630,12 +1635,12 @@ impl Config {
             error!("Config: 'TRANSFORM_BATCH_TIME_FIELDS' must be since you've set: 'TRANSFORM_BATCH_TIME_UNIT'.");
         }
 
-        let data_dir = Config::get_data_dir();
+        let _data_dir = Config::get_data_dir();
 
         let tenant = Self::get_tenant();
         let workspace = Self::get_workspace_name();
         let pipeline = Self::get_pipeline_name();
-        let env = Config::get_pipeline_env();
+        let _env = Config::get_pipeline_env();
 
         // Always use S3 as the source of truth
         let s3_key = format!("{}/{}/{}/metadata/metadata.json", tenant, workspace, pipeline);
@@ -1896,15 +1901,15 @@ impl Config {
         let s3_key = format!("{}/{}/{}/catalog/{}.yaml", tenant, workspace, pipeline, namespace);
         // Write catalog directly to S3 (no local merges)
         let bucket = Self::get_skippr_s3_bucket();
-        debug!("{} META: writing catalog to s3://{}/{}", chrono::Utc::now().to_rfc3339(), bucket, s3_key);
+        info!("Writing catalog to s3://{}/{}", bucket, s3_key);
         let yaml = match serde_yaml::to_string(catalog) { Ok(s) => s, Err(e) => { error!("Failed to serialize catalog: {}", e); drop(guard); return; } };
         let value = serde_yaml::from_str::<serde_yaml::Value>(&yaml).unwrap_or(serde_yaml::Value::Null);
         let json_equiv = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
-        // Debug: print full catalog payload being uploaded
-        // match serde_json::to_string_pretty(&json_equiv) {
-        //     Ok(pretty) => println!("{} META: catalog payload ns='{}':\n{}", chrono::Utc::now().to_rfc3339(), namespace, pretty),
-        //     Err(_) => println!("{} META: catalog payload ns='{}': <failed to stringify>", chrono::Utc::now().to_rfc3339(), namespace),
-        // }
+        // Info: print full catalog payload being uploaded
+        match serde_json::to_string_pretty(&json_equiv) {
+            Ok(pretty) => info!("Catalog JSON ns='{}':\n{}", namespace, pretty),
+            Err(_) => info!("Catalog JSON ns='{}': <failed to stringify>", namespace),
+        }
         if let Err(e) = crate::helpers::s3::put_json(&s3_key, &json_equiv).await { error!("Failed to upload catalog to S3: {:?}", e); }
         // Debug summary of catalog
         debug!("META: wrote catalog ns='{}' key='{}' fields={} has_description={}",
@@ -2004,7 +2009,8 @@ impl Config {
         // Enforce reserved name policy early
         Self::assert_pipeline_not_reserved();
 
-        
+        info!("Initializing data directories...");
+
         let data_dir = Config::get_data_dir();
         let ingest_dir = &format!("{}/ingest_buffer", data_dir);
         let deadletter_dir = &format!("{}/deadletter_buffer", data_dir);
@@ -2030,6 +2036,7 @@ impl Config {
             Err(_err) => {}
         }
 
+        info!("Initialized data directories at: {}", data_dir);
 
     }
 

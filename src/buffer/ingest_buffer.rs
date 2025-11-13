@@ -3,23 +3,20 @@ enum Durability { Memory, Disk }
 use std::fs::{File, OpenOptions};
 use std::{fs, io};
 use std::collections::{HashMap, HashSet};
-use std::ffi::OsStr;
 use std::io::{BufReader, Read, Seek, Write};
 use std::path::PathBuf;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
 use arrow::array::RecordBatch;
 use arrow_schema::{ArrowError, SchemaRef};
-use glob::{glob_with, MatchOptions};
+use glob::glob;
 use std::sync::atomic::AtomicU64;
 use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
 use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::physical_plan::RecordBatchStream;
 use datafusion::error::DataFusionError;
-use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
-use indexmap::IndexMap;
+use datafusion::prelude::{SessionConfig, SessionContext};
 use once_cell::sync::Lazy;
 use serde_derive::{Deserialize, Serialize};
 use serde_json::Value;
@@ -228,7 +225,7 @@ impl Buffers {
 
     pub async fn flush(&mut self, offsets_db: Arc<Offsets>, shared_output: Arc<Box<dyn DataOutputPlugin + Send + Sync>>) -> Result<(), ArrowError> {
         
-        let mut bytes: u64 = 0;
+        let bytes: u64 = 0;
         let mut rows: u64 = 0;
 
         let mut uploaded_bytes: u64 = 0;
@@ -251,11 +248,11 @@ impl Buffers {
 
             // Use WalStore factory to select S3 or Disk and write
             let store = crate::buffer::wal_store::WalStoreFactory::for_batches(&snapshot_batches);
-            let (seg_bytes, seg_rows, parts_count, sha256) = match store.write_snapshot_and_commit(&snapshot_id, &snapshot_offsets, &snapshot_batches, &partitions_meta) {
+            let (seg_bytes, seg_rows, _parts_count, _sha256) = match store.write_snapshot_and_commit(&snapshot_id, &snapshot_offsets, &snapshot_batches, &partitions_meta) {
                 Ok(t) => t,
                 Err(e) => { error!("Segment write failed: id={} err={}", snapshot_id, e); continue; }
             };
-            let s3_ok = true;
+            let _s3_ok = true;
             uploaded_bytes += seg_bytes;
             rows += seg_rows;
             // Update snapshot state to on-disk
@@ -268,7 +265,7 @@ impl Buffers {
                 if batches.is_empty() { continue; }
                 let mut per_partition_offsets: HashMap<OffsetKey, u64> = HashMap::new();
                 for (ok, pos) in snapshot_offsets.iter() { if ok.namespace == namespace && ok.partition == partition { per_partition_offsets.insert(ok.clone(), *pos); } }
-                let partition_key: PartitionKey = (namespace.clone(), partition.clone(), time, shard.clone());
+                let _partition_key: PartitionKey = (namespace.clone(), partition.clone(), time, shard.clone());
                 // No WAL_INDEX: compactor will inspect SEGMENT_SNAPSHOTS to decide work
             }
             for (offset, position) in snapshot_offsets.iter() {
@@ -491,7 +488,7 @@ impl Buffers {
                 let safe_len = std::cmp::min(idx.len, file_len.saturating_sub(idx.start));
                 if let Ok(mut f) = OpenOptions::new().read(true).open(path) {
                     if f.seek(io::SeekFrom::Start(idx.start)).is_err() { return false; }
-                    let mut reader = io::BufReader::new(f);
+                    let reader = io::BufReader::new(f);
                     let mut take = reader.take(safe_len);
                     match StreamReader::try_new(&mut take, None) {
                         Ok(mut sr) => { while let Some(r) = sr.next() { if r.is_err() { return false; } } }
@@ -540,7 +537,7 @@ impl Buffers {
 
         // Attempt salvage from legacy .seg.tmp (best-effort)
         if let Ok(rd) = fs::read_dir(&seg_dir) {
-            'tmp_loop: for e in rd.flatten() {
+            for e in rd.flatten() {
                 let p = e.path();
                 let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
                 if !name.ends_with(".seg.tmp") { continue; }
@@ -583,7 +580,7 @@ impl Buffers {
                     // Read Arrow stream into batches
                     let mut fpart = match OpenOptions::new().read(true).open(&p) { Ok(ff) => ff, Err(_) => break };
                     if fpart.seek(io::SeekFrom::Start(start)).is_err() { break; }
-                    let mut reader = io::BufReader::new(fpart);
+                    let reader = io::BufReader::new(fpart);
                     use std::io::Read as IoRead;
                     let mut take = reader.take(data_len);
                     match StreamReader::try_new(&mut take, None) {
@@ -755,7 +752,7 @@ impl Buffers {
         let schema: SchemaRef = {
             let mut file = OpenOptions::new().read(true).open(&seg_path)?;
             file.seek(io::SeekFrom::Start(idx.start))?;
-            let mut reader = io::BufReader::new(file);
+            let reader = io::BufReader::new(file);
             use std::io::Read as IoRead;
             let mut take = reader.take(safe_len);
             match StreamReader::try_new(&mut take, None) {
@@ -809,17 +806,17 @@ impl Buffers {
                                                             for item2 in sr2 {
                                                                 match item2 {
                                                                     Ok(batch) => { if tx.send(Ok(batch)).await.is_err() { break; } },
-                                                                    Err(e2) => { let _ = tx.send(Err(DataFusionError::ArrowError(e2, None))).await; break; }
+                                                                    Err(e2) => { let _ = tx.send(Err(DataFusionError::ArrowError(Box::new(e2), None))).await; break; }
                                                                 }
                                                             }
                                                         }
-                                                        Err(e2) => { let _ = tx.send(Err(DataFusionError::ArrowError(e2, None))).await; }
+                                                        Err(e2) => { let _ = tx.send(Err(DataFusionError::ArrowError(Box::new(e2), None))).await; }
                                                     }
                                                 }
                                                 Err(eopen) => { let _ = tx.send(Err(DataFusionError::IoError(eopen))); }
                                             }
                                         } else {
-                                            let _ = tx.send(Err(DataFusionError::ArrowError(e, None))).await;
+                                            let _ = tx.send(Err(DataFusionError::ArrowError(Box::new(e), None))).await;
                                         }
                                         break;
                                     }
@@ -840,17 +837,17 @@ impl Buffers {
                                                 for item in sr2 {
                                                     match item {
                                                         Ok(batch) => { if tx.send(Ok(batch)).await.is_err() { break; } },
-                                                        Err(e) => { let _ = tx.send(Err(DataFusionError::ArrowError(e, None))).await; break; }
+                                                        Err(e) => { let _ = tx.send(Err(DataFusionError::ArrowError(Box::new(e), None))).await; break; }
                                                     }
                                                 }
                                             }
-                                            Err(e2) => { let _ = tx.send(Err(DataFusionError::ArrowError(e2, None))).await; }
+                                            Err(e2) => { let _ = tx.send(Err(DataFusionError::ArrowError(Box::new(e2), None))).await; }
                                         }
                                     }
                                     Err(eopen) => { let _ = tx.send(Err(DataFusionError::IoError(eopen))); }
                                 }
                             } else {
-                                let _ = tx.send(Err(DataFusionError::ArrowError(e, None))).await;
+                                let _ = tx.send(Err(DataFusionError::ArrowError(Box::new(e), None))).await;
                             }
                         }
                     }
@@ -1289,7 +1286,7 @@ pub async fn drain_all_partitions(shared_output: Arc<Box<dyn DataOutputPlugin + 
     let _ = flush_all_segments(offsets.clone()).await;
 
     // Collect partition arcs
-    let mut parts: Vec<Arc<tokio::sync::Mutex<WalPartition>>> = Vec::new();
+    let parts: Vec<Arc<tokio::sync::Mutex<WalPartition>>> = Vec::new();
 
     // Bounded parallel compaction across partitions (single-threaded per partition via the mutex)
     let concurrency = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET
@@ -1338,7 +1335,7 @@ pub async fn drain_all_partitions(shared_output: Arc<Box<dyn DataOutputPlugin + 
 
 /// Force-flush all segments to WAL files regardless of thresholds.
 pub async fn flush_all_segments(offsets_db: Arc<Offsets>) -> Result<(), ArrowError> {
-    let mut bytes: u64 = 0;
+    let bytes: u64 = 0;
     let mut rows: u64 = 0;
     let mut uploaded_bytes: u64 = 0;
 
@@ -1355,7 +1352,7 @@ pub async fn flush_all_segments(offsets_db: Arc<Offsets>) -> Result<(), ArrowErr
         let mut partitions_meta: HashMap<PartitionKey, (u64, SystemTime)> = HashMap::new();
         for (k, v) in snapshot_batches.iter() { let bytes_estimate = v.iter().map(|b| b.get_array_memory_size() as u64).sum(); partitions_meta.insert(k.clone(), (bytes_estimate, SystemTime::now())); }
         let store = crate::buffer::wal_store::WalStoreFactory::for_batches(&snapshot_batches);
-        let (seg_bytes, seg_rows, parts_count, sha256) = match store.write_snapshot_and_commit(&snapshot_id, &snapshot_offsets, &snapshot_batches, &partitions_meta) {
+            let (seg_bytes, seg_rows, _parts_count, _sha256) = match store.write_snapshot_and_commit(&snapshot_id, &snapshot_offsets, &snapshot_batches, &partitions_meta) {
             Ok(t) => t,
             Err(e) => { error!("Segment write failed (drain rotated): id={} err={}", snapshot_id, e); continue; }
         };
@@ -1369,7 +1366,7 @@ pub async fn flush_all_segments(offsets_db: Arc<Offsets>) -> Result<(), ArrowErr
             if batches.is_empty() { continue; }
             let mut per_partition_offsets: HashMap<OffsetKey, u64> = HashMap::new();
                 for (ok, pos) in snapshot_offsets.iter() { if ok.namespace == namespace && ok.partition == partition { per_partition_offsets.insert(ok.clone(), *pos); } }
-            let partition_key: PartitionKey = (namespace.clone(), partition.clone(), time, shard.clone());
+            let _partition_key: PartitionKey = (namespace.clone(), partition.clone(), time, shard.clone());
             // compactor will inspect SEGMENT_SNAPSHOTS instead
         }
         // Commit offsets after successful store write
@@ -1395,7 +1392,7 @@ pub async fn flush_all_segments(offsets_db: Arc<Offsets>) -> Result<(), ArrowErr
             partitions_meta.insert(k.clone(), (bytes_estimate, SystemTime::now()));
         }
         let store = crate::buffer::wal_store::WalStoreFactory::for_batches(&to_flush_batches);
-        let (seg_bytes, seg_rows, parts_count, sha256) = match store.write_snapshot_and_commit(&snapshot_id, &to_flush_offsets, &to_flush_batches, &partitions_meta) {
+        let (seg_bytes, seg_rows, _parts_count, _sha256) = match store.write_snapshot_and_commit(&snapshot_id, &to_flush_offsets, &to_flush_batches, &partitions_meta) {
             Ok(t) => t,
             Err(e) => { error!("Segment commit failed (live flush): id={} err={}", snapshot_id, e); (0, 0, 0, [0u8;32]) }
         };
@@ -1607,7 +1604,7 @@ impl WalPartition {
                                             row_counter_task.fetch_add(batch.num_rows() as u64, AtomicOrdering::Relaxed);
                                             batch_ok_counter.fetch_add(1, AtomicOrdering::Relaxed);
                                             if tx.send(Ok(batch)).await.is_err() { break; }
-                                        }, Err(e) => { batch_error_counter.fetch_add(1, AtomicOrdering::Relaxed); let _ = tx.send(Err(DataFusionError::ArrowError(e, None))).await; break; } } }
+                                        }, Err(e) => { batch_error_counter.fetch_add(1, AtomicOrdering::Relaxed); let _ = tx.send(Err(DataFusionError::ArrowError(Box::new(e), None))).await; break; } } }
                                     }
                                     Err(e) => { error!("Failed to init Arrow stream for local segment {}: {}", path.to_string_lossy(), e); }
                                 }
@@ -1688,11 +1685,7 @@ impl WalPartition {
     #[allow(dead_code)]
     async fn apply_sql_on_ipc_stream(temp_parquet_path: &str, _sql: &str, _schema_ref: SchemaRef) -> Result<Vec<RecordBatch>, ArrowError> {
 
-        let mut session_config = SessionConfig::new();
-        session_config = session_config.set("datafusion.catalog.information_schema", "true".into());
-        session_config = session_config.set("datafusion.catalog.default_catalog", "skippr".into());
-        session_config = session_config.set("datafusion.execution.collect_statistics", "true".into());
-
+        let session_config = SessionConfig::new();
         let ctx = SessionContext::new_with_config(session_config);
 
         // ctx.register_parquet("my_table", temp_parquet_path, ParquetReadOptions {
@@ -1709,20 +1702,7 @@ impl WalPartition {
         // let results = df.collect().await.unwrap();
 
 
-        let df = ctx
-            .read_parquet(
-                temp_parquet_path,
-                ParquetReadOptions {
-                    // schema: Some(schema_ref.as_ref()),
-                    schema: None,
-                    file_extension: "parquet",
-                    table_partition_cols: vec![],
-                    parquet_pruning: None,
-                    skip_metadata: Some(true),
-                    file_sort_order: vec![],
-                },
-            )
-            .await.unwrap();
+        let df = ctx.read_parquet(temp_parquet_path, Default::default()).await.unwrap();
         let results = df.collect().await.unwrap();
 
         // Create a new DataFusion context

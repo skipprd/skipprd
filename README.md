@@ -13,15 +13,166 @@ Skippr is a tool for data ingestion and transformation. It is designed to ingest
 cargo run -- --log sync
 ```
 
-### Product Roadmap
+## CLI Commands
+
+Skippr is a single binary with subcommands. Use either a built binary or run via cargo:
+
+```bash
+cargo run -- <command> [flags]
+```
+
+Global flags:
+- `--log`: enable logging (INFO by default; override with `RUST_LOG=debug` etc.)
+
+### discover
+Discover schemas, build stats, and write catalog/semantic to S3 for a pipeline.
+Automatically runs an embeddings sync (LanceDB on S3) at the end.
+
+Flags:
+- `-p, --pipeline <name>`: pipeline name (optional)
+- `--log`: stream verbose logs while discovering
+
+Example:
+```bash
+cargo run -- discover --pipeline picnic --log
+```
+
+### sync
+Run the ingestion/sync loop for a pipeline (reads source → writes S3 parquet, stats, manifest).
+
+Flags:
+- `-p, --pipeline <name>`: pipeline name (optional)
+
+Example:
+```bash
+AWS_PROFILE=circles-prod SKIPPR_S3_BUCKET=asgsdag-datalake \
+cargo run -- sync --pipeline picnic
+```
+
+### query
+Interactive SQL (DataFusion) over registered S3 Parquet + optional WAL; supports `pipeline.namespace` and unqualified `namespace`.
+
+Flags:
+- `-s, --sql "<SQL>"`: one-shot SELECT to execute
+- `--watch <seconds>`: auto-refresh during interactive run
+- `--plain`: print CSV-like output to stdout (non-interactive)
+
+Examples:
+```bash
+# Pretty TUI, single run
+cargo run -- query --sql "SELECT * FROM picnic.track LIMIT 5"
+
+# Plain stdout
+cargo run -- query --plain --sql "SELECT event, COUNT(*) AS c FROM track GROUP BY event ORDER BY c DESC LIMIT 10"
+
+# Interactive editor with watch
+cargo run -- query --sql "SELECT COUNT(*) FROM picnic.track" --watch 5
+```
+
+Special tables:
+- `deadletters`: query quarantined rows (if enabled and present).
+
+### schema
+Utility for inspecting a pipeline’s local output buffer schema using listing tables.
+
+Flags:
+- `-p, --pipeline <name>`: pipeline name (required)
+
+Example:
+```bash
+cargo run -- schema --pipeline picnic
+```
+
+### sql-help
+Show Skippr SQL extensions and examples, or export docs.
+
+Flags:
+- `-c, --command <name>`: filter to one command (optional)
+- `-o, --output <path>`: write docs to a file (optional)
+- `-f, --format <md|html|json>`: output format (default: md)
+
+Examples:
+```bash
+cargo run -- sql-help
+cargo run -- sql-help --command "SHOW STATS" --output docs/sql.md --format md
+```
+
+### benchmark
+Generate synthetic inputs to evaluate ingest throughput/overheads.
+
+Flags:
+- `-f, --num-files <N>`: number of files
+- `-r, --records-per-file <N>`
+- `-s, --record-size <bytes>`
+- `-n, --name <label>`: benchmark name (default: baseline)
+- `-d, --description <text>`: freeform label
+
+Example:
+```bash
+cargo run -- benchmark -f 100 -r 50000 -s 800 --name bigfiles --description "IO pipeline sanity"
+```
+
+### llm
+LLM/ReAct entrypoints for chat, embeddings, cleansing, and modeling. Configure LLM via env (see Configuration).
+
+Flags:
+- `--chat "<prompt>"`: single chat turn with the configured chat model
+- `--cleanse <namespace>`: start interactive cleansing suggestions
+- `--model <namespace>`: propose MetricFlow YAML snippet(s)
+- `--embed "<text>"` (repeatable): embed one or more texts
+- `--ask "<question>"`: SQL agent to answer dataset questions
+- `--top_k <N>`: top-K rows/docs to consider (default: 5)
+
+Notes:
+- `ask` auto-discovers across pipelines; do not pass a pipeline for `ask`.
+- Embeddings are stored in LanceDB on S3 (uses `SKIPPR_S3_BUCKET`).
+
+Examples:
+```bash
+# One-off chat
+LLM_PROVIDER=OPENAI LLM_API_KEY=sk-... \
+cargo run -- llm --chat "Summarize the latest datasets."
+
+# Cleanse suggestions for a namespace
+cargo run -- llm --cleanse track
+
+# MetricFlow modeling
+cargo run -- llm --model track
+
+# Ask questions of your data (no pipeline flag)
+cargo run -- llm --ask "What were daily active users last week?"
+```
+
+## Product Roadmap
 
 These are planned features; scope and sequence may evolve.
 
+### Ingestion
 - [x] Deadletter queues for failed records
   - [x] Capture and store failed records with error and metadata for debugging.
   - [x] SQL query access (DataFusion) to deadletter records.
   - [ ] Replay capabilities to reprocess after fixing issues.
   - [ ] Configurable retention and alerting.
+- [ ] S3-backed offset database (replace sled)
+  - [ ] Custom S3-backed KV store optimized for append-heavy writes and very fast reads.
+  - [ ] Efficient batch key lookups; favor sequential ranges but resilient to slight shuffles.
+- [x] TigerBeetle TigerStyle deterministic WAL segment commits
+    - [x] Commit markers for each WAL segment and visibility gating.
+    - [x] Commit offsets to DB after WAL commit marker durably persisted. (Already recover offsets via WAL index on start)
+- [x] S3-backed WAL segments
+    - [x] Refactor write-ahead log segments to configurable persists to S3 (default to local disk).
+    - [x] Design for determinisium and consistency
+    - [x] Update `query.rs` to be able to query the WAL from S3
+- [x] Refacotor println to tracing
+    - [x] Replace all `println!` calls with `tracing` macros for structured logging.
+    - [x] Configure logging levels and formats via environment variables or config files.
+
+### LLM ReAcT Integration
+- [ ] LLM-driven data source exploration
+  - [ ] Use LLMs to analyze and summarize unknown datasets.
+  - [ ] Generate schema suggestions and data quality insights.
+
+### Data Modeling and Querying
 - [ ] External datasets (zero-copy)
   - [ ] Discover external tables/files in situ and query them without ingestion.
   - [ ] Support pushdown where possible; treat as first-class queryable sources.
@@ -34,27 +185,17 @@ These are planned features; scope and sequence may evolve.
 - [ ] Field-level attribute-based access control (ABAC)
   - [ ] Enforce per-field policies on source data; propagate through views, transforms, and SQL.
   - [ ] Policy evaluation integrated into planning/pushdown phases.
-- [ ] Apache Iceberg tables
-  - [ ] Replace existing Hive table format with Iceberg for ACID, schema evolution, and time travel.
 - [ ] End-to-end data lineage
   - [ ] Track lineage from source data through views, transformations, and SQL queries.
 - [ ] Source/dataset derivation lineage
   - [ ] Model which datasets are derived from which sources/datasets for provenance graphs.
 - [ ] LLM-based document indexing
   - [ ] Index document and external datasets via tokenization/embeddings for semantic search.
- - [ ] S3-backed offset database (replace sled)
-  - [ ] Custom S3-backed KV store optimized for append-heavy writes and very fast reads.
-  - [ ] Efficient batch key lookups; favor sequential ranges but resilient to slight shuffles.
- - [x] TigerBeetle TigerStyle deterministic WAL segment commits
-   - [x] Commit markers for each WAL segment and visibility gating.
-   - [x] Commit offsets to DB after WAL commit marker durably persisted. (Already recover offsets via WAL index on start)
- - [x] S3-backed WAL segments
-   - [x] Refactor write-ahead log segments to configurable persists to S3 (default to local disk).
-   - [x] Design for determinisium and consistency
-   - [x] Update `query.rs` to be able to query the WAL from S3
- - [x] Refacotor println to tracing
-   - [x] Replace all `println!` calls with `tracing` macros for structured logging.
-   - [x] Configure logging levels and formats via environment variables or config files.
+
+### Datalake/Warehouse Outputs
+ - [ ] Apache Iceberg tables
+   - [ ] Replace existing Hive table format with Iceberg for ACID, schema evolution, and time travel.
+
 
 ### Project Structure
 

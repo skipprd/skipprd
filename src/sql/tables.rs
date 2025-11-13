@@ -1,40 +1,57 @@
 use std::sync::Arc;
 use url::Url;
-use tracing::{debug, info, warn};
-use datafusion::prelude::{SessionContext, ParquetReadOptions};
+use datafusion::prelude::SessionContext;
 use datafusion::datasource::MemTable;
 use datafusion::datasource::view::ViewTable;
 use datafusion::error::DataFusionError;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::arrow::datatypes::DataType as ArrowDataType;
 use datafusion::logical_expr::{Expr, col};
+use datafusion::datasource::file_format::parquet::ParquetFormat;
+use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl};
+use tracing::{debug, info, warn};
+use crate::helpers::configuration::Config;
+use std::time::Duration;
+use object_store::ObjectStore;
 use object_store::aws::AmazonS3Builder;
 use aws_credential_types::provider::ProvideCredentials;
 
-use crate::helpers::configuration::Config;
-use crate::ARROW_SCHEMA;
-
 /// Register an S3 object store for the given s3:// URL
 pub async fn register_s3_object_store(ctx: &SessionContext, s3_loc: &str) {
-    if let Ok(u) = Url::parse(s3_loc) {
-        if u.scheme() != "s3" { return; }
-        if let Some(bucket) = u.host_str() {
-            // Use AWS SDK defaults chain
+    if let Ok(url) = Url::parse(s3_loc) {
+        if url.scheme() != "s3" { return; }
+        if let Some(bucket) = url.host_str() {
+            // Avoid IMDS calls in environments without metadata service
+            std::env::set_var("AWS_EC2_METADATA_DISABLED", "true");
+            // Preload credentials via AWS SDK (respects AWS_PROFILE/SSO/role) and export to env for object_store chain
             let conf = aws_config::defaults(aws_config::BehaviorVersion::latest()).load().await;
-            let region_opt = conf.region().map(|r| r.as_ref().to_string());
-            let creds_opt = if let Some(p) = conf.credentials_provider() {
-                match p.provide_credentials().await { Ok(c) => Some(c), Err(_) => None }
-            } else { None };
-            let mut b = AmazonS3Builder::new().with_bucket_name(bucket);
-            if let Some(region) = region_opt { b = b.with_region(region); }
-            if let Some(c) = creds_opt {
-                b = b.with_access_key_id(c.access_key_id().to_string())
-                     .with_secret_access_key(c.secret_access_key().to_string());
-                if let Some(t) = c.session_token() { b = b.with_token(t.to_string()); }
+            if let Some(region) = conf.region().map(|r| r.to_string()) {
+                std::env::set_var("AWS_REGION", &region);
+                std::env::set_var("AWS_DEFAULT_REGION", &region);
             }
-            if let Ok(store) = b.build() {
-                let base = Url::parse(&format!("s3://{}/", bucket)).unwrap_or(u.clone());
-                let _ = ctx.runtime_env().register_object_store(&base, Arc::new(store));
+            if let Some(provider) = conf.credentials_provider() {
+                if let Ok(creds) = provider.provide_credentials().await {
+                    std::env::set_var("AWS_ACCESS_KEY_ID", creds.access_key_id());
+                    std::env::set_var("AWS_SECRET_ACCESS_KEY", creds.secret_access_key());
+                    if let Some(tok) = creds.session_token() {
+                        std::env::set_var("AWS_SESSION_TOKEN", tok);
+                    }
+                }
+            }
+            match AmazonS3Builder::from_env().with_bucket_name(bucket).build() {
+                Ok(store) => {
+                    let store_arc: Arc<dyn ObjectStore> = Arc::new(store);
+                    // Register store for base bucket URL
+                    if let Ok(endpoint) = Url::parse(&format!("s3://{}/", bucket)) {
+                        ctx.runtime_env().register_object_store(&endpoint, store_arc);
+                        info!("Registered S3 object store for bucket='{}'", bucket);
+                    } else {
+                        warn!("register_s3_object_store: failed to parse url for bucket='{}'", bucket);
+                    }
+                }
+                Err(e) => {
+                    warn!("register_s3_object_store: failed to build store for bucket='{}': {}", bucket, e);
+                }
             }
         }
     }
@@ -84,34 +101,34 @@ fn cast_or_keep_expr(name: &str, dt: &ArrowDataType) -> Expr {
     }
 }
 
-fn build_timestamp_projection(df: &datafusion::prelude::DataFrame, namespace: &str) -> datafusion::prelude::DataFrame {
-    if let Some(swap) = ARROW_SCHEMA.get(namespace) {
-        let arrow_schema = swap.load();
-        if arrow_schema.fields().is_empty() { return df.clone(); }
-        let mut exprs: Vec<Expr> = Vec::with_capacity(arrow_schema.fields().len());
-        for f in arrow_schema.fields() {
-            exprs.push(cast_or_keep_expr(f.name(), f.data_type()));
-        }
-        match df.clone().select(exprs) { Ok(dfp) => dfp, Err(_) => df.clone() }
-    } else {
-        df.clone()
+fn build_timestamp_projection(df: &datafusion::prelude::DataFrame, _namespace: &str) -> datafusion::prelude::DataFrame {
+    let arrow_schema = df.schema();
+    if arrow_schema.fields().is_empty() { return df.clone(); }
+    let mut exprs: Vec<Expr> = Vec::with_capacity(arrow_schema.fields().len());
+    for f in arrow_schema.fields() {
+        exprs.push(cast_or_keep_expr(f.name(), f.data_type()));
     }
+    match df.clone().select(exprs) { Ok(dfp) => dfp, Err(_) => df.clone() }
 }
 
-async fn build_s3_df(ctx: &SessionContext, namespace: &str, s3_paths: &[String]) -> Result<datafusion::prelude::DataFrame, DataFusionError> {
+async fn build_s3_df(ctx: &SessionContext, _namespace: &str, s3_paths: &[String]) -> Result<datafusion::prelude::DataFrame, DataFusionError> {
     let common = find_common_s3_prefix(s3_paths).unwrap_or_else(|| s3_paths[0].trim_end_matches('/').to_string() + "/");
+    debug!("build_s3_df: {} s3 path(s), common prefix '{}'", s3_paths.len(), common);
     register_s3_object_store(ctx, &common).await;
-    let opts = ParquetReadOptions {
-        schema: None,
-        file_extension: "parquet",
-        table_partition_cols: vec![],
-        parquet_pruning: None,
-        skip_metadata: Some(true),
-        file_sort_order: vec![],
-    };
-    let tname = format!("{}_s3", namespace);
-    ctx.register_parquet(&tname, &common, opts).await?;
-    let df = ctx.table(&tname).await?;
+    // Use ListingTable with ParquetFormat
+    let url = ListingTableUrl::parse(&common).map_err(|e| DataFusionError::Execution(e.to_string()))?;
+    let fmt = ParquetFormat::default();
+    let mut listing_opts = ListingOptions::new(Arc::new(fmt));
+    listing_opts = listing_opts.with_file_extension(".parquet");
+    let cfg = ListingTableConfig::new(url).with_listing_options(listing_opts);
+    // Explicitly infer schema to avoid 'No schema provided' when reading tables with lazy schema
+    let cfg = cfg
+        .infer_schema(&ctx.state())
+        .await
+        .map_err(|e| DataFusionError::Execution(e.to_string()))?;
+    let table = ListingTable::try_new(cfg).map_err(|e| DataFusionError::Execution(e.to_string()))?;
+    let df = ctx.read_table(Arc::new(table))?;
+    debug!("build_s3_df: created DataFrame from listing at '{}'", common);
     Ok(df)
 }
 
@@ -133,11 +150,20 @@ pub async fn register_namespace_view(ctx: &SessionContext, pipeline: &str, names
     // ensure pipeline context
     crate::helpers::configuration::PIPELINE_NAME.write().clear();
     crate::helpers::configuration::PIPELINE_NAME.write().push_str(pipeline);
-    Config::init().await;
 
-    // manifest -> prefixes
+    Config::init().await;
+    info!("Registering namespace view for pipeline '{}', namespace '{}'", pipeline, namespace);
+
+    // manifest -> prefixes (bounded to avoid stalls)
     let mut s3_paths: Vec<String> = Vec::new();
-    if let Some(man) = Config::read_manifest(namespace).await {
+    let man_opt = match tokio::time::timeout(Duration::from_secs(12), Config::read_manifest(namespace)).await {
+        Ok(v) => v,
+        Err(_) => {
+            warn!("register_namespace_view: timed out reading manifest for '{}.{}'", pipeline, namespace);
+            None
+        }
+    };
+    if let Some(man) = man_opt {
         if let Some(tables) = man.get("tables").and_then(|t| t.as_object()) {
             if let Some(ns) = tables.get(namespace).and_then(|v| v.as_object()) {
                 if let Some(prefixes) = ns.get("prefixes").and_then(|p| p.as_array()) {
@@ -155,11 +181,25 @@ pub async fn register_namespace_view(ctx: &SessionContext, pipeline: &str, names
         }
     }
     if s3_paths.is_empty() {
-        return Err(DataFusionError::Plan(format!("Manifest missing or contains no absolute S3 prefixes for '{}.{}'", pipeline, namespace)));
+        info!("register_namespace_view: no manifest prefixes for '{}.{}' (skipping)", pipeline, namespace);
+        return Ok(());
     }
     // S3 DF (single listing from common prefix) + timestamp projection
-    let df_s3 = build_s3_df(ctx, namespace, &s3_paths).await?;
+    info!("register_namespace_view: {} prefix(es) for '{}.{}'", s3_paths.len(), pipeline, namespace);
+    let df_s3 = match tokio::time::timeout(Duration::from_secs(45), build_s3_df(ctx, namespace, &s3_paths)).await {
+        Ok(Ok(df)) => df,
+        Ok(Err(e)) => {
+            warn!("register_namespace_view: failed to build S3 DF for '{}.{}': {}", pipeline, namespace, e);
+            return Ok(());
+        }
+        Err(_) => {
+            warn!("register_namespace_view: timed out building S3 DF for '{}.{}'", pipeline, namespace);
+            return Ok(());
+        }
+    };
     let df_s3 = build_timestamp_projection(&df_s3, namespace);
+
+    info!("Registered S3 namespace view for '{}.{}' with {} prefixes", pipeline, namespace, s3_paths.len());
 
     // WAL DF
     let df_wal_opt = build_wal_df(ctx, pipeline, namespace).await?;
@@ -186,9 +226,38 @@ pub async fn register_namespace_view(ctx: &SessionContext, pipeline: &str, names
         }
     };
 
-    // Register view as namespace
-    let view = ViewTable::try_new(df_union.into_optimized_plan()?, Some(namespace.to_string()))?;
-    ctx.register_table(namespace, Arc::new(view))?;
+    // Register view under DataFusion catalog.schema.table → datafusion.<pipeline>.<namespace>
+    debug!("Registered WAL for '{}.{}' into namespace view", pipeline, namespace);
+    let plan = df_union.into_optimized_plan()?;
+    debug!("Created optimized plan for '{}.{}' namespace view", pipeline, namespace);
+    let view = ViewTable::new(plan, Some(namespace.to_string()));
+    // Register strictly under schema = pipeline
+    {
+        use datafusion::catalog::{CatalogProvider, SchemaProvider};
+        use datafusion::catalog::memory::{MemoryCatalogProvider, MemorySchemaProvider};
+        // Access default catalog "datafusion"
+        let state = ctx.state();
+        let cat_list = state.catalog_list();
+        if let Some(catalog) = cat_list.catalog("datafusion") {
+            // Try to get or create schema for this pipeline
+            if let Some(schema) = catalog.schema(pipeline) {
+                schema.register_table(namespace.to_string(), Arc::new(view)).map_err(|e| DataFusionError::Execution(e.to_string()))?;
+            } else {
+                // Downcast to memory catalog and create schema
+                if let Some(memcat) = catalog.as_any().downcast_ref::<MemoryCatalogProvider>() {
+                    let new_schema = Arc::new(MemorySchemaProvider::new());
+                    let _ = memcat.register_schema(pipeline, new_schema.clone());
+                    new_schema.register_table(namespace.to_string(), Arc::new(view)).map_err(|e| DataFusionError::Execution(e.to_string()))?;
+                } else {
+                    return Err(DataFusionError::Plan(format!("Cannot register schema for pipeline '{}' in default catalog", pipeline)));
+                }
+            }
+            info!("DF FQN: registered datafusion.{}.{}.", pipeline, namespace);
+        } else {
+            return Err(DataFusionError::Plan("Default catalog 'datafusion' not found".to_string()));
+        }
+    }
+    debug!("Registered FQN view for '{}.{}'", pipeline, namespace);
     Ok(())
 }
 
@@ -201,20 +270,15 @@ pub async fn register_deadletters(ctx: &SessionContext, pipeline: &str) -> Resul
     let workspace = Config::get_workspace_name();
     let dl_url = format!("s3://{}/deadletters/{}/{}/{}/", bucket, tenant, workspace, pipeline);
     register_s3_object_store(ctx, &dl_url).await;
-    let opts = ParquetReadOptions {
-        schema: None,
-        file_extension: "parquet",
-        table_partition_cols: vec![
-            ("namespace".to_string(), ArrowDataType::Utf8),
-            ("p_year".to_string(), ArrowDataType::Utf8),
-            ("p_month".to_string(), ArrowDataType::Utf8),
-            ("p_day".to_string(), ArrowDataType::Utf8),
-        ],
-        parquet_pruning: None,
-        skip_metadata: Some(true),
-        file_sort_order: vec![],
-    };
-    ctx.register_parquet("deadletters", &dl_url, opts).await?;
+    // ListingTable for deadletters with partition columns
+    let url = ListingTableUrl::parse(&dl_url).map_err(|e| DataFusionError::Execution(e.to_string()))?;
+    let fmt = ParquetFormat::default();
+    let mut listing_opts = ListingOptions::new(Arc::new(fmt));
+    listing_opts = listing_opts.with_file_extension(".parquet");
+    let cfg = ListingTableConfig::new(url)
+        .with_listing_options(listing_opts);
+    let table = ListingTable::try_new(cfg).map_err(|e| DataFusionError::Execution(e.to_string()))?;
+    ctx.register_table("deadletters", Arc::new(table))?;
     Ok(())
 }
 

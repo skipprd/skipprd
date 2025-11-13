@@ -4,94 +4,14 @@ use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::execute;
 use ratatui::{Terminal, backend::CrosstermBackend, layout::{Layout, Constraint, Direction, Rect}, widgets::{Table, Row, Cell, Block, Borders, Paragraph, BarChart, Chart, Axis, Dataset, GraphType}, style::{Style, Modifier, Color}, text::{Span, Line}};
 use datafusion::arrow::array::RecordBatch;
-use arrow::array::Array; // for is_null on Arrow arrays
+use datafusion::arrow::array::Array; // for is_null on Arrow arrays
 use datafusion::arrow::datatypes::{Schema as ArrowSchema, DataType as ArrowDataType, Field as ArrowField};
 use std::sync::mpsc;
 use crate::ARROW_SCHEMA;
 use crate::helpers::configuration::Config;
 use serde_json::{Value as JsonValue, Map as JsonMap, Number as JsonNumber};
 
-pub struct LiveTableViewConfig<'a> {
-    pub title: &'a str,
-    pub footer: Option<&'a str>,
-}
-
-pub struct LiveTableView {
-    rows_offset: usize,
-}
-
-impl LiveTableView {
-    pub fn new() -> Self { Self { rows_offset: 0 } }
-
-    pub fn run(mut self, batches: Vec<RecordBatch>, cfg: LiveTableViewConfig, auto_refresh_ms: Option<u64>, refresh_fn: Option<Box<dyn Fn() -> Option<Vec<RecordBatch>> + Send>>) {
-        let mut out: Stdout = stdout();
-        let _ = enable_raw_mode();
-        let _ = execute!(out, EnterAlternateScreen);
-        let backend = CrosstermBackend::new(out);
-        let mut terminal = Terminal::new(backend).unwrap();
-
-        let mut data = batches;
-        loop {
-            let (headers, rows) = build_rows(&data);
-            let title = cfg.title;
-            let footer_text = cfg.footer.unwrap_or("");
-
-            let _ = terminal.draw(|f| {
-                let chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)].as_ref())
-                    .split(f.size());
-
-                let header = Paragraph::new(Span::styled(title, Style::default().add_modifier(Modifier::BOLD)));
-                f.render_widget(header, chunks[0]);
-
-                let table = if headers.is_empty() {
-                    Table::new(Vec::<Row>::new(), vec![Constraint::Percentage(100)])
-                        .block(Block::default().borders(Borders::ALL).title("results"))
-                } else {
-                    let widths: Vec<Constraint> = headers.iter().map(|_| Constraint::Min(6)).collect();
-                    let header_row = Row::new(headers.iter().map(|h| Cell::from(h.clone()))).style(Style::default().add_modifier(Modifier::BOLD));
-                    let body_rows_iter = rows.iter().skip(self.rows_offset).map(|r| Row::new(r.iter().map(|c| Cell::from(c.clone()))));
-                    let mut body_rows: Vec<Row> = Vec::new();
-                    for r in body_rows_iter { body_rows.push(r); if body_rows.len() > chunks[1].height.saturating_sub(3) as usize { break; } }
-                    Table::new(body_rows, widths).header(header_row).block(Block::default().borders(Borders::ALL).title("results"))
-                };
-                f.render_widget(table, chunks[1]);
-
-                let footer = Paragraph::new(Span::raw(footer_text));
-                f.render_widget(footer, chunks[2]);
-            });
-
-            let mut should_refresh = false;
-            if let Some(ms) = auto_refresh_ms { if event::poll(std::time::Duration::from_millis(ms)).unwrap_or(false) { should_refresh = true; } }
-            if event::poll(std::time::Duration::from_millis(10)).unwrap_or(false) {
-                match event::read().unwrap() {
-                    Event::Key(k) => match k.code {
-                        KeyCode::Char('q') => break,
-                        KeyCode::Char('r') => should_refresh = true,
-                        KeyCode::Down => { self.rows_offset = self.rows_offset.saturating_add(1); },
-                        KeyCode::Up => { self.rows_offset = self.rows_offset.saturating_sub(1); },
-                        KeyCode::PageDown => { self.rows_offset = self.rows_offset.saturating_add(20); },
-                        KeyCode::PageUp => { self.rows_offset = self.rows_offset.saturating_sub(20); },
-                        KeyCode::Home => { self.rows_offset = 0; },
-                        KeyCode::End => { self.rows_offset = rows.len().saturating_sub(1); },
-                        _ => {}
-                    },
-                    _ => {}
-                }
-            }
-            if should_refresh {
-                if let Some(ref f) = refresh_fn {
-                    if let Some(new_batches) = f() { data = new_batches; self.rows_offset = 0; }
-                }
-            }
-        }
-
-        let _ = disable_raw_mode();
-        let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
-        let _ = terminal.show_cursor();
-    }
-}
+// LiveTableView removed (unused)
 
 fn build_rows(batches: &Vec<RecordBatch>) -> (Vec<String>, Vec<Vec<String>>) {
     if batches.is_empty() { return (Vec::new(), Vec::new()); }
@@ -316,13 +236,19 @@ pub(crate) fn array_cell_to_json(arr: &dyn datafusion::arrow::array::Array, row:
 }
 
 fn format_ts_ms(v: i64) -> String {
-    let dt = chrono::DateTime::<chrono::Utc>::from_utc(chrono::NaiveDateTime::from_timestamp_millis(v).unwrap_or_else(|| chrono::NaiveDateTime::from_timestamp_opt(0,0).unwrap()), chrono::Utc);
-    dt.format("%Y-%m-%dT%H:%M:%S").to_string()
+    if let Some(dt) = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(v) {
+        dt.format("%Y-%m-%dT%H:%M:%S").to_string()
+    } else if let Some(dt) = chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0) {
+        dt.format("%Y-%m-%dT%H:%M:%S").to_string()
+    } else {
+        String::new()
+    }
 }
 
 pub struct QueryEditorConfig<'a> {
     pub title: &'a str,
     pub footer: Option<&'a str>,
+    #[allow(dead_code)]
     pub initial_sql: &'a str,
 }
 
@@ -700,7 +626,7 @@ fn build_suggestions(input: &str, prefix: &str, current_schema: Option<&ArrowSch
             if let Some(entry) = ARROW_SCHEMA.get(&table) {
                 let schema = entry.value().load();
                 let mut fields: Vec<String> = Vec::new();
-                flatten_fields(schema.as_ref(), None, &mut fields);
+                flatten_fields_old(schema.as_ref(), None, &mut fields);
                 for f in fields.iter() { if !has_prefix || f.starts_with(prefix) { out.push(f.clone()); } }
                 if let Some(alias) = alias_opt.as_deref() {
                     for f in fields { let aliased = format!("{}.{}", alias, f); if !has_prefix || aliased.starts_with(prefix) { out.push(aliased); } }
@@ -812,6 +738,28 @@ fn flatten_field(field: &ArrowField, parent: Option<&str>, out: &mut Vec<String>
             // list element
             let elem_field = elem.as_ref();
             flatten_field(elem_field, Some(&name), out);
+        }
+        _ => { out.push(name); }
+    }
+}
+
+// Compatibility: ARROW_SCHEMA stores arrow_schema::Schema; provide a parallel flattener
+fn flatten_fields_old(schema: &arrow_schema::Schema, prefix: Option<String>, out: &mut Vec<String>) {
+    for f in schema.fields() {
+        flatten_field_old(f, prefix.as_deref(), out);
+    }
+}
+
+fn flatten_field_old(field: &arrow_schema::Field, parent: Option<&str>, out: &mut Vec<String>) {
+    let name = if let Some(p) = parent { format!("{}.{}", p, field.name()) } else { field.name().to_string() };
+    match field.data_type() {
+        arrow_schema::DataType::Struct(fields) => {
+            out.push(name.clone());
+            for ch in fields { flatten_field_old(ch, Some(&name), out); }
+        }
+        arrow_schema::DataType::List(elem) => {
+            let elem_field = elem.as_ref();
+            flatten_field_old(elem_field, Some(&name), out);
         }
         _ => { out.push(name); }
     }

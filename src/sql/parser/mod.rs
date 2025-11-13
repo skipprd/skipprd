@@ -243,6 +243,7 @@ pub(crate) struct TableDropStatement {
 /// standard SQL dialect, or a Skippr extension such as `SCHEMA DUMP,
 /// SCHMEA LOAD`. See [`Sparser`] for more information.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum Statement {
     /// ANSI SQL AST node (from sqlparser-rs)
     // Statement(Box<Statement>),
@@ -447,7 +448,7 @@ impl<'a> SParser<'a> {
             "." => {
                 self.parser.next_token(); // .
                 let schema = self.parser.next_token().token.to_string();
-                Some(ObjectName(vec![Ident::new(schema)]))
+                Some(ObjectName(vec![datafusion::logical_expr::sqlparser::ast::ObjectNamePart::Identifier(Ident::new(schema))]))
             },
             _ => {
                 None
@@ -462,8 +463,8 @@ impl<'a> SParser<'a> {
                 Keyword::DROP => {
                     self.parser.expect_keyword(Keyword::COLUMN)?;
                     let column_name = self.parser.parse_object_name(false)?;
-                    Ok(Statement::AlterSchemaDropColumn(AlterSchemaDropColumn {
-                        pipeline: ObjectName(vec![Ident::new(pipeline)]),
+                        Ok(Statement::AlterSchemaDropColumn(AlterSchemaDropColumn {
+                        pipeline: ObjectName(vec![datafusion::logical_expr::sqlparser::ast::ObjectNamePart::Identifier(Ident::new(pipeline))]),
                         schema,
                         column_name,
                     }))
@@ -482,8 +483,8 @@ impl<'a> SParser<'a> {
                             match value_type {
                                 ArrayElemTypeDef::AngleBracket(value) => {
 
-                                    Ok(Statement::AlterSchemaAlterColumnType(AlterSchemaAlterColumnType {
-                                        pipeline: ObjectName(vec![Ident::new(pipeline)]),
+                                        Ok(Statement::AlterSchemaAlterColumnType(AlterSchemaAlterColumnType {
+                                        pipeline: ObjectName(vec![datafusion::logical_expr::sqlparser::ast::ObjectNamePart::Identifier(Ident::new(pipeline))]),
                                         schema,
                                         column_name,
                                         // strip the <value type> from ARRAY<value type> to support matching against `SkipprTypes`
@@ -498,7 +499,7 @@ impl<'a> SParser<'a> {
                         },
                         _ => {
                             Ok(Statement::AlterSchemaAlterColumnType(AlterSchemaAlterColumnType {
-                                pipeline: ObjectName(vec![Ident::new(pipeline)]),
+                                pipeline: ObjectName(vec![datafusion::logical_expr::sqlparser::ast::ObjectNamePart::Identifier(Ident::new(pipeline))]),
                                 schema,
                                 column_name,
                                 new_type: column_new_type,
@@ -638,8 +639,8 @@ impl<'a> SParser<'a> {
                         
                         Ok(Statement::SchemaDump(SchemaDumpStatement {
                             // pipeline: SchemaDumpSource::Relation(pipeline),
-                            pipeline: ObjectName(vec![Ident::new(pipeline)]),
-                            schema: schema.map(|s| ObjectName(vec![Ident::new(s)])),
+                            pipeline: ObjectName(vec![datafusion::logical_expr::sqlparser::ast::ObjectNamePart::Identifier(Ident::new(pipeline))]),
+                            schema: schema.map(|s| ObjectName(vec![datafusion::logical_expr::sqlparser::ast::ObjectNamePart::Identifier(Ident::new(s))])),
                             target
                         }))
 
@@ -707,8 +708,8 @@ impl<'a> SParser<'a> {
                         };
 
                         Ok(Statement::TableDrop(TableDropStatement {
-                            schema: schema.map(|s| ObjectName(vec![Ident::new(s)])),
-                            table: ObjectName(vec![Ident::new(pipeline)])
+                            schema: schema.map(|s| ObjectName(vec![datafusion::logical_expr::sqlparser::ast::ObjectNamePart::Identifier(Ident::new(s))])),
+                            table: ObjectName(vec![datafusion::logical_expr::sqlparser::ast::ObjectNamePart::Identifier(Ident::new(pipeline))])
                         }))
                         // }
 

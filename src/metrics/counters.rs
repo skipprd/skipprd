@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use std::sync::atomic::{AtomicU64, Ordering};
 use once_cell::sync::Lazy;
 
@@ -22,12 +23,7 @@ pub static PARQUET_PERSISTED_OBJECTS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| Atomi
 pub static LATEST_TIMESTAMP: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static QUARANTINED_PARTITIONS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 
-// Semantic/LLM observability
-pub static LLM_ENRICH_SUCCESS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
-pub static LLM_ENRICH_FAILURE_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
-pub static LLM_ENRICH_LATENCY_NS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
-pub static SEMANTIC_WRITE_SUCCESS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
-pub static SEMANTIC_WRITE_FAILURE_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+// (removed unused LLM/semantic counters)
 
 // Dynamic tuning targets (self-tuned by ingest; read by components)
 pub static UPLOAD_CONCURRENCY_TARGET: Lazy<std::sync::atomic::AtomicUsize> = Lazy::new(|| std::sync::atomic::AtomicUsize::new(16));
@@ -117,15 +113,6 @@ pub fn add_s3_wal_error(n: u64) { S3_WAL_ERRORS_TOTAL.fetch_add(n, Ordering::Rel
 #[inline]
 pub fn set_s3_wal_retry_ema_x100(v: u64) { S3_WAL_RETRY_EMA_X100.store(v, Ordering::Relaxed); }
 
-#[inline]
-pub fn add_llm_enrich_success(n: u64) { LLM_ENRICH_SUCCESS_TOTAL.fetch_add(n, Ordering::Relaxed); }
-#[inline]
-pub fn add_llm_enrich_failure(n: u64) { LLM_ENRICH_FAILURE_TOTAL.fetch_add(n, Ordering::Relaxed); }
-#[inline]
-pub fn add_llm_enrich_latency_ns(n: u64) { LLM_ENRICH_LATENCY_NS_TOTAL.fetch_add(n, Ordering::Relaxed); }
-#[inline]
-pub fn add_semantic_write_success(n: u64) { SEMANTIC_WRITE_SUCCESS_TOTAL.fetch_add(n, Ordering::Relaxed); }
-#[inline]
-pub fn add_semantic_write_failure(n: u64) { SEMANTIC_WRITE_FAILURE_TOTAL.fetch_add(n, Ordering::Relaxed); }
+// (removed unused LLM/semantic add helpers)
 
 

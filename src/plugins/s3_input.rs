@@ -48,10 +48,6 @@ fn read_meminfo_kib(key: &str) -> Option<u64> {
 fn read_mem_total_mib() -> Option<u64> { read_meminfo_kib("MemTotal:").map(|kib| kib / 1024) }
 fn read_mem_available_mib() -> Option<u64> { read_meminfo_kib("MemAvailable:").map(|kib| kib / 1024) }
 
-/// Path for storing the S3 continuation token so we can resume syncs
-const CONTINUATION_TOKEN_FILE: Lazy<String> = Lazy::new(|| {
-    format!("{}/s3_input_continuation_token", Config::get_data_dir())
-});
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct DataSourceS3PluginConfig {
@@ -131,22 +127,7 @@ impl DataSourceS3Plugin {
         }
     }
 
-    /// Save the continuation token to a file for resuming later
-    fn save_continuation_token(token: &str) {
-        if let Ok(mut file) = fs::File::create(&*CONTINUATION_TOKEN_FILE) {
-            if let Err(e) = file.write_all(token.as_bytes()) {
-                error!("Failed to save continuation token: {}", e);
-            }
-        }
-    }
-
-    /// Load the continuation token from a file
-    fn load_continuation_token() -> Option<String> {
-        match fs::read_to_string(&*CONTINUATION_TOKEN_FILE) {
-            Ok(token) => Some(token.trim().to_string()),
-            Err(_) => None,
-        }
-    }
+    // Continuation token persistence removed; rely on paginator state.
 
     /// Synchronize data from S3 bucket to the ingestion pipeline
     ///

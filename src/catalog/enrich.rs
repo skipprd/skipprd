@@ -3,9 +3,9 @@ use crate::catalog::model::{DataCatalog, CatalogField};
 
 /// Run dataset-level and field-level LLM enrichment for a namespace.
 pub async fn enrich_namespace_with_llm(namespace: &str) {
-    if !(crate::helpers::configuration::Config::pipeline_llm_enabled() && crate::helpers::configuration::Config::catalog_llm_enabled()) {
-        return;
-    }
+    // if !(crate::helpers::configuration::Config::pipeline_llm_enabled() && crate::helpers::configuration::Config::catalog_llm_enabled()) {
+    //     return;
+    // }
     let cfg = crate::llm::config_from_env();
     let session = crate::llm::session::LlmSession::new(&cfg);
 
@@ -63,9 +63,38 @@ pub async fn enrich_namespace_with_llm(namespace: &str) {
     }
 
     // Field-level enrichment
-    let ns_stats: Option<crate::discover::stats::NamespaceStats> = match crate::helpers::configuration::Config::read_namespace_stats_async(namespace).await {
-        Some(v) => serde_json::from_value::<crate::discover::stats::NamespaceStats>(v).ok(),
-        None => None,
+    // Prefer stats embedded in catalog; fallback to separate stats JSON if present
+    let ns_stats: Option<crate::discover::stats::NamespaceStats> = {
+        let pipeline = crate::helpers::configuration::Config::get_pipeline_name();
+        let mut out: Option<crate::discover::stats::NamespaceStats> = None;
+        if let Some(entry) = crate::sql::registry::find_entry(&pipeline, namespace).await {
+            if !entry.catalog_key.is_empty() {
+                if let Ok(val) = crate::helpers::s3::get_json(&entry.catalog_key).await {
+                    if let Some(fields) = val.get("fields").and_then(|x| x.as_array()) {
+                        let mut ns = crate::discover::stats::NamespaceStats::new(namespace);
+                        for f in fields {
+                            if let (Some(name), Some(st)) = (f.get("name").and_then(|x| x.as_str()), f.get("stats").and_then(|x| x.as_object())) {
+                                let mut fs = crate::discover::stats::FieldStats::default();
+                                fs.total = st.get("total").and_then(|x| x.as_u64()).unwrap_or(0);
+                                fs.nulls = st.get("nulls").and_then(|x| x.as_u64()).unwrap_or(0);
+                                fs.min_numeric = st.get("min_numeric").and_then(|x| x.as_f64());
+                                fs.max_numeric = st.get("max_numeric").and_then(|x| x.as_f64());
+                                fs.min_len = st.get("min_len").and_then(|x| x.as_u64());
+                                fs.max_len = st.get("max_len").and_then(|x| x.as_u64());
+                                fs.approx_distinct = st.get("approx_distinct").and_then(|x| x.as_u64());
+                                fs.histogram_bins = st.get("histogram_bins").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|v| v.as_u64()).collect());
+                                fs.histogram_min = st.get("histogram_min").and_then(|x| x.as_f64());
+                                fs.histogram_max = st.get("histogram_max").and_then(|x| x.as_f64());
+                                fs.last_updated_epoch_ms = st.get("last_updated_epoch_ms").and_then(|x| x.as_u64()).unwrap_or(0);
+                                ns.fields.insert(name.to_string(), fs);
+                            }
+                        }
+                        out = Some(ns);
+                    }
+                }
+            }
+        }
+        out
     };
     // Load existing catalog (may be YAML stored as JSON via helper)
     let pipeline = crate::helpers::configuration::Config::get_pipeline_name();
@@ -86,9 +115,23 @@ pub async fn enrich_namespace_with_llm(namespace: &str) {
                             let pii = f.get("pii_sensitivity").and_then(|x| x.as_str()).map(|s| s.to_string());
                             let units = f.get("units_or_format").and_then(|x| x.as_str()).map(|s| s.to_string());
                             let role = f.get("role").and_then(|x| x.as_str()).map(|s| s.to_string());
-                            Some(CatalogField { entity: String::new(), name, description: desc, synonyms: syns, pii_sensitivity: pii, units_or_format: units, role })
+                            // Preserve pre-existing stats if present
+                            let stats_opt = f.get("stats").cloned();
+                            let stats_lite = stats_opt.and_then(|st| serde_json::from_value::<crate::catalog::model::FieldStatsLite>(st).ok());
+                            Some(CatalogField { entity: String::new(), name, description: desc, synonyms: syns, pii_sensitivity: pii, units_or_format: units, role, stats: stats_lite })
                         }).collect::<Vec<CatalogField>>()
-                    }).unwrap_or_else(|| semantic.fields.iter().map(|f| CatalogField { entity: String::new(), name: f.name.clone(), description: None, synonyms: None, pii_sensitivity: None, units_or_format: None, role: Some(format!("{:?}", f.role)) }).collect()),
+                    }).unwrap_or_else(|| semantic.fields.iter().map(|f| CatalogField { entity: String::new(), name: f.name.clone(), description: None, synonyms: None, pii_sensitivity: None, units_or_format: None, role: Some(format!("{:?}", f.role)), stats: None }).collect()),
+                    // Keep structure_index and dataset_stats if present
+                    structure_index: val.get("structure_index").and_then(|x| x.as_object()).map(|m| {
+                        let mut out = std::collections::HashMap::<String, Vec<String>>::new();
+                        for (k, v) in m {
+                            if let Some(arr) = v.as_array() {
+                                out.insert(k.clone(), arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect());
+                            }
+                        }
+                        out
+                    }).unwrap_or_default(),
+                    dataset_stats: val.get("dataset_stats").and_then(|x| serde_json::from_value::<crate::catalog::model::DatasetStats>(x.clone()).ok()),
                 };
                 // Batched field enrichment
                 let field_names: Vec<String> = catalog.fields.iter().map(|f| f.name.clone()).collect();

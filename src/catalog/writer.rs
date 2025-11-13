@@ -31,7 +31,7 @@ pub async fn enrich_field_descriptions_with_llm(namespace: &str, semantic: &Sema
         out.sort();
         out.dedup();
         if role.eq_ignore_ascii_case("id") {
-            let mut id_syn = vec!["id","identifier","uuid","key"].into_iter().map(|s| s.to_string()).collect::<Vec<_>>();
+            let id_syn = vec!["id","identifier","uuid","key"].into_iter().map(|s| s.to_string()).collect::<Vec<_>>();
             out.extend(id_syn);
             out.sort();
             out.dedup();
@@ -230,6 +230,7 @@ pub async fn enrich_field_descriptions_with_llm(namespace: &str, semantic: &Sema
 	}
 }
 
+#[allow(dead_code)]
 fn extract_json_value(text: &str) -> Option<serde_json::Value> {
     // Direct parse
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) { return Some(v); }
@@ -254,6 +255,7 @@ fn extract_json_value(text: &str) -> Option<serde_json::Value> {
     None
 }
 
+#[allow(dead_code)]
 fn infer_synonyms(name: &str, role_opt: Option<&SemanticFieldRole>) -> Vec<String> {
 	let n = name.to_lowercase();
 	let mut out: Vec<String> = Vec::new();
@@ -266,6 +268,7 @@ fn infer_synonyms(name: &str, role_opt: Option<&SemanticFieldRole>) -> Vec<Strin
 	out.sort(); out.dedup(); out
 }
 
+#[allow(dead_code)]
 fn infer_pii(name: &str, stats_opt: Option<&FieldStats>) -> String {
 	let n = name.to_lowercase();
 	// Name-based signals
@@ -279,6 +282,7 @@ fn infer_pii(name: &str, stats_opt: Option<&FieldStats>) -> String {
 	"none".to_string()
 }
 
+#[allow(dead_code)]
 fn generate_field_description(name: &str, role_opt: Option<&SemanticFieldRole>, stats_opt: Option<&FieldStats>) -> String {
 	let n = name.to_lowercase();
 	let base = n.split('.').last().unwrap_or(&n).replace('_', " ");
@@ -311,6 +315,7 @@ fn generate_field_description(name: &str, role_opt: Option<&SemanticFieldRole>, 
 	}
 }
 
+#[allow(dead_code)]
 fn generate_root_description(namespace: &str, catalog: &DataCatalog) -> String {
 	let mut highlights: Vec<&str> = Vec::new();
 	let names: Vec<String> = catalog.fields.iter().map(|f| f.name.clone()).collect();

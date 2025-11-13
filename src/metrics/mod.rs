@@ -17,7 +17,7 @@ use crate::helpers::Helpers;
 use crate::helpers::s3;
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::{METRICS, RUNNING};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 pub mod counters;
 

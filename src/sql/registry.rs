@@ -5,6 +5,8 @@ use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 
 use crate::helpers::configuration::Config;
+use std::time::Duration;
+use tracing::warn;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct NamespaceEntry {
@@ -32,10 +34,15 @@ fn get_pipeline_registry_key(pipeline: &str) -> String {
 
 async fn load_pipeline_registry(pipeline: &str) -> Option<PipelineRegistry> {
     let key = get_pipeline_registry_key(pipeline);
-    match crate::helpers::s3::get_json(&key).await {
-        Ok(val) => serde_json::from_value::<PipelineRegistry>(val).ok(),
-        Err(e) => {
+    // Bound S3 read to avoid stalling orchestrator on network hangs
+    match tokio::time::timeout(Duration::from_secs(12), crate::helpers::s3::get_json(&key)).await {
+        Ok(Ok(val)) => serde_json::from_value::<PipelineRegistry>(val).ok(),
+        Ok(Err(e)) => {
             if let aws_sdk_s3::error::SdkError::ServiceError(se) = &e { if se.err().is_no_such_key() { return None; } }
+            None
+        }
+        Err(_) => {
+            warn!("load_pipeline_registry: timed out fetching '{}'", key);
             None
         }
     }

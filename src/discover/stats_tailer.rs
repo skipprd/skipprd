@@ -105,18 +105,17 @@ fn enrich_llm(ns: &str, stats: &NamespaceStats) {
             pii_sensitivity: None,
             units_or_format: None,
             role: Some(format!("{:?}", f.role)),
+            stats: None,
         }).collect(),
+        structure_index: std::collections::HashMap::new(),
+        dataset_stats: None,
     };
     // Defer field-level LLM enrichment to end-of-discover pass
     // Write catalog (unified) to S3; warn if empty
     if catalog.fields.is_empty() { debug!("{} DISCOVER: catalog fields empty for '{}'", chrono::Utc::now().to_rfc3339(), ns); }
     // Write S3 keys and field count for debugging
-    let tenant = Config::get_tenant();
-    let workspace = Config::get_workspace_name();
-    let pipeline = Config::get_pipeline_name();
-    let stats_key = format!("{}/{}/{}/stats/{}.json", tenant, workspace, pipeline, ns);
-    let cat_key = format!("{}/{}/{}/catalog/{}.yaml", tenant, workspace, pipeline, ns);
-    debug!("{} DISCOVER: flush ns='{}' stats='{}' catalog='{}' fields={}", chrono::Utc::now().to_rfc3339(), ns, stats_key, cat_key, catalog.fields.len());
+    let cat_key = format!("{}/{}/{}/catalog/{}.yaml", Config::get_tenant(), Config::get_workspace_name(), Config::get_pipeline_name(), ns);
+    debug!("{} DISCOVER: flush ns='{}' catalog='{}' fields={}", chrono::Utc::now().to_rfc3339(), ns, cat_key, catalog.fields.len());
     // Write catalog asynchronously to S3
     match tokio::runtime::Handle::try_current() {
         Ok(_) => {
@@ -138,8 +137,6 @@ fn enrich_llm(ns: &str, stats: &NamespaceStats) {
 fn flush_all(by_ns: &mut HashMap<String, NamespaceStats>) {
     for (ns, stats) in by_ns.iter_mut() {
         for (_k, fs) in stats.fields.iter_mut() { fs.finalize(); }
-        // Flush stats to S3 only
-        Config::write_namespace_stats_sync(ns, stats);
         // Run enrichment at flush/end to ensure discover mode writes
         enrich_llm(ns, stats);
     }
@@ -178,8 +175,7 @@ pub fn emit_observation_deep(namespace: &str, field: &str, value: &serde_json::V
     }
 }
 
-/// Public helper to run LLM enrichment using an existing on-disk stats snapshot, if present.
-pub fn enrich_llm_from_existing(_ns: &str) { /* removed local fallback */ }
+// removed unused enrichment helper
 
 /// Force a final flush of stats → semantic → catalog for all namespaces.
 pub fn force_flush() {
