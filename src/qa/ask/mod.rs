@@ -5,6 +5,7 @@ use crate::qa::tools::{ToolRegistry};
 use crate::qa::tools::{sql_run::SqlRunTool, sql_schema::SqlSchemaTool, sql_stats::SqlStatsTool, sql_sample::SqlSampleTool, vect_query::VectQueryTool};
 use std::cmp::Ordering;
 use serde_json::json;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub async fn run(question: &str, pipeline: &str, namespace: Option<&str>) -> Result<String, String> {
     let ctx = SessionContext::new();
@@ -23,11 +24,14 @@ pub async fn run(question: &str, pipeline: &str, namespace: Option<&str>) -> Res
     }
     // Pre-fetch embedding candidates across all pipelines (dataset scope) and print as plain text
     let mut embeds_block: String = String::new();
+    let mut company_info_block: String = String::new();
+    let mut qvec_opt: Option<Vec<f32>> = None;
     {
         let cfg = crate::llm::config_from_env();
         let model = crate::llm::create_llm(&cfg);
         let vecs = model.embed(&[question.to_string()]).map_err(|e| e.to_string()).unwrap_or_default();
         if let Some(qvec) = vecs.get(0) {
+            qvec_opt = Some(qvec.clone());
             let mut all_hits: Vec<crate::qa::vector::lance_store::ScoredChunk> = Vec::new();
             let pipelines = crate::helpers::configuration::Config::get_pipelines();
             for p in pipelines {
@@ -67,6 +71,51 @@ pub async fn run(question: &str, pipeline: &str, namespace: Option<&str>) -> Res
                 println!("Embeddings: no candidate datasets found");
             }
         }
+        // Company information block (pre-agent): try to fetch doc embeddings; if none, ask user and upsert now.
+        if let Some(qv) = qvec_opt.as_ref() {
+            let store = crate::qa::vector::lance_store::LanceDbStore::new(pipeline);
+            if let Ok(mut hits) = store.query(qv, 10, Some("doc")).await {
+                hits.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(Ordering::Equal));
+                let mut seen = std::collections::HashSet::<String>::new();
+                let mut texts: Vec<String> = Vec::new();
+                for h in hits {
+                    if seen.insert(h.item.id.clone()) {
+                        let t = h.item.text.trim();
+                        if !t.is_empty() { texts.push(t.to_string()); }
+                    }
+                    if texts.len() >= 3 { break; }
+                }
+                if !texts.is_empty() {
+                    company_info_block.push_str("CompanyInfo:\n");
+                    for t in texts { company_info_block.push_str(&format!("- {}\n", t)); }
+                } else {
+                    println!("Please tell me a little about your business (1-3 sentences):");
+                    let mut buf = String::new();
+                    let _ = std::io::stdin().read_line(&mut buf);
+                    let text = buf.trim().to_string();
+                    if !text.is_empty() {
+                        company_info_block.push_str("CompanyInfo:\n");
+                        company_info_block.push_str(&format!("- {}\n", text));
+                        if let Ok(vs) = model.embed(&[text.clone()]) {
+                            if let Some(vec0) = vs.get(0) {
+                                let epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+                                let item = crate::qa::vector::lance_store::Chunk {
+                                    id: format!("doc:{}:company_info:{}", pipeline, epoch),
+                                    kind: "doc".to_string(),
+                                    namespace: "company".to_string(),
+                                    field: None,
+                                    text: text.clone(),
+                                    vector: vec0.clone(),
+                                    meta: serde_json::json!({"source":"user"}),
+                                    epoch,
+                                };
+                                let _ = store.upsert(&[item]).await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
     let mut registry = ToolRegistry::new();
     registry.register(SqlRunTool { ctx: ctx.clone() });
@@ -83,11 +132,127 @@ pub async fn run(question: &str, pipeline: &str, namespace: Option<&str>) -> Res
         thread_id: None,
     };
     let base_sys = system_prompt();
-    let sys = if embeds_block.is_empty() { base_sys } else { format!("{}\n\n{}", base_sys, embeds_block) };
+    let mut sys = base_sys;
+    if !embeds_block.is_empty() { sys = format!("{}\n\n{}", sys, embeds_block); }
+    if !company_info_block.is_empty() { sys = format!("{}\n\n{}", sys, company_info_block); }
     let tools = tool_card();
+    // Provide a stable thread id so we can inspect steps later instead of re-running SQL.
+    let thread_id = format!("ask_{}_{}", pipeline, chrono::Utc::now().timestamp_millis());
+    let actx = AgentCtx { thread_id: Some(thread_id.clone()), ..actx };
     let result = Agent::run(&registry, &actx, &sys, &tools, question).await?;
 
-    // If the agent produced SQL, execute it and synthesize a concise plain-text answer.
+    // Try to reuse the last successful run_sql observation from the agent thread to avoid re-running.
+    let mut header: Vec<String> = Vec::new();
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    {
+        let store = crate::qa::session::ThreadStore::new(pipeline);
+        if let Some(log) = store.get(&thread_id).await {
+            for step in log.steps.iter().rev() {
+                if step.action == "run_sql" {
+                    let obs = &step.observation;
+                    if obs.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        header = obs.get("header").and_then(|h| serde_json::from_value(h.clone()).ok()).unwrap_or_default();
+                        rows = obs.get("rows").and_then(|r| serde_json::from_value(r.clone()).ok()).unwrap_or_default();
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    // If still empty and we have SQL, run once as a fallback.
+    if header.is_empty() && rows.is_empty() {
+        if let Some(sql) = result.sql.clone() {
+            if let Ok(obs) = registry.call("run_sql", json!({"sql": sql}), &actx).await {
+                if obs.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    header = obs.get("header").and_then(|h| serde_json::from_value(h.clone()).ok()).unwrap_or_default();
+                    rows = obs.get("rows").and_then(|r| serde_json::from_value(r.clone()).ok()).unwrap_or_default();
+                }
+            }
+        }
+    }
+
+    // Company information: query doc embeddings; if missing, ask user and upsert.
+    let company_info: String = company_info_block.clone();
+
+    // Catalog context from the first referenced dataset in SQL (if any).
+    let catalog_context: String = {
+        fn first_fqn(sql: &str) -> Option<(String, String)> {
+            // naive scan for token containing a single '.' with alnum/underscore on both sides
+            let delimiters: &[char] = &[' ', '\n', '\t', ',', ';', '(', ')'];
+            for tok in sql.split(delimiters) {
+                if let Some(dot) = tok.find('.') {
+                    let (l, r) = (&tok[..dot], &tok[dot+1..]);
+                    if !l.is_empty() && !r.is_empty() && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && r.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                        return Some((l.to_string(), r.to_string()));
+                    }
+                }
+            }
+            None
+        }
+        let mut ctx_line = String::new();
+        if let Some(sql) = result.sql.as_ref() {
+            if let Some((p, ns)) = first_fqn(sql) {
+                if let Some(entry) = crate::sql::registry::find_entry(&p, &ns).await {
+                    if !entry.catalog_key.is_empty() {
+                        if let Ok(val) = crate::helpers::s3::get_json(&entry.catalog_key).await {
+                            let desc = val.get("description").and_then(|x| x.as_str()).unwrap_or_default();
+                            if !desc.is_empty() {
+                                ctx_line = format!("Dataset {}.{}: {}", p, ns, desc);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ctx_line
+    };
+
+    // Build a concise business-style summary using LLM with all available context.
+    let final_summary: Option<String> = {
+        let cfg = crate::llm::config_from_env();
+        let llm = crate::llm::create_llm(&cfg);
+        let mut lines: Vec<String> = Vec::new();
+        lines.push(format!("Question: {}", question));
+        if !result.answer.trim().is_empty() {
+            lines.push(format!("AgentAnswer: {}", result.answer.trim()));
+        }
+        if let Some(sql) = result.sql.as_ref() {
+            lines.push(format!("SQL: {}", sql.replace('\n', " ")));
+        }
+        if !header.is_empty() && !rows.is_empty() {
+            let max_rows = rows.len().min(20);
+            let display_rows = &rows[..max_rows];
+            let table_json = serde_json::json!({
+                "header": header,
+                "rows": display_rows,
+            });
+            lines.push(format!("Data: {}", table_json.to_string()));
+        }
+        if !catalog_context.is_empty() {
+            lines.push(format!("Catalog: {}", catalog_context));
+        }
+        if !company_info.trim().is_empty() {
+            lines.push(format!("CompanyInfo: {}", company_info.trim()));
+        }
+        let prompt = format!(
+            "You are a data analyst. Write a short, business-friendly answer for executives.\n\
+            Rules:\n- Be concise (≤ 2 sentences), plain text only.\n- If the data is a time series (date + metric), comment on trend/growth, and compare to the prior period when possible using the provided rows only.\n- Do not fabricate numbers; only use provided data.\n- If insufficient data for trends, state the key facts only.\n- Incorporate any relevant Catalog or CompanyInfo context to shape the message, but do not invent specifics.\n\nContext:\n{}\n\nAnswer:",
+            lines.join("\n")
+        );
+        match tokio::task::spawn_blocking({ let llm2 = llm.clone(); let p = prompt.clone(); move || llm2.chat(&[crate::llm::ChatMessage { role: "user".into(), content: p }]) }).await {
+            Ok(Ok(text)) => {
+                let t = text.trim();
+                if !t.is_empty() { Some(t.to_string()) } else { None }
+            }
+            _ => None
+        }
+    };
+
+    if let Some(s) = final_summary {
+        return Ok(s);
+    }
+
+    // Otherwise, if the agent produced SQL, execute it and synthesize a concise plain-text answer.
     if let Some(sql) = result.sql.clone() {
         if let Ok(obs) = registry.call("run_sql", json!({"sql": sql}), &actx).await {
             if obs.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
