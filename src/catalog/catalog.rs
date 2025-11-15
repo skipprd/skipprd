@@ -1,4 +1,5 @@
-use tracing::debug;
+use tracing::{debug, info};
+use crate::catalog::utils::to_stats_lite;
 
 pub struct CatalogBuilder;
 
@@ -60,21 +61,6 @@ impl CatalogBuilder {
 			for (_k, v) in idx.iter_mut() { v.sort(); v.dedup(); }
 			idx
 		}
-		fn to_stats_lite(s: &crate::discover::stats::FieldStats) -> crate::catalog::model::FieldStatsLite {
-			crate::catalog::model::FieldStatsLite {
-				total: s.total,
-				nulls: s.nulls,
-				min_numeric: s.min_numeric,
-				max_numeric: s.max_numeric,
-				min_len: s.min_len,
-				max_len: s.max_len,
-				approx_distinct: s.approx_distinct,
-				histogram_bins: s.histogram_bins.clone(),
-				histogram_min: s.histogram_min,
-				histogram_max: s.histogram_max,
-				last_updated_epoch_ms: s.last_updated_epoch_ms,
-			}
-		}
 		let mut catalog = crate::catalog::model::DataCatalog {
 			namespace: namespace.to_string(),
 			description: None,
@@ -109,7 +95,8 @@ impl CatalogBuilder {
 		// Build structure index
 		let field_names: Vec<String> = catalog.fields.iter().map(|f| f.name.clone()).collect();
 		catalog.structure_index = build_structure_index(&field_names);
-		debug!("META: build catalog ns='{}' fields={} sample=[{}]", namespace, catalog.fields.len(), catalog.fields.iter().take(8).map(|f| f.name.clone()).collect::<Vec<_>>().join(","));
+		info!("Catalog built ns='{}' fields={}", namespace, catalog.fields.len());
+		debug!("Catalog field sample ns='{}' sample=[{}]", namespace, catalog.fields.iter().take(8).map(|f| f.name.clone()).collect::<Vec<_>>().join(","));
 		// Defer field-level LLM enrichment to end-of-discover pass
 		crate::helpers::configuration::Config::write_catalog_async(namespace, &catalog).await;
 	}

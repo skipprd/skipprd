@@ -66,35 +66,13 @@ pub async fn enrich_namespace_with_llm(namespace: &str) {
     // Prefer stats embedded in catalog; fallback to separate stats JSON if present
     let ns_stats: Option<crate::discover::stats::NamespaceStats> = {
         let pipeline = crate::helpers::configuration::Config::get_pipeline_name();
-        let mut out: Option<crate::discover::stats::NamespaceStats> = None;
         if let Some(entry) = crate::sql::registry::find_entry(&pipeline, namespace).await {
             if !entry.catalog_key.is_empty() {
                 if let Ok(val) = crate::helpers::s3::get_json(&entry.catalog_key).await {
-                    if let Some(fields) = val.get("fields").and_then(|x| x.as_array()) {
-                        let mut ns = crate::discover::stats::NamespaceStats::new(namespace);
-                        for f in fields {
-                            if let (Some(name), Some(st)) = (f.get("name").and_then(|x| x.as_str()), f.get("stats").and_then(|x| x.as_object())) {
-                                let mut fs = crate::discover::stats::FieldStats::default();
-                                fs.total = st.get("total").and_then(|x| x.as_u64()).unwrap_or(0);
-                                fs.nulls = st.get("nulls").and_then(|x| x.as_u64()).unwrap_or(0);
-                                fs.min_numeric = st.get("min_numeric").and_then(|x| x.as_f64());
-                                fs.max_numeric = st.get("max_numeric").and_then(|x| x.as_f64());
-                                fs.min_len = st.get("min_len").and_then(|x| x.as_u64());
-                                fs.max_len = st.get("max_len").and_then(|x| x.as_u64());
-                                fs.approx_distinct = st.get("approx_distinct").and_then(|x| x.as_u64());
-                                fs.histogram_bins = st.get("histogram_bins").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|v| v.as_u64()).collect());
-                                fs.histogram_min = st.get("histogram_min").and_then(|x| x.as_f64());
-                                fs.histogram_max = st.get("histogram_max").and_then(|x| x.as_f64());
-                                fs.last_updated_epoch_ms = st.get("last_updated_epoch_ms").and_then(|x| x.as_u64()).unwrap_or(0);
-                                ns.fields.insert(name.to_string(), fs);
-                            }
-                        }
-                        out = Some(ns);
-                    }
-                }
-            }
-        }
-        out
+                    crate::catalog::stats_from_catalog::namespace_stats_from_catalog_json(namespace, &val)
+                } else { None }
+            } else { None }
+        } else { None }
     };
     // Load existing catalog (may be YAML stored as JSON via helper)
     let pipeline = crate::helpers::configuration::Config::get_pipeline_name();

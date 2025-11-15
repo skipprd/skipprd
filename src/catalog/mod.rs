@@ -4,7 +4,8 @@ pub mod catalog;
 pub mod orchestrator;
 pub mod model;
 pub mod infer;
-pub mod writer;
 pub mod enrich;
+pub mod utils;
+pub mod stats_from_catalog;
 
 
