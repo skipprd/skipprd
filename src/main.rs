@@ -69,6 +69,7 @@ mod models;
 
 use crate::helpers::configuration::{Config, PIPELINE_NAME};
 use crate::helpers::logging::init_logging;
+use crate::helpers::progress::ProgressUi;
 use tracing::{error, info, warn};
 
 use crate::helpers::logger::{Logger, LogLevel};
@@ -98,6 +99,7 @@ use crate::sql::query::query;
 use crate::sql::docs::{DocFormat, get_docs_in_format};
 use crate::sql::doc_parser::SqlDocParser;
 use crate::benchmark::PerformanceBenchmark;
+use std::io::IsTerminal as _;
 
 // use crate::plugins::pcap_input::DataSourcePcapPlugin;
 
@@ -619,6 +621,18 @@ async fn discover(log: bool) {
     let pipeline_name = Config::get_pipeline_name();
     let _start_time = Instant::now();
 
+    let stdout_is_tty = std::io::stdout().is_terminal();
+    let progress = ProgressUi::new(stdout_is_tty && !log);
+    if progress.enabled() {
+        progress.add_tasks(&[
+            "Ingesting",
+            "Finalising",
+            "Building stats",
+            "Building catalog",
+            "Creating embeddings",
+        ]);
+    }
+
     info!("Analysing data and generating Skippr metadata for pipeline: {}", pipeline_name);
 
     // Stats tailer removed; catalogs built at end-of-run only
@@ -676,7 +690,9 @@ async fn discover(log: bool) {
     }
 
     let shared_output_clone = shared_output.clone();
+    if progress.enabled() { progress.start("Ingesting"); }
     sync_input_plugin(offsets_db.clone(), shared_output_clone).await;
+    if progress.enabled() { progress.complete("Ingesting"); }
 
     info!("Reached end of source data");
     info!(
@@ -696,9 +712,7 @@ async fn discover(log: bool) {
     // crate::catalog::orchestrator::Orchestrator::build_all(&pipeline_metadata.metadata);
     // Stats tailer disabled
 
-    println!("→ Building Catalog...");
-    crate::catalog::orchestrator::Orchestrator::build_all(&pipeline_metadata.metadata).await;
-    println!("✔ Built Catalog");
+    crate::catalog::orchestrator::Orchestrator::build_all_with_progress(&pipeline_metadata.metadata, if progress.enabled() { Some(&progress) } else { None }).await;
 
     // Final metrics snapshot (same as periodic per-minute print)
     // if log {
@@ -729,16 +743,12 @@ async fn discover(log: bool) {
         info!("Targets - upload: {}, wal: {}, s3_download: {} | active: {}, queue: {}", up_target, wal_target, dl_target, active, queue);
     // }
 
-    println!("→ Generating Semantic Layer...");
 
     info!("Enriching catalog with LLM descriptions...");
     // Ensure per-namespace LLM enrichment has run so catalog descriptions exist
     crate::catalog::enrich::run_llm_enrichment_all(&pipeline_metadata.metadata).await;
     
-    println!("✔ Generated Semantic");
 
-    println!("→ Modelling Warehouse...");
-    println!("✔ Modelling Warehouse");
 
     // Insightful LLM summary based on Catalog Stats (not ingest counters)
     {
@@ -841,10 +851,12 @@ async fn discover(log: bool) {
     {
         let pipeline = Config::get_pipeline_name();
         info!("{} Embeddings: syncing LanceDB for pipeline='{}'...", chrono::Utc::now().to_rfc3339(), pipeline);
+        if progress.enabled() { progress.start("Creating embeddings"); }
         match crate::qa::embeddings::sync_pipeline(&pipeline).await {
             Ok(_) => info!("{} Embeddings: sync complete", chrono::Utc::now().to_rfc3339()),
             Err(e) => warn!("Embeddings sync failed: {}", e),
         }
+        if progress.enabled() { progress.complete("Creating embeddings"); }
     }
 
     {
@@ -852,6 +864,7 @@ async fn discover(log: bool) {
         counter_lock.status = MetricsStatus::Finishing;
     }
 
+    if progress.enabled() { progress.start("Finalising"); }
     while OUTPUT_RUNNING.read().load(Ordering::SeqCst) {
         sleep(Duration::from_secs(1));
     }
@@ -896,12 +909,26 @@ async fn discover(log: bool) {
         }
     }
 
+    if progress.enabled() { progress.complete("Finalising"); progress.finish(); }
+
 }
 
 async fn sync() {
 
     let pipeline_name = Config::get_pipeline_name();
     
+    let stdout_is_tty = std::io::stdout().is_terminal();
+    let progress = ProgressUi::new(stdout_is_tty && !crate::helpers::logging::cli_logs_enabled());
+    if progress.enabled() {
+        progress.add_tasks(&[
+            "Ingesting",
+            "Finalising",
+            "Building stats",
+            "Building catalog",
+            "Creating embeddings",
+        ]);
+    }
+
     {
         let mut counter_lock = METRICS.write();
         counter_lock.status = MetricsStatus::Running;
@@ -1025,7 +1052,9 @@ async fn sync() {
         }
     }
 
+    if progress.enabled() { progress.start("Ingesting"); }
     sync_input_plugin(offsets_db.clone(), shared_output_clone).await;
+    if progress.enabled() { progress.complete("Ingesting"); }
 
     info!("Reached end of source data");
     info!(
@@ -1046,6 +1075,7 @@ async fn sync() {
 
     // Deterministic drain: compact all remaining on-disk segments to parquet
     {
+        if progress.enabled() { progress.start("Finalising"); }
         // Stop background compactor pool and wait for in-flight to drain
         Buffers::request_compactor_stop();
         // Wait for in-flight to reach zero (bounded wait)
@@ -1063,6 +1093,7 @@ async fn sync() {
     // Single-thread model: no background compaction tasks remain here
     // Wait for background Glue partition tasks to settle to avoid undercount at end
     crate::plugins::athena::DataOutputAwsAthenaPlugin::await_partition_tasks_zero().await;
+    if progress.enabled() { progress.complete("Finalising"); }
 
     // Summary and integrity check: uploaded rows vs expected msgs, quarantined parts
     {
@@ -1124,10 +1155,10 @@ async fn sync() {
     info!("Pipeline sync complete");
     // Stats tailer removed; stats computed by orchestrator from DataFusion at end-of-run
     // Late rebuild from existing S3 parquet if no new data (bounded, no LLM)
-    info!("→ Building Catalog (end of sync)...");
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(120), crate::catalog::orchestrator::Orchestrator::build_all(&pipeline_metadata.metadata)).await;
+    crate::catalog::orchestrator::Orchestrator::build_all_with_progress(&pipeline_metadata.metadata, if progress.enabled() { Some(&progress) } else { None }).await;
     // Stats tailer disabled
-    info!("✔ Built Catalog");
+
+    if progress.enabled() { progress.start("Creating embeddings"); }
 
     // Deferred LLM enrichment pass across all namespaces
     crate::catalog::enrich::run_llm_enrichment_all(&pipeline_metadata.metadata).await;
@@ -1136,12 +1167,14 @@ async fn sync() {
     {
         let pipeline = Config::get_pipeline_name();
         info!("Embeddings: syncing LanceDB for pipeline='{}'...", pipeline);
+
         match crate::qa::embeddings::sync_pipeline(&pipeline).await {
             Ok(_) => info!("Embeddings: sync complete"),
             Err(e) => warn!("Embeddings sync failed: {}", e),
         }
     }
 
+    if progress.enabled() { progress.complete("Creating embeddings"); progress.finish(); }
 }
 
 // legacy no-op; replaced by catalog::orchestrator

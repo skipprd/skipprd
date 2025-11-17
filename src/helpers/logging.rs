@@ -1,6 +1,9 @@
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
+static mut CLI_LOGS_ENABLED: bool = false;
+
 pub fn init_logging(enabled: bool) {
+    unsafe { CLI_LOGS_ENABLED = enabled; }
     if !enabled {
         // Do not install a subscriber; tracing macros become no-ops
         return;
@@ -34,6 +37,10 @@ hyper=warn,reqwest=warn,rustls=warn,h2=warn";
         .with(filter)
         .with(fmt_layer)
         .init();
+}
+
+pub fn cli_logs_enabled() -> bool {
+    unsafe { CLI_LOGS_ENABLED }
 }
 
 

@@ -310,9 +310,9 @@ components:
         thread_id: { type: string }
         thread_seq: { type: integer, nullable: true }
         for_cid: { type: string, nullable: true }
-        stage: { type: string, enum: [queued, retrieving, reasoning, generating], nullable: true }
+        stage: { type: string, enum: [queued, processing, complete, error], nullable: true }
         progress: { type: number, minimum: 0, maximum: 1, nullable: true }
-        step: { type: string, nullable: true, description: "Upcoming ReAct step name (e.g., run_sql, sql_schema)" }
+        step: { type: string, nullable: true, name: enum: [run_sql, sql_schema, sql_stats, sql_sample, vect_query] }
 
     TokenResponse:
       type: object
