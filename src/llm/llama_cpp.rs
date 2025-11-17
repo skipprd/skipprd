@@ -4,8 +4,11 @@ use super::{ChatMessage, LargeLanguageModel, LlmConfig};
 #[cfg(feature = "llama_cpp")]
 mod inner {
     use super::*;
+    use std::fs;
+    use std::path::Path;
     use std::num::NonZeroU32;
     use std::sync::Arc;
+    use crate::helpers::configuration::Config;
     use llama_cpp_2::context::params::LlamaContextParams;
     use llama_cpp_2::llama_backend::LlamaBackend;
     use llama_cpp_2::llama_batch::LlamaBatch;
