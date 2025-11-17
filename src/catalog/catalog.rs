@@ -4,8 +4,9 @@ use crate::catalog::utils::to_stats_lite;
 pub struct CatalogBuilder;
 
 impl CatalogBuilder {
-	pub async fn build_and_write_with_stats(namespace: &str, ns_stats: Option<crate::discover::stats::NamespaceStats>, dataset_stats: Option<crate::catalog::model::DatasetStats>) {
+	pub async fn build_with_stats(namespace: &str, ns_stats: Option<crate::discover::stats::NamespaceStats>, dataset_stats: Option<crate::catalog::model::DatasetStats>) -> crate::catalog::model::DataCatalog {
 		// Build initial semantic view directly from provided stats to ensure first-time catalogs have fields
+		fn leaf_name(n: &str) -> String { n.rsplit('.').next().unwrap_or(n).to_string() }
 		fn classify_field(_name: &str, stats: Option<&crate::discover::stats::FieldStats>) -> crate::catalog::model::SemanticFieldRole {
 			// Name-agnostic classification using only stats
 			if let Some(s) = stats {
@@ -24,7 +25,8 @@ impl CatalogBuilder {
 				let mut fields: Vec<crate::catalog::model::SemanticField> = Vec::new();
 				for (fname, fstats) in ns.fields.iter() {
 					let role = classify_field(fname, Some(fstats));
-					fields.push(crate::catalog::model::SemanticField { name: fname.clone(), role });
+					let display = leaf_name(fname);
+					fields.push(crate::catalog::model::SemanticField { name: display, role });
 				}
 				let mut dims: Vec<String> = Vec::new();
 				let mut mets: Vec<String> = Vec::new();
@@ -83,7 +85,20 @@ impl CatalogBuilder {
 		if let Some(ns) = ns_stats.as_ref() {
 			let mut nulls_by_field: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
 			for cf in catalog.fields.iter_mut() {
-				if let Some(fs) = ns.fields.get(&cf.name) {
+				// ns.fields keyed by dot-path; cf.name is leaf-only → find by exact leaf match
+				let target = cf.name.as_str();
+				let mut hit = None;
+				if let Some(fs) = ns.fields.get(target) {
+					hit = Some(fs);
+				} else {
+					for (k, v) in ns.fields.iter() {
+						if k.rsplit('.').next().unwrap_or(k) == target {
+							hit = Some(v);
+							break;
+						}
+					}
+				}
+				if let Some(fs) = hit {
 					nulls_by_field.insert(cf.name.clone(), fs.nulls);
 					cf.stats = Some(to_stats_lite(fs));
 				}
@@ -97,7 +112,6 @@ impl CatalogBuilder {
 		catalog.structure_index = build_structure_index(&field_names);
 		info!("Catalog built ns='{}' fields={}", namespace, catalog.fields.len());
 		debug!("Catalog field sample ns='{}' sample=[{}]", namespace, catalog.fields.iter().take(8).map(|f| f.name.clone()).collect::<Vec<_>>().join(","));
-		// Defer field-level LLM enrichment to end-of-discover pass
-		crate::helpers::configuration::Config::write_catalog_async(namespace, &catalog).await;
+		catalog
 	}
 }

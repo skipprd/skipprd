@@ -21,7 +21,7 @@ impl Tool for VectQueryTool {
         // Query LanceDB across all pipelines to honor cross-pipeline discovery
         let mut all_hits: Vec<crate::qa::vector::lance_store::ScoredChunk> = Vec::new();
         let mut errors: Vec<(String, String)> = Vec::new();
-        let pipelines = crate::helpers::configuration::Config::get_pipelines();
+        let pipelines = crate::sql::registry::list_pipelines().await;
         for p in pipelines {
             let store = crate::qa::vector::lance_store::LanceDbStore::new(&p);
             match store.query(&vec, k, scope).await {
@@ -43,7 +43,7 @@ impl Tool for VectQueryTool {
             if let Some("dataset") = scope {
                 // Fallback: try fields (no scope filter)
                 let mut all_hits2: Vec<crate::qa::vector::lance_store::ScoredChunk> = Vec::new();
-                let pipelines2 = crate::helpers::configuration::Config::get_pipelines();
+                let pipelines2 = crate::sql::registry::list_pipelines().await;
                 for p in pipelines2 {
                     let store = crate::qa::vector::lance_store::LanceDbStore::new(&p);
                     if let Ok(mut v) = store.query(&vec, k, None).await { all_hits2.append(&mut v); }
@@ -75,7 +75,11 @@ impl Tool for VectQueryTool {
                     }
                     let items: Vec<Value> = dedup2.into_iter().map(|h| {
                         let it = h.item;
-                        serde_json::json!({"kind": it.kind, "namespace": it.namespace, "field": it.field, "text": it.text, "score": h.score})
+                        // Derive pipeline from chunk id pattern: "<kind>:<pipeline>:<namespace>[:field]"
+                        let parts: Vec<&str> = it.id.split(':').collect();
+                        let pipeline = if parts.len() >= 3 { parts[1].to_string() } else { ctx.pipeline.clone() };
+                        let dataset = format!("{}.{}", pipeline, it.namespace);
+                        serde_json::json!({"kind": it.kind, "namespace": it.namespace, "dataset": dataset, "field": it.field, "text": it.text, "score": h.score})
                     }).collect();
                     return Ok(serde_json::json!({"ok": true, "items": items}));
                 }

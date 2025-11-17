@@ -1,5 +1,55 @@
 # Skippr
 
+## OpenAPI schema-first (Ask WebSocket)
+
+To generate Rust models from the Ask WebSocket OpenAPI schema and (optionally) wire updates:
+
+1. Ensure the spec is present at `docs/openapi/ask-ws.yaml`.
+2. Use the helper script to run OpenAPI Generator (Docker or local jar):
+
+```bash
+scripts/gen-openapi.sh
+```
+
+This will generate Rust models under `src/ws/api_gen/`. Only `components/schemas` are used for model generation. The WebSocket path exists for documentation. The server additionally enforces strict request validation and UUID v4 thread IDs.
+
+## Start the WebSocket server (Ask API)
+
+Run the server locally (default port 8787 shown; choose any open port):
+
+```bash
+cargo run -- serve --port 8787
+# or if you have the binary installed:
+# skippr serve --port 8787
+```
+
+Connect a WebSocket client to:
+
+- `ws://localhost:8787/`
+
+Send JSON frames matching `docs/openapi/ask-ws.yaml`. Example requests:
+
+```json
+{"type":"list"}
+```
+
+```json
+{"type":"new","question":"What were total rides last week?"}
+```
+
+```json
+{"type":"open","thread_id":"<uuid>","question":"Continue."}
+```
+
+```json
+{"type":"user","thread_id":"<uuid>","text":"We rent e-bikes in NYC and care about weekend demand."}
+```
+
+Notes:
+- No authentication is required (for now).
+- The server strictly rejects unknown properties and uses UUID v4 thread IDs.
+- Full schemas and examples are in `docs/openapi/ask-ws.yaml`.
+
 ### What is Skippr?
 
 Skippr is a tool for data ingestion and transformation. It is designed to ingest data from a source and transform it into a destination datalake/warehouse.

@@ -91,6 +91,10 @@ crossbeam-channel = "0.5.15"
 ureq = { version = "2", features = ["json"] }
 lancedb = "0.22.3"
 log = "0.4.28"
+tokio-tungstenite = "0.21"
+futures-util = "0.3"
+tungstenite = "0.21"
+uuid = { version = "1", features = ["v4"] }
 
 [features]
 llama_cpp = ["llama_cpp_2"]

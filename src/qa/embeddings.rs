@@ -96,8 +96,14 @@ pub async fn sync_pipeline(pipeline: &str) -> Result<(), String> {
             }
         }
         if !dataset_text.is_empty() {
-            let mut preview = dataset_text.clone();
-            if preview.len() > 200 { preview.truncate(200); }
+            let preview = if dataset_text.len() <= 200 {
+                dataset_text.clone()
+            } else {
+                match dataset_text.char_indices().take_while(|(i, _)| *i <= 200).last() {
+                    Some((i, _)) => dataset_text[..i].to_string(),
+                    None => String::new(),
+                }
+            };
             info!("Embeddings: ns='{}' dataset_text: {}", ns, preview);
             items.push(crate::qa::vector::lance_store::Chunk {
                 id: format!("dataset:{}:{}", pipeline, ns),
@@ -134,6 +140,17 @@ pub async fn sync_pipeline(pipeline: &str) -> Result<(), String> {
         p = q;
     }
     info!("Embeddings sync completed: {} items", items.len());
+    Ok(())
+}
+
+pub async fn sync_all_pipelines() -> Result<(), String> {
+    let pipelines = crate::sql::registry::list_pipelines().await;
+    if pipelines.is_empty() {
+        return Err("Central registry missing or empty. Run discover/sync to build registry.".to_string());
+    }
+    for p in pipelines {
+        let _ = sync_pipeline(&p).await?;
+    }
     Ok(())
 }
 

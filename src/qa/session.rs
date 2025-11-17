@@ -22,18 +22,23 @@ pub struct ThreadResult {
 }
 
 pub struct ThreadStore {
-    pipeline: String,
 }
 
 impl ThreadStore {
-    pub fn new(pipeline: &str) -> Self {
-        Self { pipeline: pipeline.to_string() }
+    pub fn new() -> Self {
+        Self { }
     }
 
     fn s3_key(&self, thread_id: &str) -> String {
         let tenant = crate::helpers::configuration::Config::get_tenant();
         let workspace = crate::helpers::configuration::Config::get_workspace_name();
-        format!("{}/{}/{}/threads/{}.json", tenant, workspace, self.pipeline, thread_id)
+        format!("{}/{}/threads/{}.json", tenant, workspace, thread_id)
+    }
+
+    fn threads_prefix(&self) -> String {
+        let tenant = crate::helpers::configuration::Config::get_tenant();
+        let workspace = crate::helpers::configuration::Config::get_workspace_name();
+        format!("{}/{}/threads/", tenant, workspace)
     }
 
     pub async fn append_step(&self, thread_id: &str, step: ThreadStep) -> Result<(), String> {
@@ -56,6 +61,35 @@ impl ThreadStore {
         } else {
             None
         }
+    }
+
+    pub async fn list(&self) -> Vec<String> {
+        use aws_sdk_s3::primitives::DateTime as S3DateTime;
+        let bucket = crate::helpers::configuration::Config::get_skippr_s3_bucket();
+        let client = crate::helpers::s3::get_s3_client().await;
+        let prefix = self.threads_prefix();
+        let mut token: Option<String> = None;
+        let mut out: Vec<String> = Vec::new();
+        loop {
+            let mut req = client.list_objects_v2().bucket(&bucket).prefix(&prefix).max_keys(1000);
+            if let Some(t) = token.as_ref() { req = req.continuation_token(t); }
+            match req.send().await {
+                Ok(resp) => {
+                    for obj in resp.contents() {
+                        if let Some(k) = obj.key() {
+                            if let Some(name) = k.strip_prefix(&prefix).and_then(|s| s.strip_suffix(".json")) {
+                                out.push(name.to_string());
+                            }
+                        }
+                    }
+                    if resp.next_continuation_token().is_none() { break; }
+                    token = resp.next_continuation_token().map(|s| s.to_string());
+                }
+                Err(_) => { break; }
+            }
+        }
+        out.sort();
+        out
     }
 }
 

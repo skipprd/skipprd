@@ -64,6 +64,8 @@ mod llm;
 mod benchmark;
 mod qa;
 mod catalog;
+mod ws;
+mod models;
 
 use crate::helpers::configuration::{Config, PIPELINE_NAME};
 use crate::helpers::logging::init_logging;
@@ -476,9 +478,27 @@ async fn main() {
             let cfg = llm::config_from_env();
             println!("{} LLM: provider={:?} chat_model={:?} base_url={:?}", chrono::Utc::now().to_rfc3339(), cfg.provider, cfg.chat_model, cfg.base_url);
             let llm = llm::create_llm(&cfg);
-            if let Some(p) = options.chat {
-                let out = llm.chat(&[llm::ChatMessage { role: "user".into(), content: p }]);
-                match out { Ok(s) => println!("{}", s), Err(e) => { eprintln!("ERROR: {}", e); std::process::exit(1); } }
+            if options.ask_list {
+                let pipeline = Config::get_pipeline_name();
+                let store = crate::qa::session::ThreadStore::new();
+                let threads = store.list().await;
+                println!("Threads ({}):", threads.len());
+                for t in threads { println!("- {}", t); }
+                return;
+            }
+            if let Some(thread_id) = options.ask_open.as_ref() {
+                println!("{} LLM: resuming thread {}", chrono::Utc::now().to_rfc3339(), thread_id);
+                Config::build_config();
+                let pipeline = Config::get_pipeline_name();
+                PIPELINE_NAME.write().clear();
+                PIPELINE_NAME.write().push_str(&pipeline);
+                Config::init().await;
+                let q = "Continue.";
+                match crate::qa::ask::run(q, &pipeline, None).await {
+                    Ok(ans) => { println!("{} ASK: answer ready", chrono::Utc::now().to_rfc3339()); println!("{}", ans); }
+                    Err(e) => { eprintln!("ERROR: {}", e); std::process::exit(1); }
+                }
+                return;
             }
             if let Some(ns) = options.cleanse {
                 Config::build_config();
@@ -529,6 +549,13 @@ async fn main() {
                     Ok(ans) => { println!("{} ASK: answer ready", chrono::Utc::now().to_rfc3339()); println!("{}", ans); }
                     Err(e) => { eprintln!("ERROR: {}", e); std::process::exit(1); }
                 }
+            }
+        }
+        Mode::Serve(opts) => {
+            // Start WebSocket server
+            if let Err(e) = crate::ws::server::start(opts.port).await {
+                eprintln!("ERROR: {}", e);
+                std::process::exit(1);
             }
         }
     }
@@ -594,8 +621,7 @@ async fn discover(log: bool) {
 
     info!("Analysing data and generating Skippr metadata for pipeline: {}", pipeline_name);
 
-    // Ensure stats worker is running for discovery lifecycle
-    crate::discover::stats_tailer::ensure_stats_worker();
+    // Stats tailer removed; catalogs built at end-of-run only
 
     let _data_dir = Config::get_data_dir();
 
@@ -663,15 +689,12 @@ async fn discover(log: bool) {
 
 
 
-    println!("→ Building Stats...");
-    // Finalize stats → semantic → catalog for all namespaces
-    crate::discover::stats_tailer::force_flush();
+    // Stats tailer removed; stats computed by orchestrator from DataFusion at end-of-run
 
 
     // Late rebuild from existing S3 parquet if no new data (bounded)
     // crate::catalog::orchestrator::Orchestrator::build_all(&pipeline_metadata.metadata);
-    // Ensure worker performs final flush and exits before process ends
-    // crate::discover::stats_tailer::shutdown_and_join(600);
+    // Stats tailer disabled
 
     println!("→ Building Catalog...");
     crate::catalog::orchestrator::Orchestrator::build_all(&pipeline_metadata.metadata).await;
@@ -753,8 +776,8 @@ async fn discover(log: bool) {
                     for (fname, fs) in stats.fields.iter() {
                         approx_rows = approx_rows.max(fs.sample_total.unwrap_or(fs.total));
                         // Name-agnostic: infer time window only when numeric epoch-like stats are present
-                        if let Some(min_num) = fs.min_numeric { if let Some(s) = parse_epoch_to_secs(min_num) { min_ts = Some(min_ts.map(|m| m.min(s)).unwrap_or(s)); } }
-                        if let Some(max_num) = fs.max_numeric { if let Some(s) = parse_epoch_to_secs(max_num) { max_ts = Some(max_ts.map(|m| m.max(s)).unwrap_or(s)); } }
+                            if let Some(min_num) = fs.min_numeric { if let Some(s) = parse_epoch_to_secs(min_num) { min_ts = Some(min_ts.map(|m| m.min(s)).unwrap_or(s)); } }
+                            if let Some(max_num) = fs.max_numeric { if let Some(s) = parse_epoch_to_secs(max_num) { max_ts = Some(max_ts.map(|m| m.max(s)).unwrap_or(s)); } }
                     }
                     by_ns.insert(ns.clone(), NsSummary { approx_rows, desc: None, earliest_ts: min_ts, latest_ts: max_ts });
                 }
@@ -935,8 +958,7 @@ async fn sync() {
 
 
     info!("Syncing pipeline: {}", pipeline_name);
-    // Ensure stats worker is running for sync lifecycle
-    crate::discover::stats_tailer::ensure_stats_worker();
+    // Stats tailer removed; catalogs built at end-of-run only
 
     METADATA.store(Arc::new(pipeline_metadata.clone()));
 
@@ -1100,15 +1122,11 @@ async fn sync() {
         );
     }
     info!("Pipeline sync complete");
-    // Finalize stats → semantic → catalog (no LLM) for all namespaces
-    crate::discover::stats_tailer::force_flush();
+    // Stats tailer removed; stats computed by orchestrator from DataFusion at end-of-run
     // Late rebuild from existing S3 parquet if no new data (bounded, no LLM)
     info!("→ Building Catalog (end of sync)...");
     let _ = tokio::time::timeout(std::time::Duration::from_secs(120), crate::catalog::orchestrator::Orchestrator::build_all(&pipeline_metadata.metadata)).await;
-    // Ensure worker performs final flush and exits before process ends
-    crate::discover::stats_tailer::shutdown_and_join(30);
-    // Perform a final synchronous build to guarantee catalogs are written
-    crate::catalog::orchestrator::Orchestrator::build_all(&pipeline_metadata.metadata).await;
+    // Stats tailer disabled
     info!("✔ Built Catalog");
 
     // Deferred LLM enrichment pass across all namespaces

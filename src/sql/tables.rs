@@ -181,8 +181,11 @@ pub async fn register_namespace_view(ctx: &SessionContext, pipeline: &str, names
         }
     }
     if s3_paths.is_empty() {
-        info!("register_namespace_view: no manifest prefixes for '{}.{}' (skipping)", pipeline, namespace);
-        return Ok(());
+        // First-sync fallback: derive standard datalake prefix and proceed
+        let bucket = Config::get_skippr_s3_bucket();
+        let fallback = format!("s3://{}/datalake/{}/", bucket, namespace);
+        info!("register_namespace_view: no manifest prefixes for '{}.{}'; falling back to {}", pipeline, namespace, fallback);
+        s3_paths.push(fallback);
     }
     // S3 DF (single listing from common prefix) + timestamp projection
     info!("register_namespace_view: {} prefix(es) for '{}.{}'", s3_paths.len(), pipeline, namespace);

@@ -12,9 +12,24 @@ pub struct SqlSchemaTool {
 impl Tool for SqlSchemaTool {
     fn name(&self) -> &'static str { "sql_schema" }
     async fn call(&self, args: Value, _ctx: &AgentCtx) -> Result<Value, String> {
-        let table_opt = args.get("table").and_then(|x| x.as_str()).map(|s| s.to_string());
+			let table_opt = args.get("table").and_then(|x| x.as_str()).map(|s| {
+				let mut t = s.to_string();
+				if let Some(rest) = t.strip_prefix("datafusion.") {
+					t = rest.to_string();
+				}
+				// Collapse accidental duplicate namespace: pipeline.namespace.namespace -> pipeline.namespace
+				if t.matches('.').count() == 2 {
+					let parts: Vec<&str> = t.split('.').collect();
+					if parts.len() == 3 && parts[1] == parts[2] {
+						t = format!("{}.{}", parts[0], parts[1]);
+					}
+				}
+				t
+			});
         if let Some(t) = table_opt {
-            match self.ctx.table(&t).await {
+            // Use unified DF context so two-part names resolve consistently
+            let ctx = crate::sql::query::new_context_all_namespaces().await;
+            match ctx.table(&t).await {
                 Ok(df) => {
                     let mut cols: Vec<Value> = Vec::new();
                     for f in df.schema().fields() {
@@ -27,7 +42,8 @@ impl Tool for SqlSchemaTool {
         } else {
             // List registered tables (best effort)
             let mut names: Vec<String> = Vec::new();
-            if let Ok(df) = self.ctx.sql("SHOW TABLES").await {
+            let ctx = crate::sql::query::new_context_all_namespaces().await;
+            if let Ok(df) = ctx.sql("SHOW TABLES").await {
                 if let Ok(batches) = df.collect().await {
                     for b in batches {
                         for r in 0..b.num_rows() {

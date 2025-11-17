@@ -103,7 +103,7 @@ impl LanceDbStore {
             let uri = format!("s3://{}/{}/{}/{}/lancedb", bucket, tenant, workspace, self.pipeline);
             let db = lancedb::connect(&uri).execute().await.map_err(|e| format!("{:?}", e))?;
             let tbl = db.open_table("embeddings").execute().await.map_err(|e| format!("{:?}", e))?;
-            let mut q = tbl.vector_search(query_vec.to_vec()).map_err(|e| format!("{:?}", e))?.limit(k as usize);
+            let q = tbl.vector_search(query_vec.to_vec()).map_err(|e| format!("{:?}", e))?.limit(k as usize);
             let mut stream = q.execute().await.map_err(|e| format!("{:?}", e))?;
             use futures::StreamExt;
             use arrow::record_batch::RecordBatch as ArrowRecordBatch;

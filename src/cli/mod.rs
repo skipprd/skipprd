@@ -26,6 +26,7 @@ pub enum Mode {
     SqlHelp(SqlHelpOptions),
     Benchmark(BenchmarkOptions),
     Llm(LlmOptions),
+    Serve(ServeOptions),
 }
 
 #[derive(Parser, Clone, PartialEq)]
@@ -105,9 +106,6 @@ pub struct BenchmarkOptions {
 
 #[derive(Parser, Clone, PartialEq, Default)]
 pub struct LlmOptions {
-    /// Chat prompt to send (uses configured chat model)
-    #[arg(long)]
-    pub chat: Option<String>,
     /// Start an interactive cleansing suggestion flow for a namespace
     #[arg(long)]
     pub cleanse: Option<String>,
@@ -120,7 +118,20 @@ pub struct LlmOptions {
     /// Ask a question about ingested data (uses semantic & catalog)
     #[arg(long)]
     pub ask: Option<String>,
+    /// List ask threads
+    #[arg(long, default_value_t = false)]
+    pub ask_list: bool,
+    /// Open/resume a specific ask thread
+    #[arg(long)]
+    pub ask_open: Option<String>,
     /// Top-K rows or docs to consider
     #[arg(long, default_value_t = 5)]
     pub top_k: usize,
+}
+
+#[derive(Parser, Clone, PartialEq)]
+pub struct ServeOptions {
+    /// Port to listen for WebSocket clients
+    #[arg(long, default_value_t = 8787)]
+    pub port: u16,
 }

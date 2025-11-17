@@ -6,12 +6,13 @@ use crate::qa::tools::{sql_run::SqlRunTool, sql_schema::SqlSchemaTool, sql_stats
 use std::cmp::Ordering;
 use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
 
 pub async fn run(question: &str, pipeline: &str, namespace: Option<&str>) -> Result<String, String> {
     let ctx = SessionContext::new();
     // Auto-register all pipelines/namespaces so queries don't require a specific pipeline flag
     {
-        let pipelines = crate::helpers::configuration::Config::get_pipelines();
+        let pipelines = crate::sql::registry::list_pipelines().await;
         for p in pipelines {
             let mut namespaces = crate::sql::registry::list_namespaces(&p).await;
             namespaces.sort();
@@ -33,7 +34,7 @@ pub async fn run(question: &str, pipeline: &str, namespace: Option<&str>) -> Res
         if let Some(qvec) = vecs.get(0) {
             qvec_opt = Some(qvec.clone());
             let mut all_hits: Vec<crate::qa::vector::lance_store::ScoredChunk> = Vec::new();
-            let pipelines = crate::helpers::configuration::Config::get_pipelines();
+            let pipelines = crate::sql::registry::list_pipelines().await;
             for p in pipelines {
                 let store = crate::qa::vector::lance_store::LanceDbStore::new(&p);
                 if let Ok(mut v) = store.query(qvec, 30, Some("dataset")).await { all_hits.append(&mut v); }
@@ -123,29 +124,100 @@ pub async fn run(question: &str, pipeline: &str, namespace: Option<&str>) -> Res
     registry.register(SqlStatsTool);
     registry.register(SqlSampleTool { ctx: ctx.clone() });
     registry.register(VectQueryTool);
+    registry.register(crate::qa::tools::ask_user::AskUserTool);
     let actx = AgentCtx {
         pipeline: pipeline.to_string(),
         namespace: namespace.map(|s| s.to_string()),
         top_k: 30,
         per_step_timeout_secs: 10,
-        max_steps: 6,
+        max_steps: 10,
         thread_id: None,
+        progress_tx: None,
+        pre_step_tx: None,
     };
     let base_sys = system_prompt();
     let mut sys = base_sys;
+    // Add TimeContext so the agent always knows now (UTC) and user's local timezone
+    let now_utc = chrono::Utc::now().to_rfc3339();
+    let now_local = chrono::Local::now();
+    let local_iso = now_local.to_rfc3339();
+    let local_offset = now_local.offset().to_string();
+    sys = format!(
+        "{}\n\nTimeContext:\n- NowUTC: {}\n- UserLocal: {} (offset {})",
+        sys, now_utc, local_iso, local_offset
+    );
     if !embeds_block.is_empty() { sys = format!("{}\n\n{}", sys, embeds_block); }
     if !company_info_block.is_empty() { sys = format!("{}\n\n{}", sys, company_info_block); }
     let tools = tool_card();
-    // Provide a stable thread id so we can inspect steps later instead of re-running SQL.
-    let thread_id = format!("ask_{}_{}", pipeline, chrono::Utc::now().timestamp_millis());
+    // Provide a stable thread id (UUID v4) so we can inspect steps later instead of re-running SQL.
+    let thread_id = Uuid::new_v4().to_string();
     let actx = AgentCtx { thread_id: Some(thread_id.clone()), ..actx };
-    let result = Agent::run(&registry, &actx, &sys, &tools, question).await?;
+    // Interactive loop: run agent until it needs user input or reaches final
+    let mut thread_id = thread_id;
+    let mut result: Option<crate::qa::session::ThreadResult> = None;
+    loop {
+        let mut actx2 = actx.clone();
+        actx2.thread_id = Some(thread_id.clone());
+        match Agent::run_until_block(&registry, &actx2, &sys, &tools, question).await.map_err(|e| e.to_string())? {
+            crate::qa::agent::RunOutcome::Final { thread_id: tid, result: r } => { thread_id = tid; result = Some(r); break; }
+            crate::qa::agent::RunOutcome::AwaitUser { thread_id: tid, prompt } => {
+                thread_id = tid;
+                println!("{}", prompt);
+                let mut buf = String::new();
+                let _ = std::io::stdin().read_line(&mut buf);
+                let text = buf.trim().to_string();
+                if !text.is_empty() {
+                    // Embed and upsert to LanceDB
+                    if let Some(qv) = qvec_opt.as_ref() {
+                        let cfg = crate::llm::config_from_env();
+                        let model = crate::llm::create_llm(&cfg);
+                        if let Ok(vs) = model.embed(&[text.clone()]) {
+                            if let Some(vec0) = vs.get(0) {
+                                let epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+                                let store = crate::qa::vector::lance_store::LanceDbStore::new(pipeline);
+                                let item = crate::qa::vector::lance_store::Chunk {
+                                    id: format!("doc:{}:company_info:{}", pipeline, epoch),
+                                    kind: "doc".to_string(),
+                                    namespace: "company".to_string(),
+                                    field: None,
+                                    text: text.clone(),
+                                    vector: vec0.clone(),
+                                    meta: serde_json::json!({"source":"user"}),
+                                    epoch,
+                                };
+                                let _ = store.upsert(&[item]).await;
+                            }
+                        }
+                    }
+                    // Append user answer into thread
+                    let store = crate::qa::session::ThreadStore::new();
+                    let _ = store.append_step(&thread_id, crate::qa::session::ThreadStep {
+                        action: "user".to_string(),
+                        args: serde_json::json!({"text": text}),
+                        observation: serde_json::json!({"ok": true}),
+                        ts: chrono::Utc::now().to_rfc3339(),
+                    }).await;
+                }
+                // Continue loop to let agent resume
+            }
+        }
+    }
+    let result = result.ok_or_else(|| "No result".to_string())?;
+    // Always print the final thread JSON for visibility in CLI mode
+    {
+        let store = crate::qa::session::ThreadStore::new();
+        if let Some(log) = store.get(&thread_id).await {
+            if let Ok(pretty) = serde_json::to_string_pretty(&log) {
+                println!("{}", pretty);
+            }
+        }
+    }
 
     // Try to reuse the last successful run_sql observation from the agent thread to avoid re-running.
     let mut header: Vec<String> = Vec::new();
     let mut rows: Vec<Vec<String>> = Vec::new();
     {
-        let store = crate::qa::session::ThreadStore::new(pipeline);
+        let store = crate::qa::session::ThreadStore::new();
         if let Some(log) = store.get(&thread_id).await {
             for step in log.steps.iter().rev() {
                 if step.action == "run_sql" {
@@ -207,8 +279,8 @@ pub async fn run(question: &str, pipeline: &str, namespace: Option<&str>) -> Res
         ctx_line
     };
 
-    // Build a concise business-style summary using LLM with all available context.
-    let final_summary: Option<String> = {
+    // Build a concise business-style summary using LLM ONLY if we have data.
+    let final_summary: Option<String> = if !header.is_empty() && !rows.is_empty() {
         let cfg = crate::llm::config_from_env();
         let llm = crate::llm::create_llm(&cfg);
         let mut lines: Vec<String> = Vec::new();
@@ -219,15 +291,13 @@ pub async fn run(question: &str, pipeline: &str, namespace: Option<&str>) -> Res
         if let Some(sql) = result.sql.as_ref() {
             lines.push(format!("SQL: {}", sql.replace('\n', " ")));
         }
-        if !header.is_empty() && !rows.is_empty() {
-            let max_rows = rows.len().min(20);
-            let display_rows = &rows[..max_rows];
-            let table_json = serde_json::json!({
-                "header": header,
-                "rows": display_rows,
-            });
-            lines.push(format!("Data: {}", table_json.to_string()));
-        }
+        let max_rows = rows.len().min(20);
+        let display_rows = &rows[..max_rows];
+        let table_json = serde_json::json!({
+            "header": header,
+            "rows": display_rows,
+        });
+        lines.push(format!("Data: {}", table_json.to_string()));
         if !catalog_context.is_empty() {
             lines.push(format!("Catalog: {}", catalog_context));
         }
@@ -246,6 +316,8 @@ pub async fn run(question: &str, pipeline: &str, namespace: Option<&str>) -> Res
             }
             _ => None
         }
+    } else {
+        None
     };
 
     if let Some(s) = final_summary {
@@ -293,7 +365,10 @@ pub async fn run(question: &str, pipeline: &str, namespace: Option<&str>) -> Res
         }
     }
 
-    // Fallback to whatever the agent provided (should still be plain text).
+    // Fallback: if no rows, return a conservative message, otherwise return agent's plain answer.
+    if header.is_empty() || rows.is_empty() {
+        return Ok("No result rows were returned for the requested period or query. Please refine the question or adjust the time window.".to_string());
+    }
     Ok(result.answer)
 }
 

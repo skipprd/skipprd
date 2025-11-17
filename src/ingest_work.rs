@@ -39,7 +39,6 @@ use std::sync::atomic::Ordering::AcqRel;
 // use dashmap::{DashMap};
 
 use crate::ingest::fast_ingest::{create_default_nested_message, DEFAULT_NESTED_MESSAGE, fast_path_ingest};
-use crate::discover::stats_tailer::ensure_stats_worker;
 use crate::discover::evolution::{EvolutionProposal, infer_specs_for_record};
 static CATALOG_QUEUE: once_cell::sync::Lazy<dashmap::DashMap<String, std::time::Instant>> = once_cell::sync::Lazy::new(|| dashmap::DashMap::new());
 fn enqueue_catalog_build(ns: &str) {
@@ -62,7 +61,8 @@ fn ensure_catalog_worker() {
                     }
                     for ns in due {
                         CATALOG_QUEUE.remove(&ns);
-                        crate::catalog::orchestrator::Orchestrator::build(&ns).await;
+                        // Mid-sync catalog builds are disabled; catalogs write at end of sync.
+                        // Left intentionally as no-op to avoid empty catalogs during ingest.
                     }
                 }
             });
@@ -426,10 +426,7 @@ impl Ingest {
             ga.eq_ignore_ascii_case("true") || ci == "1" || ci.eq_ignore_ascii_case("true")
         };
 
-        // Start stats worker if enabled
-        if crate::helpers::configuration::Config::stats_enabled() {
-            ensure_stats_worker();
-        }
+        // Stats tailer disabled
 
         // Apply one-time environment overrides and CI caps via tuner
         crate::ingest::tuner::apply_env_caps();
@@ -1375,10 +1372,7 @@ impl Ingest {
                     
                     _j += 1;
 
-                    // Emit stats observations (including nested via dot-notation)
-                    if crate::helpers::configuration::Config::stats_enabled() {
-                        crate::discover::stats_tailer::emit_observation_deep(&skpr_namespace, "", &record_value);
-                    }
+                    // Stats tailer removed; no per-record stats emission
 
                     
                 }
@@ -1748,7 +1742,7 @@ impl Ingest {
 #[cfg(test)]
 mod stats_integration_tests {
 	use super::*;
-	use crate::discover::stats_tailer::{ensure_stats_worker, emit_observation};
+// stats_tailer removed
 	use crate::helpers::configuration::{Config, PIPELINE_NAME};
 	use serde_json::json;
 

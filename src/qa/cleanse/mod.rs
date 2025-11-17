@@ -21,6 +21,8 @@ pub async fn run(namespace: &str, pipeline: &str, prompt: &str) -> Result<(), St
         per_step_timeout_secs: 10,
         max_steps: 6,
         thread_id: None,
+        progress_tx: None,
+        pre_step_tx: None,
     };
     let sys = system_prompt();
     let tools = tool_card();

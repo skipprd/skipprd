@@ -1905,11 +1905,7 @@ impl Config {
         let yaml = match serde_yaml::to_string(catalog) { Ok(s) => s, Err(e) => { error!("Failed to serialize catalog: {}", e); drop(guard); return; } };
         let value = serde_yaml::from_str::<serde_yaml::Value>(&yaml).unwrap_or(serde_yaml::Value::Null);
         let json_equiv = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
-        // Info: print full catalog payload being uploaded
-        match serde_json::to_string_pretty(&json_equiv) {
-            Ok(pretty) => info!("Catalog JSON ns='{}':\n{}", namespace, pretty),
-            Err(_) => info!("Catalog JSON ns='{}': <failed to stringify>", namespace),
-        }
+        // Do not print full payload here; orchestrator will log just before final write
         if let Err(e) = crate::helpers::s3::put_json(&s3_key, &json_equiv).await { error!("Failed to upload catalog to S3: {:?}", e); }
         // Debug summary of catalog
         debug!("META: wrote catalog ns='{}' key='{}' fields={} has_description={}",

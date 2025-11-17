@@ -6,7 +6,6 @@ use datafusion::prelude::SessionContext;
 use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField};
 use datafusion::arrow::datatypes::Schema as ArrowSchema2;
 use tracing::debug;
-use crate::sql::registry::PipelineRegistry;
 
 pub async fn register_catalog(ctx: &SessionContext) {
     debug!("{} META: begin register_semantic_and_catalog (unified catalog, S3-only)", chrono::Utc::now().to_rfc3339());
@@ -23,54 +22,21 @@ pub async fn register_catalog(ctx: &SessionContext) {
         ArrowField::new("metrics", ArrowDataType::Utf8, true),
     ]));
 
-    // Load pipeline registries from S3 under: <tenant>/<workspace>/*/manifest/registry.json
-    let tenant = crate::helpers::configuration::Config::get_tenant();
-    let workspace = crate::helpers::configuration::Config::get_workspace_name();
-    let bucket = crate::helpers::configuration::Config::get_skippr_s3_bucket();
-    let prefix = format!("{}/{}/", tenant, workspace);
-    let s3 = crate::helpers::s3::get_s3_client().await;
-    let mut token: Option<String> = None;
-    let mut registries: Vec<PipelineRegistry> = Vec::new();
-    loop {
-        let mut req = s3.list_objects_v2().bucket(&bucket).prefix(&prefix);
-        if let Some(t) = &token { req = req.continuation_token(t); }
-        match req.send().await {
-            Ok(resp) => {
-                let contents = resp.contents();
-                for obj in contents {
-                    if let Some(key) = obj.key() {
-                        if key.ends_with("/manifest/registry.json") {
-                            if let Ok(val) = crate::helpers::s3::get_json(key).await {
-                                if let Ok(pr) = serde_json::from_value::<PipelineRegistry>(val) {
-                                    registries.push(pr);
-                                }
-                            }
-                        }
-                    }
-                }
-                if resp.is_truncated().unwrap_or(false) {
-                    token = resp.next_continuation_token().map(|s| s.to_string());
-                } else { break; }
-            }
-            Err(e) => {
-                debug!("{} META: failed to list registries under s3://{}/{} err={:?}", chrono::Utc::now().to_rfc3339(), bucket, prefix, e);
-                break;
-            }
+    // Load central registry
+    let registry_opt = crate::sql::registry::read_registry().await;
+    let registry = match registry_opt {
+        Some(r) => r,
+        None => {
+            debug!("{} META: central registry missing; skipping catalog registration", chrono::Utc::now().to_rfc3339());
+            return;
         }
-    }
-    debug!("{} META: registry pipelines loaded from S3: {}", chrono::Utc::now().to_rfc3339(), registries.len());
-    for p in &registries { debug!("{} META: pipeline='{}' namespaces={}", chrono::Utc::now().to_rfc3339(), p.pipeline, p.namespaces.len()); }
-    // Publish registries into cache for downstream consumers (ask/planner)
-    {
-        let mut cache = crate::sql::registry::REGISTRY_CACHE.write().await;
-        cache.clear();
-        cache.extend(registries.clone());
-    }
+    };
+    debug!("{} META: registry pipelines loaded: {}", chrono::Utc::now().to_rfc3339(), registry.pipelines.len());
 
     let mut cat_rows: Vec<(String, Option<String>, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>)> = Vec::new();
 
-    for pipe in &registries {
-        for (ns, entry) in pipe.namespaces.iter() {
+    for (pipeline, nsmap) in registry.namespaces_by_pipeline.iter() {
+        for (ns, entry) in nsmap.iter() {
             debug!("{} META: ns='{}' catalog_key='{}'", chrono::Utc::now().to_rfc3339(), ns, entry.catalog_key);
             if let Ok(val) = crate::helpers::s3::get_json(&entry.catalog_key).await {
                 let dims_str = if let Some(arr) = val.get("dimensions").and_then(|x| x.as_array()) { Some(arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect::<Vec<String>>().join(", ")) } else { None };

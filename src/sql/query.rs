@@ -53,6 +53,22 @@ use sqlparser::ast::{Statement as StdStatement, SetExpr, TableFactor, Query as S
 
 // S3 object store registration moved to crate::sql::tables
 
+// Build a SessionContext and pre-register all pipelines/namespaces so two-part names resolve
+pub async fn new_context_all_namespaces() -> SessionContext {
+	let session_config = SessionConfig::new();
+	let ctx = SessionContext::new_with_config(session_config);
+	let pipelines = crate::sql::registry::list_pipelines().await;
+	for pipeline in pipelines {
+		let mut namespaces = crate::sql::registry::list_namespaces(&pipeline).await;
+		namespaces.sort();
+		for ns in namespaces {
+			let _ = crate::sql::tables::register_namespace_view(&ctx, &pipeline, &ns).await;
+		}
+		let _ = crate::sql::tables::register_deadletters(&ctx, &pipeline).await;
+	}
+	ctx
+}
+
 pub async fn register_catalog(ctx: &SessionContext) {
     // Delegate to S3-only registry-backed builder
     crate::sql::metadata::register_catalog(ctx).await;
@@ -179,6 +195,34 @@ pub async fn explain_query(sql_str: &str) -> String {
 pub async fn query(sql_str: &str) {
 
     let sql_trim = sql_str.trim();
+    // Enforce fully-qualified table names: require <pipeline>.<namespace>, forbid default.*
+    {
+        let upper = sql_trim.to_uppercase();
+        // Skip validation for STREAM (handled below) and simple help/meta commands
+        let is_stream = upper.starts_with("STREAM ");
+        let is_explain = upper.starts_with("EXPLAIN ");
+        let is_show = upper.starts_with("SHOW ");
+        let is_describe = upper.starts_with("DESCRIBE ") || upper.starts_with("DESC ");
+        if !is_stream && !is_show && !is_describe {
+            let lower = sql_trim.to_lowercase();
+            if lower.contains(" default.") {
+                println!("Error: default.* schema is not allowed. Use <pipeline>.<namespace> (e.g., picnic.screen).");
+                return;
+            }
+            // Require at least one fully-qualified <pipeline>.<namespace> present
+            let mut allowed: Vec<String> = Vec::new();
+            let pipes = crate::sql::registry::list_pipelines().await;
+            for p in pipes {
+                let nss = crate::sql::registry::list_namespaces(&p).await;
+                for ns in nss { allowed.push(format!("{}.{}", p, ns)); }
+            }
+            let has_any_allowed = allowed.iter().any(|fqn| lower.contains(fqn));
+            if !has_any_allowed {
+                println!("Error: All tables must be referenced as <pipeline>.<namespace> (e.g., picnic.screen).\nAllowed datasets: {}", allowed.join(", "));
+                return;
+            }
+        }
+    }
     // STREAM: WAL-only, 2s refresh, table name equals pipeline name
     if sql_trim.to_uppercase().starts_with("STREAM ") {
         // Support optional WINDOW <seconds> anywhere after the projection; remove just that clause

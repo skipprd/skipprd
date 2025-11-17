@@ -4,99 +4,96 @@ use tracing::debug;
 pub struct StatsBuilder;
 
 impl StatsBuilder {
-    pub async fn compute(ctx: &SessionContext, namespace: &str, limit_n: i64) -> Result<(crate::discover::stats::NamespaceStats, crate::catalog::model::DatasetStats), String> {
-        // Build union of S3 and WAL already registered by SessionFactory
-        // Prefer registering S3 table names via manifest in caller; fallback use namespace as view
-        // Attempt to union all registered S3 tables matching pattern "<ns>_s3_*"
-        // Prefer pre-registered namespace view (union of S3+WAL) if available
-        let df_union = match ctx.table(namespace).await {
-            Ok(df) => df,
-            Err(_) => {
-                // Legacy path: attempt to union any registered S3 listing tables "<ns>_s3_i"
-                let mut sources: Vec<String> = Vec::new();
-                for i in 0..64 {
-                    let t = format!("{}_s3_{}", namespace, i);
-                    if ctx.table(&t).await.is_ok() { sources.push(t); } else { break; }
-                }
-                debug!("META: stats_builder ns='{}' found_s3_tables={}", namespace, sources.len());
-                if sources.is_empty() {
-                    // Nothing registered; return empty stats snapshot
-                    return Ok((crate::discover::stats::NamespaceStats::new(namespace), crate::catalog::model::DatasetStats::default()));
-                }
-                let first = ctx.table(&sources[0]).await.map_err(|e| e.to_string())?;
-                let mut acc = first;
-                for t in sources.iter().skip(1) {
-                    if let Ok(df_next) = ctx.table(t).await { if let Ok(u) = acc.clone().union(df_next) { acc = u; } }
-                }
-                // Union with WAL if present
-                let df_wal = match ctx.table(&format!("{}_wal", &namespace)).await { Ok(df) => df, Err(_) => acc.clone().filter(datafusion::logical_expr::lit(false)).unwrap() };
-                acc.union(df_wal).map_err(|e| e.to_string())?
-            }
-        };
-        // Authoritative stats via aggregate queries (per-column), no row iteration
-        // Register union as view under namespace for SQL ease
-        if let Ok(plan) = df_union.clone().into_optimized_plan() {
-            if let Ok(view) = datafusion::datasource::view::ViewTable::try_new(plan, Some(namespace.to_string())) {
-                let _ = ctx.register_table(namespace, std::sync::Arc::new(view));
-            }
-        }
-        // Fall back to authoritative row streaming with deep recursion for all nested structures
-        let max_rows: usize = if limit_n > 0 { limit_n as usize } else { usize::MAX };
-        if max_rows != usize::MAX { debug!("META: stats row_limit applied ns='{}' limit_n={}", namespace, max_rows); }
+	pub async fn compute(ctx: &SessionContext, namespace: &str, _limit_n: i64) -> Result<(crate::discover::stats::NamespaceStats, crate::catalog::model::DatasetStats), String> {
+		// Use the registered namespace view
+		let pipeline = crate::helpers::configuration::Config::get_pipeline_name();
+		let fqn = format!("{}.{}", pipeline, namespace);
+		let df = ctx.table(fqn).await.map_err(|e| e.to_string())?;
+		let schema = df.schema();
+
+		// Enumerate fields from schema (top-level and nested structs)
+		fn walk_fields(prefix: &str, f: &datafusion::arrow::datatypes::Field, out: &mut Vec<String>) {
+			use datafusion::arrow::datatypes::DataType as ADT;
+			match f.data_type() {
+				ADT::Struct(fields) => {
+					let base = if prefix.is_empty() { f.name().clone() } else { format!("{}.{}", prefix, f.name()) };
+					for child in fields {
+						walk_fields(&base, child, out);
+					}
+				}
+				_ => {
+					let name = if prefix.is_empty() { f.name().clone() } else { format!("{}.{}", prefix, f.name()) };
+					out.push(name);
+				}
+			}
+		}
+		let mut field_names: Vec<String> = Vec::new();
+		for f in schema.fields() { walk_fields("", f, &mut field_names); }
+		field_names.sort();
+		field_names.dedup();
+
         let mut ns_stats = crate::discover::stats::NamespaceStats::new(namespace);
-        let mut stream = df_union.execute_stream().await.map_err(|e| e.to_string())?;
-        use futures::StreamExt;
-        let mut processed_rows: usize = 0;
-        let mut earliest_ts_opt: Option<i64> = None;
-        let mut latest_ts_opt: Option<i64> = None;
-        'batches: while let Some(batch_res) = stream.next().await {
-            let b = batch_res.map_err(|e| e.to_string())?;
-            let schema = b.schema();
-            // Determine how many rows from this batch to process, honoring limit
-            let remaining = max_rows.saturating_sub(processed_rows);
-            let take_rows = std::cmp::min(b.num_rows(), remaining);
-            for (i, f) in schema.fields().iter().enumerate() {
-                let top = f.name().clone();
-                debug!("META: stats processing ns='{}' field='{}' dtype='{:?}' rows={}", namespace, top, f.data_type(), b.num_rows());
-                let col = b.column(i);
-                for r in 0..take_rows {
-                    let cell = crate::sql::tui::array_cell_to_json(col.as_ref(), r);
-                    fn update_recursive(ns_stats: &mut crate::discover::stats::NamespaceStats, prefix: &str, v: &serde_json::Value) {
-                        match v {
-                            serde_json::Value::Object(map) => {
-                                for (k, vv) in map.iter() { let next = if prefix.is_empty() { k.clone() } else { format!("{}.{}", prefix, k) }; update_recursive(ns_stats, &next, vv); }
-                            }
-                            serde_json::Value::Array(arr) => {
-                                let mut count = 0usize; for el in arr { update_recursive(ns_stats, prefix, el); count += 1; if count >= 64 { break; } }
-                            }
-                            scalar => { ns_stats.update_field(prefix, scalar); }
-                        }
-                    }
-                    update_recursive(&mut ns_stats, &top, &cell);
-                    // Name-agnostic: attempt to derive dataset time window from any numeric epoch-like values
-                    if let Some(n) = cell.as_f64().or_else(|| cell.as_str().and_then(|s| s.parse::<f64>().ok())) {
-                        // Treat values > 1e12 as millis
-                        let as_i = if n > 1_000_000_000_000.0 { (n / 1000.0) as i64 } else { n as i64 };
-                        // Only accept plausible epoch seconds (1970..=now+5y)
-                        if as_i > 0 && as_i < 4102444800 { // 2100-01-01
-                            earliest_ts_opt = Some(earliest_ts_opt.map(|e| e.min(as_i)).unwrap_or(as_i));
-                            latest_ts_opt = Some(latest_ts_opt.map(|e| e.max(as_i)).unwrap_or(as_i));
-                        }
-                    }
-                }
-            }
-            processed_rows = processed_rows.saturating_add(take_rows);
-            if processed_rows >= max_rows { break 'batches; }
-        }
-        let mut fields_vec: Vec<String> = ns_stats.fields.keys().cloned().collect(); fields_vec.sort();
-        debug!("META: stats built ns='{}' fields={} sample=[{}]", namespace, fields_vec.len(), fields_vec.iter().take(12).cloned().collect::<Vec<_>>().join(","));
-        for (_k, fs) in ns_stats.fields.iter_mut() { fs.finalize(); }
-        // Dataset stats snapshot
-        let mut ds = crate::catalog::model::DatasetStats::default();
-        ds.approx_total_rows = processed_rows as u64;
-        ds.earliest_ts = earliest_ts_opt;
-        ds.latest_ts = latest_ts_opt;
-        Ok((ns_stats, ds))
+
+		// Dataset row count (via SQL to avoid version-specific aggregate imports)
+		let total_rows: u64 = {
+			let pipeline = crate::helpers::configuration::Config::get_pipeline_name();
+			let sql = format!("SELECT COUNT(1) AS __cnt FROM \"{}\".\"{}\"", pipeline, namespace);
+			match ctx.sql(&sql).await {
+				Ok(df_cnt) => match df_cnt.collect().await {
+					Ok(batches) => {
+						if let Some(b) = batches.get(0) {
+							let s = crate::sql::tui::value_to_string(b.column(0).as_ref(), 0);
+							s.parse::<u64>().unwrap_or(0)
+						} else { 0 }
+					}
+					Err(_) => 0
+				},
+				Err(_) => 0
+			}
+		};
+
+		// Per-field aggregates via SQL (COUNT, COUNT(DISTINCT), MIN, MAX, NULLS)
+		for name in field_names.iter() {
+			let pipeline = crate::helpers::configuration::Config::get_pipeline_name();
+			let sql = format!(
+				"SELECT \
+					COUNT(\"{col}\") AS non_null, \
+					COUNT(DISTINCT \"{col}\") AS distinct_cnt, \
+					MIN(\"{col}\") AS min_v, \
+					MAX(\"{col}\") AS max_v, \
+					SUM(CASE WHEN \"{col}\" IS NULL THEN 1 ELSE 0 END) AS nulls \
+				 FROM \"{schema}\".\"{table}\"",
+				col = name, schema = pipeline, table = namespace
+			);
+			let mut fs = crate::discover::stats::FieldStats::default();
+			match ctx.sql(&sql).await {
+				Ok(df_agg) => match df_agg.collect().await {
+					Ok(batches) => {
+						if let Some(b) = batches.get(0) {
+							let non_null = crate::sql::tui::value_to_string(b.column(0).as_ref(), 0).parse::<u64>().unwrap_or(0);
+							let approx_distinct = crate::sql::tui::value_to_string(b.column(1).as_ref(), 0).parse::<u64>().ok();
+							let min_v = crate::sql::tui::value_to_string(b.column(2).as_ref(), 0);
+							let max_v = crate::sql::tui::value_to_string(b.column(3).as_ref(), 0);
+							let nulls = crate::sql::tui::value_to_string(b.column(4).as_ref(), 0).parse::<u64>().unwrap_or(0);
+							fs.total = total_rows;
+							fs.nulls = nulls;
+							fs.approx_distinct = approx_distinct;
+							fs.min_numeric = min_v.parse::<f64>().ok();
+							fs.max_numeric = max_v.parse::<f64>().ok();
+						}
+					}
+					Err(_) => {}
+				},
+				Err(_) => {}
+			}
+			fs.finalize();
+			ns_stats.fields.insert(name.clone(), fs);
+		}
+
+		let mut ds = crate::catalog::model::DatasetStats::default();
+		ds.approx_total_rows = total_rows;
+		debug!("META: stats built ns='{}' fields={}", namespace, ns_stats.fields.len());
+		Ok((ns_stats, ds))
     }
 }
 
