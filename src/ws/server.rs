@@ -151,8 +151,8 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			// processing (reasoning)
 			let mut pr = api::ProcessingResponse::new(1, m::processing_response::Type::Processing, now_iso(), state.next_seq(), thread_id.clone());
 			pr.for_cid = Some(cid.clone());
-			pr.stage = Some(m::processing_response::Stage::Reasoning);
-			pr.progress = Some(0.4);
+			pr.stage = Some(m::processing_response::Stage::Queued);
+			pr.progress = Some(0.0);
 			let prm = api::ServerMessage::Processing(pr);
 			let pr_s = serde_json::to_string(&prm).unwrap();
 			state.buffer_last(&pr_s);
@@ -210,8 +210,8 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			// processing (retrieving)
 			let mut pr = api::ProcessingResponse::new(1, m::processing_response::Type::Processing, now_iso(), state.next_seq(), thread_id.clone());
 			pr.for_cid = Some(cid.clone());
-			pr.stage = Some(m::processing_response::Stage::Retrieving);
-			pr.progress = Some(0.2);
+			pr.stage = Some(m::processing_response::Stage::Queued);
+			pr.progress = Some(0.0);
 			let prm = api::ServerMessage::Processing(pr);
 			let pr_s = serde_json::to_string(&prm).unwrap();
 			state.buffer_last(&pr_s);
@@ -432,8 +432,8 @@ async fn process_new(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt
 	// processing
 	let mut pr = api::ProcessingResponse::new(1, m::processing_response::Type::Processing, now_iso(), state.next_seq(), thread_id.clone());
 	pr.for_cid = Some(cid.clone());
-	pr.stage = Some(m::processing_response::Stage::Reasoning);
-	pr.progress = Some(0.4);
+	pr.stage = Some(m::processing_response::Stage::Queued);
+	pr.progress = Some(0.0);
 	{
 		let s = serde_json::to_string(&pr).unwrap();
 		state.buffer_last(&s);
@@ -441,7 +441,7 @@ async fn process_new(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt
 		let _ = write.send(Message::Text(s)).await;
 	}
 	// agent with periodic updates
-	run_agent_with_processing(&thread_id, &question, &cid, state, write, m::processing_response::Stage::Reasoning).await
+	run_agent_with_processing(&thread_id, &question, &cid, state, write, m::processing_response::Stage::Queued).await
 }
 
 async fn process_open(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt<Message> + Unpin)) -> Result<(), String> {
@@ -462,8 +462,8 @@ async fn process_open(v: &Value, state: &mut ConnState, write: &mut (impl SinkEx
 	// processing
 	let mut pr = api::ProcessingResponse::new(1, m::processing_response::Type::Processing, now_iso(), state.next_seq(), thread_id.clone());
 	pr.for_cid = Some(cid.clone());
-	pr.stage = Some(m::processing_response::Stage::Retrieving);
-	pr.progress = Some(0.2);
+	pr.stage = Some(m::processing_response::Stage::Queued);
+	pr.progress = Some(0.0);
 	{
 		let s = serde_json::to_string(&pr).unwrap();
 		state.buffer_last(&s);
@@ -471,7 +471,7 @@ async fn process_open(v: &Value, state: &mut ConnState, write: &mut (impl SinkEx
 		let _ = write.send(Message::Text(s)).await;
 	}
 	// agent with periodic updates
-	run_agent_with_processing(&thread_id, &question, &cid, state, write, m::processing_response::Stage::Retrieving).await
+	run_agent_with_processing(&thread_id, &question, &cid, state, write, m::processing_response::Stage::Queued).await
 }
 
 async fn run_agent_with_processing(
@@ -535,17 +535,16 @@ async fn run_agent_with_processing(
 				// Emit processing BEFORE executing the step
 				let mut pr = api::ProcessingResponse::new(1, m::processing_response::Type::Processing, now_iso(), state.next_seq(), thread_id.to_string());
 				pr.for_cid = Some(cid.to_string());
-				// Best-effort stage mapping
-				let stage = match step_name.as_str() {
-					"sql_schema" | "sql_stats" | "sql_sample" | "vect_query" => m::processing_response::Stage::Retrieving,
-					"run_sql" => m::processing_response::Stage::Generating,
-					_ => initial_stage.clone(),
-				};
-				pr.stage = Some(stage);
+				// Map to new coarse stage enum
+				pr.stage = Some(m::processing_response::Stage::Processing);
 				// Progress: last completed / max, unchanged here
 				let progress = if last_step_completed == 0 { 0.0 } else { (last_step_completed as f64) / (max_steps as f64) };
 				pr.progress = Some(progress);
-				pr.step = Some(step_name);
+				// Only emit known non-empty step names
+				match step_name.as_str() {
+					"run_sql" | "sql_schema" | "sql_stats" | "sql_sample" | "vect_query" => { pr.step = Some(step_name); }
+					_ => {}
+				}
 				let s = serde_json::to_string(&pr).unwrap();
 				state.buffer_last(&s);
 				tracing::info!("WS -> {}", s);
@@ -556,7 +555,7 @@ async fn run_agent_with_processing(
 				let progress = (last_step_completed as f64) / (max_steps as f64);
 				let mut pr = api::ProcessingResponse::new(1, m::processing_response::Type::Processing, now_iso(), state.next_seq(), thread_id.to_string());
 				pr.for_cid = Some(cid.to_string());
-				pr.stage = Some(initial_stage.clone());
+				pr.stage = Some(m::processing_response::Stage::Processing);
 				pr.progress = Some(progress);
 				pr.step = None;
 				let s = serde_json::to_string(&pr).unwrap();
@@ -567,6 +566,17 @@ async fn run_agent_with_processing(
 			res = &mut fut => {
 				match res {
 					Ok(RunOutcome::Final { thread_id: _tid, result }) => {
+						// Emit terminal processing frame (complete)
+						{
+							let mut pr = api::ProcessingResponse::new(1, m::processing_response::Type::Processing, now_iso(), state.next_seq(), thread_id.to_string());
+							pr.for_cid = Some(cid.to_string());
+							pr.stage = Some(m::processing_response::Stage::Complete);
+							pr.progress = Some(1.0);
+							let s = serde_json::to_string(&pr).unwrap();
+							state.buffer_last(&s);
+							tracing::info!("WS -> {}", s);
+							let _ = write.send(Message::Text(s)).await;
+						}
 						// Try to synthesize a richer summary using last run_sql data
 						let (header, rows) = load_last_run_sql_async(thread_id).await;
 						let improved = synthesize_summary(question, &result.answer, &result.sql, &header, &rows).await;
@@ -606,7 +616,19 @@ async fn run_agent_with_processing(
 						let _ = write.send(Message::Text(s)).await;
 						return Ok(());
 					}
-					Err(e) => return Err(e.to_string()),
+					Err(e) => {
+						// Emit terminal processing frame (error)
+						{
+							let mut pr = api::ProcessingResponse::new(1, m::processing_response::Type::Processing, now_iso(), state.next_seq(), thread_id.to_string());
+							pr.for_cid = Some(cid.to_string());
+							pr.stage = Some(m::processing_response::Stage::Error);
+							let s = serde_json::to_string(&pr).unwrap();
+							state.buffer_last(&s);
+							tracing::info!("WS -> {}", s);
+							let _ = write.send(Message::Text(s)).await;
+						}
+						return Err(e.to_string());
+					}
 				}
 			}
 			_ = ticker.tick() => {

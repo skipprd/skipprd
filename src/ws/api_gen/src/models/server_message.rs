@@ -47,12 +47,12 @@ impl Default for ServerMessage {
 pub enum Stage {
     #[serde(rename = "queued")]
     Queued,
-    #[serde(rename = "retrieving")]
-    Retrieving,
-    #[serde(rename = "reasoning")]
-    Reasoning,
-    #[serde(rename = "generating")]
-    Generating,
+    #[serde(rename = "processing")]
+    Processing,
+    #[serde(rename = "complete")]
+    Complete,
+    #[serde(rename = "error")]
+    Error,
 }
 
 impl Default for Stage {

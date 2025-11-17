@@ -60,7 +60,12 @@ impl Agent {
                 model_for_first.chat(&[ChatMessage { role: "user".into(), content: prompt_clone }])
             }).await {
                 Ok(Ok(s)) => s,
-                _ => String::from("{}"),
+                Ok(Err(e)) => {
+                    return Err(format!("LLM not configured: {}", e));
+                }
+                Err(e) => {
+                    return Err(format!("LLM execution failed: {}", e));
+                }
             };
             // Parse JSON, with one repair attempt if invalid
             let mut parsed: Option<Value> = serde_json::from_str(&act_json).ok();
@@ -77,7 +82,12 @@ impl Agent {
                     model_for_second.chat(&[ChatMessage { role: "user".into(), content: prompt_clone2 }])
                 }).await {
                     Ok(Ok(s)) => s,
-                    _ => String::from("{}"),
+                    Ok(Err(e)) => {
+                        return Err(format!("LLM not configured: {}", e));
+                    }
+                    Err(e) => {
+                        return Err(format!("LLM execution failed: {}", e));
+                    }
                 };
                 parsed = serde_json::from_str(&act_json2).ok();
                 if parsed.is_none() {
@@ -161,6 +171,11 @@ impl Agent {
                 return Ok(RunOutcome::Final { thread_id, result });
             }
             let action_name = parsed.get("action").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+            // Skip empty/invalid action names to avoid logging noisy empty steps
+            if action_name.trim().is_empty() {
+                transcript.push("Observation: invalid action - empty; retrying next step.".to_string());
+                continue;
+            }
             if let Some(tx) = ctx.pre_step_tx.as_ref() {
                 let _ = tx.send(action_name.clone());
             }
@@ -219,7 +234,12 @@ impl Agent {
                 model_for_first.chat(&[ChatMessage { role: "user".into(), content: prompt_clone }])
             }).await {
                 Ok(Ok(s)) => s,
-                _ => String::from("{}"),
+                Ok(Err(e)) => {
+                    return Err(format!("LLM not configured: {}", e));
+                }
+                Err(e) => {
+                    return Err(format!("LLM execution failed: {}", e));
+                }
             };
 
             // Parse action or final
@@ -237,7 +257,12 @@ impl Agent {
                     model_for_second.chat(&[ChatMessage { role: "user".into(), content: prompt_clone2 }])
                 }).await {
                     Ok(Ok(s)) => s,
-                    _ => String::from("{}"),
+                    Ok(Err(e)) => {
+                        return Err(format!("LLM not configured: {}", e));
+                    }
+                    Err(e) => {
+                        return Err(format!("LLM execution failed: {}", e));
+                    }
                 };
                 parsed = serde_json::from_str(&act_json2).ok();
                 if parsed.is_none() {
@@ -317,6 +342,10 @@ impl Agent {
             }
 
             let action_name = parsed.get("action").and_then(|x| x.as_str()).unwrap_or_default().to_string();
+            if action_name.trim().is_empty() {
+                transcript.push("Observation: invalid action - empty; retrying next step.".to_string());
+                continue;
+            }
             let args = parsed.get("args").cloned().unwrap_or(Value::Null);
 
             let obs = match tools.call(&action_name, args.clone(), ctx).await {
