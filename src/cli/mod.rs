@@ -106,12 +106,12 @@ pub struct BenchmarkOptions {
 
 #[derive(Parser, Clone, PartialEq, Default)]
 pub struct LlmOptions {
-    /// Start an interactive cleansing suggestion flow for a namespace
-    #[arg(long)]
-    pub cleanse: Option<String>,
-    /// Start an interactive MetricFlow modeling flow for a namespace
-    #[arg(long)]
-    pub model: Option<String>,
+    /// Start an interactive cleansing suggestion flow (cross-namespace context)
+    #[arg(long, default_value_t = false)]
+    pub cleanse: bool,
+    /// Start an interactive MetricFlow modeling flow (cross-namespace context)
+    #[arg(long, default_value_t = false)]
+    pub model: bool,
     /// Embedding inputs (repeat flag to add multiple)
     #[arg(long)]
     pub embed: Vec<String>,

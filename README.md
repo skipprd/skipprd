@@ -167,8 +167,8 @@ LLM/ReAct entrypoints for chat, embeddings, cleansing, and modeling. Configure L
 
 Flags:
 - `--chat "<prompt>"`: single chat turn with the configured chat model
-- `--cleanse <namespace>`: start interactive cleansing suggestions
-- `--model <namespace>`: propose MetricFlow YAML snippet(s)
+- `--cleanse`: interactive ReAct cleansing (cross-namespace), with human approval; writes DBT model SQL
+- `--model`: interactive ReAct modeling (cross-namespace), with human approval; writes DBT model SQL + MetricFlow YAML
 - `--embed "<text>"` (repeatable): embed one or more texts
 - `--ask "<question>"`: SQL agent to answer dataset questions
 - `--top_k <N>`: top-K rows/docs to consider (default: 5)
@@ -184,10 +184,10 @@ LLM_PROVIDER=OPENAI LLM_API_KEY=sk-... \
 cargo run -- llm --chat "Summarize the latest datasets."
 
 # Cleanse suggestions for a namespace
-cargo run -- llm --cleanse track
+cargo run -- llm --cleanse
 
 # MetricFlow modeling
-cargo run -- llm --model track
+cargo run -- llm --model
 
 # Ask questions of your data (no pipeline flag)
 cargo run -- llm --ask "What were daily active users last week?"

@@ -502,33 +502,33 @@ async fn main() {
                 }
                 return;
             }
-            if let Some(ns) = options.cleanse {
+            if options.cleanse {
                 Config::build_config();
                 let pipeline = Config::get_pipeline_name();
                 PIPELINE_NAME.write().clear();
                 PIPELINE_NAME.write().push_str(&pipeline);
                 Config::init().await;
-                println!("{} CLEANSE: starting for '{}.{}'...", chrono::Utc::now().to_rfc3339(), pipeline, ns);
+                println!("{} CLEANSE: starting (cross-namespace context) for pipeline='{}'...", chrono::Utc::now().to_rfc3339(), pipeline);
                 // Prompt user for a goal
                 println!("Enter cleansing goal (e.g., deduplicate, normalize datetime, outliers):");
                 let mut goal = String::new();
                 let _ = std::io::stdin().read_line(&mut goal);
-                match crate::qa::cleanse::run(&ns, &pipeline, goal.trim()).await {
+                match crate::qa::cleanse::run(&pipeline, goal.trim()).await {
                     Ok(_) => println!("{} CLEANSE: completed", chrono::Utc::now().to_rfc3339()),
                     Err(e) => { eprintln!("ERROR: {}", e); std::process::exit(1); }
                 }
             }
-            if let Some(ns) = options.model {
+            if options.model {
                 Config::build_config();
                 let pipeline = Config::get_pipeline_name();
                 PIPELINE_NAME.write().clear();
                 PIPELINE_NAME.write().push_str(&pipeline);
                 Config::init().await;
-                println!("{} MODEL: starting MetricFlow suggestions for '{}.{}'...", chrono::Utc::now().to_rfc3339(), pipeline, ns);
+                println!("{} MODEL: starting MetricFlow suggestions (cross-namespace) for pipeline='{}'...", chrono::Utc::now().to_rfc3339(), pipeline);
                 println!("Enter modeling goal (e.g., create measures/dimensions for DAU):");
                 let mut goal = String::new();
                 let _ = std::io::stdin().read_line(&mut goal);
-                match crate::qa::model::run(&ns, &pipeline, goal.trim()).await {
+                match crate::qa::model::run(&pipeline, goal.trim()).await {
                     Ok(_) => println!("{} MODEL: completed", chrono::Utc::now().to_rfc3339()),
                     Err(e) => { eprintln!("ERROR: {}", e); std::process::exit(1); }
                 }
