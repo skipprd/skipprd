@@ -4,7 +4,7 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 use crate::qa::agent::{Agent, AgentCtx, RunOutcome};
 use crate::qa::tools::{ToolRegistry};
-use crate::qa::tools::{sql_run::SqlRunTool, sql_schema::SqlSchemaTool, sql_stats::SqlStatsTool, sql_sample::SqlSampleTool, vect_query::VectQueryTool, ask_user::AskUserTool};
+use crate::qa::tools::{sql_run::SqlRunTool, sql_schema::SqlSchemaTool, sql_stats::SqlStatsTool, sql_sample::SqlSampleTool, vect_query::VectQueryTool, ask_user::AskUserTool, approve_save::ApproveAndSaveArtifactTool, artifacts::ArtifactsTool};
 use uuid::Uuid;
 use crate::ws::api_gen as api;
 use std::collections::{HashMap, VecDeque};
@@ -656,6 +656,7 @@ async fn run_agent_with_processing(
 			registry.register(SqlSampleTool { ctx: ctx_df.clone() });
 			registry.register(VectQueryTool);
 			registry.register(AskUserTool);
+			registry.register(ArtifactsTool);
 		}
 		"model" => {
 			registry.register(SqlRunTool { ctx: ctx_df.clone() });
@@ -664,6 +665,8 @@ async fn run_agent_with_processing(
 			registry.register(SqlSampleTool { ctx: ctx_df.clone() });
 			registry.register(VectQueryTool);
 			registry.register(AskUserTool);
+			registry.register(ApproveAndSaveArtifactTool);
+			registry.register(ArtifactsTool);
 		}
 		_ => {
 			registry.register(SqlRunTool { ctx: ctx_df.clone() });
@@ -672,6 +675,7 @@ async fn run_agent_with_processing(
 			registry.register(SqlSampleTool { ctx: ctx_df.clone() });
 			registry.register(VectQueryTool);
 			registry.register(AskUserTool);
+			registry.register(ArtifactsTool);
 		}
 	}
 	let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<usize>();
@@ -687,7 +691,24 @@ async fn run_agent_with_processing(
 		pre_step_tx: Some(pre_tx),
 		agent_name: Some(agent.to_string()),
 	};
-	let mut fut = Box::pin(Agent::run_until_block(&registry, &actx, &sys, &tools_card, &question));
+	// Agent-specific prompt injection
+	let question2 = if agent == "model" {
+		format!(
+			"Modeling goal: {}.\n\
+			 Work on ONE artifact at a time (either MetricFlow YAML or a DBT model SQL).\n\
+			 - Use a stable logical name `name` that will never change.\n\
+			 - Prefer existing artifacts if relevant (use artifacts tool); otherwise propose a new one.\n\
+			 - Always call ask_user to request approval or edits before saving.\n\
+			 - For updates: call approve_and_save_artifact with preview_diff=true first and show the diff for approval.\n\
+			 - On approval: call approve_and_save_artifact with {{kind, name, content}} to save.\n\
+			 - Do NOT answer with a query; your job here is artifact authoring.\n\
+			 Return a compact summary only in final.",
+			question
+		)
+	} else {
+		question.to_string()
+	};
+	let mut fut = Box::pin(Agent::run_until_block(&registry, &actx, &sys, &tools_card, &question2));
 	let mut ticker = tokio::time::interval(std::time::Duration::from_secs(30));
 	let mut last_step_completed: usize = 0;
 	let max_steps = actx.max_steps;
@@ -876,10 +897,27 @@ async fn run_agent_and_frames(thread_id: &str, question: &str, agent: &str) -> R
 	}
 	let actx = AgentCtx { pipeline: "".to_string(), namespace: None, top_k: 30, per_step_timeout_secs: 10, max_steps: 10, thread_id: Some(thread_id.to_string()), progress_tx: None, pre_step_tx: None, agent_name: Some(agent.to_string()) };
 	let mut frames: Vec<AgentFrame> = Vec::new();
-	match Agent::run_until_block(&registry, &actx, &sys, &tools_card, &question).await {
+	// Agent-specific prompt injection
+	let question2 = if agent == "model" {
+		format!(
+			"Modeling goal: {}.\n\
+			 Work on ONE artifact at a time (either MetricFlow YAML or a DBT model SQL).\n\
+			 - Use a stable logical name `name` that will never change.\n\
+			 - Prefer existing artifacts if relevant (use artifacts tool); otherwise propose a new one.\n\
+			 - Always call ask_user to request approval or edits before saving.\n\
+			 - For updates: call approve_and_save_artifact with preview_diff=true first and show the diff for approval.\n\
+			 - On approval: call approve_and_save_artifact with {{kind, name, content}} to save.\n\
+			 - Do NOT answer with a query; your job here is artifact authoring.\n\
+			 Return a compact summary only in final.",
+			question
+		)
+	} else {
+		question.to_string()
+	};
+	match Agent::run_until_block(&registry, &actx, &sys, &tools_card, &question2).await {
 		Ok(RunOutcome::Final { thread_id: _tid, result }) => {
 			let (header, rows) = load_last_run_sql_async(thread_id).await;
-			let improved = synthesize_summary(question, &result.answer, &result.sql, &header, &rows).await;
+			let improved = synthesize_summary(&question2, &result.answer, &result.sql, &header, &rows).await;
 			let answer = improved.unwrap_or(result.answer);
 			frames.push(AgentFrame::Final { answer, sql: result.sql });
 		}

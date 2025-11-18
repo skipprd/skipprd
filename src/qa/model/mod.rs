@@ -30,6 +30,7 @@ pub async fn run(pipeline: &str, prompt: &str) -> Result<(), String> {
     registry.register(SqlRunTool { ctx: ctx.clone() });
     registry.register(AskUserTool);
     registry.register(VectQueryTool);
+    registry.register(crate::qa::tools::approve_save::ApproveAndSaveArtifactTool);
     let actx = AgentCtx {
         pipeline: pipeline.to_string(),
         namespace: None,
@@ -43,15 +44,19 @@ pub async fn run(pipeline: &str, prompt: &str) -> Result<(), String> {
     };
     let sys = system_prompt();
     let tools = tool_card();
-    // Ask for DBT model SQL (returned in final.sql) and MetricFlow YAML (returned in final.answer).
-    // Require ask_user approval before finalizing and allow validation via run_sql.
+    // Propose exactly one artifact at a time (model or MetricFlow) with a stable logical name.
+    // Require ask_user approval; on update, first show a diff; upon approval, call approve_and_save_artifact.
     let ask = format!(
         "Modeling goal: {}.\n\
-         Propose both:\n\
-         - A DBT model SQL for a chosen dataset (SELECT ... with fully-qualified dataset <pipeline>.<namespace>)\n\
-         - A MetricFlow YAML snippet (one measure or dimension, spec-compliant)\n\
-         You MUST call ask_user to request approval or edits before returning final. Validate any SQL via run_sql before final.\n\
-         Return STRICT JSON in final: {{\"sql\": \"<DBT model SQL>\", \"answer\": \"<MetricFlow YAML>\"}}.",
+         Work on ONE artifact at a time:\n\
+         - Either a DBT model (SQL starting with SELECT ...) OR a MetricFlow YAML (one measure/dimension).\n\
+         - Use a stable logical name `name` that will never change.\n\
+         - Prefer existing MetricFlow or models if relevant; otherwise propose a new one.\n\
+         Procedure:\n\
+         1) Propose the artifact and call ask_user for approval/edits.\n\
+         2) For updates, call approve_and_save_artifact with preview_diff=true to produce a unified diff; show it via ask_user for approval.\n\
+         3) On approval, call approve_and_save_artifact with {{kind, name, content}} to save.\n\
+         Return a compact summary only in final.",
         prompt
     );
     // Interactive loop: mirror qa/ask behavior (AwaitUser / Final)
@@ -162,21 +167,7 @@ pub async fn run(pipeline: &str, prompt: &str) -> Result<(), String> {
             }
         }
     }
-    // Write artifacts (approval was collected via ask_user earlier)
-    if !model_sql.trim().is_empty() {
-        if let Some((p, ns)) = target.as_ref() {
-            let name_sql = format!("{}_model_{}", ns, chrono::Utc::now().format("%Y%m%d_%H%M%S"));
-            let _key_sql = dbt::write_model_sql(p, ns, &name_sql, &model_sql).await?;
-        } else {
-            println!("Warning: could not infer target dataset from model SQL; skipping DBT model write.");
-        }
-    }
-    if let Some((p, ns)) = target {
-        let name_yaml = format!("{}_metric_{}", ns, chrono::Utc::now().format("%Y%m%d_%H%M%S"));
-        let _key_yaml = dbt::write_metricflow_yaml(&p, &ns, &name_yaml, &yaml_text).await?;
-    } else {
-        println!("Warning: could not infer target dataset from model SQL; skipping MetricFlow YAML write.");
-    }
+    // Saving is performed by the approve_and_save_artifact tool after user approval.
     Ok(())
 }
 

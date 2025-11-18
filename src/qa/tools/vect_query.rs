@@ -29,13 +29,40 @@ impl Tool for VectQueryTool {
                 Err(e) => { errors.push((p, e)); }
             }
         }
-        // Deduplicate by id and keep top-k by score (lower distance is better in LanceDB)
+        // Bias scores: metric artifacts < model artifacts < others (lower is better)
+        for h in all_hits.iter_mut() {
+            let mut factor: f32 = 1.0;
+            if h.item.kind == "artifact" {
+                if h.item.id.starts_with("artifact:metric:") {
+                    factor = 0.6;
+                } else if h.item.id.starts_with("artifact:model:") {
+                    factor = 0.8;
+                }
+            }
+            h.score *= factor;
+        }
+        // Deduplicate by id and keep top-k by adjusted score (lower distance is better in LanceDB)
         all_hits.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal));
         let mut seen = std::collections::HashSet::<String>::new();
         let mut dedup: Vec<crate::qa::vector::lance_store::ScoredChunk> = Vec::new();
         for h in all_hits {
             if seen.insert(h.item.id.clone()) { dedup.push(h); }
             if dedup.len() >= k { break; }
+        }
+        // Optional scope filter for artifacts: "artifact"|"metric"|"model"
+        if let Some(sc) = scope {
+            match sc {
+                "artifact" => {
+                    dedup.retain(|h| h.item.id.starts_with("artifact:"));
+                }
+                "metric" => {
+                    dedup.retain(|h| h.item.id.starts_with("artifact:metric:"));
+                }
+                "model" => {
+                    dedup.retain(|h| h.item.id.starts_with("artifact:model:"));
+                }
+                _ => {}
+            }
         }
         // Print plain-text summary of hits for debugging context
         if dedup.is_empty() {

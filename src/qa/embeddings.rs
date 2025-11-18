@@ -117,6 +117,53 @@ pub async fn sync_pipeline(pipeline: &str) -> Result<(), String> {
             });
         }
         info!("Embeddings: ns='{}' field_items={}", ns, field_count_ns);
+
+        // Artifacts: index current (non-versioned) MetricFlow and DBT model content
+        {
+            let bucket = crate::helpers::configuration::Config::get_skippr_s3_bucket();
+            let client = crate::helpers::s3::get_s3_client().await;
+            let base = {
+                let tenant = crate::helpers::configuration::Config::get_tenant();
+                let workspace = crate::helpers::configuration::Config::get_workspace_name();
+                format!("{}/{}/{}/dbt", tenant, workspace, pipeline)
+            };
+            // (artifact_type, dir)
+            let kinds: &[(&str, &str)] = &[("metric", "metrics"), ("model", "models")];
+            for (atype, dir) in kinds {
+                let prefix = format!("{}/{}/{}/", base, dir, ns);
+                let mut token: Option<String> = None;
+                loop {
+                    let mut req = client.list_objects_v2().bucket(&bucket).prefix(&prefix).max_keys(1000);
+                    if let Some(t) = token.as_ref() { req = req.continuation_token(t); }
+                    match req.send().await {
+                        Ok(resp) => {
+                            for obj in resp.contents() {
+                                if let Some(k) = obj.key() {
+                                    if k.contains("/_versions/") { continue; }
+                                    // fetch content
+                                    if let Ok(bytes) = crate::helpers::s3::get_bytes(k).await {
+                                        let text = String::from_utf8_lossy(&bytes).to_string();
+                                        items.push(crate::qa::vector::lance_store::Chunk {
+                                            id: format!("artifact:{}:{}:{}:{}", atype, pipeline, ns, extract_artifact_name(k)),
+                                            kind: "artifact".to_string(),
+                                            namespace: ns.clone(),
+                                            field: None,
+                                            text,
+                                            vector: Vec::new(),
+                                            meta: serde_json::json!({"artifact_type": *atype}),
+                                            epoch,
+                                        });
+                                    }
+                                }
+                            }
+                            if resp.next_continuation_token().is_none() { break; }
+                            token = resp.next_continuation_token().map(|s| s.to_string());
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
     }
     // Embed in batches
     let batch = 64usize;
@@ -141,6 +188,16 @@ pub async fn sync_pipeline(pipeline: &str) -> Result<(), String> {
     }
     info!("Embeddings sync completed: {} items", items.len());
     Ok(())
+}
+
+fn extract_artifact_name(key: &str) -> String {
+    // expect .../{namespace}/{name}.ext
+    if let Some(pos) = key.rfind('/') {
+        let name_ext = &key[pos + 1..];
+        name_ext.trim_end_matches(".sql").trim_end_matches(".yaml").to_string()
+    } else {
+        key.to_string()
+    }
 }
 
 pub async fn sync_all_pipelines() -> Result<(), String> {

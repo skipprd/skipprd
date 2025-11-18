@@ -168,7 +168,10 @@ LLM/ReAct entrypoints for chat, embeddings, cleansing, and modeling. Configure L
 Flags:
 - `--chat "<prompt>"`: single chat turn with the configured chat model
 - `--cleanse`: interactive ReAct cleansing (cross-namespace), with human approval; writes DBT model SQL
-- `--model`: interactive ReAct modeling (cross-namespace), with human approval; writes DBT model SQL + MetricFlow YAML
+- `--model`: interactive ReAct modeling (cross-namespace), with human approval; after approval calls approve_and_save_artifact to write:
+  - Models at `dbt/models/<namespace>/<name>.sql` (raw text)
+  - MetricFlow at `dbt/metrics/<namespace>/<name>.yaml` (raw text)
+  - Also appends versioned copies under `_versions/<name>/<timestamp>.*`
 - `--embed "<text>"` (repeatable): embed one or more texts
 - `--ask "<question>"`: SQL agent to answer dataset questions
 - `--top_k <N>`: top-K rows/docs to consider (default: 5)

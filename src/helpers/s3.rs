@@ -59,6 +59,37 @@ pub async fn put_json(key: &str, value: &Value) -> Result<(), S3Error> {
     }
 }
 
+pub async fn put_bytes(key: &str, bytes: &[u8], content_type: &str) -> Result<(), S3Error> {
+    let client = get_s3_client().await;
+    let bucket = get_skippr_bucket();
+
+    // Simple retry with exponential backoff and jitter for transient throttling
+    let mut attempt: u32 = 0;
+    let max_attempts: u32 = 6;
+    loop {
+        let req = client
+            .put_object()
+            .bucket(&bucket)
+            .key(key)
+            .body(ByteStream::from(bytes.to_vec()))
+            .content_type(content_type);
+        match req.send().await {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                attempt += 1;
+                if attempt >= max_attempts {
+                    println!("Failed to upload bytes to S3 after {} attempts: {:?}", attempt, e);
+                    return Err(e.into());
+                }
+                let base = 200u64.saturating_mul(1u64 << attempt.min(10));
+                let jitter: u64 = thread_rng().gen_range(0..100);
+                let sleep_ms = (base + jitter).min(5_000);
+                tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+            }
+        }
+    }
+}
+
 pub async fn get_json(key: &str) -> Result<Value, SdkError<GetObjectError>> {
     let client = get_s3_client().await;
     let bucket = get_skippr_bucket();
@@ -80,6 +111,33 @@ pub async fn get_json(key: &str) -> Result<Value, SdkError<GetObjectError>> {
             }
             Err(e) => {
                 // If the error is a 404, return immediately
+                if let SdkError::ServiceError(se) = &e {
+                    if se.err().is_no_such_key() { return Err(e); }
+                }
+                attempt += 1;
+                if attempt >= max_attempts { return Err(e); }
+                let base = 200u64.saturating_mul(1u64 << attempt.min(10));
+                let jitter: u64 = thread_rng().gen_range(0..100);
+                let sleep_ms = (base + jitter).min(5_000);
+                tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+            }
+        }
+    }
+}
+
+pub async fn get_bytes(key: &str) -> Result<Vec<u8>, SdkError<GetObjectError>> {
+    let client = get_s3_client().await;
+    let bucket = get_skippr_bucket();
+    let mut attempt: u32 = 0;
+    let max_attempts: u32 = 6;
+    loop {
+        let res = client.get_object().bucket(&bucket).key(key).send().await;
+        match res {
+            Ok(resp) => {
+                let bytes = resp.body.collect().await.unwrap().into_bytes();
+                return Ok(bytes.to_vec());
+            }
+            Err(e) => {
                 if let SdkError::ServiceError(se) = &e {
                     if se.err().is_no_such_key() { return Err(e); }
                 }
