@@ -16,6 +16,7 @@ pub struct AgentCtx {
     pub thread_id: Option<String>,
     pub progress_tx: Option<tokio::sync::mpsc::UnboundedSender<usize>>,
     pub pre_step_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    pub agent_name: Option<String>,
 }
 
 pub struct Agent;
@@ -154,6 +155,7 @@ impl Agent {
                     args: serde_json::json!({"sql": sql_for_run}),
                     observation: obs.clone(),
                     ts: chrono::Utc::now().to_rfc3339(),
+                    agent: ctx.agent_name.clone(),
                 }).await;
                 if !(ok && rows_non_empty) {
                     let err_text = obs.get("error").and_then(|x| x.as_str()).unwrap_or("no data");
@@ -167,6 +169,7 @@ impl Agent {
                     args: final_obj.clone(),
                     observation: serde_json::json!({"ok": true}),
                     ts: chrono::Utc::now().to_rfc3339(),
+                    agent: ctx.agent_name.clone(),
                 }).await;
                 return Ok(RunOutcome::Final { thread_id, result });
             }
@@ -191,6 +194,7 @@ impl Agent {
                 args,
                 observation: obs.clone(),
                 ts: chrono::Utc::now().to_rfc3339(),
+                agent: ctx.agent_name.clone(),
             }).await;
             if let Some(tx) = ctx.progress_tx.as_ref() {
                 let _ = tx.send(step_idx + 1);
@@ -324,6 +328,7 @@ impl Agent {
                     args: serde_json::json!({"sql": sql_for_run}),
                     observation: obs.clone(),
                     ts: chrono::Utc::now().to_rfc3339(),
+                    agent: ctx.agent_name.clone(),
                 }).await;
                 if !(ok && rows_non_empty) {
                     let err_text = obs.get("error").and_then(|x| x.as_str()).unwrap_or("no data");
@@ -337,6 +342,7 @@ impl Agent {
                     args: final_obj.clone(),
                     observation: serde_json::json!({"ok": true}),
                     ts: chrono::Utc::now().to_rfc3339(),
+                    agent: ctx.agent_name.clone(),
                 }).await;
                 break;
             }
@@ -359,6 +365,7 @@ impl Agent {
                 args,
                 observation: obs,
                 ts: chrono::Utc::now().to_rfc3339(),
+                agent: ctx.agent_name.clone(),
             }).await;
         }
 

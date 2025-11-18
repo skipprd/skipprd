@@ -23,6 +23,8 @@ pub struct HistoryResponse {
     pub seq: i32,
     #[serde(rename = "thread_id")]
     pub thread_id: String,
+    #[serde(rename = "title", skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     #[serde(rename = "messages")]
     pub messages: Vec<models::HistoryResponseMessagesInner>,
     #[serde(rename = "next_before_thread_seq", skip_serializing_if = "Option::is_none")]
@@ -37,6 +39,7 @@ impl HistoryResponse {
             server_time,
             seq,
             thread_id,
+            title: None,
             messages,
             next_before_thread_seq: None,
         }

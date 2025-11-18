@@ -15,6 +15,8 @@ use serde::{Deserialize, Serialize};
 pub struct ListResponseThreadsInner {
     #[serde(rename = "thread_id")]
     pub thread_id: String,
+    #[serde(rename = "title", skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     #[serde(rename = "last_activity", skip_serializing_if = "Option::is_none")]
     pub last_activity: Option<String>,
     #[serde(rename = "unread_count", skip_serializing_if = "Option::is_none")]
@@ -27,6 +29,7 @@ impl ListResponseThreadsInner {
     pub fn new(thread_id: String) -> ListResponseThreadsInner {
         ListResponseThreadsInner {
             thread_id,
+            title: None,
             last_activity: None,
             unread_count: None,
             last_message_preview: None,

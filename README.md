@@ -176,6 +176,7 @@ Flags:
 Notes:
 - `ask` auto-discovers across pipelines; do not pass a pipeline for `ask`.
 - Embeddings are stored in LanceDB on S3 (uses `SKIPPR_S3_BUCKET`).
+- WebSocket API supports multiple agents per thread. Send `agentType` (ask | cleanse | model) on `new`/`open`. Default is `ask`. Switching agents keeps the same `thread_id` and records a `switch_agent` step.
 
 Examples:
 ```bash

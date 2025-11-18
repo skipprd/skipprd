@@ -50,6 +50,7 @@ components:
         - $ref: '#/components/schemas/ResumeRequest'
         - $ref: '#/components/schemas/HistoryRequest'
         - $ref: '#/components/schemas/SeenRequest'
+        - $ref: '#/components/schemas/DeleteRequest'
       discriminator:
         propertyName: type
         mapping:
@@ -60,6 +61,7 @@ components:
           resume: '#/components/schemas/ResumeRequest'
           history: '#/components/schemas/HistoryRequest'
           seen: '#/components/schemas/SeenRequest'
+          delete: '#/components/schemas/DeleteRequest'
 
     ServerMessage:
       oneOf:
@@ -117,6 +119,11 @@ components:
         question:
           type: string
           description: User's question to start a new thread
+        agentType:
+          type: string
+          description: Agent to use (ask | cleanse | model). Defaults to ask.
+          enum: [ask, cleanse, model]
+          default: ask
 
     OpenRequest:
       type: object
@@ -136,6 +143,11 @@ components:
         question:
           type: string
           description: Optional nudge to resume the thread (default is "Continue.")
+        agentType:
+          type: string
+          description: Agent to use for this message; if differs from current, a switch_agent step is recorded.
+          enum: [ask, cleanse, model]
+          default: ask
 
     UserRequest:
       type: object
@@ -188,6 +200,17 @@ components:
         thread_id: { type: string }
         up_to_thread_seq: { type: integer }
 
+    DeleteRequest:
+      type: object
+      additionalProperties: false
+      required: [v, type, cid, thread_id]
+      properties:
+        v: { type: integer }
+        cid: { type: string }
+        type: { type: string, enum: [delete] }
+        thread_id: { type: string }
+      description: Delete a thread (removes thread JSON and any thread-scoped embeddings)
+
     # Server -> Client
     ListResponse:
       type: object
@@ -208,6 +231,7 @@ components:
             required: [thread_id]
             properties:
               thread_id: { type: string }
+              title: { type: string, nullable: true }
               last_activity: { type: string, nullable: true }
               unread_count: { type: integer, nullable: true }
               last_message_preview: { type: string, nullable: true }
@@ -342,6 +366,7 @@ components:
         server_time: { type: string }
         seq: { type: integer }
         thread_id: { type: string }
+        title: { type: string, nullable: true }
         messages:
           type: array
           items:

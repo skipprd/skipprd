@@ -25,6 +25,9 @@ pub struct OpenRequest {
     /// Optional nudge to resume the thread (default is \"Continue.\")
     #[serde(rename = "question", skip_serializing_if = "Option::is_none")]
     pub question: Option<String>,
+    /// Agent to use for this message; if differs from current, a switch_agent step will be recorded.
+    #[serde(rename = "agentType", skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
 }
 
 impl OpenRequest {
@@ -35,6 +38,7 @@ impl OpenRequest {
             r#type,
             thread_id,
             question: None,
+            agent_type: None,
         }
     }
 }

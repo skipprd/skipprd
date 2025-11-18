@@ -7,12 +7,18 @@ pub struct ThreadStep {
     pub args: Value,
     pub observation: Value,
     pub ts: String,
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct ThreadLog {
     pub steps: Vec<ThreadStep>,
     pub result: Option<ThreadResult>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub title_finalized: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -57,7 +63,20 @@ impl ThreadStore {
     pub async fn get(&self, thread_id: &str) -> Option<ThreadLog> {
         let key = self.s3_key(thread_id);
         if let Ok(v) = crate::helpers::s3::get_json(&key).await {
-            serde_json::from_value::<ThreadLog>(v).ok()
+            let mut log_opt = serde_json::from_value::<ThreadLog>(v).ok();
+            if let Some(ref mut log) = log_opt {
+                // Back-compat: default missing agent to "ask"
+                for step in log.steps.iter_mut() {
+                    if step.agent.is_none() {
+                        step.agent = Some("ask".to_string());
+                    }
+                }
+                // Ensure defaults for new fields
+                if log.title.is_none() && !log.steps.is_empty() {
+                    // no-op default; title set explicitly by server
+                }
+            }
+            log_opt
         } else {
             None
         }
@@ -90,6 +109,43 @@ impl ThreadStore {
         }
         out.sort();
         out
+    }
+
+    pub async fn delete(&self, thread_id: &str) -> Result<(), String> {
+        let key = self.s3_key(thread_id);
+        crate::helpers::s3::delete_object(&key).await.map_err(|e| format!("{:?}", e))?;
+        Ok(())
+    }
+
+    pub async fn set_title_if_absent(&self, thread_id: &str, title: &str) -> Result<(), String> {
+        let key = self.s3_key(thread_id);
+        let mut log = if let Ok(v) = crate::helpers::s3::get_json(&key).await {
+            serde_json::from_value::<ThreadLog>(v).unwrap_or_default()
+        } else {
+            ThreadLog::default()
+        };
+        if log.title.is_none() || log.title.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+            log.title = Some(title.to_string());
+            let val = serde_json::to_value(&log).map_err(|e| e.to_string())?;
+            crate::helpers::s3::put_json(&key, &val).await.map_err(|e| format!("{:?}", e))?;
+        }
+        Ok(())
+    }
+
+    pub async fn finalize_title(&self, thread_id: &str, title: &str) -> Result<(), String> {
+        let key = self.s3_key(thread_id);
+        let mut log = if let Ok(v) = crate::helpers::s3::get_json(&key).await {
+            serde_json::from_value::<ThreadLog>(v).unwrap_or_default()
+        } else {
+            ThreadLog::default()
+        };
+        if !log.title_finalized {
+            log.title = Some(title.to_string());
+            log.title_finalized = true;
+            let val = serde_json::to_value(&log).map_err(|e| e.to_string())?;
+            crate::helpers::s3::put_json(&key, &val).await.map_err(|e| format!("{:?}", e))?;
+        }
+        Ok(())
     }
 }
 

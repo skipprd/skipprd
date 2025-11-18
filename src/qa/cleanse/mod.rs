@@ -40,6 +40,7 @@ pub async fn run(pipeline: &str, prompt: &str) -> Result<(), String> {
         thread_id: None,
         progress_tx: None,
         pre_step_tx: None,
+        agent_name: Some("cleanse".to_string()),
     };
     let sys = system_prompt();
     let tools = tool_card();
@@ -80,6 +81,7 @@ pub async fn run(pipeline: &str, prompt: &str) -> Result<(), String> {
                         args: serde_json::json!({ "text": text }),
                         observation: serde_json::json!({ "ok": true }),
                         ts: chrono::Utc::now().to_rfc3339(),
+                        agent: Some("cleanse".to_string()),
                     }).await;
                 }
                 // continue loop to let agent resume

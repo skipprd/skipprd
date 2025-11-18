@@ -103,6 +103,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 					// last_activity
 					let last_ts = log.steps.last().map(|s| s.ts.clone());
 					item.last_activity = last_ts;
+					item.title = log.title.clone();
 					// compute preview from last user or final
 					let mut preview: Option<String> = None;
 					for step in log.steps.iter().rev() {
@@ -139,6 +140,8 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			let question = req.question.clone();
 			if question.trim().is_empty() { return Err("question required".into()); }
 			let thread_id = Uuid::new_v4().to_string();
+			let agent = normalize_agent(req.agent_type.clone());
+			state.current_agent.insert(thread_id.clone(), agent.clone());
 			// ok
 			let mut ok = api::OkResponse::new(1, m::ok_response::Type::Ok, now_iso());
 			ok.cid = Some(cid.clone());
@@ -157,11 +160,29 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			let pr_s = serde_json::to_string(&prm).unwrap();
 			state.buffer_last(&pr_s);
 			out.push(pr_s);
+			// record initial user question in thread history
+			{
+				let store = crate::qa::session::ThreadStore::new();
+				let _ = store.append_step(&thread_id, crate::qa::session::ThreadStep {
+					action: "user".to_string(),
+					args: serde_json::json!({"text": question}),
+					observation: serde_json::json!({"ok": true}),
+					ts: chrono::Utc::now().to_rfc3339(),
+					agent: Some(agent.clone()),
+				}).await;
+				let _ = store.set_title_if_absent(&thread_id, &truncate_title(&question, 64)).await;
+			}
 			// run agent
-			let frames = run_agent_and_frames(&thread_id, &question).await?;
+			let frames = run_agent_and_frames(&thread_id, &question, &agent).await?;
 			for f in frames {
 				match f {
 					AgentFrame::Final { answer, sql } => {
+						// finalize title once using concise summary
+						{
+							let store = crate::qa::session::ThreadStore::new();
+							let title = synthesize_title(&question, &answer).await;
+							let _ = store.finalize_title(&thread_id, &title).await;
+						}
 						// optional token streaming (simple chunking)
 						for t in chunk_text(&answer, 24) {
 							let mut tk = api::TokenResponse::new(1, m::token_response::Type::Token, now_iso(), state.next_seq(), thread_id.clone(), t);
@@ -203,6 +224,20 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			if thread_id.is_empty() { return Err("thread_id required".into()); }
 			if uuid::Uuid::parse_str(&thread_id).is_err() { return Err("invalid thread_id".into()); }
 			let question = req.question.clone().unwrap_or_else(|| "Continue.".to_string());
+			let requested_agent = normalize_agent(req.agent_type.clone());
+			let current = state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| "ask".to_string());
+			if current != requested_agent {
+				// append switch_agent step
+				let store = crate::qa::session::ThreadStore::new();
+				let _ = store.append_step(&thread_id, crate::qa::session::ThreadStep {
+					action: "switch_agent".to_string(),
+					args: serde_json::json!({"from": current, "to": requested_agent}),
+					observation: serde_json::json!({"ok": true}),
+					ts: chrono::Utc::now().to_rfc3339(),
+					agent: Some(requested_agent.clone()),
+				}).await;
+				state.current_agent.insert(thread_id.clone(), requested_agent.clone());
+			}
 			// ok
 			let mut ok = api::OkResponse::new(1, m::ok_response::Type::Ok, now_iso());
 			ok.cid = Some(cid.clone());
@@ -217,7 +252,8 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			state.buffer_last(&pr_s);
 			out.push(pr_s);
 			// run agent
-			let frames = run_agent_and_frames(&thread_id, &question).await?;
+			let agent = state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| "ask".to_string());
+			let frames = run_agent_and_frames(&thread_id, &question, &agent).await?;
 			for f in frames {
 				match f {
 					AgentFrame::Final { answer, sql } => {
@@ -267,6 +303,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 				args: serde_json::json!({"text": text}),
 				observation: serde_json::json!({"ok": true}),
 				ts: chrono::Utc::now().to_rfc3339(),
+				agent: Some(state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| "ask".to_string())),
 			}).await;
 			// ack
 			// we don't increment thread_seq on user ack
@@ -290,6 +327,8 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			if uuid::Uuid::parse_str(&thread_id).is_err() { return Err("invalid thread_id".into()); }
 			let (messages, next_before) = build_history(&thread_id, req.before_thread_seq, req.limit).await;
 			let mut resp = api::HistoryResponse::new(1, m::history_response::Type::History, now_iso(), state.next_seq(), thread_id.clone(), messages);
+			let store = crate::qa::session::ThreadStore::new();
+			if let Some(log) = store.get(&thread_id).await { resp.title = log.title; }
 			resp.next_before_thread_seq = next_before;
 			let outm = api::ServerMessage::History(resp);
 			let s = serde_json::to_string(&outm).unwrap();
@@ -312,6 +351,30 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			state.buffer_last(&s);
 			out.push(s);
 		}
+		"delete" => {
+			// parse minimal fields without generated model
+			let cid = v.get("cid").and_then(|x| x.as_str()).unwrap_or("").to_string();
+			let thread_id = v.get("thread_id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+			if thread_id.is_empty() { return Err("thread_id required".into()); }
+			if uuid::Uuid::parse_str(&thread_id).is_err() { return Err("invalid thread_id".into()); }
+			// delete thread json
+			{
+				let store = crate::qa::session::ThreadStore::new();
+				let _ = store.delete(&thread_id).await;
+			}
+			// delete lance embeddings across all pipelines
+			{
+				let pipelines = crate::sql::registry::list_pipelines().await;
+				for p in pipelines {
+					let store = crate::qa::vector::lance_store::LanceDbStore::new(&p);
+					let _ = store.delete_thread_embeddings(&thread_id).await;
+				}
+			}
+			// respond ok
+			let mut ok = api::OkResponse::new(1, m::ok_response::Type::Ok, now_iso());
+			ok.cid = Some(cid);
+			out.push(serde_json::to_string(&api::ServerMessage::Ok(ok)).unwrap());
+		}
 		_ => {
 			return Err("unknown type".to_string());
 		}
@@ -323,11 +386,40 @@ fn now_iso() -> String {
 	Utc::now().to_rfc3339()
 }
 
+fn truncate_title(s: &str, max_chars: usize) -> String {
+	if s.len() <= max_chars { return s.to_string(); }
+	match s.char_indices().take_while(|(i, _)| *i < max_chars).last() {
+		Some((i, _)) => format!("{}…", &s[..i]),
+		None => s.chars().take(max_chars).collect(),
+	}
+}
+
+async fn synthesize_title(question: &str, answer: &str) -> String {
+	// Try LLM to produce a concise title (<= 8 words), else fallback to truncated question
+	let cfg = crate::llm::config_from_env();
+	let llm = crate::llm::create_llm(&cfg);
+	let prompt = format!(
+		"Create a very short, descriptive chat title (≤ 8 words).\nRules: plain text only, no quotes, no punctuation beyond spaces, title case.\nQuestion: {}\nAnswer: {}\nTitle:",
+		question, answer
+	);
+	let out = tokio::task::spawn_blocking({ let llm2 = llm.clone(); let p = prompt.clone(); move || llm2.chat(&[crate::llm::ChatMessage { role: "user".into(), content: p }]) }).await;
+	if let Ok(Ok(text)) = out {
+		let t = text.trim();
+		if !t.is_empty() {
+			// Normalize whitespace and cap length
+			let norm = t.split_whitespace().collect::<Vec<_>>().join(" ");
+			return truncate_title(&norm, 64);
+		}
+	}
+	truncate_title(question, 64)
+}
+
 struct ConnState {
 	seq: i32,
 	sent: VecDeque<(i32, String)>,
 	thread_seq: HashMap<String, i32>,
 	seen: HashMap<String, i32>,
+	current_agent: HashMap<String, String>,
 }
 
 async fn load_last_run_sql_async(thread_id: &str) -> (Vec<String>, Vec<Vec<String>>) {
@@ -383,7 +475,7 @@ async fn synthesize_summary(question: &str, agent_answer: &str, sql_opt: &Option
 
 impl ConnState {
 	fn new() -> Self {
-		Self { seq: 0, sent: VecDeque::new(), thread_seq: HashMap::new(), seen: HashMap::new() }
+		Self { seq: 0, sent: VecDeque::new(), thread_seq: HashMap::new(), seen: HashMap::new(), current_agent: HashMap::new() }
 	}
 	fn next_seq(&mut self) -> i32 {
 		self.seq += 1;
@@ -413,6 +505,8 @@ async fn process_new(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt
 	let question = req.question.clone();
 	if question.trim().is_empty() { return Err("question required".into()); }
 	let thread_id = Uuid::new_v4().to_string();
+	let agent = normalize_agent(req.agent_type.clone());
+	state.current_agent.insert(thread_id.clone(), agent.clone());
 	// ok
 	let mut ok = api::OkResponse::new(1, m::ok_response::Type::Ok, now_iso());
 	ok.cid = Some(cid.clone());
@@ -441,7 +535,19 @@ async fn process_new(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt
 		let _ = write.send(Message::Text(s)).await;
 	}
 	// agent with periodic updates
-	run_agent_with_processing(&thread_id, &question, &cid, state, write, m::processing_response::Stage::Queued).await
+	// record initial user question in thread history
+	{
+		let store = crate::qa::session::ThreadStore::new();
+		let _ = store.append_step(&thread_id, crate::qa::session::ThreadStep {
+			action: "user".to_string(),
+			args: serde_json::json!({"text": question}),
+			observation: serde_json::json!({"ok": true}),
+			ts: chrono::Utc::now().to_rfc3339(),
+			agent: Some(agent.clone()),
+		}).await;
+		let _ = store.set_title_if_absent(&thread_id, &truncate_title(&question, 64)).await;
+	}
+	run_agent_with_processing(&thread_id, &question, &agent, &cid, state, write, m::processing_response::Stage::Queued).await
 }
 
 async fn process_open(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt<Message> + Unpin)) -> Result<(), String> {
@@ -451,6 +557,19 @@ async fn process_open(v: &Value, state: &mut ConnState, write: &mut (impl SinkEx
 	if thread_id.is_empty() { return Err("thread_id required".into()); }
 	if uuid::Uuid::parse_str(&thread_id).is_err() { return Err("invalid thread_id".into()); }
 	let question = req.question.clone().unwrap_or_else(|| "Continue.".to_string());
+	let requested_agent = normalize_agent(req.agent_type.clone());
+	let current = state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| "ask".to_string());
+	if current != requested_agent {
+		let store = crate::qa::session::ThreadStore::new();
+		let _ = store.append_step(&thread_id, crate::qa::session::ThreadStep {
+			action: "switch_agent".to_string(),
+			args: serde_json::json!({"from": current, "to": requested_agent}),
+			observation: serde_json::json!({"ok": true}),
+			ts: chrono::Utc::now().to_rfc3339(),
+			agent: Some(requested_agent.clone()),
+		}).await;
+		state.current_agent.insert(thread_id.clone(), requested_agent.clone());
+	}
 	// ok
 	let mut ok = api::OkResponse::new(1, m::ok_response::Type::Ok, now_iso());
 	ok.cid = Some(cid.clone());
@@ -471,12 +590,34 @@ async fn process_open(v: &Value, state: &mut ConnState, write: &mut (impl SinkEx
 		let _ = write.send(Message::Text(s)).await;
 	}
 	// agent with periodic updates
-	run_agent_with_processing(&thread_id, &question, &cid, state, write, m::processing_response::Stage::Queued).await
+	let agent = state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| "ask".to_string());
+	// if user supplied a prompt on open, record it
+	if !question.trim().is_empty() {
+		let store = crate::qa::session::ThreadStore::new();
+		let _ = store.append_step(&thread_id, crate::qa::session::ThreadStep {
+			action: "user".to_string(),
+			args: serde_json::json!({"text": question}),
+			observation: serde_json::json!({"ok": true}),
+			ts: chrono::Utc::now().to_rfc3339(),
+			agent: Some(agent.clone()),
+		}).await;
+		let _ = store.set_title_if_absent(&thread_id, &truncate_title(&question, 64)).await;
+	}
+	run_agent_with_processing(&thread_id, &question, &agent, &cid, state, write, m::processing_response::Stage::Queued).await
+}
+
+fn normalize_agent(a: Option<String>) -> String {
+	match a.unwrap_or_else(|| "ask".to_string()).to_lowercase().as_str() {
+		"cleanse" => "cleanse".to_string(),
+		"model" => "model".to_string(),
+		_ => "ask".to_string(),
+	}
 }
 
 async fn run_agent_with_processing(
 	thread_id: &str,
 	question: &str,
+	agent: &str,
 	cid: &str,
 	state: &mut ConnState,
 	write: &mut (impl SinkExt<Message> + Unpin),
@@ -507,12 +648,32 @@ async fn run_agent_with_processing(
 			let _ = crate::sql::tables::register_deadletters(&ctx_df, &pipeline).await;
 		}
 	}
-	registry.register(SqlRunTool { ctx: ctx_df.clone() });
-	registry.register(SqlSchemaTool { ctx: ctx_df.clone() });
-	registry.register(SqlStatsTool);
-	registry.register(SqlSampleTool { ctx: ctx_df.clone() });
-	registry.register(VectQueryTool);
-	registry.register(AskUserTool);
+	match agent {
+		"cleanse" => {
+			registry.register(SqlRunTool { ctx: ctx_df.clone() });
+			registry.register(SqlSchemaTool { ctx: ctx_df.clone() });
+			registry.register(SqlStatsTool);
+			registry.register(SqlSampleTool { ctx: ctx_df.clone() });
+			registry.register(VectQueryTool);
+			registry.register(AskUserTool);
+		}
+		"model" => {
+			registry.register(SqlRunTool { ctx: ctx_df.clone() });
+			registry.register(SqlSchemaTool { ctx: ctx_df.clone() });
+			registry.register(SqlStatsTool);
+			registry.register(SqlSampleTool { ctx: ctx_df.clone() });
+			registry.register(VectQueryTool);
+			registry.register(AskUserTool);
+		}
+		_ => {
+			registry.register(SqlRunTool { ctx: ctx_df.clone() });
+			registry.register(SqlSchemaTool { ctx: ctx_df.clone() });
+			registry.register(SqlStatsTool);
+			registry.register(SqlSampleTool { ctx: ctx_df.clone() });
+			registry.register(VectQueryTool);
+			registry.register(AskUserTool);
+		}
+	}
 	let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<usize>();
 	let (pre_tx, mut pre_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 	let actx = AgentCtx {
@@ -524,6 +685,7 @@ async fn run_agent_with_processing(
 		thread_id: Some(thread_id.to_string()),
 		progress_tx: Some(tx),
 		pre_step_tx: Some(pre_tx),
+		agent_name: Some(agent.to_string()),
 	};
 	let mut fut = Box::pin(Agent::run_until_block(&registry, &actx, &sys, &tools_card, &question));
 	let mut ticker = tokio::time::interval(std::time::Duration::from_secs(30));
@@ -581,6 +743,12 @@ async fn run_agent_with_processing(
 						let (header, rows) = load_last_run_sql_async(thread_id).await;
 						let improved = synthesize_summary(question, &result.answer, &result.sql, &header, &rows).await;
 						let streamed_answer = improved.as_deref().unwrap_or(&result.answer);
+						// Finalize title once
+						{
+							let store = crate::qa::session::ThreadStore::new();
+							let title = synthesize_title(question, streamed_answer).await;
+							let _ = store.finalize_title(thread_id, &title).await;
+						}
 						for t in chunk_text(streamed_answer, 24) {
 							let mut tk = api::TokenResponse::new(1, m::token_response::Type::Token, now_iso(), state.next_seq(), thread_id.to_string(), t);
 							tk.for_cid = Some(cid.to_string());
@@ -654,7 +822,7 @@ enum AgentFrame {
 	AwaitUser { prompt: String },
 }
 
-async fn run_agent_and_frames(thread_id: &str, question: &str) -> Result<Vec<AgentFrame>, String> {
+async fn run_agent_and_frames(thread_id: &str, question: &str, agent: &str) -> Result<Vec<AgentFrame>, String> {
 	let mut sys = crate::qa::prompts::system_prompt();
 	// Inject TimeContext
 	let now_utc = chrono::Utc::now().to_rfc3339();
@@ -680,13 +848,33 @@ async fn run_agent_and_frames(thread_id: &str, question: &str) -> Result<Vec<Age
 			let _ = crate::sql::tables::register_deadletters(&ctx_df, &pipeline).await;
 		}
 	}
-	registry.register(SqlRunTool { ctx: ctx_df.clone() });
-	registry.register(SqlSchemaTool { ctx: ctx_df.clone() });
-	registry.register(SqlStatsTool);
-	registry.register(SqlSampleTool { ctx: ctx_df.clone() });
-	registry.register(VectQueryTool);
-	registry.register(AskUserTool);
-	let actx = AgentCtx { pipeline: "".to_string(), namespace: None, top_k: 30, per_step_timeout_secs: 10, max_steps: 10, thread_id: Some(thread_id.to_string()), progress_tx: None, pre_step_tx: None };
+	match agent {
+		"cleanse" => {
+			registry.register(SqlRunTool { ctx: ctx_df.clone() });
+			registry.register(SqlSchemaTool { ctx: ctx_df.clone() });
+			registry.register(SqlStatsTool);
+			registry.register(SqlSampleTool { ctx: ctx_df.clone() });
+			registry.register(VectQueryTool);
+			registry.register(AskUserTool);
+		}
+		"model" => {
+			registry.register(SqlRunTool { ctx: ctx_df.clone() });
+			registry.register(SqlSchemaTool { ctx: ctx_df.clone() });
+			registry.register(SqlStatsTool);
+			registry.register(SqlSampleTool { ctx: ctx_df.clone() });
+			registry.register(VectQueryTool);
+			registry.register(AskUserTool);
+		}
+		_ => {
+			registry.register(SqlRunTool { ctx: ctx_df.clone() });
+			registry.register(SqlSchemaTool { ctx: ctx_df.clone() });
+			registry.register(SqlStatsTool);
+			registry.register(SqlSampleTool { ctx: ctx_df.clone() });
+			registry.register(VectQueryTool);
+			registry.register(AskUserTool);
+		}
+	}
+	let actx = AgentCtx { pipeline: "".to_string(), namespace: None, top_k: 30, per_step_timeout_secs: 10, max_steps: 10, thread_id: Some(thread_id.to_string()), progress_tx: None, pre_step_tx: None, agent_name: Some(agent.to_string()) };
 	let mut frames: Vec<AgentFrame> = Vec::new();
 	match Agent::run_until_block(&registry, &actx, &sys, &tools_card, &question).await {
 		Ok(RunOutcome::Final { thread_id: _tid, result }) => {

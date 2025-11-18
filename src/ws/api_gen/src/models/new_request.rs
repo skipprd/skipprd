@@ -22,6 +22,9 @@ pub struct NewRequest {
     /// User's question to start a new thread
     #[serde(rename = "question")]
     pub question: String,
+    /// Agent to use for this thread (ask | cleanse | model). Defaults to ask.
+    #[serde(rename = "agentType", skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
 }
 
 impl NewRequest {
@@ -31,6 +34,7 @@ impl NewRequest {
             cid,
             r#type,
             question,
+            agent_type: None,
         }
     }
 }

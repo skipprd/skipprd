@@ -144,6 +144,22 @@ impl LanceDbStore {
             }
             Ok(out)
     }
+
+    pub async fn delete_thread_embeddings(&self, thread_id: &str) -> Result<(), String> {
+            // Best-effort deletion by id pattern containing thread identifier
+            let bucket = crate::helpers::configuration::Config::get_skippr_s3_bucket();
+            let tenant = crate::helpers::configuration::Config::get_tenant();
+            let workspace = crate::helpers::configuration::Config::get_workspace_name();
+            let uri = format!("s3://{}/{}/{}/{}/lancedb", bucket, tenant, workspace, self.pipeline);
+            let db = lancedb::connect(&uri).execute().await.map_err(|e| format!("{:?}", e))?;
+            let tbl = db.open_table("embeddings").execute().await.map_err(|e| format!("{:?}", e))?;
+            // Attempt a predicate delete on id LIKE pattern
+            let pred = format!("id LIKE '%:{}:%'", thread_id);
+            match tbl.delete(pred.as_str()).await {
+                Ok(_) => Ok(()),
+                Err(e) => Err(format!("{:?}", e)),
+            }
+    }
 }
 
 
