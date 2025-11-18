@@ -634,50 +634,9 @@ async fn run_agent_with_processing(
 		sys, now_utc, local_iso, local_offset
 	);
 	let tools_card = crate::qa::prompts::tool_card();
-	let mut registry = ToolRegistry::new();
 	let ctx_df = datafusion::prelude::SessionContext::new();
-	{
-		// Pre-register all pipelines' namespaces so two-part names work regardless of active pipeline
-		let pipelines = crate::sql::registry::list_pipelines().await;
-		for pipeline in pipelines {
-			let mut namespaces = crate::sql::registry::list_namespaces(&pipeline).await;
-			namespaces.sort();
-			for ns in namespaces {
-				let _ = crate::sql::tables::register_namespace_view(&ctx_df, &pipeline, &ns).await;
-			}
-			let _ = crate::sql::tables::register_deadletters(&ctx_df, &pipeline).await;
-		}
-	}
-	match agent {
-		"cleanse" => {
-			registry.register(SqlRunTool { ctx: ctx_df.clone() });
-			registry.register(SqlSchemaTool { ctx: ctx_df.clone() });
-			registry.register(SqlStatsTool);
-			registry.register(SqlSampleTool { ctx: ctx_df.clone() });
-			registry.register(VectQueryTool);
-			registry.register(AskUserTool);
-			registry.register(ArtifactsTool);
-		}
-		"model" => {
-			registry.register(SqlRunTool { ctx: ctx_df.clone() });
-			registry.register(SqlSchemaTool { ctx: ctx_df.clone() });
-			registry.register(SqlStatsTool);
-			registry.register(SqlSampleTool { ctx: ctx_df.clone() });
-			registry.register(VectQueryTool);
-			registry.register(AskUserTool);
-			registry.register(ApproveAndSaveArtifactTool);
-			registry.register(ArtifactsTool);
-		}
-		_ => {
-			registry.register(SqlRunTool { ctx: ctx_df.clone() });
-			registry.register(SqlSchemaTool { ctx: ctx_df.clone() });
-			registry.register(SqlStatsTool);
-			registry.register(SqlSampleTool { ctx: ctx_df.clone() });
-			registry.register(VectQueryTool);
-			registry.register(AskUserTool);
-			registry.register(ArtifactsTool);
-		}
-	}
+	crate::ws::agent_runner::pre_register_all_namespaces(&ctx_df).await;
+	let mut registry = crate::ws::agent_runner::build_registry(agent, &ctx_df);
 	let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<usize>();
 	let (pre_tx, mut pre_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 	let actx = AgentCtx {
@@ -691,23 +650,7 @@ async fn run_agent_with_processing(
 		pre_step_tx: Some(pre_tx),
 		agent_name: Some(agent.to_string()),
 	};
-	// Agent-specific prompt injection
-	let question2 = if agent == "model" {
-		format!(
-			"Modeling goal: {}.\n\
-			 Work on ONE artifact at a time (either MetricFlow YAML or a DBT model SQL).\n\
-			 - Use a stable logical name `name` that will never change.\n\
-			 - Prefer existing artifacts if relevant (use artifacts tool); otherwise propose a new one.\n\
-			 - Always call ask_user to request approval or edits before saving.\n\
-			 - For updates: call approve_and_save_artifact with preview_diff=true first and show the diff for approval.\n\
-			 - On approval: call approve_and_save_artifact with {{kind, name, content}} to save.\n\
-			 - Do NOT answer with a query; your job here is artifact authoring.\n\
-			 Return a compact summary only in final.",
-			question
-		)
-	} else {
-		question.to_string()
-	};
+	let question2 = crate::ws::agent_runner::inject_agent_question(agent, question);
 	let mut fut = Box::pin(Agent::run_until_block(&registry, &actx, &sys, &tools_card, &question2));
 	let mut ticker = tokio::time::interval(std::time::Duration::from_secs(30));
 	let mut last_step_completed: usize = 0;
@@ -897,23 +840,7 @@ async fn run_agent_and_frames(thread_id: &str, question: &str, agent: &str) -> R
 	}
 	let actx = AgentCtx { pipeline: "".to_string(), namespace: None, top_k: 30, per_step_timeout_secs: 10, max_steps: 10, thread_id: Some(thread_id.to_string()), progress_tx: None, pre_step_tx: None, agent_name: Some(agent.to_string()) };
 	let mut frames: Vec<AgentFrame> = Vec::new();
-	// Agent-specific prompt injection
-	let question2 = if agent == "model" {
-		format!(
-			"Modeling goal: {}.\n\
-			 Work on ONE artifact at a time (either MetricFlow YAML or a DBT model SQL).\n\
-			 - Use a stable logical name `name` that will never change.\n\
-			 - Prefer existing artifacts if relevant (use artifacts tool); otherwise propose a new one.\n\
-			 - Always call ask_user to request approval or edits before saving.\n\
-			 - For updates: call approve_and_save_artifact with preview_diff=true first and show the diff for approval.\n\
-			 - On approval: call approve_and_save_artifact with {{kind, name, content}} to save.\n\
-			 - Do NOT answer with a query; your job here is artifact authoring.\n\
-			 Return a compact summary only in final.",
-			question
-		)
-	} else {
-		question.to_string()
-	};
+	let question2 = crate::ws::agent_runner::inject_agent_question(agent, question);
 	match Agent::run_until_block(&registry, &actx, &sys, &tools_card, &question2).await {
 		Ok(RunOutcome::Final { thread_id: _tid, result }) => {
 			let (header, rows) = load_last_run_sql_async(thread_id).await;
