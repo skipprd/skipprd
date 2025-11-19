@@ -66,6 +66,8 @@ mod qa;
 mod catalog;
 mod ws;
 mod models;
+mod flows;
+mod prompts;
 
 use crate::helpers::configuration::{Config, PIPELINE_NAME};
 use crate::helpers::logging::init_logging;

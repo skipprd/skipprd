@@ -3,8 +3,7 @@ use serde_json::Value;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 use crate::qa::agent::{Agent, AgentCtx, RunOutcome};
-use crate::qa::tools::{ToolRegistry};
-use crate::qa::tools::{sql_run::SqlRunTool, sql_schema::SqlSchemaTool, sql_stats::SqlStatsTool, sql_sample::SqlSampleTool, vect_query::VectQueryTool, ask_user::AskUserTool, approve_save::ApproveAndSaveArtifactTool, artifacts::ArtifactsTool};
+// Removed unused tool imports; flows handle registry/tool selection
 use uuid::Uuid;
 use crate::ws::api_gen as api;
 use std::collections::{HashMap, VecDeque};
@@ -941,13 +940,7 @@ async fn process_reject(v: &Value, state: &mut ConnState, write: &mut (impl Sink
 	tracing::info!("reject: thread_id={} agent={}", thread_id, agent);
 	run_agent_with_processing(&thread_id, "Continue.", &agent, &cid, state, write, m::processing_response::Stage::Queued).await
 }
-fn normalize_agent(a: Option<String>) -> String {
-	match a.unwrap_or_else(|| "ask".to_string()).to_lowercase().as_str() {
-		"cleanse" => "cleanse".to_string(),
-		"model" => "model".to_string(),
-		_ => "ask".to_string(),
-	}
-}
+// normalize_agent removed (unused)
 
 fn normalize_agent_new(a: Option<api::new_request::AgentType>) -> String {
 	match a {
@@ -986,7 +979,7 @@ async fn run_agent_with_processing(
 	let tools_card = if agent == "model" { crate::qa::prompts_model::model_tool_card() } else { crate::qa::prompts::tool_card() };
 	let ctx_df = datafusion::prelude::SessionContext::new();
 	crate::ws::agent_runner::pre_register_all_namespaces(&ctx_df).await;
-	let mut registry = crate::ws::agent_runner::build_registry(agent, &ctx_df);
+	let registry = crate::ws::agent_runner::build_registry(agent, &ctx_df);
 	// Determine question for embeddings (prefer first user text)
 	let q_for_embed = {
 		let storeq = crate::qa::session::ThreadStore::new();
@@ -1046,8 +1039,6 @@ async fn run_agent_with_processing(
 			}
 		}
 	}
-	// Preflight: think-out-loud intent and decision; gate if low confidence
-	let mut decision = crate::ws::context::PreflightDecision::default();
 	// Preflight: think-out-loud intent and decision; gate if low confidence
 	let mut decision = crate::ws::context::PreflightDecision::default();
 	if !have_selection {
@@ -1205,6 +1196,7 @@ async fn run_agent_with_processing(
 			} else {
 				crate::qa::reference::dbt_model_example()
 			};
+			// Remove earlier unused store; declare once here
 			let store = crate::qa::session::ThreadStore::new();
 			let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
 				action: "reference_example".to_string(),
@@ -1423,218 +1415,20 @@ enum AgentFrame {
 }
 
 async fn run_agent_and_frames(thread_id: &str, question: &str, agent: &str) -> Result<Vec<AgentFrame>, String> {
-	let mut sys = if agent == "model" { crate::qa::prompts_model::model_system_prompt() } else { crate::qa::prompts::system_prompt() };
-	// Inject TimeContext
-	let now_utc = chrono::Utc::now().to_rfc3339();
-	let now_local = chrono::Local::now();
-	let local_iso = now_local.to_rfc3339();
-	let local_offset = now_local.offset().to_string();
-	sys = format!(
-		"{}\n\nTimeContext:\n- NowUTC: {}\n- UserLocal: {} (offset {})",
-		sys, now_utc, local_iso, local_offset
-	);
-	let tools_card = if agent == "model" { crate::qa::prompts_model::model_tool_card() } else { crate::qa::prompts::tool_card() };
-	let ctx_df = datafusion::prelude::SessionContext::new();
-	crate::ws::agent_runner::pre_register_all_namespaces(&ctx_df).await;
-	let registry = crate::ws::agent_runner::build_registry(agent, &ctx_df);
-	// Determine question for embeddings
-	let q_for_embed = {
-		let storeq = crate::qa::session::ThreadStore::new();
-		let mut q = question.to_string();
-		if let Some(log) = storeq.get(thread_id).await {
-			if let Some(first_user) = log.steps.iter().find(|s| s.action == "user") {
-				if let Some(t) = first_user.args.get("text").and_then(|x| x.as_str()) {
-					if !t.trim().is_empty() { q = t.to_string(); }
-				}
-			}
+	// Delegate to flows
+	let convert = |ff: crate::flows::adapter::FlowFrame| -> AgentFrame {
+		match ff {
+			crate::flows::adapter::FlowFrame::Final { answer, sql } => AgentFrame::Final { answer, sql },
+			crate::flows::adapter::FlowFrame::AwaitUser { prompt } => AgentFrame::AwaitUser { prompt },
+			crate::flows::adapter::FlowFrame::AwaitApproval { prompt } => AgentFrame::AwaitApproval { prompt },
+			crate::flows::adapter::FlowFrame::Processing { .. } => AgentFrame::AwaitUser { prompt: "Processing...".to_string() },
 		}
-		q
 	};
-	// Preflight: resolve dataset candidates for all agents
-	let candidates = crate::ws::context::resolve_datasets(&q_for_embed, 3).await;
-	if !candidates.is_empty() {
-		let store = crate::qa::session::ThreadStore::new();
-		let arr: Vec<serde_json::Value> = candidates.iter().map(|c| serde_json::json!({"pipeline": c.pipeline, "namespace": c.namespace, "score": c.score})).collect();
-		let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
-			action: "resolved_datasets".to_string(),
-			args: serde_json::json!({"candidates": arr}),
-			observation: serde_json::json!({"ok": true}),
-			ts: chrono::Utc::now().to_rfc3339(),
-			agent: Some(agent.to_string()),
-		}).await;
-	}
-	// Preflight: resolve metric artifacts for all agents
-	{
-		let arts = crate::ws::context::resolve_artifacts(&q_for_embed, 3, "metric").await;
-		if !arts.is_empty() {
-			let store = crate::qa::session::ThreadStore::new();
-			let arr: Vec<serde_json::Value> = arts.iter().map(|a| serde_json::json!({
-				"pipeline": a.pipeline, "namespace": a.namespace, "name": a.name, "kind": a.kind, "score": a.score
-			})).collect();
-			let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
-				action: "resolved_artifacts".to_string(),
-				args: serde_json::json!({"items": arr}),
-				observation: serde_json::json!({"ok": true}),
-				ts: chrono::Utc::now().to_rfc3339(),
-				agent: Some(agent.to_string()),
-			}).await;
-		}
-	}
-	// Preflight: think-out-loud intent and decision; if low confidence, return AwaitUser frame
-	// Check for existing confident selection to avoid re-gating
-	let mut have_selection = false;
-	{
-		let store = crate::qa::session::ThreadStore::new();
-		if let Some(log) = store.get(thread_id).await {
-			for step in log.steps.iter().rev() {
-				if step.action == "preflight_decision" {
-					if let (Some(sel), Some(conf)) = (step.args.get("selection"), step.args.get("confidence").and_then(|v| v.as_f64())) {
-						if sel.is_object() && conf >= 0.5 { have_selection = true; }
-					}
-					break;
-				}
-			}
-		}
-	}
-	// Working variable for downstream gating and reference example injection
-	let mut decision = crate::ws::context::PreflightDecision::default();
-	if !have_selection {
-		let intent = crate::ws::context::preflight_intent_llm(&q_for_embed).await;
-		{
-			let store = crate::qa::session::ThreadStore::new();
-			let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
-				action: "preflight_intent".to_string(),
-				args: serde_json::to_value(&intent).unwrap_or(serde_json::json!({})),
-				observation: serde_json::json!({"ok": true}),
-				ts: chrono::Utc::now().to_rfc3339(),
-				agent: Some(agent.to_string()),
-			}).await;
-		}
-		let arts_vec = {
-			let store = crate::qa::session::ThreadStore::new();
-			let mut out: Vec<crate::ws::context::ResolvedArtifact> = Vec::new();
-			if let Some(log) = store.get(thread_id).await {
-				for step in log.steps.iter().rev() {
-					if step.action == "resolved_artifacts" {
-						if let Some(arr) = step.args.get("items").and_then(|x| x.as_array()) {
-							for v in arr {
-								let p = v.get("pipeline").and_then(|x| x.as_str()).unwrap_or("").to_string();
-								let ns = v.get("namespace").and_then(|x| x.as_str()).unwrap_or("").to_string();
-								let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
-								let score = v.get("score").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
-								out.push(crate::ws::context::ResolvedArtifact { pipeline: p, namespace: ns, name, kind: "metric".to_string(), score, text: String::new() });
-							}
-						}
-						break;
-					}
-				}
-			}
-			out
-		};
-		decision = crate::ws::context::preflight_decision_llm(&intent, &candidates, &arts_vec).await;
-		{
-			let store = crate::qa::session::ThreadStore::new();
-			let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
-				action: "preflight_decision".to_string(),
-				args: serde_json::to_value(&decision).unwrap_or(serde_json::json!({})),
-				observation: serde_json::json!({"ok": true}),
-				ts: chrono::Utc::now().to_rfc3339(),
-				agent: Some(agent.to_string()),
-			}).await;
-		}
-		if decision.selection.is_none() || decision.confidence < 0.5 {
-			return Ok(vec![AgentFrame::AwaitUser { prompt: CHOOSE_TYPE_PROMPT.to_string() }]);
-		}
-	} else {
-		// Load existing confident decision
-		let store = crate::qa::session::ThreadStore::new();
-		if let Some(log) = store.get(thread_id).await {
-			for step in log.steps.iter().rev() {
-				if step.action == "preflight_decision" {
-					if let Ok(d) = serde_json::from_value::<crate::ws::context::PreflightDecision>(step.args.clone()) {
-						if d.selection.is_some() && d.confidence >= 0.5 { decision = d; }
-					}
-					break;
-				}
-			}
-		}
-	}
-	// Preflight: inject reference example for model agent based on thread state (no heuristics)
-	if agent == "model" {
-		// If an artifact is focused, remind the agent to update in place
-		{
-			let store = crate::qa::session::ThreadStore::new();
-			if let Some(log) = store.get(thread_id).await {
-				for step in log.steps.iter().rev() {
-					if step.action == "artifact_focus" {
-						let name = step.args.get("name").and_then(|v| v.as_str()).unwrap_or("");
-						let pipeline_f = step.args.get("pipeline").and_then(|v| v.as_str()).unwrap_or("");
-						let ns_f = step.args.get("namespace").and_then(|v| v.as_str()).unwrap_or("");
-						if !name.is_empty() {
-							let mut note = format!("You are updating the focused artifact '{}' in place; do not rename.", name);
-							if let (true, true) = (!pipeline_f.is_empty(), !ns_f.is_empty()) {
-								note = format!("{}\nFor MetricFlow YAML, include a top comment for the dataset:\n# Dataset: {}.{}", note, pipeline_f, ns_f);
-							}
-							sys = format!("{}\n\n{}", sys, note);
-						}
-						break;
-					}
-				}
-			}
-		}
-		let store = crate::qa::session::ThreadStore::new();
-		let mut kind_opt: Option<String> = None;
-		// decide by preflight_decision only (selection.type)
-		if let Some(sel) = decision.selection.as_ref() {
-			if sel.type_name == "metric" { kind_opt = Some("metric".to_string()); }
-			if sel.type_name == "model" { kind_opt = Some("model".to_string()); }
-		}
-		if let Some(kind) = kind_opt {
-			let text = if kind == "metric" {
-				crate::qa::reference::metricflow_example()
-			} else {
-				crate::qa::reference::dbt_model_example()
-			};
-			let store = crate::qa::session::ThreadStore::new();
-			let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
-				action: "reference_example".to_string(),
-				args: serde_json::json!({"kind": kind, "text": text}),
-				observation: serde_json::json!({"ok": true}),
-				ts: chrono::Utc::now().to_rfc3339(),
-				agent: Some(agent.to_string()),
-			}).await;
-			// Note in the prompt header
-			sys = format!("{}\n\nReferenceExample: provided for kind '{}'; follow its syntax strictly.", sys, kind);
-		}
-	}
-	let actx = AgentCtx {
-		top_k: 30,
-		per_step_timeout_secs: 10,
-		max_steps: 10,
-		thread_id: Some(thread_id.to_string()),
-		progress_tx: None,
-		pre_step_tx: None,
-		agent_name: Some(agent.to_string()),
-		dataset_candidates: candidates.iter().map(|c| crate::qa::agent::DatasetCandidate { pipeline: c.pipeline.clone(), namespace: c.namespace.clone(), score: c.score }).collect(),
+	let frames = match agent {
+		"model" => crate::flows::model::run(thread_id, question).await?.into_iter().map(convert).collect(),
+		"cleanse" => crate::flows::cleanse::run(thread_id, question).await?.into_iter().map(convert).collect(),
+		_ => crate::flows::ask::run(thread_id, question).await?.into_iter().map(convert).collect(),
 	};
-	let mut frames: Vec<AgentFrame> = Vec::new();
-	let question2 = crate::ws::agent_runner::inject_agent_question(agent, question);
-	match Agent::run_until_block(&registry, &actx, &sys, &tools_card, &question2).await {
-		Ok(RunOutcome::Final { thread_id: _tid, result }) => {
-			let (header, rows) = load_last_run_sql_async(thread_id).await;
-			let improved = synthesize_summary(&question2, &result.answer, &result.sql, &header, &rows).await;
-			let answer = improved.unwrap_or(result.answer);
-			let sql_opt = if agent == "model" { None } else { result.sql };
-			frames.push(AgentFrame::Final { answer, sql: sql_opt });
-		}
-		Ok(RunOutcome::AwaitUser { thread_id: _tid, prompt }) => {
-			frames.push(AgentFrame::AwaitUser { prompt });
-		}
-		Ok(RunOutcome::AwaitApproval { thread_id: _tid, prompt }) => {
-			frames.push(AgentFrame::AwaitApproval { prompt });
-		}
-		Err(e) => return Err(e),
-	}
 	Ok(frames)
 }
 

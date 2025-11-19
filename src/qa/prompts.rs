@@ -36,7 +36,6 @@ pub fn tool_card() -> String {
 - run_sql(args:{sql:string}) -> {"ok":true,"header":[string], "rows":[[string]]} or {"ok":false,"error":string}
  - ask_user(args:{prompt:string}) -> {"ok":true,"prompt":string}
  - artifacts(args:{op:"list", namespace?:string, type?:"model"|"metric", limit?:int} | {op:"get", pipeline:string, namespace:string, type:"model"|"metric", name:string})
- - approve_and_save_artifact(args:{kind:"model"|"metric", name:string, content:string, pipeline?:string, namespace?:string, preview_diff?:bool})
 
 Usage guidance:
 - Always return only JSON, never prose. Examples:
