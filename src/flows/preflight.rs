@@ -108,4 +108,64 @@ pub async fn run_preflight(thread_id: &str, question: &str, agent: &str, cfg: &P
 	}
 }
 
+pub async fn run_preflight_on_bundle(thread_id: &str, agent: &str) -> PreflightOutcome {
+	// Read back the latest discovery bundle from the thread
+	let store = crate::qa::session::ThreadStore::new();
+	let mut datasets: Vec<crate::ws::context::DatasetResolved> = Vec::new();
+	if let Some(log) = store.get(thread_id).await {
+		for step in log.steps.iter().rev() {
+			if step.action == "discovery_bundle" {
+				if let Some(arr) = step.args.get("datasets").and_then(|x| x.as_array()) {
+					for v in arr {
+						let p = v.get("pipeline").and_then(|x| x.as_str()).unwrap_or("").to_string();
+						let ns = v.get("namespace").and_then(|x| x.as_str()).unwrap_or("").to_string();
+						let score = v.get("score").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
+						if !p.is_empty() && !ns.is_empty() {
+							datasets.push(crate::ws::context::DatasetResolved { pipeline: p, namespace: ns, score, fields_hint: String::new() });
+						}
+					}
+				}
+				break;
+			}
+		}
+	}
+	// Intent then decision using the original first user question
+	let q_for_embed = {
+		if let Some(log) = store.get(thread_id).await {
+			if let Some(first_user) = log.steps.iter().find(|s| s.action == "user") {
+				if let Some(t) = first_user.args.get("text").and_then(|x| x.as_str()) {
+					if !t.trim().is_empty() { t.to_string() } else { String::new() }
+				} else { String::new() }
+			} else { String::new() }
+		} else { String::new() }
+	};
+	let intent = crate::ws::context::preflight_intent_llm(&q_for_embed).await;
+	{
+		let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
+			action: "preflight_intent".to_string(),
+			args: serde_json::to_value(&intent).unwrap_or(serde_json::json!({})),
+			observation: serde_json::json!({"ok": true}),
+			ts: chrono::Utc::now().to_rfc3339(),
+			agent: Some(agent.to_string()),
+		}).await;
+	}
+	let arts_vec: Vec<crate::ws::context::ResolvedArtifact> = Vec::new();
+	let decision = crate::ws::context::preflight_decision_llm(&intent, &datasets, &arts_vec).await;
+	{
+		let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
+			action: "preflight_decision".to_string(),
+			args: serde_json::to_value(&decision).unwrap_or(serde_json::json!({})),
+			observation: serde_json::json!({"ok": true}),
+			ts: chrono::Utc::now().to_rfc3339(),
+			agent: Some(agent.to_string()),
+		}).await;
+	}
+	PreflightOutcome {
+		intent: Some(serde_json::to_value(intent).unwrap_or(serde_json::json!({}))),
+		datasets: datasets.iter().map(|c| serde_json::json!({"pipeline": c.pipeline, "namespace": c.namespace, "score": c.score})).collect(),
+		artifacts: Vec::new(),
+		decision: Some(decision),
+	}
+}
+
 

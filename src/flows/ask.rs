@@ -1,4 +1,3 @@
-use datafusion::prelude::SessionContext;
 use crate::flows::adapter::FlowFrame;
 
 pub async fn run(thread_id: &str, question: &str) -> Result<Vec<FlowFrame>, String> {
@@ -6,38 +5,32 @@ pub async fn run(thread_id: &str, question: &str) -> Result<Vec<FlowFrame>, Stri
 	let sys = crate::prompts::prompts_shared::with_time_context(crate::prompts::ask::system_prompt());
 	let tools_card = crate::prompts::ask::tool_card();
 
-	// Create/reuse DF context scoped to thread
+	// Thread-scoped DF context
 	let ctx_df = crate::ws::agent_runner::get_or_create_thread_ctx(thread_id);
-	// Preflight first (no modeling gates)
-	let pre = crate::flows::preflight::run_preflight(
+	// Liberal parallel discovery (datasets, schemas, samples)
+	let bundle = crate::flows::discovery::run_discovery(
 		thread_id,
 		question,
-		"ask",
-		&crate::flows::preflight::PreflightConfig {
-			resolve_artifacts: true,
-			gate_on_selection: false,
-			selection_types: vec!["dataset","metric","model"],
-		}
+		&ctx_df,
+		&crate::flows::discovery::DiscoveryLimits::default(),
 	).await;
-	// Greedily register all candidate namespaces from preflight
-	let mut pairs: Vec<(String,String)> = Vec::new();
-	for v in pre.datasets.iter() {
-		if let (Some(p), Some(ns)) = (v.get("pipeline").and_then(|x| x.as_str()), v.get("namespace").and_then(|x| x.as_str())) {
-			pairs.push((p.to_string(), ns.to_string()));
-		}
-	}
+	// Register all discovered datasets (already done inside, but safe)
+	let mut pairs: Vec<(String,String)> = bundle.datasets.iter().map(|(p,ns,_)| (p.clone(), ns.clone())).collect();
+	crate::flows::util::dedup_pairs(&mut pairs);
 	crate::ws::agent_runner::pre_register_selected_namespaces(&ctx_df, &pairs).await;
+	// Batch preflight on bundle
+	let pre = crate::flows::preflight::run_preflight_on_bundle(thread_id, "ask").await;
 	let registry = crate::flows::registry::build_for("ask", &ctx_df);
 
 	let actx = crate::qa::agent::AgentCtx {
 		top_k: 30,
 		per_step_timeout_secs: 10,
-		max_steps: 10,
+		max_steps: 50,
 		thread_id: Some(thread_id.to_string()),
 		progress_tx: None,
 		pre_step_tx: None,
 		agent_name: Some("ask".to_string()),
-		dataset_candidates: Vec::new(),
+		dataset_candidates: bundle.datasets.iter().take(8).map(|(p,ns,sc)| crate::qa::agent::DatasetCandidate { pipeline: p.clone(), namespace: ns.clone(), score: *sc }).collect(),
 	};
 	let question2 = question.to_string();
 	let mut frames: Vec<FlowFrame> = Vec::new();

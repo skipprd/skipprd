@@ -12,7 +12,7 @@ pub struct SqlSampleTool {
 impl Tool for SqlSampleTool {
     fn name(&self) -> &'static str { "sql_sample" }
     async fn call(&self, args: Value, _ctx: &AgentCtx) -> Result<Value, String> {
-        let table = args.get("table").and_then(|x| x.as_str()).unwrap_or("");
+			let table = args.get("table").and_then(|x| x.as_str()).unwrap_or("");
         let field = args.get("field").and_then(|x| x.as_str()).unwrap_or("");
         let k = args.get("k").and_then(|x| x.as_u64()).unwrap_or(10);
         if table.is_empty() || field.is_empty() {
@@ -20,7 +20,13 @@ impl Tool for SqlSampleTool {
         }
         let sql = format!("SELECT {f} AS value, COUNT(1) AS cnt FROM {t} GROUP BY {f} ORDER BY cnt DESC LIMIT {k}",
             f = field, t = table, k = k);
-        match self.ctx.sql(&sql).await {
+			// Always use existing thread-scoped context if available; else fall back to injected ctx
+			let ctx = if let Some(tid) = _ctx.thread_id.as_ref() {
+				crate::ws::agent_runner::get_or_create_thread_ctx(tid)
+			} else {
+				self.ctx.clone()
+			};
+			match ctx.sql(&sql).await {
             Ok(df) => match df.collect().await {
                 Ok(batches) => {
                     let mut values: Vec<Value> = Vec::new();

@@ -8,25 +8,18 @@ pub async fn run(thread_id: &str, question: &str) -> Result<Vec<FlowFrame>, Stri
 	// DF context reused per thread
 	let ctx_df = crate::ws::agent_runner::get_or_create_thread_ctx(thread_id);
 
-	// Preflight with artifacts
-	let pre = crate::flows::preflight::run_preflight(
+	// Liberal parallel discovery (datasets, schemas, samples)
+	let bundle = crate::flows::discovery::run_discovery(
 		thread_id,
 		question,
-		"model",
-		&crate::flows::preflight::PreflightConfig {
-			resolve_artifacts: true,
-			gate_on_selection: true,
-			selection_types: vec!["metric","model"],
-		}
+		&ctx_df,
+		&crate::flows::discovery::DiscoveryLimits::default(),
 	).await;
-	// Greedily register all candidate namespaces from preflight
-	let mut pairs: Vec<(String,String)> = Vec::new();
-	for v in pre.datasets.iter() {
-		if let (Some(p), Some(ns)) = (v.get("pipeline").and_then(|x| x.as_str()), v.get("namespace").and_then(|x| x.as_str())) {
-			pairs.push((p.to_string(), ns.to_string()));
-		}
-	}
+	let mut pairs: Vec<(String,String)> = bundle.datasets.iter().map(|(p,ns,_)| (p.clone(), ns.clone())).collect();
+	crate::flows::util::dedup_pairs(&mut pairs);
 	crate::ws::agent_runner::pre_register_selected_namespaces(&ctx_df, &pairs).await;
+	// Batch preflight on bundle
+	let pre = crate::flows::preflight::run_preflight_on_bundle(thread_id, "model").await;
 	let registry = crate::flows::registry::build_for("model", &ctx_df);
 	// Prefer prior confident decision from thread before gating again
 	let mut decision_opt = pre.decision.clone();
@@ -69,12 +62,12 @@ pub async fn run(thread_id: &str, question: &str) -> Result<Vec<FlowFrame>, Stri
 	let actx = crate::qa::agent::AgentCtx {
 		top_k: 30,
 		per_step_timeout_secs: 10,
-		max_steps: 10,
+		max_steps: 50,
 		thread_id: Some(thread_id.to_string()),
 		progress_tx: None,
 		pre_step_tx: None,
 		agent_name: Some("model".to_string()),
-		dataset_candidates: Vec::new(),
+		dataset_candidates: bundle.datasets.iter().take(8).map(|(p,ns,sc)| crate::qa::agent::DatasetCandidate { pipeline: p.clone(), namespace: ns.clone(), score: *sc }).collect(),
 	};
 	let question2 = crate::ws::agent_runner::inject_agent_question("model", question);
 	let mut frames: Vec<FlowFrame> = Vec::new();

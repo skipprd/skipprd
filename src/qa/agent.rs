@@ -88,6 +88,8 @@ impl Agent {
             }
         }
 
+        // Simple loop-guard memory: last few short, repeating failures
+        let mut recent: std::collections::VecDeque<(String, String, u128)> = std::collections::VecDeque::with_capacity(8);
         for step_idx in 0..ctx.max_steps {
             info!("ReAct step {}", step_idx + 1);
             let prompt = transcript.join("\n\n") + &format!("\n\nStep {}: Decide next action.", step_idx + 1);
@@ -221,10 +223,12 @@ impl Agent {
                 let _ = tx.send(action_name.clone());
             }
             let args = parsed.get("args").cloned().unwrap_or(Value::Null);
+            let start = std::time::Instant::now();
             let obs = match tools.call(&action_name, args.clone(), ctx).await {
                 Ok(o) => o,
                 Err(e) => serde_json::json!({"ok": false, "error": e}),
             };
+            let dur_ms = start.elapsed().as_millis();
             transcript.push(format!("Action: {} Args: {}", action_name, args));
             transcript.push(format!("Observation: {}", obs));
             let _ = store.append_step(&thread_id, ThreadStep {
@@ -234,6 +238,31 @@ impl Agent {
                 ts: chrono::Utc::now().to_rfc3339(),
                 agent: ctx.agent_name.clone(),
             }).await;
+            // Loop-guard bookkeeping
+            let err_snippet = obs.get("error").and_then(|x| x.as_str()).unwrap_or("").chars().take(64).collect::<String>();
+            if !err_snippet.is_empty() {
+                if recent.len() == 8 { recent.pop_front(); }
+                recent.push_back((action_name.clone(), err_snippet.clone(), dur_ms));
+                // If 5 most recent are the same action+error and each < 300ms and total < 3000ms → stop
+                if recent.len() >= 5 {
+                    let n = recent.len();
+                    let window = &recent.as_slices().0[(n-5)..];
+                    let same = window.iter().all(|(a,e,_)| a == &action_name && e == &err_snippet);
+                    let fast = window.iter().all(|(_,_,d)| *d < 300);
+                    let total: u128 = window.iter().map(|(_,_,d)| *d).sum();
+                    if same && fast && total < 3000 {
+                        let result = ThreadResult { sql: None, answer: format!("Halting due to rapid repeated '{}' errors. Last error: {}", action_name, err_snippet) };
+                        let _ = store.append_step(&thread_id, ThreadStep {
+                            action: "final".to_string(),
+                            args: serde_json::json!({"answer": result.answer, "sql": null}),
+                            observation: serde_json::json!({"ok": true}),
+                            ts: chrono::Utc::now().to_rfc3339(),
+                            agent: ctx.agent_name.clone(),
+                        }).await;
+                        return Ok(RunOutcome::Final { thread_id, result });
+                    }
+                }
+            }
             if let Some(tx) = ctx.progress_tx.as_ref() {
                 let _ = tx.send(step_idx + 1);
             }
