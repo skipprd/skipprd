@@ -61,9 +61,9 @@ pub async fn new_context_all_namespaces() -> SessionContext {
 	for pipeline in pipelines {
 		let mut namespaces = crate::sql::registry::list_namespaces(&pipeline).await;
 		namespaces.sort();
-		for ns in namespaces {
-			let _ = crate::sql::tables::register_namespace_view(&ctx, &pipeline, &ns).await;
-		}
+		let mut pairs: Vec<(String, String)> = Vec::new();
+		for ns in namespaces { pairs.push((pipeline.clone(), ns)); }
+		crate::ws::agent_runner::pre_register_selected_namespaces(&ctx, &pairs).await;
 		let _ = crate::sql::tables::register_deadletters(&ctx, &pipeline).await;
 	}
 	ctx

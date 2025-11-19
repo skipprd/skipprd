@@ -6,13 +6,10 @@ pub async fn run(thread_id: &str, question: &str) -> Result<Vec<FlowFrame>, Stri
 	let sys = crate::prompts::prompts_shared::with_time_context(crate::prompts::ask::system_prompt());
 	let tools_card = crate::prompts::ask::tool_card();
 
-	// Pre-register namespaces
-	let ctx_df = SessionContext::new();
-	crate::ws::agent_runner::pre_register_all_namespaces(&ctx_df).await;
-	let registry = crate::flows::registry::build_for("ask", &ctx_df);
-
-	// Reuse preflight (no modeling gates)
-	let _pre = crate::flows::preflight::run_preflight(
+	// Create/reuse DF context scoped to thread
+	let ctx_df = crate::ws::agent_runner::get_or_create_thread_ctx(thread_id);
+	// Preflight first (no modeling gates)
+	let pre = crate::flows::preflight::run_preflight(
 		thread_id,
 		question,
 		"ask",
@@ -22,6 +19,15 @@ pub async fn run(thread_id: &str, question: &str) -> Result<Vec<FlowFrame>, Stri
 			selection_types: vec!["dataset","metric","model"],
 		}
 	).await;
+	// Greedily register all candidate namespaces from preflight
+	let mut pairs: Vec<(String,String)> = Vec::new();
+	for v in pre.datasets.iter() {
+		if let (Some(p), Some(ns)) = (v.get("pipeline").and_then(|x| x.as_str()), v.get("namespace").and_then(|x| x.as_str())) {
+			pairs.push((p.to_string(), ns.to_string()));
+		}
+	}
+	crate::ws::agent_runner::pre_register_selected_namespaces(&ctx_df, &pairs).await;
+	let registry = crate::flows::registry::build_for("ask", &ctx_df);
 
 	let actx = crate::qa::agent::AgentCtx {
 		top_k: 30,

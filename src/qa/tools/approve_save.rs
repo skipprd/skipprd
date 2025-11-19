@@ -3,6 +3,7 @@ use serde_json::Value;
 use crate::qa::agent::AgentCtx;
 use super::Tool;
 use tracing::info;
+use datafusion::prelude::SessionContext;
 
 pub struct ApproveAndSaveArtifactTool;
 
@@ -152,11 +153,17 @@ impl Tool for ApproveAndSaveArtifactTool {
 			}));
 		}
 
-		// Validate
-			if kind == "model" {
-				validate_model_sql(&content_final).await?;
+		// Validate using thread-scoped DF context and only the selected dataset
+			let ctx_df: SessionContext = if let Some(tid) = _ctx.thread_id.as_ref() {
+				crate::ws::agent_runner::get_or_create_thread_ctx(tid)
 			} else {
-				validate_metric_yaml_for_dataset(&content_final, &pipeline, &namespace).await?;
+				SessionContext::new()
+			};
+			crate::ws::agent_runner::pre_register_selected_namespaces(&ctx_df, &[(pipeline.clone(), namespace.clone())]).await;
+			if kind == "model" {
+				validate_model_sql_for_dataset(&content_final, &pipeline, &namespace, &ctx_df).await?;
+			} else {
+				validate_metric_yaml_for_dataset(&content_final, &pipeline, &namespace, &ctx_df).await?;
 			}
 
 		// Save current (stable name)
@@ -295,7 +302,7 @@ fn preprocess_model_sql(raw: &str) -> String {
 	cleaned
 }
 
-async fn validate_model_sql(raw: &str) -> Result<(), String> {
+async fn validate_model_sql_for_dataset(raw: &str, pipeline: &str, namespace: &str, ctx: &SessionContext) -> Result<(), String> {
 	let cleaned = preprocess_model_sql(raw);
 	if cleaned.is_empty() {
 		return Err("empty SQL after preprocessing".to_string());
@@ -308,15 +315,18 @@ async fn validate_model_sql(raw: &str) -> Result<(), String> {
 	if !forced.to_lowercase().contains(" limit ") {
 		forced.push_str(" LIMIT 10");
 	}
-	let ctx = crate::sql::query::new_context_all_namespaces().await;
+	// Ensure only the selected dataset is registered in this context
+	crate::ws::agent_runner::pre_register_selected_namespaces(ctx, &[(pipeline.to_string(), namespace.to_string())]).await;
 	match ctx.sql(&forced).await {
 		Ok(df) => df.collect().await.map(|_| ()).map_err(|e| e.to_string()),
 		Err(e) => Err(e.to_string()),
 	}
 }
 
-async fn validate_metric_yaml(yaml_text: &str) -> Result<(), String> {
+async fn validate_metric_yaml_for_dataset(yaml_text: &str, pipeline: &str, namespace: &str, ctx: &SessionContext) -> Result<(), String> {
+	// Structural validation
 	let parsed_yaml = serde_yaml::from_str::<serde_yaml::Value>(yaml_text).map_err(|e| e.to_string())?;
+	// Optional: validate embedded SELECTs against the selected dataset context only
 	let mut sqls: Vec<String> = Vec::new();
 	fn find_sql_fragments(v: &serde_yaml::Value, out: &mut Vec<String>) {
 		match v {
@@ -336,7 +346,7 @@ async fn validate_metric_yaml(yaml_text: &str) -> Result<(), String> {
 		}
 	}
 	find_sql_fragments(&parsed_yaml, &mut sqls);
-	let ctx = crate::sql::query::new_context_all_namespaces().await;
+	crate::ws::agent_runner::pre_register_selected_namespaces(ctx, &[(pipeline.to_string(), namespace.to_string())]).await;
 	for s in sqls.iter() {
 		let sl = s.trim().to_lowercase();
 		if sl.starts_with("select ") {
@@ -346,14 +356,7 @@ async fn validate_metric_yaml(yaml_text: &str) -> Result<(), String> {
 			}
 		}
 	}
-	Ok(())
-}
-
-async fn validate_metric_yaml_for_dataset(yaml_text: &str, pipeline: &str, namespace: &str) -> Result<(), String> {
-	// Base structural/SQL validation
-	validate_metric_yaml(yaml_text).await?;
 	// Best-effort field compatibility check: ensure expressions reference at least one known column
-	let ctx = crate::sql::query::new_context_all_namespaces().await;
 	let table_name = format!("{}.{}", pipeline, namespace);
 	let df = ctx.table(&table_name).await.map_err(|e| format!("Dataset '{}' unavailable: {}", table_name, e))?;
 	let mut cols: Vec<String> = Vec::new();
@@ -361,7 +364,6 @@ async fn validate_metric_yaml_for_dataset(yaml_text: &str, pipeline: &str, names
 		cols.push(f.name().to_lowercase());
 	}
 	let colset: std::collections::HashSet<&str> = cols.iter().map(|s| s.as_str()).collect();
-	let parsed_yaml = serde_yaml::from_str::<serde_yaml::Value>(yaml_text).map_err(|e| e.to_string())?;
 	let mut exprs: Vec<String> = Vec::new();
 	fn collect_exprs(v: &serde_yaml::Value, out: &mut Vec<String>) {
 		match v {

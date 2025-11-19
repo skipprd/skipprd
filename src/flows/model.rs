@@ -5,10 +5,8 @@ pub async fn run(thread_id: &str, question: &str) -> Result<Vec<FlowFrame>, Stri
 	let sys = crate::prompts::prompts_shared::with_time_context(crate::prompts::model::system_prompt());
 	let tools_card = crate::prompts::model::tool_card();
 
-	// DF context and registry
-	let ctx_df = SessionContext::new();
-	crate::ws::agent_runner::pre_register_all_namespaces(&ctx_df).await;
-	let registry = crate::flows::registry::build_for("model", &ctx_df);
+	// DF context reused per thread
+	let ctx_df = crate::ws::agent_runner::get_or_create_thread_ctx(thread_id);
 
 	// Preflight with artifacts
 	let pre = crate::flows::preflight::run_preflight(
@@ -21,6 +19,15 @@ pub async fn run(thread_id: &str, question: &str) -> Result<Vec<FlowFrame>, Stri
 			selection_types: vec!["metric","model"],
 		}
 	).await;
+	// Greedily register all candidate namespaces from preflight
+	let mut pairs: Vec<(String,String)> = Vec::new();
+	for v in pre.datasets.iter() {
+		if let (Some(p), Some(ns)) = (v.get("pipeline").and_then(|x| x.as_str()), v.get("namespace").and_then(|x| x.as_str())) {
+			pairs.push((p.to_string(), ns.to_string()));
+		}
+	}
+	crate::ws::agent_runner::pre_register_selected_namespaces(&ctx_df, &pairs).await;
+	let registry = crate::flows::registry::build_for("model", &ctx_df);
 	// Prefer prior confident decision from thread before gating again
 	let mut decision_opt = pre.decision.clone();
 	if decision_opt.is_none() || decision_opt.as_ref().unwrap().selection.is_none() || decision_opt.as_ref().unwrap().confidence < 0.5 {

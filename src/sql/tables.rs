@@ -147,6 +147,24 @@ async fn build_wal_df(ctx: &SessionContext, pipeline: &str, namespace: &str) -> 
 }
 
 pub async fn register_namespace_view(ctx: &SessionContext, pipeline: &str, namespace: &str) -> Result<(), DataFusionError> {
+	// If this table already exists in this context, skip work
+	{
+		use datafusion::catalog::CatalogProvider;
+		let state = ctx.state();
+		let cat_list = state.catalog_list();
+		if let Some(catalog) = cat_list.catalog("datafusion") {
+			if let Some(schema) = catalog.schema(pipeline) {
+				// Async check for existing table in this context
+				match schema.table(namespace).await {
+					Ok(Some(_tbl)) => {
+						debug!("register_namespace_view: table already present in context: datafusion.{}.{}", pipeline, namespace);
+						return Ok(());
+					}
+					_ => {}
+				}
+			}
+		}
+	}
     // ensure pipeline context
     crate::helpers::configuration::PIPELINE_NAME.write().clear();
     crate::helpers::configuration::PIPELINE_NAME.write().push_str(pipeline);

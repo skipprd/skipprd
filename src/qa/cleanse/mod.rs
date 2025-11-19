@@ -10,17 +10,18 @@ use uuid::Uuid;
 use crate::qa::session::ThreadResult;
 
 pub async fn run(pipeline: &str, prompt: &str) -> Result<(), String> {
-    let ctx = SessionContext::new();
-    // Auto-register all pipelines/namespaces for cross-namespace context
+    // Create thread id first to reuse a thread-scoped context
+    let thread_id0 = Uuid::new_v4().to_string();
+    let ctx = crate::ws::agent_runner::get_or_create_thread_ctx(&thread_id0);
+    // Greedy, checksum-aware register of all namespaces (once per process/thread)
     {
         let pipelines = crate::sql::registry::list_pipelines().await;
         for p in pipelines {
             let mut namespaces = crate::sql::registry::list_namespaces(&p).await;
             namespaces.sort();
-            for ns in namespaces {
-                let _ = crate::sql::tables::register_namespace_view(&ctx, &p, &ns).await;
-            }
-            // Also register deadletters (best-effort)
+            let mut pairs: Vec<(String, String)> = Vec::new();
+            for ns in namespaces { pairs.push((p.clone(), ns)); }
+            crate::ws::agent_runner::pre_register_selected_namespaces(&ctx, &pairs).await;
             let _ = crate::sql::tables::register_deadletters(&ctx, &p).await;
         }
     }
@@ -54,7 +55,6 @@ pub async fn run(pipeline: &str, prompt: &str) -> Result<(), String> {
     );
 
     // Interactive loop similar to qa/ask: handle AwaitUser interactions
-    let thread_id0 = Uuid::new_v4().to_string();
     let actx = AgentCtx { thread_id: Some(thread_id0.clone()), ..actx };
     let mut thread_id = thread_id0;
     let mut result: Option<ThreadResult> = None;

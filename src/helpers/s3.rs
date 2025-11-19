@@ -2,6 +2,7 @@ use aws_sdk_s3::{Client as S3Client, Error as S3Error};
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::operation::get_object::GetObjectError;
+use aws_sdk_s3::operation::head_object::HeadObjectError;
 use aws_sdk_s3::operation::delete_object::DeleteObjectError;
 use serde_json::Value;
 use std::sync::Arc;
@@ -282,4 +283,27 @@ pub async fn list_parquet_keys(bucket: &str, prefix: &str, max: usize) -> Vec<St
     }
     out.sort_by_key(|(_, ts)| *ts);
     out.into_iter().map(|(k, _)| k).take(max).collect()
+}
+
+/// HEAD an object and return its ETag (without surrounding quotes) if present.
+pub async fn head_etag(key: &str) -> Result<Option<String>, SdkError<HeadObjectError>> {
+    let client = get_s3_client().await;
+    let bucket = get_skippr_bucket();
+    let res = client.head_object().bucket(&bucket).key(key).send().await;
+    match res {
+        Ok(resp) => {
+            let et = resp.e_tag().map(|s| s.trim_matches('"').to_string());
+            Ok(et)
+        }
+        Err(e) => {
+            // Treat 404/NotFound as missing object → None
+            if let SdkError::ServiceError(se) = &e {
+                // Some SDKs expose is_not_found; if not, fall back to None on 404 status
+                if se.err().is_not_found() {
+                    return Ok(None);
+                }
+            }
+            Err(e)
+        }
+    }
 }

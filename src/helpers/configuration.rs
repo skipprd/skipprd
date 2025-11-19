@@ -14,6 +14,7 @@ use dashmap::DashMap;
 use ini::configparser::ini::Ini;
 use lazy_static::lazy_static;
 use once_cell::sync::Lazy;
+use once_cell::sync::OnceCell;
 
 // use aws_config::profile::profile_file::ProfileFileKind::Config;
 use serde_derive::{Deserialize};
@@ -44,6 +45,8 @@ lazy_static! {
 }
 
 const DEFAULT_CONFIG: &'static str = "NULL_VALUE";
+
+pub static DATA_DIR_INIT_ONCE: OnceCell<()> = OnceCell::new();
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Skippr {
@@ -2005,7 +2008,9 @@ impl Config {
         // Enforce reserved name policy early
         Self::assert_pipeline_not_reserved();
 
-        info!("Initializing data directories...");
+        if crate::helpers::configuration::DATA_DIR_INIT_ONCE.get().is_none() {
+            info!("Initializing data directories...");
+        }
 
         let data_dir = Config::get_data_dir();
         let ingest_dir = &format!("{}/ingest_buffer", data_dir);
@@ -2032,7 +2037,10 @@ impl Config {
             Err(_err) => {}
         }
 
-        info!("Initialized data directories at: {}", data_dir);
+        if crate::helpers::configuration::DATA_DIR_INIT_ONCE.get().is_none() {
+            info!("Initialized data directories at: {}", data_dir);
+            let _ = crate::helpers::configuration::DATA_DIR_INIT_ONCE.set(());
+        }
 
     }
 
