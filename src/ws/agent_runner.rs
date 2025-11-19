@@ -45,16 +45,8 @@ pub fn get_or_create_thread_ctx(thread_id: &str) -> SessionContext {
 pub async fn pre_register_selected_namespaces(ctx: &SessionContext, pairs: &[(String, String)]) {
 	for (pipeline, namespace) in pairs.iter() {
 		let key = format!("{}.{}", pipeline, namespace);
-		// Resolve manifest key for this (pipeline, namespace)
-		let manifest_key_opt = {
-			let prev = crate::helpers::configuration::Config::get_pipeline_name();
-			crate::helpers::configuration::PIPELINE_NAME.write().clear();
-			crate::helpers::configuration::PIPELINE_NAME.write().push_str(pipeline);
-			let out = crate::helpers::configuration::Config::get_manifest_s3_key(namespace).map(|(_, k)| k);
-			crate::helpers::configuration::PIPELINE_NAME.write().clear();
-			crate::helpers::configuration::PIPELINE_NAME.write().push_str(&prev);
-			out
-		};
+		// Resolve manifest key for this (pipeline, namespace) without using any global pipeline state
+		let manifest_key = crate::sql::registry::manifest_key_for(pipeline, namespace);
 
 		// Determine current etag (with 10-minute TTL on HEAD checks)
 		let mut current_etag: String = "missing".to_string();
@@ -63,13 +55,11 @@ pub async fn pre_register_selected_namespaces(ctx: &SessionContext, pairs: &[(St
 			None => true,
 		};
 		if refresh_needed {
-			if let Some(man_key) = manifest_key_opt.as_ref() {
-				match crate::helpers::s3::head_etag(man_key).await {
-					Ok(Some(et)) => { current_etag = et; }
-					Ok(None) => { current_etag = "missing".to_string(); }
-					Err(_e) => {
-						// keep "missing" sentinel; avoid blocking registration on HEAD failures
-					}
+			match crate::helpers::s3::head_etag(&manifest_key).await {
+				Ok(Some(et)) => { current_etag = et; }
+				Ok(None) => { current_etag = "missing".to_string(); }
+				Err(_e) => {
+					// keep "missing" sentinel; avoid blocking registration on HEAD failures
 				}
 			}
 			ns_etag_cache().insert(key.clone(), EtagEntry { etag: current_etag.clone(), checked_at: Instant::now() });

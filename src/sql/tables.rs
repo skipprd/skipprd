@@ -165,20 +165,29 @@ pub async fn register_namespace_view(ctx: &SessionContext, pipeline: &str, names
 			}
 		}
 	}
-    // ensure pipeline context
-    crate::helpers::configuration::PIPELINE_NAME.write().clear();
-    crate::helpers::configuration::PIPELINE_NAME.write().push_str(pipeline);
-
+    // Initialize config (tenant/workspace/bucket), but do NOT touch global pipeline state
     Config::init().await;
     info!("Registering namespace view for pipeline '{}', namespace '{}'", pipeline, namespace);
 
     // manifest -> prefixes (bounded to avoid stalls)
     let mut s3_paths: Vec<String> = Vec::new();
-    let man_opt = match tokio::time::timeout(Duration::from_secs(12), Config::read_manifest(namespace)).await {
-        Ok(v) => v,
-        Err(_) => {
-            warn!("register_namespace_view: timed out reading manifest for '{}.{}'", pipeline, namespace);
-            None
+    // Build manifest key from explicit pipeline/namespace (no global pipeline)
+    let man_opt = {
+        let key = crate::sql::registry::manifest_key_for(pipeline, namespace);
+        match tokio::time::timeout(Duration::from_secs(12), crate::helpers::s3::get_json(&key)).await {
+            Ok(Ok(v)) => {
+                info!("Reading manifest from s3://{}/{}", Config::get_skippr_s3_bucket(), key);
+                info!("Manifest content: {}", v);
+                Some(v)
+            }
+            Ok(Err(e)) => {
+                warn!("register_namespace_view: failed to fetch manifest for '{}.{}': {:?}", pipeline, namespace, e);
+                None
+            }
+            Err(_) => {
+                warn!("register_namespace_view: timed out reading manifest for '{}.{}'", pipeline, namespace);
+                None
+            }
         }
     };
     if let Some(man) = man_opt {
