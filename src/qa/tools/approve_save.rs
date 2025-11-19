@@ -55,16 +55,25 @@ impl Tool for ApproveAndSaveArtifactTool {
 				// - For MetricFlow YAML, anchor to the top preflight candidate (no YAML changes needed for spec);
 				//   we will add a top-of-file comment to document the assumed dataset.
 				if kind == "model" {
-					let lower = content.to_lowercase();
-					if let Some((p, ns)) = candidates.iter().find(|(p, ns)| {
+					let lc = content.to_lowercase();
+					// find at least one referenced candidate (FQN or dbt source)
+					let mut referenced: Vec<(String,String)> = Vec::new();
+					for (p, ns) in candidates.iter() {
 						let fqn = format!("{}.{}", p, ns).to_lowercase();
-						lower.contains(&fqn)
-					}) {
-						(p.clone(), ns.clone())
-					} else {
-						let list = candidates.iter().map(|(p, ns)| format!("{}.{}", p, ns)).collect::<Vec<_>>().join(", ");
-						return Err(format!("Model SQL must reference a resolved dataset FQN. Use one of: {}", list));
+						let src1 = format!("source('{}','{}')", p, ns);
+						let src2 = format!("source(\"{}\",\"{}\")", p, ns);
+						let src3 = format!("source('{}', '{}')", p, ns);
+						let src4 = format!("source(\"{}\", \"{}\")", p, ns);
+						if lc.contains(&fqn) || lc.contains(&src1) || lc.contains(&src2) || lc.contains(&src3) || lc.contains(&src4) {
+							referenced.push((p.clone(), ns.clone()));
+						}
 					}
+					if referenced.is_empty() {
+						let list = candidates.iter().map(|(p, ns)| format!("{}.{}", p, ns)).collect::<Vec<_>>().join(", ");
+						return Err(format!("Model SQL must reference at least one resolved dataset (FQN or dbt source). Use one of: {}", list));
+					}
+					// choose the first as primary
+					referenced[0].clone()
 				} else {
 					// metric
 					candidates.first().cloned().unwrap()
@@ -153,15 +162,95 @@ impl Tool for ApproveAndSaveArtifactTool {
 			}));
 		}
 
-		// Validate using thread-scoped DF context and only the selected dataset
+		// Validate using thread-scoped DF context and only the referenced datasets
 			let ctx_df: SessionContext = if let Some(tid) = _ctx.thread_id.as_ref() {
 				crate::ws::agent_runner::get_or_create_thread_ctx(tid)
 			} else {
 				SessionContext::new()
 			};
-			crate::ws::agent_runner::pre_register_selected_namespaces(&ctx_df, &[(pipeline.clone(), namespace.clone())]).await;
+			// Build a minimal registration set: any resolved candidates referenced in content
+			let mut to_register: Vec<(String,String)> = vec![(pipeline.clone(), namespace.clone())];
+			if let Some(tid) = _ctx.thread_id.as_ref() {
+				let store = crate::qa::session::ThreadStore::new();
+				if let Some(log) = store.get(tid).await {
+					let mut uniq = std::collections::HashSet::<String>::new();
+					let lc = content.to_lowercase();
+					for step in log.steps.iter().rev() {
+						if step.action == "resolved_datasets" {
+							if let Some(arr) = step.args.get("candidates").and_then(|x| x.as_array()) {
+								for v in arr {
+									if let (Some(p), Some(ns)) = (v.get("pipeline").and_then(|x| x.as_str()), v.get("namespace").and_then(|x| x.as_str())) {
+										let fqn = format!("{}.{}", p, ns).to_lowercase();
+										let src1 = format!("source('{}','{}')", p, ns);
+										let src2 = format!("source(\"{}\",\"{}\")", p, ns);
+										let src3 = format!("source('{}', '{}')", p, ns);
+										let src4 = format!("source(\"{}\", \"{}\")", p, ns);
+										if lc.contains(&fqn) || lc.contains(&src1) || lc.contains(&src2) || lc.contains(&src3) || lc.contains(&src4) {
+											let key = format!("{}.{}", p, ns);
+											if uniq.insert(key) {
+												to_register.push((p.to_string(), ns.to_string()));
+											}
+										}
+									}
+								}
+							}
+							break;
+						}
+					}
+				}
+			}
+			crate::ws::agent_runner::pre_register_selected_namespaces(&ctx_df, &to_register).await;
 			if kind == "model" {
-				validate_model_sql_for_dataset(&content_final, &pipeline, &namespace, &ctx_df).await?;
+				if let Err(err0) = validate_model_sql_for_dataset(&content_final, &pipeline, &namespace, &ctx_df).await {
+					// Eager fix: if dataset has a 'properties' struct, try prefixing known nested fields and re-validate
+					let table_name = format!("{}.{}", pipeline, namespace);
+					let mut properties_fields: std::collections::HashSet<String> = std::collections::HashSet::new();
+					if let Ok(df0) = ctx_df.table(&table_name).await {
+						let schema = df0.schema();
+						for f in schema.fields() {
+							if f.name() == "properties" {
+								use datafusion::arrow::datatypes::DataType;
+								if let DataType::Struct(fields) = f.data_type() {
+									for ch in fields {
+										properties_fields.insert(ch.name().to_string());
+									}
+								}
+								break;
+							}
+						}
+					}
+					if !properties_fields.is_empty() {
+						let fixed = apply_properties_prefix(&content_final, &properties_fields);
+						if fixed != content_final {
+							if validate_model_sql_for_dataset(&fixed, &pipeline, &namespace, &ctx_df).await.is_ok() {
+								// Return a structured fix suggestion for user approval
+								let diff = compute_unified_diff(&content_final, &fixed);
+								if let Some(tid) = _ctx.thread_id.as_ref() {
+									let store = crate::qa::session::ThreadStore::new();
+									let _ = store.append_step(tid, crate::qa::session::ThreadStep {
+										action: "eager_fix".to_string(),
+										args: serde_json::json!({ "reason": "prefix nested fields under 'properties'", "diff": diff }),
+										observation: serde_json::json!({ "ok": true }),
+										ts: chrono::Utc::now().to_rfc3339(),
+										agent: _ctx.agent_name.clone(),
+									}).await;
+								}
+								return Ok(serde_json::json!({
+									"ok": false,
+									"error": err0,
+									"fix_suggested": true,
+									"fixed_content": fixed,
+									"diff": compute_unified_diff(&content_final, &fixed),
+									"kind": kind,
+									"name": name_final,
+									"pipeline": pipeline,
+									"namespace": namespace
+								}));
+							}
+						}
+					}
+					return Err(err0);
+				}
 			} else {
 				validate_metric_yaml_for_dataset(&content_final, &pipeline, &namespace, &ctx_df).await?;
 			}
@@ -275,7 +364,7 @@ fn preprocess_model_sql(raw: &str) -> String {
 		if lt.starts_with("{{") && lt.contains("config(") {
 			continue;
 		}
-		// Unwrap ref('x') or ref(\"x\")
+		// Unwrap ref('x') or ref(\"x\") and source('db','table') → db.table
 		let mut ll = l.clone();
 		while let Some(start) = ll.find("{{") {
 			if let Some(end) = ll[start..].find("}}") {
@@ -285,6 +374,10 @@ fn preprocess_model_sql(raw: &str) -> String {
 					let inner = expr.trim_start_matches("ref(").trim_end_matches(')').trim();
 					let inner = inner.trim_matches('"').trim_matches('\'').to_string();
 					inner
+				} else if expr.starts_with("source(") {
+					let inner = expr.trim_start_matches("source(").trim_end_matches(')').trim();
+					let parts: Vec<&str> = inner.split(',').map(|s| s.trim().trim_matches('"').trim_matches('\'')).collect();
+					if parts.len() == 2 { format!("{}.{}", parts[0], parts[1]) } else { String::new() }
 				} else {
 					String::new()
 				};
@@ -307,19 +400,68 @@ async fn validate_model_sql_for_dataset(raw: &str, pipeline: &str, namespace: &s
 	if cleaned.is_empty() {
 		return Err("empty SQL after preprocessing".to_string());
 	}
-	let upper = cleaned.trim_start().to_uppercase();
-	if !(upper.starts_with("SELECT ") || upper.starts_with("WITH ")) {
-		return Err("model SQL must start with SELECT or WITH".to_string());
+	// Be robust to leading template debris: find first SELECT/WITH token and slice from there
+	let trimmed = cleaned.trim_start();
+	let lower_all = trimmed.to_lowercase();
+	let mut core = trimmed;
+	let sel_idx = lower_all.find("select ");
+	let with_idx = lower_all.find("with ");
+	if let (None, None) = (sel_idx, with_idx) {
+		// Provide a hint: echo first 80 chars for debugging
+		let snippet: String = trimmed.chars().take(80).collect();
+		return Err(format!("model SQL must start with SELECT or WITH; saw: {}", snippet));
+	} else {
+		let start_idx = match (sel_idx, with_idx) {
+			(Some(a), Some(b)) => std::cmp::min(a, b),
+			(Some(a), None) => a,
+			(None, Some(b)) => b,
+			_ => 0,
+		};
+		core = &trimmed[start_idx..];
 	}
-	let mut forced = cleaned.trim().to_string();
+	let mut forced = core.trim().to_string();
 	if !forced.to_lowercase().contains(" limit ") {
 		forced.push_str(" LIMIT 10");
 	}
 	// Ensure only the selected dataset is registered in this context
 	crate::ws::agent_runner::pre_register_selected_namespaces(ctx, &[(pipeline.to_string(), namespace.to_string())]).await;
+	// Try to fetch base schema to provide helpful nested-field hints if available
+	let mut has_properties_struct = false;
+	let table_name = format!("{}.{}", pipeline, namespace);
+	if let Ok(df0) = ctx.table(&table_name).await {
+		let schema = df0.schema();
+		for f in schema.fields() {
+			if f.name() == "properties" {
+				#[allow(unused_imports)]
+				use datafusion::arrow::datatypes::DataType;
+				if matches!(f.data_type(), DataType::Struct(_)) {
+					has_properties_struct = true;
+				}
+				break;
+			}
+		}
+	}
 	match ctx.sql(&forced).await {
-		Ok(df) => df.collect().await.map(|_| ()).map_err(|e| e.to_string()),
-		Err(e) => Err(e.to_string()),
+		Ok(df) => {
+			match df.collect().await {
+				Ok(_) => Ok(()),
+				Err(e) => {
+					let mut msg = e.to_string();
+					if has_properties_struct && msg.contains("No field named ") {
+						// Add a concise hint for nested struct access commonly seen in event schemas
+						msg.push_str(" Hint: nested fields are under 'properties', e.g., properties.remaining_boosts, properties.active.");
+					}
+					Err(msg)
+				}
+			}
+		}
+		Err(e) => {
+			let mut msg = e.to_string();
+			if has_properties_struct && msg.contains("No field named ") {
+				msg.push_str(" Hint: nested fields are under 'properties', e.g., properties.remaining_boosts, properties.active.");
+			}
+			Err(msg)
+		}
 	}
 }
 
@@ -402,6 +544,42 @@ async fn validate_metric_yaml_for_dataset(yaml_text: &str, pipeline: &str, names
 		return Err(format!("MetricFlow YAML expressions may not match fields in '{}'. Inspect schema and align expressions.", table_name));
 	}
 	Ok(())
+}
+
+fn apply_properties_prefix(sql: &str, property_fields: &std::collections::HashSet<String>) -> String {
+	// Best-effort textual rewrite:
+	// - Replace ".field" with ".properties.field" when not already ".properties."
+	// - Replace bare " field" tokens with " properties.field"
+	// Avoid double-prefixing.
+	let mut out = sql.to_string();
+	for f in property_fields.iter() {
+		// Replace alias.field -> alias.properties.field
+		// We do a manual scan to avoid double-prefix
+		let needle = format!(".{}", f);
+		let repl = format!(".properties.{}", f);
+		let mut idx = 0usize;
+		while let Some(pos) = out[idx..].find(&needle) {
+			let pos_abs = idx + pos;
+			let already = pos_abs >= 11 && &out[pos_abs - 11..pos_abs] == ".properties";
+			if !already {
+				out.replace_range(pos_abs..pos_abs + needle.len(), &repl);
+				idx = pos_abs + repl.len();
+			} else {
+				idx = pos_abs + needle.len();
+			}
+		}
+		// Replace bare tokens: use simple separators to reduce false positives
+		for sep in [" ", "(", ",", "\n", "\t"] {
+			let needle2 = format!("{}{}", sep, f);
+			let repl2 = format!("{}properties.{}", sep, f);
+			// Skip if already properties.field
+			let needle2_already = format!("{}properties.{}", sep, f);
+			if !out.contains(&needle2_already) && out.contains(&needle2) {
+				out = out.replace(&needle2, &repl2);
+			}
+		}
+	}
+	out
 }
 
 
