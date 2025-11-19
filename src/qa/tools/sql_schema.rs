@@ -26,9 +26,13 @@ impl Tool for SqlSchemaTool {
 				}
 				t
 			});
-        if let Some(t) = table_opt {
-            // Use unified DF context so two-part names resolve consistently
-            let ctx = crate::sql::query::new_context_all_namespaces().await;
+			if let Some(t) = table_opt {
+				// Always use the existing thread-scoped context if available; else fall back to injected ctx
+				let ctx = if let Some(tid) = _ctx.thread_id.as_ref() {
+					crate::ws::agent_runner::get_or_create_thread_ctx(tid)
+				} else {
+					self.ctx.clone()
+				};
             match ctx.table(&t).await {
                 Ok(df) => {
                     let mut cols: Vec<Value> = Vec::new();
@@ -42,7 +46,11 @@ impl Tool for SqlSchemaTool {
         } else {
             // List registered tables (best effort)
             let mut names: Vec<String> = Vec::new();
-            let ctx = crate::sql::query::new_context_all_namespaces().await;
+				let ctx = if let Some(tid) = _ctx.thread_id.as_ref() {
+					crate::ws::agent_runner::get_or_create_thread_ctx(tid)
+				} else {
+					self.ctx.clone()
+				};
             if let Ok(df) = ctx.sql("SHOW TABLES").await {
                 if let Ok(batches) = df.collect().await {
                     for b in batches {

@@ -19,8 +19,12 @@ impl Tool for SqlRunTool {
         if !forced.to_lowercase().contains(" limit ") {
             forced.push_str(" LIMIT 50");
         }
-			// Use centralized DF context with all namespaces registered
-			let ctx = crate::sql::query::new_context_all_namespaces().await;
+			// Always use the existing thread-scoped context if available; else fall back to injected ctx
+			let ctx = if let Some(tid) = _ctx.thread_id.as_ref() {
+				crate::ws::agent_runner::get_or_create_thread_ctx(tid)
+			} else {
+				self.ctx.clone()
+			};
 			match ctx.sql(&forced).await {
             Ok(df) => match df.collect().await {
                 Ok(batches) => {
