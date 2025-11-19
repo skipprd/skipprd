@@ -51,6 +51,8 @@ components:
         - $ref: '#/components/schemas/HistoryRequest'
         - $ref: '#/components/schemas/SeenRequest'
         - $ref: '#/components/schemas/DeleteRequest'
+        - $ref: '#/components/schemas/ApproveRequest'
+        - $ref: '#/components/schemas/RejectRequest'
       discriminator:
         propertyName: type
         mapping:
@@ -62,12 +64,15 @@ components:
           history: '#/components/schemas/HistoryRequest'
           seen: '#/components/schemas/SeenRequest'
           delete: '#/components/schemas/DeleteRequest'
+          approve: '#/components/schemas/ApproveRequest'
+          reject: '#/components/schemas/RejectRequest'
 
     ServerMessage:
       oneOf:
         - $ref: '#/components/schemas/ListResponse'
         - $ref: '#/components/schemas/FinalResponse'
         - $ref: '#/components/schemas/AwaitUserResponse'
+        - $ref: '#/components/schemas/AwaitApprovalResponse'
         - $ref: '#/components/schemas/OkResponse'
         - $ref: '#/components/schemas/ErrorResponse'
         - $ref: '#/components/schemas/ThreadAssignedResponse'
@@ -81,6 +86,7 @@ components:
           list: '#/components/schemas/ListResponse'
           final: '#/components/schemas/FinalResponse'
           await_user: '#/components/schemas/AwaitUserResponse'
+          await_approval: '#/components/schemas/AwaitApprovalResponse'
           ok: '#/components/schemas/OkResponse'
           error: '#/components/schemas/ErrorResponse'
           thread_assigned: '#/components/schemas/ThreadAssignedResponse'
@@ -211,6 +217,26 @@ components:
         thread_id: { type: string }
       description: Delete a thread (removes thread JSON and any thread-scoped embeddings)
 
+    ApproveRequest:
+      type: object
+      additionalProperties: false
+      required: [v, type, cid, thread_id]
+      properties:
+        v: { type: integer }
+        cid: { type: string }
+        type: { type: string, enum: [approve] }
+        thread_id: { type: string }
+
+    RejectRequest:
+      type: object
+      additionalProperties: false
+      required: [v, type, cid, thread_id]
+      properties:
+        v: { type: integer }
+        cid: { type: string }
+        type: { type: string, enum: [reject] }
+        thread_id: { type: string }
+
     # Server -> Client
     ListResponse:
       type: object
@@ -281,6 +307,22 @@ components:
         prompt:
           type: string
           description: Question the agent asks the user to proceed
+    AwaitApprovalResponse:
+      type: object
+      additionalProperties: false
+      required: [v, type, server_time, seq, thread_id, thread_seq, prompt]
+      properties:
+        v: { type: integer }
+        type:
+          type: string
+          enum: [await_approval]
+        server_time: { type: string }
+        seq: { type: integer }
+        thread_id: { type: string }
+        thread_seq: { type: integer }
+        prompt:
+          type: string
+          description: Approval request message; clients should present Approve/Reject controls
 
     OkResponse:
       type: object
@@ -478,6 +520,30 @@ components:
         thread_id: th_1731761234567
         thread_seq: 2
         prompt: Please tell me a bit about your business (1–3 sentences).
+    awaitApprovalResponse:
+      summary: Agent requests approval for a proposal
+      value:
+        v: 1
+        type: await_approval
+        server_time: "2025-11-16T12:00:05Z"
+        seq: 107
+        thread_id: th_1731761234567
+        thread_seq: 3
+        prompt: Approve the updated MetricFlow definition for metric 'rides_weekly'?
+    approveRequest:
+      summary: Approve current proposal
+      value:
+        v: 1
+        type: approve
+        cid: "a1111111-2222-3333-4444-555555555555"
+        thread_id: th_1731761234567
+    rejectRequest:
+      summary: Reject current proposal
+      value:
+        v: 1
+        type: reject
+        cid: "a1111111-2222-3333-4444-555555555555"
+        thread_id: th_1731761234567
 
     userRequest:
       summary: Provide user input
@@ -496,8 +562,8 @@ components:
 
   x-notes:
     semantics: |
-      - Clients send a request frame and receive a sequence of responses: ok/error, thread_assigned (for new), processing/token (optional), then final or await_user.
-      - Flow: `new` -> (ok) -> [thread_assigned] -> [`processing`/`token`]* -> (`final` | `await_user`). If `await_user`, send `user` to continue until `final`.
+      - Clients send a request frame and receive a sequence of responses: ok/error, thread_assigned (for new), processing/token (optional), then final or await_user/await_approval.
+      - Flow: `new` -> (ok) -> [thread_assigned] -> [`processing`/`token`]* -> (`final` | `await_user` | `await_approval`). If `await_user`, send `user` to continue. If `await_approval`, send `approve` or `reject` (or `user` with edits) to continue.
       - Most server frames include `seq` and `server_time`. Thread-scoped frames include `thread_seq`.
     security: |
       No authentication/authorization is enforced by the server as specified here. Avoid exposing publicly.

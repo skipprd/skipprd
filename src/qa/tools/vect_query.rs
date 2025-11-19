@@ -104,8 +104,8 @@ impl Tool for VectQueryTool {
                         let it = h.item;
                         // Derive pipeline from chunk id pattern: "<kind>:<pipeline>:<namespace>[:field]"
                         let parts: Vec<&str> = it.id.split(':').collect();
-                        let pipeline = if parts.len() >= 3 { parts[1].to_string() } else { ctx.pipeline.clone() };
-                        let dataset = format!("{}.{}", pipeline, it.namespace);
+                        let pipeline = if parts.len() >= 3 { parts[1].to_string() } else { String::new() };
+                        let dataset = if pipeline.is_empty() { it.namespace.clone() } else { format!("{}.{}", pipeline, it.namespace) };
                         serde_json::json!({"kind": it.kind, "namespace": it.namespace, "dataset": dataset, "field": it.field, "text": it.text, "score": h.score})
                     }).collect();
                     return Ok(serde_json::json!({"ok": true, "items": items}));
@@ -138,8 +138,8 @@ impl Tool for VectQueryTool {
             let it = h.item;
             // Derive pipeline from chunk id pattern: "<kind>:<pipeline>:<namespace>[:field]"
             let parts: Vec<&str> = it.id.split(':').collect();
-            let pipeline = if parts.len() >= 3 { parts[1].to_string() } else { ctx.pipeline.clone() };
-            let dataset = format!("{}.{}", pipeline, it.namespace);
+            let pipeline = if parts.len() >= 3 { parts[1].to_string() } else { String::new() };
+            let dataset = if pipeline.is_empty() { it.namespace.clone() } else { format!("{}.{}", pipeline, it.namespace) };
             serde_json::json!({"kind": it.kind, "namespace": it.namespace, "dataset": dataset, "field": it.field, "text": it.text, "score": h.score})
         }).collect();
         Ok(serde_json::json!({"ok": true, "items": items}))

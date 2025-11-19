@@ -126,8 +126,6 @@ pub async fn run(question: &str, pipeline: &str, namespace: Option<&str>) -> Res
     registry.register(VectQueryTool);
     registry.register(crate::qa::tools::ask_user::AskUserTool);
     let actx = AgentCtx {
-        pipeline: pipeline.to_string(),
-        namespace: namespace.map(|s| s.to_string()),
         top_k: 30,
         per_step_timeout_secs: 10,
         max_steps: 10,
@@ -135,6 +133,7 @@ pub async fn run(question: &str, pipeline: &str, namespace: Option<&str>) -> Res
         progress_tx: None,
         pre_step_tx: None,
         agent_name: Some("ask".to_string()),
+        dataset_candidates: Vec::new(),
     };
     let base_sys = system_prompt();
     let mut sys = base_sys;
@@ -191,6 +190,24 @@ pub async fn run(question: &str, pipeline: &str, namespace: Option<&str>) -> Res
                         }
                     }
                     // Append user answer into thread
+                    let store = crate::qa::session::ThreadStore::new();
+                    let _ = store.append_step(&thread_id, crate::qa::session::ThreadStep {
+                        action: "user".to_string(),
+                        args: serde_json::json!({"text": text}),
+                        observation: serde_json::json!({"ok": true}),
+                        ts: chrono::Utc::now().to_rfc3339(),
+                        agent: Some("ask".to_string()),
+                    }).await;
+                }
+                // Continue loop to let agent resume
+            }
+            crate::qa::agent::RunOutcome::AwaitApproval { thread_id: tid, prompt } => {
+                thread_id = tid;
+                println!("{}", prompt);
+                let mut buf = String::new();
+                let _ = std::io::stdin().read_line(&mut buf);
+                let text = buf.trim().to_string();
+                if !text.is_empty() {
                     let store = crate::qa::session::ThreadStore::new();
                     let _ = store.append_step(&thread_id, crate::qa::session::ThreadStep {
                         action: "user".to_string(),

@@ -16,6 +16,7 @@ pub async fn pre_register_all_namespaces(ctx: &SessionContext) {
 pub fn build_registry(agent: &str, ctx: &SessionContext) -> ToolRegistry {
 	use crate::qa::tools::{sql_run::SqlRunTool, sql_schema::SqlSchemaTool, sql_stats::SqlStatsTool, sql_sample::SqlSampleTool, vect_query::VectQueryTool, ask_user::AskUserTool};
 	use crate::qa::tools::{approve_save::ApproveAndSaveArtifactTool, artifacts::ArtifactsTool};
+	use crate::qa::tools::ask_approval::AskApprovalTool;
 	let mut registry = ToolRegistry::new();
 	match agent {
 		"cleanse" => {
@@ -34,6 +35,7 @@ pub fn build_registry(agent: &str, ctx: &SessionContext) -> ToolRegistry {
 			registry.register(SqlSampleTool { ctx: ctx.clone() });
 			registry.register(VectQueryTool);
 			registry.register(AskUserTool);
+			registry.register(AskApprovalTool);
 			registry.register(ApproveAndSaveArtifactTool);
 			registry.register(ArtifactsTool);
 		}
@@ -57,7 +59,7 @@ pub fn inject_agent_question(agent: &str, question: &str) -> String {
 			 Work on ONE artifact at a time (either MetricFlow YAML or a DBT model SQL).\n\
 			 - Use a stable logical name `name` that will never change.\n\
 			 - Prefer existing artifacts if relevant (use artifacts tool); otherwise propose a new one.\n\
-			 - Always call ask_user to request approval or edits before saving.\n\
+			 - Use ask_approval to request approval; use ask_user for clarifications/edits.\n\
 			 - For updates: call approve_and_save_artifact with preview_diff=true first and show the diff for approval.\n\
 			 - On approval: call approve_and_save_artifact with {{kind, name, content}} to save.\n\
 			 - Do NOT answer with a query; your job here is artifact authoring.\n\

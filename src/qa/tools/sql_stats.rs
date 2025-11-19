@@ -11,17 +11,23 @@ impl Tool for SqlStatsTool {
     async fn call(&self, args: Value, ctx: &AgentCtx) -> Result<Value, String> {
         let table = args.get("table").and_then(|x| x.as_str()).unwrap_or("");
         let field = args.get("field").and_then(|x| x.as_str()).unwrap_or("");
-        let ns = if !table.is_empty() { table } else { ctx.namespace.as_deref().unwrap_or("") };
-        if ns.is_empty() || field.is_empty() {
+		let ns = if !table.is_empty() {
+			table.to_string()
+		} else if let Some(c) = ctx.dataset_candidates.first() {
+			format!("{}.{}", c.pipeline, c.namespace)
+		} else {
+			String::new()
+		};
+		if ns.is_empty() || field.is_empty() {
             return Ok(serde_json::json!({"ok": false, "error": "missing table/field"}));
         }
         // Read stats from Catalog (preferred) or fallback to separate stats JSON
-        let (pipeline, namespace) = if ns.contains('.') {
-            let parts: Vec<&str> = ns.splitn(2, '.').collect();
-            (parts[0].to_string(), parts[1].to_string())
-        } else {
-            (crate::helpers::configuration::Config::get_pipeline_name(), ns.to_string())
-        };
+		let (pipeline, namespace) = if ns.contains('.') {
+			let parts: Vec<&str> = ns.splitn(2, '.').collect();
+			(parts[0].to_string(), parts[1].to_string())
+		} else {
+			return Ok(serde_json::json!({"ok": false, "error": "table must be fully-qualified <pipeline>.<namespace> or dataset_candidates must be present"}));
+		};
         // Try catalog
         let mut distinct: Option<u64> = None;
         let mut min_numeric: Option<f64> = None;

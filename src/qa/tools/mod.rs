@@ -34,6 +34,7 @@ pub mod sql_sample;
 pub mod vect_query;
 pub mod vect_upsert;
 pub mod ask_user;
+pub mod ask_approval;
 pub mod approve_save;
 pub mod artifacts;
 

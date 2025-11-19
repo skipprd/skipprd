@@ -1,10 +1,10 @@
 use crate::qa::agent::{Agent, AgentCtx};
-use crate::qa::prompts::{system_prompt, tool_card};
+use crate::qa::prompts_model::{model_system_prompt, model_tool_card};
 use crate::qa::tools::{ToolRegistry};
 use datafusion::prelude::SessionContext;
-use crate::qa::tools::{sql_schema::SqlSchemaTool, sql_stats::SqlStatsTool};
 use crate::qa::tools::sql_run::SqlRunTool;
 use crate::qa::tools::ask_user::AskUserTool;
+use crate::qa::tools::ask_approval::AskApprovalTool;
 use crate::qa::tools::vect_query::VectQueryTool;
 use crate::qa::dbt;
 use uuid::Uuid;
@@ -25,15 +25,13 @@ pub async fn run(pipeline: &str, prompt: &str) -> Result<(), String> {
         }
     }
     let mut registry = ToolRegistry::new();
-    registry.register(SqlSchemaTool { ctx: ctx.clone() });
-    registry.register(SqlStatsTool);
     registry.register(SqlRunTool { ctx: ctx.clone() });
     registry.register(AskUserTool);
+    registry.register(AskApprovalTool);
     registry.register(VectQueryTool);
     registry.register(crate::qa::tools::approve_save::ApproveAndSaveArtifactTool);
+    registry.register(crate::qa::tools::artifacts::ArtifactsTool);
     let actx = AgentCtx {
-        pipeline: pipeline.to_string(),
-        namespace: None,
         top_k: 30,
         per_step_timeout_secs: 10,
         max_steps: 6,
@@ -41,11 +39,12 @@ pub async fn run(pipeline: &str, prompt: &str) -> Result<(), String> {
         progress_tx: None,
         pre_step_tx: None,
         agent_name: Some("model".to_string()),
+        dataset_candidates: Vec::new(),
     };
-    let sys = system_prompt();
-    let tools = tool_card();
+    let sys = model_system_prompt();
+    let tools = model_tool_card();
     // Propose exactly one artifact at a time (model or MetricFlow) with a stable logical name.
-    // Require ask_user approval; on update, first show a diff; upon approval, call approve_and_save_artifact.
+    // Use ask_approval for approvals; on update, first show a diff; upon approval, call approve_and_save_artifact.
     let ask = format!(
         "Modeling goal: {}.\n\
          Work on ONE artifact at a time:\n\
@@ -53,8 +52,8 @@ pub async fn run(pipeline: &str, prompt: &str) -> Result<(), String> {
          - Use a stable logical name `name` that will never change.\n\
          - Prefer existing MetricFlow or models if relevant; otherwise propose a new one.\n\
          Procedure:\n\
-         1) Propose the artifact and call ask_user for approval/edits.\n\
-         2) For updates, call approve_and_save_artifact with preview_diff=true to produce a unified diff; show it via ask_user for approval.\n\
+         1) Propose the artifact and call ask_approval for approval (use ask_user for clarifications/edits).\n\
+         2) For updates, call approve_and_save_artifact with preview_diff=true to produce a unified diff; show it via ask_approval for approval.\n\
          3) On approval, call approve_and_save_artifact with {{kind, name, content}} to save.\n\
          Return a compact summary only in final.",
         prompt
@@ -74,6 +73,24 @@ pub async fn run(pipeline: &str, prompt: &str) -> Result<(), String> {
                 break;
             }
             crate::qa::agent::RunOutcome::AwaitUser { thread_id: tid, prompt } => {
+                thread_id = tid;
+                println!("{}", prompt);
+                let mut buf = String::new();
+                let _ = std::io::stdin().read_line(&mut buf);
+                let text = buf.trim().to_string();
+                if !text.is_empty() {
+                    let store = crate::qa::session::ThreadStore::new();
+                    let _ = store.append_step(&thread_id, crate::qa::session::ThreadStep {
+                        action: "user".to_string(),
+                        args: serde_json::json!({ "text": text }),
+                        observation: serde_json::json!({ "ok": true }),
+                        ts: chrono::Utc::now().to_rfc3339(),
+                        agent: Some("model".to_string()),
+                    }).await;
+                }
+                // continue
+            }
+            crate::qa::agent::RunOutcome::AwaitApproval { thread_id: tid, prompt } => {
                 thread_id = tid;
                 println!("{}", prompt);
                 let mut buf = String::new();

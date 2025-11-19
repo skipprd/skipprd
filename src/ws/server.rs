@@ -53,6 +53,28 @@ pub async fn start(port: u16) -> Result<(), String> {
 											let _ = write.send(Message::Text(s)).await;
 										}
 										continue;
+									} else if t == "approve" {
+										if let Err(e) = process_approve(&v, &mut state, &mut write).await {
+											let cid_guess = v.get("cid").and_then(|x| x.as_str()).map(|s| s.to_string());
+											let mut err = api::ErrorResponse::new(1, m::error_response::Type::Error, now_iso(), e.clone());
+											err.code = Some("invalid_request".to_string());
+											err.cid = cid_guess;
+											let s = serde_json::to_string(&err).unwrap_or_else(|_| "{\"v\":1,\"type\":\"error\",\"server_time\":\"\",\"error\":\"internal\"}".to_string());
+											tracing::info!("WS -> {}", s);
+											let _ = write.send(Message::Text(s)).await;
+										}
+										continue;
+									} else if t == "reject" {
+										if let Err(e) = process_reject(&v, &mut state, &mut write).await {
+											let cid_guess = v.get("cid").and_then(|x| x.as_str()).map(|s| s.to_string());
+											let mut err = api::ErrorResponse::new(1, m::error_response::Type::Error, now_iso(), e.clone());
+											err.code = Some("invalid_request".to_string());
+											err.cid = cid_guess;
+											let s = serde_json::to_string(&err).unwrap_or_else(|_| "{\"v\":1,\"type\":\"error\",\"server_time\":\"\",\"error\":\"internal\"}".to_string());
+											tracing::info!("WS -> {}", s);
+											let _ = write.send(Message::Text(s)).await;
+										}
+										continue;
 									}
 								}
 							}
@@ -177,6 +199,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			for f in frames {
 				match f {
 					AgentFrame::Final { answer, sql } => {
+						let sql = if agent == "model" { None } else { sql };
 						// finalize title once using concise summary
 						{
 							let store = crate::qa::session::ThreadStore::new();
@@ -211,6 +234,21 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 						let tseq = state.next_thread_seq(&thread_id);
 						let resp = api::ServerMessage::AwaitUser(api::AwaitUserResponse::new(1, m::await_user_response::Type::AwaitUser, now_iso(), state.next_seq(), thread_id.clone(), tseq, prompt));
 						let s = serde_json::to_string(&resp).unwrap();
+						state.buffer_last(&s);
+						out.push(s);
+					}
+					AgentFrame::AwaitApproval { prompt } => {
+						let tseq = state.next_thread_seq(&thread_id);
+						let outv = serde_json::json!({
+							"v": 1,
+							"type": "await_approval",
+							"server_time": now_iso(),
+							"seq": state.next_seq(),
+							"thread_id": thread_id.clone(),
+							"thread_seq": tseq,
+							"prompt": prompt,
+						});
+						let s = outv.to_string();
 						state.buffer_last(&s);
 						out.push(s);
 					}
@@ -257,6 +295,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			for f in frames {
 				match f {
 					AgentFrame::Final { answer, sql } => {
+						let sql = if agent == "model" { None } else { sql };
 						// optional token streaming (simple chunking)
 						for t in chunk_text(&answer, 24) {
 							let mut tk = api::TokenResponse::new(1, m::token_response::Type::Token, now_iso(), state.next_seq(), thread_id.clone(), t);
@@ -288,6 +327,21 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 						state.buffer_last(&s);
 						out.push(s);
 					}
+					AgentFrame::AwaitApproval { prompt } => {
+						let tseq = state.next_thread_seq(&thread_id);
+						let outv = serde_json::json!({
+							"v": 1,
+							"type": "await_approval",
+							"server_time": now_iso(),
+							"seq": state.next_seq(),
+							"thread_id": thread_id.clone(),
+							"thread_seq": tseq,
+							"prompt": prompt,
+						});
+						let s = outv.to_string();
+						state.buffer_last(&s);
+						out.push(s);
+					}
 				}
 			}
 		}
@@ -309,6 +363,66 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			// we don't increment thread_seq on user ack
 			let ok = api::OkResponse::new(1, m::ok_response::Type::Ok, now_iso());
 			out.push(serde_json::to_string(&api::ServerMessage::Ok(ok)).unwrap());
+			// auto-resume: emit processing and continue agent immediately
+			let agent = state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| "ask".to_string());
+			// processing
+			let mut pr = api::ProcessingResponse::new(1, m::processing_response::Type::Processing, now_iso(), state.next_seq(), thread_id.clone());
+			pr.stage = Some(m::processing_response::Stage::Queued);
+			pr.progress = Some(0.0);
+			let prm = api::ServerMessage::Processing(pr);
+			let pr_s = serde_json::to_string(&prm).unwrap();
+			state.buffer_last(&pr_s);
+			out.push(pr_s);
+			// run agent for this thread
+			tracing::info!("user auto-resume: thread_id={} agent={}", thread_id, agent);
+			let frames = run_agent_and_frames(&thread_id, "Continue.", &agent).await?;
+			for f in frames {
+				match f {
+					AgentFrame::Final { answer, sql } => {
+						// optional token streaming (simple chunking); no cid here in generic handler
+						for t in chunk_text(&answer, 24) {
+							let mut tk = api::TokenResponse::new(1, m::token_response::Type::Token, now_iso(), state.next_seq(), thread_id.clone(), t);
+							let m = api::ServerMessage::Token(tk);
+							let s = serde_json::to_string(&m).unwrap();
+							state.buffer_last(&s);
+							out.push(s);
+						}
+						let tseq = state.next_thread_seq(&thread_id);
+						let resp = api::ServerMessage::Final(api::FinalResponse::new(1, m::final_response::Type::Final, now_iso(), state.next_seq(), thread_id.clone(), tseq, api::FinalResponseResult { sql, answer }));
+						let s = serde_json::to_string(&resp).unwrap();
+						state.buffer_last(&s);
+						out.push(s);
+						// Log entire thread on final (best-effort)
+						if let Some(log) = store.get(&thread_id).await {
+							if let Ok(pretty) = serde_json::to_string_pretty(&log) {
+								tracing::info!("{}", pretty);
+							}
+						}
+					}
+					AgentFrame::AwaitUser { prompt } => {
+						let tseq = state.next_thread_seq(&thread_id);
+						let resp = api::ServerMessage::AwaitUser(api::AwaitUserResponse::new(1, m::await_user_response::Type::AwaitUser, now_iso(), state.next_seq(), thread_id.clone(), tseq, prompt));
+						let s = serde_json::to_string(&resp).unwrap();
+						state.buffer_last(&s);
+						out.push(s);
+					}
+					AgentFrame::AwaitApproval { prompt } => {
+						let tseq = state.next_thread_seq(&thread_id);
+						let outv = serde_json::json!({
+							"v": 1,
+							"type": "await_approval",
+							"server_time": now_iso(),
+							"seq": state.next_seq(),
+							"thread_id": thread_id.clone(),
+							"thread_seq": tseq,
+							"prompt": prompt,
+						});
+						let s = outv.to_string();
+						state.buffer_last(&s);
+						out.push(s);
+					}
+				}
+			}
 		}
 		"resume" => {
 			let req: api::ResumeRequest = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
@@ -606,6 +720,85 @@ async fn process_open(v: &Value, state: &mut ConnState, write: &mut (impl SinkEx
 	run_agent_with_processing(&thread_id, &question, &agent, &cid, state, write, m::processing_response::Stage::Queued).await
 }
 
+async fn process_approve(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt<Message> + Unpin)) -> Result<(), String> {
+	let cid = v.get("cid").and_then(|x| x.as_str()).ok_or_else(|| "cid required".to_string())?.to_string();
+	let thread_id = v.get("thread_id").and_then(|x| x.as_str()).ok_or_else(|| "thread_id required".to_string())?.to_string();
+	if thread_id.is_empty() { return Err("thread_id required".into()); }
+	if uuid::Uuid::parse_str(&thread_id).is_err() { return Err("invalid thread_id".into()); }
+	let agent = state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| "ask".to_string());
+	// ack
+	let mut ok = api::OkResponse::new(1, m::ok_response::Type::Ok, now_iso());
+	ok.cid = Some(cid.clone());
+	{
+		let s = serde_json::to_string(&ok).unwrap();
+		tracing::info!("WS -> {}", s);
+		let _ = write.send(Message::Text(s)).await;
+	}
+	// processing
+	let mut pr = api::ProcessingResponse::new(1, m::processing_response::Type::Processing, now_iso(), state.next_seq(), thread_id.clone());
+	pr.for_cid = Some(cid.clone());
+	pr.stage = Some(m::processing_response::Stage::Queued);
+	pr.progress = Some(0.0);
+	{
+		let s = serde_json::to_string(&pr).unwrap();
+		state.buffer_last(&s);
+		tracing::info!("WS -> {}", s);
+		let _ = write.send(Message::Text(s)).await;
+	}
+	// append user=approve step
+	{
+		let store = crate::qa::session::ThreadStore::new();
+		let _ = store.append_step(&thread_id, crate::qa::session::ThreadStep {
+			action: "user".to_string(),
+			args: serde_json::json!({"text": "approve"}),
+			observation: serde_json::json!({"ok": true}),
+			ts: chrono::Utc::now().to_rfc3339(),
+			agent: Some(agent.clone()),
+		}).await;
+	}
+	tracing::info!("approve: thread_id={} agent={}", thread_id, agent);
+	run_agent_with_processing(&thread_id, "Continue.", &agent, &cid, state, write, m::processing_response::Stage::Queued).await
+}
+
+async fn process_reject(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt<Message> + Unpin)) -> Result<(), String> {
+	let cid = v.get("cid").and_then(|x| x.as_str()).ok_or_else(|| "cid required".to_string())?.to_string();
+	let thread_id = v.get("thread_id").and_then(|x| x.as_str()).ok_or_else(|| "thread_id required".to_string())?.to_string();
+	if thread_id.is_empty() { return Err("thread_id required".into()); }
+	if uuid::Uuid::parse_str(&thread_id).is_err() { return Err("invalid thread_id".into()); }
+	let agent = state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| "ask".to_string());
+	// ack
+	let mut ok = api::OkResponse::new(1, m::ok_response::Type::Ok, now_iso());
+	ok.cid = Some(cid.clone());
+	{
+		let s = serde_json::to_string(&ok).unwrap();
+		tracing::info!("WS -> {}", s);
+		let _ = write.send(Message::Text(s)).await;
+	}
+	// processing
+	let mut pr = api::ProcessingResponse::new(1, m::processing_response::Type::Processing, now_iso(), state.next_seq(), thread_id.clone());
+	pr.for_cid = Some(cid.clone());
+	pr.stage = Some(m::processing_response::Stage::Queued);
+	pr.progress = Some(0.0);
+	{
+		let s = serde_json::to_string(&pr).unwrap();
+		state.buffer_last(&s);
+		tracing::info!("WS -> {}", s);
+		let _ = write.send(Message::Text(s)).await;
+	}
+	// append user=reject step
+	{
+		let store = crate::qa::session::ThreadStore::new();
+		let _ = store.append_step(&thread_id, crate::qa::session::ThreadStep {
+			action: "user".to_string(),
+			args: serde_json::json!({"text": "reject"}),
+			observation: serde_json::json!({"ok": true}),
+			ts: chrono::Utc::now().to_rfc3339(),
+			agent: Some(agent.clone()),
+		}).await;
+	}
+	tracing::info!("reject: thread_id={} agent={}", thread_id, agent);
+	run_agent_with_processing(&thread_id, "Continue.", &agent, &cid, state, write, m::processing_response::Stage::Queued).await
+}
 fn normalize_agent(a: Option<String>) -> String {
 	match a.unwrap_or_else(|| "ask".to_string()).to_lowercase().as_str() {
 		"cleanse" => "cleanse".to_string(),
@@ -624,7 +817,7 @@ async fn run_agent_with_processing(
 	initial_stage: m::processing_response::Stage,
 ) -> Result<(), String> {
 	// Prepare agent
-	let mut sys = crate::qa::prompts::system_prompt();
+	let mut sys = if agent == "model" { crate::qa::prompts_model::model_system_prompt() } else { crate::qa::prompts::system_prompt() };
 	let now_utc = chrono::Utc::now().to_rfc3339();
 	let now_local = chrono::Local::now();
 	let local_iso = now_local.to_rfc3339();
@@ -633,15 +826,90 @@ async fn run_agent_with_processing(
 		"{}\n\nTimeContext:\n- NowUTC: {}\n- UserLocal: {} (offset {})",
 		sys, now_utc, local_iso, local_offset
 	);
-	let tools_card = crate::qa::prompts::tool_card();
+	let tools_card = if agent == "model" { crate::qa::prompts_model::model_tool_card() } else { crate::qa::prompts::tool_card() };
 	let ctx_df = datafusion::prelude::SessionContext::new();
 	crate::ws::agent_runner::pre_register_all_namespaces(&ctx_df).await;
 	let mut registry = crate::ws::agent_runner::build_registry(agent, &ctx_df);
+	// Preflight: resolve dataset candidates for all agents
+	let candidates = crate::ws::context::resolve_datasets(question, 3).await;
+	if !candidates.is_empty() {
+		// Append thread step
+		let store = crate::qa::session::ThreadStore::new();
+		let arr: Vec<serde_json::Value> = candidates.iter().map(|c| serde_json::json!({"pipeline": c.pipeline, "namespace": c.namespace, "score": c.score})).collect();
+		let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
+			action: "resolved_datasets".to_string(),
+			args: serde_json::json!({"candidates": arr}),
+			observation: serde_json::json!({"ok": true}),
+			ts: chrono::Utc::now().to_rfc3339(),
+			agent: Some(agent.to_string()),
+		}).await;
+	}
+	// Preflight: resolve metric artifacts and append step for all agents
+	{
+		let arts = crate::ws::context::resolve_artifacts(question, 3, "metric").await;
+		if !arts.is_empty() {
+			let store = crate::qa::session::ThreadStore::new();
+			let arr: Vec<serde_json::Value> = arts.iter().map(|a| serde_json::json!({
+				"pipeline": a.pipeline, "namespace": a.namespace, "name": a.name, "kind": a.kind, "score": a.score
+			})).collect();
+			let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
+				action: "resolved_artifacts".to_string(),
+				args: serde_json::json!({"items": arr}),
+				observation: serde_json::json!({"ok": true}),
+				ts: chrono::Utc::now().to_rfc3339(),
+				agent: Some(agent.to_string()),
+			}).await;
+		}
+	}
+	// Preflight: inject reference example for model agent based on thread state (no heuristics)
+	if agent == "model" {
+		let store = crate::qa::session::ThreadStore::new();
+		let mut kind_opt: Option<String> = None;
+		if let Some(log) = store.get(thread_id).await {
+			for step in log.steps.iter().rev() {
+				if step.action == "artifact_focus" {
+					if let Some(k) = step.args.get("kind").and_then(|x| x.as_str()) {
+						kind_opt = Some(k.to_string());
+						break;
+					}
+				}
+				if step.action == "approve_and_save_artifact" {
+					if let Some(k) = step.args.get("kind").and_then(|x| x.as_str()) {
+						kind_opt = Some(k.to_string());
+						break;
+					}
+				}
+				if step.action == "artifacts" {
+					if let Some(t) = step.args.get("type").and_then(|x| x.as_str()) {
+						if t == "metric" {
+							kind_opt = Some("metric".to_string());
+							break;
+						}
+					}
+				}
+			}
+		}
+		if let Some(kind) = kind_opt {
+			let text = if kind == "metric" {
+				crate::qa::reference::metricflow_example()
+			} else {
+				crate::qa::reference::dbt_model_example()
+			};
+			let store = crate::qa::session::ThreadStore::new();
+			let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
+				action: "reference_example".to_string(),
+				args: serde_json::json!({"kind": kind, "text": text}),
+				observation: serde_json::json!({"ok": true}),
+				ts: chrono::Utc::now().to_rfc3339(),
+				agent: Some(agent.to_string()),
+			}).await;
+			// Note in the prompt header
+			sys = format!("{}\n\nReferenceExample: provided for kind '{}'; follow its syntax strictly.", sys, kind);
+		}
+	}
 	let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<usize>();
 	let (pre_tx, mut pre_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 	let actx = AgentCtx {
-		pipeline: "".to_string(),
-		namespace: None,
 		top_k: 30,
 		per_step_timeout_secs: 10,
 		max_steps: 10,
@@ -649,6 +917,7 @@ async fn run_agent_with_processing(
 		progress_tx: Some(tx),
 		pre_step_tx: Some(pre_tx),
 		agent_name: Some(agent.to_string()),
+		dataset_candidates: candidates.iter().map(|c| crate::qa::agent::DatasetCandidate { pipeline: c.pipeline.clone(), namespace: c.namespace.clone(), score: c.score }).collect(),
 	};
 	let question2 = crate::ws::agent_runner::inject_agent_question(agent, question);
 	let mut fut = Box::pin(Agent::run_until_block(&registry, &actx, &sys, &tools_card, &question2));
@@ -748,6 +1017,23 @@ async fn run_agent_with_processing(
 						let _ = write.send(Message::Text(s)).await;
 						return Ok(());
 					}
+					Ok(RunOutcome::AwaitApproval { thread_id: _tid, prompt }) => {
+						let tseq = state.next_thread_seq(thread_id);
+						let outv = serde_json::json!({
+							"v": 1,
+							"type": "await_approval",
+							"server_time": now_iso(),
+							"seq": state.next_seq(),
+							"thread_id": thread_id.to_string(),
+							"thread_seq": tseq,
+							"prompt": prompt,
+						});
+						let s = outv.to_string();
+						state.buffer_last(&s);
+						tracing::info!("WS -> {}", s);
+						let _ = write.send(Message::Text(s)).await;
+						return Ok(());
+					}
 					Err(e) => {
 						// Emit terminal processing frame (error)
 						{
@@ -784,10 +1070,11 @@ async fn run_agent_with_processing(
 enum AgentFrame {
 	Final { answer: String, sql: Option<String> },
 	AwaitUser { prompt: String },
+	AwaitApproval { prompt: String },
 }
 
 async fn run_agent_and_frames(thread_id: &str, question: &str, agent: &str) -> Result<Vec<AgentFrame>, String> {
-	let mut sys = crate::qa::prompts::system_prompt();
+	let mut sys = if agent == "model" { crate::qa::prompts_model::model_system_prompt() } else { crate::qa::prompts::system_prompt() };
 	// Inject TimeContext
 	let now_utc = chrono::Utc::now().to_rfc3339();
 	let now_local = chrono::Local::now();
@@ -797,48 +1084,96 @@ async fn run_agent_and_frames(thread_id: &str, question: &str, agent: &str) -> R
 		"{}\n\nTimeContext:\n- NowUTC: {}\n- UserLocal: {} (offset {})",
 		sys, now_utc, local_iso, local_offset
 	);
-	let tools_card = crate::qa::prompts::tool_card();
-	let mut registry = ToolRegistry::new();
+	let tools_card = if agent == "model" { crate::qa::prompts_model::model_tool_card() } else { crate::qa::prompts::tool_card() };
 	let ctx_df = datafusion::prelude::SessionContext::new();
+	crate::ws::agent_runner::pre_register_all_namespaces(&ctx_df).await;
+	let registry = crate::ws::agent_runner::build_registry(agent, &ctx_df);
+	// Preflight: resolve dataset candidates for all agents
+	let candidates = crate::ws::context::resolve_datasets(question, 3).await;
+	if !candidates.is_empty() {
+		let store = crate::qa::session::ThreadStore::new();
+		let arr: Vec<serde_json::Value> = candidates.iter().map(|c| serde_json::json!({"pipeline": c.pipeline, "namespace": c.namespace, "score": c.score})).collect();
+		let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
+			action: "resolved_datasets".to_string(),
+			args: serde_json::json!({"candidates": arr}),
+			observation: serde_json::json!({"ok": true}),
+			ts: chrono::Utc::now().to_rfc3339(),
+			agent: Some(agent.to_string()),
+		}).await;
+	}
+	// Preflight: resolve metric artifacts for all agents
 	{
-		// Pre-register all pipelines' namespaces so two-part names work regardless of active pipeline
-		let pipelines = crate::sql::registry::list_pipelines().await;
-		for pipeline in pipelines {
-			let mut namespaces = crate::sql::registry::list_namespaces(&pipeline).await;
-			namespaces.sort();
-			for ns in namespaces {
-				let _ = crate::sql::tables::register_namespace_view(&ctx_df, &pipeline, &ns).await;
+		let arts = crate::ws::context::resolve_artifacts(question, 3, "metric").await;
+		if !arts.is_empty() {
+			let store = crate::qa::session::ThreadStore::new();
+			let arr: Vec<serde_json::Value> = arts.iter().map(|a| serde_json::json!({
+				"pipeline": a.pipeline, "namespace": a.namespace, "name": a.name, "kind": a.kind, "score": a.score
+			})).collect();
+			let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
+				action: "resolved_artifacts".to_string(),
+				args: serde_json::json!({"items": arr}),
+				observation: serde_json::json!({"ok": true}),
+				ts: chrono::Utc::now().to_rfc3339(),
+				agent: Some(agent.to_string()),
+			}).await;
+		}
+	}
+	// Preflight: inject reference example for model agent based on thread state (no heuristics)
+	if agent == "model" {
+		let store = crate::qa::session::ThreadStore::new();
+		let mut kind_opt: Option<String> = None;
+		if let Some(log) = store.get(thread_id).await {
+			for step in log.steps.iter().rev() {
+				if step.action == "artifact_focus" {
+					if let Some(k) = step.args.get("kind").and_then(|x| x.as_str()) {
+						kind_opt = Some(k.to_string());
+						break;
+					}
+				}
+				if step.action == "approve_and_save_artifact" {
+					if let Some(k) = step.args.get("kind").and_then(|x| x.as_str()) {
+						kind_opt = Some(k.to_string());
+						break;
+					}
+				}
+				if step.action == "artifacts" {
+                    if let Some(t) = step.args.get("type").and_then(|x| x.as_str()) {
+                        if t == "metric" {
+                            kind_opt = Some("metric".to_string());
+                            break;
+                        }
+                    }
+                }
 			}
-			let _ = crate::sql::tables::register_deadletters(&ctx_df, &pipeline).await;
+		}
+		if let Some(kind) = kind_opt {
+			let text = if kind == "metric" {
+				crate::qa::reference::metricflow_example()
+			} else {
+				crate::qa::reference::dbt_model_example()
+			};
+			let store = crate::qa::session::ThreadStore::new();
+			let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
+				action: "reference_example".to_string(),
+				args: serde_json::json!({"kind": kind, "text": text}),
+				observation: serde_json::json!({"ok": true}),
+				ts: chrono::Utc::now().to_rfc3339(),
+				agent: Some(agent.to_string()),
+			}).await;
+			// Note in the prompt header
+			sys = format!("{}\n\nReferenceExample: provided for kind '{}'; follow its syntax strictly.", sys, kind);
 		}
 	}
-	match agent {
-		"cleanse" => {
-			registry.register(SqlRunTool { ctx: ctx_df.clone() });
-			registry.register(SqlSchemaTool { ctx: ctx_df.clone() });
-			registry.register(SqlStatsTool);
-			registry.register(SqlSampleTool { ctx: ctx_df.clone() });
-			registry.register(VectQueryTool);
-			registry.register(AskUserTool);
-		}
-		"model" => {
-			registry.register(SqlRunTool { ctx: ctx_df.clone() });
-			registry.register(SqlSchemaTool { ctx: ctx_df.clone() });
-			registry.register(SqlStatsTool);
-			registry.register(SqlSampleTool { ctx: ctx_df.clone() });
-			registry.register(VectQueryTool);
-			registry.register(AskUserTool);
-		}
-		_ => {
-			registry.register(SqlRunTool { ctx: ctx_df.clone() });
-			registry.register(SqlSchemaTool { ctx: ctx_df.clone() });
-			registry.register(SqlStatsTool);
-			registry.register(SqlSampleTool { ctx: ctx_df.clone() });
-			registry.register(VectQueryTool);
-			registry.register(AskUserTool);
-		}
-	}
-	let actx = AgentCtx { pipeline: "".to_string(), namespace: None, top_k: 30, per_step_timeout_secs: 10, max_steps: 10, thread_id: Some(thread_id.to_string()), progress_tx: None, pre_step_tx: None, agent_name: Some(agent.to_string()) };
+	let actx = AgentCtx {
+		top_k: 30,
+		per_step_timeout_secs: 10,
+		max_steps: 10,
+		thread_id: Some(thread_id.to_string()),
+		progress_tx: None,
+		pre_step_tx: None,
+		agent_name: Some(agent.to_string()),
+		dataset_candidates: candidates.iter().map(|c| crate::qa::agent::DatasetCandidate { pipeline: c.pipeline.clone(), namespace: c.namespace.clone(), score: c.score }).collect(),
+	};
 	let mut frames: Vec<AgentFrame> = Vec::new();
 	let question2 = crate::ws::agent_runner::inject_agent_question(agent, question);
 	match Agent::run_until_block(&registry, &actx, &sys, &tools_card, &question2).await {
@@ -846,10 +1181,14 @@ async fn run_agent_and_frames(thread_id: &str, question: &str, agent: &str) -> R
 			let (header, rows) = load_last_run_sql_async(thread_id).await;
 			let improved = synthesize_summary(&question2, &result.answer, &result.sql, &header, &rows).await;
 			let answer = improved.unwrap_or(result.answer);
-			frames.push(AgentFrame::Final { answer, sql: result.sql });
+			let sql_opt = if agent == "model" { None } else { result.sql };
+			frames.push(AgentFrame::Final { answer, sql: sql_opt });
 		}
 		Ok(RunOutcome::AwaitUser { thread_id: _tid, prompt }) => {
 			frames.push(AgentFrame::AwaitUser { prompt });
+		}
+		Ok(RunOutcome::AwaitApproval { thread_id: _tid, prompt }) => {
+			frames.push(AgentFrame::AwaitApproval { prompt });
 		}
 		Err(e) => return Err(e),
 	}
@@ -885,7 +1224,7 @@ fn compute_unread_for_log(log: &crate::qa::session::ThreadLog, seen_seq: i32) ->
 			"user" => {
 				tseq += 1;
 			}
-			"final" | "ask_user" => {
+			"final" | "ask_user" | "ask_approval" => {
 				tseq += 1;
 				if tseq > seen_seq {
 					assistant_count_after_seen += 1;
@@ -929,6 +1268,16 @@ async fn build_history(thread_id: &str, before: Option<i32>, limit_opt: Option<i
 					});
 				}
 				"ask_user" => {
+					tseq += 1;
+					let content = step.observation.get("prompt").and_then(|x| x.as_str()).unwrap_or("").to_string();
+					all_msgs.push(api::HistoryResponseMessagesInner {
+						thread_seq: tseq,
+						role: m::history_response_messages_inner::Role::Assistant,
+						content,
+						created_at: step.ts.clone(),
+					});
+				}
+				"ask_approval" => {
 					tseq += 1;
 					let content = step.observation.get("prompt").and_then(|x| x.as_str()).unwrap_or("").to_string();
 					all_msgs.push(api::HistoryResponseMessagesInner {

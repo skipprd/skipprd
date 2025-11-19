@@ -32,8 +32,6 @@ pub async fn run(pipeline: &str, prompt: &str) -> Result<(), String> {
     registry.register(AskUserTool);
     registry.register(VectQueryTool);
     let actx = AgentCtx {
-        pipeline: pipeline.to_string(),
-        namespace: None,
         top_k: 30,
         per_step_timeout_secs: 10,
         max_steps: 6,
@@ -41,15 +39,16 @@ pub async fn run(pipeline: &str, prompt: &str) -> Result<(), String> {
         progress_tx: None,
         pre_step_tx: None,
         agent_name: Some("cleanse".to_string()),
+        dataset_candidates: Vec::new(),
     };
     let sys = system_prompt();
     let tools = tool_card();
-    // Ask the agent to propose cleansing candidates (cross-namespace), validate via run_sql, and require ask_user approval before final.
+    // Ask the agent to propose cleansing candidates (cross-namespace), validate via run_sql; use ask_user for clarifications/edits if needed before final.
     let ask = format!(
         "Cleansing goal: {}.\n\
          Identify cleansing candidates across datasets including: coalesce by value/type, deduplicate, normalize_datetime, outliers.\n\
          For the chosen candidate, include fully-qualified target dataset(s) and field(s) (e.g., <pipeline>.<namespace>.<field>), a short rationale, and a preview SELECT SQL showing the transformation.\n\
-         You MUST call ask_user to request approval or edits before returning final. After approval, validate with run_sql and then return final.\n\
+         If needed, call ask_user to request clarifications or edits before returning final. Validate with run_sql and then return final.\n\
          Return STRICT JSON in final: {{\"sql\": \"SELECT ...\", \"answer\": \"short rationale\"}}.",
         prompt
     );
@@ -69,6 +68,24 @@ pub async fn run(pipeline: &str, prompt: &str) -> Result<(), String> {
                 break;
             }
             crate::qa::agent::RunOutcome::AwaitUser { thread_id: tid, prompt } => {
+                thread_id = tid;
+                println!("{}", prompt);
+                let mut buf = String::new();
+                let _ = std::io::stdin().read_line(&mut buf);
+                let text = buf.trim().to_string();
+                if !text.is_empty() {
+                    let store = crate::qa::session::ThreadStore::new();
+                    let _ = store.append_step(&thread_id, crate::qa::session::ThreadStep {
+                        action: "user".to_string(),
+                        args: serde_json::json!({ "text": text }),
+                        observation: serde_json::json!({ "ok": true }),
+                        ts: chrono::Utc::now().to_rfc3339(),
+                        agent: Some("cleanse".to_string()),
+                    }).await;
+                }
+                // continue loop to let agent resume
+            }
+            crate::qa::agent::RunOutcome::AwaitApproval { thread_id: tid, prompt } => {
                 thread_id = tid;
                 println!("{}", prompt);
                 let mut buf = String::new();

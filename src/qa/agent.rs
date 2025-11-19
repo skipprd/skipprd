@@ -8,8 +8,6 @@ use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct AgentCtx {
-    pub pipeline: String,
-    pub namespace: Option<String>,
     pub top_k: usize,
     pub per_step_timeout_secs: u64,
     pub max_steps: usize,
@@ -17,6 +15,15 @@ pub struct AgentCtx {
     pub progress_tx: Option<tokio::sync::mpsc::UnboundedSender<usize>>,
     pub pre_step_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     pub agent_name: Option<String>,
+    // Dataset candidates resolved from embeddings/catalog before the agent runs
+    pub dataset_candidates: Vec<DatasetCandidate>,
+}
+
+#[derive(Clone)]
+pub struct DatasetCandidate {
+    pub pipeline: String,
+    pub namespace: String,
+    pub score: f32,
 }
 
 pub struct Agent;
@@ -24,6 +31,7 @@ pub struct Agent;
 pub enum RunOutcome {
     Final { thread_id: String, result: ThreadResult },
     AwaitUser { thread_id: String, prompt: String },
+    AwaitApproval { thread_id: String, prompt: String },
 }
 
 impl Agent {
@@ -39,7 +47,37 @@ impl Agent {
         let mut transcript: Vec<String> = Vec::new();
         transcript.push(system_prompt.to_string());
         transcript.push(tool_card.to_string());
-        transcript.push(format!("Context: pipeline={} namespace={}", ctx.pipeline, ctx.namespace.clone().unwrap_or_default()));
+        if !ctx.dataset_candidates.is_empty() {
+            let mut lines: Vec<String> = Vec::new();
+            lines.push("ResolvedDatasets:".to_string());
+            for c in ctx.dataset_candidates.iter().take(6) {
+                lines.push(format!("- {}.{} (score={:.4})", c.pipeline, c.namespace, c.score));
+            }
+            transcript.push(lines.join("\n"));
+        }
+        // Include resolved artifacts (metrics) if present in thread
+        if let Some(tid) = ctx.thread_id.as_ref() {
+            let store = ThreadStore::new();
+            if let Some(log) = store.get(tid).await {
+                for step in log.steps.iter().rev() {
+                    if step.action == "resolved_artifacts" {
+                        if let Some(arr) = step.args.get("items").and_then(|x| x.as_array()) {
+                            let mut lines: Vec<String> = Vec::new();
+                            lines.push("ResolvedArtifacts:".to_string());
+                            for v in arr.iter().take(6) {
+                                let p = v.get("pipeline").and_then(|x| x.as_str()).unwrap_or("");
+                                let ns = v.get("namespace").and_then(|x| x.as_str()).unwrap_or("");
+                                let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("");
+                                let score = v.get("score").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                                lines.push(format!("- {}.{}::{} (score={:.4})", p, ns, name, score));
+                            }
+                            transcript.push(lines.join("\n"));
+                        }
+                        break;
+                    }
+                }
+            }
+        }
         transcript.push(format!("Question: {}", user_prompt));
 
         let store = ThreadStore::new();
@@ -203,6 +241,10 @@ impl Agent {
                 let prompt = obs.get("prompt").and_then(|x| x.as_str()).unwrap_or("Please provide additional context.").to_string();
                 return Ok(RunOutcome::AwaitUser { thread_id, prompt });
             }
+            if action_name == "ask_approval" {
+                let prompt = obs.get("prompt").and_then(|x| x.as_str()).unwrap_or("Please review and approve/reject.").to_string();
+                return Ok(RunOutcome::AwaitApproval { thread_id, prompt });
+            }
         }
         // If we get here, no final or ask_user; return a minimal result to avoid blocking.
         Ok(RunOutcome::Final { thread_id, result: ThreadResult { sql: None, answer: "No result".to_string() } })
@@ -219,7 +261,37 @@ impl Agent {
         let mut transcript: Vec<String> = Vec::new();
         transcript.push(system_prompt.to_string());
         transcript.push(tool_card.to_string());
-        transcript.push(format!("Context: pipeline={} namespace={}", ctx.pipeline, ctx.namespace.clone().unwrap_or_default()));
+        if !ctx.dataset_candidates.is_empty() {
+            let mut lines: Vec<String> = Vec::new();
+            lines.push("ResolvedDatasets:".to_string());
+            for c in ctx.dataset_candidates.iter().take(6) {
+                lines.push(format!("- {}.{} (score={:.4})", c.pipeline, c.namespace, c.score));
+            }
+            transcript.push(lines.join("\n"));
+        }
+        // Include resolved artifacts (metrics) if present in thread
+        if let Some(tid) = ctx.thread_id.as_ref() {
+            let store = ThreadStore::new();
+            if let Some(log) = store.get(tid).await {
+                for step in log.steps.iter().rev() {
+                    if step.action == "resolved_artifacts" {
+                        if let Some(arr) = step.args.get("items").and_then(|x| x.as_array()) {
+                            let mut lines: Vec<String> = Vec::new();
+                            lines.push("ResolvedArtifacts:".to_string());
+                            for v in arr.iter().take(6) {
+                                let p = v.get("pipeline").and_then(|x| x.as_str()).unwrap_or("");
+                                let ns = v.get("namespace").and_then(|x| x.as_str()).unwrap_or("");
+                                let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("");
+                                let score = v.get("score").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                                lines.push(format!("- {}.{}::{} (score={:.4})", p, ns, name, score));
+                            }
+                            transcript.push(lines.join("\n"));
+                        }
+                        break;
+                    }
+                }
+            }
+        }
         transcript.push(format!("Question: {}", user_prompt));
 
         let store = ThreadStore::new();

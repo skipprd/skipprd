@@ -22,20 +22,48 @@ impl Tool for ApproveAndSaveArtifactTool {
 		if content.trim().is_empty() {
 			return Err("content required".to_string());
 		}
-		let pipeline_arg = args.get("pipeline").and_then(|x| x.as_str()).map(|s| s.to_string());
-		let namespace_arg = args.get("namespace").and_then(|x| x.as_str()).map(|s| s.to_string());
 		let preview_diff = args.get("preview_diff").and_then(|x| x.as_bool()).unwrap_or(false);
 
-		// Infer (pipeline, namespace) from content FQNs if not provided
-		let (pipeline, namespace) = match (pipeline_arg, namespace_arg) {
-			(Some(p), Some(ns)) => (p, ns),
-			(p, n) => {
-				let derived = derive_fqn(&content);
-				let p2 = p.or_else(|| derived.as_ref().map(|(a, _)| a.clone()))
-					.ok_or_else(|| "pipeline could not be inferred; provide explicitly".to_string())?;
-				let n2 = n.or_else(|| derived.as_ref().map(|(_, b)| b.clone()))
-					.ok_or_else(|| "namespace could not be inferred; provide explicitly".to_string())?;
-				(p2, n2)
+		// Load candidates from thread's resolved_datasets
+		let (pipeline, namespace) = {
+			let mut candidates: Vec<(String, String)> = Vec::new();
+			if let Some(tid) = _ctx.thread_id.as_ref() {
+				let store = crate::qa::session::ThreadStore::new();
+				if let Some(log) = store.get(tid).await {
+					for step in log.steps.iter().rev() {
+						if step.action == "resolved_datasets" {
+							if let Some(arr) = step.args.get("candidates").and_then(|x| x.as_array()) {
+								for v in arr {
+									let p = v.get("pipeline").and_then(|x| x.as_str()).unwrap_or("").to_string();
+									let ns = v.get("namespace").and_then(|x| x.as_str()).unwrap_or("").to_string();
+									if !p.is_empty() && !ns.is_empty() {
+										candidates.push((p, ns));
+									}
+								}
+							}
+							break;
+						}
+					}
+				}
+			}
+			if candidates.is_empty() {
+				return Err("No resolved datasets found. First, resolve dataset candidates via vect_query(scope:\"dataset\"), record them, then retry save.".to_string());
+			}
+			// Match content against candidates by FQN presence
+			let lower = content.to_lowercase();
+			let mut chosen: Option<(String, String)> = None;
+			for (p, ns) in candidates.iter() {
+				let fqn = format!("{}.{}", p, ns).to_lowercase();
+				if lower.contains(&fqn) {
+					chosen = Some((p.clone(), ns.clone()));
+					break;
+				}
+			}
+			if let Some(c) = chosen {
+				c
+			} else {
+				let list = candidates.iter().map(|(p, ns)| format!("{}.{}", p, ns)).collect::<Vec<_>>().join(", ");
+				return Err(format!("Artifact content does not reference any resolved dataset. Rewrite SQL to use one of: {}", list));
 			}
 		};
 
@@ -120,18 +148,7 @@ fn dbt_base_prefix(pipeline: &str) -> String {
 	format!("{}/{}/{}/dbt", tenant, workspace, pipeline)
 }
 
-fn derive_fqn(content: &str) -> Option<(String, String)> {
-	let lower = content.to_lowercase();
-	let pipes = futures::executor::block_on(crate::sql::registry::list_pipelines());
-	for p in pipes {
-		let nss = futures::executor::block_on(crate::sql::registry::list_namespaces(&p));
-		for ns in nss {
-			let fqn = format!("{}.{}", p, ns).to_lowercase();
-			if lower.contains(&fqn) { return Some((p.clone(), ns.clone())); }
-		}
-	}
-	None
-}
+// Legacy derive_fqn removed: enforcement relies on resolved_datasets from thread
 
 fn compute_unified_diff(old: &str, new: &str) -> String {
 	// Simple line-wise diff; not minimal but sufficient for preview
@@ -163,12 +180,72 @@ fn compute_unified_diff(old: &str, new: &str) -> String {
 	out.join("\n")
 }
 
-async fn validate_model_sql(sql: &str) -> Result<(), String> {
-	let s = sql.trim();
-	if !s.to_uppercase().starts_with("SELECT ") {
-		return Err("model SQL must start with SELECT".to_string());
+fn preprocess_model_sql(raw: &str) -> String {
+	// Strip Jinja config and template blocks commonly used by dbt
+	// Remove lines like "{{ config(...) }}" and unwrap {{ ref('x.y') }} -> x.y
+	let mut out = String::new();
+	let mut in_block_comment = false;
+	for line in raw.lines() {
+		let mut l = line.to_string();
+		// Remove block comments /* ... */
+		if in_block_comment {
+			if let Some(end) = l.find("*/") {
+				l = l[end + 2..].to_string();
+				in_block_comment = false;
+			} else {
+				continue;
+			}
+		}
+		if let Some(start) = l.find("/*") {
+			if let Some(end) = l.find("*/") {
+				l.replace_range(start..end + 2, "");
+			} else {
+				in_block_comment = true;
+				l.replace_range(start.., "");
+			}
+		}
+		let lt = l.trim();
+		// Drop config-only lines
+		if lt.starts_with("{{") && lt.contains("config(") {
+			continue;
+		}
+		// Unwrap ref('x') or ref(\"x\")
+		let mut ll = l.clone();
+		while let Some(start) = ll.find("{{") {
+			if let Some(end) = ll[start..].find("}}") {
+				let expr = &ll[start + 2..start + end].trim();
+				let replacement = if expr.starts_with("ref(") {
+					// extract quoted content
+					let inner = expr.trim_start_matches("ref(").trim_end_matches(')').trim();
+					let inner = inner.trim_matches('"').trim_matches('\'').to_string();
+					inner
+				} else {
+					String::new()
+				};
+				ll.replace_range(start..start + end + 2, &replacement);
+			} else {
+				break;
+			}
+		}
+		// Remove line comments
+		let ll2 = if let Some(pos) = ll.find("--") { ll[..pos].to_string() } else { ll };
+		out.push_str(&ll2);
+		out.push('\n');
 	}
-	let mut forced = s.to_string();
+	let cleaned = out.trim().to_string();
+	cleaned
+}
+
+async fn validate_model_sql(raw: &str) -> Result<(), String> {
+	let cleaned = preprocess_model_sql(raw);
+	if cleaned.is_empty() {
+		return Err("empty SQL after preprocessing".to_string());
+	}
+	let upper = cleaned.trim_start().to_uppercase();
+	if !(upper.starts_with("SELECT ") || upper.starts_with("WITH ")) {
+		return Err("model SQL must start with SELECT or WITH".to_string());
+	}
+	let mut forced = cleaned.trim().to_string();
 	if !forced.to_lowercase().contains(" limit ") {
 		forced.push_str(" LIMIT 10");
 	}
