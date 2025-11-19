@@ -13,7 +13,7 @@ Name | Type | Description | Notes
 **for_cid** | Option<**String**> |  | [optional]
 **stage** | Option<**String**> |  | [optional]
 **progress** | Option<**f64**> |  | [optional]
-**step** | Option<**String**> | Upcoming ReAct step name (e.g., run_sql, sql_schema) | [optional]
+**step** | Option<**String**> |  | [optional]
 
 [[Back to Model list]](../README.md#documentation-for-models) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to README]](../README.md)
 

@@ -1,14 +1,16 @@
-# ListResponseThreadsInner
+# AwaitApprovalResponse
 
 ## Properties
 
 Name | Type | Description | Notes
 ------------ | ------------- | ------------- | -------------
+**v** | **i32** |  | 
+**r#type** | **String** |  | 
+**server_time** | **String** |  | 
+**seq** | **i32** |  | 
 **thread_id** | **String** |  | 
-**title** | Option<**String**> |  | [optional]
-**last_activity** | Option<**String**> |  | [optional]
-**unread_count** | Option<**i32**> |  | [optional]
-**last_message_preview** | Option<**String**> |  | [optional]
+**thread_seq** | **i32** |  | 
+**prompt** | **String** | Approval request message; clients should present Approve/Reject controls | 
 
 [[Back to Model list]](../README.md#documentation-for-models) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to README]](../README.md)
 

@@ -16,7 +16,13 @@ impl Tool for VectQueryTool {
         // Embed the query
         let cfg = crate::llm::config_from_env();
         let model = crate::llm::create_llm(&cfg);
-        let vec = model.embed(&[query_text.to_string()]).map_err(|e| e.to_string())?.pop().unwrap_or_default();
+        let vec = match model.embed(&[query_text.to_string()]) {
+            Ok(mut v) => v.pop().unwrap_or_default(),
+            Err(e) => {
+                // Degraded fallback: return ok with no items so the agent can continue using preflight candidates
+                return Ok(serde_json::json!({"ok": true, "items": [], "note": "degraded: embeddings error", "error": e.to_string()}));
+            }
+        };
 
         // Query LanceDB across all pipelines to honor cross-pipeline discovery
         let mut all_hits: Vec<crate::qa::vector::lance_store::ScoredChunk> = Vec::new();
@@ -29,17 +35,20 @@ impl Tool for VectQueryTool {
                 Err(e) => { errors.push((p, e)); }
             }
         }
-        // Bias scores: metric artifacts < model artifacts < others (lower is better)
-        for h in all_hits.iter_mut() {
-            let mut factor: f32 = 1.0;
-            if h.item.kind == "artifact" {
-                if h.item.id.starts_with("artifact:metric:") {
-                    factor = 0.6;
-                } else if h.item.id.starts_with("artifact:model:") {
-                    factor = 0.8;
+        // Bias scores: For ask agent, prefer artifacts (metric < model < others). For model agent, remain neutral.
+        let is_model_agent = ctx.agent_name.as_deref() == Some("model");
+        if !is_model_agent {
+            for h in all_hits.iter_mut() {
+                let mut factor: f32 = 1.0;
+                if h.item.kind == "artifact" {
+                    if h.item.id.starts_with("artifact:metric:") {
+                        factor = 0.6;
+                    } else if h.item.id.starts_with("artifact:model:") {
+                        factor = 0.8;
+                    }
                 }
+                h.score *= factor;
             }
-            h.score *= factor;
         }
         // Deduplicate by id and keep top-k by adjusted score (lower distance is better in LanceDB)
         all_hits.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal));

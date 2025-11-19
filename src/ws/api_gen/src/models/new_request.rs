@@ -22,9 +22,9 @@ pub struct NewRequest {
     /// User's question to start a new thread
     #[serde(rename = "question")]
     pub question: String,
-    /// Agent to use for this thread (ask | cleanse | model). Defaults to ask.
+    /// Agent to use (ask | cleanse | model). Defaults to ask.
     #[serde(rename = "agentType", skip_serializing_if = "Option::is_none")]
-    pub agent_type: Option<String>,
+    pub agent_type: Option<AgentType>,
 }
 
 impl NewRequest {
@@ -48,6 +48,22 @@ pub enum Type {
 impl Default for Type {
     fn default() -> Type {
         Self::New
+    }
+}
+/// Agent to use (ask | cleanse | model). Defaults to ask.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+pub enum AgentType {
+    #[serde(rename = "ask")]
+    Ask,
+    #[serde(rename = "cleanse")]
+    Cleanse,
+    #[serde(rename = "model")]
+    Model,
+}
+
+impl Default for AgentType {
+    fn default() -> AgentType {
+        Self::Ask
     }
 }
 

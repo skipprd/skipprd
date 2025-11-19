@@ -9,6 +9,7 @@ Name | Type | Description | Notes
 **server_time** | **String** |  | 
 **seq** | **i32** |  | 
 **thread_id** | **String** |  | 
+**title** | Option<**String**> |  | [optional]
 **messages** | [**Vec<models::HistoryResponseMessagesInner>**](HistoryResponse_messages_inner.md) |  | 
 **next_before_thread_seq** | Option<**i32**> |  | [optional]
 

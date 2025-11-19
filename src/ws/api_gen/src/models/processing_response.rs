@@ -31,9 +31,8 @@ pub struct ProcessingResponse {
     pub stage: Option<Stage>,
     #[serde(rename = "progress", skip_serializing_if = "Option::is_none")]
     pub progress: Option<f64>,
-    /// Upcoming ReAct step name (e.g., run_sql, sql_schema)
     #[serde(rename = "step", skip_serializing_if = "Option::is_none")]
-    pub step: Option<String>,
+    pub step: Option<Step>,
 }
 
 impl ProcessingResponse {
@@ -80,6 +79,26 @@ pub enum Stage {
 impl Default for Stage {
     fn default() -> Stage {
         Self::Queued
+    }
+}
+/// 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+pub enum Step {
+    #[serde(rename = "run_sql")]
+    RunSql,
+    #[serde(rename = "sql_schema")]
+    SqlSchema,
+    #[serde(rename = "sql_stats")]
+    SqlStats,
+    #[serde(rename = "sql_sample")]
+    SqlSample,
+    #[serde(rename = "vect_query")]
+    VectQuery,
+}
+
+impl Default for Step {
+    fn default() -> Step {
+        Self::RunSql
     }
 }
 

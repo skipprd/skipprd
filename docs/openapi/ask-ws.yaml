@@ -288,6 +288,34 @@ components:
             answer:
               type: string
               description: Plain-text concise answer
+            data:
+              description: Optional tabular data from the last successful run_sql
+              type: object
+              additionalProperties: false
+              required: [header, rows]
+              properties:
+                header:
+                  type: array
+                  items: { type: string }
+                rows:
+                  type: array
+                  items:
+                    type: array
+                    items: { type: string }
+            chart:
+              description: Optional chart suggestion derived from data shape
+              type: object
+              additionalProperties: false
+              required: [type, x, y]
+              properties:
+                type:
+                  type: string
+                  enum: [line, bar, area]
+                x:
+                  type: string
+                y:
+                  type: array
+                  items: { type: string }
 
     AwaitUserResponse:
       type: object

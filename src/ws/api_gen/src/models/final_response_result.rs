@@ -19,6 +19,10 @@ pub struct FinalResponseResult {
     /// Plain-text concise answer
     #[serde(rename = "answer")]
     pub answer: String,
+    #[serde(rename = "data", skip_serializing_if = "Option::is_none")]
+    pub data: Option<models::FinalResponseResultData>,
+    #[serde(rename = "chart", skip_serializing_if = "Option::is_none")]
+    pub chart: Option<models::FinalResponseResultChart>,
 }
 
 impl FinalResponseResult {
@@ -26,6 +30,8 @@ impl FinalResponseResult {
         FinalResponseResult {
             sql: None,
             answer,
+            data: None,
+            chart: None,
         }
     }
 }

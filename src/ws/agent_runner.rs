@@ -59,6 +59,8 @@ pub fn inject_agent_question(agent: &str, question: &str) -> String {
 			 Work on ONE artifact at a time (either MetricFlow YAML or a DBT model SQL).\n\
 			 - Use a stable logical name `name` that will never change.\n\
 			 - Prefer existing artifacts if relevant (use artifacts tool); otherwise propose a new one.\n\
+			 - Before asking for criteria, exhaust schema exploration: use vect_query(scope:\"field\"), sql_schema, sql_sample/sql_stats to infer plausible fields/values.\n\
+			 - Propose a reasonable default filter using discovered fields (only ask if multiple equally plausible options remain).\n\
 			 - Use ask_approval to request approval; use ask_user for clarifications/edits.\n\
 			 - For updates: call approve_and_save_artifact with preview_diff=true first and show the diff for approval.\n\
 			 - On approval: call approve_and_save_artifact with {{kind, name, content}} to save.\n\

@@ -1,7 +1,9 @@
 use crate::qa::vector::lance_store::LanceDbStore;
 use crate::qa::vector::lance_store::ScoredChunk;
 use serde_json::Value;
+use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatasetResolved {
 	pub pipeline: String,
 	pub namespace: String,
@@ -9,6 +11,7 @@ pub struct DatasetResolved {
 	pub fields_hint: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedArtifact {
 	pub pipeline: String,
 	pub namespace: String,
@@ -16,6 +19,34 @@ pub struct ResolvedArtifact {
 	pub kind: String, // metric|model
 	pub score: f32,
 	pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PreflightIntent {
+	pub intents: Vec<String>,
+	pub period: Option<String>,
+	pub hints: Vec<String>,
+	pub rationale: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Selection {
+	#[serde(rename = "type")]
+	pub type_name: String, // metric|model|dataset
+	pub pipeline: String,
+	pub namespace: String,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PreflightDecision {
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub selection: Option<Selection>,
+	#[serde(default)]
+	pub secondaries: Vec<Selection>,
+	pub confidence: f32,
+	pub rationale: String,
 }
 
 pub async fn resolve_datasets(question: &str, top_k: usize) -> Vec<DatasetResolved> {
@@ -100,6 +131,46 @@ pub async fn resolve_artifacts(question: &str, top_k: usize, kind: &str) -> Vec<
 		}
 	}
 	out
+}
+
+pub async fn preflight_intent_llm(question: &str) -> PreflightIntent {
+	let cfg = crate::llm::config_from_env();
+	let llm = crate::llm::create_llm(&cfg);
+	let prompt = format!(
+		r#"You are preparing to answer a data question. Think aloud BRIEFLY and extract intent.
+Return STRICT JSON only with keys: intents[], period?, hints[], rationale.
+Question: {}"#,
+		question
+	);
+	match tokio::task::spawn_blocking({ let llm2 = llm.clone(); let p = prompt.clone(); move || llm2.chat(&[crate::llm::ChatMessage { role: "user".into(), content: p }]) }).await {
+		Ok(Ok(text)) => serde_json::from_str::<PreflightIntent>(&text).unwrap_or_default(),
+		_ => PreflightIntent::default(),
+	}
+}
+
+pub async fn preflight_decision_llm(intent: &PreflightIntent, datasets: &[DatasetResolved], artifacts: &[ResolvedArtifact]) -> PreflightDecision {
+	let cfg = crate::llm::config_from_env();
+	let llm = crate::llm::create_llm(&cfg);
+	let ds_json = serde_json::to_string(datasets).unwrap_or_default();
+	let arts_json = serde_json::to_string(artifacts).unwrap_or_default();
+	let intent_json = serde_json::to_string(intent).unwrap_or_default();
+	let prompt = format!(
+		r#"You are selecting the primary source to answer the question. Use ONLY the provided intent, datasets and artifacts. No guessing.
+Return STRICT JSON: {{
+  "selection": {{"type":"metric"|"model"|"dataset","pipeline":string,"namespace":string,"name":string?}} | null,
+  "secondaries": [{{"type":string,"pipeline":string,"namespace":string,"name":string?}}],
+  "confidence": number,
+  "rationale": string
+}}
+Intent: {}
+Datasets: {}
+Artifacts: {}"#,
+		intent_json, ds_json, arts_json
+	);
+	match tokio::task::spawn_blocking({ let llm2 = llm.clone(); let p = prompt.clone(); move || llm2.chat(&[crate::llm::ChatMessage { role: "user".into(), content: p }]) }).await {
+		Ok(Ok(text)) => serde_json::from_str::<PreflightDecision>(&text).unwrap_or_default(),
+		_ => PreflightDecision::default(),
+	}
 }
 
 async fn load_catalog_hint(pipeline: &str, namespace: &str) -> Result<String, String> {

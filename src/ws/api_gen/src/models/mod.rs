@@ -10,8 +10,17 @@ pub use error_response::ErrorResponse;
 pub mod final_response_result;
 pub use final_response_result::FinalResponseResult;
 
+pub mod final_response_result_data;
+pub use final_response_result_data::FinalResponseResultData;
+
+pub mod final_response_result_chart;
+pub use final_response_result_chart::FinalResponseResultChart;
+
 pub mod final_response;
 pub use final_response::FinalResponse;
+
+pub mod await_approval_response;
+pub use await_approval_response::AwaitApprovalResponse;
 
 pub mod history_request;
 pub use history_request::HistoryRequest;
@@ -39,6 +48,15 @@ pub use ok_response::OkResponse;
 
 pub mod open_request;
 pub use open_request::OpenRequest;
+
+pub mod delete_request;
+pub use delete_request::DeleteRequest;
+
+pub mod approve_request;
+pub use approve_request::ApproveRequest;
+
+pub mod reject_request;
+pub use reject_request::RejectRequest;
 
 pub mod processing_response;
 pub use processing_response::ProcessingResponse;

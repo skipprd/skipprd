@@ -12,6 +12,29 @@ use chrono::Utc;
 use crate::models as m;
 use crate::qa::session::ThreadStore;
 
+// Prompts used for preflight gating (centralized)
+const CHOOSE_TYPE_PROMPT: &str = "Should I work with a DBT Model or a DBT MetricFlow? (Reply: \"model\" or \"metric\")";
+
+fn build_existing_or_new_prompt(sel_type: &str, first_name: &str, extra_count: usize) -> String {
+	let kind_label = if sel_type == "metric" { "MetricFlow" } else { "DBT Model" };
+	if !first_name.is_empty() && extra_count > 1 {
+		format!(
+			"I found existing {} candidates (e.g., '{}', +{} more). Use an existing one (update) or create a new one? (Reply: \"existing\" or \"new\")",
+			kind_label, first_name, extra_count - 1
+		)
+	} else if !first_name.is_empty() {
+		format!(
+			"I found an existing {} '{}'. Use existing (update) or create a new one? (Reply: \"existing\" or \"new\")",
+			kind_label, first_name
+		)
+	} else {
+		format!(
+			"Use an existing {} (update) or create a new one? (Reply: \"existing\" or \"new\")",
+			kind_label
+		)
+	}
+}
+
 pub async fn start(port: u16) -> Result<(), String> {
     // Ensure configuration is loaded so tenant/workspace are correct for this process
     crate::helpers::configuration::Config::build_config();
@@ -162,7 +185,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			let question = req.question.clone();
 			if question.trim().is_empty() { return Err("question required".into()); }
 			let thread_id = Uuid::new_v4().to_string();
-			let agent = normalize_agent(req.agent_type.clone());
+			let agent = normalize_agent_new(req.agent_type.clone());
 			state.current_agent.insert(thread_id.clone(), agent.clone());
 			// ok
 			let mut ok = api::OkResponse::new(1, m::ok_response::Type::Ok, now_iso());
@@ -216,10 +239,21 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 							out.push(s);
 						}
 						let tseq = state.next_thread_seq(&thread_id);
-						let resp = api::ServerMessage::Final(api::FinalResponse::new(1, m::final_response::Type::Final, now_iso(), state.next_seq(), thread_id.clone(), tseq, api::FinalResponseResult { sql, answer }));
+						let resp = api::ServerMessage::Final(api::FinalResponse::new(1, m::final_response::Type::Final, now_iso(), state.next_seq(), thread_id.clone(), tseq, api::FinalResponseResult { sql: sql.clone(), answer: answer.clone(), data: None, chart: None }));
 						let s = serde_json::to_string(&resp).unwrap();
 						state.buffer_last(&s);
 						out.push(s);
+						// Append final_response step with the exact payload sent
+						{
+							let store = crate::qa::session::ThreadStore::new();
+							let _ = store.append_step(&thread_id, crate::qa::session::ThreadStep {
+								action: "final_response".to_string(),
+								args: serde_json::json!({"answer": answer, "sql": sql, "data": null, "chart": null}),
+								observation: serde_json::json!({"ok": true}),
+								ts: chrono::Utc::now().to_rfc3339(),
+								agent: Some(agent.clone()),
+							}).await;
+						}
 						// Log entire thread on final
 						{
 							let store = crate::qa::session::ThreadStore::new();
@@ -232,10 +266,21 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 					}
 					AgentFrame::AwaitUser { prompt } => {
 						let tseq = state.next_thread_seq(&thread_id);
-						let resp = api::ServerMessage::AwaitUser(api::AwaitUserResponse::new(1, m::await_user_response::Type::AwaitUser, now_iso(), state.next_seq(), thread_id.clone(), tseq, prompt));
+						let resp = api::ServerMessage::AwaitUser(api::AwaitUserResponse::new(1, m::await_user_response::Type::AwaitUser, now_iso(), state.next_seq(), thread_id.clone(), tseq, prompt.clone()));
 						let s = serde_json::to_string(&resp).unwrap();
 						state.buffer_last(&s);
 						out.push(s);
+						// persist gate in thread
+						{
+							let store = crate::qa::session::ThreadStore::new();
+							let _ = store.append_step(&thread_id, crate::qa::session::ThreadStep {
+								action: "await_user".to_string(),
+								args: serde_json::json!({"prompt": prompt}),
+								observation: serde_json::json!({"ok": true}),
+								ts: chrono::Utc::now().to_rfc3339(),
+								agent: Some(agent.clone()),
+							}).await;
+						}
 					}
 					AgentFrame::AwaitApproval { prompt } => {
 						let tseq = state.next_thread_seq(&thread_id);
@@ -262,7 +307,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			if thread_id.is_empty() { return Err("thread_id required".into()); }
 			if uuid::Uuid::parse_str(&thread_id).is_err() { return Err("invalid thread_id".into()); }
 			let question = req.question.clone().unwrap_or_else(|| "Continue.".to_string());
-			let requested_agent = normalize_agent(req.agent_type.clone());
+			let requested_agent = normalize_agent_open(req.agent_type.clone());
 			let current = state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| "ask".to_string());
 			if current != requested_agent {
 				// append switch_agent step
@@ -306,10 +351,21 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 							out.push(s);
 						}
 						let tseq = state.next_thread_seq(&thread_id);
-						let resp = api::ServerMessage::Final(api::FinalResponse::new(1, m::final_response::Type::Final, now_iso(), state.next_seq(), thread_id.clone(), tseq, api::FinalResponseResult { sql, answer }));
+						let resp = api::ServerMessage::Final(api::FinalResponse::new(1, m::final_response::Type::Final, now_iso(), state.next_seq(), thread_id.clone(), tseq, api::FinalResponseResult { sql: sql.clone(), answer: answer.clone(), data: None, chart: None }));
 						let s = serde_json::to_string(&resp).unwrap();
 						state.buffer_last(&s);
 						out.push(s);
+						// Append final_response step with the exact payload sent
+						{
+							let store = crate::qa::session::ThreadStore::new();
+							let _ = store.append_step(&thread_id, crate::qa::session::ThreadStep {
+								action: "final_response".to_string(),
+								args: serde_json::json!({"answer": answer, "sql": sql, "data": null, "chart": null}),
+								observation: serde_json::json!({"ok": true}),
+								ts: chrono::Utc::now().to_rfc3339(),
+								agent: Some(agent.clone()),
+							}).await;
+						}
 						// Log entire thread on final
 						{
 							let store = crate::qa::session::ThreadStore::new();
@@ -322,10 +378,21 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 					}
 					AgentFrame::AwaitUser { prompt } => {
 						let tseq = state.next_thread_seq(&thread_id);
-						let resp = api::ServerMessage::AwaitUser(api::AwaitUserResponse::new(1, m::await_user_response::Type::AwaitUser, now_iso(), state.next_seq(), thread_id.clone(), tseq, prompt));
+						let resp = api::ServerMessage::AwaitUser(api::AwaitUserResponse::new(1, m::await_user_response::Type::AwaitUser, now_iso(), state.next_seq(), thread_id.clone(), tseq, prompt.clone()));
 						let s = serde_json::to_string(&resp).unwrap();
 						state.buffer_last(&s);
 						out.push(s);
+						// persist gate in thread
+						{
+							let store = crate::qa::session::ThreadStore::new();
+							let _ = store.append_step(&thread_id, crate::qa::session::ThreadStep {
+								action: "await_user".to_string(),
+								args: serde_json::json!({"prompt": prompt}),
+								observation: serde_json::json!({"ok": true}),
+								ts: chrono::Utc::now().to_rfc3339(),
+								agent: Some(agent.clone()),
+							}).await;
+						}
 					}
 					AgentFrame::AwaitApproval { prompt } => {
 						let tseq = state.next_thread_seq(&thread_id);
@@ -363,6 +430,60 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			// we don't increment thread_seq on user ack
 			let ok = api::OkResponse::new(1, m::ok_response::Type::Ok, now_iso());
 			out.push(serde_json::to_string(&api::ServerMessage::Ok(ok)).unwrap());
+			// Accept explicit replies to conclude preflight gates (no heuristics)
+			{
+				let store = crate::qa::session::ThreadStore::new();
+				if let Some(log) = store.get(&thread_id).await {
+					// Unconditional type choice acceptance
+					let lc_uncond = text.trim().to_lowercase();
+					if lc_uncond == "model" || lc_uncond == "metric" {
+						let selection = serde_json::json!({"type": lc_uncond, "pipeline": "", "namespace": "", "name": null});
+						let _ = store.append_step(&thread_id, crate::qa::session::ThreadStep {
+							action: "preflight_decision".to_string(),
+							args: serde_json::json!({"selection": selection, "secondaries": [], "confidence": 1.0, "rationale": "User explicitly chose."}),
+							observation: serde_json::json!({"ok": true}),
+							ts: chrono::Utc::now().to_rfc3339(),
+							agent: Some(state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| "ask".to_string())),
+						}).await;
+					}
+					if let Some(last_await) = log.steps.iter().rev().find(|s| s.action == "await_user") {
+						let prompt = last_await.args.get("prompt").and_then(|x| x.as_str()).unwrap_or("");
+						let lc = text.trim().to_lowercase();
+						if prompt == CHOOSE_TYPE_PROMPT {
+							if lc == "model" || lc == "metric" {
+								let selection = serde_json::json!({"type": lc, "pipeline": "", "namespace": "", "name": null});
+								let _ = store.append_step(&thread_id, crate::qa::session::ThreadStep {
+									action: "preflight_decision".to_string(),
+									args: serde_json::json!({"selection": selection, "secondaries": [], "confidence": 1.0, "rationale": "User explicitly chose."}),
+									observation: serde_json::json!({"ok": true}),
+									ts: chrono::Utc::now().to_rfc3339(),
+									agent: Some(state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| "ask".to_string())),
+								}).await;
+							}
+						} else if prompt.contains("Use an existing") && prompt.contains("(Reply: \"existing\" or \"new\")") {
+							if lc == "existing" || lc == "new" {
+								// find last selection to augment with action
+								let mut sel = serde_json::json!({"type": "", "pipeline": "", "namespace": "", "name": null});
+								for s in log.steps.iter().rev() {
+									if s.action == "preflight_decision" {
+										if let Some(obj) = s.args.get("selection").cloned() {
+											if obj.is_object() { sel = obj; }
+										}
+										break;
+									}
+								}
+								let _ = store.append_step(&thread_id, crate::qa::session::ThreadStep {
+									action: "preflight_decision".to_string(),
+									args: serde_json::json!({"selection": sel, "action": lc, "secondaries": [], "confidence": 1.0, "rationale": "User explicitly chose."}),
+									observation: serde_json::json!({"ok": true}),
+									ts: chrono::Utc::now().to_rfc3339(),
+									agent: Some(state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| "ask".to_string())),
+								}).await;
+							}
+						}
+					}
+				}
+			}
 			// auto-resume: emit processing and continue agent immediately
 			let agent = state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| "ask".to_string());
 			// processing
@@ -375,7 +496,17 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			out.push(pr_s);
 			// run agent for this thread
 			tracing::info!("user auto-resume: thread_id={} agent={}", thread_id, agent);
-			let frames = run_agent_and_frames(&thread_id, "Continue.", &agent).await?;
+			// Use the first user question to preserve embeddings context
+			let store2 = crate::qa::session::ThreadStore::new();
+			let mut q_for_resume = "Continue.".to_string();
+			if let Some(log) = store2.get(&thread_id).await {
+				if let Some(first_user) = log.steps.iter().find(|s| s.action == "user") {
+					if let Some(t) = first_user.args.get("text").and_then(|x| x.as_str()) {
+						if !t.trim().is_empty() { q_for_resume = t.to_string(); }
+					}
+				}
+			}
+			let frames = run_agent_and_frames(&thread_id, &q_for_resume, &agent).await?;
 			for f in frames {
 				match f {
 					AgentFrame::Final { answer, sql } => {
@@ -388,10 +519,21 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 							out.push(s);
 						}
 						let tseq = state.next_thread_seq(&thread_id);
-						let resp = api::ServerMessage::Final(api::FinalResponse::new(1, m::final_response::Type::Final, now_iso(), state.next_seq(), thread_id.clone(), tseq, api::FinalResponseResult { sql, answer }));
+						let resp = api::ServerMessage::Final(api::FinalResponse::new(1, m::final_response::Type::Final, now_iso(), state.next_seq(), thread_id.clone(), tseq, api::FinalResponseResult { sql: sql.clone(), answer: answer.clone(), data: None, chart: None }));
 						let s = serde_json::to_string(&resp).unwrap();
 						state.buffer_last(&s);
 						out.push(s);
+						// Append final_response step with the exact payload sent
+						{
+							let store = crate::qa::session::ThreadStore::new();
+							let _ = store.append_step(&thread_id, crate::qa::session::ThreadStep {
+								action: "final_response".to_string(),
+								args: serde_json::json!({"answer": answer, "sql": sql, "data": null, "chart": null}),
+								observation: serde_json::json!({"ok": true}),
+								ts: chrono::Utc::now().to_rfc3339(),
+								agent: Some(state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| "ask".to_string())),
+							}).await;
+						}
 						// Log entire thread on final (best-effort)
 						if let Some(log) = store.get(&thread_id).await {
 							if let Ok(pretty) = serde_json::to_string_pretty(&log) {
@@ -401,7 +543,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 					}
 					AgentFrame::AwaitUser { prompt } => {
 						let tseq = state.next_thread_seq(&thread_id);
-						let resp = api::ServerMessage::AwaitUser(api::AwaitUserResponse::new(1, m::await_user_response::Type::AwaitUser, now_iso(), state.next_seq(), thread_id.clone(), tseq, prompt));
+						let resp = api::ServerMessage::AwaitUser(api::AwaitUserResponse::new(1, m::await_user_response::Type::AwaitUser, now_iso(), state.next_seq(), thread_id.clone(), tseq, prompt.clone()));
 						let s = serde_json::to_string(&resp).unwrap();
 						state.buffer_last(&s);
 						out.push(s);
@@ -619,7 +761,7 @@ async fn process_new(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt
 	let question = req.question.clone();
 	if question.trim().is_empty() { return Err("question required".into()); }
 	let thread_id = Uuid::new_v4().to_string();
-	let agent = normalize_agent(req.agent_type.clone());
+	let agent = normalize_agent_new(req.agent_type.clone());
 	state.current_agent.insert(thread_id.clone(), agent.clone());
 	// ok
 	let mut ok = api::OkResponse::new(1, m::ok_response::Type::Ok, now_iso());
@@ -671,7 +813,7 @@ async fn process_open(v: &Value, state: &mut ConnState, write: &mut (impl SinkEx
 	if thread_id.is_empty() { return Err("thread_id required".into()); }
 	if uuid::Uuid::parse_str(&thread_id).is_err() { return Err("invalid thread_id".into()); }
 	let question = req.question.clone().unwrap_or_else(|| "Continue.".to_string());
-	let requested_agent = normalize_agent(req.agent_type.clone());
+	let requested_agent = normalize_agent_open(req.agent_type.clone());
 	let current = state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| "ask".to_string());
 	if current != requested_agent {
 		let store = crate::qa::session::ThreadStore::new();
@@ -807,6 +949,21 @@ fn normalize_agent(a: Option<String>) -> String {
 	}
 }
 
+fn normalize_agent_new(a: Option<api::new_request::AgentType>) -> String {
+	match a {
+		Some(api::new_request::AgentType::Cleanse) => "cleanse".to_string(),
+		Some(api::new_request::AgentType::Model) => "model".to_string(),
+		_ => "ask".to_string(),
+	}
+}
+
+fn normalize_agent_open(a: Option<api::open_request::AgentType>) -> String {
+	match a {
+		Some(api::open_request::AgentType::Cleanse) => "cleanse".to_string(),
+		Some(api::open_request::AgentType::Model) => "model".to_string(),
+		_ => "ask".to_string(),
+	}
+}
 async fn run_agent_with_processing(
 	thread_id: &str,
 	question: &str,
@@ -830,8 +987,21 @@ async fn run_agent_with_processing(
 	let ctx_df = datafusion::prelude::SessionContext::new();
 	crate::ws::agent_runner::pre_register_all_namespaces(&ctx_df).await;
 	let mut registry = crate::ws::agent_runner::build_registry(agent, &ctx_df);
+	// Determine question for embeddings (prefer first user text)
+	let q_for_embed = {
+		let storeq = crate::qa::session::ThreadStore::new();
+		let mut q = question.to_string();
+		if let Some(log) = storeq.get(thread_id).await {
+			if let Some(first_user) = log.steps.iter().find(|s| s.action == "user") {
+				if let Some(t) = first_user.args.get("text").and_then(|x| x.as_str()) {
+					if !t.trim().is_empty() { q = t.to_string(); }
+				}
+			}
+		}
+		q
+	};
 	// Preflight: resolve dataset candidates for all agents
-	let candidates = crate::ws::context::resolve_datasets(question, 3).await;
+	let candidates = crate::ws::context::resolve_datasets(&q_for_embed, 3).await;
 	if !candidates.is_empty() {
 		// Append thread step
 		let store = crate::qa::session::ThreadStore::new();
@@ -846,7 +1016,7 @@ async fn run_agent_with_processing(
 	}
 	// Preflight: resolve metric artifacts and append step for all agents
 	{
-		let arts = crate::ws::context::resolve_artifacts(question, 3, "metric").await;
+		let arts = crate::ws::context::resolve_artifacts(&q_for_embed, 3, "metric").await;
 		if !arts.is_empty() {
 			let store = crate::qa::session::ThreadStore::new();
 			let arr: Vec<serde_json::Value> = arts.iter().map(|a| serde_json::json!({
@@ -861,32 +1031,172 @@ async fn run_agent_with_processing(
 			}).await;
 		}
 	}
+	// Check for existing confident selection to avoid re-gating
+	let mut have_selection = false;
+	{
+		let store = crate::qa::session::ThreadStore::new();
+		if let Some(log) = store.get(thread_id).await {
+			for step in log.steps.iter().rev() {
+				if step.action == "preflight_decision" {
+					if let (Some(sel), Some(conf)) = (step.args.get("selection"), step.args.get("confidence").and_then(|v| v.as_f64())) {
+						if sel.is_object() && conf >= 0.5 { have_selection = true; }
+					}
+					break;
+				}
+			}
+		}
+	}
+	// Preflight: think-out-loud intent and decision; gate if low confidence
+	let mut decision = crate::ws::context::PreflightDecision::default();
+	// Preflight: think-out-loud intent and decision; gate if low confidence
+	let mut decision = crate::ws::context::PreflightDecision::default();
+	if !have_selection {
+		let intent = crate::ws::context::preflight_intent_llm(&q_for_embed).await;
+		{
+			let store = crate::qa::session::ThreadStore::new();
+			let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
+				action: "preflight_intent".to_string(),
+				args: serde_json::to_value(&intent).unwrap_or(serde_json::json!({})),
+				observation: serde_json::json!({"ok": true}),
+				ts: chrono::Utc::now().to_rfc3339(),
+				agent: Some(agent.to_string()),
+			}).await;
+		}
+		let arts_vec = {
+			let store = crate::qa::session::ThreadStore::new();
+			let mut out: Vec<crate::ws::context::ResolvedArtifact> = Vec::new();
+			if let Some(log) = store.get(thread_id).await {
+				for step in log.steps.iter().rev() {
+					if step.action == "resolved_artifacts" {
+						if let Some(arr) = step.args.get("items").and_then(|x| x.as_array()) {
+							for v in arr {
+								let p = v.get("pipeline").and_then(|x| x.as_str()).unwrap_or("").to_string();
+								let ns = v.get("namespace").and_then(|x| x.as_str()).unwrap_or("").to_string();
+								let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+								let score = v.get("score").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
+								out.push(crate::ws::context::ResolvedArtifact { pipeline: p, namespace: ns, name, kind: "metric".to_string(), score, text: String::new() });
+							}
+						}
+						break;
+					}
+				}
+			}
+			out
+		};
+		// Reuse last confident decision if exists, otherwise ask LLM
+		decision = {
+			let store = crate::qa::session::ThreadStore::new();
+			let mut out: Option<crate::ws::context::PreflightDecision> = None;
+			if let Some(log) = store.get(thread_id).await {
+				for step in log.steps.iter().rev() {
+					if step.action == "preflight_decision" {
+						if let Ok(d) = serde_json::from_value::<crate::ws::context::PreflightDecision>(step.args.clone()) {
+							if d.selection.is_some() && d.confidence >= 0.5 { out = Some(d); }
+						}
+						break;
+					}
+				}
+			}
+			if let Some(d) = out {
+				d
+			} else {
+				crate::ws::context::preflight_decision_llm(&intent, &candidates, &arts_vec).await
+			}
+		};
+		// Append decision (best-effort, may be similar to last)
+		{
+			let store = crate::qa::session::ThreadStore::new();
+			let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
+				action: "preflight_decision".to_string(),
+				args: serde_json::to_value(&decision).unwrap_or(serde_json::json!({})),
+				observation: serde_json::json!({"ok": true}),
+				ts: chrono::Utc::now().to_rfc3339(),
+				agent: Some(agent.to_string()),
+			}).await;
+		}
+		// Gates based on decision
+		if decision.selection.is_none() || decision.confidence < 0.5 {
+			// Stage A: Ask user to choose artifact type (neutral)
+			let tseq = state.next_thread_seq(&thread_id);
+			let prompt = CHOOSE_TYPE_PROMPT.to_string();
+			let resp = api::ServerMessage::AwaitUser(api::AwaitUserResponse::new(1, m::await_user_response::Type::AwaitUser, now_iso(), state.next_seq(), thread_id.to_string(), tseq, prompt));
+			let s = serde_json::to_string(&resp).unwrap();
+			state.buffer_last(&s);
+			tracing::info!("WS -> {}", s);
+			let _ = write.send(Message::Text(s)).await;
+			// persist gate
+			{
+				let store = crate::qa::session::ThreadStore::new();
+				let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
+					action: "await_user".to_string(),
+					args: serde_json::json!({"prompt": CHOOSE_TYPE_PROMPT}),
+					observation: serde_json::json!({"ok": true}),
+					ts: chrono::Utc::now().to_rfc3339(),
+					agent: Some(agent.to_string()),
+				}).await;
+			}
+			return Ok(());
+		}
+		// Stage B: If selection.type is present and existing artifacts of that type exist, ask existing vs new
+		if let Some(sel) = decision.selection.as_ref() {
+			let sel_type = sel.type_name.as_str();
+			let mut first_name = String::new();
+			let mut count = 0usize;
+			if sel_type == "metric" {
+				// refresh artifacts under this selection
+				let arts_b = crate::ws::context::resolve_artifacts(&q_for_embed, 3, "metric").await;
+				if !arts_b.is_empty() {
+					first_name = arts_b.get(0).map(|a| a.name.clone()).unwrap_or_default();
+					count = arts_b.len();
+				}
+			}
+			if count > 0 {
+				let tseq = state.next_thread_seq(&thread_id);
+				let prompt = build_existing_or_new_prompt(sel_type, &first_name, count);
+				let resp = api::ServerMessage::AwaitUser(api::AwaitUserResponse::new(1, m::await_user_response::Type::AwaitUser, now_iso(), state.next_seq(), thread_id.to_string(), tseq, prompt.clone()));
+				let s = serde_json::to_string(&resp).unwrap();
+				state.buffer_last(&s);
+				tracing::info!("WS -> {}", s);
+				let _ = write.send(Message::Text(s)).await;
+				// persist gate
+				let store = crate::qa::session::ThreadStore::new();
+				let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
+					action: "await_user".to_string(),
+					args: serde_json::json!({"prompt": prompt}),
+					observation: serde_json::json!({"ok": true}),
+					ts: chrono::Utc::now().to_rfc3339(),
+					agent: Some(agent.to_string()),
+				}).await;
+				return Ok(());
+			}
+		}
+	}
+	// When a confident selection already exists, load it into `decision`
+	if have_selection {
+		let store = crate::qa::session::ThreadStore::new();
+		if let Some(log) = store.get(thread_id).await {
+			for step in log.steps.iter().rev() {
+				if step.action == "preflight_decision" {
+					if let Ok(d) = serde_json::from_value::<crate::ws::context::PreflightDecision>(step.args.clone()) {
+						if d.selection.is_some() && d.confidence >= 0.5 {
+							decision = d;
+						}
+					}
+					break;
+				}
+			}
+		}
+	}
 	// Preflight: inject reference example for model agent based on thread state (no heuristics)
 	if agent == "model" {
 		let store = crate::qa::session::ThreadStore::new();
 		let mut kind_opt: Option<String> = None;
-		if let Some(log) = store.get(thread_id).await {
-			for step in log.steps.iter().rev() {
-				if step.action == "artifact_focus" {
-					if let Some(k) = step.args.get("kind").and_then(|x| x.as_str()) {
-						kind_opt = Some(k.to_string());
-						break;
-					}
-				}
-				if step.action == "approve_and_save_artifact" {
-					if let Some(k) = step.args.get("kind").and_then(|x| x.as_str()) {
-						kind_opt = Some(k.to_string());
-						break;
-					}
-				}
-				if step.action == "artifacts" {
-					if let Some(t) = step.args.get("type").and_then(|x| x.as_str()) {
-						if t == "metric" {
-							kind_opt = Some("metric".to_string());
-							break;
-						}
-					}
-				}
+		// Decide example kind strictly from preflight_decision.selection.type if present
+		if let Some(sel) = decision.selection.as_ref() {
+			if sel.type_name == "metric" {
+				kind_opt = Some("metric".to_string());
+			} else if sel.type_name == "model" {
+				kind_opt = Some("model".to_string());
 			}
 		}
 		if let Some(kind) = kind_opt {
@@ -937,7 +1247,11 @@ async fn run_agent_with_processing(
 				pr.progress = Some(progress);
 				// Only emit known non-empty step names
 				match step_name.as_str() {
-					"run_sql" | "sql_schema" | "sql_stats" | "sql_sample" | "vect_query" => { pr.step = Some(step_name); }
+					"run_sql" => { pr.step = Some(m::processing_response::Step::RunSql); }
+					"sql_schema" => { pr.step = Some(m::processing_response::Step::SqlSchema); }
+					"sql_stats" => { pr.step = Some(m::processing_response::Step::SqlStats); }
+					"sql_sample" => { pr.step = Some(m::processing_response::Step::SqlSample); }
+					"vect_query" => { pr.step = Some(m::processing_response::Step::VectQuery); }
 					_ => {}
 				}
 				let s = serde_json::to_string(&pr).unwrap();
@@ -976,6 +1290,18 @@ async fn run_agent_with_processing(
 						let (header, rows) = load_last_run_sql_async(thread_id).await;
 						let improved = synthesize_summary(question, &result.answer, &result.sql, &header, &rows).await;
 						let streamed_answer = improved.as_deref().unwrap_or(&result.answer);
+						// Suggest a simple chart based on data shape (ask agent only)
+						let mut chart: Option<api::FinalResponseResultChart> = None;
+						if agent == "ask" && !header.is_empty() && !rows.is_empty() {
+							// Heuristic: if first col looks like time and there is at least one numeric column -> line chart
+							let x_col = header.get(0).cloned().unwrap_or_default();
+							let mut y_cols: Vec<String> = Vec::new();
+							// treat any additional columns as metrics
+							for c in header.iter().skip(1) { y_cols.push(c.clone()); }
+							if !y_cols.is_empty() {
+								chart = Some(api::FinalResponseResultChart::new(api::final_response_result_chart::Type::Line, x_col, y_cols));
+							}
+						}
 						// Finalize title once
 						{
 							let store = crate::qa::session::ThreadStore::new();
@@ -992,11 +1318,34 @@ async fn run_agent_with_processing(
 						}
 						let tseq = state.next_thread_seq(thread_id);
 						let final_answer = improved.unwrap_or(result.answer.clone());
-						let resp = api::FinalResponse::new(1, m::final_response::Type::Final, now_iso(), state.next_seq(), thread_id.to_string(), tseq, api::FinalResponseResult { sql: result.sql, answer: final_answer });
+						let mut res = api::FinalResponseResult { sql: result.sql, answer: final_answer, data: None, chart: None };
+						// Attach data+chart if ask agent
+						if agent == "ask" && !header.is_empty() && !rows.is_empty() {
+							res.data = Some(api::FinalResponseResultData { header: header.clone(), rows: rows.clone() });
+							if let Some(c) = chart { res.chart = Some(c); }
+						}
+						let resp = api::FinalResponse::new(1, m::final_response::Type::Final, now_iso(), state.next_seq(), thread_id.to_string(), tseq, res);
 						let s = serde_json::to_string(&resp).unwrap();
 						state.buffer_last(&s);
 						tracing::info!("WS -> {}", s);
 						let _ = write.send(Message::Text(s)).await;
+						// Append final_response step with the exact payload sent
+						{
+							let store = crate::qa::session::ThreadStore::new();
+							let payload = &resp.result;
+							let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
+								action: "final_response".to_string(),
+								args: serde_json::json!({
+									"answer": payload.answer,
+									"sql": payload.sql,
+									"data": payload.data,
+									"chart": payload.chart
+								}),
+								observation: serde_json::json!({"ok": true}),
+								ts: chrono::Utc::now().to_rfc3339(),
+								agent: Some(agent.to_string()),
+							}).await;
+						}
 						// Log entire thread on final
 						{
 							let store = crate::qa::session::ThreadStore::new();
@@ -1088,8 +1437,21 @@ async fn run_agent_and_frames(thread_id: &str, question: &str, agent: &str) -> R
 	let ctx_df = datafusion::prelude::SessionContext::new();
 	crate::ws::agent_runner::pre_register_all_namespaces(&ctx_df).await;
 	let registry = crate::ws::agent_runner::build_registry(agent, &ctx_df);
+	// Determine question for embeddings
+	let q_for_embed = {
+		let storeq = crate::qa::session::ThreadStore::new();
+		let mut q = question.to_string();
+		if let Some(log) = storeq.get(thread_id).await {
+			if let Some(first_user) = log.steps.iter().find(|s| s.action == "user") {
+				if let Some(t) = first_user.args.get("text").and_then(|x| x.as_str()) {
+					if !t.trim().is_empty() { q = t.to_string(); }
+				}
+			}
+		}
+		q
+	};
 	// Preflight: resolve dataset candidates for all agents
-	let candidates = crate::ws::context::resolve_datasets(question, 3).await;
+	let candidates = crate::ws::context::resolve_datasets(&q_for_embed, 3).await;
 	if !candidates.is_empty() {
 		let store = crate::qa::session::ThreadStore::new();
 		let arr: Vec<serde_json::Value> = candidates.iter().map(|c| serde_json::json!({"pipeline": c.pipeline, "namespace": c.namespace, "score": c.score})).collect();
@@ -1103,7 +1465,7 @@ async fn run_agent_and_frames(thread_id: &str, question: &str, agent: &str) -> R
 	}
 	// Preflight: resolve metric artifacts for all agents
 	{
-		let arts = crate::ws::context::resolve_artifacts(question, 3, "metric").await;
+		let arts = crate::ws::context::resolve_artifacts(&q_for_embed, 3, "metric").await;
 		if !arts.is_empty() {
 			let store = crate::qa::session::ThreadStore::new();
 			let arr: Vec<serde_json::Value> = arts.iter().map(|a| serde_json::json!({
@@ -1118,33 +1480,114 @@ async fn run_agent_and_frames(thread_id: &str, question: &str, agent: &str) -> R
 			}).await;
 		}
 	}
-	// Preflight: inject reference example for model agent based on thread state (no heuristics)
-	if agent == "model" {
+	// Preflight: think-out-loud intent and decision; if low confidence, return AwaitUser frame
+	// Check for existing confident selection to avoid re-gating
+	let mut have_selection = false;
+	{
 		let store = crate::qa::session::ThreadStore::new();
-		let mut kind_opt: Option<String> = None;
 		if let Some(log) = store.get(thread_id).await {
 			for step in log.steps.iter().rev() {
-				if step.action == "artifact_focus" {
-					if let Some(k) = step.args.get("kind").and_then(|x| x.as_str()) {
-						kind_opt = Some(k.to_string());
-						break;
+				if step.action == "preflight_decision" {
+					if let (Some(sel), Some(conf)) = (step.args.get("selection"), step.args.get("confidence").and_then(|v| v.as_f64())) {
+						if sel.is_object() && conf >= 0.5 { have_selection = true; }
 					}
+					break;
 				}
-				if step.action == "approve_and_save_artifact" {
-					if let Some(k) = step.args.get("kind").and_then(|x| x.as_str()) {
-						kind_opt = Some(k.to_string());
-						break;
-					}
-				}
-				if step.action == "artifacts" {
-                    if let Some(t) = step.args.get("type").and_then(|x| x.as_str()) {
-                        if t == "metric" {
-                            kind_opt = Some("metric".to_string());
-                            break;
-                        }
-                    }
-                }
 			}
+		}
+	}
+	// Working variable for downstream gating and reference example injection
+	let mut decision = crate::ws::context::PreflightDecision::default();
+	if !have_selection {
+		let intent = crate::ws::context::preflight_intent_llm(&q_for_embed).await;
+		{
+			let store = crate::qa::session::ThreadStore::new();
+			let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
+				action: "preflight_intent".to_string(),
+				args: serde_json::to_value(&intent).unwrap_or(serde_json::json!({})),
+				observation: serde_json::json!({"ok": true}),
+				ts: chrono::Utc::now().to_rfc3339(),
+				agent: Some(agent.to_string()),
+			}).await;
+		}
+		let arts_vec = {
+			let store = crate::qa::session::ThreadStore::new();
+			let mut out: Vec<crate::ws::context::ResolvedArtifact> = Vec::new();
+			if let Some(log) = store.get(thread_id).await {
+				for step in log.steps.iter().rev() {
+					if step.action == "resolved_artifacts" {
+						if let Some(arr) = step.args.get("items").and_then(|x| x.as_array()) {
+							for v in arr {
+								let p = v.get("pipeline").and_then(|x| x.as_str()).unwrap_or("").to_string();
+								let ns = v.get("namespace").and_then(|x| x.as_str()).unwrap_or("").to_string();
+								let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+								let score = v.get("score").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
+								out.push(crate::ws::context::ResolvedArtifact { pipeline: p, namespace: ns, name, kind: "metric".to_string(), score, text: String::new() });
+							}
+						}
+						break;
+					}
+				}
+			}
+			out
+		};
+		decision = crate::ws::context::preflight_decision_llm(&intent, &candidates, &arts_vec).await;
+		{
+			let store = crate::qa::session::ThreadStore::new();
+			let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
+				action: "preflight_decision".to_string(),
+				args: serde_json::to_value(&decision).unwrap_or(serde_json::json!({})),
+				observation: serde_json::json!({"ok": true}),
+				ts: chrono::Utc::now().to_rfc3339(),
+				agent: Some(agent.to_string()),
+			}).await;
+		}
+		if decision.selection.is_none() || decision.confidence < 0.5 {
+			return Ok(vec![AgentFrame::AwaitUser { prompt: CHOOSE_TYPE_PROMPT.to_string() }]);
+		}
+	} else {
+		// Load existing confident decision
+		let store = crate::qa::session::ThreadStore::new();
+		if let Some(log) = store.get(thread_id).await {
+			for step in log.steps.iter().rev() {
+				if step.action == "preflight_decision" {
+					if let Ok(d) = serde_json::from_value::<crate::ws::context::PreflightDecision>(step.args.clone()) {
+						if d.selection.is_some() && d.confidence >= 0.5 { decision = d; }
+					}
+					break;
+				}
+			}
+		}
+	}
+	// Preflight: inject reference example for model agent based on thread state (no heuristics)
+	if agent == "model" {
+		// If an artifact is focused, remind the agent to update in place
+		{
+			let store = crate::qa::session::ThreadStore::new();
+			if let Some(log) = store.get(thread_id).await {
+				for step in log.steps.iter().rev() {
+					if step.action == "artifact_focus" {
+						let name = step.args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+						let pipeline_f = step.args.get("pipeline").and_then(|v| v.as_str()).unwrap_or("");
+						let ns_f = step.args.get("namespace").and_then(|v| v.as_str()).unwrap_or("");
+						if !name.is_empty() {
+							let mut note = format!("You are updating the focused artifact '{}' in place; do not rename.", name);
+							if let (true, true) = (!pipeline_f.is_empty(), !ns_f.is_empty()) {
+								note = format!("{}\nFor MetricFlow YAML, include a top comment for the dataset:\n# Dataset: {}.{}", note, pipeline_f, ns_f);
+							}
+							sys = format!("{}\n\n{}", sys, note);
+						}
+						break;
+					}
+				}
+			}
+		}
+		let store = crate::qa::session::ThreadStore::new();
+		let mut kind_opt: Option<String> = None;
+		// decide by preflight_decision only (selection.type)
+		if let Some(sel) = decision.selection.as_ref() {
+			if sel.type_name == "metric" { kind_opt = Some("metric".to_string()); }
+			if sel.type_name == "model" { kind_opt = Some("model".to_string()); }
 		}
 		if let Some(kind) = kind_opt {
 			let text = if kind == "metric" {

@@ -25,9 +25,9 @@ pub struct OpenRequest {
     /// Optional nudge to resume the thread (default is \"Continue.\")
     #[serde(rename = "question", skip_serializing_if = "Option::is_none")]
     pub question: Option<String>,
-    /// Agent to use for this message; if differs from current, a switch_agent step will be recorded.
+    /// Agent to use for this message; if differs from current, a switch_agent step is recorded.
     #[serde(rename = "agentType", skip_serializing_if = "Option::is_none")]
-    pub agent_type: Option<String>,
+    pub agent_type: Option<AgentType>,
 }
 
 impl OpenRequest {
@@ -52,6 +52,22 @@ pub enum Type {
 impl Default for Type {
     fn default() -> Type {
         Self::Open
+    }
+}
+/// Agent to use for this message; if differs from current, a switch_agent step is recorded.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+pub enum AgentType {
+    #[serde(rename = "ask")]
+    Ask,
+    #[serde(rename = "cleanse")]
+    Cleanse,
+    #[serde(rename = "model")]
+    Model,
+}
+
+impl Default for AgentType {
+    fn default() -> AgentType {
+        Self::Ask
     }
 }
 

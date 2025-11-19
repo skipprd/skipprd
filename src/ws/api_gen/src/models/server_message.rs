@@ -20,6 +20,8 @@ pub enum ServerMessage {
     Final(models::FinalResponse),
     #[serde(rename="await_user")]
     AwaitUser(models::AwaitUserResponse),
+    #[serde(rename="await_approval")]
+    AwaitApproval(models::AwaitApprovalResponse),
     #[serde(rename="ok")]
     Ok(models::OkResponse),
     #[serde(rename="error")]
@@ -58,6 +60,26 @@ pub enum Stage {
 impl Default for Stage {
     fn default() -> Stage {
         Self::Queued
+    }
+}
+/// 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+pub enum Step {
+    #[serde(rename = "run_sql")]
+    RunSql,
+    #[serde(rename = "sql_schema")]
+    SqlSchema,
+    #[serde(rename = "sql_stats")]
+    SqlStats,
+    #[serde(rename = "sql_sample")]
+    SqlSample,
+    #[serde(rename = "vect_query")]
+    VectQuery,
+}
+
+impl Default for Step {
+    fn default() -> Step {
+        Self::RunSql
     }
 }
 /// 

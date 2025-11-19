@@ -18,14 +18,14 @@ impl Tool for ApproveAndSaveArtifactTool {
 		if name.is_empty() {
 			return Err("name required".to_string());
 		}
-		let content = args.get("content").and_then(|x| x.as_str()).unwrap_or("").to_string();
+			let content = args.get("content").and_then(|x| x.as_str()).unwrap_or("").to_string();
 		if content.trim().is_empty() {
 			return Err("content required".to_string());
 		}
 		let preview_diff = args.get("preview_diff").and_then(|x| x.as_bool()).unwrap_or(false);
 
-		// Load candidates from thread's resolved_datasets
-		let (pipeline, namespace) = {
+			// Load candidates from thread's resolved_datasets
+			let (mut pipeline, mut namespace) = {
 			let mut candidates: Vec<(String, String)> = Vec::new();
 			if let Some(tid) = _ctx.thread_id.as_ref() {
 				let store = crate::qa::session::ThreadStore::new();
@@ -49,35 +49,75 @@ impl Tool for ApproveAndSaveArtifactTool {
 			if candidates.is_empty() {
 				return Err("No resolved datasets found. First, resolve dataset candidates via vect_query(scope:\"dataset\"), record them, then retry save.".to_string());
 			}
-			// Match content against candidates by FQN presence
-			let lower = content.to_lowercase();
-			let mut chosen: Option<(String, String)> = None;
-			for (p, ns) in candidates.iter() {
-				let fqn = format!("{}.{}", p, ns).to_lowercase();
-				if lower.contains(&fqn) {
-					chosen = Some((p.clone(), ns.clone()));
-					break;
+				// Selection strategy:
+				// - For DBT models, require explicit FQN presence in SQL to avoid invented tables.
+				// - For MetricFlow YAML, anchor to the top preflight candidate (no YAML changes needed for spec);
+				//   we will add a top-of-file comment to document the assumed dataset.
+				if kind == "model" {
+					let lower = content.to_lowercase();
+					if let Some((p, ns)) = candidates.iter().find(|(p, ns)| {
+						let fqn = format!("{}.{}", p, ns).to_lowercase();
+						lower.contains(&fqn)
+					}) {
+						(p.clone(), ns.clone())
+					} else {
+						let list = candidates.iter().map(|(p, ns)| format!("{}.{}", p, ns)).collect::<Vec<_>>().join(", ");
+						return Err(format!("Model SQL must reference a resolved dataset FQN. Use one of: {}", list));
+					}
+				} else {
+					// metric
+					candidates.first().cloned().unwrap()
+				}
+			}; // end selection
+
+			// For metrics, persist a top comment documenting the assumed dataset
+			let mut content_final = if kind == "metric" { ensure_dataset_comment(&content, &pipeline, &namespace) } else { content.clone() };
+
+			// Update-in-place: if a focused artifact exists in the thread, enforce writing to that exact key
+			let mut name_final = name.clone();
+			if let Some(tid) = _ctx.thread_id.as_ref() {
+				let store = crate::qa::session::ThreadStore::new();
+				if let Some(log) = store.get(tid).await {
+					for step in log.steps.iter().rev() {
+						if step.action == "artifact_focus" {
+							let exists_true = step.observation.get("exists").and_then(|v| v.as_bool()).unwrap_or(false);
+							if exists_true {
+								let fk = step.args.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+								let fname = step.args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+								let fp = step.args.get("pipeline").and_then(|v| v.as_str()).unwrap_or("");
+								let fns = step.args.get("namespace").and_then(|v| v.as_str()).unwrap_or("");
+								if fk != kind {
+									return Err(format!("Focused artifact kind is '{}'; cannot save kind '{}'. Update the focused artifact in place.", fk, kind));
+								}
+								if fname.is_empty() || fp.is_empty() || fns.is_empty() {
+									break;
+								}
+								// Override target to focused artifact
+								name_final = fname.to_string();
+								pipeline = fp.to_string();
+								namespace = fns.to_string();
+								// Ensure metric YAML comment reflects focused dataset if metric
+								if kind == "metric" {
+									content_final = ensure_dataset_comment(&content_final, &pipeline, &namespace);
+								}
+							}
+							break;
+						}
+					}
 				}
 			}
-			if let Some(c) = chosen {
-				c
-			} else {
-				let list = candidates.iter().map(|(p, ns)| format!("{}.{}", p, ns)).collect::<Vec<_>>().join(", ");
-				return Err(format!("Artifact content does not reference any resolved dataset. Rewrite SQL to use one of: {}", list));
-			}
-		};
 
 		let (current_key, version_key, content_type) = match kind {
 			"model" => {
-				let base = dbt_base_prefix(&pipeline);
-				let current = format!("{}/models/{}/{}.sql", base, namespace, name);
-				let ver = format!("{}/models/{}/_versions/{}/{}.sql", base, namespace, name, chrono::Utc::now().format("%Y%m%d_%H%M%S"));
+					let base = dbt_base_prefix(&pipeline);
+					let current = format!("{}/models/{}/{}.sql", base, namespace, name_final);
+					let ver = format!("{}/models/{}/_versions/{}/{}.sql", base, namespace, name_final, chrono::Utc::now().format("%Y%m%d_%H%M%S"));
 				(current, ver, "text/sql")
 			}
 			_ => {
-				let base = dbt_base_prefix(&pipeline);
-				let current = format!("{}/metrics/{}/{}.yaml", base, namespace, name);
-				let ver = format!("{}/metrics/{}/_versions/{}/{}.yaml", base, namespace, name, chrono::Utc::now().format("%Y%m%d_%H%M%S"));
+					let base = dbt_base_prefix(&pipeline);
+					let current = format!("{}/metrics/{}/{}.yaml", base, namespace, name_final);
+					let ver = format!("{}/metrics/{}/_versions/{}/{}.yaml", base, namespace, name_final, chrono::Utc::now().format("%Y%m%d_%H%M%S"));
 				(current, ver, "text/yaml")
 			}
 		};
@@ -89,7 +129,7 @@ impl Tool for ApproveAndSaveArtifactTool {
 		};
 
 		if preview_diff {
-			let diff = compute_unified_diff(existing.as_deref().unwrap_or(""), &content);
+				let diff = compute_unified_diff(existing.as_deref().unwrap_or(""), &content_final);
 			// Log focus step for auditing which artifact is being considered
 			if let Some(tid) = _ctx.thread_id.as_ref() {
 				let store = crate::qa::session::ThreadStore::new();
@@ -113,16 +153,16 @@ impl Tool for ApproveAndSaveArtifactTool {
 		}
 
 		// Validate
-		if kind == "model" {
-			validate_model_sql(&content).await?;
-		} else {
-			validate_metric_yaml(&content).await?;
-		}
+			if kind == "model" {
+				validate_model_sql(&content_final).await?;
+			} else {
+				validate_metric_yaml_for_dataset(&content_final, &pipeline, &namespace).await?;
+			}
 
 		// Save current (stable name)
-		crate::helpers::s3::put_bytes(&current_key, content.as_bytes(), content_type).await.map_err(|e| format!("{:?}", e))?;
+			crate::helpers::s3::put_bytes(&current_key, content_final.as_bytes(), content_type).await.map_err(|e| format!("{:?}", e))?;
 		// Save versioned copy
-		let _ = crate::helpers::s3::put_bytes(&version_key, content.as_bytes(), content_type).await;
+			let _ = crate::helpers::s3::put_bytes(&version_key, content_final.as_bytes(), content_type).await;
 
 		info!("Artifact saved: kind={} key={}", kind, current_key);
 
@@ -178,6 +218,25 @@ fn compute_unified_diff(old: &str, new: &str) -> String {
 		}
 	}
 	out.join("\n")
+}
+
+fn ensure_dataset_comment(yaml_text: &str, pipeline: &str, namespace: &str) -> String {
+	let wanted = format!("# Dataset: {}.{}", pipeline, namespace);
+	// If already present (anywhere in the first 5 lines), keep original
+	let mut lines: Vec<&str> = yaml_text.split('\n').collect();
+	let scan_end = std::cmp::min(lines.len(), 5);
+	for i in 0..scan_end {
+		if lines[i].trim_start().starts_with("# Dataset:") {
+			return yaml_text.to_string();
+		}
+	}
+	// Insert comment at the very top followed by a blank line if first line is not empty/comment
+	let mut out = String::new();
+	out.push_str(&wanted);
+	out.push('\n');
+	out.push('\n');
+	out.push_str(yaml_text);
+	out
 }
 
 fn preprocess_model_sql(raw: &str) -> String {
@@ -286,6 +345,59 @@ async fn validate_metric_yaml(yaml_text: &str) -> Result<(), String> {
 				return Err(format!("MetricFlow SQL validation failed: {}", e));
 			}
 		}
+	}
+	Ok(())
+}
+
+async fn validate_metric_yaml_for_dataset(yaml_text: &str, pipeline: &str, namespace: &str) -> Result<(), String> {
+	// Base structural/SQL validation
+	validate_metric_yaml(yaml_text).await?;
+	// Best-effort field compatibility check: ensure expressions reference at least one known column
+	let ctx = crate::sql::query::new_context_all_namespaces().await;
+	let table_name = format!("{}.{}", pipeline, namespace);
+	let df = ctx.table(&table_name).await.map_err(|e| format!("Dataset '{}' unavailable: {}", table_name, e))?;
+	let mut cols: Vec<String> = Vec::new();
+	for f in df.schema().fields() {
+		cols.push(f.name().to_lowercase());
+	}
+	let colset: std::collections::HashSet<&str> = cols.iter().map(|s| s.as_str()).collect();
+	let parsed_yaml = serde_yaml::from_str::<serde_yaml::Value>(yaml_text).map_err(|e| e.to_string())?;
+	let mut exprs: Vec<String> = Vec::new();
+	fn collect_exprs(v: &serde_yaml::Value, out: &mut Vec<String>) {
+		match v {
+			serde_yaml::Value::Mapping(map) => {
+				for (k, val) in map {
+					if let serde_yaml::Value::String(key) = k {
+						let key_l = key.to_lowercase();
+						if key_l == "expr" || key_l.contains("expression") {
+							if let serde_yaml::Value::String(s) = val { out.push(s.clone()); }
+						}
+					}
+					collect_exprs(val, out);
+				}
+			}
+			serde_yaml::Value::Sequence(arr) => { for el in arr { collect_exprs(el, out); } }
+			_ => {}
+		}
+	}
+	collect_exprs(&parsed_yaml, &mut exprs);
+	let mut all_ok = true;
+	for e in exprs.iter() {
+		let el = e.to_lowercase();
+		let mut matched = false;
+		for c in colset.iter() {
+			if el.contains(c) {
+				matched = true;
+				break;
+			}
+		}
+		if !matched {
+			all_ok = false;
+			break;
+		}
+	}
+	if !all_ok {
+		return Err(format!("MetricFlow YAML expressions may not match fields in '{}'. Inspect schema and align expressions.", table_name));
 	}
 	Ok(())
 }

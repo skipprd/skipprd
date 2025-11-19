@@ -28,6 +28,12 @@ pub enum ClientMessage {
     History(models::HistoryRequest),
     #[serde(rename="seen")]
     Seen(models::SeenRequest),
+    #[serde(rename="delete")]
+    Delete(models::DeleteRequest),
+    #[serde(rename="approve")]
+    Approve(models::ApproveRequest),
+    #[serde(rename="reject")]
+    Reject(models::RejectRequest),
 }
 
 impl Default for ClientMessage {
@@ -36,4 +42,20 @@ impl Default for ClientMessage {
     }
 }
 
+/// Agent to use for this message; if differs from current, a switch_agent step is recorded.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+pub enum AgentType {
+    #[serde(rename = "ask")]
+    Ask,
+    #[serde(rename = "cleanse")]
+    Cleanse,
+    #[serde(rename = "model")]
+    Model,
+}
+
+impl Default for AgentType {
+    fn default() -> AgentType {
+        Self::Ask
+    }
+}
 
