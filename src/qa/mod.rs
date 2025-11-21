@@ -9,6 +9,7 @@ pub mod cleanse;
 pub mod model;
 pub mod embeddings;
 pub mod dbt;
+pub mod dbt_examples;
 pub mod reference;
 
 

@@ -28,6 +28,13 @@ pub async fn sync_pipeline(pipeline: &str) -> Result<(), String> {
                             dataset_text.push_str(desc);
                         }
                     }
+                    // Governance digest (curated catalog note)
+                    if let Some(gn) = val.get("governance_notes").and_then(|g| g.get("dataset")).and_then(|d| d.get("digest")).and_then(|x| x.as_str()) {
+                        if !gn.trim().is_empty() {
+                            if !dataset_text.is_empty() { dataset_text.push(' '); }
+                            dataset_text.push_str(gn);
+                        }
+                    }
                     // Fields as separate chunks
                     if let Some(fields) = val.get("fields").and_then(|x| x.as_array()) {
                         for f in fields {
@@ -118,7 +125,7 @@ pub async fn sync_pipeline(pipeline: &str) -> Result<(), String> {
         }
         info!("Embeddings: ns='{}' field_items={}", ns, field_count_ns);
 
-        // Artifacts: index current (non-versioned) MetricFlow and DBT model content
+        // Artifacts: index current (non-versioned) DBT project content (rich types)
         {
             let bucket = crate::helpers::configuration::Config::get_skippr_s3_bucket();
             let client = crate::helpers::s3::get_s3_client().await;
@@ -127,10 +134,22 @@ pub async fn sync_pipeline(pipeline: &str) -> Result<(), String> {
                 let workspace = crate::helpers::configuration::Config::get_workspace_name();
                 format!("{}/{}/{}/dbt", tenant, workspace, pipeline)
             };
-            // (artifact_type, dir)
-            let kinds: &[(&str, &str)] = &[("metric", "metrics"), ("model", "models")];
-            for (atype, dir) in kinds {
-                let prefix = format!("{}/{}/{}/", base, dir, ns);
+            // Directory scanners with inferred types
+            #[derive(Clone, Copy)]
+            struct Scan<'a> { dir: &'a str, type_hint: &'a str }
+            let scans_ns = [
+                Scan { dir: "models", type_hint: "dbt_model" },
+                Scan { dir: "metrics", type_hint: "dbt_metricflow" },
+                Scan { dir: "macros", type_hint: "dbt_macro" },
+                Scan { dir: "snapshots", type_hint: "dbt_snapshot" },
+                Scan { dir: "seeds", type_hint: "dbt_seed" },
+                Scan { dir: "analyses", type_hint: "dbt_analysis" },
+                Scan { dir: "tests", type_hint: "dbt_test" },
+                Scan { dir: "exposures", type_hint: "dbt_exposure" },
+                Scan { dir: "docs", type_hint: "dbt_doc" },
+            ];
+            for sc in scans_ns.iter() {
+                let prefix = format!("{}/{}/{}/", base, sc.dir, ns);
                 let mut token: Option<String> = None;
                 loop {
                     let mut req = client.list_objects_v2().bucket(&bucket).prefix(&prefix).max_keys(1000);
@@ -140,9 +159,13 @@ pub async fn sync_pipeline(pipeline: &str) -> Result<(), String> {
                             for obj in resp.contents() {
                                 if let Some(k) = obj.key() {
                                     if k.contains("/_versions/") { continue; }
-                                    // fetch content
+                                    // fetch content (best-effort; skip very large objects by size hint)
+                                    if let Some(sz) = obj.size() {
+                                        if sz > 2_000_000 { continue; } // skip files >2MB
+                                    }
                                     if let Ok(bytes) = crate::helpers::s3::get_bytes(k).await {
                                         let text = String::from_utf8_lossy(&bytes).to_string();
+                                        let atype = infer_type_from_key(k, sc.type_hint);
                                         items.push(crate::qa::vector::lance_store::Chunk {
                                             id: format!("artifact:{}:{}:{}:{}", atype, pipeline, ns, extract_artifact_name(k)),
                                             kind: "artifact".to_string(),
@@ -150,7 +173,7 @@ pub async fn sync_pipeline(pipeline: &str) -> Result<(), String> {
                                             field: None,
                                             text,
                                             vector: Vec::new(),
-                                            meta: serde_json::json!({"artifact_type": *atype}),
+                                            meta: serde_json::json!({"type": atype, "path": k, "s3_uri": format!("s3://{}/{}", bucket, k)}),
                                             epoch,
                                         });
                                     }
@@ -161,6 +184,24 @@ pub async fn sync_pipeline(pipeline: &str) -> Result<(), String> {
                         }
                         Err(_) => break,
                     }
+                }
+            }
+            // Top-level project files (no namespace folder)
+            let top_files = [("dbt_project.yml", "dbt_project"), ("packages.yml", "dbt_packages")];
+            for (fname, tname) in top_files.iter() {
+                let key = format!("{}/{}", base, fname);
+                if let Ok(bytes) = crate::helpers::s3::get_bytes(&key).await {
+                    let text = String::from_utf8_lossy(&bytes).to_string();
+                    items.push(crate::qa::vector::lance_store::Chunk {
+                        id: format!("artifact:{}:{}:{}:{}", *tname, pipeline, ns, fname),
+                        kind: "artifact".to_string(),
+                        namespace: ns.clone(),
+                        field: None,
+                        text,
+                        vector: Vec::new(),
+                        meta: serde_json::json!({"type": *tname, "path": key, "s3_uri": format!("s3://{}/{}", bucket, key)}),
+                        epoch,
+                    });
                 }
             }
         }
@@ -198,6 +239,32 @@ fn extract_artifact_name(key: &str) -> String {
     } else {
         key.to_string()
     }
+}
+
+fn infer_type_from_key(key: &str, default_hint: &str) -> String {
+    // Derive type from directory and extension; fallback to provided hint
+    let lower = key.to_lowercase();
+    let t = if lower.contains("/models/") && lower.ends_with(".sql") { "dbt_model" }
+        else if lower.contains("/models/") && (lower.ends_with(".yml") || lower.ends_with(".yaml")) { "dbt_schema" }
+        else if lower.contains("/metrics/") { "dbt_metricflow" }
+        else if lower.contains("/macros/") { "dbt_macro" }
+        else if lower.contains("/snapshots/") { "dbt_snapshot" }
+        else if lower.contains("/seeds/") && (lower.ends_with(".csv") || lower.ends_with(".parquet")) { "dbt_seed" }
+        else if lower.contains("/analyses/") { "dbt_analysis" }
+        else if lower.contains("/tests/") { "dbt_test" }
+        else if lower.contains("/exposures/") { "dbt_exposure" }
+        else if lower.contains("/docs/") { "dbt_doc" }
+        else if lower.ends_with("/dbt_project.yml") { "dbt_project" }
+        else if lower.ends_with("/packages.yml") { "dbt_packages" }
+        else {
+            // generic based on extension
+            if lower.ends_with(".sql") { "file_sql" }
+            else if lower.ends_with(".yaml") || lower.ends_with(".yml") { "file_yaml" }
+            else if lower.ends_with(".md") { "file_md" }
+            else if lower.ends_with(".py") { "file_py" }
+            else { default_hint }
+        };
+    t.to_string()
 }
 
 pub async fn sync_all_pipelines() -> Result<(), String> {

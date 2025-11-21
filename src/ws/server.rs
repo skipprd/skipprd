@@ -11,32 +11,15 @@ use chrono::Utc;
 use crate::models as m;
 use crate::qa::session::ThreadStore;
 
-// Prompts used for preflight gating (centralized)
-const CHOOSE_TYPE_PROMPT: &str = "Should I work with a DBT Model or a DBT MetricFlow? (Reply: \"model\" or \"metric\")";
-
-fn build_existing_or_new_prompt(sel_type: &str, first_name: &str, extra_count: usize) -> String {
-	let kind_label = if sel_type == "metric" { "MetricFlow" } else { "DBT Model" };
-	if !first_name.is_empty() && extra_count > 1 {
-		format!(
-			"I found existing {} candidates (e.g., '{}', +{} more). Use an existing one (update) or create a new one? (Reply: \"existing\" or \"new\")",
-			kind_label, first_name, extra_count - 1
-		)
-	} else if !first_name.is_empty() {
-		format!(
-			"I found an existing {} '{}'. Use existing (update) or create a new one? (Reply: \"existing\" or \"new\")",
-			kind_label, first_name
-		)
-	} else {
-		format!(
-			"Use an existing {} (update) or create a new one? (Reply: \"existing\" or \"new\")",
-			kind_label
-		)
-	}
-}
+// Steering prompts removed for model agent; model runs eagerly without awaiting user choice.
 
 pub async fn start(port: u16) -> Result<(), String> {
     // Ensure configuration is loaded so tenant/workspace are correct for this process
     crate::helpers::configuration::Config::build_config();
+    // Kick off global DBT examples sync (non-blocking)
+    tokio::spawn(async {
+        crate::qa::dbt_examples::ensure_synced_once().await;
+    });
     let addr = format!("0.0.0.0:{}", port);
     let listener = TcpListener::bind(&addr).await.map_err(|e| e.to_string())?;
     tracing::info!("WebSocket server listening on ws://{}", addr);
@@ -429,60 +412,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			// we don't increment thread_seq on user ack
 			let ok = api::OkResponse::new(1, m::ok_response::Type::Ok, now_iso());
 			out.push(serde_json::to_string(&api::ServerMessage::Ok(ok)).unwrap());
-			// Accept explicit replies to conclude preflight gates (no heuristics)
-			{
-				let store = crate::qa::session::ThreadStore::new();
-				if let Some(log) = store.get(&thread_id).await {
-					// Unconditional type choice acceptance
-					let lc_uncond = text.trim().to_lowercase();
-					if lc_uncond == "model" || lc_uncond == "metric" {
-						let selection = serde_json::json!({"type": lc_uncond, "pipeline": "", "namespace": "", "name": null});
-						let _ = store.append_step(&thread_id, crate::qa::session::ThreadStep {
-							action: "preflight_decision".to_string(),
-							args: serde_json::json!({"selection": selection, "secondaries": [], "confidence": 1.0, "rationale": "User explicitly chose."}),
-							observation: serde_json::json!({"ok": true}),
-							ts: chrono::Utc::now().to_rfc3339(),
-							agent: Some(state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| "ask".to_string())),
-						}).await;
-					}
-					if let Some(last_await) = log.steps.iter().rev().find(|s| s.action == "await_user") {
-						let prompt = last_await.args.get("prompt").and_then(|x| x.as_str()).unwrap_or("");
-						let lc = text.trim().to_lowercase();
-						if prompt == CHOOSE_TYPE_PROMPT {
-							if lc == "model" || lc == "metric" {
-								let selection = serde_json::json!({"type": lc, "pipeline": "", "namespace": "", "name": null});
-								let _ = store.append_step(&thread_id, crate::qa::session::ThreadStep {
-									action: "preflight_decision".to_string(),
-									args: serde_json::json!({"selection": selection, "secondaries": [], "confidence": 1.0, "rationale": "User explicitly chose."}),
-									observation: serde_json::json!({"ok": true}),
-									ts: chrono::Utc::now().to_rfc3339(),
-									agent: Some(state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| "ask".to_string())),
-								}).await;
-							}
-						} else if prompt.contains("Use an existing") && prompt.contains("(Reply: \"existing\" or \"new\")") {
-							if lc == "existing" || lc == "new" {
-								// find last selection to augment with action
-								let mut sel = serde_json::json!({"type": "", "pipeline": "", "namespace": "", "name": null});
-								for s in log.steps.iter().rev() {
-									if s.action == "preflight_decision" {
-										if let Some(obj) = s.args.get("selection").cloned() {
-											if obj.is_object() { sel = obj; }
-										}
-										break;
-									}
-								}
-								let _ = store.append_step(&thread_id, crate::qa::session::ThreadStep {
-									action: "preflight_decision".to_string(),
-									args: serde_json::json!({"selection": sel, "action": lc, "secondaries": [], "confidence": 1.0, "rationale": "User explicitly chose."}),
-									observation: serde_json::json!({"ok": true}),
-									ts: chrono::Utc::now().to_rfc3339(),
-									agent: Some(state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| "ask".to_string())),
-								}).await;
-							}
-						}
-					}
-				}
-			}
+			// Steering gates removed: user messages no longer drive model/metric type or existing/new choices.
 			// auto-resume: emit processing and continue agent immediately
 			let agent = state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| "ask".to_string());
 			// processing
@@ -1106,61 +1036,8 @@ async fn run_agent_with_processing(
 			}).await;
 		}
 		// Gates based on decision
-		if decision.selection.is_none() || decision.confidence < 0.5 {
-			// Stage A: Ask user to choose artifact type (neutral)
-			let tseq = state.next_thread_seq(&thread_id);
-			let prompt = CHOOSE_TYPE_PROMPT.to_string();
-			let resp = api::ServerMessage::AwaitUser(api::AwaitUserResponse::new(1, m::await_user_response::Type::AwaitUser, now_iso(), state.next_seq(), thread_id.to_string(), tseq, prompt));
-			let s = serde_json::to_string(&resp).unwrap();
-			state.buffer_last(&s);
-			tracing::info!("WS -> {}", s);
-			let _ = write.send(Message::Text(s)).await;
-			// persist gate
-			{
-				let store = crate::qa::session::ThreadStore::new();
-				let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
-					action: "await_user".to_string(),
-					args: serde_json::json!({"prompt": CHOOSE_TYPE_PROMPT}),
-					observation: serde_json::json!({"ok": true}),
-					ts: chrono::Utc::now().to_rfc3339(),
-					agent: Some(agent.to_string()),
-				}).await;
-			}
-			return Ok(());
-		}
-		// Stage B: If selection.type is present and existing artifacts of that type exist, ask existing vs new
-		if let Some(sel) = decision.selection.as_ref() {
-			let sel_type = sel.type_name.as_str();
-			let mut first_name = String::new();
-			let mut count = 0usize;
-			if sel_type == "metric" {
-				// refresh artifacts under this selection
-				let arts_b = crate::ws::context::resolve_artifacts(&q_for_embed, 3, "metric").await;
-				if !arts_b.is_empty() {
-					first_name = arts_b.get(0).map(|a| a.name.clone()).unwrap_or_default();
-					count = arts_b.len();
-				}
-			}
-			if count > 0 {
-				let tseq = state.next_thread_seq(&thread_id);
-				let prompt = build_existing_or_new_prompt(sel_type, &first_name, count);
-				let resp = api::ServerMessage::AwaitUser(api::AwaitUserResponse::new(1, m::await_user_response::Type::AwaitUser, now_iso(), state.next_seq(), thread_id.to_string(), tseq, prompt.clone()));
-				let s = serde_json::to_string(&resp).unwrap();
-				state.buffer_last(&s);
-				tracing::info!("WS -> {}", s);
-				let _ = write.send(Message::Text(s)).await;
-				// persist gate
-				let store = crate::qa::session::ThreadStore::new();
-				let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
-					action: "await_user".to_string(),
-					args: serde_json::json!({"prompt": prompt}),
-					observation: serde_json::json!({"ok": true}),
-					ts: chrono::Utc::now().to_rfc3339(),
-					agent: Some(agent.to_string()),
-				}).await;
-				return Ok(());
-			}
-		}
+		// Stage A removed: do not gate on DBT type; proceed eagerly.
+		// Stage B removed: do not gate on existing/new; proceed eagerly.
 	}
 	// When a confident selection already exists, load it into `decision`
 	if have_selection {
@@ -1178,37 +1055,7 @@ async fn run_agent_with_processing(
 			}
 		}
 	}
-	// Preflight: inject reference example for model agent based on thread state (no heuristics)
-	if agent == "model" {
-		let store = crate::qa::session::ThreadStore::new();
-		let mut kind_opt: Option<String> = None;
-		// Decide example kind strictly from preflight_decision.selection.type if present
-		if let Some(sel) = decision.selection.as_ref() {
-			if sel.type_name == "metric" {
-				kind_opt = Some("metric".to_string());
-			} else if sel.type_name == "model" {
-				kind_opt = Some("model".to_string());
-			}
-		}
-		if let Some(kind) = kind_opt {
-			let text = if kind == "metric" {
-				crate::qa::reference::metricflow_example()
-			} else {
-				crate::qa::reference::dbt_model_example()
-			};
-			// Remove earlier unused store; declare once here
-			let store = crate::qa::session::ThreadStore::new();
-			let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
-				action: "reference_example".to_string(),
-				args: serde_json::json!({"kind": kind, "text": text}),
-				observation: serde_json::json!({"ok": true}),
-				ts: chrono::Utc::now().to_rfc3339(),
-				agent: Some(agent.to_string()),
-			}).await;
-			// Note in the prompt header
-			sys = format!("{}\n\nReferenceExample: provided for kind '{}'; follow its syntax strictly.", sys, kind);
-		}
-	}
+	// Removed static reference example injection for model agent.
 	let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<usize>();
 	let (pre_tx, mut pre_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 	let actx = AgentCtx {

@@ -3,8 +3,8 @@ use crate::qa::prompts_model::{model_system_prompt, model_tool_card};
 use crate::qa::tools::{ToolRegistry};
 use datafusion::prelude::SessionContext;
 use crate::qa::tools::sql_run::SqlRunTool;
-use crate::qa::tools::ask_user::AskUserTool;
 use crate::qa::tools::ask_approval::AskApprovalTool;
+use crate::qa::tools::ask_user::AskUserTool;
 use crate::qa::tools::vect_query::VectQueryTool;
 use crate::qa::dbt;
 use uuid::Uuid;
@@ -31,6 +31,10 @@ pub async fn run(pipeline: &str, prompt: &str) -> Result<(), String> {
     registry.register(AskUserTool);
     registry.register(AskApprovalTool);
     registry.register(VectQueryTool);
+    registry.register(crate::qa::tools::dbt_examples::SearchDbtExamplesTool);
+    registry.register(crate::qa::tools::dbt_validate::DbtValidateTool);
+    registry.register(crate::qa::tools::sql_register::SqlRegisterTool);
+    registry.register(crate::qa::tools::catalog_note::CatalogNoteTool);
     registry.register(crate::qa::tools::approve_save::ApproveAndSaveArtifactTool);
     registry.register(crate::qa::tools::artifacts::ArtifactsTool);
     let actx = AgentCtx {

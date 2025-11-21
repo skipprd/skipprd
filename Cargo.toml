@@ -95,6 +95,7 @@ tokio-tungstenite = "0.21"
 futures-util = "0.3"
 tungstenite = "0.21"
 uuid = { version = "1", features = ["v4"] }
+tempfile = "3.10"
 
 [features]
 llama_cpp = ["llama_cpp_2"]

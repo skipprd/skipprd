@@ -37,5 +37,9 @@ pub mod ask_user;
 pub mod ask_approval;
 pub mod approve_save;
 pub mod artifacts;
+pub mod dbt_examples;
+pub mod dbt_validate;
+pub mod catalog_note;
+pub mod sql_register;
 
 

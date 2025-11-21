@@ -255,12 +255,38 @@ impl Tool for ApproveAndSaveArtifactTool {
 				validate_metric_yaml_for_dataset(&content_final, &pipeline, &namespace, &ctx_df).await?;
 			}
 
+		// Ensure minimal dbt project scaffolding exists before first save
+			let _ = crate::qa::dbt::ensure_minimal_project(&pipeline).await;
 		// Save current (stable name)
 			crate::helpers::s3::put_bytes(&current_key, content_final.as_bytes(), content_type).await.map_err(|e| format!("{:?}", e))?;
 		// Save versioned copy
 			let _ = crate::helpers::s3::put_bytes(&version_key, content_final.as_bytes(), content_type).await;
 
 		info!("Artifact saved: kind={} key={}", kind, current_key);
+
+		// Upsert/update embedding for this artifact (immediate availability)
+		{
+			let cfg = crate::llm::config_from_env();
+			let model = crate::llm::create_llm(&cfg);
+			if let Ok(vecs) = model.embed(&[content_final.clone()]) {
+				if let Some(v) = vecs.get(0) {
+					let atype = if kind == "model" { "dbt_model" } else { "dbt_metricflow" };
+					let id = format!("artifact:{}:{}:{}:{}", if kind == "model" { "model" } else { "metric" }, pipeline, namespace, name_final);
+					let chunk = crate::qa::vector::lance_store::Chunk {
+						id,
+						kind: "artifact".to_string(),
+						namespace: namespace.clone(),
+						field: None,
+						text: content_final.clone(),
+						vector: v.clone(),
+						meta: serde_json::json!({"type": atype, "path": current_key, "s3_uri": format!("s3://{}/{}", crate::helpers::configuration::Config::get_skippr_s3_bucket(), current_key)}),
+						epoch: chrono::Utc::now().timestamp() as u64,
+					};
+					let store = crate::qa::vector::lance_store::LanceDbStore::new(&pipeline);
+					let _ = store.upsert(&[chunk]).await;
+				}
+			}
+		}
 
 		// Log step into thread if available
 		if let Some(tid) = _ctx.thread_id.as_ref() {

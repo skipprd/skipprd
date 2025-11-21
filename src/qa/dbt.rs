@@ -20,4 +20,23 @@ pub async fn write_metricflow_yaml(pipeline: &str, namespace: &str, name: &str, 
     Ok(key)
 }
 
+pub async fn ensure_minimal_project(pipeline: &str) -> Result<(), String> {
+    // Ensure a minimal dbt_project.yml exists under <base>/dbt_project.yml
+    let base = dbt_base_prefix(pipeline);
+    let project_key = format!("{}/dbt_project.yml", base);
+    match crate::helpers::s3::head_etag(&project_key).await {
+        Ok(Some(_)) => return Ok(()), // exists
+        Ok(None) => {},
+        Err(_) => {},
+    }
+    let name = format!("{}_project", pipeline.replace('/', "_"));
+    let y = format!(
+        "name: {name}\nversion: '1.0'\nprofile: '{pipeline}'\nmodel-paths: ['models']\nseed-paths: ['seeds']\nmacro-paths: ['macros']\ntarget-path: 'target'\n",
+        name=name, pipeline=pipeline
+    );
+    crate::helpers::s3::put_bytes(&project_key, y.as_bytes(), "text/yaml").await.map_err(|e| format!("{:?}", e))?;
+    info!("DBT minimal project created: s3://{}/{}", crate::helpers::configuration::Config::get_skippr_s3_bucket(), project_key);
+    Ok(())
+}
+
 

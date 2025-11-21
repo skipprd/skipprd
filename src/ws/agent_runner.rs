@@ -92,7 +92,6 @@ pub fn build_registry(agent: &str, ctx: &SessionContext) -> ToolRegistry {
 			registry.register(SqlStatsTool);
 			registry.register(SqlSampleTool { ctx: ctx.clone() });
 			registry.register(VectQueryTool);
-			registry.register(AskUserTool);
 			registry.register(ArtifactsTool);
 		}
 		"model" => {
@@ -104,6 +103,10 @@ pub fn build_registry(agent: &str, ctx: &SessionContext) -> ToolRegistry {
 			registry.register(AskUserTool);
 			registry.register(AskApprovalTool);
 			registry.register(ApproveAndSaveArtifactTool);
+			registry.register(crate::qa::tools::dbt_examples::SearchDbtExamplesTool);
+			registry.register(crate::qa::tools::dbt_validate::DbtValidateTool);
+			registry.register(crate::qa::tools::sql_register::SqlRegisterTool);
+			registry.register(crate::qa::tools::catalog_note::CatalogNoteTool);
 			registry.register(ArtifactsTool);
 		}
 		_ => {
@@ -112,7 +115,6 @@ pub fn build_registry(agent: &str, ctx: &SessionContext) -> ToolRegistry {
 			registry.register(SqlStatsTool);
 			registry.register(SqlSampleTool { ctx: ctx.clone() });
 			registry.register(VectQueryTool);
-			registry.register(AskUserTool);
 			registry.register(ArtifactsTool);
 		}
 	}
@@ -123,16 +125,12 @@ pub fn inject_agent_question(agent: &str, question: &str) -> String {
 	if agent == "model" {
 		format!(
 			"Modeling goal: {}.\n\
-			 Work on ONE artifact at a time (either MetricFlow YAML or a DBT model SQL).\n\
-			 - Use a stable logical name `name` that will never change.\n\
-			 - Prefer existing artifacts if relevant (use artifacts tool); otherwise propose a new one.\n\
-			 - Before asking for criteria, exhaust schema exploration: use vect_query(scope:\"field\"), sql_schema, sql_sample/sql_stats to infer plausible fields/values.\n\
-			 - Propose a reasonable default filter using discovered fields (only ask if multiple equally plausible options remain).\n\
-			 - Use ask_approval to request approval; use ask_user for clarifications/edits.\n\
-			 - For updates: call approve_and_save_artifact with preview_diff=true first and show the diff for approval.\n\
-			 - On approval: call approve_and_save_artifact with {{kind, name, content}} to save.\n\
-			 - Do NOT answer with a query; your job here is artifact authoring.\n\
-			 Return a compact summary only in final.",
+			 Act as a proactive DBT Engineer with strong business domain focus.\n\
+			 - Resolve datasets; if schema is empty, call sql_register on candidates and proceed anyway with a minimal staging model using {{ source('<pipeline>','<namespace>') }}.\n\
+			 - Search DBT examples (search_dbt_examples) and adopt conventions from the top match.\n\
+			 - Choose artifact type automatically (default to DBT model unless examples strongly indicate MetricFlow) and author ONE artifact with a stable name.\n\
+			 - Validate with dbt_validate; on success ask_approval and then save via approve_and_save_artifact.\n\
+			 - Ask the user only when confidence is very low (≤0.4) and only for concrete details; after any clarification, write a considered, sentient update from a fastidious custodian of data governance via catalog_note (preview if material).",
 			question
 		)
 	} else {

@@ -50,6 +50,9 @@ impl Tool for VectQueryTool {
                 h.score *= factor;
             }
         }
+        // Exclude global example embeddings from any scope (never use to answer)
+        all_hits.retain(|h| h.item.kind != "dbt_example");
+
         // Deduplicate by id and keep top-k by adjusted score (lower distance is better in LanceDB)
         all_hits.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal));
         let mut seen = std::collections::HashSet::<String>::new();
@@ -71,6 +74,32 @@ impl Tool for VectQueryTool {
                     dedup.retain(|h| h.item.id.starts_with("artifact:model:"));
                 }
                 _ => {}
+            }
+        }
+        // Optional types filter: args.types = [string] mapping to id prefix "artifact:<token>:"
+        if let Some(arr) = args.get("types").and_then(|x| x.as_array()) {
+            let mut allow: Vec<String> = Vec::new();
+            for t in arr {
+                if let Some(ts) = t.as_str() {
+                    let token = match ts {
+                        "dbt_model" => "model",
+                        "dbt_metricflow" => "metric",
+                        "dbt_macro" => "macro",
+                        "dbt_snapshot" => "snapshot",
+                        "dbt_seed" => "seed",
+                        "dbt_analysis" => "analysis",
+                        "dbt_test" => "test",
+                        "dbt_exposure" => "exposure",
+                        "dbt_doc" => "doc",
+                        "dbt_project" => "project",
+                        "dbt_packages" => "packages",
+                        _ => ""
+                    };
+                    if !token.is_empty() { allow.push(format!("artifact:{}:", token)); }
+                }
+            }
+            if !allow.is_empty() {
+                dedup.retain(|h| allow.iter().any(|pfx| h.item.id.starts_with(pfx)));
             }
         }
         // Print plain-text summary of hits for debugging context

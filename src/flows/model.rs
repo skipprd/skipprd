@@ -38,26 +38,7 @@ pub async fn run(thread_id: &str, question: &str) -> Result<Vec<FlowFrame>, Stri
 			}
 		}
 	}
-	// Gate only if still not confident; otherwise inject reference example
-	if let Some(dec) = decision_opt.as_ref() {
-		if dec.selection.is_none() || dec.confidence < 0.5 {
-			return Ok(vec![FlowFrame::AwaitUser { prompt: "Should I work with a DBT Model or a DBT MetricFlow? (Reply: \"model\" or \"metric\")".to_string() }]);
-		}
-		if let Some(sel) = dec.selection.as_ref() {
-			let kind = sel.type_name.as_str();
-			let text = if kind == "metric" { crate::qa::reference::metricflow_example() } else { crate::qa::reference::dbt_model_example() };
-			let store = crate::qa::session::ThreadStore::new();
-			let _ = store.append_step(thread_id, crate::qa::session::ThreadStep{
-				action: "reference_example".to_string(),
-				args: serde_json::json!({"kind": kind, "text": text}),
-				observation: serde_json::json!({"ok": true}),
-				ts: chrono::Utc::now().to_rfc3339(),
-				agent: Some("model".to_string()),
-			}).await;
-		}
-	} else {
-		return Ok(vec![FlowFrame::AwaitUser { prompt: "Should I work with a DBT Model or a DBT MetricFlow? (Reply: \"model\" or \"metric\")".to_string() }]);
-	}
+	// Removed gating: proceed eagerly without asking user to choose model vs metric.
 
 	let actx = crate::qa::agent::AgentCtx {
 		top_k: 30,
