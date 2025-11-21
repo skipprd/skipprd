@@ -41,7 +41,28 @@ impl Tool for SqlSchemaTool {
                     }
                     Ok(serde_json::json!({"ok": true, "columns": cols}))
                 }
-                Err(e) => Ok(serde_json::json!({"ok": false, "error": e.to_string()})),
+                Err(e) => {
+					// If FQN schema missing, attempt registration and retry once
+					let err_s = e.to_string();
+					if let Some(dot) = t.find('.') {
+						let (pipeline, namespace) = t.split_at(dot);
+						let namespace = namespace.trim_start_matches('.');
+						if err_s.contains("failed to resolve schema") || err_s.to_lowercase().contains("schema") {
+							let _ = crate::ws::agent_runner::pre_register_selected_namespaces(&ctx, &[(pipeline.to_string(), namespace.to_string())]).await;
+							match ctx.table(&t).await {
+								Ok(df2) => {
+									let mut cols: Vec<Value> = Vec::new();
+									for f in df2.schema().fields() {
+										cols.push(serde_json::json!({"name": f.name(), "type": format!("{:?}", f.data_type())}));
+									}
+									return Ok(serde_json::json!({"ok": true, "columns": cols}));
+								}
+								Err(e2) => return Ok(serde_json::json!({"ok": false, "error": e2.to_string()})),
+							}
+						}
+					}
+					Ok(serde_json::json!({"ok": false, "error": err_s}))
+				},
             }
         } else {
             // List registered tables (best effort)

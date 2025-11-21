@@ -25,6 +25,7 @@ Hard rules:
 - For MetricFlow YAML: anchor to the chosen dataset and add a top comment documenting it exactly as:
   # Dataset: <pipeline>.<namespace>
 - Before saving, validate with dbt_validate (parse, then compile with target 'datafusion' if available).
+ - For project scaffolding: do NOT build piece‑meal and do NOT request per‑artifact approvals. Produce ONE consolidated plan and then save the ENTIRE initial project in a single batch using approve_and_save_artifact_batch. If dbt_validate is unavailable, proceed without blocking.
 - STRICT JSON only; exactly one JSON object per step; no prose outside JSON."#.to_string()
 }
 
@@ -32,6 +33,7 @@ pub fn model_tool_card() -> String {
 	r#"Tools:
 - artifacts(args:{op:"list", namespace?:string, type?:"model"|"metric", limit?:int} | {op:"get", pipeline:string, namespace:string, type:"model"|"metric", name:string})
 - approve_and_save_artifact(args:{kind:"model"|"metric", name:string, content:string, pipeline?:string, namespace?:string, preview_diff?:bool})
+- approve_and_save_artifact_batch(args:{items:[{kind:"model"|"metric", name:string, content:string, pipeline:string, namespace:string}], preview_diff?:bool})
 - vect_query(args:{scope:"dataset"|"field"|"doc"|"artifact"|"metric"|"model", query_text:string, k:int})
 - search_dbt_examples(args:{query:string, k?:int}) -> {"ok":true,"examples":[{project,path,s3_uri,preview,score}]}
 - sql_schema(args:{pipeline?:string, namespace?:string, table?:string}) -> {"ok":true,"columns":[{"name":string,"data_type":string}], "pipeline":string, "namespace":string}
@@ -51,6 +53,7 @@ Usage guidance:
 - Start by calling search_dbt_examples using a concise query describing the intended model/metric; adopt conventions from top match.
 - Before saving, call dbt_validate and fix any parse/compile errors; only then ask_approval and save.
 - When schema is empty/unavailable, call sql_register for the dataset candidates and proceed with a minimal staging model using {{ source('<pipeline>','<namespace>') }}. Do not stall.
+ - For project scaffolding, aggregate the initial staging/core/test artifacts across top-K datasets and call approve_and_save_artifact_batch ONCE (no per‑artifact approvals). If validation is unavailable, note it and proceed.
 - After any user clarification, call catalog_note to write a curated digest into the catalog (preview first if the change is material); then continue modeling.
 - Use vect_query scope:"metric" to find MetricFlow artifacts and scope:"artifact" to list any artifacts.
 - Map time-relative constraints (e.g., "joined over 1 day ago") to discovered timestamp fields (e.g., created_at, signup_ts, verified_at) using reasonable default comparisons; prefer dataset-qualified references."#.to_string()

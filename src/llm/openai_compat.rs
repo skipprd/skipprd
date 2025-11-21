@@ -90,7 +90,8 @@ pub struct OpenAICompatModel {
 
 impl OpenAICompatModel {
     pub fn new(cfg: LlmConfig) -> Self {
-        let http_timeout_secs: u64 = crate::helpers::configuration::Config::getenv("LLM_HTTP_TIMEOUT_SECS", "10").parse().unwrap_or(10);
+        // Increase default timeout to accommodate /v1/responses latency on newer models
+        let http_timeout_secs: u64 = crate::helpers::configuration::Config::getenv("LLM_HTTP_TIMEOUT_SECS", "30").parse().unwrap_or(30);
         let agent = ureq::AgentBuilder::new()
             .timeout(std::time::Duration::from_secs(http_timeout_secs))
             .build();
@@ -102,30 +103,111 @@ impl LargeLanguageModel for OpenAICompatModel {
     fn chat(&self, messages: &[ChatMessage]) -> Result<String, String> {
         let base = self.cfg.base_url.clone().ok_or_else(|| "missing base_url".to_string())?;
         let model = self.cfg.chat_model.clone().ok_or_else(|| "missing chat_model".to_string())?;
-        let url = format!("{}/v1/chat/completions", base.trim_end_matches('/'));
-        // latency-optimized defaults
-        let max_tokens: u32 = crate::helpers::configuration::Config::getenv("LLM_MAX_TOKENS", "256").parse().unwrap_or(256);
-        let temperature: f32 = crate::helpers::configuration::Config::getenv("LLM_TEMPERATURE", "0.2").parse().unwrap_or(0.2);
-        let top_p: f32 = crate::helpers::configuration::Config::getenv("LLM_TOP_P", "1.0").parse().unwrap_or(1.0);
-        let body = OaiChatReq {
-            model,
-            messages: messages.iter().map(|m| OaiChatMessage { role: m.role.clone(), content: m.content.clone() }).collect(),
-            stream: Some(false),
-            max_tokens: Some(max_tokens),
-            temperature: Some(temperature),
-            top_p: Some(top_p),
-        };
-        let mut req = self.agent.request("POST", &url).set("Content-Type", "application/json");
-        if let Some(k) = self.cfg.api_key.as_ref() { req = req.set("Authorization", &format!("Bearer {}", k)); }
-        let resp = req.send_json(serde_json::to_value(&body).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-        if !(200..300).contains(&resp.status()) { return Err(format!("http {}", resp.status())); }
-        let obj: OaiChatResp = resp.into_json().map_err(|e| e.to_string())?;
-        let mut out = String::new();
-        for c in obj.choices.iter() {
-            if let Some(m) = &c.message { out.push_str(&m.content); }
-            if let Some(d) = &c.delta { if let Some(s) = &d.content { out.push_str(s); } }
+        let use_responses = model.starts_with("gpt-5") || model.starts_with("o4");
+        if use_responses {
+            #[derive(serde::Serialize)]
+            struct RespMsg { role: String, content: String }
+            #[derive(serde::Serialize)]
+            struct RespReq {
+                model: String,
+                input: Vec<RespMsg>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                max_output_tokens: Option<i32>,
+            }
+            #[derive(serde::Deserialize)]
+            struct RespResp {
+                #[serde(default)]
+                output_text: Option<String>,
+                #[serde(default)]
+                output: Vec<serde_json::Value>,
+            }
+            let url = format!("{}/v1/responses", base.trim_end_matches('/'));
+            let max_tokens: i32 = crate::helpers::configuration::Config::getenv("LLM_MAX_TOKENS", "8192").parse().unwrap_or(8192);
+            let body = RespReq {
+                model: model.clone(),
+                input: messages.iter().map(|m| RespMsg { role: m.role.clone(), content: m.content.clone() }).collect(),
+                max_output_tokens: Some(max_tokens),
+            };
+            let mut req = self.agent.request("POST", &url).set("Content-Type", "application/json");
+            if let Some(k) = self.cfg.api_key.as_ref() { req = req.set("Authorization", &format!("Bearer {}", k)); }
+            // Retries for network timeouts / transient errors
+            let payload = serde_json::to_value(&body).map_err(|e| e.to_string())?;
+            let mut attempt = 0usize;
+            let max_retries = 3usize;
+            let resp = loop {
+                attempt += 1;
+                let res = req.clone().send_json(payload.clone());
+                match res {
+                    Ok(r) => break Ok(r),
+                    Err(e) => {
+                        let es = e.to_string().to_lowercase();
+                        let transient = es.contains("timed out") || es.contains("network error") || es.contains("connection") || es.contains("temporarily");
+                        if attempt < max_retries && transient {
+                            let backoff_ms = 200u64.saturating_mul(1u64 << (attempt as u32 - 1)).min(2_000);
+                            std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+                            continue;
+                        }
+                        break Err(e);
+                    }
+                }
+            }.map_err(|e| e.to_string())?;
+            if !(200..300).contains(&resp.status()) { return Err(format!("http {}", resp.status())); }
+            let obj: RespResp = resp.into_json().map_err(|e| e.to_string())?;
+            if let Some(t) = obj.output_text { return Ok(t); }
+            if let Some(t) = obj.output.get(0)
+                .and_then(|v| v.get("content"))
+                .and_then(|c| c.get(0))
+                .and_then(|p| p.get("text"))
+                .and_then(|x| x.as_str()) {
+                return Ok(t.to_string());
+            }
+            Err("empty response".to_string())
+        } else {
+            let url = format!("{}/v1/chat/completions", base.trim_end_matches('/'));
+            // latency-optimized defaults
+            let max_tokens: u32 = crate::helpers::configuration::Config::getenv("LLM_MAX_TOKENS", "256").parse().unwrap_or(256);
+            let temperature: f32 = crate::helpers::configuration::Config::getenv("LLM_TEMPERATURE", "0.2").parse().unwrap_or(0.2);
+            let top_p: f32 = crate::helpers::configuration::Config::getenv("LLM_TOP_P", "1.0").parse().unwrap_or(1.0);
+            let body = OaiChatReq {
+                model,
+                messages: messages.iter().map(|m| OaiChatMessage { role: m.role.clone(), content: m.content.clone() }).collect(),
+                stream: Some(false),
+                max_tokens: Some(max_tokens),
+                temperature: Some(temperature),
+                top_p: Some(top_p),
+            };
+            let mut req = self.agent.request("POST", &url).set("Content-Type", "application/json");
+            if let Some(k) = self.cfg.api_key.as_ref() { req = req.set("Authorization", &format!("Bearer {}", k)); }
+            // Retries for transient issues
+            let payload = serde_json::to_value(&body).map_err(|e| e.to_string())?;
+            let mut attempt = 0usize;
+            let max_retries = 3usize;
+            let resp = loop {
+                attempt += 1;
+                let res = req.clone().send_json(payload.clone());
+                match res {
+                    Ok(r) => break Ok(r),
+                    Err(e) => {
+                        let es = e.to_string().to_lowercase();
+                        let transient = es.contains("timed out") || es.contains("network error") || es.contains("connection") || es.contains("temporarily");
+                        if attempt < max_retries && transient {
+                            let backoff_ms = 200u64.saturating_mul(1u64 << (attempt as u32 - 1)).min(2_000);
+                            std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+                            continue;
+                        }
+                        break Err(e);
+                    }
+                }
+            }.map_err(|e| e.to_string())?;
+            if !(200..300).contains(&resp.status()) { return Err(format!("http {}", resp.status())); }
+            let obj: OaiChatResp = resp.into_json().map_err(|e| e.to_string())?;
+            let mut out = String::new();
+            for c in obj.choices.iter() {
+                if let Some(m) = &c.message { out.push_str(&m.content); }
+                if let Some(d) = &c.delta { if let Some(s) = &d.content { out.push_str(s); } }
+            }
+            Ok(out)
         }
-        Ok(out)
     }
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
         let base = self.cfg.base_url.clone().ok_or_else(|| "missing base_url".to_string())?;
@@ -134,7 +216,27 @@ impl LargeLanguageModel for OpenAICompatModel {
         let body = OaiEmbReq { model, input: texts.to_vec() };
         let mut req = self.agent.request("POST", &url).set("Content-Type", "application/json");
         if let Some(k) = self.cfg.api_key.as_ref() { req = req.set("Authorization", &format!("Bearer {}", k)); }
-        let resp = req.send_json(serde_json::to_value(&body).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        // Retries for transient issues
+        let payload = serde_json::to_value(&body).map_err(|e| e.to_string())?;
+        let mut attempt = 0usize;
+        let max_retries = 3usize;
+        let resp = loop {
+            attempt += 1;
+            let res = req.clone().send_json(payload.clone());
+            match res {
+                Ok(r) => break Ok(r),
+                Err(e) => {
+                    let es = e.to_string().to_lowercase();
+                    let transient = es.contains("timed out") || es.contains("network error") || es.contains("connection") || es.contains("temporarily");
+                    if attempt < max_retries && transient {
+                        let backoff_ms = 200u64.saturating_mul(1u64 << (attempt as u32 - 1)).min(2_000);
+                        std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+                        continue;
+                    }
+                    break Err(e);
+                }
+            }
+        }.map_err(|e| e.to_string())?;
         if !(200..300).contains(&resp.status()) { return Err(format!("http {}", resp.status())); }
         let obj: OaiEmbResp = resp.into_json().map_err(|e| e.to_string())?;
         Ok(obj.data.into_iter().map(|d| d.embedding).collect())

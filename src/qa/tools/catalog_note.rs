@@ -59,13 +59,16 @@ impl Tool for CatalogNoteTool {
 		);
 		let cfg = crate::llm::config_from_env();
 		let llm = crate::llm::create_llm(&cfg);
+		// Track token expense (chars only) and avoid moving prompt
+		let chat_in_chars: usize = sys.len() + prompt.len();
 		let bullets_text = match llm.chat(&[
 			crate::llm::ChatMessage{ role:"system".to_string(), content: sys.to_string() },
-			crate::llm::ChatMessage{ role:"user".to_string(), content: prompt },
+			crate::llm::ChatMessage{ role:"user".to_string(), content: prompt.clone() },
 		]) {
 			Ok(s) => s,
 			Err(_) => text.clone(),
 		};
+		let chat_out_chars: usize = bullets_text.len();
 		// Parse bullets (lines starting with - or *)
 		let mut proposed: Vec<String> = Vec::new();
 		for line in bullets_text.lines() {
@@ -95,7 +98,8 @@ impl Tool for CatalogNoteTool {
 		}
 		let digest = curated.get(0).cloned().unwrap_or_else(|| proposed.get(0).cloned().unwrap_or_else(|| text.chars().take(200).collect()));
 		if preview {
-			return Ok(serde_json::json!({"ok": true, "preview": { "add": curated, "remove": [], "digest": digest }}));
+			let est_tokens = ((chat_in_chars + chat_out_chars) as f32 / 4.0).round() as i64;
+			return Ok(serde_json::json!({"ok": true, "preview": { "add": curated, "remove": [], "digest": digest }, "llm_expense": {"chat_chars_in": chat_in_chars, "chat_chars_out": chat_out_chars, "est_tokens": est_tokens}}));
 		}
 		// Merge into catalog JSON
 		let now = chrono::Utc::now().to_rfc3339();
@@ -141,7 +145,8 @@ impl Tool for CatalogNoteTool {
 			};
 			let _ = store.upsert(&[chunk]).await;
 		}
-		Ok(serde_json::json!({"ok": true, "curated": { "digest": digest, "facts": curated }, "key": catalog_key }))
+		let est_tokens = ((chat_in_chars + chat_out_chars) as f32 / 4.0).round() as i64;
+		Ok(serde_json::json!({"ok": true, "curated": { "digest": digest, "facts": curated }, "key": catalog_key, "llm_expense": {"chat_chars_in": chat_in_chars, "chat_chars_out": chat_out_chars, "est_tokens": est_tokens}}))
 	}
 }
 

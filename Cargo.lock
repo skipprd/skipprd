@@ -7940,6 +7940,7 @@ dependencies = [
  "icu",
  "indexmap 1.9.3",
  "ini",
+ "itertools 0.12.1",
  "lancedb",
  "lazy_static",
  "libc",

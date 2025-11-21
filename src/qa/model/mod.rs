@@ -38,9 +38,9 @@ pub async fn run(pipeline: &str, prompt: &str) -> Result<(), String> {
     registry.register(crate::qa::tools::approve_save::ApproveAndSaveArtifactTool);
     registry.register(crate::qa::tools::artifacts::ArtifactsTool);
     let actx = AgentCtx {
-        top_k: 30,
-        per_step_timeout_secs: 10,
-        max_steps: 6,
+        top_k: 100,
+        per_step_timeout_secs: 25,
+        max_steps: 50,
         thread_id: None,
         progress_tx: None,
         pre_step_tx: None,

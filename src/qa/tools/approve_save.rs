@@ -257,6 +257,33 @@ impl Tool for ApproveAndSaveArtifactTool {
 
 		// Ensure minimal dbt project scaffolding exists before first save
 			let _ = crate::qa::dbt::ensure_minimal_project(&pipeline).await;
+		// Compute diff stats against existing for summary
+			fn diff_stats(old: &str, new: &str) -> (usize, usize) {
+				let old_lines: Vec<&str> = old.split('\n').collect();
+				let new_lines: Vec<&str> = new.split('\n').collect();
+				let mut added = 0usize;
+				let mut removed = 0usize;
+				let mut i = 0usize;
+				let mut j = 0usize;
+				while i < old_lines.len() || j < new_lines.len() {
+					if i < old_lines.len() && j < new_lines.len() {
+						if old_lines[i] == new_lines[j] {
+							i += 1; j += 1;
+						} else {
+							removed += 1;
+							added += 1;
+							i += 1; j += 1;
+						}
+					} else if i < old_lines.len() {
+						removed += 1; i += 1;
+					} else {
+						added += 1; j += 1;
+					}
+				}
+				(added, removed)
+			}
+			let (lines_added, lines_removed) = diff_stats(existing.as_deref().unwrap_or(""), &content_final);
+			let status = if existing.is_some() { "modified" } else { "added" };
 		// Save current (stable name)
 			crate::helpers::s3::put_bytes(&current_key, content_final.as_bytes(), content_type).await.map_err(|e| format!("{:?}", e))?;
 		// Save versioned copy
@@ -294,13 +321,13 @@ impl Tool for ApproveAndSaveArtifactTool {
 			let _ = store.append_step(tid, crate::qa::session::ThreadStep {
 				action: "artifact_saved".to_string(),
 				args: serde_json::json!({ "kind": kind, "name": name, "pipeline": pipeline, "namespace": namespace }),
-				observation: serde_json::json!({ "key": current_key }),
+				observation: serde_json::json!({ "key": current_key, "status": status, "lines_added": lines_added, "lines_removed": lines_removed }),
 				ts: chrono::Utc::now().to_rfc3339(),
 				agent: _ctx.agent_name.clone(),
 			}).await;
 		}
 
-		Ok(serde_json::json!({"ok": true, "key": current_key}))
+		Ok(serde_json::json!({"ok": true, "key": current_key, "status": status, "lines_added": lines_added, "lines_removed": lines_removed}))
 	}
 }
 

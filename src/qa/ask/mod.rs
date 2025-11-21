@@ -126,7 +126,7 @@ pub async fn run(question: &str, pipeline: &str, namespace: Option<&str>) -> Res
     registry.register(VectQueryTool);
     registry.register(crate::qa::tools::ask_user::AskUserTool);
     let actx = AgentCtx {
-        top_k: 30,
+        top_k: 100,
         per_step_timeout_secs: 10,
         max_steps: 10,
         thread_id: None,

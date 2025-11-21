@@ -20,6 +20,11 @@ pub async fn start(port: u16) -> Result<(), String> {
     tokio::spawn(async {
         crate::qa::dbt_examples::ensure_synced_once().await;
     });
+    // Bootstrap pre-registration of all namespaces once on startup (background)
+    tokio::spawn(async {
+        let ctx0 = datafusion::prelude::SessionContext::new();
+        crate::ws::agent_runner::pre_register_all_namespaces(&ctx0).await;
+    });
     let addr = format!("0.0.0.0:{}", port);
     let listener = TcpListener::bind(&addr).await.map_err(|e| e.to_string())?;
     tracing::info!("WebSocket server listening on ws://{}", addr);
@@ -923,8 +928,8 @@ async fn run_agent_with_processing(
 		}
 		q
 	};
-	// Preflight: resolve dataset candidates for all agents
-	let candidates = crate::ws::context::resolve_datasets(&q_for_embed, 3).await;
+	// Preflight: resolve dataset candidates for all agents (broader K)
+	let candidates = crate::ws::context::resolve_datasets(&q_for_embed, 50).await;
 	if !candidates.is_empty() {
 		// Append thread step
 		let store = crate::qa::session::ThreadStore::new();
@@ -1059,7 +1064,7 @@ async fn run_agent_with_processing(
 	let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<usize>();
 	let (pre_tx, mut pre_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 	let actx = AgentCtx {
-		top_k: 30,
+		top_k: 100,
 		per_step_timeout_secs: 10,
 		max_steps: 10,
 		thread_id: Some(thread_id.to_string()),

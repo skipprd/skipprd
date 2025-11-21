@@ -14,6 +14,7 @@ impl Tool for SearchDbtExamplesTool {
 		let k = args.get("k").and_then(|x| x.as_u64()).unwrap_or(8) as usize;
 		// Ensure examples synced at least once (non-blocking if already done)
 		crate::qa::dbt_examples::ensure_synced_once().await;
+		let embed_chars = query.len();
 		let results = crate::qa::dbt_examples::search_examples(&query, k).await?;
 		// Map to compact response
 		let mut examples: Vec<Value> = Vec::new();
@@ -44,7 +45,8 @@ impl Tool for SearchDbtExamplesTool {
 				"score": sc.score,
 			}));
 		}
-		Ok(serde_json::json!({"ok": true, "examples": examples}))
+		let est_tokens = ((embed_chars as f32)/4.0).round() as i64;
+		Ok(serde_json::json!({"ok": true, "examples": examples, "llm_expense": {"embed_chars": embed_chars, "est_tokens": est_tokens}}))
 	}
 }
 

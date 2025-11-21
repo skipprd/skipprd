@@ -207,7 +207,9 @@ impl Config {
     }
 
     pub fn llm_chat_model() -> Option<String> {
-        let v = Self::getenv("LLM_CHAT_MODEL", "gpt-4o-mini"); if v.is_empty() { None } else { Some(v) }
+        // let v = Self::getenv("LLM_CHAT_MODEL", "gpt-4o-mini"); if v.is_empty() { None } else { Some(v) }
+        // let v = Self::getenv("LLM_CHAT_MODEL", "gpt-4.1"); if v.is_empty() { None } else { Some(v) }
+        let v = Self::getenv("LLM_CHAT_MODEL", "gpt-5.1"); if v.is_empty() { None } else { Some(v) }
     }
 
     pub fn llm_embed_model() -> Option<String> {

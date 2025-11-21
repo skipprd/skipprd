@@ -11,16 +11,17 @@ impl Tool for VectQueryTool {
     async fn call(&self, args: Value, ctx: &AgentCtx) -> Result<Value, String> {
         let scope = args.get("scope").and_then(|x| x.as_str());
         let query_text = args.get("query_text").and_then(|x| x.as_str()).unwrap_or("");
-        let k = args.get("k").and_then(|x| x.as_u64()).unwrap_or(8) as usize;
+        let k = args.get("k").and_then(|x| x.as_u64()).unwrap_or(100) as usize;
 
         // Embed the query
         let cfg = crate::llm::config_from_env();
         let model = crate::llm::create_llm(&cfg);
+        let mut embed_chars: usize = query_text.len();
         let vec = match model.embed(&[query_text.to_string()]) {
             Ok(mut v) => v.pop().unwrap_or_default(),
             Err(e) => {
                 // Degraded fallback: return ok with no items so the agent can continue using preflight candidates
-                return Ok(serde_json::json!({"ok": true, "items": [], "note": "degraded: embeddings error", "error": e.to_string()}));
+                return Ok(serde_json::json!({"ok": true, "items": [], "note": "degraded: embeddings error", "error": e.to_string(), "llm_expense": {"embed_chars": embed_chars, "est_tokens": (embed_chars as f32/4.0) as i64}}));
             }
         };
 
@@ -180,7 +181,8 @@ impl Tool for VectQueryTool {
             let dataset = if pipeline.is_empty() { it.namespace.clone() } else { format!("{}.{}", pipeline, it.namespace) };
             serde_json::json!({"kind": it.kind, "namespace": it.namespace, "dataset": dataset, "field": it.field, "text": it.text, "score": h.score})
         }).collect();
-        Ok(serde_json::json!({"ok": true, "items": items}))
+        let est_tokens = ((embed_chars as f32)/4.0).round() as i64;
+        Ok(serde_json::json!({"ok": true, "items": items, "llm_expense": {"embed_chars": embed_chars, "est_tokens": est_tokens}}))
     }
 }
 

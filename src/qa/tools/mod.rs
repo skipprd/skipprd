@@ -36,6 +36,7 @@ pub mod vect_upsert;
 pub mod ask_user;
 pub mod ask_approval;
 pub mod approve_save;
+pub mod approve_save_batch;
 pub mod artifacts;
 pub mod dbt_examples;
 pub mod dbt_validate;

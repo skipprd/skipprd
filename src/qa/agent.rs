@@ -97,7 +97,10 @@ impl Agent {
             let model = crate::llm::create_llm(&cfg);
             let prompt_clone = prompt.clone();
             let model_for_first = model.clone();
-            let act_json = match tokio::task::spawn_blocking(move || {
+            // Track LLM expense (chat) for this decision
+            let mut chat_chars_in: usize = prompt.len();
+            let mut chat_chars_out: usize = 0;
+            let mut act_json = match tokio::task::spawn_blocking(move || {
                 model_for_first.chat(&[ChatMessage { role: "user".into(), content: prompt_clone }])
             }).await {
                 Ok(Ok(s)) => s,
@@ -108,6 +111,7 @@ impl Agent {
                     return Err(format!("LLM execution failed: {}", e));
                 }
             };
+            chat_chars_out += act_json.len();
             // Parse JSON, with one repair attempt if invalid
             let mut parsed: Option<Value> = serde_json::from_str(&act_json).ok();
             if parsed.is_none() {
@@ -131,6 +135,8 @@ impl Agent {
                     }
                 };
                 parsed = serde_json::from_str(&act_json2).ok();
+                chat_chars_in += repair_prompt.len();
+                chat_chars_out += act_json2.len();
                 if parsed.is_none() {
                     // Record the failure as an observation and continue loop
                     transcript.push(format!("Observation: parser_error invalid JSON twice; raw='{}'", act_json2));
@@ -224,10 +230,20 @@ impl Agent {
             }
             let args = parsed.get("args").cloned().unwrap_or(Value::Null);
             let start = std::time::Instant::now();
-            let obs = match tools.call(&action_name, args.clone(), ctx).await {
+            let mut obs = match tools.call(&action_name, args.clone(), ctx).await {
                 Ok(o) => o,
                 Err(e) => serde_json::json!({"ok": false, "error": e}),
             };
+            // Attach LLM expense estimate (tokens only) for this step
+            let est_tokens = ((chat_chars_in + chat_chars_out) as f32 / 4.0).round() as i64;
+            let expense = serde_json::json!({
+                "chat_chars_in": chat_chars_in,
+                "chat_chars_out": chat_chars_out,
+                "est_tokens": est_tokens
+            });
+            if let Some(map) = obs.as_object_mut() {
+                map.insert("llm_expense".to_string(), expense);
+            }
             let dur_ms = start.elapsed().as_millis();
             transcript.push(format!("Action: {} Args: {}", action_name, args));
             transcript.push(format!("Observation: {}", obs));
@@ -276,7 +292,35 @@ impl Agent {
             }
         }
         // If we get here, no final or ask_user; return a minimal result to avoid blocking.
-        Ok(RunOutcome::Final { thread_id, result: ThreadResult { sql: None, answer: "No result".to_string() } })
+        // Build a concise summary from recent saved artifacts to avoid empty finals
+        let mut summary = String::from("Scaffolded dbt project artifacts.");
+        {
+            let store2 = ThreadStore::new();
+            if let Some(log) = store2.get(&thread_id).await {
+                // Collect saved keys from batch or singles
+                let mut keys: Vec<String> = Vec::new();
+                for step in log.steps.iter().rev() {
+                    if step.action == "approve_and_save_artifact_batch" {
+                        if let Some(arr) = step.observation.get("keys").and_then(|x| x.as_array()) {
+                            for v in arr { if let Some(s) = v.as_str() { keys.push(s.to_string()); } }
+                        }
+                        break;
+                    }
+                    if step.action == "artifact_saved" {
+                        if let Some(k) = step.observation.get("key").and_then(|x| x.as_str()) {
+                            keys.push(k.to_string());
+                        }
+                    }
+                    if keys.len() >= 12 { break; }
+                }
+                if !keys.is_empty() {
+                    let shown: Vec<String> = keys.iter().take(6).cloned().collect();
+                    let extra = if keys.len() > 6 { format!(" (+{} more)", keys.len() - 6) } else { String::new() };
+                    summary = format!("Saved {} artifact(s): {}{}", keys.len(), shown.join(", "), extra);
+                }
+            }
+        }
+        Ok(RunOutcome::Final { thread_id, result: ThreadResult { sql: None, answer: summary } })
     }
 
     pub async fn run(
@@ -335,7 +379,7 @@ impl Agent {
             let model = crate::llm::create_llm(&cfg);
             let prompt_clone = prompt.clone();
             let model_for_first = model.clone();
-            let act_json = match tokio::task::spawn_blocking(move || {
+            let mut act_json = match tokio::task::spawn_blocking(move || {
                 model_for_first.chat(&[ChatMessage { role: "user".into(), content: prompt_clone }])
             }).await {
                 Ok(Ok(s)) => s,
@@ -346,6 +390,8 @@ impl Agent {
                     return Err(format!("LLM execution failed: {}", e));
                 }
             };
+            let mut chat_chars_in: usize = prompt.len();
+            let mut chat_chars_out: usize = act_json.len();
 
             // Parse action or final
             let mut parsed: Option<Value> = serde_json::from_str(&act_json).ok();
@@ -370,6 +416,8 @@ impl Agent {
                     }
                 };
                 parsed = serde_json::from_str(&act_json2).ok();
+                chat_chars_in += repair_prompt.len();
+                chat_chars_out += act_json2.len();
                 if parsed.is_none() {
                     transcript.push(format!("Observation: parser_error invalid JSON twice; raw='{}'", act_json2));
                     continue;
@@ -415,10 +463,20 @@ impl Agent {
                         continue;
                     }
                 };
-                let obs = match tools.call("run_sql", serde_json::json!({"sql": sql_for_run}), ctx).await {
+                let mut obs = match tools.call("run_sql", serde_json::json!({"sql": sql_for_run}), ctx).await {
                     Ok(o) => o,
                     Err(e) => serde_json::json!({"ok": false, "error": e}),
                 };
+                // Attach LLM expense estimate (tokens only) for this step (final decision chat)
+                let est_tokens = ((chat_chars_in + chat_chars_out) as f32 / 4.0).round() as i64;
+                let expense = serde_json::json!({
+                    "chat_chars_in": chat_chars_in,
+                    "chat_chars_out": chat_chars_out,
+                    "est_tokens": est_tokens
+                });
+                if let Some(map) = obs.as_object_mut() {
+                    map.insert("llm_expense".to_string(), expense);
+                }
                 let ok = obs.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
                 let rows_non_empty = obs.get("rows")
                     .and_then(|r| serde_json::from_value::<Vec<Vec<String>>>(r.clone()).ok())

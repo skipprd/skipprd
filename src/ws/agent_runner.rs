@@ -3,17 +3,36 @@ use datafusion::prelude::SessionContext;
 use once_cell::sync::OnceCell;
 use dashmap::{DashMap, DashSet};
 use std::time::{Duration, Instant};
+use futures::{stream::FuturesUnordered, StreamExt};
+use std::pin::Pin;
+use std::future::Future;
 
 pub async fn pre_register_all_namespaces(ctx: &SessionContext) {
 	let pipelines = crate::sql::registry::list_pipelines().await;
+	// Bounded concurrency
+	let limit = 16usize;
+	let mut futs: FuturesUnordered<Pin<Box<dyn Future<Output = ()> + Send>>> = FuturesUnordered::new();
 	for pipeline in pipelines {
 		let mut namespaces = crate::sql::registry::list_namespaces(&pipeline).await;
 		namespaces.sort();
 		for ns in namespaces {
-			let _ = crate::sql::tables::register_namespace_view(ctx, &pipeline, &ns).await;
+			// Backpressure
+			while futs.len() >= limit {
+				let _ = futs.next().await;
+			}
+			let ctx2 = ctx.clone();
+			let p2 = pipeline.clone();
+			futs.push(Box::pin(async move {
+				let _ = crate::sql::tables::register_namespace_view(&ctx2, &p2, &ns).await;
+			}));
 		}
-		let _ = crate::sql::tables::register_deadletters(ctx, &pipeline).await;
+		let ctx3 = ctx.clone();
+		let p3 = pipeline.clone();
+		futs.push(Box::pin(async move {
+			let _ = crate::sql::tables::register_deadletters(&ctx3, &p3).await;
+		}));
 	}
+	while let Some(_) = futs.next().await {}
 }
 
 // Process-wide caches to avoid redundant registrations
@@ -103,6 +122,7 @@ pub fn build_registry(agent: &str, ctx: &SessionContext) -> ToolRegistry {
 			registry.register(AskUserTool);
 			registry.register(AskApprovalTool);
 			registry.register(ApproveAndSaveArtifactTool);
+			registry.register(crate::qa::tools::approve_save_batch::ApproveAndSaveArtifactBatchTool);
 			registry.register(crate::qa::tools::dbt_examples::SearchDbtExamplesTool);
 			registry.register(crate::qa::tools::dbt_validate::DbtValidateTool);
 			registry.register(crate::qa::tools::sql_register::SqlRegisterTool);
@@ -126,10 +146,10 @@ pub fn inject_agent_question(agent: &str, question: &str) -> String {
 		format!(
 			"Modeling goal: {}.\n\
 			 Act as a proactive DBT Engineer with strong business domain focus.\n\
-			 - Resolve datasets; if schema is empty, call sql_register on candidates and proceed anyway with a minimal staging model using {{ source('<pipeline>','<namespace>') }}.\n\
+			 - Resolve datasets; if schema is empty, call sql_register on candidates and proceed anyway with minimal staging models using {{ source('<pipeline>','<namespace>') }}.\n\
 			 - Search DBT examples (search_dbt_examples) and adopt conventions from the top match.\n\
-			 - Choose artifact type automatically (default to DBT model unless examples strongly indicate MetricFlow) and author ONE artifact with a stable name.\n\
-			 - Validate with dbt_validate; on success ask_approval and then save via approve_and_save_artifact.\n\
+			 - Choose artifact type automatically (default DBT model). For project scaffolding, DO NOT build piece‑meal or ask per‑artifact approvals. Produce a consolidated batch of initial artifacts (staging/core/tests/docs) and save them in ONE call to approve_and_save_artifact_batch.\n\
+			 - Validate with dbt_validate when available; if unavailable, proceed without blocking.\n\
 			 - Ask the user only when confidence is very low (≤0.4) and only for concrete details; after any clarification, write a considered, sentient update from a fastidious custodian of data governance via catalog_note (preview if material).",
 			question
 		)

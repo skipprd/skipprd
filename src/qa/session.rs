@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use once_cell::sync::OnceCell;
+use dashmap::DashMap;
+use std::time::Instant;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ThreadStep {
@@ -30,6 +33,11 @@ pub struct ThreadResult {
 pub struct ThreadStore {
 }
 
+#[derive(Clone)]
+struct CacheEntry { log: ThreadLog, ts: Instant }
+static THREAD_CACHE: OnceCell<DashMap<String, CacheEntry>> = OnceCell::new();
+fn cache() -> &'static DashMap<String, CacheEntry> { THREAD_CACHE.get_or_init(|| DashMap::new()) }
+
 impl ThreadStore {
     pub fn new() -> Self {
         Self { }
@@ -49,19 +57,33 @@ impl ThreadStore {
 
     pub async fn append_step(&self, thread_id: &str, step: ThreadStep) -> Result<(), String> {
         let key = self.s3_key(thread_id);
-        let mut log = if let Ok(v) = crate::helpers::s3::get_json(&key).await {
-            serde_json::from_value::<ThreadLog>(v).unwrap_or_default()
-        } else {
-            ThreadLog::default()
+        // Try cache first to avoid extra GETs
+        let mut log = match cache().get(thread_id) {
+            Some(entry) => entry.log.clone(),
+            None => {
+                if let Ok(v) = crate::helpers::s3::get_json(&key).await {
+                    serde_json::from_value::<ThreadLog>(v).unwrap_or_default()
+                } else {
+                    ThreadLog::default()
+                }
+            }
         };
         log.steps.push(step);
         let val = serde_json::to_value(&log).map_err(|e| e.to_string())?;
         crate::helpers::s3::put_json(&key, &val).await.map_err(|e| format!("{:?}", e))?;
+        // Update cache
+        cache().insert(thread_id.to_string(), CacheEntry { log, ts: Instant::now() });
         Ok(())
     }
 
     pub async fn get(&self, thread_id: &str) -> Option<ThreadLog> {
         let key = self.s3_key(thread_id);
+        // Serve from cache if fresh (5 seconds)
+        if let Some(entry) = cache().get(thread_id) {
+            if entry.ts.elapsed().as_secs() < 5 {
+                return Some(entry.log.clone());
+            }
+        }
         if let Ok(v) = crate::helpers::s3::get_json(&key).await {
             let mut log_opt = serde_json::from_value::<ThreadLog>(v).ok();
             if let Some(ref mut log) = log_opt {
@@ -75,6 +97,9 @@ impl ThreadStore {
                 if log.title.is_none() && !log.steps.is_empty() {
                     // no-op default; title set explicitly by server
                 }
+            }
+            if let Some(ref log) = log_opt {
+                cache().insert(thread_id.to_string(), CacheEntry { log: log.clone(), ts: Instant::now() });
             }
             log_opt
         } else {
@@ -119,31 +144,25 @@ impl ThreadStore {
 
     pub async fn set_title_if_absent(&self, thread_id: &str, title: &str) -> Result<(), String> {
         let key = self.s3_key(thread_id);
-        let mut log = if let Ok(v) = crate::helpers::s3::get_json(&key).await {
-            serde_json::from_value::<ThreadLog>(v).unwrap_or_default()
-        } else {
-            ThreadLog::default()
-        };
+        let mut log = cache().get(thread_id).map(|e| e.log.clone()).unwrap_or_else(|| ThreadLog::default());
         if log.title.is_none() || log.title.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
             log.title = Some(title.to_string());
             let val = serde_json::to_value(&log).map_err(|e| e.to_string())?;
             crate::helpers::s3::put_json(&key, &val).await.map_err(|e| format!("{:?}", e))?;
+            cache().insert(thread_id.to_string(), CacheEntry { log, ts: Instant::now() });
         }
         Ok(())
     }
 
     pub async fn finalize_title(&self, thread_id: &str, title: &str) -> Result<(), String> {
         let key = self.s3_key(thread_id);
-        let mut log = if let Ok(v) = crate::helpers::s3::get_json(&key).await {
-            serde_json::from_value::<ThreadLog>(v).unwrap_or_default()
-        } else {
-            ThreadLog::default()
-        };
+        let mut log = cache().get(thread_id).map(|e| e.log.clone()).unwrap_or_else(|| ThreadLog::default());
         if !log.title_finalized {
             log.title = Some(title.to_string());
             log.title_finalized = true;
             let val = serde_json::to_value(&log).map_err(|e| e.to_string())?;
             crate::helpers::s3::put_json(&key, &val).await.map_err(|e| format!("{:?}", e))?;
+            cache().insert(thread_id.to_string(), CacheEntry { log, ts: Instant::now() });
         }
         Ok(())
     }

@@ -27,7 +27,7 @@ pub async fn run_preflight(thread_id: &str, question: &str, agent: &str, cfg: &P
 		} else { question.to_string() }
 	};
 	// Resolve datasets
-	let candidates = crate::ws::context::resolve_datasets(&q_for_embed, 3).await;
+	let candidates = crate::ws::context::resolve_datasets(&q_for_embed, 50).await;
 	if !candidates.is_empty() {
 		let store = crate::qa::session::ThreadStore::new();
 		let arr: Vec<serde_json::Value> = candidates.iter().map(|c| serde_json::json!({"pipeline": c.pipeline, "namespace": c.namespace, "score": c.score})).collect();
