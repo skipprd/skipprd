@@ -913,7 +913,29 @@ async fn run_agent_with_processing(
 	);
 	let tools_card = if agent == "model" { crate::qa::prompts_model::model_tool_card() } else { crate::qa::prompts::tool_card() };
 	let ctx_df = datafusion::prelude::SessionContext::new();
-	crate::ws::agent_runner::pre_register_all_namespaces(&ctx_df).await;
+	// Also register compiled dbt models as dbt.<model> views if present
+	let _ = crate::sql::tables::register_dbt_models(&ctx_df).await;
+	// If no dbt models are registered, note that we'll fall back to raw datasets for this question
+	{
+		use datafusion::catalog::CatalogProvider;
+		let state_df = ctx_df.state();
+		let cat_list = state_df.catalog_list();
+		if let Some(cat) = cat_list.catalog("datafusion") {
+			if let Some(schema) = cat.schema("dbt") {
+				let names = schema.table_names();
+				if names.is_empty() {
+					let store = crate::qa::session::ThreadStore::new();
+					let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
+						action: "dbt_models_unavailable".to_string(),
+						args: serde_json::json!({"notice":"No dbt.<model> views available; falling back to raw datasets for this question"}),
+						observation: serde_json::json!({"ok": true}),
+						ts: chrono::Utc::now().to_rfc3339(),
+						agent: Some(agent.to_string()),
+					}).await;
+				}
+			}
+		}
+	}
 	let registry = crate::ws::agent_runner::build_registry(agent, &ctx_df);
 	// Determine question for embeddings (prefer first user text)
 	let q_for_embed = {
@@ -930,6 +952,14 @@ async fn run_agent_with_processing(
 	};
 	// Preflight: resolve dataset candidates for all agents (broader K)
 	let candidates = crate::ws::context::resolve_datasets(&q_for_embed, 50).await;
+	// Register only selected namespaces for the current question (no bulk registration)
+	if !candidates.is_empty() {
+		let mut pairs: Vec<(String, String)> = Vec::new();
+		for c in &candidates {
+			pairs.push((c.pipeline.clone(), c.namespace.clone()));
+		}
+		crate::ws::agent_runner::pre_register_selected_namespaces(&ctx_df, &pairs).await;
+	}
 	if !candidates.is_empty() {
 		// Append thread step
 		let store = crate::qa::session::ThreadStore::new();

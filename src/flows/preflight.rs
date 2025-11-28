@@ -121,7 +121,9 @@ pub async fn run_preflight_on_bundle(thread_id: &str, agent: &str) -> PreflightO
 						let ns = v.get("namespace").and_then(|x| x.as_str()).unwrap_or("").to_string();
 						let score = v.get("score").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
 						if !p.is_empty() && !ns.is_empty() {
-							datasets.push(crate::ws::context::DatasetResolved { pipeline: p, namespace: ns, score, fields_hint: String::new() });
+							// Load catalog-derived field hints (names/roles) to enrich dataset context
+							let hint = crate::ws::context::load_catalog_hint(&p, &ns).await.unwrap_or_default();
+							datasets.push(crate::ws::context::DatasetResolved { pipeline: p, namespace: ns, score, fields_hint: hint });
 						}
 					}
 				}

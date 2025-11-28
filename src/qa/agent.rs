@@ -105,7 +105,11 @@ impl Agent {
             }).await {
                 Ok(Ok(s)) => s,
                 Ok(Err(e)) => {
-                    return Err(format!("LLM not configured: {}", e));
+                    let el = e.to_lowercase();
+                    if el.contains("http 429") || el.contains("status code 429") || el.contains("rate limit") {
+                        return Err(format!("LLM rate limited (429): {}", e));
+                    }
+                    return Err(format!("LLM request failed: {}", e));
                 }
                 Err(e) => {
                     return Err(format!("LLM execution failed: {}", e));

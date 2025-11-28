@@ -5,12 +5,12 @@ pub fn system_prompt() -> String {
 
 Global rules:
 - STRICT JSON only. No prose outside JSON. Output exactly ONE JSON object. No code fences or markdown.
-- SELECT-only SQL with LIMIT.
+- SQL may use CTEs (WITH ...) and window functions when helpful. Include a LIMIT where practical to cap output rows.
 - DataFusion constraints: do NOT use range() or generate_series() with timestamps; use date_trunc('day'|'week'|'month', time_col) and GROUP BY that.
-- CRITICAL: Always reference tables as <pipeline>.<namespace> (e.g., picnic.screen). Never use unqualified names or default.*.
-- Forbidden: Never use 'default.<namespace>' or any implicit/default schema. If unsure of dataset, call vect_query(scope="dataset") to obtain the FQN (<pipeline>.<namespace>) and then use it.
+- CRITICAL: Prefer dbt.<model> if available; otherwise reference tables as <pipeline>.<namespace> (e.g., picnic.screen). Never use unqualified names or default.*.
+- Forbidden: Never use 'default.<namespace>' or any implicit/default schema. If unsure of dataset, call vect_query(scope=\"dataset\") to obtain the FQN and then use it.
 - Never fabricate data. All numbers MUST come from run_sql results.
-- Context preference: Prefer MetricFlow artifacts over models, and models over raw tables/docs/stats when reasoning. Use embeddings (vect_query) to surface artifacts first.
+- Context preference: Prefer dbt models over raw datasets when reasoning. Use embeddings (vect_query) to surface artifacts first.
 - Time awareness: You will be provided a TimeContext containing NowUTC and the user's local time with offset. Anchor relative phrases (e.g., "today", "last 7 days") to NowUTC by default, and consider the user's local offset when appropriate for business reporting.
 - Nested fields: Use dotted paths (e.g., context.session.id), and always qualify columns with the table name when used in SQL.
 
@@ -68,8 +68,8 @@ Question: {}"#, context, user_q)
 }
 
 pub fn sql_generation(context: &str, join_hints: &str, user_q: &str, top_k: usize) -> String {
-    format!(r#"You are a SQL generator. Given Datasets/Fields context and Join hints, write a single SELECT query to answer the Question.
-Rules: SELECT only; no DDL/DML; include LIMIT {}; prefer aggregates; qualify columns with table names.
+    format!(r#"You are a SQL generator. Given Datasets/Fields context and Join hints, write a single query (SELECT or WITH ... SELECT) to answer the Question.
+Rules: No DDL/DML; include LIMIT {}; prefer aggregates; qualify columns with table names.
 ALL table references MUST be fully-qualified as <pipeline>.<namespace>. Do NOT use unqualified names or default.*.
 For nested Struct fields, use dotted paths, e.g., table.struct.field.
 Return ONLY the SQL, no prose.
@@ -129,9 +129,9 @@ Output JSON:"#, fields_ctx, schema_ctx, user_q, top_k)
 
 pub fn sql_generation_json(namespace: &str, user_q: &str, stats_ctx: &str, top_k: usize) -> String {
     format!(r#"You are a SQL generator.
-Write a single SELECT query to answer the Question using the provided dataset and fields.
+Write a single query (SELECT or WITH ... SELECT) to answer the Question using the provided dataset and fields.
 Rules:
-- SELECT only; no DDL/DML
+- No DDL/DML
 - Use dataset (fully-qualified): {ns}
 - ALL table references MUST be fully-qualified as <pipeline>.<namespace>
 - Prefer simple, robust aggregations. If grouping is needed, choose an appropriate grouping column based on the Question (e.g., a user/account/profile identifier for user questions).
@@ -141,7 +141,7 @@ Rules:
 - Prefer date_trunc-based grouping over synthetic date series. If you must generate a series, use Int64 range and cast with to_timestamp_millis(), but avoid unless explicitly asked.
  - For nested Struct fields, use dotted paths, e.g., table.struct.field
 Output formatting requirements:
-- The SQL MUST be a single SELECT statement and MUST start with the word SELECT
+- The SQL MUST be a single statement; it may start with WITH for a CTE or with SELECT
 - No CTEs unless strictly necessary; no procedural constructs
 - Do NOT include markdown, code fences, or prose
 - Respond with STRICT JSON only: {{"sql": "<YOUR SQL HERE>"}}
@@ -169,7 +169,7 @@ The previous SQL failed with an error. Produce a corrected SQL.
 Rules:
 - Keep intent and structure, but fix column names, qualifiers, or syntax
 - Use only columns that exist in the provided schema
-- The SQL MUST be a single SELECT statement and MUST start with the word SELECT
+- The SQL MUST be a single statement; it may start with WITH for a CTE or with SELECT
 - Do NOT include markdown, code fences, or prose
 - Respond with STRICT JSON only: {{"sql": string}}
 

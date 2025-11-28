@@ -14,9 +14,12 @@ impl Tool for SqlRunTool {
     async fn call(&self, args: Value, _ctx: &AgentCtx) -> Result<Value, String> {
         let sql = args.get("sql").and_then(|x| x.as_str()).unwrap_or("");
 			let s = sql.trim();
-        if !s.to_uppercase().starts_with("SELECT ") { return Ok(serde_json::json!({"ok": false, "error": "only SELECT allowed"})); }
 			let mut forced = normalize_sql_identifiers(s);
-        if !forced.to_lowercase().contains(" limit ") {
+        // Append a LIMIT to plain SELECT/CTE queries that don't specify one, to avoid huge outputs
+        let up = forced.to_uppercase();
+        let starts_with_select = up.starts_with("SELECT ");
+        let starts_with_with = up.starts_with("WITH ");
+        if (starts_with_select || starts_with_with) && !forced.to_lowercase().contains(" limit ") {
             forced.push_str(" LIMIT 50");
         }
 			// Always use the existing thread-scoped context if available; else fall back to injected ctx

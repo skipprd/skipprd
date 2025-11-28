@@ -10,19 +10,9 @@ use uuid::Uuid;
 
 pub async fn run(question: &str, pipeline: &str, namespace: Option<&str>) -> Result<String, String> {
     let ctx = SessionContext::new();
-    // Auto-register all pipelines/namespaces so queries don't require a specific pipeline flag
-    {
-        let pipelines = crate::sql::registry::list_pipelines().await;
-        for p in pipelines {
-            let mut namespaces = crate::sql::registry::list_namespaces(&p).await;
-            namespaces.sort();
-            for ns in namespaces {
-                let _ = crate::sql::tables::register_namespace_view(&ctx, &p, &ns).await;
-            }
-            // Also register deadletters (best-effort)
-            let _ = crate::sql::tables::register_deadletters(&ctx, &p).await;
-        }
-    }
+    // Avoid bulk registration on start; registration will be on-demand for discovered datasets.
+    // Register compiled dbt models as dbt.<model> (best-effort)
+    let _ = crate::sql::tables::register_dbt_models(&ctx).await;
     // Pre-fetch embedding candidates across all pipelines (dataset scope) and print as plain text
     let mut embeds_block: String = String::new();
     let mut company_info_block: String = String::new();

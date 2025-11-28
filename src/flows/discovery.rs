@@ -105,7 +105,12 @@ pub async fn run_discovery(thread_id: &str, question: &str, ctx: &SessionContext
 
 	// Record bundle in thread log
 	let store = crate::qa::session::ThreadStore::new();
-	let ds_arr: Vec<serde_json::Value> = pairs.iter().map(|(p,ns,sc)| json!({"pipeline":p,"namespace":ns,"score":sc})).collect();
+	// Include lightweight catalog field hints where available (best-effort)
+	let mut ds_arr: Vec<serde_json::Value> = Vec::with_capacity(pairs.len());
+	for (p, ns, sc) in pairs.iter() {
+		let hint = crate::ws::context::load_catalog_hint(p, ns).await.unwrap_or_default();
+		ds_arr.push(json!({"pipeline":p,"namespace":ns,"score":sc,"fields_hint": hint}));
+	}
 	let sch_map: serde_json::Value = serde_json::Value::Object(
 		schemas.iter().fold(serde_json::Map::new(), |mut m, (p,ns,cols)| {
 			let key = format!("{}.{}", p, ns);

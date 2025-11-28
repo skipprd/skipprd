@@ -312,6 +312,104 @@ pub async fn register_deadletters(ctx: &SessionContext, pipeline: &str) -> Resul
     Ok(())
 }
 
+/// Ensure the logical schema 'dbt' exists under the default 'datafusion' catalog.
+pub fn ensure_dbt_schema(ctx: &SessionContext) -> Result<(), DataFusionError> {
+    use datafusion::catalog::{CatalogProvider, SchemaProvider};
+    use datafusion::catalog::memory::{MemoryCatalogProvider, MemorySchemaProvider};
+    let state = ctx.state();
+    let cat_list = state.catalog_list();
+    if let Some(catalog) = cat_list.catalog("datafusion") {
+        if catalog.schema("dbt").is_some() {
+            return Ok(());
+        }
+        if let Some(memcat) = catalog.as_any().downcast_ref::<MemoryCatalogProvider>() {
+            let new_schema = Arc::new(MemorySchemaProvider::new());
+            let _ = memcat.register_schema("dbt", new_schema);
+            info!("Created DataFusion schema 'dbt'");
+            Ok(())
+        } else {
+            Err(DataFusionError::Plan("Default catalog is not a memory catalog; cannot create 'dbt' schema".to_string()))
+        }
+    } else {
+        Err(DataFusionError::Plan("Default catalog 'datafusion' not found".to_string()))
+    }
+}
+
+/// Scan S3 for compiled dbt model SQL and register each as a view: dbt.<model>
+pub async fn register_dbt_models(ctx: &SessionContext) -> Result<(), DataFusionError> {
+    // Ensure config (tenant/workspace/bucket)
+    Config::init().await;
+    ensure_dbt_schema(ctx)?;
+    let bucket = Config::get_skippr_s3_bucket();
+    let tenant = Config::get_tenant();
+    let workspace = Config::get_workspace_name();
+    // List all pipelines
+    let pipelines = crate::sql::registry::list_pipelines().await;
+    let client = crate::helpers::s3::get_s3_client().await;
+    use std::collections::HashSet;
+    let mut seen_models: HashSet<String> = HashSet::new();
+    for pipeline in pipelines {
+        // compiled SQL can live in various target subdirs; scan target recursively
+        let prefix = format!("{}/{}/{}/dbt/target/", tenant, workspace, pipeline);
+        // list objects under this prefix
+        let mut token: Option<String> = None;
+        loop {
+            let mut req = client.list_objects_v2()
+                .bucket(&bucket)
+                .prefix(&prefix)
+                .max_keys(1000);
+            if let Some(t) = token.as_ref() { req = req.continuation_token(t); }
+            let resp = match req.send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!("register_dbt_models: list_objects_v2 failed for prefix '{}' in bucket '{}': {:?}", prefix, bucket, e);
+                    break;
+                }
+            };
+            let contents = resp.contents();
+            for obj in contents {
+                if let Some(key) = obj.key() {
+                    // interested only in compiled SQL files
+                    if !key.ends_with(".sql") { continue; }
+                    if !key.contains("/compiled/") { continue; }
+                    // derive model name from filename
+                    let model = key.rsplit('/').next().unwrap_or("").trim_end_matches(".sql");
+                    if model.is_empty() { continue; }
+                    if seen_models.contains(model) {
+                        warn!("dbt model name collision: dbt.{} already registered; replacing with {}", model, key);
+                    }
+                    // fetch SQL
+                    match crate::helpers::s3::get_bytes(key).await {
+                        Ok(bytes) => {
+                            let sql_text = String::from_utf8_lossy(&bytes).to_string();
+                            if sql_text.trim().is_empty() { continue; }
+                            // Register or replace view using DDL to avoid provider plumbing
+                            let view_stmt = format!("CREATE OR REPLACE VIEW dbt.\"{}\" AS {}", model, sql_text);
+                            match ctx.sql(&view_stmt).await {
+                                Ok(df) => {
+                                    // execute DDL
+                                    let _ = df.collect().await;
+                                    info!("Registered dbt view: dbt.{} (from {})", model, key);
+                                    seen_models.insert(model.to_string());
+                                }
+                                Err(e) => {
+                                    warn!("Failed to register dbt view for model '{}' from key '{}': {}", model, key, e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!("register_dbt_models: failed to fetch compiled SQL '{}': {:?}", key, e);
+                        }
+                    }
+                }
+            }
+            if resp.next_continuation_token().is_none() { break; }
+            token = resp.next_continuation_token().map(|s| s.to_string());
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::find_common_s3_prefix;

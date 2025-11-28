@@ -106,11 +106,17 @@ impl LargeLanguageModel for OpenAICompatModel {
         let use_responses = model.starts_with("gpt-5") || model.starts_with("o4");
         if use_responses {
             #[derive(serde::Serialize)]
-            struct RespMsg { role: String, content: String }
+            struct RespPart { #[serde(rename="type")] r#type: String, text: String }
+            #[derive(serde::Serialize)]
+            struct RespMsg { role: String, content: Vec<RespPart> }
             #[derive(serde::Serialize)]
             struct RespReq {
                 model: String,
-                input: Vec<RespMsg>,
+                messages: Vec<RespMsg>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                modalities: Option<Vec<String>>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                response_format: Option<serde_json::Value>,
                 #[serde(skip_serializing_if = "Option::is_none")]
                 max_output_tokens: Option<i32>,
             }
@@ -123,9 +129,23 @@ impl LargeLanguageModel for OpenAICompatModel {
             }
             let url = format!("{}/v1/responses", base.trim_end_matches('/'));
             let max_tokens: i32 = crate::helpers::configuration::Config::getenv("LLM_MAX_TOKENS", "8192").parse().unwrap_or(8192);
+            // Map messages to Responses 'messages' with typed content
+            let mut msgs: Vec<RespMsg> = Vec::new();
+            for m in messages.iter() {
+                let role = if m.role.eq_ignore_ascii_case("system") { "system" } else if m.role.eq_ignore_ascii_case("assistant") { "assistant" } else { "user" };
+                let part = RespPart { r#type: "text".to_string(), text: m.content.clone() };
+                msgs.push(RespMsg { role: role.to_string(), content: vec![part] });
+            }
+            if msgs.is_empty() {
+                // Fallback: collapse all messages into one user input
+                let joined = messages.iter().map(|m| format!("{}: {}", m.role, m.content)).collect::<Vec<_>>().join("\n");
+                msgs.push(RespMsg { role: "user".to_string(), content: vec![RespPart { r#type: "text".to_string(), text: joined }] });
+            }
             let body = RespReq {
                 model: model.clone(),
-                input: messages.iter().map(|m| RespMsg { role: m.role.clone(), content: m.content.clone() }).collect(),
+                messages: msgs,
+                modalities: Some(vec!["text".to_string()]),
+                response_format: Some(serde_json::json!({"type": "text"})),
                 max_output_tokens: Some(max_tokens),
             };
             let mut req = self.agent.request("POST", &url).set("Content-Type", "application/json");
@@ -138,7 +158,17 @@ impl LargeLanguageModel for OpenAICompatModel {
                 attempt += 1;
                 let res = req.clone().send_json(payload.clone());
                 match res {
-                    Ok(r) => break Ok(r),
+                    Ok(r) => {
+                        if r.status() == 429 && attempt < max_retries {
+                            // Honor Retry-After if present (seconds), else exponential backoff with jitter
+                            let retry_after = r.header("retry-after").and_then(|s| s.parse::<u64>().ok());
+                            let backoff_ms = retry_after.map(|s| s.saturating_mul(1000)).unwrap_or_else(|| 500u64.saturating_mul(1u64 << (attempt as u32 - 1)).min(5_000));
+                            let jitter = (rand::random::<u64>() % 250);
+                            std::thread::sleep(std::time::Duration::from_millis(backoff_ms + jitter));
+                            continue;
+                        }
+                        break Ok(r)
+                    },
                     Err(e) => {
                         let es = e.to_string().to_lowercase();
                         let transient = es.contains("timed out") || es.contains("network error") || es.contains("connection") || es.contains("temporarily");
@@ -151,7 +181,45 @@ impl LargeLanguageModel for OpenAICompatModel {
                     }
                 }
             }.map_err(|e| e.to_string())?;
-            if !(200..300).contains(&resp.status()) { return Err(format!("http {}", resp.status())); }
+            if !(200..300).contains(&resp.status()) {
+                let status = resp.status();
+                let body_text = resp.into_string().unwrap_or_else(|_| String::new());
+                let snippet = if body_text.len() > 500 { &body_text[..500] } else { &body_text };
+                // Fallback: attempt chat.completions for compatibility if 400 and model is gpt-5.x
+                if status == 400 && (model.starts_with("gpt-5") || model.starts_with("o4")) {
+                    // Build chat.completions payload from the same messages
+                    let url_cc = format!("{}/v1/chat/completions", base.trim_end_matches('/'));
+                    let cc_body = OaiChatReq {
+                        model: model.clone(),
+                        messages: messages.iter().map(|m| OaiChatMessage { role: m.role.clone(), content: m.content.clone() }).collect(),
+                        stream: Some(false),
+                        max_tokens: Some(max_tokens as u32),
+                        temperature: Some(crate::helpers::configuration::Config::getenv("LLM_TEMPERATURE", "0.2").parse().unwrap_or(0.2)),
+                        top_p: Some(crate::helpers::configuration::Config::getenv("LLM_TOP_P", "1.0").parse().unwrap_or(1.0)),
+                    };
+                    let mut req_cc = self.agent.request("POST", &url_cc).set("Content-Type", "application/json");
+                    if let Some(k) = self.cfg.api_key.as_ref() { req_cc = req_cc.set("Authorization", &format!("Bearer {}", k)); }
+                    let res_cc = req_cc.send_json(serde_json::to_value(&cc_body).map_err(|e| e.to_string())?);
+                    match res_cc {
+                        Ok(rcc) if (200..300).contains(&rcc.status()) => {
+                            let obj: OaiChatResp = rcc.into_json().map_err(|e| e.to_string())?;
+                            let mut out = String::new();
+                            for c in obj.choices.iter() {
+                                if let Some(m) = &c.message { out.push_str(&m.content); }
+                                if let Some(d) = &c.delta { if let Some(s) = &d.content { out.push_str(s); } }
+                            }
+                            return Ok(out);
+                        }
+                        Ok(rcc) => {
+                            return Err(format!("http 400 (responses) and fallback chat {}: {}", rcc.status(), snippet));
+                        }
+                        Err(ecc) => {
+                            return Err(format!("http 400 (responses) and fallback chat error: {}; {}", ecc, snippet));
+                        }
+                    }
+                }
+                return Err(format!("http {}: {}", status, snippet));
+            }
             let obj: RespResp = resp.into_json().map_err(|e| e.to_string())?;
             if let Some(t) = obj.output_text { return Ok(t); }
             if let Some(t) = obj.output.get(0)
@@ -186,7 +254,16 @@ impl LargeLanguageModel for OpenAICompatModel {
                 attempt += 1;
                 let res = req.clone().send_json(payload.clone());
                 match res {
-                    Ok(r) => break Ok(r),
+                    Ok(r) => {
+                        if r.status() == 429 && attempt < max_retries {
+                            let retry_after = r.header("retry-after").and_then(|s| s.parse::<u64>().ok());
+                            let backoff_ms = retry_after.map(|s| s.saturating_mul(1000)).unwrap_or_else(|| 500u64.saturating_mul(1u64 << (attempt as u32 - 1)).min(5_000));
+                            let jitter = (rand::random::<u64>() % 250);
+                            std::thread::sleep(std::time::Duration::from_millis(backoff_ms + jitter));
+                            continue;
+                        }
+                        break Ok(r)
+                    },
                     Err(e) => {
                         let es = e.to_string().to_lowercase();
                         let transient = es.contains("timed out") || es.contains("network error") || es.contains("connection") || es.contains("temporarily");
@@ -199,7 +276,9 @@ impl LargeLanguageModel for OpenAICompatModel {
                     }
                 }
             }.map_err(|e| e.to_string())?;
-            if !(200..300).contains(&resp.status()) { return Err(format!("http {}", resp.status())); }
+            if !(200..300).contains(&resp.status()) {
+                return Err(format!("http {}", resp.status()));
+            }
             let obj: OaiChatResp = resp.into_json().map_err(|e| e.to_string())?;
             let mut out = String::new();
             for c in obj.choices.iter() {
@@ -224,7 +303,16 @@ impl LargeLanguageModel for OpenAICompatModel {
             attempt += 1;
             let res = req.clone().send_json(payload.clone());
             match res {
-                Ok(r) => break Ok(r),
+                Ok(r) => {
+                    if r.status() == 429 && attempt < max_retries {
+                        let retry_after = r.header("retry-after").and_then(|s| s.parse::<u64>().ok());
+                        let backoff_ms = retry_after.map(|s| s.saturating_mul(1000)).unwrap_or_else(|| 500u64.saturating_mul(1u64 << (attempt as u32 - 1)).min(5_000));
+                        let jitter = (rand::random::<u64>() % 250);
+                        std::thread::sleep(std::time::Duration::from_millis(backoff_ms + jitter));
+                        continue;
+                    }
+                    break Ok(r)
+                },
                 Err(e) => {
                     let es = e.to_string().to_lowercase();
                     let transient = es.contains("timed out") || es.contains("network error") || es.contains("connection") || es.contains("temporarily");
@@ -237,7 +325,9 @@ impl LargeLanguageModel for OpenAICompatModel {
                 }
             }
         }.map_err(|e| e.to_string())?;
-        if !(200..300).contains(&resp.status()) { return Err(format!("http {}", resp.status())); }
+        if !(200..300).contains(&resp.status()) {
+            return Err(format!("http {}", resp.status()));
+        }
         let obj: OaiEmbResp = resp.into_json().map_err(|e| e.to_string())?;
         Ok(obj.data.into_iter().map(|d| d.embedding).collect())
     }

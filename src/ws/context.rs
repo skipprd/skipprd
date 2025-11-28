@@ -173,7 +173,7 @@ Artifacts: {}"#,
 	}
 }
 
-async fn load_catalog_hint(pipeline: &str, namespace: &str) -> Result<String, String> {
+pub async fn load_catalog_hint(pipeline: &str, namespace: &str) -> Result<String, String> {
 	if let Some(entry) = crate::sql::registry::find_entry(pipeline, namespace).await {
 		if !entry.catalog_key.is_empty() {
 			if let Ok(v) = crate::helpers::s3::get_json(&entry.catalog_key).await {
