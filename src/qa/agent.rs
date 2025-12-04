@@ -253,7 +253,7 @@ impl Agent {
             transcript.push(format!("Observation: {}", obs));
             let _ = store.append_step(&thread_id, ThreadStep {
                 action: action_name.clone(),
-                args,
+                args: args.clone(),
                 observation: obs.clone(),
                 ts: chrono::Utc::now().to_rfc3339(),
                 agent: ctx.agent_name.clone(),
@@ -287,11 +287,20 @@ impl Agent {
                 let _ = tx.send(step_idx + 1);
             }
             if action_name == "ask_user" {
-                let prompt = obs.get("prompt").and_then(|x| x.as_str()).unwrap_or("Please provide additional context.").to_string();
+                // Prefer model-provided args.prompt; fall back to tool observation
+                let prompt = args.get("prompt")
+                    .and_then(|x| x.as_str())
+                    .or_else(|| obs.get("prompt").and_then(|x| x.as_str()))
+                    .unwrap_or("Please provide additional context.")
+                    .to_string();
                 return Ok(RunOutcome::AwaitUser { thread_id, prompt });
             }
             if action_name == "ask_approval" {
-                let prompt = obs.get("prompt").and_then(|x| x.as_str()).unwrap_or("Please review and approve/reject.").to_string();
+                let prompt = args.get("prompt")
+                    .and_then(|x| x.as_str())
+                    .or_else(|| obs.get("prompt").and_then(|x| x.as_str()))
+                    .unwrap_or("Please review and approve/reject.")
+                    .to_string();
                 return Ok(RunOutcome::AwaitApproval { thread_id, prompt });
             }
         }

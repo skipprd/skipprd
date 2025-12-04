@@ -15,6 +15,18 @@ impl Tool for SqlRunTool {
         let sql = args.get("sql").and_then(|x| x.as_str()).unwrap_or("");
 			let s = sql.trim();
 			let mut forced = normalize_sql_identifiers(s);
+			// Ensure referenced datasets are registered before execution (best-effort)
+			{
+				let ctx = if let Some(tid) = _ctx.thread_id.as_ref() {
+					crate::ws::agent_runner::get_or_create_thread_ctx(tid)
+				} else {
+					self.ctx.clone()
+				};
+				let pairs = extract_sql_datasets(&forced);
+				if !pairs.is_empty() {
+					crate::ws::agent_runner::pre_register_selected_namespaces(&ctx, &pairs).await;
+				}
+			}
         // Append a LIMIT to plain SELECT/CTE queries that don't specify one, to avoid huge outputs
         let up = forced.to_uppercase();
         let starts_with_select = up.starts_with("SELECT ");
@@ -97,6 +109,79 @@ fn normalize_sql_identifiers(sql: &str) -> String {
 		}
 	}
 	out
+}
+
+// Extract candidate <pipeline>.<namespace> references from SQL near FROM/JOIN clauses.
+fn extract_sql_datasets(sql: &str) -> Vec<(String, String)> {
+	let delimiters: &[char] = &[' ', '\n', '\t', ',', ';', '(', ')'];
+	let mut pairs: Vec<(String, String)> = Vec::new();
+	let mut tokens: Vec<String> = Vec::new();
+	// Tokenize using simple delimiter split while keeping order
+	let mut i = 0usize;
+	while i < sql.len() {
+		let rest = &sql[i..];
+		let end = rest.find(delimiters).unwrap_or(rest.len());
+		let tok = &rest[..end];
+		if !tok.is_empty() {
+			tokens.push(tok.to_string());
+		}
+		i += end;
+		if end < rest.len() {
+			// push the delimiter as a separate "token" only if it's a newline to preserve statement edges (optional)
+			i += 1;
+		}
+	}
+	// Scan tokens and capture table identifiers after FROM/JOIN
+	let mut idx = 0usize;
+	while idx < tokens.len() {
+		let t = &tokens[idx];
+		let tl = t.to_ascii_lowercase();
+		let is_from_or_join = tl == "from" || tl.ends_with("join"); // covers JOIN, LEFT JOIN, INNER JOIN tokenization variants
+		if is_from_or_join {
+			// next non-empty token is a potential table identifier
+			if let Some(next) = tokens.get(idx + 1) {
+				let ident_norm = normalize_identifier(next);
+				if let Some((p, n)) = split_pipeline_namespace(&ident_norm) {
+					if !pairs.iter().any(|(pp, nn)| pp == &p && nn == &n) {
+						pairs.push((p, n));
+					}
+				}
+			}
+		}
+		idx += 1;
+	}
+	pairs
+}
+
+// Normalize a single identifier token by removing leading datafusion. and collapsing duplicate ns.
+fn normalize_identifier(tok: &str) -> String {
+	let mut t = tok.trim_matches('"').trim_matches('`').to_string();
+	if let Some(rest) = t.strip_prefix("datafusion.") {
+		t = rest.to_string();
+	}
+	let parts: Vec<&str> = t.split('.').collect();
+	if parts.len() == 3 && parts[1].eq_ignore_ascii_case(parts[2]) {
+		return format!("{}.{}", parts[0], parts[1]);
+	}
+	t
+}
+
+fn split_pipeline_namespace(ident: &str) -> Option<(String, String)> {
+	let parts: Vec<&str> = ident.split('.').collect();
+	match parts.len() {
+		2 => {
+			let p = parts[0].to_string();
+			let n = parts[1].to_string();
+			if !p.is_empty() && !n.is_empty() { Some((p, n)) } else { None }
+		}
+		3 => {
+			// Treat as catalog.schema.table → drop catalog, use schema.table
+			let p = parts[1].to_string();
+			let n = parts[2].to_string();
+			if !p.is_empty() && !n.is_empty() { Some((p, n)) } else { None }
+		}
+		_ => None,
+	}
 }
 
 

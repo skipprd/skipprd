@@ -47,11 +47,9 @@ impl Default for LlmConfig {
 /// Factory to build an LLM from configuration.
 /// Note: Concrete providers are optional at compile-time; when not linked,
 /// this returns a no-op placeholder that errors on use.
-pub fn create_llm(cfg: &LlmConfig) -> Arc<dyn LargeLanguageModel> {
-    match cfg.provider {
-        LlmProviderType::Local => Arc::new(crate::llm::llama_cpp::LlamaCppModel::new(cfg.clone())),
-        LlmProviderType::OpenAICompat => Arc::new(crate::llm::openai_compat::OpenAICompatModel::new(cfg.clone())),
-    }
+pub fn create_llm(_cfg: &LlmConfig) -> Arc<dyn LargeLanguageModel> {
+    // Return router-backed model to keep callers stable
+    Arc::new(crate::llm::session::RouterModel::new())
 }
 
 pub fn config_from_env() -> LlmConfig {
@@ -92,6 +90,13 @@ impl LargeLanguageModel for NullModel {
 pub mod llama_cpp;
 pub mod openai_compat;
 pub mod session;
+pub mod types;
+pub mod adapter;
+pub mod registry;
+pub mod router;
+pub mod openai_chat_adapter;
+pub mod openai_responses_adapter;
+pub mod llama_cpp_adapter;
 
 #[cfg(test)]
 mod tests {

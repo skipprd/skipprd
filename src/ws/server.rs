@@ -912,7 +912,8 @@ async fn run_agent_with_processing(
 		sys, now_utc, local_iso, local_offset
 	);
 	let tools_card = if agent == "model" { crate::qa::prompts_model::model_tool_card() } else { crate::qa::prompts::tool_card() };
-	let ctx_df = datafusion::prelude::SessionContext::new();
+	// Use the existing thread-scoped SessionContext so registrations persist across steps for this thread
+	let ctx_df = crate::ws::agent_runner::get_or_create_thread_ctx(thread_id);
 	// Also register compiled dbt models as dbt.<model> views if present
 	let _ = crate::sql::tables::register_dbt_models(&ctx_df).await;
 	// If no dbt models are registered, note that we'll fall back to raw datasets for this question
@@ -952,7 +953,7 @@ async fn run_agent_with_processing(
 	};
 	// Preflight: resolve dataset candidates for all agents (broader K)
 	let candidates = crate::ws::context::resolve_datasets(&q_for_embed, 50).await;
-	// Register only selected namespaces for the current question (no bulk registration)
+	// Register only selected namespaces for the current question (no bulk registration), on this same thread context
 	if !candidates.is_empty() {
 		let mut pairs: Vec<(String, String)> = Vec::new();
 		for c in &candidates {

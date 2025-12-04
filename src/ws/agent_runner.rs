@@ -135,6 +135,8 @@ pub fn build_registry(agent: &str, ctx: &SessionContext) -> ToolRegistry {
 			registry.register(SqlStatsTool);
 			registry.register(SqlSampleTool { ctx: ctx.clone() });
 			registry.register(VectQueryTool);
+			registry.register(AskUserTool);
+			registry.register(AskApprovalTool);
 			registry.register(ArtifactsTool);
 		}
 	}
