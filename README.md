@@ -379,6 +379,13 @@ skippr/skipprd:v3.1.0
 
 For local and remote LLM setup, auto-tuning, and model guidance, see `LLM.md`.
 
+### DBT Validation (compile-first)
+
+- Validation runs `dbt deps` → `dbt parse` → `dbt compile --target <target>`, with optional `dbt build` (preferred) or `dbt run`.
+- Default target is `datafusion` if `DBT_TARGET` is not set.
+- You can pass `profiles_dir`, `target`, `run` (bool), and `build` (bool) to the `dbt_validate` tool API.
+- Global registration of DBT models only uses compiled outputs under `dbt/target/compiled/` discovered on S3.
+
 # Performance Analysis
 
 ### mpstat

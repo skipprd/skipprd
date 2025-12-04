@@ -925,6 +925,7 @@ async fn run_agent_with_processing(
 			if let Some(schema) = cat.schema("dbt") {
 				let names = schema.table_names();
 				if names.is_empty() {
+					tracing::info!("DBT models: 0 compiled views available");
 					let store = crate::qa::session::ThreadStore::new();
 					let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
 						action: "dbt_models_unavailable".to_string(),
@@ -934,6 +935,7 @@ async fn run_agent_with_processing(
 						agent: Some(agent.to_string()),
 					}).await;
 				} else {
+					tracing::info!("DBT models: {} compiled view(s) available", names.len());
 					let store = crate::qa::session::ThreadStore::new();
 					let items: Vec<serde_json::Value> = names.into_iter().take(50).map(|n| {
 						serde_json::json!({"pipeline": "", "namespace": "", "name": n, "kind": "model", "score": 1.0})

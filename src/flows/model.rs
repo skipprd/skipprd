@@ -1,5 +1,7 @@
 use datafusion::prelude::SessionContext;
 use crate::flows::adapter::FlowFrame;
+use crate::qa::tools::Tool;
+use serde_json::json;
 
 pub async fn run(thread_id: &str, question: &str) -> Result<Vec<FlowFrame>, String> {
 	let sys = crate::prompts::prompts_shared::with_time_context(crate::prompts::model::system_prompt());
@@ -56,6 +58,57 @@ pub async fn run(thread_id: &str, question: &str) -> Result<Vec<FlowFrame>, Stri
 		Ok(crate::qa::agent::RunOutcome::Final { thread_id: _tid, result }) => {
 			// enforce no SQL in model finals
 			frames.push(FlowFrame::Final { answer: result.answer, sql: None });
+			// After artifact save, validate DBT project from S3 and refresh compiled registrations
+			// Derive target pipeline from the most recent artifact_saved step in this thread
+			let store = crate::qa::session::ThreadStore::new();
+			if let Some(log) = store.get(thread_id).await {
+				let mut pipeline_opt: Option<String> = None;
+				for step in log.steps.iter().rev() {
+					if step.action == "artifact_saved" {
+						if let Some(p) = step.args.get("pipeline").and_then(|x| x.as_str()) {
+							if !p.is_empty() { pipeline_opt = Some(p.to_string()); }
+						}
+						break;
+					}
+				}
+				if let Some(pipeline) = pipeline_opt {
+					// Build s3_prefix: <tenant>/<workspace>/<pipeline>/dbt/
+					let tenant = crate::helpers::configuration::Config::get_tenant();
+					let workspace = crate::helpers::configuration::Config::get_workspace_name();
+					let s3_prefix = format!("{}/{}/{}/dbt/", tenant, workspace, pipeline);
+					// Call dbt_validate (S3-only)
+					let validate_tool = crate::qa::tools::dbt_validate::DbtValidateTool;
+					let args = json!({
+						"project_name": format!("{}_project", pipeline.replace('/', "_")),
+						"s3_prefix": s3_prefix,
+						"target": "datafusion",
+						"build": true
+					});
+					let actx2 = crate::qa::agent::AgentCtx { thread_id: Some(thread_id.to_string()), ..actx.clone() };
+					match validate_tool.call(args, &actx2).await {
+						Ok(obs) => {
+							let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
+								action: "dbt_validate".to_string(),
+								args: serde_json::json!({"s3_prefix": format!("{}/{}/{}/dbt/", tenant, workspace, pipeline)}),
+								observation: obs,
+								ts: chrono::Utc::now().to_rfc3339(),
+								agent: Some("model".to_string()),
+							}).await;
+						}
+						Err(e) => {
+							let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
+								action: "dbt_validate".to_string(),
+								args: serde_json::json!({"s3_prefix": format!("{}/{}/{}/dbt/", tenant, workspace, pipeline)}),
+								observation: serde_json::json!({"ok": false, "error": e}),
+								ts: chrono::Utc::now().to_rfc3339(),
+								agent: Some("model".to_string()),
+							}).await;
+						}
+					}
+					// Refresh compiled DBT views (compiled-only registration)
+					let _ = crate::sql::tables::register_dbt_models(&ctx_df).await;
+				}
+			}
 		}
 		Ok(crate::qa::agent::RunOutcome::AwaitUser { thread_id: _tid, prompt }) => {
 			frames.push(FlowFrame::AwaitUser { prompt });

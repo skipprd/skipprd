@@ -262,7 +262,7 @@ impl LargeLanguageModel for OpenAICompatModel {
         } else {
             let url = format!("{}/v1/chat/completions", base.trim_end_matches('/'));
             // latency-optimized defaults
-            let max_tokens: u32 = crate::helpers::configuration::Config::getenv("LLM_MAX_TOKENS", "256").parse().unwrap_or(256);
+            let max_tokens: u32 = crate::helpers::configuration::Config::getenv("LLM_MAX_TOKENS", "1024").parse().unwrap_or(1024);
             let temperature: f32 = crate::helpers::configuration::Config::getenv("LLM_TEMPERATURE", "0.2").parse().unwrap_or(0.2);
             let top_p: f32 = crate::helpers::configuration::Config::getenv("LLM_TOP_P", "1.0").parse().unwrap_or(1.0);
             let body = OaiChatReq {

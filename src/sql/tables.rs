@@ -348,11 +348,13 @@ pub async fn register_dbt_models(ctx: &SessionContext) -> Result<(), DataFusionE
     let client = crate::helpers::s3::get_s3_client().await;
     use std::collections::HashSet;
     let mut seen_models: HashSet<String> = HashSet::new();
+    let mut total_registered: usize = 0;
     for pipeline in pipelines {
         // compiled SQL can live in various target subdirs; scan target recursively
         let prefix = format!("{}/{}/{}/dbt/target/", tenant, workspace, pipeline);
         // list objects under this prefix
         let mut token: Option<String> = None;
+        let mut registered_for_pipeline: usize = 0;
         loop {
             let mut req = client.list_objects_v2()
                 .bucket(&bucket)
@@ -391,6 +393,7 @@ pub async fn register_dbt_models(ctx: &SessionContext) -> Result<(), DataFusionE
                                     let _ = df.collect().await;
                                     info!("Registered dbt view: dbt.{} (from {})", model, key);
                                     seen_models.insert(model.to_string());
+                                    registered_for_pipeline += 1;
                                 }
                                 Err(e) => {
                                     warn!("Failed to register dbt view for model '{}' from key '{}': {}", model, key, e);
@@ -406,7 +409,14 @@ pub async fn register_dbt_models(ctx: &SessionContext) -> Result<(), DataFusionE
             if resp.next_continuation_token().is_none() { break; }
             token = resp.next_continuation_token().map(|s| s.to_string());
         }
+        if registered_for_pipeline > 0 {
+            info!("DBT registration: pipeline='{}' registered {} compiled model view(s)", pipeline, registered_for_pipeline);
+            total_registered += registered_for_pipeline;
+        } else {
+            info!("DBT registration: pipeline='{}' no compiled models found under {}/dbt/target/compiled/", pipeline, pipeline);
+        }
     }
+    info!("DBT registration: total compiled model views registered: {}", total_registered);
     Ok(())
 }
 

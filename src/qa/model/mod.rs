@@ -9,6 +9,8 @@ use crate::qa::tools::vect_query::VectQueryTool;
 use crate::qa::dbt;
 use uuid::Uuid;
 use crate::qa::session::ThreadResult;
+use serde_json::json;
+use crate::qa::tools::Tool;
 
 pub async fn run(pipeline: &str, prompt: &str) -> Result<(), String> {
     // Create thread id first to reuse a thread-scoped context
@@ -189,7 +191,48 @@ pub async fn run(pipeline: &str, prompt: &str) -> Result<(), String> {
             }
         }
     }
-    // Saving is performed by the approve_and_save_artifact tool after user approval.
+    // After modeling flow, validate the DBT project from S3 (S3-only) and refresh compiled registrations
+    {
+        // Build s3_prefix: <tenant>/<workspace>/<pipeline>/dbt/
+        let tenant = crate::helpers::configuration::Config::get_tenant();
+        let workspace = crate::helpers::configuration::Config::get_workspace_name();
+        let s3_prefix = format!("{}/{}/{}/dbt/", tenant, workspace, pipeline);
+        // Call dbt_validate tool directly (S3-only)
+        let validate_tool = crate::qa::tools::dbt_validate::DbtValidateTool;
+        let args = json!({
+            "project_name": format!("{}_project", pipeline.replace('/', "_")),
+            "s3_prefix": s3_prefix,
+            "target": "datafusion",
+            "build": true
+        });
+        let actx2 = AgentCtx { thread_id: Some(thread_id.clone()), ..actx };
+        match validate_tool.call(args, &actx2).await {
+            Ok(v) => {
+                // Append a thread step for observability
+                let store = crate::qa::session::ThreadStore::new();
+                let _ = store.append_step(&thread_id, crate::qa::session::ThreadStep {
+                    action: "dbt_validate".to_string(),
+                    args: serde_json::json!({"s3_prefix": format!("{}/{}/{}/dbt/", tenant, workspace, pipeline)}),
+                    observation: v,
+                    ts: chrono::Utc::now().to_rfc3339(),
+                    agent: Some("model".to_string()),
+                }).await;
+            }
+            Err(e) => {
+                let store = crate::qa::session::ThreadStore::new();
+                let _ = store.append_step(&thread_id, crate::qa::session::ThreadStep {
+                    action: "dbt_validate".to_string(),
+                    args: serde_json::json!({"s3_prefix": format!("{}/{}/{}/dbt/", tenant, workspace, pipeline)}),
+                    observation: serde_json::json!({"ok": false, "error": e}),
+                    ts: chrono::Utc::now().to_rfc3339(),
+                    agent: Some("model".to_string()),
+                }).await;
+            }
+        }
+        // Refresh compiled DBT views (compiled-only registration)
+        let _ = crate::sql::tables::register_dbt_models(&ctx).await;
+    }
+    // Saving is performed by the approve_and_save_artifact tool after user approval; validation executed above.
     Ok(())
 }
 

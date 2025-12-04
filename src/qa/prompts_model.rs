@@ -24,7 +24,7 @@ Hard rules:
 - Use run_sql ONLY to validate authored SQL fragments; NEVER to answer.
 - For MetricFlow YAML: anchor to the chosen dataset and add a top comment documenting it exactly as:
   # Dataset: <pipeline>.<namespace>
-- Before saving, validate with dbt_validate (parse, then compile with target 'datafusion' if available).
+- After saving the project files to S3, validate the project with dbt_validate using s3_prefix (deps → parse → compile with target 'datafusion'; build preferred). Do not send inline file content.
  - For project scaffolding: do NOT build piece‑meal and do NOT request per‑artifact approvals. Produce ONE consolidated plan and then save the ENTIRE initial project in a single batch using approve_and_save_artifact_batch. If dbt_validate is unavailable, proceed without blocking.
 - STRICT JSON only; exactly one JSON object per step; no prose outside JSON."#.to_string()
 }
@@ -42,7 +42,7 @@ pub fn model_tool_card() -> String {
 - run_sql(args:{sql:string}) -> {"ok":true,"header":[string], "rows":[[string]]} or {"ok":false,"error":string}
 - ask_user(args:{prompt:string}) -> {"ok":true,"prompt":string}
 - ask_approval(args:{prompt:string}) -> {"ok":true,"prompt":string}
-- dbt_validate(args:{project_name:string, files:[{path,content}], profiles_dir?:string, target?:string})
+- dbt_validate(args:{project_name:string, s3_prefix:string, profiles_dir?:string, target?:string, build?:bool, run?:bool})
  - sql_register(args:{pairs:[{pipeline,namespace}]}) -> {"ok":true,"count":int}
  - catalog_note(args:{pipeline:string, namespace?:string, field?:string, text:string, tags?:[string], preview?:boolean})
 
@@ -51,7 +51,7 @@ Usage guidance:
 - For updates, first compute a diff via approve_and_save_artifact(preview_diff=true), then ask_approval, then save.
 - After a successful save, produce final with {"answer":"<concise>","sql":null}.
 - Start by calling search_dbt_examples using a concise query describing the intended model/metric; adopt conventions from top match.
-- Before saving, call dbt_validate and fix any parse/compile errors; only then ask_approval and save.
+- After saving artifacts to S3, call dbt_validate with s3_prefix and fix any parse/compile errors; only then proceed.
 - When schema is empty/unavailable, call sql_register for the dataset candidates and proceed with a minimal staging model using {{ source('<pipeline>','<namespace>') }}. Do not stall.
  - For project scaffolding, aggregate the initial staging/core/test artifacts across top-K datasets and call approve_and_save_artifact_batch ONCE (no per‑artifact approvals). If validation is unavailable, note it and proceed.
 - After any user clarification, call catalog_note to write a curated digest into the catalog (preview first if the change is material); then continue modeling.

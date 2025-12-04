@@ -39,7 +39,7 @@ impl LargeLanguageModel for RouterModel {
         let req = crate::llm::types::ChatRequest {
             model,
             messages: messages.iter().map(|m| crate::llm::types::ChatMessage { role: m.role.clone(), content: m.content.clone() }).collect(),
-            max_output_tokens: crate::helpers::configuration::Config::getenv("LLM_MAX_TOKENS", "256").parse().ok(),
+            max_output_tokens: crate::helpers::configuration::Config::getenv("LLM_MAX_TOKENS", "1024").parse().ok(),
             temperature: crate::helpers::configuration::Config::getenv("LLM_TEMPERATURE", "0.2").parse().ok(),
             top_p: crate::helpers::configuration::Config::getenv("LLM_TOP_P", "1.0").parse().ok(),
             response_format: None,
