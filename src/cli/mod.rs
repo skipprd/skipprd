@@ -10,9 +10,9 @@ pub static CLI_MODE: Lazy<TimedRwLock<Mode>> = Lazy::new(|| TimedRwLock::new("cl
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
-    /// Enable diagnostic logging output
-    #[arg(long, global = true, default_value_t = false)]
-    pub log: bool,
+    /// Enable logging. Optional level: debug|info|warn|error. Using --log defaults to 'info'.
+    #[arg(long, global = true, num_args=0..=1, default_missing_value="info", value_name="LEVEL")]
+    pub log: Option<String>,
     #[command(subcommand)]
     pub mode: Mode,
 }

@@ -47,6 +47,17 @@ mod tests {
 use super::{ChatMessage, LargeLanguageModel, LlmConfig};
 use serde::{Deserialize, Serialize};
 
+fn pretty_json(text: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(v) => serde_json::to_string_pretty(&v).unwrap_or_else(|_| text.to_string()),
+        Err(_) => text.to_string(),
+    }
+}
+
+fn pretty_val(val: &serde_json::Value) -> String {
+    serde_json::to_string_pretty(val).unwrap_or_else(|_| val.to_string())
+}
+
 #[derive(Serialize, Deserialize)]
 struct OaiChatMessage { role: String, content: String }
 
@@ -112,7 +123,8 @@ impl LargeLanguageModel for OpenAICompatModel {
             #[derive(serde::Serialize)]
             struct RespReq {
                 model: String,
-                messages: Vec<RespMsg>,
+                // Use 'input' per Responses API, with typed content parts ('input_text')
+                input: Vec<RespMsg>,
                 #[serde(skip_serializing_if = "Option::is_none")]
                 modalities: Option<Vec<String>>,
                 #[serde(skip_serializing_if = "Option::is_none")]
@@ -129,21 +141,22 @@ impl LargeLanguageModel for OpenAICompatModel {
             }
             let url = format!("{}/v1/responses", base.trim_end_matches('/'));
             let max_tokens: i32 = crate::helpers::configuration::Config::getenv("LLM_MAX_TOKENS", "8192").parse().unwrap_or(8192);
-            // Map messages to Responses 'messages' with typed content
+            // Map messages to Responses 'input' with typed content parts
             let mut msgs: Vec<RespMsg> = Vec::new();
             for m in messages.iter() {
                 let role = if m.role.eq_ignore_ascii_case("system") { "system" } else if m.role.eq_ignore_ascii_case("assistant") { "assistant" } else { "user" };
-                let part = RespPart { r#type: "text".to_string(), text: m.content.clone() };
+                // Responses expects 'input_text' for plain text parts
+                let part = RespPart { r#type: "input_text".to_string(), text: m.content.clone() };
                 msgs.push(RespMsg { role: role.to_string(), content: vec![part] });
             }
             if msgs.is_empty() {
                 // Fallback: collapse all messages into one user input
                 let joined = messages.iter().map(|m| format!("{}: {}", m.role, m.content)).collect::<Vec<_>>().join("\n");
-                msgs.push(RespMsg { role: "user".to_string(), content: vec![RespPart { r#type: "text".to_string(), text: joined }] });
+                msgs.push(RespMsg { role: "user".to_string(), content: vec![RespPart { r#type: "input_text".to_string(), text: joined }] });
             }
             let body = RespReq {
                 model: model.clone(),
-                messages: msgs,
+                input: msgs,
                 modalities: Some(vec!["text".to_string()]),
                 response_format: Some(serde_json::json!({"type": "text"})),
                 max_output_tokens: Some(max_tokens),
@@ -152,6 +165,8 @@ impl LargeLanguageModel for OpenAICompatModel {
             if let Some(k) = self.cfg.api_key.as_ref() { req = req.set("Authorization", &format!("Bearer {}", k)); }
             // Retries for network timeouts / transient errors
             let payload = serde_json::to_value(&body).map_err(|e| e.to_string())?;
+            // Debug: pretty-print full prompt
+            tracing::debug!("LLM(responses) request model='{}'\n{}", model, pretty_val(&payload));
             let mut attempt = 0usize;
             let max_retries = 3usize;
             let resp = loop {
@@ -184,6 +199,7 @@ impl LargeLanguageModel for OpenAICompatModel {
             if !(200..300).contains(&resp.status()) {
                 let status = resp.status();
                 let body_text = resp.into_string().unwrap_or_else(|_| String::new());
+                tracing::debug!("LLM(responses) non-2xx status={} body:\n{}", status, pretty_json(&body_text));
                 let snippet = if body_text.len() > 500 { &body_text[..500] } else { &body_text };
                 // Fallback: attempt chat.completions for compatibility if 400 and model is gpt-5.x
                 if status == 400 && (model.starts_with("gpt-5") || model.starts_with("o4")) {
@@ -199,10 +215,14 @@ impl LargeLanguageModel for OpenAICompatModel {
                     };
                     let mut req_cc = self.agent.request("POST", &url_cc).set("Content-Type", "application/json");
                     if let Some(k) = self.cfg.api_key.as_ref() { req_cc = req_cc.set("Authorization", &format!("Bearer {}", k)); }
-                    let res_cc = req_cc.send_json(serde_json::to_value(&cc_body).map_err(|e| e.to_string())?);
+                    let cc_payload = serde_json::to_value(&cc_body).map_err(|e| e.to_string())?;
+                    tracing::debug!("LLM(chat.completions) fallback request model='{}'\n{}", cc_body.model, pretty_val(&cc_payload));
+                    let res_cc = req_cc.send_json(cc_payload);
                     match res_cc {
                         Ok(rcc) if (200..300).contains(&rcc.status()) => {
-                            let obj: OaiChatResp = rcc.into_json().map_err(|e| e.to_string())?;
+                            let text = rcc.into_string().map_err(|e| e.to_string())?;
+                            tracing::debug!("LLM(chat.completions) fallback response:\n{}", pretty_json(&text));
+                            let obj: OaiChatResp = serde_json::from_str(&text).map_err(|e| e.to_string())?;
                             let mut out = String::new();
                             for c in obj.choices.iter() {
                                 if let Some(m) = &c.message { out.push_str(&m.content); }
@@ -211,7 +231,10 @@ impl LargeLanguageModel for OpenAICompatModel {
                             return Ok(out);
                         }
                         Ok(rcc) => {
-                            return Err(format!("http 400 (responses) and fallback chat {}: {}", rcc.status(), snippet));
+                            let status_cc = rcc.status();
+                            let body_text_cc = rcc.into_string().unwrap_or_else(|_| String::new());
+                            tracing::debug!("LLM(chat.completions) fallback non-2xx={} body:\n{}", status_cc, pretty_json(&body_text_cc));
+                            return Err(format!("http 400 (responses) and fallback chat {}: {}", status_cc, snippet));
                         }
                         Err(ecc) => {
                             return Err(format!("http 400 (responses) and fallback chat error: {}; {}", ecc, snippet));
@@ -220,13 +243,19 @@ impl LargeLanguageModel for OpenAICompatModel {
                 }
                 return Err(format!("http {}: {}", status, snippet));
             }
-            let obj: RespResp = resp.into_json().map_err(|e| e.to_string())?;
-            if let Some(t) = obj.output_text { return Ok(t); }
+            let body_text = resp.into_string().map_err(|e| e.to_string())?;
+            tracing::debug!("LLM(responses) response:\n{}", pretty_json(&body_text));
+            let obj: RespResp = serde_json::from_str(&body_text).map_err(|e| e.to_string())?;
+            if let Some(t) = obj.output_text {
+                tracing::debug!("LLM(responses) output_text:\n{}", t);
+                return Ok(t);
+            }
             if let Some(t) = obj.output.get(0)
                 .and_then(|v| v.get("content"))
                 .and_then(|c| c.get(0))
                 .and_then(|p| p.get("text"))
                 .and_then(|x| x.as_str()) {
+                tracing::debug!("LLM(responses) output.content[0].text:\n{}", t);
                 return Ok(t.to_string());
             }
             Err("empty response".to_string())
@@ -248,6 +277,8 @@ impl LargeLanguageModel for OpenAICompatModel {
             if let Some(k) = self.cfg.api_key.as_ref() { req = req.set("Authorization", &format!("Bearer {}", k)); }
             // Retries for transient issues
             let payload = serde_json::to_value(&body).map_err(|e| e.to_string())?;
+            // Debug: pretty-print full prompt
+            tracing::debug!("LLM(chat.completions) request model='{}'\n{}", body.model, pretty_val(&payload));
             let mut attempt = 0usize;
             let max_retries = 3usize;
             let resp = loop {
@@ -277,14 +308,20 @@ impl LargeLanguageModel for OpenAICompatModel {
                 }
             }.map_err(|e| e.to_string())?;
             if !(200..300).contains(&resp.status()) {
-                return Err(format!("http {}", resp.status()));
+                let status = resp.status();
+                let body_text = resp.into_string().unwrap_or_else(|_| String::new());
+                tracing::debug!("LLM(chat.completions) non-2xx status={} body:\n{}", status, pretty_json(&body_text));
+                return Err(format!("http {}", status));
             }
-            let obj: OaiChatResp = resp.into_json().map_err(|e| e.to_string())?;
+            let body_text = resp.into_string().map_err(|e| e.to_string())?;
+            tracing::debug!("LLM(chat.completions) response:\n{}", pretty_json(&body_text));
+            let obj: OaiChatResp = serde_json::from_str(&body_text).map_err(|e| e.to_string())?;
             let mut out = String::new();
             for c in obj.choices.iter() {
                 if let Some(m) = &c.message { out.push_str(&m.content); }
                 if let Some(d) = &c.delta { if let Some(s) = &d.content { out.push_str(s); } }
             }
+            tracing::debug!("LLM(chat.completions) text:\n{}", out);
             Ok(out)
         }
     }
@@ -292,6 +329,8 @@ impl LargeLanguageModel for OpenAICompatModel {
         let base = self.cfg.base_url.clone().ok_or_else(|| "missing base_url".to_string())?;
         let model = self.cfg.embed_model.clone().ok_or_else(|| "missing embed_model".to_string())?;
         let url = format!("{}/v1/embeddings", base.trim_end_matches('/'));
+        // Debug: pretty-print embedding inputs
+        tracing::debug!("LLM(embeddings) request model='{}' inputs:\n{}", model, pretty_json(&serde_json::to_string(texts).unwrap_or_else(|_| "[]".to_string())));
         let body = OaiEmbReq { model, input: texts.to_vec() };
         let mut req = self.agent.request("POST", &url).set("Content-Type", "application/json");
         if let Some(k) = self.cfg.api_key.as_ref() { req = req.set("Authorization", &format!("Bearer {}", k)); }
@@ -326,10 +365,18 @@ impl LargeLanguageModel for OpenAICompatModel {
             }
         }.map_err(|e| e.to_string())?;
         if !(200..300).contains(&resp.status()) {
-            return Err(format!("http {}", resp.status()));
+            let status = resp.status();
+            let body_text = resp.into_string().unwrap_or_else(|_| String::new());
+            tracing::debug!("LLM(embeddings) non-2xx status={} body:\n{}", status, pretty_json(&body_text));
+            return Err(format!("http {}", status));
         }
-        let obj: OaiEmbResp = resp.into_json().map_err(|e| e.to_string())?;
-        Ok(obj.data.into_iter().map(|d| d.embedding).collect())
+        let body_text = resp.into_string().map_err(|e| e.to_string())?;
+        // Do not log raw embedding vectors; parse silently and report only shape
+        let obj: OaiEmbResp = serde_json::from_str(&body_text).map_err(|e| e.to_string())?;
+        let vecs: Vec<Vec<f32>> = obj.data.into_iter().map(|d| d.embedding).collect();
+        let dim = vecs.get(0).map(|v| v.len()).unwrap_or(0);
+        tracing::debug!("LLM(embeddings) shape: count={} dim={}", vecs.len(), dim);
+        Ok(vecs)
     }
 }
 

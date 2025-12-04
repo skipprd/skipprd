@@ -188,8 +188,8 @@ async fn main() {
 
     let cli: Cli = Cli::parse();
 
-    // Initialize logging only if explicitly enabled
-    init_logging(cli.log);
+    // Initialize logging if --log is provided; default level is 'info', '--log debug' enables debug
+    init_logging(cli.log.clone());
 
     CLI_MODE.write().clone_from(&cli.mode);
 
