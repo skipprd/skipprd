@@ -16,12 +16,9 @@ impl Tool for SqlRunTool {
 			let s = sql.trim();
 			let mut forced = normalize_sql_identifiers(s);
 			// Ensure referenced datasets are registered before execution (best-effort)
-			{
-				let ctx = if let Some(tid) = _ctx.thread_id.as_ref() {
-					crate::ws::agent_runner::get_or_create_thread_ctx(tid)
-				} else {
-					self.ctx.clone()
-				};
+			// Skip in-thread to avoid redundant work; rely on thread-scoped pre-registration.
+			if _ctx.thread_id.is_none() {
+				let ctx = self.ctx.clone();
 				let pairs = extract_sql_datasets(&forced);
 				if !pairs.is_empty() {
 					crate::ws::agent_runner::pre_register_selected_namespaces(&ctx, &pairs).await;
