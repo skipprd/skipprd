@@ -43,6 +43,7 @@ impl LargeLanguageModel for RouterModel {
             temperature: crate::helpers::configuration::Config::getenv("LLM_TEMPERATURE", "0.2").parse().ok(),
             top_p: crate::helpers::configuration::Config::getenv("LLM_TOP_P", "1.0").parse().ok(),
             response_format: None,
+            thread_id: None,
         };
         let r = self.router.chat(&req)?;
         Ok(r.text)

@@ -1,4 +1,9 @@
 use std::sync::Arc;
+use once_cell::sync::OnceCell;
+use dashmap::DashMap;
+use std::time::{Duration, Instant};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 use crate::helpers::configuration::Config;
 use tracing::debug;
@@ -24,6 +29,14 @@ pub struct LlmRouter {
     http: ureq::Agent,
 }
 
+#[derive(Clone)]
+struct MemoEntry {
+    at: Instant,
+    resp: ChatResponse,
+}
+static CHAT_MEMO: OnceCell<DashMap<String, MemoEntry>> = OnceCell::new();
+fn chat_memo() -> &'static DashMap<String, MemoEntry> { CHAT_MEMO.get_or_init(|| DashMap::new()) }
+
 impl LlmRouter {
     pub fn new() -> Self {
         let adapter = pick_adapter_from_config();
@@ -47,6 +60,25 @@ impl LlmRouter {
             "OPENAI" | "OPENAI_COMPAT" | "HTTP" => pick_openai_adapter_for_model(&req.model),
             _ => self.adapter.clone(),
         };
+        // Memoization key: model + hash(messages JSON)
+        let mut hasher = DefaultHasher::new();
+        if let Ok(msgs_json) = serde_json::to_string(&req.messages) {
+            msgs_json.hash(&mut hasher);
+        } else {
+            // fallback: concatenate roles+contents
+            for m in req.messages.iter() {
+                m.role.hash(&mut hasher);
+                m.content.hash(&mut hasher);
+            }
+        }
+        let key = format!("{}|{:016x}", req.model, hasher.finish());
+        // TTL 120s
+        if let Some(entry) = chat_memo().get(&key) {
+            if entry.at.elapsed() < Duration::from_secs(120) {
+                tracing::debug!("LLM(router) chat memo hit");
+                return Ok(entry.resp.clone());
+            }
+        }
         let http_req = adapter.build_chat_http(req)?;
         // Local llama.cpp branch (no HTTP)
         if http_req.url.starts_with("local://chat") {
@@ -84,6 +116,8 @@ impl LlmRouter {
         // Pretty print parsed text if it's JSON; otherwise print raw text
         let pretty_text = pretty_json(&parsed.text);
         debug!("LLM(router) response text:\n{}", pretty_text);
+        // store in memo
+        chat_memo().insert(key, MemoEntry { at: Instant::now(), resp: parsed.clone() });
         Ok(parsed)
     }
 

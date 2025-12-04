@@ -3,6 +3,7 @@ use serde_json::Value;
 use once_cell::sync::OnceCell;
 use dashmap::DashMap;
 use std::time::Instant;
+use std::collections::HashMap;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ThreadStep {
@@ -37,6 +38,56 @@ pub struct ThreadStore {
 struct CacheEntry { log: ThreadLog, ts: Instant }
 static THREAD_CACHE: OnceCell<DashMap<String, CacheEntry>> = OnceCell::new();
 fn cache() -> &'static DashMap<String, CacheEntry> { THREAD_CACHE.get_or_init(|| DashMap::new()) }
+
+// Per-thread, in-memory context cache (not persisted)
+#[derive(Clone, Debug, Default)]
+pub struct ThreadCache {
+    pub candidates: Vec<(String, String, f32)>, // (pipeline, namespace, score)
+    pub schemas: HashMap<String, Vec<(String, String)>>, // dataset FQN -> [(name, type)]
+    pub samples: HashMap<String, Vec<Vec<String>>>, // dataset FQN -> rows
+    pub updated_at: Option<Instant>,
+}
+
+static THREAD_CTX_CACHE: OnceCell<DashMap<String, ThreadCache>> = OnceCell::new();
+fn ctx_cache() -> &'static DashMap<String, ThreadCache> { THREAD_CTX_CACHE.get_or_init(|| DashMap::new()) }
+
+impl ThreadCache {
+    pub fn ttl_fresh(&self, secs: u64) -> bool {
+        match self.updated_at {
+            Some(t) => t.elapsed().as_secs() < secs,
+            None => false,
+        }
+    }
+}
+
+pub struct ThreadCacheStore;
+
+impl ThreadCacheStore {
+    pub fn get(thread_id: &str) -> Option<ThreadCache> {
+        ctx_cache().get(thread_id).map(|c| c.clone())
+    }
+    pub fn set(thread_id: &str, cache: ThreadCache) {
+        ctx_cache().insert(thread_id.to_string(), cache);
+    }
+    pub fn update_candidates(thread_id: &str, cands: Vec<(String, String, f32)>) {
+        let mut entry = ctx_cache().get(thread_id).map(|e| e.clone()).unwrap_or_default();
+        entry.candidates = cands;
+        entry.updated_at = Some(Instant::now());
+        ctx_cache().insert(thread_id.to_string(), entry);
+    }
+    pub fn update_schema(thread_id: &str, dataset_fqn: &str, cols: Vec<(String, String)>) {
+        let mut entry = ctx_cache().get(thread_id).map(|e| e.clone()).unwrap_or_default();
+        entry.schemas.insert(dataset_fqn.to_string(), cols);
+        entry.updated_at = Some(Instant::now());
+        ctx_cache().insert(thread_id.to_string(), entry);
+    }
+    pub fn update_samples(thread_id: &str, dataset_fqn: &str, rows: Vec<Vec<String>>) {
+        let mut entry = ctx_cache().get(thread_id).map(|e| e.clone()).unwrap_or_default();
+        entry.samples.insert(dataset_fqn.to_string(), rows);
+        entry.updated_at = Some(Instant::now());
+        ctx_cache().insert(thread_id.to_string(), entry);
+    }
+}
 
 impl ThreadStore {
     pub fn new() -> Self {

@@ -916,7 +916,7 @@ async fn run_agent_with_processing(
 	let ctx_df = crate::ws::agent_runner::get_or_create_thread_ctx(thread_id);
 	// Also register compiled dbt models as dbt.<model> views if present
 	let _ = crate::sql::tables::register_dbt_models(&ctx_df).await;
-	// If no dbt models are registered, note that we'll fall back to raw datasets for this question
+	// If dbt models are registered, surface them to the LLM; else note unavailability
 	{
 		use datafusion::catalog::CatalogProvider;
 		let state_df = ctx_df.state();
@@ -929,6 +929,18 @@ async fn run_agent_with_processing(
 					let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
 						action: "dbt_models_unavailable".to_string(),
 						args: serde_json::json!({"notice":"No dbt.<model> views available; falling back to raw datasets for this question"}),
+						observation: serde_json::json!({"ok": true}),
+						ts: chrono::Utc::now().to_rfc3339(),
+						agent: Some(agent.to_string()),
+					}).await;
+				} else {
+					let store = crate::qa::session::ThreadStore::new();
+					let items: Vec<serde_json::Value> = names.into_iter().take(50).map(|n| {
+						serde_json::json!({"pipeline": "", "namespace": "", "name": n, "kind": "model", "score": 1.0})
+					}).collect();
+					let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
+						action: "resolved_artifacts".to_string(),
+						args: serde_json::json!({"items": items}),
 						observation: serde_json::json!({"ok": true}),
 						ts: chrono::Utc::now().to_rfc3339(),
 						agent: Some(agent.to_string()),
@@ -951,8 +963,22 @@ async fn run_agent_with_processing(
 		}
 		q
 	};
-	// Preflight: resolve dataset candidates for all agents (broader K)
-	let candidates = crate::ws::context::resolve_datasets(&q_for_embed, 50).await;
+	// Preflight: resolve dataset candidates for all agents (broader K) with per-thread cache
+	let candidates = {
+		let ttl_secs: u64 = 600;
+		let cache_hit = crate::qa::session::ThreadCacheStore::get(thread_id)
+			.and_then(|c| if !c.candidates.is_empty() && c.ttl_fresh(ttl_secs) { Some(c.candidates) } else { None });
+        if let Some(cands) = cache_hit {
+			tracing::debug!("cache:candidates hit (thread_id={})", thread_id);
+            cands.into_iter().map(|(p,n,s)| crate::ws::context::DatasetResolved { pipeline: p, namespace: n, score: s, fields_hint: String::new() }).collect::<Vec<_>>()
+		} else {
+			tracing::debug!("cache:candidates miss (thread_id={})", thread_id);
+			let cands = crate::ws::context::resolve_datasets(&q_for_embed, 50).await;
+			let pairs = cands.iter().map(|c| (c.pipeline.clone(), c.namespace.clone(), c.score)).collect::<Vec<_>>();
+			crate::qa::session::ThreadCacheStore::update_candidates(thread_id, pairs);
+			cands
+		}
+	};
 	// Register only selected namespaces for the current question (no bulk registration), on this same thread context
 	if !candidates.is_empty() {
 		let mut pairs: Vec<(String, String)> = Vec::new();
@@ -960,6 +986,57 @@ async fn run_agent_with_processing(
 			pairs.push((c.pipeline.clone(), c.namespace.clone()));
 		}
 		crate::ws::agent_runner::pre_register_selected_namespaces(&ctx_df, &pairs).await;
+	}
+	// For the top few candidates, compact schema and sample a few rows; update thread cache and add a schema_context step
+	{
+		use datafusion::catalog::CatalogProvider;
+		let top = candidates.iter().take(5);
+		let mut tables_ctx: Vec<serde_json::Value> = Vec::new();
+		for c in top {
+			let fqn = format!("{}.{}", c.pipeline, c.namespace);
+			// try to load table and read schema
+			if let Ok(df) = ctx_df.table(&fqn).await {
+				let schema = df.schema();
+				let cols = compact_schema_columns(schema.fields());
+				crate::qa::session::ThreadCacheStore::update_schema(thread_id, &fqn, cols.clone());
+				// sample rows
+				let sample_sql = format!("SELECT * FROM {} LIMIT 3", fqn);
+				let mut rows_out: Vec<Vec<String>> = Vec::new();
+				if let Ok(df2) = ctx_df.sql(&sample_sql).await {
+					if let Ok(batches) = df2.collect().await {
+						for b in batches.iter() {
+							for r in 0..b.num_rows() {
+								let mut row: Vec<String> = Vec::new();
+								for cidx in 0..b.num_columns() {
+									row.push(crate::sql::tui::value_to_string(b.column(cidx).as_ref(), r));
+								}
+								rows_out.push(row);
+								if rows_out.len() >= 3 { break; }
+							}
+							if rows_out.len() >= 3 { break; }
+						}
+					}
+				}
+				if !rows_out.is_empty() {
+					crate::qa::session::ThreadCacheStore::update_samples(thread_id, &fqn, rows_out.clone());
+				}
+				tables_ctx.push(serde_json::json!({
+					"dataset": fqn,
+					"columns": cols.iter().map(|(n,t)| serde_json::json!({"name": n, "type": t})).collect::<Vec<_>>(),
+					"samples": rows_out
+				}));
+			}
+		}
+		if !tables_ctx.is_empty() {
+			let store = crate::qa::session::ThreadStore::new();
+			let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
+				action: "schema_context".to_string(),
+				args: serde_json::json!({"tables": tables_ctx}),
+				observation: serde_json::json!({"ok": true}),
+				ts: chrono::Utc::now().to_rfc3339(),
+				agent: Some(agent.to_string()),
+			}).await;
+		}
 	}
 	if !candidates.is_empty() {
 		// Append thread step
@@ -1291,6 +1368,27 @@ async fn run_agent_with_processing(
 	}
 }
 
+fn compact_schema_columns(fields: &[datafusion::arrow::datatypes::FieldRef]) -> Vec<(String, String)> {
+	use datafusion::arrow::datatypes::{Field, DataType};
+	fn walk(prefix: &str, f: &Field, depth: usize, out: &mut Vec<(String,String)>) {
+		let name = if prefix.is_empty() { f.name().to_string() } else { format!("{}.{}", prefix, f.name()) };
+		match f.data_type() {
+			DataType::Struct(inner) if depth < 2 => {
+                for child in inner.iter() {
+                    walk(&name, child.as_ref(), depth + 1, out);
+				}
+			}
+			dt => {
+				out.push((name, format!("{:?}", dt)));
+			}
+		}
+	}
+	let mut out: Vec<(String,String)> = Vec::new();
+	for f in fields {
+		walk("", f.as_ref(), 0, &mut out);
+	}
+	out
+}
 enum AgentFrame {
 	Final { answer: String, sql: Option<String> },
 	AwaitUser { prompt: String },
