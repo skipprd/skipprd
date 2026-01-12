@@ -4,6 +4,7 @@ use crate::qa::agent::AgentCtx;
 use super::Tool;
 use tracing::info;
 use datafusion::prelude::SessionContext;
+use serde_json::json;
 
 pub struct ApproveAndSaveArtifactTool;
 
@@ -325,6 +326,49 @@ impl Tool for ApproveAndSaveArtifactTool {
 				ts: chrono::Utc::now().to_rfc3339(),
 				agent: _ctx.agent_name.clone(),
 			}).await;
+
+			// Immediately validate the DBT project and refresh compiled views to guarantee consistency
+			// Build s3_prefix: <tenant>/<workspace>/<pipeline>/dbt/
+			let s3_prefix = format!("{}/", dbt_base_prefix(&pipeline));
+			let validate_tool = crate::qa::tools::dbt_validate::DbtValidateTool;
+			let args = json!({
+				"project_name": format!("{}_project", pipeline.replace('/', "_")),
+				"s3_prefix": s3_prefix,
+				"target": "datafusion",
+				"build": true
+			});
+			match validate_tool.call(args, _ctx).await {
+				Ok(obs) => {
+					info!("approve_and_save_artifact: dbt_validate observation: {:?}", obs);
+					let _ = store.append_step(tid, crate::qa::session::ThreadStep {
+						action: "dbt_validate".to_string(),
+						args: serde_json::json!({"s3_prefix": s3_prefix, "build": true}),
+						observation: obs,
+						ts: chrono::Utc::now().to_rfc3339(),
+						agent: _ctx.agent_name.clone(),
+					}).await;
+				}
+				Err(e) => {
+					info!("approve_and_save_artifact: dbt_validate failed: {}", e);
+					let _ = store.append_step(tid, crate::qa::session::ThreadStep {
+						action: "dbt_validate".to_string(),
+						args: serde_json::json!({"s3_prefix": s3_prefix, "build": true}),
+						observation: serde_json::json!({"ok": false, "error": e}),
+						ts: chrono::Utc::now().to_rfc3339(),
+						agent: _ctx.agent_name.clone(),
+					}).await;
+				}
+			}
+			// Best-effort to refresh compiled DBT views in the active thread context
+			let ctx_df2: SessionContext = crate::ws::agent_runner::get_or_create_thread_ctx(tid);
+			let _ = crate::sql::tables::register_dbt_models(&ctx_df2).await;
+			let _ = store.append_step(tid, crate::qa::session::ThreadStep {
+				action: "register_dbt_models".to_string(),
+				args: serde_json::json!({"pipeline": pipeline}),
+				observation: serde_json::json!({"ok": true}),
+				ts: chrono::Utc::now().to_rfc3339(),
+				agent: _ctx.agent_name.clone(),
+			}).await;
 		}
 
 		Ok(serde_json::json!({"ok": true, "key": current_key, "status": status, "lines_added": lines_added, "lines_removed": lines_removed}))
@@ -472,10 +516,18 @@ async fn validate_model_sql_for_dataset(raw: &str, pipeline: &str, namespace: &s
 		};
 		core = &trimmed[start_idx..];
 	}
-	let mut forced = core.trim().to_string();
-	if !forced.to_lowercase().contains(" limit ") {
-		forced.push_str(" LIMIT 10");
-	}
+	// Wrap in subquery and apply LIMIT to avoid trailing semicolon and ORDER BY issues
+	let forced = {
+		let core_trimmed = core.trim().trim_end_matches(';').trim().to_string();
+		let lower_core = core_trimmed.to_lowercase();
+		if lower_core.starts_with("with ") {
+			// For CTE queries, append LIMIT directly
+			format!("{} LIMIT 10", core_trimmed)
+		} else {
+			// For plain SELECT, wrap to normalize
+			format!("SELECT * FROM ({}) t LIMIT 10", core_trimmed)
+		}
+	};
 	// Ensure only the selected dataset is registered in this context
 	crate::ws::agent_runner::pre_register_selected_namespaces(ctx, &[(pipeline.to_string(), namespace.to_string())]).await;
 	// Try to fetch base schema to provide helpful nested-field hints if available
@@ -545,7 +597,8 @@ async fn validate_metric_yaml_for_dataset(yaml_text: &str, pipeline: &str, names
 	for s in sqls.iter() {
 		let sl = s.trim().to_lowercase();
 		if sl.starts_with("select ") {
-			let limited = if sl.contains(" limit ") { s.clone() } else { format!("{} LIMIT 10", s) };
+			let core_trimmed = s.trim().trim_end_matches(';').trim().to_string();
+			let limited = format!("SELECT * FROM ({}) t LIMIT 10", core_trimmed);
 			if let Err(e) = ctx.sql(&limited).await {
 				return Err(format!("MetricFlow SQL validation failed: {}", e));
 			}

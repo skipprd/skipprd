@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::io::Write;
+use std::fs;
 use crate::qa::agent::AgentCtx;
 use super::Tool;
 use tracing::info;
@@ -17,6 +18,10 @@ impl Tool for DbtValidateTool {
 		if s3_prefix_opt.is_none() {
 			return Ok(serde_json::json!({"ok": false, "error": "s3_prefix is required. Upload the project to S3 and pass s3_prefix to validate."}));
 		}
+		let s3_prefix_base = {
+			let pref = s3_prefix_opt.clone().unwrap();
+			if pref.ends_with('/') { pref } else { format!("{}/", pref) }
+		};
 		let profiles_dir = args.get("profiles_dir").and_then(|x| x.as_str()).map(|s| s.to_string())
 			.or_else(|| std::env::var("DBT_PROFILES_DIR").ok());
 		let target = args.get("target").and_then(|x| x.as_str()).map(|s| s.to_string())
@@ -97,6 +102,26 @@ impl Tool for DbtValidateTool {
 		};
 		let ok = deps_res.status_ok && parse_res.status_ok && compile_res.status_ok
 			&& run_or_build_res.as_ref().map(|o| o.status_ok).unwrap_or(true);
+		// If compile (or build/run) succeeded, upload local target/ back to S3 under <s3_prefix>/target/
+		let mut uploaded_files: usize = 0;
+		if compile_res.status_ok || run_or_build_res.as_ref().map(|r| r.status_ok).unwrap_or(false) {
+			let local_target = root.join("target");
+			if local_target.exists() {
+				let s3_target_prefix = format!("{}target/", s3_prefix_base);
+				info!("dbt_validate: preparing upload from local '{}' to s3://{}/{}", local_target.display(), crate::helpers::configuration::Config::get_skippr_s3_bucket(), s3_target_prefix);
+				match upload_dir_to_s3(&local_target, &s3_target_prefix).await {
+					Ok(c) => {
+						uploaded_files = c;
+						info!("dbt_validate: uploaded {} target file(s) to s3://{}/{}", c, crate::helpers::configuration::Config::get_skippr_s3_bucket(), s3_target_prefix);
+					}
+					Err(e) => {
+						info!("dbt_validate: upload of compiled target to S3 failed: {}", e);
+					}
+				}
+			} else {
+				info!("dbt_validate: no local target/ directory found to upload");
+			}
+		}
 		// Collect error strings
 		let mut errs_vec: Vec<String> = Vec::new();
 		for e in combine_errors(&deps_res, &parse_res) { errs_vec.push(e); }
@@ -107,6 +132,7 @@ impl Tool for DbtValidateTool {
 			"parse_ok": parse_res.status_ok,
 			"compile_ok": compile_res.status_ok,
 			"run_ok": run_or_build_res.as_ref().map(|o| o.status_ok),
+			"uploaded_target_files": uploaded_files,
 			"errors": errs_vec,
 			"warnings": [],
 			"logs": {
@@ -161,6 +187,40 @@ fn combine_errors(a: &CmdOut, b: &CmdOut) -> Vec<String> {
 		if !b.stdout.trim().is_empty() { v.push(b.stdout.trim().to_string()); }
 	}
 	v
+}
+
+async fn upload_dir_to_s3(local_dir: &Path, s3_prefix: &str) -> Result<usize, String> {
+	if !local_dir.is_dir() {
+		return Ok(0);
+	}
+	let mut stack: Vec<PathBuf> = vec![local_dir.to_path_buf()];
+	let mut uploaded: usize = 0;
+	while let Some(dir) = stack.pop() {
+		for entry in fs::read_dir(&dir).map_err(|e| e.to_string())? {
+			let entry = entry.map_err(|e| e.to_string())?;
+			let path = entry.path();
+			if path.is_dir() {
+				stack.push(path);
+				continue;
+			}
+			// derive key: s3_prefix + relative path from local_dir
+			let rel = path.strip_prefix(local_dir).map_err(|e| e.to_string())?;
+			let mut key = String::from(s3_prefix);
+			let rel_s = rel.to_string_lossy().replace('\\', "/");
+			key.push_str(&rel_s);
+			let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+			let content_type = match path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase().as_str() {
+				"sql" => "text/sql",
+				"json" => "application/json",
+				"yml" | "yaml" => "text/yaml",
+				"txt" => "text/plain",
+				_ => "application/octet-stream",
+			};
+			crate::helpers::s3::put_bytes(&key, &bytes, content_type).await.map_err(|e| format!("{:?}", e))?;
+			uploaded += 1;
+		}
+	}
+	Ok(uploaded)
 }
 
 

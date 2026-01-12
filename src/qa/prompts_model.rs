@@ -26,6 +26,7 @@ Hard rules:
   # Dataset: <pipeline>.<namespace>
 - After saving the project files to S3, validate the project with dbt_validate using s3_prefix (deps → parse → compile with target 'datafusion'; build preferred). Do not send inline file content.
  - For project scaffolding: do NOT build piece‑meal and do NOT request per‑artifact approvals. Produce ONE consolidated plan and then save the ENTIRE initial project in a single batch using approve_and_save_artifact_batch. If dbt_validate is unavailable, proceed without blocking.
+- For full project creation: include dbt_project.yml, sources (schema.yml), and staging models for all resolved datasets.
 - STRICT JSON only; exactly one JSON object per step; no prose outside JSON."#.to_string()
 }
 

@@ -6,6 +6,60 @@ fn dbt_base_prefix(pipeline: &str) -> String {
     format!("{}/{}/{}/dbt", tenant, workspace, pipeline)
 }
 
+pub async fn scaffold_full_project(pipeline: &str, namespaces: &[String]) -> Result<Vec<String>, String> {
+    // Ensure minimal project file exists
+    ensure_minimal_project(pipeline).await?;
+    let base = dbt_base_prefix(pipeline);
+    let mut written: Vec<String> = Vec::new();
+
+    // Write sources (schema.yml) enumerating all namespaces for this pipeline
+    let sources_yaml = make_sources_yaml(pipeline, namespaces);
+    let sources_key = format!("{}/models/schema.yml", base);
+    crate::helpers::s3::put_bytes(&sources_key, sources_yaml.as_bytes(), "text/yaml")
+        .await
+        .map_err(|e| format!("{:?}", e))?;
+    written.push(sources_key);
+
+    // For each namespace, create a simple staging model selecting from the dbt source
+    for ns in namespaces {
+        let model_name = format!("stg_{}", ns);
+        let sql_text = make_staging_model_sql(pipeline, ns);
+        let key = format!("{}/models/{}/{}.sql", base, ns, model_name);
+        crate::helpers::s3::put_bytes(&key, sql_text.as_bytes(), "text/sql")
+            .await
+            .map_err(|e| format!("{:?}", e))?;
+        written.push(key);
+    }
+
+    info!("DBT scaffolding complete for pipeline '{}' ({} file(s))", pipeline, written.len());
+    Ok(written)
+}
+
+fn make_sources_yaml(pipeline: &str, namespaces: &[String]) -> String {
+    // Minimal version:2 sources block listing all namespaces as tables under one source
+    let mut out = String::new();
+    out.push_str("version: 2\n\n");
+    out.push_str("sources:\n");
+    out.push_str(&format!("  - name: {}\n", pipeline));
+    out.push_str("    tables:\n");
+    for ns in namespaces {
+        out.push_str(&format!("      - name: {}\n", ns));
+    }
+    out
+}
+
+fn make_staging_model_sql(pipeline: &str, namespace: &str) -> String {
+    format!(
+        r#"{{{{ config(materialized="view") }}}}
+
+select *
+from {{{{ source('{pipeline}','{namespace}') }}}}
+"#,
+        pipeline = pipeline,
+        namespace = namespace
+    )
+}
+
 pub async fn write_model_sql(pipeline: &str, namespace: &str, name: &str, sql: &str) -> Result<String, String> {
     let key = format!("{}/models/{}/{}.sql", dbt_base_prefix(pipeline), namespace, name);
     crate::helpers::s3::put_bytes(&key, sql.as_bytes(), "text/sql").await.map_err(|e| format!("{:?}", e))?;

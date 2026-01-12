@@ -184,9 +184,9 @@ pub async fn register_namespace_view(ctx: &SessionContext, pipeline: &str, names
                 warn!("register_namespace_view: failed to fetch manifest for '{}.{}': {:?}", pipeline, namespace, e);
                 None
             }
-            Err(_) => {
-                warn!("register_namespace_view: timed out reading manifest for '{}.{}'", pipeline, namespace);
-                None
+        Err(_) => {
+            warn!("register_namespace_view: timed out reading manifest for '{}.{}'", pipeline, namespace);
+            None
             }
         }
     };

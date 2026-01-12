@@ -28,3 +28,5 @@ docs/releases/git
 bike-hire-5
 openapi-generator-cli-7.9.0.jar
 dbt-examples
+.dbt-build
+.dbt-profiles

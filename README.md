@@ -1,3 +1,11 @@
+## DBT validation target and S3 layout
+
+- Target adapter for validation/compile is `datafusion`. Ensure `DBT_PROFILES_DIR` (or `profiles_dir` in calls) provides a profile compatible with the `datafusion` target.
+- DBT project files are stored in S3 under `<tenant>/<workspace>/<pipeline>/dbt/`.
+  - `dbt_project.yml`
+  - `models/schema.yml` (sources)
+  - `models/<namespace>/stg_<namespace>.sql` (staging)
+  - Compiled artifacts uploaded to `<tenant>/<workspace>/<pipeline>/dbt/target/` after successful `dbt compile`/`dbt build`.
 # Skippr
 
 ## OpenAPI schema-first (Ask WebSocket)

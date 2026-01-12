@@ -2,6 +2,7 @@ use datafusion::prelude::SessionContext;
 use crate::flows::adapter::FlowFrame;
 use crate::qa::tools::Tool;
 use serde_json::json;
+use tracing::info;
 
 pub async fn run(thread_id: &str, question: &str) -> Result<Vec<FlowFrame>, String> {
 	let sys = crate::prompts::prompts_shared::with_time_context(crate::prompts::model::system_prompt());
@@ -71,6 +72,39 @@ pub async fn run(thread_id: &str, question: &str) -> Result<Vec<FlowFrame>, Stri
 						break;
 					}
 				}
+				// Fallback: if no artifact was saved, scaffold a full DBT project from discovered datasets
+				if pipeline_opt.is_none() {
+					if let Some((p0, _, _)) = bundle.datasets.first() {
+						let primary = p0.clone();
+						let namespaces: Vec<String> = bundle.datasets.iter()
+							.filter(|(p, _, _)| p == &primary)
+							.map(|(_, ns, _)| ns.clone())
+							.collect();
+						if !namespaces.is_empty() {
+							match crate::qa::dbt::scaffold_full_project(&primary, &namespaces).await {
+								Ok(keys) => {
+									let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
+										action: "dbt_scaffold".to_string(),
+										args: serde_json::json!({ "pipeline": primary, "namespaces": namespaces, "files": keys }),
+										observation: serde_json::json!({ "ok": true }),
+										ts: chrono::Utc::now().to_rfc3339(),
+										agent: Some("model".to_string()),
+									}).await;
+									pipeline_opt = Some(primary);
+								}
+								Err(e) => {
+									let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
+										action: "dbt_scaffold".to_string(),
+										args: serde_json::json!({}),
+										observation: serde_json::json!({ "ok": false, "error": e }),
+										ts: chrono::Utc::now().to_rfc3339(),
+										agent: Some("model".to_string()),
+									}).await;
+								}
+							}
+						}
+					}
+				}
 				if let Some(pipeline) = pipeline_opt {
 					// Build s3_prefix: <tenant>/<workspace>/<pipeline>/dbt/
 					let tenant = crate::helpers::configuration::Config::get_tenant();
@@ -87,6 +121,7 @@ pub async fn run(thread_id: &str, question: &str) -> Result<Vec<FlowFrame>, Stri
 					let actx2 = crate::qa::agent::AgentCtx { thread_id: Some(thread_id.to_string()), ..actx.clone() };
 					match validate_tool.call(args, &actx2).await {
 						Ok(obs) => {
+							info!("model flow: dbt_validate observation: {:?}", obs);
 							let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
 								action: "dbt_validate".to_string(),
 								args: serde_json::json!({"s3_prefix": format!("{}/{}/{}/dbt/", tenant, workspace, pipeline)}),
@@ -96,6 +131,7 @@ pub async fn run(thread_id: &str, question: &str) -> Result<Vec<FlowFrame>, Stri
 							}).await;
 						}
 						Err(e) => {
+							info!("model flow: dbt_validate failed: {}", e);
 							let _ = store.append_step(thread_id, crate::qa::session::ThreadStep {
 								action: "dbt_validate".to_string(),
 								args: serde_json::json!({"s3_prefix": format!("{}/{}/{}/dbt/", tenant, workspace, pipeline)}),

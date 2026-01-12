@@ -12,7 +12,7 @@ pub struct SqlSampleTool {
 impl Tool for SqlSampleTool {
     fn name(&self) -> &'static str { "sql_sample" }
     async fn call(&self, args: Value, _ctx: &AgentCtx) -> Result<Value, String> {
-			let table = args.get("table").and_then(|x| x.as_str()).unwrap_or("");
+        let table = args.get("table").and_then(|x| x.as_str()).unwrap_or("");
         let field = args.get("field").and_then(|x| x.as_str()).unwrap_or("");
         let k = args.get("k").and_then(|x| x.as_u64()).unwrap_or(10);
         if table.is_empty() || field.is_empty() {
