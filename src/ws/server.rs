@@ -172,7 +172,9 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			let question = req.question.clone();
 			if question.trim().is_empty() { return Err("question required".into()); }
 			let thread_id = Uuid::new_v4().to_string();
-			let agent = normalize_agent_new(req.agent_type.clone());
+			let suite_id = req.suite_id.clone();
+			let agent = normalize_agent_new(req.agent_type);
+			state.current_suite.insert(thread_id.clone(), suite_id.clone());
 			state.current_agent.insert(thread_id.clone(), agent.clone());
 			// ok
 			let mut ok = api::OkResponse::new(1, m::ok_response::Type::Ok, now_iso());
@@ -205,7 +207,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 				let _ = store.set_title_if_absent(&thread_id, &truncate_title(&question, 64)).await;
 			}
 			// run agent
-			let frames = run_agent_and_frames(&thread_id, &question, &agent).await?;
+			let frames = run_agent_and_frames(&thread_id, &question, &suite_id, &agent).await?;
 			for f in frames {
 				match f {
 					AgentFrame::Final { answer, sql } => {
@@ -294,8 +296,24 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			if thread_id.is_empty() { return Err("thread_id required".into()); }
 			if uuid::Uuid::parse_str(&thread_id).is_err() { return Err("invalid thread_id".into()); }
 			let question = req.question.clone().unwrap_or_else(|| "Continue.".to_string());
-			let requested_agent = normalize_agent_open(req.agent_type.clone());
-			let current = state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| "ask".to_string());
+			let requested_suite = req.suite_id.clone();
+			let requested_agent = normalize_agent_open(req.agent_type);
+
+			// Track suite per-thread (explicit client selection)
+			let current_suite = state.current_suite.get(&thread_id).cloned().unwrap_or_else(|| requested_suite.clone());
+			if current_suite != requested_suite {
+				let store = crate::qa::session::ThreadStore::new();
+				let _ = store.append_step(&thread_id, crate::qa::session::ThreadStep {
+					action: "switch_suite".to_string(),
+					args: serde_json::json!({"from": current_suite, "to": requested_suite}),
+					observation: serde_json::json!({"ok": true}),
+					ts: chrono::Utc::now().to_rfc3339(),
+					agent: Some(requested_agent.clone()),
+				}).await;
+			}
+			state.current_suite.insert(thread_id.clone(), requested_suite.clone());
+
+			let current = state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| requested_agent.clone());
 			if current != requested_agent {
 				// append switch_agent step
 				let store = crate::qa::session::ThreadStore::new();
@@ -308,6 +326,8 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 				}).await;
 				state.current_agent.insert(thread_id.clone(), requested_agent.clone());
 			}
+			// Ensure we always persist the explicitly requested agent for this thread
+			state.current_agent.insert(thread_id.clone(), requested_agent.clone());
 			// ok
 			let mut ok = api::OkResponse::new(1, m::ok_response::Type::Ok, now_iso());
 			ok.cid = Some(cid.clone());
@@ -322,8 +342,9 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			state.buffer_last(&pr_s);
 			out.push(pr_s);
 			// run agent
-			let agent = state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| "ask".to_string());
-			let frames = run_agent_and_frames(&thread_id, &question, &agent).await?;
+			let suite_id = state.current_suite.get(&thread_id).cloned().unwrap_or_else(|| requested_suite.clone());
+			let agent = state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| requested_agent.clone());
+			let frames = run_agent_and_frames(&thread_id, &question, &suite_id, &agent).await?;
 			for f in frames {
 				match f {
 					AgentFrame::Final { answer, sql } => {
@@ -419,7 +440,16 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			out.push(serde_json::to_string(&api::ServerMessage::Ok(ok)).unwrap());
 			// Steering gates removed: user messages no longer drive model/metric type or existing/new choices.
 			// auto-resume: emit processing and continue agent immediately
-			let agent = state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| "ask".to_string());
+			let suite_id = state
+				.current_suite
+				.get(&thread_id)
+				.cloned()
+				.ok_or_else(|| "suite_id missing for thread".to_string())?;
+			let agent = state
+				.current_agent
+				.get(&thread_id)
+				.cloned()
+				.ok_or_else(|| "agent_type missing for thread".to_string())?;
 			// processing
 			let mut pr = api::ProcessingResponse::new(1, m::processing_response::Type::Processing, now_iso(), state.next_seq(), thread_id.clone());
 			pr.stage = Some(m::processing_response::Stage::Queued);
@@ -440,7 +470,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 					}
 				}
 			}
-			let frames = run_agent_and_frames(&thread_id, &q_for_resume, &agent).await?;
+			let frames = run_agent_and_frames(&thread_id, &q_for_resume, &suite_id, &agent).await?;
 			for f in frames {
 				match f {
 					AgentFrame::Final { answer, sql } => {
@@ -609,6 +639,7 @@ struct ConnState {
 	sent: VecDeque<(i32, String)>,
 	thread_seq: HashMap<String, i32>,
 	seen: HashMap<String, i32>,
+	current_suite: HashMap<String, String>,
 	current_agent: HashMap<String, String>,
 }
 
@@ -665,7 +696,14 @@ async fn synthesize_summary(question: &str, agent_answer: &str, sql_opt: &Option
 
 impl ConnState {
 	fn new() -> Self {
-		Self { seq: 0, sent: VecDeque::new(), thread_seq: HashMap::new(), seen: HashMap::new(), current_agent: HashMap::new() }
+		Self {
+			seq: 0,
+			sent: VecDeque::new(),
+			thread_seq: HashMap::new(),
+			seen: HashMap::new(),
+			current_suite: HashMap::new(),
+			current_agent: HashMap::new(),
+		}
 	}
 	fn next_seq(&mut self) -> i32 {
 		self.seq += 1;
@@ -695,7 +733,9 @@ async fn process_new(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt
 	let question = req.question.clone();
 	if question.trim().is_empty() { return Err("question required".into()); }
 	let thread_id = Uuid::new_v4().to_string();
-	let agent = normalize_agent_new(req.agent_type.clone());
+	let suite_id = req.suite_id.clone();
+	let agent = normalize_agent_new(req.agent_type);
+	state.current_suite.insert(thread_id.clone(), suite_id.clone());
 	state.current_agent.insert(thread_id.clone(), agent.clone());
 	// ok
 	let mut ok = api::OkResponse::new(1, m::ok_response::Type::Ok, now_iso());
@@ -737,7 +777,7 @@ async fn process_new(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt
 		}).await;
 		let _ = store.set_title_if_absent(&thread_id, &truncate_title(&question, 64)).await;
 	}
-	run_agent_with_processing(&thread_id, &question, &agent, &cid, state, write, m::processing_response::Stage::Queued).await
+	run_agent_with_processing(&thread_id, &question, &suite_id, &agent, &cid, state, write, m::processing_response::Stage::Queued).await
 }
 
 async fn process_open(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt<Message> + Unpin)) -> Result<(), String> {
@@ -747,8 +787,23 @@ async fn process_open(v: &Value, state: &mut ConnState, write: &mut (impl SinkEx
 	if thread_id.is_empty() { return Err("thread_id required".into()); }
 	if uuid::Uuid::parse_str(&thread_id).is_err() { return Err("invalid thread_id".into()); }
 	let question = req.question.clone().unwrap_or_else(|| "Continue.".to_string());
-	let requested_agent = normalize_agent_open(req.agent_type.clone());
-	let current = state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| "ask".to_string());
+	let requested_suite = req.suite_id.clone();
+	let requested_agent = normalize_agent_open(req.agent_type);
+
+	let current_suite = state.current_suite.get(&thread_id).cloned().unwrap_or_else(|| requested_suite.clone());
+	if current_suite != requested_suite {
+		let store = crate::qa::session::ThreadStore::new();
+		let _ = store.append_step(&thread_id, crate::qa::session::ThreadStep {
+			action: "switch_suite".to_string(),
+			args: serde_json::json!({"from": current_suite, "to": requested_suite}),
+			observation: serde_json::json!({"ok": true}),
+			ts: chrono::Utc::now().to_rfc3339(),
+			agent: Some(requested_agent.clone()),
+		}).await;
+	}
+	state.current_suite.insert(thread_id.clone(), requested_suite.clone());
+
+	let current = state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| requested_agent.clone());
 	if current != requested_agent {
 		let store = crate::qa::session::ThreadStore::new();
 		let _ = store.append_step(&thread_id, crate::qa::session::ThreadStep {
@@ -760,6 +815,8 @@ async fn process_open(v: &Value, state: &mut ConnState, write: &mut (impl SinkEx
 		}).await;
 		state.current_agent.insert(thread_id.clone(), requested_agent.clone());
 	}
+	// Ensure we always persist the explicitly requested agent for this thread
+	state.current_agent.insert(thread_id.clone(), requested_agent.clone());
 	// ok
 	let mut ok = api::OkResponse::new(1, m::ok_response::Type::Ok, now_iso());
 	ok.cid = Some(cid.clone());
@@ -780,7 +837,8 @@ async fn process_open(v: &Value, state: &mut ConnState, write: &mut (impl SinkEx
 		let _ = write.send(Message::Text(s)).await;
 	}
 	// agent with periodic updates
-	let agent = state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| "ask".to_string());
+	let suite_id = state.current_suite.get(&thread_id).cloned().unwrap_or_else(|| requested_suite.clone());
+	let agent = state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| requested_agent.clone());
 	// if user supplied a prompt on open, record it
 	if !question.trim().is_empty() {
 		let store = crate::qa::session::ThreadStore::new();
@@ -793,7 +851,7 @@ async fn process_open(v: &Value, state: &mut ConnState, write: &mut (impl SinkEx
 		}).await;
 		let _ = store.set_title_if_absent(&thread_id, &truncate_title(&question, 64)).await;
 	}
-	run_agent_with_processing(&thread_id, &question, &agent, &cid, state, write, m::processing_response::Stage::Queued).await
+	run_agent_with_processing(&thread_id, &question, &suite_id, &agent, &cid, state, write, m::processing_response::Stage::Queued).await
 }
 
 async fn process_approve(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt<Message> + Unpin)) -> Result<(), String> {
@@ -801,7 +859,16 @@ async fn process_approve(v: &Value, state: &mut ConnState, write: &mut (impl Sin
 	let thread_id = v.get("thread_id").and_then(|x| x.as_str()).ok_or_else(|| "thread_id required".to_string())?.to_string();
 	if thread_id.is_empty() { return Err("thread_id required".into()); }
 	if uuid::Uuid::parse_str(&thread_id).is_err() { return Err("invalid thread_id".into()); }
-	let agent = state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| "ask".to_string());
+	let suite_id = state
+		.current_suite
+		.get(&thread_id)
+		.cloned()
+		.ok_or_else(|| "suite_id missing for thread".to_string())?;
+	let agent = state
+		.current_agent
+		.get(&thread_id)
+		.cloned()
+		.ok_or_else(|| "agent_type missing for thread".to_string())?;
 	// ack
 	let mut ok = api::OkResponse::new(1, m::ok_response::Type::Ok, now_iso());
 	ok.cid = Some(cid.clone());
@@ -833,7 +900,7 @@ async fn process_approve(v: &Value, state: &mut ConnState, write: &mut (impl Sin
 		}).await;
 	}
 	tracing::info!("approve: thread_id={} agent={}", thread_id, agent);
-	run_agent_with_processing(&thread_id, "Continue.", &agent, &cid, state, write, m::processing_response::Stage::Queued).await
+	run_agent_with_processing(&thread_id, "Continue.", &suite_id, &agent, &cid, state, write, m::processing_response::Stage::Queued).await
 }
 
 async fn process_reject(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt<Message> + Unpin)) -> Result<(), String> {
@@ -841,7 +908,16 @@ async fn process_reject(v: &Value, state: &mut ConnState, write: &mut (impl Sink
 	let thread_id = v.get("thread_id").and_then(|x| x.as_str()).ok_or_else(|| "thread_id required".to_string())?.to_string();
 	if thread_id.is_empty() { return Err("thread_id required".into()); }
 	if uuid::Uuid::parse_str(&thread_id).is_err() { return Err("invalid thread_id".into()); }
-	let agent = state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| "ask".to_string());
+	let suite_id = state
+		.current_suite
+		.get(&thread_id)
+		.cloned()
+		.ok_or_else(|| "suite_id missing for thread".to_string())?;
+	let agent = state
+		.current_agent
+		.get(&thread_id)
+		.cloned()
+		.ok_or_else(|| "agent_type missing for thread".to_string())?;
 	// ack
 	let mut ok = api::OkResponse::new(1, m::ok_response::Type::Ok, now_iso());
 	ok.cid = Some(cid.clone());
@@ -873,34 +949,40 @@ async fn process_reject(v: &Value, state: &mut ConnState, write: &mut (impl Sink
 		}).await;
 	}
 	tracing::info!("reject: thread_id={} agent={}", thread_id, agent);
-	run_agent_with_processing(&thread_id, "Continue.", &agent, &cid, state, write, m::processing_response::Stage::Queued).await
+	run_agent_with_processing(&thread_id, "Continue.", &suite_id, &agent, &cid, state, write, m::processing_response::Stage::Queued).await
 }
 // normalize_agent removed (unused)
 
-fn normalize_agent_new(a: Option<api::new_request::AgentType>) -> String {
+fn normalize_agent_new(a: api::new_request::AgentType) -> String {
 	match a {
-		Some(api::new_request::AgentType::Cleanse) => "cleanse".to_string(),
-		Some(api::new_request::AgentType::Model) => "model".to_string(),
-		_ => "ask".to_string(),
+		api::new_request::AgentType::Cleanse => "cleanse".to_string(),
+		api::new_request::AgentType::Model => "model".to_string(),
+		api::new_request::AgentType::Ask => "ask".to_string(),
 	}
 }
 
-fn normalize_agent_open(a: Option<api::open_request::AgentType>) -> String {
+fn normalize_agent_open(a: api::open_request::AgentType) -> String {
 	match a {
-		Some(api::open_request::AgentType::Cleanse) => "cleanse".to_string(),
-		Some(api::open_request::AgentType::Model) => "model".to_string(),
-		_ => "ask".to_string(),
+		api::open_request::AgentType::Cleanse => "cleanse".to_string(),
+		api::open_request::AgentType::Model => "model".to_string(),
+		api::open_request::AgentType::Ask => "ask".to_string(),
 	}
 }
 async fn run_agent_with_processing(
 	thread_id: &str,
 	question: &str,
+	suite_id: &str,
 	agent: &str,
 	cid: &str,
 	state: &mut ConnState,
 	write: &mut (impl SinkExt<Message> + Unpin),
 	initial_stage: m::processing_response::Stage,
 ) -> Result<(), String> {
+	// Suite-based runner. We intentionally keep this simple: the suite owns prompts/tools and the core
+	// WS server only handles message I/O. Step-level progress streaming can be reintroduced later by
+	// threading progress channels through the suite runner.
+	return run_agent_with_processing_suite(thread_id, question, suite_id, agent, cid, state, write, initial_stage).await;
+
 	// Prepare agent
 	let mut sys = if agent == "model" { crate::qa::prompts_model::model_system_prompt() } else { crate::qa::prompts::system_prompt() };
 	let now_utc = chrono::Utc::now().to_rfc3339();
@@ -1397,8 +1479,103 @@ enum AgentFrame {
 	AwaitApproval { prompt: String },
 }
 
-async fn run_agent_and_frames(thread_id: &str, question: &str, agent: &str) -> Result<Vec<AgentFrame>, String> {
-	// Delegate to flows
+async fn run_agent_with_processing_suite(
+	thread_id: &str,
+	question: &str,
+	suite_id: &str,
+	agent: &str,
+	cid: &str,
+	state: &mut ConnState,
+	write: &mut (impl SinkExt<Message> + Unpin),
+	_initial_stage: m::processing_response::Stage,
+) -> Result<(), String> {
+	let frames = run_agent_and_frames(thread_id, question, suite_id, agent).await?;
+	for f in frames {
+		match f {
+			AgentFrame::Final { answer, sql } => {
+				let sql = if agent == "model" { None } else { sql };
+				for t in chunk_text(&answer, 24) {
+					let mut tk = api::TokenResponse::new(1, m::token_response::Type::Token, now_iso(), state.next_seq(), thread_id.to_string(), t);
+					tk.for_cid = Some(cid.to_string());
+					let s = serde_json::to_string(&tk).unwrap();
+					state.buffer_last(&s);
+					tracing::info!("WS -> {}", s);
+					let _ = write.send(Message::Text(s)).await;
+				}
+				let tseq = state.next_thread_seq(thread_id);
+				let resp = api::FinalResponse::new(
+					1,
+					m::final_response::Type::Final,
+					now_iso(),
+					state.next_seq(),
+					thread_id.to_string(),
+					tseq,
+					api::FinalResponseResult { sql: sql.clone(), answer: answer.clone(), data: None, chart: None },
+				);
+				let s = serde_json::to_string(&resp).unwrap();
+				state.buffer_last(&s);
+				tracing::info!("WS -> {}", s);
+				let _ = write.send(Message::Text(s)).await;
+
+				// Append final_response step with the exact payload sent
+				{
+					let store = crate::qa::session::ThreadStore::new();
+					let _ = store
+						.append_step(
+							thread_id,
+							crate::qa::session::ThreadStep {
+								action: "final_response".to_string(),
+								args: serde_json::json!({"answer": answer, "sql": sql, "data": null, "chart": null}),
+								observation: serde_json::json!({"ok": true}),
+								ts: chrono::Utc::now().to_rfc3339(),
+								agent: Some(agent.to_string()),
+							},
+						)
+						.await;
+				}
+				return Ok(());
+			}
+			AgentFrame::AwaitUser { prompt } => {
+				let tseq = state.next_thread_seq(thread_id);
+				let resp = api::AwaitUserResponse::new(
+					1,
+					m::await_user_response::Type::AwaitUser,
+					now_iso(),
+					state.next_seq(),
+					thread_id.to_string(),
+					tseq,
+					prompt,
+				);
+				let s = serde_json::to_string(&resp).unwrap();
+				state.buffer_last(&s);
+				tracing::info!("WS -> {}", s);
+				let _ = write.send(Message::Text(s)).await;
+				return Ok(());
+			}
+			AgentFrame::AwaitApproval { prompt } => {
+				let tseq = state.next_thread_seq(thread_id);
+				let resp = api::AwaitApprovalResponse::new(
+					1,
+					m::await_approval_response::Type::AwaitApproval,
+					now_iso(),
+					state.next_seq(),
+					thread_id.to_string(),
+					tseq,
+					prompt,
+				);
+				let s = serde_json::to_string(&resp).unwrap();
+				state.buffer_last(&s);
+				tracing::info!("WS -> {}", s);
+				let _ = write.send(Message::Text(s)).await;
+				return Ok(());
+			}
+		}
+	}
+	Ok(())
+}
+
+async fn run_agent_and_frames(thread_id: &str, question: &str, suite_id: &str, agent: &str) -> Result<Vec<AgentFrame>, String> {
+	// Delegate to suites
 	let convert = |ff: crate::flows::adapter::FlowFrame| -> AgentFrame {
 		match ff {
 			crate::flows::adapter::FlowFrame::Final { answer, sql } => AgentFrame::Final { answer, sql },
@@ -1407,11 +1584,17 @@ async fn run_agent_and_frames(thread_id: &str, question: &str, agent: &str) -> R
 			crate::flows::adapter::FlowFrame::Processing { .. } => AgentFrame::AwaitUser { prompt: "Processing...".to_string() },
 		}
 	};
-	let frames = match agent {
-		"model" => crate::flows::model::run(thread_id, question).await?.into_iter().map(convert).collect(),
-		"cleanse" => crate::flows::cleanse::run(thread_id, question).await?.into_iter().map(convert).collect(),
-		_ => crate::flows::ask::run(thread_id, question).await?.into_iter().map(convert).collect(),
-	};
+	let reg = crate::suites::registry::default_registry();
+	let suite = reg
+		.get(suite_id)
+		.ok_or_else(|| format!("invalid suite_id '{}'", suite_id))?;
+	let sctx = crate::suites::SuiteCtx::default();
+	let frames = suite
+		.handle_open(thread_id, question, agent, &sctx)
+		.await?
+		.into_iter()
+		.map(convert)
+		.collect();
 	Ok(frames)
 }
 

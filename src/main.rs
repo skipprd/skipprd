@@ -68,6 +68,8 @@ mod ws;
 mod models;
 mod flows;
 mod prompts;
+mod suites;
+mod adapters;
 
 use crate::helpers::configuration::{Config, PIPELINE_NAME};
 use crate::helpers::logging::init_logging;

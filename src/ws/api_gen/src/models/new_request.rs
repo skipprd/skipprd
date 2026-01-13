@@ -22,19 +22,23 @@ pub struct NewRequest {
     /// User's question to start a new thread
     #[serde(rename = "question")]
     pub question: String,
-    /// Agent to use (ask | cleanse | model). Defaults to ask.
-    #[serde(rename = "agentType", skip_serializing_if = "Option::is_none")]
-    pub agent_type: Option<AgentType>,
+    /// Suite id to use (e.g. skippr_ask | skippr_model).
+    #[serde(rename = "suiteId")]
+    pub suite_id: String,
+    /// Agent to use (ask | cleanse | model). Required.
+    #[serde(rename = "agentType")]
+    pub agent_type: AgentType,
 }
 
 impl NewRequest {
-    pub fn new(v: i32, cid: String, r#type: Type, question: String) -> NewRequest {
+    pub fn new(v: i32, cid: String, r#type: Type, question: String, suite_id: String, agent_type: AgentType) -> NewRequest {
         NewRequest {
             v,
             cid,
             r#type,
             question,
-            agent_type: None,
+            suite_id,
+            agent_type,
         }
     }
 }

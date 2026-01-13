@@ -25,20 +25,24 @@ pub struct OpenRequest {
     /// Optional nudge to resume the thread (default is \"Continue.\")
     #[serde(rename = "question", skip_serializing_if = "Option::is_none")]
     pub question: Option<String>,
+    /// Suite id to use (e.g. skippr_ask | skippr_model).
+    #[serde(rename = "suiteId")]
+    pub suite_id: String,
     /// Agent to use for this message; if differs from current, a switch_agent step is recorded.
-    #[serde(rename = "agentType", skip_serializing_if = "Option::is_none")]
-    pub agent_type: Option<AgentType>,
+    #[serde(rename = "agentType")]
+    pub agent_type: AgentType,
 }
 
 impl OpenRequest {
-    pub fn new(v: i32, cid: String, r#type: Type, thread_id: String) -> OpenRequest {
+    pub fn new(v: i32, cid: String, r#type: Type, thread_id: String, suite_id: String, agent_type: AgentType) -> OpenRequest {
         OpenRequest {
             v,
             cid,
             r#type,
             thread_id,
             question: None,
-            agent_type: None,
+            suite_id,
+            agent_type,
         }
     }
 }
