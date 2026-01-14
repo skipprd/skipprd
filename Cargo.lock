@@ -6903,6 +6903,52 @@ dependencies = [
 ]
 
 [[package]]
+name = "react"
+version = "0.0.0-git"
+dependencies = [
+ "arrow",
+ "arrow-buffer",
+ "arrow-schema",
+ "async-trait",
+ "aws-config",
+ "aws-sdk-athena",
+ "aws-sdk-glue",
+ "aws-sdk-s3",
+ "aws-types",
+ "bytes",
+ "chrono",
+ "clap",
+ "dashmap 5.5.3",
+ "futures",
+ "futures-util",
+ "hex",
+ "httpmock",
+ "itertools 0.12.1",
+ "lancedb",
+ "lazy_static",
+ "once_cell",
+ "parquet",
+ "rand 0.8.5",
+ "regex",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "tungstenite",
+ "ureq",
+ "uuid 1.18.1",
+ "walkdir",
+]
+
+[[package]]
 name = "recursive"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

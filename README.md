@@ -1,11 +1,11 @@
 ## DBT validation target and S3 layout
 
 - Target adapter for validation/compile is `datafusion`. Ensure `DBT_PROFILES_DIR` (or `profiles_dir` in calls) provides a profile compatible with the `datafusion` target.
-- DBT project files are stored in S3 under `<tenant>/<workspace>/<pipeline>/dbt/`.
+- DBT project files (ReAct-owned) are stored in S3 under `<tenant>/<workspace>/<project_id>/dbt/`.
   - `dbt_project.yml`
   - `models/schema.yml` (sources)
-  - `models/<namespace>/stg_<namespace>.sql` (staging)
-  - Compiled artifacts uploaded to `<tenant>/<workspace>/<pipeline>/dbt/target/` after successful `dbt compile`/`dbt build`.
+  - `models/<dataset_id>/stg_<dataset_id>.sql` (staging; `dataset_id` is encoded for safe S3 keys)
+  - Compiled artifacts uploaded to `<tenant>/<workspace>/<project_id>/dbt/target/` after successful `dbt compile`/`dbt build`.
 # Skippr
 
 ## OpenAPI schema-first (Ask WebSocket)
@@ -26,9 +26,7 @@ This will generate Rust models under `src/ws/api_gen/`. Only `components/schemas
 Run the server locally (default port 8787 shown; choose any open port):
 
 ```bash
-cargo run -- serve --port 8787
-# or if you have the binary installed:
-# skippr serve --port 8787
+cargo run -p react -- serve --port 8787 --log
 ```
 
 Connect a WebSocket client to:
@@ -73,10 +71,15 @@ cargo run -- --log sync
 
 ## CLI Commands
 
-Skippr is a single binary with subcommands. Use either a built binary or run via cargo:
+This repository is a Cargo workspace with two crates:
+
+- `skippr`: ingest + plugins + `sqlrt` (DataFusion runtime)
+- `react`: engine-agnostic ReAct runtime + Athena/Glue provider + WebSocket server
+
+Use either a built binary or run via cargo:
 
 ```bash
-cargo run -- <command> [flags]
+cargo run -p skippr -- <command> [flags]
 ```
 
 Global flags:
@@ -108,7 +111,7 @@ cargo run -- sync --pipeline picnic
 ```
 
 ### query
-Interactive SQL (DataFusion) over registered S3 Parquet + optional WAL; supports `pipeline.namespace` and unqualified `namespace`.
+Interactive SQL (DataFusion) over registered S3 Parquet + optional WAL; supports `pipeline.namespace` (ingest/sqlrt convention) and unqualified `namespace`.
 
 Flags:
 - `-s, --sql "<SQL>"`: one-shot SELECT to execute

@@ -1,4 +1,15 @@
 
+This repository is a Cargo workspace with two crates:
+
+- `skippr`: ingest + plugins + `sqlrt`
+- `react`: ReAct runtime + WebSocket server (`serve`)
+
+To run the ReAct server:
+
+```bash
+cargo run -p react -- serve --port 8787 --log
+```
+
 
 Usage: skippr convert <INPUT> <OUTPUT> [OPTIONS]
 

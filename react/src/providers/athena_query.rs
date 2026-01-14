@@ -1,0 +1,445 @@
+use async_trait::async_trait;
+use aws_sdk_athena::types::{QueryExecutionState, ResultConfiguration};
+use aws_sdk_athena::Client as AthenaClient;
+use aws_sdk_glue::Client as GlueClient;
+use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::RwLock;
+
+use crate::providers::{DatasetCatalogProvider, DatasetId, QueryProvider, QueryResult};
+
+#[derive(Clone)]
+pub struct AthenaQueryProvider {
+    inner: Arc<Inner>,
+}
+
+struct Inner {
+    athena: AthenaClient,
+    glue: GlueClient,
+    workgroup: Option<String>,
+    result_output_location: Option<String>,
+    default_catalog: String,
+    default_database: Option<String>,
+    cache_ttl: Duration,
+    cache: RwLock<Cache>,
+}
+
+#[derive(Default)]
+struct Cache {
+    databases: Option<(Instant, Vec<String>)>,
+    tables_by_db: HashMap<String, (Instant, Vec<String>)>,
+    schema_by_fqn: HashMap<String, (Instant, Vec<(String, String)>)>,
+}
+
+impl AthenaQueryProvider {
+    /// Create from environment variables using the standard AWS credential chain.
+    ///
+    /// Supported env vars (with backward-compatible aliases):
+    /// - `ATHENA_WORKGROUP` (alias: `DATA_OUTPUT_ATHENA_WORKGROUP_NAME`)
+    /// - `ATHENA_RESULT_S3` (alias: `DATA_OUTPUT_ATHENA_RESULTS_S3_BUCKET` + optional prefix)
+    /// - `ATHENA_DEFAULT_DATABASE`
+    /// - `ATHENA_CATALOG` (default: `AwsDataCatalog`)
+    /// - `ATHENA_DISCOVERY_CACHE_TTL_SECS` (default: 120)
+    pub async fn from_env() -> Self {
+        let workgroup = getenv_nonempty("ATHENA_WORKGROUP")
+            .or_else(|| getenv_nonempty("DATA_OUTPUT_ATHENA_WORKGROUP_NAME"));
+        let default_database = getenv_nonempty("ATHENA_DEFAULT_DATABASE");
+        let default_catalog = getenv("ATHENA_CATALOG", "AwsDataCatalog");
+
+        // Prefer a single s3://... output location if provided; else leave None and rely on WG config.
+        let result_output_location = getenv_nonempty("ATHENA_RESULT_S3")
+            .or_else(|| {
+                // Legacy: only bucket provided; user can still set ATHENA_RESULT_S3 for full control
+                let b = getenv_nonempty("DATA_OUTPUT_ATHENA_RESULTS_S3_BUCKET")?;
+                Some(format!("s3://{}/", b.trim_end_matches('/')))
+            });
+
+        let ttl_secs: u64 = getenv("ATHENA_DISCOVERY_CACHE_TTL_SECS", "120")
+            .parse::<u64>()
+            .unwrap_or(120)
+            .max(5)
+            .min(3600);
+
+        let aws_cfg = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .load()
+            .await;
+        let athena = AthenaClient::new(&aws_cfg);
+        let glue = GlueClient::new(&aws_cfg);
+
+        Self {
+            inner: Arc::new(Inner {
+                athena,
+                glue,
+                workgroup,
+                result_output_location,
+                default_catalog,
+                default_database,
+                cache_ttl: Duration::from_secs(ttl_secs),
+                cache: RwLock::new(Cache::default()),
+            }),
+        }
+    }
+
+    fn parse_dataset_id(&self, s: &str) -> Result<DatasetId, String> {
+        let raw = s.trim();
+        if raw.is_empty() {
+            return Err("dataset id is empty".to_string());
+        }
+
+        // Allow quoted identifiers in input, but keep parsing simple.
+        let cleaned = raw.trim_matches('"').trim_matches('`');
+        let parts: Vec<&str> = cleaned.split('.').collect();
+        match parts.len() {
+            3 => Ok(DatasetId { catalog: parts[0].to_string(), database: parts[1].to_string(), table: parts[2].to_string() }),
+            2 => Ok(DatasetId { catalog: self.inner.default_catalog.clone(), database: parts[0].to_string(), table: parts[1].to_string() }),
+            1 => {
+                let db = self
+                    .inner
+                    .default_database
+                    .clone()
+                    .ok_or_else(|| "dataset id missing database; set ATHENA_DEFAULT_DATABASE or use <db>.<table>".to_string())?;
+                Ok(DatasetId { catalog: self.inner.default_catalog.clone(), database: db, table: parts[0].to_string() })
+            }
+            _ => Err("dataset id must be <catalog>.<db>.<table> (or <db>.<table>)".to_string()),
+        }
+    }
+
+    fn quote_ident(ident: &str) -> String {
+        // Athena uses double quotes for identifiers; escape quotes by doubling.
+        format!("\"{}\"", ident.replace('"', "\"\""))
+    }
+
+    fn quote_table(db: &str, table: &str) -> String {
+        format!("{}.{}", Self::quote_ident(db), Self::quote_ident(table))
+    }
+
+    async fn start_query(&self, sql: &str, database: Option<&str>) -> Result<String, String> {
+        let mut req = self.inner.athena.start_query_execution().query_string(sql.to_string());
+        if let Some(wg) = self.inner.workgroup.as_ref() {
+            req = req.work_group(wg);
+        }
+        // Use explicit database if provided, else fall back to env default.
+        if let Some(db) = database.or(self.inner.default_database.as_deref()) {
+            req = req.query_execution_context(
+                aws_sdk_athena::types::QueryExecutionContext::builder()
+                    .database(db)
+                    .build(),
+            );
+        }
+        // If output location specified, set it; otherwise rely on workgroup.
+        if let Some(loc) = self.inner.result_output_location.as_ref() {
+            req = req.result_configuration(
+                ResultConfiguration::builder()
+                    .output_location(loc)
+                    .build(),
+            );
+        }
+        let out = req.send().await.map_err(|e| e.to_string())?;
+        out.query_execution_id()
+            .map(|s| s.to_string())
+            .ok_or_else(|| "missing query_execution_id".to_string())
+    }
+
+    async fn wait_query_succeeded(&self, qid: &str) -> Result<(Duration, Option<i64>), String> {
+        let start = Instant::now();
+        let mut sleep_ms: u64 = 200;
+        loop {
+            let out = self
+                .inner
+                .athena
+                .get_query_execution()
+                .query_execution_id(qid)
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+            let qe = out.query_execution().ok_or_else(|| "missing query_execution".to_string())?;
+            let status = qe.status().ok_or_else(|| "missing query_execution.status".to_string())?;
+            match status.state() {
+                Some(QueryExecutionState::Succeeded) => {
+                    let bytes = qe.statistics().and_then(|s| s.data_scanned_in_bytes());
+                    return Ok((start.elapsed(), bytes));
+                }
+                Some(QueryExecutionState::Failed) | Some(QueryExecutionState::Cancelled) => {
+                    let reason = status.state_change_reason().unwrap_or("query failed");
+                    return Err(reason.to_string());
+                }
+                _ => {
+                    tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+                    sleep_ms = (sleep_ms * 2).min(1500);
+                    continue;
+                }
+            }
+        }
+    }
+
+    async fn fetch_all_rows(&self, qid: &str) -> Result<(Vec<String>, Vec<Vec<String>>), String> {
+        let mut next_token: Option<String> = None;
+        let mut header: Vec<String> = Vec::new();
+        let mut rows: Vec<Vec<String>> = Vec::new();
+        let mut is_first_page = true;
+        loop {
+            let mut req = self.inner.athena.get_query_results().query_execution_id(qid);
+            if let Some(tok) = next_token.as_ref() {
+                req = req.next_token(tok);
+            }
+            let out = req.send().await.map_err(|e| e.to_string())?;
+            if let Some(rs) = out.result_set() {
+                if header.is_empty() {
+                    if let Some(md) = rs.result_set_metadata() {
+                        let cols = md.column_info();
+                        header = cols.iter().map(|c| c.name().to_string()).collect();
+                    }
+                }
+                let rws = rs.rows();
+                for (idx, r) in rws.iter().enumerate() {
+                    // Athena includes a header row as the first row of the first page.
+                    if is_first_page && idx == 0 {
+                        continue;
+                    }
+                    let mut out_row: Vec<String> = Vec::new();
+                    for d in r.data() {
+                        let s = d.var_char_value().unwrap_or("").to_string();
+                        out_row.push(s);
+                    }
+                    rows.push(out_row);
+                }
+            }
+            next_token = out.next_token().map(|s| s.to_string());
+            if next_token.is_none() {
+                break;
+            }
+            is_first_page = false;
+        }
+        Ok((header, rows))
+    }
+
+    async fn cached_databases(&self) -> Result<Vec<String>, String> {
+        {
+            let cache = self.inner.cache.read().await;
+            if let Some((ts, v)) = cache.databases.as_ref() {
+                if ts.elapsed() < self.inner.cache_ttl {
+                    return Ok(v.clone());
+                }
+            }
+        }
+        let mut out: Vec<String> = Vec::new();
+        let mut next_token: Option<String> = None;
+        loop {
+            let mut req = self.inner.glue.get_databases().max_results(100);
+            if let Some(tok) = next_token.as_ref() {
+                req = req.next_token(tok);
+            }
+            let resp = req.send().await.map_err(|e| e.to_string())?;
+            for d in resp.database_list() {
+                out.push(d.name().to_string());
+            }
+            next_token = resp.next_token().map(|s| s.to_string());
+            if next_token.is_none() {
+                break;
+            }
+        }
+        out.sort();
+        out.dedup();
+        let mut cache = self.inner.cache.write().await;
+        cache.databases = Some((Instant::now(), out.clone()));
+        Ok(out)
+    }
+
+    async fn cached_tables(&self, database: &str) -> Result<Vec<String>, String> {
+        {
+            let cache = self.inner.cache.read().await;
+            if let Some((ts, v)) = cache.tables_by_db.get(database) {
+                if ts.elapsed() < self.inner.cache_ttl {
+                    return Ok(v.clone());
+                }
+            }
+        }
+        let mut out: Vec<String> = Vec::new();
+        let mut next_token: Option<String> = None;
+        loop {
+            let mut req = self
+                .inner
+                .glue
+                .get_tables()
+                .database_name(database)
+                .max_results(100);
+            if let Some(tok) = next_token.as_ref() {
+                req = req.next_token(tok);
+            }
+            let resp = req.send().await.map_err(|e| e.to_string())?;
+            for t in resp.table_list() {
+                out.push(t.name().to_string());
+            }
+            next_token = resp.next_token().map(|s| s.to_string());
+            if next_token.is_none() {
+                break;
+            }
+        }
+        out.sort();
+        out.dedup();
+        let mut cache = self.inner.cache.write().await;
+        cache.tables_by_db.insert(database.to_string(), (Instant::now(), out.clone()));
+        Ok(out)
+    }
+
+    async fn cached_schema(&self, dataset: &DatasetId) -> Result<Vec<(String, String)>, String> {
+        let fqn = dataset.fqn();
+        {
+            let cache = self.inner.cache.read().await;
+            if let Some((ts, cols)) = cache.schema_by_fqn.get(&fqn) {
+                if ts.elapsed() < self.inner.cache_ttl {
+                    return Ok(cols.clone());
+                }
+            }
+        }
+        let resp = self
+            .inner
+            .glue
+            .get_table()
+            .database_name(&dataset.database)
+            .name(&dataset.table)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let table = resp.table().ok_or_else(|| "Glue GetTable returned no table".to_string())?;
+        let sd = table
+            .storage_descriptor()
+            .ok_or_else(|| "Glue table missing storage_descriptor".to_string())?;
+
+        let mut cols: Vec<(String, String)> = Vec::new();
+        for col in sd.columns() {
+            let name = col.name().to_string();
+            let ty = col.r#type().unwrap_or("").to_string();
+            if !name.is_empty() {
+                cols.push((name, ty));
+            }
+        }
+        // Include partition keys as well (Athena exposes them as columns in queries).
+        for col in table.partition_keys() {
+            let name = col.name().to_string();
+            let ty = col.r#type().unwrap_or("").to_string();
+            if !name.is_empty() && !cols.iter().any(|(n, _)| n == &name) {
+                cols.push((name, ty));
+            }
+        }
+        let mut cache = self.inner.cache.write().await;
+        cache.schema_by_fqn.insert(fqn, (Instant::now(), cols.clone()));
+        Ok(cols)
+    }
+}
+
+#[async_trait]
+impl QueryProvider for AthenaQueryProvider {
+    async fn query(&self, sql: &str) -> Result<QueryResult, String> {
+        let qid = self.start_query(sql, None).await?;
+        let (elapsed, bytes_scanned) = self.wait_query_succeeded(&qid).await?;
+        let (header, rows) = self.fetch_all_rows(&qid).await?;
+        let meta = serde_json::json!({
+            "engine": "athena",
+            "query_execution_id": qid,
+            "elapsed_ms": elapsed.as_millis() as u64,
+            "bytes_scanned": bytes_scanned
+        });
+        Ok(QueryResult { header, rows, meta: Some(meta) })
+    }
+
+    async fn schema(&self, dataset_fqn: &str) -> Result<Vec<(String, String)>, String> {
+        let ds = self.parse_dataset_id(dataset_fqn)?;
+        self.cached_schema(&ds).await
+    }
+
+    async fn sample(&self, dataset_fqn: &str, limit: usize) -> Result<Vec<Vec<String>>, String> {
+        let ds = self.parse_dataset_id(dataset_fqn)?;
+        let lim = limit.max(1).min(5000);
+        let sql = format!("SELECT * FROM {} LIMIT {}", Self::quote_table(&ds.database, &ds.table), lim);
+        let qr = self.query(&sql).await?;
+        Ok(qr.rows)
+    }
+}
+
+#[async_trait]
+impl DatasetCatalogProvider for AthenaQueryProvider {
+    async fn list_datasets(&self) -> Result<Vec<DatasetId>, String> {
+        let dbs = self.cached_databases().await?;
+        let mut out: Vec<DatasetId> = Vec::new();
+        for db in dbs {
+            let tables = self.cached_tables(&db).await.unwrap_or_default();
+            for t in tables {
+                out.push(DatasetId {
+                    catalog: self.inner.default_catalog.clone(),
+                    database: db.clone(),
+                    table: t,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    async fn get_dataset_schema(&self, dataset: &DatasetId) -> Result<Vec<(String, String)>, String> {
+        self.cached_schema(dataset).await
+    }
+
+    async fn get_dataset_stats(
+        &self,
+        dataset: &DatasetId,
+        max_fields: usize,
+    ) -> Result<(crate::discover::stats::DatasetFieldStats, crate::providers::catalog::types::DatasetStats), String> {
+        // Minimal baseline: row count + per-field nulls/distinct/min/max where feasible.
+        // This is intentionally conservative; callers can choose to skip stats for very wide tables.
+        let cols = self.cached_schema(dataset).await?;
+        let max_fields = max_fields.max(1).min(500);
+        let cols = cols.into_iter().take(max_fields).collect::<Vec<_>>();
+
+        let tbl = Self::quote_table(&dataset.database, &dataset.table);
+        // Row count
+        let count_sql = format!("SELECT COUNT(1) AS __cnt FROM {}", tbl);
+        let qr_cnt = self.query(&count_sql).await?;
+        let total_rows: u64 = qr_cnt
+            .rows
+            .get(0)
+            .and_then(|r| r.get(0))
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+
+        let mut ns_stats = crate::discover::stats::DatasetFieldStats::new(&dataset.fqn());
+        for (name, _ty) in cols.iter() {
+            // Use TRY_CAST to DOUBLE for numeric min/max without failing on strings; may yield nulls.
+            let sql = format!(
+                "SELECT \
+                    COUNT(1) AS __rows, \
+                    SUM(CASE WHEN {c} IS NULL THEN 1 ELSE 0 END) AS __nulls, \
+                    COUNT(DISTINCT {c}) AS __distinct, \
+                    MIN(TRY_CAST({c} AS DOUBLE)) AS __min_num, \
+                    MAX(TRY_CAST({c} AS DOUBLE)) AS __max_num \
+                 FROM {}",
+                tbl,
+                c = Self::quote_ident(name),
+            );
+            let qr = self.query(&sql).await?;
+            let row = qr.rows.get(0).cloned().unwrap_or_default();
+            let mut fs = crate::discover::stats::FieldStats::default();
+            fs.total = total_rows;
+            fs.nulls = row.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            fs.approx_distinct = row.get(2).and_then(|s| s.parse::<u64>().ok());
+            fs.min_numeric = row.get(3).and_then(|s| s.parse::<f64>().ok());
+            fs.max_numeric = row.get(4).and_then(|s| s.parse::<f64>().ok());
+            fs.finalize();
+            ns_stats.fields.insert(name.clone(), fs);
+        }
+
+        let mut ds = crate::providers::catalog::types::DatasetStats::default();
+        ds.approx_total_rows = total_rows;
+        Ok((ns_stats, ds))
+    }
+}
+
+fn getenv(key: &str, default: &str) -> String {
+    std::env::var(key).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| default.to_string())
+}
+
+fn getenv_nonempty(key: &str) -> Option<String> {
+    std::env::var(key).ok().and_then(|v| if v.trim().is_empty() { None } else { Some(v) })
+}
+
