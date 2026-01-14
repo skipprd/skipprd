@@ -1,3 +1,3 @@
-pub use crate::ws::api_gen::src::models::*;
+pub use crate::react::ws::api_gen::src::models::*;
 
 

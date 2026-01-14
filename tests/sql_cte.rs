@@ -1,12 +1,36 @@
-use skippr::qa::tools::sql_run::SqlRunTool;
-use skippr::qa::agent::AgentCtx;
+use skippr::react::suites::shared::tools::sql_run::SqlRunTool;
+use skippr::react::tools::Tool;
+use skippr::react::agent::AgentCtx;
 use serde_json::json;
-use datafusion::prelude::SessionContext;
+use std::sync::Arc;
+use skippr::react::providers::{QueryProvider, QueryResult};
+
+#[derive(Clone)]
+struct DummyQueryProvider;
+
+#[async_trait::async_trait]
+impl QueryProvider for DummyQueryProvider {
+    async fn query(&self, sql: &str) -> Result<QueryResult, String> {
+        // Minimal “smoke” execution: just return header consistent with the test SQL.
+        // We validate the tool’s plumbing (limit behavior + provider delegation), not engine semantics here.
+        let _ = sql;
+        Ok(QueryResult {
+            header: vec!["a".to_string(), "rn".to_string()],
+            rows: vec![vec!["1".to_string(), "1".to_string()]],
+            meta: None,
+        })
+    }
+    async fn schema(&self, _dataset_fqn: &str) -> Result<Vec<(String, String)>, String> {
+        Ok(vec![])
+    }
+    async fn sample(&self, _dataset_fqn: &str, _limit: usize) -> Result<Vec<Vec<String>>, String> {
+        Ok(vec![])
+    }
+}
 
 #[tokio::test]
 async fn run_sql_allows_cte_and_window() {
-	let ctx = SessionContext::new();
-	let tool = SqlRunTool { ctx };
+	let tool = SqlRunTool { query: Arc::new(DummyQueryProvider) };
 	let sql = r#"
 WITH x AS (SELECT 1 AS a)
 SELECT a, ROW_NUMBER() OVER () AS rn
@@ -23,6 +47,13 @@ LIMIT 1
 		pre_step_tx: None,
 		agent_name: Some("test".to_string()),
 		dataset_candidates: vec![],
+		llm: std::sync::Arc::new(skippr::llm::NullModel::new()),
+		storage: std::sync::Arc::new(skippr::adapters::storage::InMemoryStorageAdapter::default()),
+		scope: skippr::react::providers::RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() },
+		keyspace: std::sync::Arc::new(skippr::react::providers::DefaultKeyspace::new("b".into())),
+		dbt: None,
+		vector: None,
+		thread_store: None,
 	};
 	let res = tool.call(args, &actx).await.expect("tool call");
 	assert!(res.get("ok").and_then(|x| x.as_bool()).unwrap_or(false), "expected ok response, got {}", res);

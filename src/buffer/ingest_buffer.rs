@@ -1172,6 +1172,7 @@ mod tests_wal_commit {
     use std::sync::Arc;
     use std::collections::HashMap as StdHashMap;
     use std::fs;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
 
     fn temp_dir() -> PathBuf {
         let base = std::env::temp_dir().join(format!("skippr_test_{}", rand::random::<u64>()));
@@ -1185,7 +1186,12 @@ mod tests_wal_commit {
         RecordBatch::try_new(Arc::new(schema), vec![Arc::new(arr)]).unwrap()
     }
 
-    struct EnvGuard { old_data_dir: Option<String> }
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    fn env_lock() -> MutexGuard<'static, ()> {
+        ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    struct EnvGuard { old_data_dir: Option<String>, _lock: MutexGuard<'static, ()> }
     impl Drop for EnvGuard {
         fn drop(&mut self) {
             if let Some(ref v) = self.old_data_dir { Config::setenv("DATA_DIR", v); } else { std::env::remove_var("DATA_DIR"); }
@@ -1193,6 +1199,10 @@ mod tests_wal_commit {
     }
 
     fn setup_data_dir() -> (PathBuf, EnvGuard) {
+        // NOTE: Config/Data-dir is env-backed and process-global; tests run in parallel by default.
+        // Hold a global lock so concurrent tests don't stomp each other's DATA_DIR and end up opening
+        // the same sled DB concurrently (sled forbids that and returns AlreadyOpenError).
+        let lock = env_lock();
         let td = temp_dir();
         let old_data_dir = std::env::var("DATA_DIR").ok();
         Config::setenv("DATA_DIR", td.to_str().unwrap());
@@ -1200,7 +1210,7 @@ mod tests_wal_commit {
         let _ = fs::create_dir_all(&seg_dir);
         // ensure clean
         if let Ok(rd) = fs::read_dir(&seg_dir) { for e in rd.flatten() { let _ = fs::remove_file(e.path()); } }
-        (seg_dir, EnvGuard { old_data_dir })
+        (seg_dir, EnvGuard { old_data_dir, _lock: lock })
     }
 
     fn commit_exists(seg_path: &PathBuf) -> bool { seg_path.with_extension("seg.commit").exists() }

@@ -194,7 +194,7 @@ impl Metrics {
         }
     }
 
-    pub(crate) fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.source_bytes_total = 0;
 
         self.messages_total = 0;
@@ -239,7 +239,7 @@ impl Metrics {
 
     }
 
-    pub(crate) async fn send_metrics<'a>(
+    pub async fn send_metrics<'a>(
         exit_code: Option<i8>,
     ) -> Result<(), Box<dyn std::error::Error>> {
 
@@ -420,7 +420,7 @@ impl Metrics {
         Ok(())
     }
 
-    pub(crate) async fn send_config() -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn send_config() -> Result<(), Box<dyn std::error::Error>> {
 
         let metrics: Metrics;
         {
@@ -470,7 +470,7 @@ impl Metrics {
         Ok(())
     }
 
-    pub(crate) fn init_send_loop() {
+    pub fn init_send_loop() {
 
         let now = Arc::new(TimedRwLock::new("now".to_string(), Instant::now()));
 

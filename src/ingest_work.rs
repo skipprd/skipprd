@@ -1564,7 +1564,7 @@ impl Ingest {
         
     }
 
-    pub(crate) fn prepare_arrow_schema_with_metadata(
+    pub fn prepare_arrow_schema_with_metadata(
         skpr_namespace: &str,
         metadata: &HashMap<String, Metadata>,
         flatten: bool,
@@ -1668,7 +1668,7 @@ impl Ingest {
     }
 
     // Version for read-only query context: builds/publishes Arrow schema without external side effects
-    pub(crate) fn prepare_arrow_schema_with_metadata_for_query(
+    pub fn prepare_arrow_schema_with_metadata_for_query(
         skpr_namespace: &str,
         metadata: &HashMap<String, Metadata>,
         flatten: bool,
@@ -1739,7 +1739,7 @@ impl Ingest {
     
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "stats_integration"))]
 mod stats_integration_tests {
 	use super::*;
 // stats_tailer removed

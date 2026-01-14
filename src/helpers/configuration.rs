@@ -1810,8 +1810,13 @@ impl Config {
             Err(err) => { error!("Failed to upload stats to S3: {:?}", err); }
         }
         // Update registry with stats key
-        let _ = crate::sql::registry::ensure_ns_entry(&pipeline, namespace, |current| {
-            let mut e = current.unwrap_or(crate::sql::registry::NamespaceEntry { semantic_key: String::new(), catalog_key: String::new(), stats_key: String::new(), last_updated_epoch: 0 });
+        let _ = crate::sqlrt::registry::ensure_ns_entry(&pipeline, namespace, |current| {
+            let mut e = current.unwrap_or(crate::sqlrt::registry::NamespaceEntry {
+                semantic_key: String::new(),
+                catalog_key: String::new(),
+                stats_key: String::new(),
+                last_updated_epoch: 0,
+            });
             e.stats_key = s3_key.clone();
             e
         }).await;
@@ -1857,7 +1862,7 @@ impl Config {
         Self::truth_value(&Self::getenv("CATALOG_LLM_ENABLED", "true"))
     }
 
-    pub async fn write_semantic_async(namespace: &str, semantic: &crate::catalog::model::SemanticModel) {
+    pub async fn write_semantic_async(namespace: &str, semantic: &crate::react::providers::catalog::types::SemanticModel) {
         use std::sync::Arc;
         use tokio::sync::Mutex;
         use once_cell::sync::Lazy as OnceLazy;
@@ -1885,15 +1890,20 @@ impl Config {
         );
         // Update registry with semantic key
         let pipeline = Self::get_pipeline_name();
-        let _ = crate::sql::registry::ensure_ns_entry(&pipeline, namespace, |current| {
-            let mut e = current.unwrap_or(crate::sql::registry::NamespaceEntry { semantic_key: String::new(), catalog_key: String::new(), stats_key: String::new(), last_updated_epoch: 0 });
+        let _ = crate::sqlrt::registry::ensure_ns_entry(&pipeline, namespace, |current| {
+            let mut e = current.unwrap_or(crate::sqlrt::registry::NamespaceEntry {
+                semantic_key: String::new(),
+                catalog_key: String::new(),
+                stats_key: String::new(),
+                last_updated_epoch: 0,
+            });
             e.semantic_key = s3_key.clone();
             e
         }).await;
         drop(guard);
     }
 
-    pub async fn write_catalog_async(namespace: &str, catalog: &crate::catalog::model::DataCatalog) {
+    pub async fn write_catalog_async(namespace: &str, catalog: &crate::react::providers::catalog::types::DataCatalog) {
         use std::sync::Arc;
         use tokio::sync::Mutex;
         use once_cell::sync::Lazy as OnceLazy;
@@ -1921,15 +1931,24 @@ impl Config {
         );
         // Update registry with catalog key
         let pipeline = Self::get_pipeline_name();
-        let _ = crate::sql::registry::ensure_ns_entry(&pipeline, namespace, |current| {
-            let mut e = current.unwrap_or(crate::sql::registry::NamespaceEntry { semantic_key: String::new(), catalog_key: String::new(), stats_key: String::new(), last_updated_epoch: 0 });
+        let _ = crate::sqlrt::registry::ensure_ns_entry(&pipeline, namespace, |current| {
+            let mut e = current.unwrap_or(crate::sqlrt::registry::NamespaceEntry {
+                semantic_key: String::new(),
+                catalog_key: String::new(),
+                stats_key: String::new(),
+                last_updated_epoch: 0,
+            });
             e.catalog_key = s3_key.clone();
             e
         }).await;
         drop(guard);
     }
 
-    pub fn write_semantic_and_catalog_sync(namespace: &str, semantic: &crate::catalog::model::SemanticModel, catalog: &crate::catalog::model::DataCatalog) {
+    pub fn write_semantic_and_catalog_sync(
+        namespace: &str,
+        semantic: &crate::react::providers::catalog::types::SemanticModel,
+        catalog: &crate::react::providers::catalog::types::DataCatalog,
+    ) {
         debug!("bbbbb");
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             debug!("b1");

@@ -36,7 +36,7 @@ pub struct Log {
 }
 
 pub struct Logger {
-    pub(crate) logs: BTreeMap<SystemTime, Log>,
+    pub logs: BTreeMap<SystemTime, Log>,
     buffer_limit: usize,
 }
 

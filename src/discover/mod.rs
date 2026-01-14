@@ -179,18 +179,18 @@ impl OutputMetadata {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct PipelineMetadata {
-    pub(crate) name: String,
-    pub(crate) metadata: HashMap<String, Metadata>,
-    pub(crate) sql: Option<Vec<String>>,
-    pub(crate) enabled: bool,
+    pub name: String,
+    pub metadata: HashMap<String, Metadata>,
+    pub sql: Option<Vec<String>>,
+    pub enabled: bool,
     #[serde(default)]
-    pub(crate) flattened: bool,
+    pub flattened: bool,
 }
 
 impl crate::discover::PipelineMetadata {
     #[inline]
     #[must_use]
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         let pipeline_name = Config::get_pipeline_name();
         let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.or(Some("no".to_string())).unwrap());
         
@@ -203,7 +203,7 @@ impl crate::discover::PipelineMetadata {
         }
     }
 
-    pub(crate) fn from_metadata(metadata: HashMap<String, Metadata>) -> Result<Self, bool> {
+    pub fn from_metadata(metadata: HashMap<String, Metadata>) -> Result<Self, bool> {
         let pipeline_name = Config::get_pipeline_name();
         let flatten = Config::truth_value(&Config::get_transform_config().flatten_events.or(Some("no".to_string())).unwrap());
         
@@ -216,7 +216,7 @@ impl crate::discover::PipelineMetadata {
         })
     }
 
-    pub(crate) fn append_sql(&mut self, sql_str: String) {
+    pub fn append_sql(&mut self, sql_str: String) {
         let sql = self.sql.as_mut();
         match sql {
             Some(pipeline_sql) => {

@@ -1,4 +1,3 @@
-mod arr;
 use std::time::{Duration, SystemTime};
 use rand::Rng;
 
@@ -6,7 +5,8 @@ use arrow::datatypes::Schema;
 
 // mod thread_pool;
 // use thread_pool::ThreadPool;
-mod ingest_work;
+// Note: Skippr now builds both a library (`skippr`) and a binary (`src/main.rs`).
+// This binary should prefer importing functionality from the library to avoid duplicating modules.
 
 extern crate nix;
 
@@ -24,20 +24,8 @@ use std::sync::atomic::{AtomicBool, Ordering, AtomicU64};
 use std::thread::sleep;
 use std::time::Instant;
 
-mod buffer;
-
-mod helpers;
-
-mod metrics;
-
-mod internalfields;
-
-mod discover;
-use crate::discover::{PipelineMetadata};
-mod converters;
-// use self::converters::avro_parquet::AvroSchema;
-mod cli;
-use crate::cli::{Cli, Mode, CLI_MODE};
+use skippr::discover::PipelineMetadata;
+use skippr::cli::{Cli, Mode, CLI_MODE};
 
 extern crate clap;
 extern crate core;
@@ -54,80 +42,50 @@ use once_cell::sync::Lazy;
 use signal_hook::consts::{SIGABRT, SIGINT, SIGQUIT, SIGTERM};
 use tokio::runtime;
 
-mod ingest;
+// All modules are provided by the library crate `skippr`.
 
-mod serdes;
-
-mod plugins;
-mod sql;
-mod llm;
-mod benchmark;
-mod qa;
-mod catalog;
-mod ws;
-mod models;
-mod flows;
-mod prompts;
-mod suites;
-mod adapters;
-
-use crate::helpers::configuration::{Config, PIPELINE_NAME};
-use crate::helpers::logging::init_logging;
-use crate::helpers::progress::ProgressUi;
+use skippr::helpers::configuration::{Config, PIPELINE_NAME};
+use skippr::helpers::logging::init_logging;
+use skippr::helpers::progress::ProgressUi;
 use tracing::{error, info, warn};
 
-use crate::helpers::logger::{Logger, LogLevel};
-use crate::helpers::offsets::Offsets;
+use skippr::helpers::logger::{Logger, LogLevel};
+use skippr::helpers::offsets::Offsets;
 
-use crate::plugins::athena::DataOutputAwsAthenaPlugin;
+use skippr::plugins::athena::DataOutputAwsAthenaPlugin;
 
-use crate::plugins::s3_input::DataSourceS3Plugin;
+use skippr::plugins::s3_input::DataSourceS3Plugin;
 // use crate::plugins::s3_inventory::DataSourceS3InventoryPlugin;
 
-use crate::metrics::{Metrics, MetricsStatus};
-use crate::plugins::file_input::DataSourceLocalFilePlugin;
+use skippr::metrics::{Metrics, MetricsStatus};
+use skippr::plugins::file_input::DataSourceLocalFilePlugin;
+use skippr::{ARROW_SCHEMA, ARROW_SCHEMA_VERSION, LOGGER, METADATA, METRICS, OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE, OUTPUT_RUNNING, RUNNING};
 // use crate::plugins::file_output::DataOutputFilePlugin;
 // use crate::plugins::s3_output::DataOutputS3Plugin;
 // use crate::plugins::stdin_input::DataSourceStdinPlugin;
 // use crate::plugins::stdout_output::DataOutputStdoutPlugin;
 
 use datafusion::prelude::*;
-use crate::buffer::ingest_buffer::{Buffers, wal_recover};
+use skippr::buffer::ingest_buffer::{Buffers, wal_recover};
 // use crate::buffer::BufferChunker;
-use crate::helpers::timed_rwlock::TimedRwLock;
-use crate::ingest_work::Ingest;
+use skippr::helpers::timed_rwlock::TimedRwLock;
+use skippr::ingest_work::Ingest;
 use arc_swap::ArcSwap;
-use crate::plugins::DataOutputPlugin;
-use crate::plugins::file_output::DataOutputFilePlugin;
-use crate::sql::query::query;
-use crate::sql::docs::{DocFormat, get_docs_in_format};
-use crate::sql::doc_parser::SqlDocParser;
-use crate::benchmark::PerformanceBenchmark;
+use skippr::plugins::DataOutputPlugin;
+use skippr::plugins::file_output::DataOutputFilePlugin;
+use skippr::sqlrt::query::query;
+use skippr::sqlrt::docs::{DocFormat, get_docs_in_format};
+use skippr::sqlrt::doc_parser::SqlDocParser;
+use skippr::benchmark::PerformanceBenchmark;
 use std::io::IsTerminal as _;
+use skippr::llm;
 
 // use crate::plugins::pcap_input::DataSourcePcapPlugin;
 
 // pub static DISPLAY_METRICS: Lazy<TimedRwLock<AtomicBool>> =
 //     Lazy::new(|| TimedRwLock::new("display_metrics".to_string(), AtomicBool::new(false)));
 
-pub static RUNNING: Lazy<TimedRwLock<AtomicBool>> = Lazy::new(|| TimedRwLock::new("running".to_string(),AtomicBool::new(true)));
-
-pub static OUTPUT_RUNNING: Lazy<TimedRwLock<AtomicBool>> =
-    Lazy::new(|| TimedRwLock::new("output_running".to_string(), AtomicBool::new(false)));
-
-// pub static BUFFER_FINALISE_RUNNING: Lazy<TimedRwLock<AtomicBool>> =
-//     Lazy::new(|| TimedRwLock::new("buffer_finalise_running".to_string(), AtomicBool::new(false)));
-
-pub static OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE: Lazy<TimedRwLock<AtomicBool>> =
-    Lazy::new(|| TimedRwLock::new("output_graceful_shutdown_complete".to_string(), AtomicBool::new(false)));
-
-pub static LOGGER: Lazy<Arc<tokio::sync::RwLock<Logger>>> = Lazy::new(|| Logger::new(100));
-pub static METRICS: Lazy<Arc<TimedRwLock<Metrics>>> = Lazy::new(|| Arc::new(TimedRwLock::new("metrics".to_string(), Metrics::new())));
-// Publish metadata via ArcSwap; readers do lock-free loads
-pub static METADATA: Lazy<ArcSwap<PipelineMetadata>> = Lazy::new(|| ArcSwap::new(Arc::new(PipelineMetadata::new())));
-// Per-namespace Arrow schema snapshots and versions
-pub static ARROW_SCHEMA: Lazy<dashmap::DashMap<String, ArcSwap<Schema>>> = Lazy::new(|| dashmap::DashMap::new());
-pub static ARROW_SCHEMA_VERSION: Lazy<dashmap::DashMap<String, AtomicU64>> = Lazy::new(|| dashmap::DashMap::new());
+// Global runtime state now lives in the library crate (see `src/globals.rs`).
 
 #[derive(Clone, Debug)]
 struct PipelineCache {
@@ -485,8 +443,19 @@ async fn main() {
             println!("{} LLM: provider={:?} chat_model={:?} base_url={:?}", chrono::Utc::now().to_rfc3339(), cfg.provider, cfg.chat_model, cfg.base_url);
             let llm = llm::create_llm(&cfg);
             if options.ask_list {
+                Config::build_config();
+                let tenant = Config::get_tenant();
+                let workspace = Config::get_workspace_name();
+                let threads_prefix = format!("{}/{}/threads/", tenant, workspace);
+                let storage: Arc<dyn skippr::adapters::storage::StorageAdapter> =
+                    Arc::new(skippr::adapters::storage::S3StorageAdapter::default());
                 let pipeline = Config::get_pipeline_name();
-                let store = crate::qa::session::ThreadStore::new();
+                let bucket = Config::get_skippr_s3_bucket();
+                // NOTE: For now, re-use the existing configured pipeline name as the ReAct project_id.
+                let scope = skippr::react::providers::RequestScope { tenant, workspace, project_id: pipeline };
+                let keyspace: Arc<dyn skippr::react::providers::Keyspace> =
+                    Arc::new(skippr::react::providers::DefaultKeyspace::new(bucket));
+                let store = skippr::react::session::ThreadStore::new(storage, scope, keyspace);
                 let threads = store.list().await;
                 println!("Threads ({}):", threads.len());
                 for t in threads { println!("- {}", t); }
@@ -500,8 +469,24 @@ async fn main() {
                 PIPELINE_NAME.write().push_str(&pipeline);
                 Config::init().await;
                 let q = "Continue.";
-                match crate::qa::ask::run(q, &pipeline, None).await {
-                    Ok(ans) => { println!("{} ASK: answer ready", chrono::Utc::now().to_rfc3339()); println!("{}", ans); }
+                let tenant = Config::get_tenant();
+                let workspace = Config::get_workspace_name();
+                let threads_prefix = format!("{}/{}/threads/", tenant, workspace);
+                let storage: Arc<dyn skippr::adapters::storage::StorageAdapter> =
+                    Arc::new(skippr::adapters::storage::S3StorageAdapter::default());
+                let secrets: Arc<dyn skippr::react::providers::SecretsProvider> =
+                    Arc::new(skippr::react::providers::EnvSecretsProvider::default());
+                let scope = skippr::react::providers::RequestScope {
+                    tenant: tenant.clone(),
+                    workspace: workspace.clone(),
+                    project_id: pipeline.clone(),
+                };
+                let bucket = Config::get_skippr_s3_bucket();
+                let keyspace: Arc<dyn skippr::react::providers::Keyspace> =
+                    Arc::new(skippr::react::providers::DefaultKeyspace::new(bucket));
+                let suite_ctx = skippr::react::suites::SuiteCtx::new(storage, secrets, llm.clone(), scope, keyspace);
+                match skippr::react::suites::skippr_ask_suite::flows::ask::run(&suite_ctx, &pipeline, q).await {
+                    Ok(ans) => { println!("{} ASK: answer ready", chrono::Utc::now().to_rfc3339()); println!("{:?}", ans); }
                     Err(e) => { eprintln!("ERROR: {}", e); std::process::exit(1); }
                 }
                 return;
@@ -517,7 +502,23 @@ async fn main() {
                 println!("Enter cleansing goal (e.g., deduplicate, normalize datetime, outliers):");
                 let mut goal = String::new();
                 let _ = std::io::stdin().read_line(&mut goal);
-                match crate::qa::cleanse::run(&pipeline, goal.trim()).await {
+                let tenant = Config::get_tenant();
+                let workspace = Config::get_workspace_name();
+                let threads_prefix = format!("{}/{}/threads/", tenant, workspace);
+                let storage: Arc<dyn skippr::adapters::storage::StorageAdapter> =
+                    Arc::new(skippr::adapters::storage::S3StorageAdapter::default());
+                let secrets: Arc<dyn skippr::react::providers::SecretsProvider> =
+                    Arc::new(skippr::react::providers::EnvSecretsProvider::default());
+                let scope = skippr::react::providers::RequestScope {
+                    tenant: tenant.clone(),
+                    workspace: workspace.clone(),
+                    project_id: pipeline.clone(),
+                };
+                let bucket = Config::get_skippr_s3_bucket();
+                let keyspace: Arc<dyn skippr::react::providers::Keyspace> =
+                    Arc::new(skippr::react::providers::DefaultKeyspace::new(bucket));
+                let suite_ctx = skippr::react::suites::SuiteCtx::new(storage, secrets, llm.clone(), scope, keyspace);
+                match skippr::react::suites::skippr_model_suite::flows::cleanse::run(&suite_ctx, &pipeline, goal.trim()).await {
                     Ok(_) => println!("{} CLEANSE: completed", chrono::Utc::now().to_rfc3339()),
                     Err(e) => { eprintln!("ERROR: {}", e); std::process::exit(1); }
                 }
@@ -532,7 +533,34 @@ async fn main() {
                 println!("Enter modeling goal (e.g., create measures/dimensions for DAU):");
                 let mut goal = String::new();
                 let _ = std::io::stdin().read_line(&mut goal);
-                match crate::qa::model::run(&pipeline, goal.trim()).await {
+                let tenant = Config::get_tenant();
+                let workspace = Config::get_workspace_name();
+                let threads_prefix = format!("{}/{}/threads/", tenant, workspace);
+                let storage: Arc<dyn skippr::adapters::storage::StorageAdapter> =
+                    Arc::new(skippr::adapters::storage::S3StorageAdapter::default());
+                let secrets: Arc<dyn skippr::react::providers::SecretsProvider> =
+                    Arc::new(skippr::react::providers::EnvSecretsProvider::default());
+                let scope = skippr::react::providers::RequestScope {
+                    tenant: tenant.clone(),
+                    workspace: workspace.clone(),
+                    project_id: pipeline.clone(),
+                };
+                let bucket = Config::get_skippr_s3_bucket();
+                let keyspace: Arc<dyn skippr::react::providers::Keyspace> =
+                    Arc::new(skippr::react::providers::DefaultKeyspace::new(bucket));
+                let mut suite_ctx = skippr::react::suites::SuiteCtx::new(storage, secrets, llm.clone(), scope, keyspace);
+                suite_ctx.catalog = Some(Arc::new(skippr::react::providers::catalog::SkipprCatalogProvider::new(
+                    suite_ctx.storage.clone(),
+                    suite_ctx.keyspace.clone(),
+                    suite_ctx.llm.clone(),
+                    Config::catalog_llm_timeout_secs(),
+                    Config::catalog_llm_batch_size(),
+                )));
+                suite_ctx.dbt = Some(Arc::new(skippr::react::providers::SkipprDbtProvider::new(
+                    suite_ctx.storage.clone(),
+                    suite_ctx.keyspace.clone(),
+                )));
+                match skippr::react::suites::skippr_model_suite::flows::model::run(&suite_ctx, &pipeline, goal.trim()).await {
                     Ok(_) => println!("{} MODEL: completed", chrono::Utc::now().to_rfc3339()),
                     Err(e) => { eprintln!("ERROR: {}", e); std::process::exit(1); }
                 }
@@ -551,15 +579,93 @@ async fn main() {
                 PIPELINE_NAME.write().push_str(&pipeline);
                 Config::init().await;
                 println!("{} LLM: starting ask pipeline...", chrono::Utc::now().to_rfc3339());
-                match crate::qa::ask::run(&q, &pipeline, None).await {
-                    Ok(ans) => { println!("{} ASK: answer ready", chrono::Utc::now().to_rfc3339()); println!("{}", ans); }
+                let tenant = Config::get_tenant();
+                let workspace = Config::get_workspace_name();
+                let threads_prefix = format!("{}/{}/threads/", tenant, workspace);
+                let storage: Arc<dyn skippr::adapters::storage::StorageAdapter> =
+                    Arc::new(skippr::adapters::storage::S3StorageAdapter::default());
+                let secrets: Arc<dyn skippr::react::providers::SecretsProvider> =
+                    Arc::new(skippr::react::providers::EnvSecretsProvider::default());
+                let scope = skippr::react::providers::RequestScope {
+                    tenant: tenant.clone(),
+                    workspace: workspace.clone(),
+                    project_id: pipeline.clone(),
+                };
+                let bucket = Config::get_skippr_s3_bucket();
+                let keyspace: Arc<dyn skippr::react::providers::Keyspace> =
+                    Arc::new(skippr::react::providers::DefaultKeyspace::new(bucket));
+                let mut suite_ctx = skippr::react::suites::SuiteCtx::new(storage, secrets, llm.clone(), scope, keyspace);
+                suite_ctx.catalog = Some(Arc::new(skippr::react::providers::catalog::SkipprCatalogProvider::new(
+                    suite_ctx.storage.clone(),
+                    suite_ctx.keyspace.clone(),
+                    suite_ctx.llm.clone(),
+                    Config::catalog_llm_timeout_secs(),
+                    Config::catalog_llm_batch_size(),
+                )));
+                suite_ctx.dbt = Some(Arc::new(skippr::react::providers::SkipprDbtProvider::new(
+                    suite_ctx.storage.clone(),
+                    suite_ctx.keyspace.clone(),
+                )));
+                match skippr::react::suites::skippr_ask_suite::flows::ask::run(&suite_ctx, &pipeline, &q).await {
+                    Ok(ans) => { println!("{} ASK: answer ready", chrono::Utc::now().to_rfc3339()); println!("{:?}", ans); }
                     Err(e) => { eprintln!("ERROR: {}", e); std::process::exit(1); }
                 }
             }
         }
         Mode::Serve(opts) => {
-            // Start WebSocket server
-            if let Err(e) = crate::ws::server::start(opts.port).await {
+            // Start WebSocket server (suite ctx injected; WS runtime stays generic)
+            Config::build_config();
+            // Kick off global DBT examples sync (non-blocking)
+            tokio::spawn(async {
+                let storage: std::sync::Arc<dyn skippr::adapters::storage::StorageAdapter> =
+                    std::sync::Arc::new(skippr::adapters::storage::S3StorageAdapter::default());
+                let keyspace: std::sync::Arc<dyn skippr::react::providers::Keyspace> =
+                    std::sync::Arc::new(skippr::react::providers::DefaultKeyspace::new(Config::get_skippr_s3_bucket()));
+                let scope = skippr::react::providers::RequestScope {
+                    tenant: Config::get_tenant(),
+                    workspace: Config::get_workspace_name(),
+                    project_id: Config::get_pipeline_name(),
+                };
+                let llm = skippr::llm::create_llm(&skippr::llm::config_from_env());
+                skippr::react::dbt::examples::ensure_synced_once(storage, keyspace, scope, llm).await;
+            });
+            // Bootstrap pre-registration of all namespaces once on startup (background)
+            tokio::spawn(async {
+                let ctx0 = datafusion::prelude::SessionContext::new();
+                // Engine-agnostic ReAct does not pre-register sqlrt namespaces into DataFusion.
+            });
+            let storage: Arc<dyn skippr::adapters::storage::StorageAdapter> =
+                Arc::new(skippr::adapters::storage::S3StorageAdapter::default());
+            let secrets: Arc<dyn skippr::react::providers::SecretsProvider> =
+                Arc::new(skippr::react::providers::EnvSecretsProvider::default());
+            let llm = skippr::llm::create_llm(&skippr::llm::config_from_env());
+            let tenant = Config::get_tenant();
+            let workspace = Config::get_workspace_name();
+            let pipeline = Config::get_pipeline_name();
+            let bucket = Config::get_skippr_s3_bucket();
+            // TODO(JWT): derive tenant/workspace/pipeline from JWT claims during WS handshake and
+            // construct a per-connection SuiteCtx. For now we use the existing Config-backed values.
+            // NOTE: For now, re-use the existing configured pipeline name as the ReAct project_id.
+            let scope = skippr::react::providers::RequestScope { tenant, workspace, project_id: pipeline };
+            let keyspace: Arc<dyn skippr::react::providers::Keyspace> =
+                Arc::new(skippr::react::providers::DefaultKeyspace::new(bucket));
+            let mut suite_ctx = skippr::react::suites::SuiteCtx::new(storage, secrets, llm, scope, keyspace);
+            suite_ctx.catalog = Some(Arc::new(skippr::react::providers::catalog::SkipprCatalogProvider::new(
+                suite_ctx.storage.clone(),
+                suite_ctx.keyspace.clone(),
+                suite_ctx.llm.clone(),
+                Config::catalog_llm_timeout_secs(),
+                Config::catalog_llm_batch_size(),
+            )));
+            suite_ctx.dbt = Some(Arc::new(skippr::react::providers::SkipprDbtProvider::new(
+                suite_ctx.storage.clone(),
+                suite_ctx.keyspace.clone(),
+            )));
+            suite_ctx.vector = Some(Arc::new(skippr::react::providers::SkipprLanceVectorStore::new(
+                suite_ctx.keyspace.clone(),
+                suite_ctx.scope.clone(),
+            )));
+            if let Err(e) = skippr::react::ws::server::start_with_ctx(opts.port, suite_ctx).await {
                 eprintln!("ERROR: {}", e);
                 std::process::exit(1);
             }
@@ -713,19 +819,45 @@ async fn discover(log: bool) {
 
 
     // Late rebuild from existing S3 parquet if no new data (bounded)
-    // crate::catalog::orchestrator::Orchestrator::build_all(&pipeline_metadata.metadata);
+    // (legacy catalog module removed; this is now provider-driven)
     // Stats tailer disabled
 
-    crate::catalog::orchestrator::Orchestrator::build_all_with_progress(&pipeline_metadata.metadata, if progress.enabled() { Some(&progress) } else { None }).await;
+    {
+        use skippr::react::providers::catalog::{CatalogProvider, SkipprCatalogProvider};
+        use skippr::react::providers::{DefaultKeyspace, Keyspace, RequestScope};
+        use skippr::adapters::storage::{S3StorageAdapter, StorageAdapter};
+
+        let storage: std::sync::Arc<dyn StorageAdapter> = std::sync::Arc::new(S3StorageAdapter::default());
+        let keyspace: std::sync::Arc<dyn Keyspace> =
+            std::sync::Arc::new(DefaultKeyspace::new(Config::get_skippr_s3_bucket()));
+        let llm = skippr::llm::create_llm(&skippr::llm::config_from_env());
+        let provider = SkipprCatalogProvider::new(storage, keyspace, llm, Config::catalog_llm_timeout_secs(), Config::catalog_llm_batch_size());
+
+        let scope = RequestScope {
+            tenant: Config::get_tenant(),
+            workspace: Config::get_workspace_name(),
+            project_id: pipeline_name.clone(),
+        };
+        // Catalog build goes via the configured query provider (Athena provider owns Glue/Athena SDKs).
+        let athena = skippr::react::providers::AthenaQueryProvider::from_env().await;
+        let _ = provider
+            .build_all_with_progress(
+                &scope,
+                &athena,
+                &pipeline_metadata.metadata,
+                if progress.enabled() { Some(&progress) } else { None },
+            )
+            .await;
+    }
 
     // Final metrics snapshot (same as periodic per-minute print)
     // if log {
         use std::sync::atomic::Ordering as AtomicOrdering;
-        let messages_total_counter = crate::metrics::counters::MESSAGES_TOTAL.load(AtomicOrdering::Relaxed);
-        let source_bytes_total_counter = crate::metrics::counters::SOURCE_BYTES_TOTAL.load(AtomicOrdering::Relaxed);
-        let deadletters_total_counter = crate::metrics::counters::DEADLETTERS_TOTAL.load(AtomicOrdering::Relaxed);
-        let _ingested_slow_total_counter = crate::metrics::counters::INGESTED_SLOW_TOTAL.load(AtomicOrdering::Relaxed);
-        let human_bytes = crate::helpers::Helpers::human_readable_size(source_bytes_total_counter);
+        let messages_total_counter = skippr::metrics::counters::MESSAGES_TOTAL.load(AtomicOrdering::Relaxed);
+        let source_bytes_total_counter = skippr::metrics::counters::SOURCE_BYTES_TOTAL.load(AtomicOrdering::Relaxed);
+        let deadletters_total_counter = skippr::metrics::counters::DEADLETTERS_TOTAL.load(AtomicOrdering::Relaxed);
+        let _ingested_slow_total_counter = skippr::metrics::counters::INGESTED_SLOW_TOTAL.load(AtomicOrdering::Relaxed);
+        let human_bytes = skippr::helpers::Helpers::human_readable_size(source_bytes_total_counter);
         info!("Messages per Min: {}", 0);
         info!("Messages Fixed per Min: {}", 0);
         info!("Bytes Total: {}", human_bytes);
@@ -734,23 +866,21 @@ async fn discover(log: bool) {
         info!("Deadletter Total: {}", deadletters_total_counter);
         // Runtime not directly accessible here; print 0 to keep format consistent
         info!("Runtime: {} seconds", 0);
-        let up_total = crate::metrics::counters::UPLOADS_TOTAL.load(AtomicOrdering::SeqCst);
-        let up_inflight = crate::metrics::counters::UPLOADS_IN_FLIGHT.load(AtomicOrdering::SeqCst);
-        let up_lat_ns_total = crate::metrics::counters::UPLOAD_LATENCY_NS_TOTAL.load(AtomicOrdering::SeqCst);
+        let up_total = skippr::metrics::counters::UPLOADS_TOTAL.load(AtomicOrdering::SeqCst);
+        let up_inflight = skippr::metrics::counters::UPLOADS_IN_FLIGHT.load(AtomicOrdering::SeqCst);
+        let up_lat_ns_total = skippr::metrics::counters::UPLOAD_LATENCY_NS_TOTAL.load(AtomicOrdering::SeqCst);
         let avg_up_ms = if up_total > 0 { (up_lat_ns_total / up_total) as f64 / 1_000_000.0 } else { 0.0 };
-        let up_target = crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.load(AtomicOrdering::SeqCst);
-        let wal_target = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.load(AtomicOrdering::SeqCst);
-        let dl_target = crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.load(AtomicOrdering::SeqCst);
-        let active = crate::metrics::counters::ACTIVE_THREADS.load(AtomicOrdering::SeqCst);
-        let queue = crate::metrics::counters::QUEUE_LENGTH.load(AtomicOrdering::SeqCst);
+        let up_target = skippr::metrics::counters::UPLOAD_CONCURRENCY_TARGET.load(AtomicOrdering::SeqCst);
+        let wal_target = skippr::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.load(AtomicOrdering::SeqCst);
+        let dl_target = skippr::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.load(AtomicOrdering::SeqCst);
+        let active = skippr::metrics::counters::ACTIVE_THREADS.load(AtomicOrdering::SeqCst);
+        let queue = skippr::metrics::counters::QUEUE_LENGTH.load(AtomicOrdering::SeqCst);
         info!("Uploads total: {}, inflight: {}, avg latency: {:.2} ms", up_total, up_inflight, avg_up_ms);
         info!("Targets - upload: {}, wal: {}, s3_download: {} | active: {}, queue: {}", up_target, wal_target, dl_target, active, queue);
     // }
 
 
-    info!("Enriching catalog with LLM descriptions...");
-    // Ensure per-namespace LLM enrichment has run so catalog descriptions exist
-    crate::catalog::enrich::run_llm_enrichment_all(&pipeline_metadata.metadata).await;
+    // LLM enrichment is run via the catalog provider (see provider.run_llm_enrichment_all above).
     
 
 
@@ -760,7 +890,7 @@ async fn discover(log: bool) {
         use std::collections::HashMap;
         // Collect namespaces from registry (preferred) or metadata
         let pipeline = Config::get_pipeline_name();
-        let mut namespaces = crate::sql::registry::list_namespaces(&pipeline).await;
+        let mut namespaces = skippr::sqlrt::registry::list_namespaces(&pipeline).await;
         if namespaces.is_empty() { namespaces = pipeline_metadata.metadata.keys().cloned().collect::<Vec<_>>(); }
 
         // Gather per-namespace stats and descriptions
@@ -783,7 +913,7 @@ async fn discover(log: bool) {
         for ns in namespaces.iter() {
             // Stats → approx rows and date range heuristic
             if let Some(v) = Config::read_namespace_stats_async(ns).await {
-                if let Ok(stats) = serde_json::from_value::<crate::discover::stats::NamespaceStats>(v) {
+                if let Ok(stats) = serde_json::from_value::<skippr::discover::stats::NamespaceStats>(v) {
                     let mut approx_rows: u64 = 0;
                     let mut min_ts: Option<i64> = None;
                     let mut max_ts: Option<i64> = None;
@@ -797,9 +927,9 @@ async fn discover(log: bool) {
                 }
             }
             // Catalog → description
-            if let Some(entry) = crate::sql::registry::find_entry(&pipeline, ns).await {
+            if let Some(entry) = skippr::sqlrt::registry::find_entry(&pipeline, ns).await {
                 if !entry.catalog_key.is_empty() {
-                    if let Ok(val) = crate::helpers::s3::get_json(&entry.catalog_key).await {
+                    if let Ok(val) = skippr::helpers::s3::get_json(&entry.catalog_key).await {
                         if let Some(s) = val.get("description").and_then(|x| x.as_str()) { by_ns.entry(ns.clone()).or_default().desc = Some(s.to_string()); }
                     }
                 }
@@ -856,7 +986,19 @@ async fn discover(log: bool) {
         let pipeline = Config::get_pipeline_name();
         info!("{} Embeddings: syncing LanceDB for pipeline='{}'...", chrono::Utc::now().to_rfc3339(), pipeline);
         if progress.enabled() { progress.start("Creating embeddings"); }
-        match crate::qa::embeddings::sync_pipeline(&pipeline).await {
+        let storage: std::sync::Arc<dyn skippr::adapters::storage::StorageAdapter> =
+            std::sync::Arc::new(skippr::adapters::storage::S3StorageAdapter::default());
+        let keyspace: std::sync::Arc<dyn skippr::react::providers::Keyspace> =
+            std::sync::Arc::new(skippr::react::providers::DefaultKeyspace::new(Config::get_skippr_s3_bucket()));
+        let scope = skippr::react::providers::RequestScope {
+            tenant: Config::get_tenant(),
+            workspace: Config::get_workspace_name(),
+            project_id: pipeline.clone(),
+        };
+        let llm = skippr::llm::create_llm(&skippr::llm::config_from_env());
+        let vector: std::sync::Arc<dyn skippr::react::providers::VectorStore> =
+            std::sync::Arc::new(skippr::react::providers::SkipprLanceVectorStore::new(keyspace.clone(), scope.clone()));
+        match skippr::react::embeddings::sync_pipeline(storage, keyspace, &scope, llm, vector, &pipeline).await {
             Ok(_) => info!("{} Embeddings: sync complete", chrono::Utc::now().to_rfc3339()),
             Err(e) => warn!("Embeddings sync failed: {}", e),
         }
@@ -922,7 +1064,7 @@ async fn sync() {
     let pipeline_name = Config::get_pipeline_name();
     
     let stdout_is_tty = std::io::stdout().is_terminal();
-    let progress = ProgressUi::new(stdout_is_tty && !crate::helpers::logging::cli_logs_enabled());
+    let progress = ProgressUi::new(stdout_is_tty && !skippr::helpers::logging::cli_logs_enabled());
     if progress.enabled() {
         progress.add_tasks(&[
             "Ingesting",
@@ -1084,7 +1226,7 @@ async fn sync() {
         Buffers::request_compactor_stop();
         // Wait for in-flight to reach zero (bounded wait)
         for _ in 0..40 {
-            let inflight = crate::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT.load(std::sync::atomic::Ordering::Relaxed);
+            let inflight = skippr::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT.load(std::sync::atomic::Ordering::Relaxed);
             if inflight == 0 { break; }
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
@@ -1096,15 +1238,15 @@ async fn sync() {
     }
     // Single-thread model: no background compaction tasks remain here
     // Wait for background Glue partition tasks to settle to avoid undercount at end
-    crate::plugins::athena::DataOutputAwsAthenaPlugin::await_partition_tasks_zero().await;
+    skippr::plugins::athena::DataOutputAwsAthenaPlugin::await_partition_tasks_zero().await;
     if progress.enabled() { progress.complete("Finalising"); }
 
     // Summary and integrity check: uploaded rows vs expected msgs, quarantined parts
     {
         use std::sync::atomic::Ordering as AO;
-        let uploaded_rows = crate::metrics::counters::PARQUET_PERSISTED_ROWS_TOTAL.load(AO::Relaxed);
-        let expected_msgs = crate::metrics::counters::MESSAGES_TOTAL.load(AO::Relaxed);
-        let quarantined_parts = crate::metrics::counters::QUARANTINED_PARTITIONS_TOTAL.load(AO::Relaxed);
+        let uploaded_rows = skippr::metrics::counters::PARQUET_PERSISTED_ROWS_TOTAL.load(AO::Relaxed);
+        let expected_msgs = skippr::metrics::counters::MESSAGES_TOTAL.load(AO::Relaxed);
+        let quarantined_parts = skippr::metrics::counters::QUARANTINED_PARTITIONS_TOTAL.load(AO::Relaxed);
         info!(
             "Compactor: summary uploaded_rows={} expected_msgs={} quarantined_parts={}",
             uploaded_rows, expected_msgs, quarantined_parts
@@ -1140,7 +1282,7 @@ async fn sync() {
 
     // Final concise metrics
     {
-        use crate::metrics::counters as counters;
+        use skippr::metrics::counters as counters;
         let m = METRICS.read();
         let messages_total = m.messages_total + counters::MESSAGES_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
         let source_bytes_total = m.source_bytes_total + counters::SOURCE_BYTES_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
@@ -1159,20 +1301,73 @@ async fn sync() {
     info!("Pipeline sync complete");
     // Stats tailer removed; stats computed by orchestrator from DataFusion at end-of-run
     // Late rebuild from existing S3 parquet if no new data (bounded, no LLM)
-    crate::catalog::orchestrator::Orchestrator::build_all_with_progress(&pipeline_metadata.metadata, if progress.enabled() { Some(&progress) } else { None }).await;
+    {
+        use skippr::react::providers::catalog::{CatalogProvider, SkipprCatalogProvider};
+        use skippr::react::providers::{DefaultKeyspace, Keyspace, RequestScope};
+        use skippr::adapters::storage::{S3StorageAdapter, StorageAdapter};
+
+        let storage: std::sync::Arc<dyn StorageAdapter> = std::sync::Arc::new(S3StorageAdapter::default());
+        let keyspace: std::sync::Arc<dyn Keyspace> =
+            std::sync::Arc::new(DefaultKeyspace::new(Config::get_skippr_s3_bucket()));
+        let llm = skippr::llm::create_llm(&skippr::llm::config_from_env());
+        let provider = SkipprCatalogProvider::new(storage, keyspace, llm, Config::catalog_llm_timeout_secs(), Config::catalog_llm_batch_size());
+
+        let scope = RequestScope {
+            tenant: Config::get_tenant(),
+            workspace: Config::get_workspace_name(),
+            project_id: pipeline_name.clone(),
+        };
+        let athena = skippr::react::providers::AthenaQueryProvider::from_env().await;
+        let _ = provider
+            .build_all_with_progress(
+                &scope,
+                &athena,
+                &pipeline_metadata.metadata,
+                if progress.enabled() { Some(&progress) } else { None },
+            )
+            .await;
+    }
     // Stats tailer disabled
 
     if progress.enabled() { progress.start("Creating embeddings"); }
 
     // Deferred LLM enrichment pass across all namespaces
-    crate::catalog::enrich::run_llm_enrichment_all(&pipeline_metadata.metadata).await;
+    {
+        use skippr::react::providers::catalog::{CatalogProvider, SkipprCatalogProvider};
+        use skippr::react::providers::{DefaultKeyspace, Keyspace, RequestScope};
+        use skippr::adapters::storage::{S3StorageAdapter, StorageAdapter};
 
+        let storage: std::sync::Arc<dyn StorageAdapter> = std::sync::Arc::new(S3StorageAdapter::default());
+        let keyspace: std::sync::Arc<dyn Keyspace> =
+            std::sync::Arc::new(DefaultKeyspace::new(Config::get_skippr_s3_bucket()));
+        let llm = skippr::llm::create_llm(&skippr::llm::config_from_env());
+        let provider = SkipprCatalogProvider::new(storage, keyspace, llm, Config::catalog_llm_timeout_secs(), Config::catalog_llm_batch_size());
+
+        let scope = RequestScope {
+            tenant: Config::get_tenant(),
+            workspace: Config::get_workspace_name(),
+            project_id: pipeline_name.clone(),
+        };
+        let _ = provider.run_llm_enrichment_all(&scope, &pipeline_metadata.metadata).await;
+    }
     // Ensure embeddings are generated at the end of sync runs
     {
         let pipeline = Config::get_pipeline_name();
         info!("Embeddings: syncing LanceDB for pipeline='{}'...", pipeline);
 
-        match crate::qa::embeddings::sync_pipeline(&pipeline).await {
+        let storage: std::sync::Arc<dyn skippr::adapters::storage::StorageAdapter> =
+            std::sync::Arc::new(skippr::adapters::storage::S3StorageAdapter::default());
+        let keyspace: std::sync::Arc<dyn skippr::react::providers::Keyspace> =
+            std::sync::Arc::new(skippr::react::providers::DefaultKeyspace::new(Config::get_skippr_s3_bucket()));
+        let scope = skippr::react::providers::RequestScope {
+            tenant: Config::get_tenant(),
+            workspace: Config::get_workspace_name(),
+            project_id: pipeline.clone(),
+        };
+        let llm = skippr::llm::create_llm(&skippr::llm::config_from_env());
+        let vector: std::sync::Arc<dyn skippr::react::providers::VectorStore> =
+            std::sync::Arc::new(skippr::react::providers::SkipprLanceVectorStore::new(keyspace.clone(), scope.clone()));
+        match skippr::react::embeddings::sync_pipeline(storage, keyspace, &scope, llm, vector, &pipeline).await {
             Ok(_) => info!("Embeddings: sync complete"),
             Err(e) => warn!("Embeddings sync failed: {}", e),
         }
