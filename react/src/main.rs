@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
+use std::path::Path;
 
 use react::adapters::storage::S3StorageAdapter;
 use react::llm;
 use react::providers::{
-    AthenaQueryProvider, DbtProjectProvider, DefaultKeyspace, EnvSecretsProvider, LanceVectorStore,
+    AthenaQueryProvider, AthenaSettings, DbtProjectProvider, DefaultKeyspace, EnvSecretsProvider, LanceVectorStore,
 };
 use react::providers::catalog::DefaultCatalogProvider;
 use react::suites::SuiteCtx;
@@ -25,9 +26,13 @@ struct Cli {
 enum Command {
     /// Start the ReAct WebSocket server.
     Serve {
+        /// Path to YAML config file.
+        #[arg(long, value_name = "PATH")]
+        config: String,
+
         /// WebSocket port to listen on.
-        #[arg(long, default_value_t = 8787)]
-        port: u16,
+        #[arg(long)]
+        port: Option<u16>,
 
         /// S3 bucket for ReAct artifacts (catalogs, vectors, threads, dbt project).
         /// Defaults to env `SKIPPR_S3_BUCKET` if set.
@@ -35,16 +40,16 @@ enum Command {
         bucket: Option<String>,
 
         /// Tenant scope (artifact partition).
-        #[arg(long, default_value = "default")]
-        tenant: String,
+        #[arg(long)]
+        tenant: Option<String>,
 
         /// Workspace scope (artifact partition).
-        #[arg(long, default_value = "default")]
-        workspace: String,
+        #[arg(long)]
+        workspace: Option<String>,
 
         /// ReAct project identifier (artifact partition).
-        #[arg(long, default_value = "default")]
-        project_id: String,
+        #[arg(long)]
+        project_id: Option<String>,
     },
 }
 
@@ -68,43 +73,78 @@ async fn main() {
     init_logging(&cli.log);
 
     match cli.cmd {
-        Command::Serve { port, bucket, tenant, workspace, project_id } => {
-            let bucket = bucket
-                .or_else(|| std::env::var("SKIPPR_S3_BUCKET").ok())
-                .unwrap_or_else(|| "unset".to_string());
+        Command::Serve { config, port, bucket, tenant, workspace, project_id } => {
+            let file_cfg = match react::config::ReactConfigFile::load_yaml(Path::new(&config)) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("ERROR: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            let cfg = match react::config::ReactResolvedConfig::resolve(
+                file_cfg,
+                react::config::ServeOverrides {
+                    port,
+                    bucket,
+                    tenant,
+                    workspace,
+                    project_id,
+                },
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("ERROR: {}", e);
+                    std::process::exit(1);
+                }
+            };
 
-            let storage = Arc::new(S3StorageAdapter::from_env(bucket.clone()).await);
-            let keyspace = Arc::new(DefaultKeyspace::new(bucket.clone()));
+            let storage = Arc::new(S3StorageAdapter::from_env(cfg.storage.bucket.clone()).await);
+            let keyspace = Arc::new(DefaultKeyspace::new(cfg.storage.bucket.clone()));
             let secrets = Arc::new(EnvSecretsProvider::default());
-            let llm = llm::create_llm(&llm::config_from_env());
+            let llm = llm::create_llm(&llm::config_from_resolved(&cfg));
 
-            let scope = react::providers::RequestScope { tenant, workspace, project_id };
-
-            let mut suite_ctx = SuiteCtx::new(storage, secrets, llm, scope, keyspace.clone());
+            let mut suite_ctx = SuiteCtx::new(storage, secrets, llm, cfg.scope.clone(), keyspace.clone());
 
             // Query + dataset discovery (Athena/Glue)
-            let athena = Arc::new(AthenaQueryProvider::from_env().await);
-            suite_ctx.query = Some(athena.clone());
-            suite_ctx.datasets = Some(athena);
+            if cfg.providers.athena.enabled {
+                let athena = Arc::new(
+                    AthenaQueryProvider::from_settings(AthenaSettings {
+                        workgroup: cfg.providers.athena.workgroup.clone(),
+                        result_output_location: cfg.providers.athena.result_s3.clone(),
+                        default_catalog: cfg.providers.athena.catalog.clone(),
+                        default_database: cfg.providers.athena.default_database.clone(),
+                        discovery_cache_ttl_secs: cfg.providers.athena.discovery_cache_ttl_secs,
+                    })
+                    .await,
+                );
+                suite_ctx.query = Some(athena.clone());
+                suite_ctx.datasets = Some(athena);
+            }
 
             // Catalog + DBT + vectors
-            suite_ctx.catalog = Some(Arc::new(DefaultCatalogProvider::new(
-                suite_ctx.storage.clone(),
-                suite_ctx.keyspace.clone(),
-                suite_ctx.llm.clone(),
-                60,
-                8,
-            )));
-            suite_ctx.dbt = Some(Arc::new(DbtProjectProvider::new(
-                suite_ctx.storage.clone(),
-                suite_ctx.keyspace.clone(),
-            )));
-            suite_ctx.vector = Some(Arc::new(LanceVectorStore::new(
-                suite_ctx.keyspace.clone(),
-                suite_ctx.scope.clone(),
-            )));
+            if cfg.providers.catalog.enabled {
+                suite_ctx.catalog = Some(Arc::new(DefaultCatalogProvider::new(
+                    suite_ctx.storage.clone(),
+                    suite_ctx.keyspace.clone(),
+                    suite_ctx.llm.clone(),
+                    cfg.providers.catalog.refresh_secs,
+                    cfg.providers.catalog.max_concurrency,
+                )));
+            }
+            if cfg.providers.dbt.enabled {
+                suite_ctx.dbt = Some(Arc::new(DbtProjectProvider::new(
+                    suite_ctx.storage.clone(),
+                    suite_ctx.keyspace.clone(),
+                )));
+            }
+            if cfg.providers.vector.enabled {
+                suite_ctx.vector = Some(Arc::new(LanceVectorStore::new(
+                    suite_ctx.keyspace.clone(),
+                    suite_ctx.scope.clone(),
+                )));
+            }
 
-            if let Err(e) = react::ws::server::start_with_ctx(port, suite_ctx).await {
+            if let Err(e) = react::ws::server::start_with_ctx(cfg.server.port, suite_ctx).await {
                 eprintln!("ERROR: {}", e);
                 std::process::exit(1);
             }

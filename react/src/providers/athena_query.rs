@@ -15,6 +15,16 @@ pub struct AthenaQueryProvider {
     inner: Arc<Inner>,
 }
 
+/// Explicit Athena configuration (preferred over reading env directly).
+#[derive(Clone, Debug, Default)]
+pub struct AthenaSettings {
+    pub workgroup: Option<String>,
+    pub result_output_location: Option<String>,
+    pub default_catalog: String,
+    pub default_database: Option<String>,
+    pub discovery_cache_ttl_secs: u64,
+}
+
 struct Inner {
     athena: AthenaClient,
     glue: GlueClient,
@@ -34,6 +44,29 @@ struct Cache {
 }
 
 impl AthenaQueryProvider {
+    /// Create from explicit settings using the standard AWS credential chain.
+    pub async fn from_settings(settings: AthenaSettings) -> Self {
+        let ttl_secs = settings.discovery_cache_ttl_secs.max(5).min(3600);
+        let aws_cfg = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .load()
+            .await;
+        let athena = AthenaClient::new(&aws_cfg);
+        let glue = GlueClient::new(&aws_cfg);
+
+        Self {
+            inner: Arc::new(Inner {
+                athena,
+                glue,
+                workgroup: settings.workgroup,
+                result_output_location: settings.result_output_location,
+                default_catalog: settings.default_catalog,
+                default_database: settings.default_database,
+                cache_ttl: Duration::from_secs(ttl_secs),
+                cache: RwLock::new(Cache::default()),
+            }),
+        }
+    }
+
     /// Create from environment variables using the standard AWS credential chain.
     ///
     /// Supported env vars (with backward-compatible aliases):
@@ -58,28 +91,16 @@ impl AthenaQueryProvider {
 
         let ttl_secs: u64 = getenv("ATHENA_DISCOVERY_CACHE_TTL_SECS", "120")
             .parse::<u64>()
-            .unwrap_or(120)
-            .max(5)
-            .min(3600);
+            .unwrap_or(120);
 
-        let aws_cfg = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .load()
-            .await;
-        let athena = AthenaClient::new(&aws_cfg);
-        let glue = GlueClient::new(&aws_cfg);
-
-        Self {
-            inner: Arc::new(Inner {
-                athena,
-                glue,
-                workgroup,
-                result_output_location,
-                default_catalog,
-                default_database,
-                cache_ttl: Duration::from_secs(ttl_secs),
-                cache: RwLock::new(Cache::default()),
-            }),
-        }
+        Self::from_settings(AthenaSettings {
+            workgroup,
+            result_output_location,
+            default_catalog,
+            default_database,
+            discovery_cache_ttl_secs: ttl_secs,
+        })
+        .await
     }
 
     fn parse_dataset_id(&self, s: &str) -> Result<DatasetId, String> {

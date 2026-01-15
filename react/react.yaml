@@ -1,0 +1,49 @@
+version: 1
+
+server:
+  port: 8787
+
+storage:
+  # From repo-root skippr.yml: skippr.skippr_s3_bucket
+  bucket: asgsdag-datalake
+
+scope:
+  # From repo-root skippr.yml: skippr.tenant / skippr.workspace
+  tenant: picnic
+  workspace: test
+
+  # react-specific partition; closest analogue to a skippr pipeline.
+  project_id: app
+
+llm:
+  # Keep secrets (api keys) in env via EnvSecretsProvider (e.g. LLM_API_KEY).
+  provider: OPENAI_COMPAT
+  base_url: https://api.openai.com
+  chat_model: gpt-5.1
+  embed_model: text-embedding-3-small
+  context_length: 4096
+  http_timeout_secs: 30
+  max_tokens: 1024
+  temperature: 0.2
+  top_p: 1.0
+
+providers:
+  athena:
+    enabled: true
+    workgroup: picnic
+    default_database: picnic
+    catalog: AwsDataCatalog
+    result_s3: s3://asgsdag-datalake/
+    discovery_cache_ttl_secs: 120
+
+  catalog:
+    enabled: true
+    refresh_secs: 60
+    max_concurrency: 8
+
+  dbt:
+    enabled: true
+    target: datafusion
+
+  vector:
+    enabled: true

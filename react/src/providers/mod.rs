@@ -17,7 +17,7 @@ pub mod state;
 pub mod vector;
 
 pub use catalog::CatalogProvider;
-pub use athena_query::AthenaQueryProvider;
+pub use athena_query::{AthenaQueryProvider, AthenaSettings};
 pub use dbt::{DbtProvider, DbtProjectProvider, DbtValidateArgs, DbtValidateResult};
 pub use dataset_catalog_provider::{DatasetCatalogProvider, DatasetId};
 pub use keyspace::{DefaultKeyspace, Keyspace};

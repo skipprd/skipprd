@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use react::adapters::storage::{InMemoryStorageAdapter, StorageAdapter};
 use react::providers::{DefaultKeyspace, Keyspace, RequestScope};
-use react::providers::catalog::{CatalogProvider, SkipprCatalogProvider};
+use react::providers::catalog::{CatalogProvider, DefaultCatalogProvider};
 use react::providers::catalog::types::{SemanticModel, DataCatalog};
 
 #[tokio::test]
@@ -10,7 +10,7 @@ async fn provider_write_semantic_uses_keyspace_key_and_roundtrips() {
     let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
     let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("bucket".to_string()));
     let llm: Arc<dyn react::llm::LargeLanguageModel> = Arc::new(react::llm::NullModel::new());
-    let provider = SkipprCatalogProvider::new(storage.clone(), keyspace.clone(), llm, 0, 8);
+    let provider = DefaultCatalogProvider::new(storage.clone(), keyspace.clone(), llm, 0, 8);
 
     let scope = RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() };
     let ns = "events";
@@ -38,7 +38,7 @@ async fn provider_write_catalog_uses_keyspace_key_and_roundtrips() {
     let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
     let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("bucket".to_string()));
     let llm: Arc<dyn react::llm::LargeLanguageModel> = Arc::new(react::llm::NullModel::new());
-    let provider = SkipprCatalogProvider::new(storage.clone(), keyspace.clone(), llm, 0, 8);
+    let provider = DefaultCatalogProvider::new(storage.clone(), keyspace.clone(), llm, 0, 8);
 
     let scope = RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() };
     let ns = "events";

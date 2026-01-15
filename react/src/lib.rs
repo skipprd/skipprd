@@ -3,6 +3,7 @@
 //! Suites must live under `react/suites`.
 
 pub mod adapters;
+pub mod config;
 pub mod helpers;
 pub mod discover;
 pub mod llm;

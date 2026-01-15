@@ -71,6 +71,35 @@ pub fn config_from_env() -> LlmConfig {
     }
 }
 
+/// Build LLM config from a resolved `react` config file (with env overrides already applied).
+///
+/// Note: `LLM_API_KEY` remains env-driven and is intentionally not stored in YAML.
+pub fn config_from_resolved(cfg: &crate::config::ReactResolvedConfig) -> LlmConfig {
+    let prov = cfg
+        .llm
+        .provider
+        .clone()
+        .unwrap_or_else(|| crate::helpers::configuration::Config::llm_provider())
+        .to_uppercase();
+    let provider = match prov.as_str() {
+        "OPENAI" | "OPENAI_COMPAT" | "HTTP" => LlmProviderType::OpenAICompat,
+        _ => LlmProviderType::Local,
+    };
+    LlmConfig {
+        provider,
+        chat_model: cfg.llm.chat_model.clone().or_else(|| crate::helpers::configuration::Config::llm_chat_model()),
+        embed_model: cfg.llm.embed_model.clone().or_else(|| crate::helpers::configuration::Config::llm_embed_model()),
+        base_url: cfg.llm.base_url.clone().or_else(|| crate::helpers::configuration::Config::llm_base_url()),
+        api_key: crate::helpers::configuration::Config::llm_api_key(),
+        gpu_layers: cfg.llm.gpu_layers.or_else(|| crate::helpers::configuration::Config::llm_gpu_layers()),
+        context_length: cfg
+            .llm
+            .context_length
+            .or_else(|| crate::helpers::configuration::Config::llm_context_length_opt())
+            .or(Some(crate::helpers::configuration::Config::llm_context_length())),
+    }
+}
+
 /// Placeholder model that always errors. Used when provider backends are not wired yet.
 pub struct NullModel {}
 
