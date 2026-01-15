@@ -18,6 +18,12 @@ struct Cli {
     #[arg(long, num_args = 0..=1, default_missing_value = "info")]
     log: Option<String>,
 
+    /// Include very verbose AWS S3/Smithy HTTP logs when using `--log debug` / `--log trace`.
+    ///
+    /// By default, `--log debug` suppresses noisy AWS request/response logging to keep output readable.
+    #[arg(long, default_value_t = false)]
+    verbose_debug: bool,
+
     #[command(subcommand)]
     cmd: Command,
 }
@@ -53,13 +59,45 @@ enum Command {
     },
 }
 
-fn init_logging(log: &Option<String>) {
+fn init_logging(log: &Option<String>, verbose_debug: bool) {
     if log.is_none() {
         return;
     }
     if std::env::var("RUST_LOG").ok().filter(|v| !v.trim().is_empty()).is_none() {
         if let Some(level) = log.as_ref() {
-            std::env::set_var("RUST_LOG", level);
+            // Keep `debug` useful by default: suppress very noisy AWS SDK (S3/STS/Athena/Glue)
+            // and Smithy HTTP logs unless opted in.
+            if (level == "debug" || level == "trace") && !verbose_debug {
+                let quiet = format!(
+                    "{level},\
+aws_smithy_http=info,\
+aws_smithy_http_tower=info,\
+aws_smithy_runtime=info,\
+aws_sdk_s3=info,\
+aws_sdk_sts=info,\
+aws_sdk_athena=info,\
+aws_sdk_glue=info,\
+aws_config=info,\
+tokio_tungstenite=info,\
+tungstenite=info,\
+lance=info,\
+lance_core=info,\
+lance_io=info,\
+lance_table=info,\
+react::ws=info,\
+react::vector=info,\
+h2=info,\
+rustls=info,\
+tokio_rustls=info,\
+hyper_rustls=info,\
+hyper=info,\
+reqwest=info",
+                    level = level
+                );
+                std::env::set_var("RUST_LOG", quiet);
+            } else {
+                std::env::set_var("RUST_LOG", level);
+            }
         }
     }
     let _ = tracing_subscriber::fmt()
@@ -70,7 +108,7 @@ fn init_logging(log: &Option<String>) {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    init_logging(&cli.log);
+    init_logging(&cli.log, cli.verbose_debug);
 
     match cli.cmd {
         Command::Serve { config, port, bucket, tenant, workspace, project_id } => {
