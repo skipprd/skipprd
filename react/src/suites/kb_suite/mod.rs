@@ -59,7 +59,6 @@ impl KbSuite {
             dbt: None,
             vector: sctx.vector.clone(),
             thread_store: Some(thread_store),
-            dataset_candidates: Vec::new(),
         };
 
         match Agent::run_until_block(&registry, &actx, sys, tools_card, question).await {

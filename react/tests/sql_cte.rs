@@ -57,7 +57,6 @@ LIMIT 1
 		dbt: None,
 		vector: None,
 		thread_store: None,
-		dataset_candidates: vec![],
 	};
 	let res = tool.call(args, &actx).await.expect("tool call");
 	assert!(res.get("ok").and_then(|x| x.as_bool()).unwrap_or(false), "expected ok response, got {}", res);

@@ -1,11 +1,13 @@
 use async_trait::async_trait;
 
 use crate::flow_frame::FlowFrame;
-use crate::agent::{Agent, AgentCtx, DatasetCandidate, RunOutcome, SqlValidatedFinalPolicy};
+use crate::agent::{Agent, AgentCtx, RunOutcome};
 use crate::tools::ToolRegistry;
 use crate::suites::preflight::PreflightProvider;
 use crate::suites::{Suite, SuiteCtx};
 use crate::session::ThreadStore;
+use crate::suites::skippr_shared::policy_sql_validated::SqlValidatedPolicy;
+use crate::suites::skippr_shared::types::DatasetCandidate;
 
 pub struct SkipprAskSuite;
 
@@ -77,16 +79,15 @@ impl SkipprAskSuite {
             progress_tx: None,
             pre_step_tx: None,
             agent_name: Some("ask".to_string()),
-            policy: std::sync::Arc::new(SqlValidatedFinalPolicy),
-            dataset_candidates: bundle
-                .datasets
-                .iter()
-                .take(8)
-                .map(|(ds, sc)| DatasetCandidate {
-                    dataset_id: ds.clone(),
-                    score: *sc,
-                })
-                .collect(),
+            policy: std::sync::Arc::new(SqlValidatedPolicy {
+                dataset_candidates: bundle
+                    .datasets
+                    .iter()
+                    .take(8)
+                    .map(|(ds, sc)| DatasetCandidate { dataset_id: ds.clone(), score: *sc })
+                    .collect(),
+                ..SqlValidatedPolicy::default()
+            }),
             llm: sctx.llm.clone(),
             storage: sctx.storage.clone(),
             scope: sctx.scope.clone(),

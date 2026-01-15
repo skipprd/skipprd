@@ -2,11 +2,13 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use crate::flow_frame::FlowFrame;
-use crate::agent::{Agent, AgentCtx, DatasetCandidate, RunOutcome, SqlValidatedFinalPolicy};
+use crate::agent::{Agent, AgentCtx, RunOutcome};
 use crate::tools::{Tool, ToolRegistry};
 use crate::suites::preflight::PreflightProvider;
 use crate::suites::{Suite, SuiteCtx};
 use crate::session::ThreadStore;
+use crate::suites::skippr_shared::policy_sql_validated::SqlValidatedPolicy;
+use crate::suites::skippr_shared::types::DatasetCandidate;
 
 pub struct SkipprModelSuite;
 
@@ -124,16 +126,15 @@ impl SkipprModelSuite {
             progress_tx: None,
             pre_step_tx: None,
             agent_name: Some("cleanse".to_string()),
-            policy: std::sync::Arc::new(SqlValidatedFinalPolicy),
-            dataset_candidates: bundle
-                .datasets
-                .iter()
-                .take(8)
-                .map(|(ds, sc)| DatasetCandidate {
-                    dataset_id: ds.clone(),
-                    score: *sc,
-                })
-                .collect(),
+            policy: std::sync::Arc::new(SqlValidatedPolicy {
+                dataset_candidates: bundle
+                    .datasets
+                    .iter()
+                    .take(8)
+                    .map(|(ds, sc)| DatasetCandidate { dataset_id: ds.clone(), score: *sc })
+                    .collect(),
+                ..SqlValidatedPolicy::default()
+            }),
             llm: sctx.llm.clone(),
             storage: sctx.storage.clone(),
             scope: sctx.scope.clone(),
@@ -183,16 +184,15 @@ impl SkipprModelSuite {
             progress_tx: None,
             pre_step_tx: None,
             agent_name: Some("model".to_string()),
-            policy: std::sync::Arc::new(SqlValidatedFinalPolicy),
-            dataset_candidates: bundle
-                .datasets
-                .iter()
-                .take(8)
-                .map(|(ds, sc)| DatasetCandidate {
-                    dataset_id: ds.clone(),
-                    score: *sc,
-                })
-                .collect(),
+            policy: std::sync::Arc::new(SqlValidatedPolicy {
+                dataset_candidates: bundle
+                    .datasets
+                    .iter()
+                    .take(8)
+                    .map(|(ds, sc)| DatasetCandidate { dataset_id: ds.clone(), score: *sc })
+                    .collect(),
+                ..SqlValidatedPolicy::default()
+            }),
             llm: sctx.llm.clone(),
             storage: sctx.storage.clone(),
             scope: sctx.scope.clone(),

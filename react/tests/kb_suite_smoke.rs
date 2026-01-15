@@ -1,9 +1,13 @@
 use std::sync::Arc;
 
-use react::agent::{Agent, AgentCtx, DefaultPolicy, RunOutcome};
+use async_trait::async_trait;
+use react::agent::{Agent, AgentCtx, AgentPolicy, DefaultPolicy, Interrupt, RunOutcome};
 use react::adapters::storage::InMemoryStorageAdapter;
 use react::llm::{ChatMessage, LargeLanguageModel};
+use react::session::ThreadStore;
 use react::tools::ToolRegistry;
+use react::tools::Tool;
+use serde_json::Value;
 
 struct FixedJsonModel {
     out: String,
@@ -16,6 +20,43 @@ impl LargeLanguageModel for FixedJsonModel {
 
     fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
         Ok(vec![vec![0.0; 8]])
+    }
+}
+
+struct AskUserTool;
+
+#[async_trait]
+impl Tool for AskUserTool {
+    fn name(&self) -> &'static str {
+        "ask_user"
+    }
+    async fn call(&self, _args: Value, _ctx: &react::agent::AgentCtx) -> Result<Value, String> {
+        Ok(serde_json::json!({"ok": true, "prompt": "hi"}))
+    }
+}
+
+struct InterruptOnAskUser;
+
+#[async_trait]
+impl AgentPolicy for InterruptOnAskUser {
+    fn interrupt_for_action(&self, action_name: &str, _args: &Value, obs: &Value) -> Option<Interrupt> {
+        if action_name == "ask_user" {
+            let prompt = obs.get("prompt").and_then(|x| x.as_str()).unwrap_or("x").to_string();
+            return Some(Interrupt::AwaitUser { prompt });
+        }
+        None
+    }
+
+    async fn handle_final(
+        &self,
+        _tools: &ToolRegistry,
+        _ctx: &react::agent::AgentCtx,
+        _transcript: &mut Vec<String>,
+        _store: Option<&ThreadStore>,
+        _thread_id: &str,
+        _final_obj: &Value,
+    ) -> Result<Option<RunOutcome>, String> {
+        Ok(None)
     }
 }
 
@@ -40,7 +81,6 @@ async fn agent_default_policy_accepts_final_without_sql() {
         dbt: None,
         vector: None,
         thread_store: None,
-        dataset_candidates: vec![],
     };
     let reg = ToolRegistry::new();
     let out = Agent::run_until_block(&reg, &ctx, "sys", "tools", "q").await.expect("run");
@@ -50,6 +90,68 @@ async fn agent_default_policy_accepts_final_without_sql() {
             assert!(result.sql.is_none());
         }
         _ => panic!("expected final"),
+    }
+}
+
+#[tokio::test]
+async fn agent_does_not_special_case_ask_user_tool_name() {
+    let llm = Arc::new(FixedJsonModel {
+        out: r#"{"action":"ask_user","args":{}} "#.to_string(),
+    });
+    let ctx = AgentCtx {
+        top_k: 1,
+        per_step_timeout_secs: 1,
+        max_steps: 1,
+        thread_id: None,
+        progress_tx: None,
+        pre_step_tx: None,
+        agent_name: Some("test".to_string()),
+        policy: Arc::new(DefaultPolicy),
+        llm,
+        storage: Arc::new(InMemoryStorageAdapter::default()),
+        scope: react::providers::RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() },
+        keyspace: Arc::new(react::providers::DefaultKeyspace::new("b".into())),
+        dbt: None,
+        vector: None,
+        thread_store: None,
+    };
+    let mut reg = ToolRegistry::new();
+    reg.register(AskUserTool);
+    let out = Agent::run_until_block(&reg, &ctx, "sys", "tools", "q").await.expect("run");
+    match out {
+        RunOutcome::Final { .. } => {} // OK: did not become AwaitUser automatically
+        other => panic!("expected Final (no interrupt policy), got {:?}", std::mem::discriminant(&other)),
+    }
+}
+
+#[tokio::test]
+async fn agent_interrupts_only_when_policy_requests_it() {
+    let llm = Arc::new(FixedJsonModel {
+        out: r#"{"action":"ask_user","args":{}} "#.to_string(),
+    });
+    let ctx = AgentCtx {
+        top_k: 1,
+        per_step_timeout_secs: 1,
+        max_steps: 1,
+        thread_id: None,
+        progress_tx: None,
+        pre_step_tx: None,
+        agent_name: Some("test".to_string()),
+        policy: Arc::new(InterruptOnAskUser),
+        llm,
+        storage: Arc::new(InMemoryStorageAdapter::default()),
+        scope: react::providers::RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() },
+        keyspace: Arc::new(react::providers::DefaultKeyspace::new("b".into())),
+        dbt: None,
+        vector: None,
+        thread_store: None,
+    };
+    let mut reg = ToolRegistry::new();
+    reg.register(AskUserTool);
+    let out = Agent::run_until_block(&reg, &ctx, "sys", "tools", "q").await.expect("run");
+    match out {
+        RunOutcome::AwaitUser { prompt, .. } => assert_eq!(prompt, "hi"),
+        _ => panic!("expected AwaitUser"),
     }
 }
 
