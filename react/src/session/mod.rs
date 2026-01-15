@@ -50,7 +50,7 @@ fn cache() -> &'static DashMap<String, CacheEntry> { THREAD_CACHE.get_or_init(||
 // Per-thread, in-memory context cache (not persisted)
 #[derive(Clone, Debug, Default)]
 pub struct ThreadCache {
-    pub candidates: Vec<(String, String, f32)>, // (pipeline, namespace, score)
+    pub candidates: Vec<(String, String, f32)>, // (project_id, dataset_id, score) [legacy cache shape; best-effort only]
     pub schemas: HashMap<String, Vec<(String, String)>>, // dataset FQN -> [(name, type)]
     pub samples: HashMap<String, Vec<Vec<String>>>, // dataset FQN -> rows
     pub updated_at: Option<Instant>,

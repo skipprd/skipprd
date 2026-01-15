@@ -24,9 +24,9 @@ to the provider-based implementation under `src/react/providers/catalog/*`.
   - `CatalogProvider::write_semantic(scope, namespace, semantic)`
 
 ### LLM enrichment pass
-- **Legacy**: `src/catalog/enrich.rs` `enrich_namespace_with_llm(namespace)` and `run_llm_enrichment_all(...)`.
+- **Legacy**: `src/catalog/enrich.rs` `enrich_namespace_with_llm(namespace)` and `run_llm_enrichment_all(...)` (now dataset_id-based internally).
 - **Provider**:
-  - `CatalogProvider::run_llm_enrichment_all(scope, namespaces)`
+  - `CatalogProvider::run_llm_enrichment_all(scope, dataset_ids)`
   - uses `react/providers/catalog/enrich.rs` but with injected `llm` (no env/config creation inside providers).
 
 ### SessionFactory behavior

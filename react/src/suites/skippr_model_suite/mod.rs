@@ -32,7 +32,7 @@ impl SkipprModelSuite {
             format!(
                 "Modeling goal: {}.\n\
                  Act as a proactive DBT Engineer with strong business domain focus.\n\
-                 - Resolve datasets; if schema is empty, call sql_register on candidates and proceed anyway with minimal staging models using {{ source('<pipeline>','<namespace>') }}.\n\
+                 - Resolve datasets; if schema is empty, call sql_register on candidates and proceed anyway with minimal staging models using {{ source('<project_id>','<dataset_id>') }} (dataset_id is `catalog.db.table`).\n\
                  - Search DBT examples (search_dbt_examples) and adopt conventions from the top match.\n\
                  - Choose artifact type automatically (default DBT model). For project scaffolding, DO NOT build piece‑meal or ask per‑artifact approvals. Produce a consolidated batch of initial artifacts (staging/core/tests/docs) and save them in ONE call to approve_and_save_artifact_batch.\n\
                  - Validate with dbt_validate when available; if unavailable, proceed without blocking.\n\
@@ -319,7 +319,7 @@ impl SkipprModelSuite {
                             }
                         }
 
-                        // No sqlrt/DataFusion registration in engine-agnostic ReAct.
+                        // ReAct is engine-agnostic: no sqlrt/DataFusion registration here.
                     }
                 }
             }

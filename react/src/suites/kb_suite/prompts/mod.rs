@@ -27,7 +27,7 @@ Tools (strict JSON):
 
 Notes:
 - kb_search searches only kind=\"doc\" embeddings.
-- dataset_id is a logical namespace for your knowledge base. Use \"kb\" unless you have multiple KBs.
+- dataset_id is a logical identifier for your knowledge base. Use \"kb\" unless you have multiple KBs.
 "#
 }
 

@@ -5,24 +5,24 @@ use std::sync::Arc;
 use super::types::{CatalogField, DataCatalog};
 use crate::llm::ChatMessage;
 
-/// Run dataset-level and field-level LLM enrichment for a namespace.
-pub async fn enrich_namespace_with_llm(
+/// Run dataset-level and field-level LLM enrichment for a dataset_id.
+pub async fn enrich_dataset_with_llm(
     storage: Arc<dyn crate::adapters::storage::StorageAdapter>,
     keyspace: Arc<dyn crate::providers::Keyspace>,
     llm: Arc<dyn crate::llm::LargeLanguageModel>,
     scope: &crate::providers::RequestScope,
-    namespace: &str,
+    dataset_id: &str,
     llm_timeout_secs: u64,
     llm_batch_size: usize,
 ) {
 
     // Load semantic from S3
-    let semantic = super::infer::infer_semantic_model_async(storage.clone(), keyspace.clone(), scope, namespace).await;
+    let semantic = super::infer::infer_semantic_model_async(storage.clone(), keyspace.clone(), scope, dataset_id).await;
 
     // Dataset-level short description (STRICT JSON)
     if !semantic.fields.is_empty() {
         let mut lines: Vec<String> = Vec::new();
-        lines.push(format!("Dataset namespace: {}", namespace));
+        lines.push(format!("Dataset: {}", dataset_id));
         lines.push(format!(
             "Fields: {}",
             semantic
@@ -62,9 +62,9 @@ pub async fn enrich_namespace_with_llm(
         };
         if let Some(text) = text_opt {
             debug!(
-                "{} LLM Enrich: dataset description raw for ns='{}': {}",
+                "{} LLM Enrich: dataset description raw for dataset_id='{}': {}",
                 chrono::Utc::now().to_rfc3339(),
-                namespace,
+                dataset_id,
                 text
             );
             let summary_raw = super_extract_json_value(&text)
@@ -87,7 +87,7 @@ pub async fn enrich_namespace_with_llm(
             let ascii_ok = s_trim.chars().all(|c| c.is_ascii() && !c.is_control());
             let len_ok = s_trim.len() <= 220 && s_trim.len() >= 8;
             if !is_placeholder && ascii_ok && len_ok {
-                let key = keyspace.catalog_key(scope, namespace);
+                let key = keyspace.catalog_key(scope, dataset_id);
                 if let Ok(mut v) = storage.get_json(&key).await {
                     v.as_object_mut()
                         .map(|obj| obj.insert("description".to_string(), serde_json::Value::String(summary_raw.clone())));
@@ -100,18 +100,18 @@ pub async fn enrich_namespace_with_llm(
     // Field-level enrichment
     // Prefer stats embedded in catalog; fallback to separate stats JSON if present
     let ns_stats: Option<crate::discover::stats::DatasetFieldStats> = {
-        let key = keyspace.catalog_key(scope, namespace);
+        let key = keyspace.catalog_key(scope, dataset_id);
         match storage.get_json(&key).await {
-            Ok(val) => super::stats_from_catalog::dataset_field_stats_from_catalog_json(namespace, &val),
+            Ok(val) => super::stats_from_catalog::dataset_field_stats_from_catalog_json(dataset_id, &val),
             Err(_) => None,
         }
     };
     // Load existing catalog (may be YAML stored as JSON via helper)
-    let key = keyspace.catalog_key(scope, namespace);
+    let key = keyspace.catalog_key(scope, dataset_id);
     if let Ok(val) = storage.get_json(&key).await {
                 // Build DataCatalog from existing JSON
                 let mut catalog = DataCatalog {
-                    dataset_id: namespace.to_string(),
+                    dataset_id: dataset_id.to_string(),
                     catalog: val.get("catalog").and_then(|x| x.as_str()).unwrap_or("").to_string(),
                     database: val.get("database").and_then(|x| x.as_str()).unwrap_or("").to_string(),
                     table: val.get("table").and_then(|x| x.as_str()).unwrap_or("").to_string(),
@@ -256,7 +256,7 @@ pub async fn enrich_namespace_with_llm(
                         .join(", ");
                     let prompt_desc = format!(
                         "Return STRICT JSON only: {{\"descriptionByField\": {{ \"<field_name>\": \"<≤20 words>\" }} }}.\nRules: one sentence (≤20 words) per field; JSON only; start with '{{' and end with '}}'. Keys MUST be exactly the provided FieldNames.\n\nDataset: {ns}\nFieldNames: {fnames}\nField details: [{items}]\n\nOutput JSON:",
-                        ns = namespace,
+                        ns = dataset_id,
                         fnames = field_names_json,
                         items = items
                     );
@@ -270,9 +270,9 @@ pub async fn enrich_namespace_with_llm(
                     .and_then(|r| r.ok())
                     .unwrap_or_default();
                     debug!(
-                        "{} LLM Enrich: description batch raw ns='{}' fields=[{}]: {}",
+                        "{} LLM Enrich: description batch raw dataset_id='{}' fields=[{}]: {}",
                         chrono::Utc::now().to_rfc3339(),
-                        namespace,
+                        dataset_id,
                         fields.join(","),
                         desc_text
                     );
@@ -307,7 +307,7 @@ pub async fn enrich_namespace_with_llm(
                             let single_prompt = format!(
                                 "Return STRICT JSON only: {{\"descriptionByField\": {{ \"{fname}\": \"<≤20 words>\" }} }}.\nRules: one sentence (≤20 words) per field; JSON only; start with '{{' and end with '}}'.\nDataset: {ns}\nField details: [{item}]\n\nOutput JSON:",
                                 fname = fname,
-                                ns = namespace,
+                                ns = dataset_id,
                                 item = item
                             );
                             let single_text = tokio::task::spawn_blocking({
@@ -338,7 +338,7 @@ pub async fn enrich_namespace_with_llm(
                     let items2 = fields.iter().map(|n| format!("{{name: {}}}", n)).collect::<Vec<String>>().join(", ");
                     let prompt_syn = format!(
                         "Return STRICT JSON only: {{\"synonymsByField\": {{ \"<field_name>\": [\"a\",\"b\"] }} }}.\nRules: 3–6 single-word synonyms, lowercase; JSON only; start with '{{' and end with '}}'. Keys MUST match FieldNames.\n\nDataset: {ns}\nFieldNames: {fnames}\nFields: [{items}]\n\nOutput JSON:",
-                        ns = namespace,
+                        ns = dataset_id,
                         fnames = field_names_json,
                         items = items2
                     );
@@ -352,9 +352,9 @@ pub async fn enrich_namespace_with_llm(
                     .and_then(|r| r.ok())
                     .unwrap_or_default();
                     debug!(
-                        "{} LLM Enrich: synonyms batch raw ns='{}' fields=[{}]: {}",
+                        "{} LLM Enrich: synonyms batch raw dataset_id='{}' fields=[{}]: {}",
                         chrono::Utc::now().to_rfc3339(),
-                        namespace,
+                        dataset_id,
                         fields.join(","),
                         syn_text
                     );
@@ -389,7 +389,7 @@ pub async fn enrich_namespace_with_llm(
                     let items3 = fields.iter().map(|n| format!("{{name: {}}}", n)).collect::<Vec<String>>().join(", ");
                     let prompt_pu = format!(
                         "Return STRICT JSON only: {{\"piiUnitsByField\": {{ \"<field_name>\": {{\"pii\": \"none|low|medium|high\", \"units\": \"<units or format>\"}} }} }}.\nRules: units may be null if not applicable; JSON only; start with '{{' and end with '}}'. Keys MUST match FieldNames.\n\nDataset: {ns}\nFieldNames: {fnames}\nFields: [{items}]\n\nOutput JSON:",
-                        ns = namespace,
+                        ns = dataset_id,
                         fnames = field_names_json,
                         items = items3
                     );
@@ -403,9 +403,9 @@ pub async fn enrich_namespace_with_llm(
                     .and_then(|r| r.ok())
                     .unwrap_or_default();
                     debug!(
-                        "{} LLM Enrich: pii/units batch raw ns='{}' fields=[{}]: {}",
+                        "{} LLM Enrich: pii/units batch raw dataset_id='{}' fields=[{}]: {}",
                         chrono::Utc::now().to_rfc3339(),
-                        namespace,
+                        dataset_id,
                         fields.join(","),
                         pu_text
                     );
@@ -480,31 +480,31 @@ pub async fn enrich_namespace_with_llm(
     }
 }
 
-/// Enrich all namespaces with LLM at the end of discover.
+/// Enrich all datasets with LLM at the end of discovery.
 pub async fn run_llm_enrichment_all(
     storage: Arc<dyn crate::adapters::storage::StorageAdapter>,
     keyspace: Arc<dyn crate::providers::Keyspace>,
     llm: Arc<dyn crate::llm::LargeLanguageModel>,
     scope: &crate::providers::RequestScope,
-    namespaces: &HashMap<String, crate::discover::Metadata>,
+    dataset_ids: &HashMap<String, crate::discover::Metadata>,
     llm_timeout_secs: u64,
     llm_batch_size: usize,
 ) {
-    // Engine-agnostic: iterate provided namespace keys (no sqlrt/registry coupling).
-    for ns in namespaces.keys() {
-        enrich_namespace_with_llm(
+    // Engine-agnostic: iterate provided dataset ids (no sqlrt/registry coupling).
+    for ds in dataset_ids.keys() {
+        enrich_dataset_with_llm(
             storage.clone(),
             keyspace.clone(),
             llm.clone(),
             scope,
-            ns,
+            ds,
             llm_timeout_secs,
             llm_batch_size,
         ).await;
     }
 }
 
-// NOTE: legacy wrapper removed. Call `run_llm_enrichment_all(storage, keyspace, llm, scope, namespaces)` instead.
+// NOTE: legacy wrapper removed. Call `run_llm_enrichment_all(storage, keyspace, llm, scope, dataset_ids)` instead.
 
 // Helper to salvage first JSON object from a text block
 pub fn super_extract_json_value(text: &str) -> Result<serde_json::Value, serde_json::Error> {

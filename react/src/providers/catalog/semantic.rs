@@ -3,7 +3,7 @@ use std::sync::Arc;
 use super::types::SemanticModel;
 
 /// Parity port of legacy `src/catalog/semantic.rs`:
-/// infer semantic model for a namespace and persist it to scoped storage.
+/// infer semantic model for a dataset_id and persist it to scoped storage.
 pub async fn infer_and_write_semantic(
     storage: Arc<dyn crate::adapters::storage::StorageAdapter>,
     keyspace: Arc<dyn crate::providers::Keyspace>,

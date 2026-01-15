@@ -222,7 +222,7 @@ pub async fn sync_pipeline(
                     }
                 }
             }
-            // Top-level project files (no namespace folder)
+            // Top-level project files (no dataset_id folder)
             let top_files = [("dbt_project.yml", "dbt_project"), ("packages.yml", "dbt_packages")];
             for (fname, tname) in top_files.iter() {
                 let key = format!("{}/{}", base, fname);
@@ -268,7 +268,7 @@ pub async fn sync_pipeline(
 }
 
 fn extract_artifact_name(key: &str) -> String {
-    // expect .../{namespace}/{name}.ext
+    // expect .../{dataset_id}/{name}.ext
     if let Some(pos) = key.rfind('/') {
         let name_ext = &key[pos + 1..];
         name_ext.trim_end_matches(".sql").trim_end_matches(".yaml").to_string()

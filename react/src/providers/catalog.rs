@@ -18,24 +18,24 @@ pub trait CatalogProvider: Send + Sync {
     async fn read_catalog(
         &self,
         scope: &crate::providers::RequestScope,
-        namespace: &str,
+        dataset_id: &str,
     ) -> Result<Option<DataCatalog>, String>;
     async fn write_catalog(
         &self,
         scope: &crate::providers::RequestScope,
-        namespace: &str,
+        dataset_id: &str,
         catalog: &DataCatalog,
     ) -> Result<(), String>;
 
     async fn infer_semantic(
         &self,
         scope: &crate::providers::RequestScope,
-        namespace: &str,
+        dataset_id: &str,
     ) -> Result<SemanticModel, String>;
     async fn write_semantic(
         &self,
         scope: &crate::providers::RequestScope,
-        namespace: &str,
+        dataset_id: &str,
         semantic: &SemanticModel,
     ) -> Result<(), String>;
 
@@ -43,14 +43,14 @@ pub trait CatalogProvider: Send + Sync {
         &self,
         scope: &crate::providers::RequestScope,
         query: &dyn crate::providers::DatasetCatalogProvider,
-        namespaces: &HashMap<String, crate::discover::Metadata>,
+        dataset_ids: &HashMap<String, crate::discover::Metadata>,
         progress: Option<&crate::helpers::progress::ProgressUi>,
     ) -> Result<(), String>;
 
     async fn run_llm_enrichment_all(
         &self,
         scope: &crate::providers::RequestScope,
-        namespaces: &HashMap<String, crate::discover::Metadata>,
+        dataset_ids: &HashMap<String, crate::discover::Metadata>,
     ) -> Result<(), String>;
 }
 
@@ -84,9 +84,9 @@ impl CatalogProvider for SkipprCatalogProvider {
     async fn read_catalog(
         &self,
         scope: &crate::providers::RequestScope,
-        namespace: &str,
+        dataset_id: &str,
     ) -> Result<Option<DataCatalog>, String> {
-        let key = self.keyspace.catalog_key(scope, namespace);
+        let key = self.keyspace.catalog_key(scope, dataset_id);
         match self.storage.get_json(&key).await {
             Ok(val) => Ok(Some(serde_json::from_value::<DataCatalog>(val).map_err(|e| e.to_string())?)),
             Err(_) => Ok(None),
@@ -96,11 +96,11 @@ impl CatalogProvider for SkipprCatalogProvider {
     async fn write_catalog(
         &self,
         scope: &crate::providers::RequestScope,
-        namespace: &str,
+        dataset_id: &str,
         catalog: &DataCatalog,
     ) -> Result<(), String> {
         // Match legacy behavior: YAML -> serde_yaml::Value -> JSON written.
-        let key = self.keyspace.catalog_key(scope, namespace);
+        let key = self.keyspace.catalog_key(scope, dataset_id);
         let yaml = serde_yaml::to_string(catalog).map_err(|e| e.to_string())?;
         let value = serde_yaml::from_str::<serde_yaml::Value>(&yaml).unwrap_or(serde_yaml::Value::Null);
         let json_equiv = serde_json::to_value(value).unwrap_or(serde_json::Value::Null);
@@ -111,28 +111,28 @@ impl CatalogProvider for SkipprCatalogProvider {
     async fn infer_semantic(
         &self,
         scope: &crate::providers::RequestScope,
-        namespace: &str,
+        dataset_id: &str,
     ) -> Result<SemanticModel, String> {
-        Ok(infer::infer_semantic_model_async(self.storage.clone(), self.keyspace.clone(), scope, namespace).await)
+        Ok(infer::infer_semantic_model_async(self.storage.clone(), self.keyspace.clone(), scope, dataset_id).await)
     }
 
     async fn write_semantic(
         &self,
         scope: &crate::providers::RequestScope,
-        namespace: &str,
+        dataset_id: &str,
         semantic: &SemanticModel,
     ) -> Result<(), String> {
-        semantic::write_semantic(self.storage.clone(), self.keyspace.clone(), scope, namespace, semantic).await
+        semantic::write_semantic(self.storage.clone(), self.keyspace.clone(), scope, dataset_id, semantic).await
     }
 
     async fn build_all_with_progress(
         &self,
         scope: &crate::providers::RequestScope,
         query: &dyn crate::providers::DatasetCatalogProvider,
-        namespaces: &HashMap<String, crate::discover::Metadata>,
+        dataset_ids: &HashMap<String, crate::discover::Metadata>,
         progress: Option<&crate::helpers::progress::ProgressUi>,
     ) -> Result<(), String> {
-        let items = orchestrator::Orchestrator::build_all_with_progress(query, namespaces, progress).await?;
+        let items = orchestrator::Orchestrator::build_all_with_progress(query, dataset_ids, progress).await?;
         for (dataset_id, cat) in items {
             self.write_catalog(scope, &dataset_id, &cat).await?;
         }
@@ -142,14 +142,14 @@ impl CatalogProvider for SkipprCatalogProvider {
     async fn run_llm_enrichment_all(
         &self,
         scope: &crate::providers::RequestScope,
-        namespaces: &HashMap<String, crate::discover::Metadata>,
+        dataset_ids: &HashMap<String, crate::discover::Metadata>,
     ) -> Result<(), String> {
         enrich::run_llm_enrichment_all(
             self.storage.clone(),
             self.keyspace.clone(),
             self.llm.clone(),
             scope,
-            namespaces,
+            dataset_ids,
             self.llm_timeout_secs,
             self.llm_batch_size,
         ).await;

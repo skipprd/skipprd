@@ -227,7 +227,7 @@ impl Agent {
                 {
                     return Ok(outcome);
                 }
-                continue;
+                    continue;
             }
             let action_name = parsed.get("action").and_then(|x| x.as_str()).unwrap_or_default().to_string();
             // Skip empty/invalid action names to avoid logging noisy empty steps
@@ -306,7 +306,7 @@ impl Agent {
         ctx.policy.fallback(tools, ctx, &mut transcript, store_opt, &thread_id).await
     }
 
-    // NOTE: `run` was an older single-shot API and duplicated logic. Prefer `run_until_block`.
+    // NOTE: legacy `run` removed (it duplicated logic). Prefer `run_until_block`.
 }
 
 
