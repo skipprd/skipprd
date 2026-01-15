@@ -22,7 +22,7 @@ pub struct NewRequest {
     /// User's question to start a new thread
     #[serde(rename = "question")]
     pub question: String,
-    /// Suite id to use (e.g. skippr_ask | skippr_model | kb)
+    /// Suite id to use (e.g. data_engineer | kb)
     #[serde(rename = "suiteId")]
     pub suite_id: String,
     /// Agent/mode to use (ask | cleanse | model | kb). Required.

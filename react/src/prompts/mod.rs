@@ -1,4 +1,4 @@
-pub mod ask_legacy;
-pub mod model_legacy;
+pub mod ask;
+pub mod model;
 pub mod reference;
 

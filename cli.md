@@ -11,7 +11,7 @@ cargo run -p react -- serve --port 8787 --log
 ```
 
 Suites (default registry):
-- `skippr_ask` / `skippr_model`: analytics + DBT-oriented suites
+- `data_engineer`: unified analytics + DBT-oriented suite (`ask` | `model` | `cleanse`)
 - `kb`: minimal local knowledge-base suite (local file ingest + vector Q&A)
 
 

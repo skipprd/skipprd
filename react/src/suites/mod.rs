@@ -22,8 +22,7 @@ pub mod preflight;
 
 pub mod shared;
 
-pub mod skippr_ask_suite;
-pub mod skippr_model_suite;
+pub mod data_engineer_suite;
 pub mod kb_suite;
 pub mod skippr_shared;
 

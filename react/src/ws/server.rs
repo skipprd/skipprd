@@ -2,7 +2,7 @@ use futures_util::{StreamExt, SinkExt};
 use serde_json::Value;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
-use crate::agent::{Agent, AgentCtx, RunOutcome};
+// Agent loop is invoked through suites; WS server doesn't call Agent directly.
 // Removed unused tool imports; flows handle registry/tool selection
 use uuid::Uuid;
 use crate::ws::api_gen as api;
@@ -177,7 +177,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 				"type": "suites",
 				"server_time": now_iso(),
 				"seq": state.next_seq(),
-				"defaultSuiteId": "skippr_ask",
+				"defaultSuiteId": "data_engineer",
 				"suites": suites,
 			});
 			let s = outv.to_string();
@@ -339,7 +339,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			let store = state.thread_store();
 			let (current_suite, current_agent) = match store.get(&thread_id).await {
 				Some(log) => derive_thread_context(&log),
-				None => ("skippr_ask".to_string(), "ask".to_string()),
+				None => ("data_engineer".to_string(), "ask".to_string()),
 			};
 			// Track suite per-thread (explicit client selection) and persist switch if changed
 			if current_suite != requested_suite {
@@ -752,7 +752,7 @@ impl ConnState {
 
 fn derive_thread_context(log: &ThreadLog) -> (String, String) {
 	// Defaults for back-compat threads with no recorded context.
-	let mut suite_id = "skippr_ask".to_string();
+	let mut suite_id = "data_engineer".to_string();
 	let mut agent_type = "ask".to_string();
 	for step in log.steps.iter() {
 		if step.action == "switch_suite" {
@@ -783,17 +783,11 @@ fn build_suites_catalog(reg: &SuiteRegistry) -> Vec<serde_json::Value> {
 	let mut out: Vec<serde_json::Value> = Vec::new();
 	for id in reg.list_ids() {
 		match id {
-			"skippr_ask" => out.push(serde_json::json!({
-				"suiteId": "skippr_ask",
-				"label": "Ask",
-				"allowedAgentTypes": ["ask"],
+			"data_engineer" => out.push(serde_json::json!({
+				"suiteId": "data_engineer",
+				"label": "Data Engineer",
+				"allowedAgentTypes": ["ask", "model", "cleanse"],
 				"defaultAgentType": "ask",
-			})),
-			"skippr_model" => out.push(serde_json::json!({
-				"suiteId": "skippr_model",
-				"label": "Model",
-				"allowedAgentTypes": ["cleanse", "model"],
-				"defaultAgentType": "model",
 			})),
 			"kb" => out.push(serde_json::json!({
 				"suiteId": "kb",
@@ -897,7 +891,7 @@ async fn process_open(v: &Value, state: &mut ConnState, write: &mut (impl SinkEx
 	let store = state.thread_store();
 	let (current_suite, current_agent) = match store.get(&thread_id).await {
 		Some(log) => derive_thread_context(&log),
-		None => ("skippr_ask".to_string(), "ask".to_string()),
+		None => ("data_engineer".to_string(), "ask".to_string()),
 	};
 	if current_suite != requested_suite {
 		let _ = store.append_step(&thread_id, crate::session::ThreadStep {

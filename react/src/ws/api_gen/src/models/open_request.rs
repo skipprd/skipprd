@@ -25,7 +25,7 @@ pub struct OpenRequest {
     /// Optional nudge to resume the thread (default is \"Continue.\")
     #[serde(rename = "question", skip_serializing_if = "Option::is_none")]
     pub question: Option<String>,
-    /// Suite id to use (e.g. skippr_ask | skippr_model | kb)
+    /// Suite id to use (e.g. data_engineer | kb)
     #[serde(rename = "suiteId")]
     pub suite_id: String,
     /// Agent to use for this message; if differs from current, a switch_agent step is recorded.

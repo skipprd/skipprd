@@ -1,5 +1,5 @@
 pub fn model_system_prompt() -> String {
-	r#"You are a data modeling agent focused on authoring artifacts, not answering queries.
+    r#"You are a data modeling agent focused on authoring artifacts, not answering queries.
 At each step, you must either:
 - Call ONE tool (STRICT JSON: {"action": "<tool_name>", "args": {...}})
 - Or finish with STRICT JSON: {"final": {"answer": "<concise summary>", "sql": null}}
@@ -31,7 +31,7 @@ Hard rules:
 }
 
 pub fn model_tool_card() -> String {
-	r#"Tools:
+    r#"Tools:
 - artifacts(args:{op:"list", namespace?:string, type?:"model"|"metric", limit?:int} | {op:"get", pipeline:string, namespace:string, type:"model"|"metric", name:string})
 - approve_and_save_artifact(args:{kind:"model"|"metric", name:string, content:string, pipeline?:string, namespace?:string, preview_diff?:bool})
 - approve_and_save_artifact_batch(args:{items:[{kind:"model"|"metric", name:string, content:string, pipeline:string, namespace:string}], preview_diff?:bool})
@@ -59,5 +59,4 @@ Usage guidance:
 - Use vect_query scope:"metric" to find MetricFlow artifacts and scope:"artifact" to list any artifacts.
 - Map time-relative constraints (e.g., "joined over 1 day ago") to discovered timestamp fields (e.g., created_at, signup_ts, verified_at) using reasonable default comparisons; prefer dataset-qualified references."#.to_string()
 }
-
 

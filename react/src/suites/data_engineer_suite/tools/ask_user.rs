@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use serde_json::Value;
+
 use crate::agent::AgentCtx;
 use crate::tools::Tool;
 
@@ -10,11 +11,16 @@ pub struct AskUserTool;
 
 #[async_trait]
 impl Tool for AskUserTool {
-    fn name(&self) -> &'static str { "ask_user" }
+    fn name(&self) -> &'static str {
+        "ask_user"
+    }
+
     async fn call(&self, args: Value, _ctx: &AgentCtx) -> Result<Value, String> {
-        let prompt = args.get("prompt").and_then(|x| x.as_str()).unwrap_or("Please provide additional context:");
+        let prompt = args
+            .get("prompt")
+            .and_then(|x| x.as_str())
+            .unwrap_or("Please provide additional context:");
         Ok(serde_json::json!({"ok": true, "prompt": prompt}))
     }
 }
-
 

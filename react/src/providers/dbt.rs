@@ -283,7 +283,7 @@ impl DbtProvider for SkipprDbtProvider {
         scope: &RequestScope,
         args: &DbtValidateArgs,
     ) -> Result<DbtValidateResult, String> {
-        let project_name = if args.project_name.is_empty() { "skippr_model".to_string() } else { args.project_name.clone() };
+        let project_name = if args.project_name.is_empty() { "data_engineer".to_string() } else { args.project_name.clone() };
         let s3_prefix_base = {
             let pref = self.keyspace.dbt_prefix(scope);
             if pref.ends_with('/') { pref } else { format!("{}/", pref) }
