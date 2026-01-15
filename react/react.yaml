@@ -21,9 +21,9 @@ llm:
   base_url: https://api.openai.com
   chat_model: gpt-5.1
   embed_model: text-embedding-3-small
-  context_length: 4096
-  http_timeout_secs: 30
-  max_tokens: 1024
+  context_length: 8192
+  http_timeout_secs: 120
+  max_tokens: 8192
   temperature: 0.2
   top_p: 1.0
 
@@ -43,7 +43,12 @@ providers:
 
   dbt:
     enabled: true
-    target: datafusion
+    # Use "docker" to avoid host-python/dbt dependency issues.
+    runner: docker
+    # Pinned official adapter image (example). Choose a version compatible with your DBT project.
+    docker_image: ghcr.io/dbt-labs/dbt-athena:1.8.3
+    docker_mount_aws_dir: true
+    target: athena
 
   vector:
     enabled: true

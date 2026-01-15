@@ -6,5 +6,6 @@
 //! This module only retains DBT example syncing/search helpers.
 
 pub mod examples;
+pub mod profile;
 
 

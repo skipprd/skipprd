@@ -1,0 +1,27 @@
+server:
+  port: 8089
+
+storage:
+  # Required even when using in-memory adapters in tests.
+  bucket: "example-bucket"
+
+scope:
+  tenant: "example"
+  workspace: "default"
+  project_id: "data_engineer"
+
+llm:
+  # "null" starts the server without an external LLM (useful for smoke tests)
+  provider: "null"
+
+providers:
+  # Disable all providers for a pure server boot smoke test.
+  athena:
+    enabled: false
+  catalog:
+    enabled: false
+  dbt:
+    enabled: false
+  vector:
+    enabled: false
+

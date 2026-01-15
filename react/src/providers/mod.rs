@@ -14,6 +14,7 @@ pub mod query;
 pub mod scope;
 pub mod secrets;
 pub mod state;
+pub mod type_parse;
 pub mod vector;
 
 pub use catalog::CatalogProvider;
@@ -25,6 +26,7 @@ pub use query::{QueryProvider, QueryResult};
 pub use scope::RequestScope;
 pub use secrets::{EnvSecretsProvider, SecretsProvider};
 pub use state::StateStore;
+pub use type_parse::FlattenedField;
 pub use vector::{LanceVectorStore, VectorStore};
 
 /// LLM provider is currently identical to the existing `skippr::llm::LargeLanguageModel`.

@@ -34,7 +34,10 @@ impl Orchestrator {
             };
             let mut type_by_field: std::collections::HashMap<String, String> = std::collections::HashMap::new();
             for (name, ty) in schema_cols.iter() {
-                type_by_field.insert(name.clone(), ty.clone());
+                // Expand nested types into leaf dot-paths so catalog fields can carry types.
+                for (path, leaf_ty) in crate::providers::type_parse::flatten_type_paths(name, ty).into_iter() {
+                    type_by_field.insert(path, leaf_ty);
+                }
             }
 
             // Prefer provider stats. If unavailable, fall back to schema-only catalog.
@@ -55,9 +58,11 @@ impl Orchestrator {
                 } else {
                     let mut ns = crate::discover::stats::DatasetFieldStats::new(&ds_id);
                     for (name, _ty) in schema_cols.iter() {
-                        ns.fields
-                            .entry(name.clone())
-                            .or_insert_with(crate::discover::stats::FieldStats::default);
+                        for (path, _leaf_ty) in crate::providers::type_parse::flatten_type_paths(name, _ty).into_iter() {
+                            ns.fields
+                                .entry(path)
+                                .or_insert_with(crate::discover::stats::FieldStats::default);
+                        }
                     }
                     Some(ns)
                 }

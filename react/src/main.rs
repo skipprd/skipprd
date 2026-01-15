@@ -104,6 +104,7 @@ async fn main() {
             let llm = llm::create_llm(&llm::config_from_resolved(&cfg));
 
             let mut suite_ctx = SuiteCtx::new(storage, secrets, llm, cfg.scope.clone(), keyspace.clone());
+            suite_ctx.resolved_config = Some(Arc::new(cfg.clone()));
 
             // Query + dataset discovery (Athena/Glue)
             if cfg.providers.athena.enabled {
@@ -135,6 +136,13 @@ async fn main() {
                 suite_ctx.dbt = Some(Arc::new(DbtProjectProvider::new(
                     suite_ctx.storage.clone(),
                     suite_ctx.keyspace.clone(),
+                    react::providers::dbt::DbtRunnerConfig {
+                        mode: cfg.providers.dbt.runner.clone(),
+                        docker_image: cfg.providers.dbt.docker_image.clone(),
+                        docker_platform: cfg.providers.dbt.docker_platform.clone(),
+                        docker_network: cfg.providers.dbt.docker_network.clone(),
+                        docker_mount_aws_dir: cfg.providers.dbt.docker_mount_aws_dir,
+                    },
                 )));
             }
             if cfg.providers.vector.enabled {

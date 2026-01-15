@@ -7,6 +7,21 @@ use tracing::info;
 
 pub struct ApproveAndSaveArtifactBatchTool;
 
+fn encode_key_component(s: &str) -> String {
+    // Match Keyspace / provider encoding: keep a conservative safe set; percent-encode the rest.
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        let c = *b as char;
+        let safe = c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.';
+        if safe {
+            out.push(c);
+        } else {
+            out.push_str(&format!("%{:02X}", b));
+        }
+    }
+    out
+}
+
 fn compute_unified_diff(old: &str, new: &str) -> String {
     // Simple line-wise diff
     let old_lines: Vec<&str> = old.split('\n').collect();
@@ -71,12 +86,20 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
                 .trim()
                 .to_string();
             let content = it.get("content").and_then(|x| x.as_str()).unwrap_or("").to_string();
-            let pipeline = it.get("pipeline").and_then(|x| x.as_str()).unwrap_or("").to_string();
-            let namespace = it.get("namespace").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            // Refactor: replace legacy {pipeline,namespace} with {dataset_id} for grouping,
+            // and allow saving to models/<dataset_id>/<name>.sql and metrics/<dataset_id>/<name>.yaml.
+            // Back-compat: accept legacy `namespace` as an alias for `dataset_id`.
+            let dataset_id = it
+                .get("dataset_id")
+                .or_else(|| it.get("namespace"))
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
             let explicit_path = it.get("path").and_then(|x| x.as_str()).map(|s| s.to_string());
-            if content.trim().is_empty() || pipeline.is_empty() {
+            if content.trim().is_empty() {
                 return Err(
-                    "each item requires {content,pipeline} and either {kind,name,namespace} or a {path}".to_string(),
+                    "each item requires {content} and either a {path} (kind='file') or {dataset_id,name} (kind='model'|'metric')".to_string(),
                 );
             }
             let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
@@ -99,27 +122,35 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
                 (current, ver, ct)
             } else if kind == "model" {
                 // Special-case: dbt schema.yml
-                if namespace == "models" && name == "schema" && content.trim_start().to_lowercase().starts_with("version:")
+                if dataset_id == "models" && name == "schema" && content.trim_start().to_lowercase().starts_with("version:")
                 {
                     let current = format!("{}/models/schema.yml", base);
                     (current, String::new(), "text/yaml")
                 } else {
-                    let current = format!("{}/models/{}/{}.sql", base, namespace, name);
+                    if dataset_id.is_empty() || name.is_empty() {
+                        return Err("model items require {dataset_id,name} (or use kind='file' with a path)".to_string());
+                    }
+                    let dir = encode_key_component(&dataset_id);
+                    let current = format!("{}/models/{}/{}.sql", base, dir, name);
                     let ver = format!(
                         "{}/models/{}/_versions/{}/{}.sql",
                         base,
-                        namespace,
+                        dir,
                         name,
                         chrono::Utc::now().format("%Y%m%d_%H%M%S")
                     );
                     (current, ver, "text/sql")
                 }
             } else if kind == "metric" {
-                let current = format!("{}/metrics/{}/{}.yaml", base, namespace, name);
+                if dataset_id.is_empty() || name.is_empty() {
+                    return Err("metric items require {dataset_id,name} (or use kind='file' with a path)".to_string());
+                }
+                let dir = encode_key_component(&dataset_id);
+                let current = format!("{}/metrics/{}/{}.yaml", base, dir, name);
                 let ver = format!(
                     "{}/metrics/{}/_versions/{}/{}.yaml",
                     base,
-                    namespace,
+                    dir,
                     name,
                     chrono::Utc::now().format("%Y%m%d_%H%M%S")
                 );
@@ -138,8 +169,7 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
                 let (lines_added, lines_removed) = diff_stats(existing.as_deref().unwrap_or(""), &content);
                 out_diffs.push(serde_json::json!({
                     "name": name,
-                    "pipeline": pipeline,
-                    "namespace": namespace,
+                    "dataset_id": dataset_id,
                     "kind": kind,
                     "key": current_key,
                     "diff": diff,

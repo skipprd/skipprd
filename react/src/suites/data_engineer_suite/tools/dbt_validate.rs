@@ -3,6 +3,8 @@ use serde_json::Value;
 
 use crate::agent::AgentCtx;
 use crate::tools::Tool;
+use std::fs;
+use std::path::PathBuf;
 
 pub struct DbtValidateTool;
 
@@ -21,7 +23,7 @@ impl Tool for DbtValidateTool {
             .dbt
             .as_ref()
             .ok_or_else(|| "dbt provider missing".to_string())?;
-        let profiles_dir = args
+        let mut profiles_dir = args
             .get("profiles_dir")
             .and_then(|x| x.as_str())
             .map(|s| s.to_string())
@@ -34,6 +36,22 @@ impl Tool for DbtValidateTool {
             .unwrap_or_else(|| "datafusion".to_string());
         let run = args.get("run").and_then(|x| x.as_bool()).unwrap_or(false);
         let build = args.get("build").and_then(|x| x.as_bool()).unwrap_or(false);
+
+        // If profiles_dir not provided, try generating one from resolved config for the active warehouse provider.
+        // Keep the tempdir alive for the duration of this call.
+        let mut _tmp: Option<tempfile::TempDir> = None;
+        if profiles_dir.is_none() {
+            if let Some(cfg) = ctx.resolved_config.as_ref() {
+                if let Ok(gen) = crate::dbt::profile::generate_profiles_yml(cfg.as_ref()) {
+                    let td = tempfile::tempdir().map_err(|e| e.to_string())?;
+                    let mut p = PathBuf::from(td.path());
+                    p.push("profiles.yml");
+                    fs::write(&p, gen.profiles_yml.as_bytes()).map_err(|e| e.to_string())?;
+                    profiles_dir = Some(td.path().to_string_lossy().to_string());
+                    _tmp = Some(td);
+                }
+            }
+        }
 
         let res = dbt
             .validate_project(

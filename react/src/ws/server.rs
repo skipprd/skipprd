@@ -11,6 +11,7 @@ use chrono::Utc;
 use crate::models as m;
 use crate::session::ThreadStore;
 use crate::session::ThreadLog;
+use crate::session::ThreadStep;
 use crate::suites::registry::SuiteRegistry;
 use crate::suites::SuiteCtx;
 use std::sync::Arc;
@@ -247,7 +248,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			for f in frames {
 				match f {
 					AgentFrame::Final { answer, sql } => {
-						let sql = if agent == "model" { None } else { sql };
+						let sql = if agent == "model" || agent == "cleanse" { None } else { sql };
 						// finalize title once using concise summary
 						{
 							let store = state.thread_store();
@@ -386,7 +387,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			for f in frames {
 				match f {
 					AgentFrame::Final { answer, sql } => {
-						let sql = if agent == "model" { None } else { sql };
+						let sql = if agent == "model" || agent == "cleanse" { None } else { sql };
 						// optional token streaming (simple chunking)
 						for t in chunk_text(&answer, 24) {
 							let mut tk = api::TokenResponse::new(1, m::token_response::Type::Token, now_iso(), state.next_seq(), thread_id.clone(), t);
@@ -652,6 +653,62 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 
 fn now_iso() -> String {
 	Utc::now().to_rfc3339()
+}
+
+fn env_truthy(key: &str) -> bool {
+	std::env::var(key)
+		.ok()
+		.map(|v| {
+			let vv = v.trim().to_lowercase();
+			vv == "1" || vv == "true" || vv == "yes"
+		})
+		.unwrap_or(false)
+}
+
+fn truncate_str(s: &str, max: usize) -> String {
+	if s.len() <= max { return s.to_string(); }
+	match s.char_indices().take_while(|(i, _)| *i < max).last() {
+		Some((i, _)) => format!("{}…", &s[..i]),
+		None => s.chars().take(max).collect(),
+	}
+}
+
+fn summarize_step(step: &ThreadStep) -> String {
+	let args = truncate_str(&step.args.to_string(), 160);
+	let obs = truncate_str(&step.observation.to_string(), 160);
+	let agent = step.agent.clone().unwrap_or_else(|| "unknown".to_string());
+	format!("ts={} agent={} action={} args={} obs={}", step.ts, agent, step.action, args, obs)
+}
+
+async fn log_thread_steps_if_enabled(store: &ThreadStore, thread_id: &str, reason: &str) {
+	if !env_truthy("REACT_LOG_THREAD_STEPS") {
+		return;
+	}
+	match store.get(thread_id).await {
+		Some(log) => {
+			tracing::info!(
+				"THREAD_LOG {} thread_id={} steps={} title={:?} finalized={}",
+				reason,
+				thread_id,
+				log.steps.len(),
+				log.title,
+				log.title_finalized
+			);
+			// Print last N steps (most useful when debugging long loops).
+			let n = 40usize;
+			let start = log.steps.len().saturating_sub(n);
+			for (i, step) in log.steps.iter().enumerate().skip(start) {
+				tracing::info!("THREAD_STEP {} #{} {}", thread_id, i + 1, summarize_step(step));
+			}
+			// Optional full JSON dump (very verbose).
+			if env_truthy("REACT_LOG_THREAD_JSON") {
+				if let Ok(pretty) = serde_json::to_string_pretty(&log) {
+					tracing::info!("THREAD_JSON {} {}", thread_id, pretty);
+				}
+			}
+		}
+		None => tracing::info!("THREAD_LOG {} thread_id={} (not found)", reason, thread_id),
+	}
 }
 
 fn truncate_title(s: &str, max_chars: usize) -> String {
@@ -1139,89 +1196,170 @@ async fn run_agent_with_processing_suite(
 	write: &mut (impl SinkExt<Message> + Unpin),
 	_initial_stage: m::processing_response::Stage,
 ) -> Result<(), String> {
-	let frames = run_agent_and_frames(thread_id, question, suite_id, agent, &state.reg, &state.suite_ctx).await?;
-	for f in frames {
-		match f {
-			AgentFrame::Final { answer, sql } => {
-				let sql = if agent == "model" { None } else { sql };
-				for t in chunk_text(&answer, 24) {
-					let mut tk = api::TokenResponse::new(1, m::token_response::Type::Token, now_iso(), state.next_seq(), thread_id.to_string(), t);
-					tk.for_cid = Some(cid.to_string());
-					let s = serde_json::to_string(&tk).unwrap();
-					state.buffer_last(&s);
-					tracing::info!("WS -> {}", s);
-					let _ = write.send(Message::Text(s)).await;
-				}
-				let tseq = state.next_thread_seq(thread_id);
-				let resp = api::FinalResponse::new(
-					1,
-					m::final_response::Type::Final,
-					now_iso(),
-					state.next_seq(),
-					thread_id.to_string(),
-					tseq,
-					api::FinalResponseResult { sql: sql.clone(), answer: answer.clone(), data: None, chart: None },
-				);
-				let s = serde_json::to_string(&resp).unwrap();
-				state.buffer_last(&s);
-				tracing::info!("WS -> {}", s);
-				let _ = write.send(Message::Text(s)).await;
+	// Optional trace streaming: allow the agent loop to emit short debug lines and forward them
+	// to the client as `processing` frames (extra field `message`).
+	let trace_enabled = std::env::var("REACT_TRACE")
+		.ok()
+		.map(|v| {
+			let vv = v.trim().to_lowercase();
+			vv == "1" || vv == "true" || vv == "yes"
+		})
+		.unwrap_or(false);
 
-				// Append final_response step with the exact payload sent
-				{
-					let store = state.thread_store();
-					let _ = store
-						.append_step(
-							thread_id,
-							crate::session::ThreadStep {
-								action: "final_response".to_string(),
-								args: serde_json::json!({"answer": answer, "sql": sql, "data": null, "chart": null}),
-								observation: serde_json::json!({"ok": true}),
-								ts: chrono::Utc::now().to_rfc3339(),
-								agent: Some(agent.to_string()),
-							},
-						)
-						.await;
+	let (trace_tx, mut trace_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+	let mut sctx2 = state.suite_ctx.clone();
+	if trace_enabled {
+		sctx2.trace_tx = Some(trace_tx);
+	}
+
+	let suite = state
+		.reg
+		.get(suite_id)
+		.ok_or_else(|| format!("invalid suite_id '{}'", suite_id))?
+		.clone();
+	let thread_id_s = thread_id.to_string();
+	let q_s = question.to_string();
+	let agent_s = agent.to_string();
+
+	let agent_task = tokio::spawn(async move { suite.handle_open(&thread_id_s, &q_s, &agent_s, &sctx2).await });
+	tokio::pin!(agent_task);
+
+	// While the suite/agent is running, forward trace lines (if enabled).
+	loop {
+		tokio::select! {
+			Some(line) = trace_rx.recv() => {
+				if !trace_enabled { continue; }
+				let msg = if line.len() > 260 { format!("{}…", &line[..260]) } else { line };
+				let outv = serde_json::json!({
+					"v": 1,
+					"type": "processing",
+					"server_time": now_iso(),
+					"seq": state.next_seq(),
+					"thread_id": thread_id,
+					"for_cid": cid,
+					"stage": "processing",
+					"message": msg,
+				});
+				let s = outv.to_string();
+				state.buffer_last(&s);
+				tracing::info!("WS -> {}", s);
+				let _ = write.send(Message::Text(s)).await;
+			}
+			res = &mut agent_task => {
+				let frames = match res {
+					Ok(Ok(v)) => v,
+					Ok(Err(e)) => return Err(e),
+					Err(e) => return Err(format!("agent task failed: {}", e)),
+				};
+				let convert = |ff: crate::flow_frame::FlowFrame| -> AgentFrame {
+					match ff {
+						crate::flow_frame::FlowFrame::Final { answer, sql } => AgentFrame::Final { answer, sql },
+						crate::flow_frame::FlowFrame::AwaitUser { prompt } => AgentFrame::AwaitUser { prompt },
+						crate::flow_frame::FlowFrame::AwaitApproval { prompt } => AgentFrame::AwaitApproval { prompt },
+					}
+				};
+				let frames = frames.into_iter().map(convert).collect::<Vec<_>>();
+				// Continue with normal WS frame emission below.
+				let frames = frames;
+
+				for f in frames {
+					match f {
+						AgentFrame::Final { answer, sql } => {
+							let sql = if agent == "model" || agent == "cleanse" { None } else { sql };
+							for t in chunk_text(&answer, 24) {
+								let mut tk = api::TokenResponse::new(1, m::token_response::Type::Token, now_iso(), state.next_seq(), thread_id.to_string(), t);
+								tk.for_cid = Some(cid.to_string());
+								let s = serde_json::to_string(&tk).unwrap();
+								state.buffer_last(&s);
+								tracing::info!("WS -> {}", s);
+								let _ = write.send(Message::Text(s)).await;
+							}
+							let tseq = state.next_thread_seq(thread_id);
+							let resp = api::FinalResponse::new(
+								1,
+								m::final_response::Type::Final,
+								now_iso(),
+								state.next_seq(),
+								thread_id.to_string(),
+								tseq,
+								api::FinalResponseResult { sql: sql.clone(), answer: answer.clone(), data: None, chart: None },
+							);
+							let s = serde_json::to_string(&resp).unwrap();
+							state.buffer_last(&s);
+							tracing::info!("WS -> {}", s);
+							let _ = write.send(Message::Text(s)).await;
+
+							// Append final_response step with the exact payload sent
+							{
+								let store = state.thread_store();
+								let _ = store
+									.append_step(
+										thread_id,
+										crate::session::ThreadStep {
+											action: "final_response".to_string(),
+											args: serde_json::json!({"answer": answer, "sql": sql, "data": null, "chart": null}),
+											observation: serde_json::json!({"ok": true}),
+											ts: chrono::Utc::now().to_rfc3339(),
+											agent: Some(agent.to_string()),
+										},
+									)
+									.await;
+							}
+							// Debug: print persisted thread steps
+							{
+								let store = state.thread_store();
+								log_thread_steps_if_enabled(&store, thread_id, "final").await;
+							}
+							return Ok(());
+						}
+						AgentFrame::AwaitUser { prompt } => {
+							let tseq = state.next_thread_seq(thread_id);
+							let resp = api::AwaitUserResponse::new(
+								1,
+								m::await_user_response::Type::AwaitUser,
+								now_iso(),
+								state.next_seq(),
+								thread_id.to_string(),
+								tseq,
+								prompt,
+							);
+							let s = serde_json::to_string(&resp).unwrap();
+							state.buffer_last(&s);
+							tracing::info!("WS -> {}", s);
+							let _ = write.send(Message::Text(s)).await;
+							{
+								let store = state.thread_store();
+								log_thread_steps_if_enabled(&store, thread_id, "await_user").await;
+							}
+							return Ok(());
+						}
+						AgentFrame::AwaitApproval { prompt } => {
+							let tseq = state.next_thread_seq(thread_id);
+							let resp = api::AwaitApprovalResponse::new(
+								1,
+								m::await_approval_response::Type::AwaitApproval,
+								now_iso(),
+								state.next_seq(),
+								thread_id.to_string(),
+								tseq,
+								prompt,
+							);
+							let s = serde_json::to_string(&resp).unwrap();
+							state.buffer_last(&s);
+							tracing::info!("WS -> {}", s);
+							let _ = write.send(Message::Text(s)).await;
+							{
+								let store = state.thread_store();
+								log_thread_steps_if_enabled(&store, thread_id, "await_approval").await;
+							}
+							return Ok(());
+						}
+					}
 				}
-				return Ok(());
-			}
-			AgentFrame::AwaitUser { prompt } => {
-				let tseq = state.next_thread_seq(thread_id);
-				let resp = api::AwaitUserResponse::new(
-					1,
-					m::await_user_response::Type::AwaitUser,
-					now_iso(),
-					state.next_seq(),
-					thread_id.to_string(),
-					tseq,
-					prompt,
-				);
-				let s = serde_json::to_string(&resp).unwrap();
-				state.buffer_last(&s);
-				tracing::info!("WS -> {}", s);
-				let _ = write.send(Message::Text(s)).await;
-				return Ok(());
-			}
-			AgentFrame::AwaitApproval { prompt } => {
-				let tseq = state.next_thread_seq(thread_id);
-				let resp = api::AwaitApprovalResponse::new(
-					1,
-					m::await_approval_response::Type::AwaitApproval,
-					now_iso(),
-					state.next_seq(),
-					thread_id.to_string(),
-					tseq,
-					prompt,
-				);
-				let s = serde_json::to_string(&resp).unwrap();
-				state.buffer_last(&s);
-				tracing::info!("WS -> {}", s);
-				let _ = write.send(Message::Text(s)).await;
 				return Ok(());
 			}
 		}
 	}
-	Ok(())
 }
 
 async fn run_agent_and_frames(

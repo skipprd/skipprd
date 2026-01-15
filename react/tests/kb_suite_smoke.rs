@@ -72,15 +72,18 @@ async fn agent_default_policy_accepts_final_without_sql() {
         thread_id: None,
         progress_tx: None,
         pre_step_tx: None,
+        trace_tx: None,
         agent_name: Some("test".to_string()),
         policy: Arc::new(DefaultPolicy),
         llm,
         storage: Arc::new(InMemoryStorageAdapter::default()),
         scope: react::providers::RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() },
         keyspace: Arc::new(react::providers::DefaultKeyspace::new("b".into())),
+        query: None,
         dbt: None,
         vector: None,
         thread_store: None,
+        resolved_config: None,
     };
     let reg = ToolRegistry::new();
     let out = Agent::run_until_block(&reg, &ctx, "sys", "tools", "q").await.expect("run");
@@ -105,15 +108,18 @@ async fn agent_does_not_special_case_ask_user_tool_name() {
         thread_id: None,
         progress_tx: None,
         pre_step_tx: None,
+        trace_tx: None,
         agent_name: Some("test".to_string()),
         policy: Arc::new(DefaultPolicy),
         llm,
         storage: Arc::new(InMemoryStorageAdapter::default()),
         scope: react::providers::RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() },
         keyspace: Arc::new(react::providers::DefaultKeyspace::new("b".into())),
+        query: None,
         dbt: None,
         vector: None,
         thread_store: None,
+        resolved_config: None,
     };
     let mut reg = ToolRegistry::new();
     reg.register(AskUserTool);
@@ -136,15 +142,18 @@ async fn agent_interrupts_only_when_policy_requests_it() {
         thread_id: None,
         progress_tx: None,
         pre_step_tx: None,
+        trace_tx: None,
         agent_name: Some("test".to_string()),
         policy: Arc::new(InterruptOnAskUser),
         llm,
         storage: Arc::new(InMemoryStorageAdapter::default()),
         scope: react::providers::RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() },
         keyspace: Arc::new(react::providers::DefaultKeyspace::new("b".into())),
+        query: None,
         dbt: None,
         vector: None,
         thread_store: None,
+        resolved_config: None,
     };
     let mut reg = ToolRegistry::new();
     reg.register(AskUserTool);

@@ -53,6 +53,10 @@ pub struct ThreadCache {
     pub candidates: Vec<(String, String, f32)>, // (project_id, dataset_id, score) [legacy cache shape; best-effort only]
     pub schemas: HashMap<String, Vec<(String, String)>>, // dataset FQN -> [(name, type)]
     pub samples: HashMap<String, Vec<Vec<String>>>, // dataset FQN -> rows
+    /// Last published curated relations (materialized in the warehouse), best-effort.
+    pub published_relations: Vec<String>, // dataset FQN list (e.g. catalog.db.table)
+    /// Digest of the manifest that produced `published_relations`, best-effort.
+    pub published_manifest_sha256: Option<String>,
     pub updated_at: Option<Instant>,
 }
 
@@ -92,6 +96,14 @@ impl ThreadCacheStore {
     pub fn update_samples(thread_id: &str, dataset_fqn: &str, rows: Vec<Vec<String>>) {
         let mut entry = ctx_cache().get(thread_id).map(|e| e.clone()).unwrap_or_default();
         entry.samples.insert(dataset_fqn.to_string(), rows);
+        entry.updated_at = Some(Instant::now());
+        ctx_cache().insert(thread_id.to_string(), entry);
+    }
+
+    pub fn update_published(thread_id: &str, manifest_sha256: &str, relations: Vec<String>) {
+        let mut entry = ctx_cache().get(thread_id).map(|e| e.clone()).unwrap_or_default();
+        entry.published_relations = relations;
+        entry.published_manifest_sha256 = Some(manifest_sha256.to_string());
         entry.updated_at = Some(Instant::now());
         ctx_cache().insert(thread_id.to_string(), entry);
     }

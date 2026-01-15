@@ -16,6 +16,8 @@ use crate::providers::{
 };
 use crate::adapters::storage::{InMemoryStorageAdapter, StorageAdapter};
 use std::sync::Arc;
+use crate::config::ReactResolvedConfig;
+use tokio::sync::mpsc::UnboundedSender;
 
 pub mod registry;
 pub mod preflight;
@@ -37,6 +39,12 @@ pub struct SuiteCtx {
     pub keyspace: Arc<dyn Keyspace>,
     pub secrets: Arc<dyn SecretsProvider>,
     pub llm: DynLlmProvider,
+    /// Resolved runtime configuration (from YAML + env + CLI), if available.
+    ///
+    /// Suites/tools may use this to generate DBT profiles or choose an active warehouse provider.
+    pub resolved_config: Option<Arc<ReactResolvedConfig>>,
+    /// Optional trace channel for streaming internal progress/debug lines (WS server may consume).
+    pub trace_tx: Option<UnboundedSender<String>>,
 
     pub query: Option<Arc<dyn QueryProvider>>,
     pub datasets: Option<Arc<dyn DatasetCatalogProvider>>,
@@ -54,7 +62,7 @@ impl SuiteCtx {
         scope: RequestScope,
         keyspace: Arc<dyn Keyspace>,
     ) -> Self {
-        Self { storage, scope, keyspace, secrets, llm, query: None, datasets: None, catalog: None, vector: None, dbt: None, state: None }
+        Self { storage, scope, keyspace, secrets, llm, resolved_config: None, trace_tx: None, query: None, datasets: None, catalog: None, vector: None, dbt: None, state: None }
     }
 }
 
@@ -68,6 +76,8 @@ impl Default for SuiteCtx {
             secrets: Arc::new(EnvSecretsProvider::default()),
             // No implicit config/env reads in generic defaults; callers should inject a real LLM.
             llm: Arc::new(crate::llm::NullModel::new()),
+            resolved_config: None,
+            trace_tx: None,
             query: None,
             datasets: None,
             catalog: None,

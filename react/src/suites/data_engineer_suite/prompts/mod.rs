@@ -7,11 +7,11 @@ pub fn ask_tool_card() -> String {
 }
 
 pub fn cleanse_system_prompt() -> String {
-    crate::prompts::ask::system_prompt()
+    crate::prompts::model::model_system_prompt()
 }
 
 pub fn cleanse_tool_card() -> String {
-    crate::prompts::ask::tool_card()
+    crate::prompts::model::model_tool_card()
 }
 
 pub fn model_system_prompt() -> String {

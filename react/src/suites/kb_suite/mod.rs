@@ -50,15 +50,18 @@ impl KbSuite {
             thread_id: Some(thread_id.to_string()),
             progress_tx: None,
             pre_step_tx: None,
+            trace_tx: sctx.trace_tx.clone(),
             agent_name: Some("kb".to_string()),
             policy: Arc::new(DefaultPolicy),
             llm: sctx.llm.clone(),
             storage: sctx.storage.clone(),
             scope: sctx.scope.clone(),
             keyspace: sctx.keyspace.clone(),
+            query: None,
             dbt: None,
             vector: sctx.vector.clone(),
             thread_store: Some(thread_store),
+            resolved_config: sctx.resolved_config.clone(),
         };
 
         match Agent::run_until_block(&registry, &actx, sys, tools_card, question).await {

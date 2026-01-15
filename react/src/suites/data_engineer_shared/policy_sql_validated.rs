@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::agent::{AgentPolicy, Interrupt, RunOutcome};
-use crate::session::{ThreadResult, ThreadStep, ThreadStore};
+use crate::session::{ThreadCacheStore, ThreadResult, ThreadStep, ThreadStore};
 use crate::tools::ToolRegistry;
 
 use super::types::DatasetCandidate;
@@ -33,9 +33,19 @@ impl AgentPolicy for SqlValidatedPolicy {
         &self,
         _ctx: &crate::agent::AgentCtx,
         _store: Option<&ThreadStore>,
-        _thread_id: &str,
+        thread_id: &str,
     ) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
+        if let Some(cache) = ThreadCacheStore::get(thread_id) {
+            if !cache.published_relations.is_empty() {
+                let mut lines: Vec<String> = Vec::new();
+                lines.push("PublishedRelations (prefer these over bronze/raw when possible):".to_string());
+                for r in cache.published_relations.iter().take(10) {
+                    lines.push(format!("- {}", r));
+                }
+                out.push(lines.join("\n"));
+            }
+        }
         if !self.dataset_candidates.is_empty() {
             let mut lines: Vec<String> = Vec::new();
             lines.push("ResolvedDatasets:".to_string());
@@ -65,6 +75,17 @@ impl AgentPolicy for SqlValidatedPolicy {
                 .unwrap_or("Please review and approve/reject.")
                 .to_string();
             return Some(Interrupt::AwaitApproval { prompt });
+        }
+        if action_name == "publish_dbt_to_provider" {
+            let awaiting = obs.get("await_approval").and_then(|x| x.as_bool()).unwrap_or(false);
+            if awaiting {
+                let prompt = obs
+                    .get("prompt")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("Please review and approve/reject.")
+                    .to_string();
+                return Some(Interrupt::AwaitApproval { prompt });
+            }
         }
         None
     }

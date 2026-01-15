@@ -48,15 +48,18 @@ LIMIT 1
 		thread_id: None,
 		progress_tx: None,
 		pre_step_tx: None,
+		trace_tx: None,
 		agent_name: Some("test".to_string()),
 		policy: std::sync::Arc::new(DefaultPolicy),
 		llm: std::sync::Arc::new(NullModel::new()),
 		storage: std::sync::Arc::new(InMemoryStorageAdapter::default()),
 		scope: react::providers::RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() },
 		keyspace: std::sync::Arc::new(react::providers::DefaultKeyspace::new("b".into())),
+		query: None,
 		dbt: None,
 		vector: None,
 		thread_store: None,
+		resolved_config: None,
 	};
 	let res = tool.call(args, &actx).await.expect("tool call");
 	assert!(res.get("ok").and_then(|x| x.as_bool()).unwrap_or(false), "expected ok response, got {}", res);

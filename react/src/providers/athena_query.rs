@@ -411,7 +411,6 @@ impl DatasetCatalogProvider for AthenaQueryProvider {
         // This is intentionally conservative; callers can choose to skip stats for very wide tables.
         let cols = self.cached_schema(dataset).await?;
         let max_fields = max_fields.max(1).min(500);
-        let cols = cols.into_iter().take(max_fields).collect::<Vec<_>>();
 
         let tbl = Self::quote_table(&dataset.database, &dataset.table);
         // Row count
@@ -425,29 +424,103 @@ impl DatasetCatalogProvider for AthenaQueryProvider {
             .unwrap_or(0);
 
         let mut ns_stats = crate::discover::stats::DatasetFieldStats::new(&dataset.fqn());
-        for (name, _ty) in cols.iter() {
-            // Use TRY_CAST to DOUBLE for numeric min/max without failing on strings; may yield nulls.
-            let sql = format!(
-                "SELECT \
-                    COUNT(1) AS __rows, \
-                    SUM(CASE WHEN {c} IS NULL THEN 1 ELSE 0 END) AS __nulls, \
-                    COUNT(DISTINCT {c}) AS __distinct, \
-                    MIN(TRY_CAST({c} AS DOUBLE)) AS __min_num, \
-                    MAX(TRY_CAST({c} AS DOUBLE)) AS __max_num \
-                 FROM {}",
-                tbl,
-                c = Self::quote_ident(name),
-            );
-            let qr = self.query(&sql).await?;
+        // Expand nested struct/row columns into leaf dot-path fields (bounded by max_fields).
+        let mut expanded: Vec<(String, String, Option<String>, bool)> = Vec::new(); // (path, type, expr, is_complex)
+        for (name, ty) in cols.iter() {
+            let leafs = crate::providers::type_parse::flatten_athena_type(name, ty);
+            for lf in leafs {
+                // Prefer a stable expression for top-level identifiers by quoting the root segment.
+                let expr = if let Some(e) = lf.expr.as_ref() {
+                    // If it's a nested deref (a.b.c), quote only the root.
+                    if let Some((root, rest)) = e.split_once('.') {
+                        Some(format!("{}{}", Self::quote_ident(root), format!(".{}", rest)))
+                    } else {
+                        Some(Self::quote_ident(e))
+                    }
+                } else {
+                    None
+                };
+                expanded.push((lf.path, lf.data_type, expr, lf.is_complex));
+            }
+            if expanded.len() >= max_fields {
+                break;
+            }
+        }
+        expanded.truncate(max_fields);
+
+        for (path, ty, expr_opt, is_complex) in expanded.into_iter() {
+            let Some(expr) = expr_opt else {
+                let mut fs = crate::discover::stats::FieldStats::default();
+                fs.total = total_rows;
+                fs.finalize();
+                ns_stats.fields.insert(path, fs);
+                continue;
+            };
+
+            let ty_lc = ty.to_lowercase();
+            let is_timestamp = ty_lc.starts_with("timestamp");
+            let is_date = ty_lc.starts_with("date");
+
+            let sql = if is_complex {
+                format!(
+                    "SELECT \
+                        COUNT(1) AS __rows, \
+                        SUM(CASE WHEN {c} IS NULL THEN 1 ELSE 0 END) AS __nulls \
+                     FROM {}",
+                    tbl,
+                    c = expr,
+                )
+            } else {
+                format!(
+                    "SELECT \
+                        COUNT(1) AS __rows, \
+                        SUM(CASE WHEN {c} IS NULL THEN 1 ELSE 0 END) AS __nulls, \
+                        COUNT(DISTINCT {c}) AS __distinct, \
+                        MIN({min_expr}) AS __min_num, \
+                        MAX({max_expr}) AS __max_num \
+                     FROM {}",
+                    tbl,
+                    c = expr,
+                    // Athena/Presto can't cast TIMESTAMP -> DOUBLE directly; use epoch seconds instead.
+                    min_expr = if is_timestamp {
+                        format!("to_unixtime({})", expr)
+                    } else if is_date {
+                        format!("to_unixtime(CAST({} AS TIMESTAMP))", expr)
+                    } else {
+                        format!("TRY_CAST({} AS DOUBLE)", expr)
+                    },
+                    max_expr = if is_timestamp {
+                        format!("to_unixtime({})", expr)
+                    } else if is_date {
+                        format!("to_unixtime(CAST({} AS TIMESTAMP))", expr)
+                    } else {
+                        format!("TRY_CAST({} AS DOUBLE)", expr)
+                    },
+                )
+            };
+
+            let qr = match self.query(&sql).await {
+                Ok(qr) => qr,
+                Err(e) => {
+                    tracing::warn!("athena stats: dataset='{}' field='{}' type='{}' failed: {}", dataset.fqn(), path, ty, e);
+                    let mut fs = crate::discover::stats::FieldStats::default();
+                    fs.total = total_rows;
+                    fs.finalize();
+                    ns_stats.fields.insert(path, fs);
+                    continue;
+                }
+            };
             let row = qr.rows.get(0).cloned().unwrap_or_default();
             let mut fs = crate::discover::stats::FieldStats::default();
             fs.total = total_rows;
             fs.nulls = row.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-            fs.approx_distinct = row.get(2).and_then(|s| s.parse::<u64>().ok());
-            fs.min_numeric = row.get(3).and_then(|s| s.parse::<f64>().ok());
-            fs.max_numeric = row.get(4).and_then(|s| s.parse::<f64>().ok());
+            if !is_complex {
+                fs.approx_distinct = row.get(2).and_then(|s| s.parse::<u64>().ok());
+                fs.min_numeric = row.get(3).and_then(|s| s.parse::<f64>().ok());
+                fs.max_numeric = row.get(4).and_then(|s| s.parse::<f64>().ok());
+            }
             fs.finalize();
-            ns_stats.fields.insert(name.clone(), fs);
+            ns_stats.fields.insert(path, fs);
         }
 
         let mut ds = crate::providers::catalog::types::DatasetStats::default();

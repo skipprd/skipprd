@@ -55,7 +55,11 @@ use crate::providers::RequestScope;
 ///     max_concurrency: 8
 ///   dbt:
 ///     enabled: true
-///     target: datafusion
+///     # Run DBT in a deterministic environment.
+///     runner: docker
+///     docker_image: ghcr.io/dbt-labs/dbt-athena:1.8.3
+///     docker_mount_aws_dir: true
+///     target: athena
 ///   vector:
 ///     enabled: true
 /// ```
@@ -149,6 +153,13 @@ pub struct DbtFile {
     pub enabled: Option<bool>,
     pub profiles_dir: Option<String>,
     pub target: Option<String>,
+    /// DBT runner mode: "host" (default) or "docker".
+    pub runner: Option<String>,
+    /// Docker image reference to use when runner=="docker".
+    pub docker_image: Option<String>,
+    pub docker_platform: Option<String>,
+    pub docker_network: Option<String>,
+    pub docker_mount_aws_dir: Option<bool>,
 }
  
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -219,6 +230,11 @@ pub struct DbtResolved {
     pub enabled: bool,
     pub profiles_dir: Option<String>,
     pub target: Option<String>,
+    pub runner: String,
+    pub docker_image: Option<String>,
+    pub docker_platform: Option<String>,
+    pub docker_network: Option<String>,
+    pub docker_mount_aws_dir: bool,
 }
  
 #[derive(Clone, Debug)]
@@ -368,6 +384,17 @@ impl ReactResolvedConfig {
                     enabled: dbt_f.enabled.unwrap_or(true),
                     profiles_dir: getenv_nonempty("DBT_PROFILES_DIR").or(dbt_f.profiles_dir),
                     target: getenv_nonempty("DBT_TARGET").or(dbt_f.target),
+                    runner: getenv_nonempty("DBT_RUNNER").or(dbt_f.runner).unwrap_or_else(|| "host".to_string()),
+                    docker_image: getenv_nonempty("DBT_DOCKER_IMAGE").or(dbt_f.docker_image),
+                    docker_platform: getenv_nonempty("DBT_DOCKER_PLATFORM").or(dbt_f.docker_platform),
+                    docker_network: getenv_nonempty("DBT_DOCKER_NETWORK").or(dbt_f.docker_network),
+                    docker_mount_aws_dir: getenv_nonempty("DBT_DOCKER_MOUNT_AWS_DIR")
+                        .map(|v| {
+                            let vv = v.trim().to_lowercase();
+                            vv == "1" || vv == "true" || vv == "yes"
+                        })
+                        .or(dbt_f.docker_mount_aws_dir)
+                        .unwrap_or(false),
                 },
                 vector: VectorResolved {
                     enabled: vec_f.enabled.unwrap_or(true),
@@ -390,6 +417,11 @@ impl ReactResolvedConfig {
  
         if let Some(v) = cfg.providers.dbt.profiles_dir.as_ref() { set_env_if_unset("DBT_PROFILES_DIR", v); }
         if let Some(v) = cfg.providers.dbt.target.as_ref() { set_env_if_unset("DBT_TARGET", v); }
+        set_env_if_unset("DBT_RUNNER", &cfg.providers.dbt.runner);
+        if let Some(v) = cfg.providers.dbt.docker_image.as_ref() { set_env_if_unset("DBT_DOCKER_IMAGE", v); }
+        if let Some(v) = cfg.providers.dbt.docker_platform.as_ref() { set_env_if_unset("DBT_DOCKER_PLATFORM", v); }
+        if let Some(v) = cfg.providers.dbt.docker_network.as_ref() { set_env_if_unset("DBT_DOCKER_NETWORK", v); }
+        set_env_if_unset("DBT_DOCKER_MOUNT_AWS_DIR", if cfg.providers.dbt.docker_mount_aws_dir { "true" } else { "false" });
  
         Ok(cfg)
     }

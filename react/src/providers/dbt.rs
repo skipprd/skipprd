@@ -65,12 +65,28 @@ pub trait DbtProvider: Send + Sync {
 pub struct DbtProjectProvider {
     pub storage: Arc<dyn StorageAdapter>,
     pub keyspace: Arc<dyn Keyspace>,
+    /// How DBT commands should be executed (host vs docker).
+    pub runner: DbtRunnerConfig,
 }
 
 impl DbtProjectProvider {
-    pub fn new(storage: Arc<dyn StorageAdapter>, keyspace: Arc<dyn Keyspace>) -> Self {
-        Self { storage, keyspace }
+    pub fn new(storage: Arc<dyn StorageAdapter>, keyspace: Arc<dyn Keyspace>, runner: DbtRunnerConfig) -> Self {
+        Self { storage, keyspace, runner }
     }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DbtRunnerConfig {
+    /// Runner mode: "host" (default) or "docker".
+    pub mode: String,
+    /// Docker image to use when mode=="docker" (pinned strongly recommended).
+    pub docker_image: Option<String>,
+    /// Optional docker platform (e.g. "linux/amd64").
+    pub docker_platform: Option<String>,
+    /// Optional docker network (e.g. "host" or a named network).
+    pub docker_network: Option<String>,
+    /// If true, mount ~/.aws into the container at /root/.aws (useful for AWS_PROFILE flows).
+    pub docker_mount_aws_dir: bool,
 }
 
 fn parse_dataset_id(dataset_id: &str) -> Option<(String, String, String)> {
@@ -163,6 +179,123 @@ fn run_cmd(cmd: &str, args: &[&str], cwd: &Path, envs: &[(&str, String)]) -> Cmd
     }
 }
 
+fn build_docker_run_args(
+    runner: &DbtRunnerConfig,
+    project_dir: &Path,
+    profiles_dir: Option<&Path>,
+    dbt_args: &[&str],
+    envs: &[(&str, String)],
+) -> Result<Vec<String>, String> {
+    let image = runner
+        .docker_image
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "dbt runner is docker but providers.dbt.docker_image is not set".to_string())?;
+
+    let proj = project_dir.canonicalize().unwrap_or_else(|_| project_dir.to_path_buf());
+    let proj_s = proj.to_string_lossy().to_string();
+
+    let mut args: Vec<String> = Vec::new();
+    args.push("run".to_string());
+    args.push("--rm".to_string());
+    if let Some(p) = runner.docker_platform.as_ref().filter(|s| !s.trim().is_empty()) {
+        args.push("--platform".to_string());
+        args.push(p.trim().to_string());
+    }
+    if let Some(n) = runner.docker_network.as_ref().filter(|s| !s.trim().is_empty()) {
+        args.push("--network".to_string());
+        args.push(n.trim().to_string());
+    }
+
+    // Mount project at /project.
+    args.push("-v".to_string());
+    args.push(format!("{}:/project", proj_s));
+    args.push("-w".to_string());
+    args.push("/project".to_string());
+
+    // Mount profiles at /profiles and force DBT_PROFILES_DIR to that path.
+    if let Some(pd) = profiles_dir {
+        let pd = pd.canonicalize().unwrap_or_else(|_| pd.to_path_buf());
+        args.push("-v".to_string());
+        args.push(format!("{}:/profiles", pd.to_string_lossy()));
+        args.push("-e".to_string());
+        args.push("DBT_PROFILES_DIR=/profiles".to_string());
+    }
+
+    // Pass through envs requested by caller.
+    for (k, v) in envs.iter() {
+        args.push("-e".to_string());
+        args.push(format!("{}={}", k, v));
+    }
+
+    // Pass through common AWS env vars if present. This avoids baking secrets into files.
+    for k in [
+        "AWS_REGION",
+        "AWS_DEFAULT_REGION",
+        "AWS_PROFILE",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_SDK_LOAD_CONFIG",
+    ] {
+        if let Ok(v) = std::env::var(k) {
+            if !v.trim().is_empty() {
+                args.push("-e".to_string());
+                args.push(format!("{}={}", k, v));
+            }
+        }
+    }
+
+    // Optional: mount ~/.aws for profile-based auth chains.
+    if runner.docker_mount_aws_dir {
+        if let Ok(home) = std::env::var("HOME") {
+            let aws_dir = Path::new(&home).join(".aws");
+            if aws_dir.exists() {
+                args.push("-v".to_string());
+                args.push(format!("{}:/root/.aws:ro", aws_dir.to_string_lossy()));
+            }
+        }
+    }
+
+    // Image + command.
+    args.push("--entrypoint".to_string());
+    args.push("dbt".to_string());
+    args.push(image);
+    for a in dbt_args.iter() {
+        args.push(a.to_string());
+    }
+    Ok(args)
+}
+
+fn run_cmd_docker(
+    runner: &DbtRunnerConfig,
+    project_dir: &Path,
+    profiles_dir: Option<&Path>,
+    dbt_args: &[&str],
+    envs: &[(&str, String)],
+) -> CmdOut {
+    let args = match build_docker_run_args(runner, project_dir, profiles_dir, dbt_args, envs) {
+        Ok(v) => v,
+        Err(e) => {
+            return CmdOut { status_ok: false, code: -1, stdout: String::new(), stderr: e };
+        }
+    };
+
+    let mut c = std::process::Command::new("docker");
+    c.args(&args);
+    match c.output() {
+        Ok(o) => {
+            let code = o.status.code().unwrap_or(-1);
+            let ok = o.status.success();
+            let stdout = String::from_utf8_lossy(&o.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+            CmdOut { status_ok: ok, code, stdout, stderr }
+        }
+        Err(e) => CmdOut { status_ok: false, code: -1, stdout: String::new(), stderr: format!("spawn error: {}", e) },
+    }
+}
+
 fn combine_errors(a: &CmdOut, b: &CmdOut) -> Vec<String> {
     let mut v = Vec::new();
     if !a.status_ok {
@@ -220,9 +353,9 @@ impl DbtProvider for DbtProjectProvider {
         }
         let name = format!("{}_project", scope.project_id.replace('/', "_"));
         let y = format!(
-            "name: {name}\nversion: '1.0'\nprofile: '{pipeline}'\nmodel-paths: ['models']\nseed-paths: ['seeds']\nmacro-paths: ['macros']\ntarget-path: 'target'\n",
+            "name: {name}\nversion: '1.0'\nprofile: '{project_id}'\nmodel-paths: ['models']\nseed-paths: ['seeds']\nmacro-paths: ['macros']\ntarget-path: 'target'\n",
             name = name,
-            pipeline = scope.project_id
+            project_id = scope.project_id
         );
         self.storage.put_bytes(&project_key, y.as_bytes(), "text/yaml").await?;
         Ok(())
@@ -326,13 +459,35 @@ impl DbtProvider for DbtProjectProvider {
         let mut envs: Vec<(&str, String)> = Vec::new();
         if let Some(pd) = profiles_dir.as_ref() { envs.push(("DBT_PROFILES_DIR", pd.clone())); }
 
-        let deps_res = run_cmd("dbt", &["deps"], &root, &envs);
-        let parse_res = run_cmd("dbt", &["parse"], &root, &envs);
-        let compile_res = run_cmd("dbt", &["compile", "--target", &target], &root, &envs);
+        let use_docker = self.runner.mode.to_lowercase() == "docker";
+        let profiles_path = profiles_dir.as_ref().map(|s| Path::new(s));
+        let deps_res = if use_docker {
+            run_cmd_docker(&self.runner, &root, profiles_path, &["deps"], &envs)
+        } else {
+            run_cmd("dbt", &["deps"], &root, &envs)
+        };
+        let parse_res = if use_docker {
+            run_cmd_docker(&self.runner, &root, profiles_path, &["parse"], &envs)
+        } else {
+            run_cmd("dbt", &["parse"], &root, &envs)
+        };
+        let compile_res = if use_docker {
+            run_cmd_docker(&self.runner, &root, profiles_path, &["compile", "--target", &target], &envs)
+        } else {
+            run_cmd("dbt", &["compile", "--target", &target], &root, &envs)
+        };
         let run_or_build_res = if build {
-            Some(run_cmd("dbt", &["build", "--target", &target], &root, &envs))
+            Some(if use_docker {
+                run_cmd_docker(&self.runner, &root, profiles_path, &["build", "--target", &target], &envs)
+            } else {
+                run_cmd("dbt", &["build", "--target", &target], &root, &envs)
+            })
         } else if run {
-            Some(run_cmd("dbt", &["run", "--target", &target], &root, &envs))
+            Some(if use_docker {
+                run_cmd_docker(&self.runner, &root, profiles_path, &["run", "--target", &target], &envs)
+            } else {
+                run_cmd("dbt", &["run", "--target", &target], &root, &envs)
+            })
         } else {
             None
         };
@@ -373,6 +528,39 @@ impl DbtProvider for DbtProjectProvider {
                 "fetched_files": file_count,
             }),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn docker_args_require_image() {
+        let runner = DbtRunnerConfig { mode: "docker".to_string(), docker_image: None, ..Default::default() };
+        let tmp = tempfile::tempdir().unwrap();
+        let err = build_docker_run_args(&runner, tmp.path(), None, &["deps"], &[]).unwrap_err();
+        assert!(err.to_lowercase().contains("docker_image"));
+    }
+
+    #[test]
+    fn docker_args_include_project_mount_and_workdir() {
+        let runner = DbtRunnerConfig {
+            mode: "docker".to_string(),
+            docker_image: Some("ghcr.io/dbt-labs/dbt-athena:1.8.3".to_string()),
+            docker_platform: Some("linux/amd64".to_string()),
+            docker_network: Some("host".to_string()),
+            docker_mount_aws_dir: false,
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let args = build_docker_run_args(&runner, tmp.path(), None, &["deps"], &[]).unwrap();
+        let joined = args.join(" ");
+        assert!(joined.contains("--rm"));
+        assert!(joined.contains("--platform linux/amd64"));
+        assert!(joined.contains("--network host"));
+        assert!(joined.contains(":/project"));
+        assert!(joined.contains("-w /project"));
+        assert!(joined.contains("ghcr.io/dbt-labs/dbt-athena:1.8.3"));
     }
 }
 

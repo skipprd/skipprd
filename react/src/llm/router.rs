@@ -40,7 +40,8 @@ fn chat_memo() -> &'static DashMap<String, MemoEntry> { CHAT_MEMO.get_or_init(||
 impl LlmRouter {
     pub fn new() -> Self {
         let adapter = pick_adapter_from_config();
-        let timeout_secs: u64 = Config::getenv("LLM_HTTP_TIMEOUT_SECS", "30").parse().unwrap_or(30);
+        // Default timeout bumped to accommodate /v1/responses latency; still overridable via env/config.
+        let timeout_secs: u64 = Config::getenv("LLM_HTTP_TIMEOUT_SECS", "120").parse().unwrap_or(120);
         let http = ureq::AgentBuilder::new()
             .timeout(std::time::Duration::from_secs(timeout_secs))
             .build();
@@ -95,22 +96,57 @@ impl LlmRouter {
             debug!("LLM(router) request content (text):\n{}", joined);
         }
         // Execute
-        let mut r = self.http
-            .request(&http_req.method, &format!("{}{}", self.base_prefix(), http_req.url))
-            .set("Content-Type", "application/json");
-        if let Some(k) = self.api_key.as_ref() { r = r.set("Authorization", &format!("Bearer {}", k)); }
-        for (h, v) in http_req.headers.iter() { r = r.set(h, v); }
-        let resp = r.send_json(serde_json::to_value(&http_req.body).map_err(|e| e.to_string())?);
-        let (status, body_text) = match resp {
-            Ok(resp_ok) => (resp_ok.status(), resp_ok.into_string().unwrap_or_default()),
-            Err(ureq::Error::Status(s, r)) => (s, r.into_string().unwrap_or_default()),
-            Err(e) => return Err(e.to_string()),
+        let full_url = format!("{}{}", self.base_prefix(), http_req.url);
+        let payload = serde_json::to_value(&http_req.body).map_err(|e| e.to_string())?;
+        let max_retries: usize = Config::getenv("LLM_HTTP_MAX_RETRIES", "3").parse().unwrap_or(3).max(1).min(10);
+
+        let mut attempt = 0usize;
+        let (status, body_text) = loop {
+            attempt += 1;
+            let mut r = self.http
+                .request(&http_req.method, &full_url)
+                .set("Content-Type", "application/json");
+            if let Some(k) = self.api_key.as_ref() { r = r.set("Authorization", &format!("Bearer {}", k)); }
+            for (h, v) in http_req.headers.iter() { r = r.set(h, v); }
+
+            let resp = r.send_json(payload.clone());
+            match resp {
+                Ok(resp_ok) => break (resp_ok.status(), resp_ok.into_string().unwrap_or_default()),
+                Err(ureq::Error::Status(s, rr)) => {
+                    // Retry 429 with backoff
+                    if s == 429 && attempt < max_retries {
+                        let retry_after = rr.header("retry-after").and_then(|v| v.parse::<u64>().ok());
+                        let backoff_ms = retry_after
+                            .map(|secs| secs.saturating_mul(1000))
+                            .unwrap_or_else(|| 500u64.saturating_mul(1u64 << (attempt as u32 - 1)).min(5_000));
+                        let jitter = rand::random::<u64>() % 250;
+                        std::thread::sleep(Duration::from_millis(backoff_ms + jitter));
+                        continue;
+                    }
+                    break (s, rr.into_string().unwrap_or_default())
+                }
+                Err(e) => {
+                    let es = e.to_string().to_lowercase();
+                    let transient = es.contains("timed out")
+                        || es.contains("timeout")
+                        || es.contains("network error")
+                        || es.contains("connection")
+                        || es.contains("temporarily");
+                    if transient && attempt < max_retries {
+                        let backoff_ms = 250u64.saturating_mul(1u64 << (attempt as u32 - 1)).min(2_000);
+                        std::thread::sleep(Duration::from_millis(backoff_ms));
+                        continue;
+                    }
+                    return Err(format!("LLM request failed: {}: {}", full_url, e));
+                }
+            }
         };
         let ph = ProviderHttpResponse { status: status as u16, body_text };
         // Log response (pretty)
         debug!("LLM(router) response chat status={}\n{}", ph.status, pretty_json(&ph.body_text));
         if !(200..300).contains(&(ph.status as i32)) {
-            return Err(format!("http {}", ph.status));
+            let snippet = if ph.body_text.len() > 500 { &ph.body_text[..500] } else { &ph.body_text };
+            return Err(format!("LLM request failed: {}: http {}: {}", full_url, ph.status, snippet));
         }
         let parsed = adapter.parse_chat_http(&ph)?;
         // Pretty print parsed text if it's JSON; otherwise print raw text
@@ -139,22 +175,56 @@ impl LlmRouter {
         // Log request
         debug!("LLM(router) request embed {} {}\n{}", http_req.method, http_req.url, serde_json::to_string_pretty(&http_req.body).unwrap_or_default());
         // Execute
-        let mut r = self.http
-            .request(&http_req.method, &format!("{}{}", self.base_prefix(), http_req.url))
-            .set("Content-Type", "application/json");
-        if let Some(k) = self.api_key.as_ref() { r = r.set("Authorization", &format!("Bearer {}", k)); }
-        for (h, v) in http_req.headers.iter() { r = r.set(h, v); }
-        let resp = r.send_json(serde_json::to_value(&http_req.body).map_err(|e| e.to_string())?);
-        let (status, body_text) = match resp {
-            Ok(resp_ok) => (resp_ok.status(), resp_ok.into_string().unwrap_or_default()),
-            Err(ureq::Error::Status(s, r)) => (s, r.into_string().unwrap_or_default()),
-            Err(e) => return Err(e.to_string()),
+        let full_url = format!("{}{}", self.base_prefix(), http_req.url);
+        let payload = serde_json::to_value(&http_req.body).map_err(|e| e.to_string())?;
+        let max_retries: usize = Config::getenv("LLM_HTTP_MAX_RETRIES", "3").parse().unwrap_or(3).max(1).min(10);
+
+        let mut attempt = 0usize;
+        let (status, body_text) = loop {
+            attempt += 1;
+            let mut r = self.http
+                .request(&http_req.method, &full_url)
+                .set("Content-Type", "application/json");
+            if let Some(k) = self.api_key.as_ref() { r = r.set("Authorization", &format!("Bearer {}", k)); }
+            for (h, v) in http_req.headers.iter() { r = r.set(h, v); }
+
+            let resp = r.send_json(payload.clone());
+            match resp {
+                Ok(resp_ok) => break (resp_ok.status(), resp_ok.into_string().unwrap_or_default()),
+                Err(ureq::Error::Status(s, rr)) => {
+                    if s == 429 && attempt < max_retries {
+                        let retry_after = rr.header("retry-after").and_then(|v| v.parse::<u64>().ok());
+                        let backoff_ms = retry_after
+                            .map(|secs| secs.saturating_mul(1000))
+                            .unwrap_or_else(|| 500u64.saturating_mul(1u64 << (attempt as u32 - 1)).min(5_000));
+                        let jitter = rand::random::<u64>() % 250;
+                        std::thread::sleep(Duration::from_millis(backoff_ms + jitter));
+                        continue;
+                    }
+                    break (s, rr.into_string().unwrap_or_default())
+                }
+                Err(e) => {
+                    let es = e.to_string().to_lowercase();
+                    let transient = es.contains("timed out")
+                        || es.contains("timeout")
+                        || es.contains("network error")
+                        || es.contains("connection")
+                        || es.contains("temporarily");
+                    if transient && attempt < max_retries {
+                        let backoff_ms = 250u64.saturating_mul(1u64 << (attempt as u32 - 1)).min(2_000);
+                        std::thread::sleep(Duration::from_millis(backoff_ms));
+                        continue;
+                    }
+                    return Err(format!("LLM request failed: {}: {}", full_url, e));
+                }
+            }
         };
         let ph = ProviderHttpResponse { status: status as u16, body_text };
         // Log response (pretty; avoid printing large vectors)
         debug!("LLM(router) response embed status={}\n{}", ph.status, pretty_json(&ph.body_text));
         if !(200..300).contains(&(ph.status as i32)) {
-            return Err(format!("http {}", ph.status));
+            let snippet = if ph.body_text.len() > 500 { &ph.body_text[..500] } else { &ph.body_text };
+            return Err(format!("LLM request failed: {}: http {}: {}", full_url, ph.status, snippet));
         }
         adapter.parse_embed_http(&ph)
     }

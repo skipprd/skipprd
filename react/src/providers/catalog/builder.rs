@@ -12,7 +12,7 @@ impl CatalogBuilder {
 		dataset_stats: Option<super::types::DatasetStats>,
 	) -> DataCatalog {
 		// Build initial semantic view directly from provided stats to ensure first-time catalogs have fields
-		fn leaf_name(n: &str) -> String { n.rsplit('.').next().unwrap_or(n).to_string() }
+		// Preserve full dot-paths for nested fields (e.g. context.session.id).
 		fn classify_field(_name: &str, stats: Option<&crate::discover::stats::FieldStats>) -> SemanticFieldRole {
 			// Name-agnostic classification using only stats
 			if let Some(s) = stats {
@@ -31,8 +31,7 @@ impl CatalogBuilder {
 				let mut fields: Vec<SemanticField> = Vec::new();
 				for (fname, fstats) in ns.fields.iter() {
 					let role = classify_field(fname, Some(fstats));
-					let display = leaf_name(fname);
-					fields.push(SemanticField { name: display, role });
+					fields.push(SemanticField { name: fname.clone(), role });
 				}
 				let mut dims: Vec<String> = Vec::new();
 				let mut mets: Vec<String> = Vec::new();
@@ -95,20 +94,7 @@ impl CatalogBuilder {
 		if let Some(ns) = ns_stats.as_ref() {
 			let mut nulls_by_field: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
 			for cf in catalog.fields.iter_mut() {
-				// ns.fields keyed by dot-path; cf.name is leaf-only → find by exact leaf match
-				let target = cf.name.as_str();
-				let mut hit = None;
-				if let Some(fs) = ns.fields.get(target) {
-					hit = Some(fs);
-				} else {
-					for (k, v) in ns.fields.iter() {
-						if k.rsplit('.').next().unwrap_or(k) == target {
-							hit = Some(v);
-							break;
-						}
-					}
-				}
-				if let Some(fs) = hit {
+				if let Some(fs) = ns.fields.get(&cf.name) {
 					nulls_by_field.insert(cf.name.clone(), fs.nulls);
 					cf.stats = Some(to_stats_lite(fs));
 				}

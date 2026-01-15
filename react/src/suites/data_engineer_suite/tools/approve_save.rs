@@ -9,6 +9,29 @@ use crate::tools::Tool;
 // NOTE: Engine-agnostic ReAct: no DataFusion/SessionContext usage here.
 pub struct ApproveAndSaveArtifactTool;
 
+fn encode_key_component(s: &str) -> String {
+    // Match Keyspace / provider encoding: keep a conservative safe set; percent-encode the rest.
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        let c = *b as char;
+        let safe = c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.';
+        if safe {
+            out.push(c);
+        } else {
+            out.push_str(&format!("%{:02X}", b));
+        }
+    }
+    out
+}
+
+fn parse_dataset_id(dataset_id: &str) -> Option<(String, String, String)> {
+    let parts: Vec<&str> = dataset_id.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    Some((parts[0].to_string(), parts[1].to_string(), parts[2].to_string()))
+}
+
 #[async_trait]
 impl Tool for ApproveAndSaveArtifactTool {
     fn name(&self) -> &'static str {
@@ -35,31 +58,60 @@ impl Tool for ApproveAndSaveArtifactTool {
         }
         let preview_diff = args.get("preview_diff").and_then(|x| x.as_bool()).unwrap_or(false);
 
-        // Load candidates from thread's resolved_datasets
-        let (mut pipeline, mut namespace) = {
-            let mut candidates: Vec<(String, String)> = Vec::new();
-            if let Some(tid) = ctx.thread_id.as_ref() {
-                let store = ctx
-                    .thread_store
-                    .as_ref()
-                    .ok_or_else(|| "thread_store not configured".to_string())?;
-                if let Some(log) = store.get(tid).await {
-                    for step in log.steps.iter().rev() {
-                        if step.action == "resolved_datasets" {
-                            if let Some(arr) = step.args.get("candidates").and_then(|x| x.as_array()) {
-                                for v in arr {
-                                    let p = v.get("pipeline").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                                    let ns = v.get("namespace").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                                    if !p.is_empty() && !ns.is_empty() {
-                                        candidates.push((p, ns));
+        // Refactor: dataset_id replaces legacy (pipeline, namespace).
+        // Back-compat: accept either args.dataset_id or args.pipeline+args.namespace.
+        let explicit_dataset_id = args
+            .get("dataset_id")
+            .and_then(|x| x.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                let p = args.get("pipeline").and_then(|x| x.as_str()).unwrap_or("").trim();
+                let ns = args.get("namespace").and_then(|x| x.as_str()).unwrap_or("").trim();
+                if !p.is_empty() && !ns.is_empty() {
+                    Some(format!("{}.{}", p, ns))
+                } else {
+                    None
+                }
+            });
+
+        // Load candidates from thread's resolved_datasets (new or legacy shape)
+        let mut candidates: Vec<String> = Vec::new();
+        if let Some(tid) = ctx.thread_id.as_ref() {
+            let store = ctx
+                .thread_store
+                .as_ref()
+                .ok_or_else(|| "thread_store not configured".to_string())?;
+            if let Some(log) = store.get(tid).await {
+                for step in log.steps.iter().rev() {
+                    if step.action == "resolved_datasets" {
+                        if let Some(arr) = step.args.get("candidates").and_then(|x| x.as_array()) {
+                            for v in arr {
+                                // New: {dataset_id}
+                                if let Some(ds) = v.get("dataset_id").and_then(|x| x.as_str()) {
+                                    let t = ds.trim();
+                                    if !t.is_empty() {
+                                        candidates.push(t.to_string());
+                                        continue;
                                     }
                                 }
+                                // Legacy: {pipeline, namespace} -> dataset_id
+                                let p = v.get("pipeline").and_then(|x| x.as_str()).unwrap_or("").trim();
+                                let ns = v.get("namespace").and_then(|x| x.as_str()).unwrap_or("").trim();
+                                if !p.is_empty() && !ns.is_empty() {
+                                    candidates.push(format!("{}.{}", p, ns));
+                                }
                             }
-                            break;
                         }
+                        break;
                     }
                 }
             }
+        }
+
+        let mut dataset_id: String = if let Some(ds) = explicit_dataset_id {
+            ds
+        } else {
             if candidates.is_empty() {
                 return Err(
                     "No resolved datasets found. First, resolve dataset candidates via vect_query(scope:\"dataset\"), record them, then retry save."
@@ -67,29 +119,34 @@ impl Tool for ApproveAndSaveArtifactTool {
                 );
             }
             // Selection strategy:
-            // - For DBT models, require explicit FQN presence in SQL to avoid invented tables.
-            // - For MetricFlow YAML, anchor to the top preflight candidate (no YAML changes needed for spec);
-            //   we will add a top-of-file comment to document the assumed dataset.
+            // - For DBT models, require explicit dataset presence in SQL to avoid invented tables.
+            // - For MetricFlow YAML, anchor to the top preflight candidate.
             if kind == "model" {
                 let lc = content.to_lowercase();
-                // find at least one referenced candidate (FQN or dbt source)
-                let mut referenced: Vec<(String, String)> = Vec::new();
-                for (p, ns) in candidates.iter() {
-                    let fqn = format!("{}.{}", p, ns).to_lowercase();
-                    let src1 = format!("source('{}','{}')", p, ns);
-                    let src2 = format!("source(\"{}\",\"{}\")", p, ns);
-                    let src3 = format!("source('{}', '{}')", p, ns);
-                    let src4 = format!("source(\"{}\", \"{}\")", p, ns);
-                    if lc.contains(&fqn) || lc.contains(&src1) || lc.contains(&src2) || lc.contains(&src3) || lc.contains(&src4) {
-                        referenced.push((p.clone(), ns.clone()));
+                let mut referenced: Vec<String> = Vec::new();
+                for ds in candidates.iter() {
+                    let ds_lc = ds.to_lowercase();
+                    let mut ok = lc.contains(&ds_lc);
+                    if !ok {
+                        if let Some((_cat, db, table)) = parse_dataset_id(ds) {
+                            let db_table = format!("{}.{}", db, table).to_lowercase();
+                            let src1 = format!("source('{}','{}')", db, table);
+                            let src2 = format!("source(\"{}\",\"{}\")", db, table);
+                            let src3 = format!("source('{}', '{}')", db, table);
+                            let src4 = format!("source(\"{}\", \"{}\")", db, table);
+                            ok = lc.contains(&db_table)
+                                || lc.contains(&src1)
+                                || lc.contains(&src2)
+                                || lc.contains(&src3)
+                                || lc.contains(&src4);
+                        }
+                    }
+                    if ok {
+                        referenced.push(ds.clone());
                     }
                 }
                 if referenced.is_empty() {
-                    let list = candidates
-                        .iter()
-                        .map(|(p, ns)| format!("{}.{}", p, ns))
-                        .collect::<Vec<_>>()
-                        .join(", ");
+                    let list = candidates.iter().cloned().collect::<Vec<_>>().join(", ");
                     return Err(format!(
                         "Model SQL must reference at least one resolved dataset (FQN or dbt source). Use one of: {}",
                         list
@@ -97,13 +154,13 @@ impl Tool for ApproveAndSaveArtifactTool {
                 }
                 referenced[0].clone()
             } else {
-                candidates.first().cloned().unwrap()
+                candidates[0].clone()
             }
-        }; // end selection
+        };
 
         // For metrics, persist a top comment documenting the assumed dataset
         let mut content_final = if kind == "metric" {
-            ensure_dataset_comment(&content, &pipeline, &namespace)
+            ensure_dataset_comment(&content, &dataset_id)
         } else {
             content.clone()
         };
@@ -122,24 +179,37 @@ impl Tool for ApproveAndSaveArtifactTool {
                         if exists_true {
                             let fk = step.args.get("kind").and_then(|v| v.as_str()).unwrap_or("");
                             let fname = step.args.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                            let fp = step.args.get("pipeline").and_then(|v| v.as_str()).unwrap_or("");
-                            let fns = step.args.get("namespace").and_then(|v| v.as_str()).unwrap_or("");
                             if fk != kind {
                                 return Err(format!(
                                     "Focused artifact kind is '{}'; cannot save kind '{}'. Update the focused artifact in place.",
                                     fk, kind
                                 ));
                             }
-                            if fname.is_empty() || fp.is_empty() || fns.is_empty() {
+                            let fds = step
+                                .args
+                                .get("dataset_id")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .or_else(|| {
+                                    // Legacy focus: {pipeline,namespace}
+                                    let fp = step.args.get("pipeline").and_then(|v| v.as_str()).unwrap_or("").trim();
+                                    let fns = step.args.get("namespace").and_then(|v| v.as_str()).unwrap_or("").trim();
+                                    if !fp.is_empty() && !fns.is_empty() {
+                                        Some(format!("{}.{}", fp, fns))
+                                    } else {
+                                        None
+                                    }
+                                });
+                            if fname.is_empty() || fds.is_none() {
                                 break;
                             }
                             // Override target to focused artifact
                             name_final = fname.to_string();
-                            pipeline = fp.to_string();
-                            namespace = fns.to_string();
+                            dataset_id = fds.unwrap();
                             // Ensure metric YAML comment reflects focused dataset if metric
                             if kind == "metric" {
-                                content_final = ensure_dataset_comment(&content_final, &pipeline, &namespace);
+                                content_final = ensure_dataset_comment(&content_final, &dataset_id);
                             }
                         }
                         break;
@@ -151,11 +221,12 @@ impl Tool for ApproveAndSaveArtifactTool {
         let (current_key, version_key, content_type) = match kind {
             "model" => {
                 let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
-                let current = format!("{}/models/{}/{}.sql", base, namespace, name_final);
+                let dir = encode_key_component(&dataset_id);
+                let current = format!("{}/models/{}/{}.sql", base, dir, name_final);
                 let ver = format!(
                     "{}/models/{}/_versions/{}/{}.sql",
                     base,
-                    namespace,
+                    dir,
                     name_final,
                     chrono::Utc::now().format("%Y%m%d_%H%M%S")
                 );
@@ -163,11 +234,12 @@ impl Tool for ApproveAndSaveArtifactTool {
             }
             _ => {
                 let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
-                let current = format!("{}/metrics/{}/{}.yaml", base, namespace, name_final);
+                let dir = encode_key_component(&dataset_id);
+                let current = format!("{}/metrics/{}/{}.yaml", base, dir, name_final);
                 let ver = format!(
                     "{}/metrics/{}/_versions/{}/{}.yaml",
                     base,
-                    namespace,
+                    dir,
                     name_final,
                     chrono::Utc::now().format("%Y%m%d_%H%M%S")
                 );
@@ -194,7 +266,7 @@ impl Tool for ApproveAndSaveArtifactTool {
                         tid,
                         crate::session::ThreadStep {
                             action: "artifact_focus".to_string(),
-                            args: serde_json::json!({ "kind": kind, "name": name, "pipeline": pipeline, "namespace": namespace }),
+                            args: serde_json::json!({ "kind": kind, "name": name, "dataset_id": dataset_id }),
                             observation: serde_json::json!({ "exists": existing.is_some() }),
                             ts: chrono::Utc::now().to_rfc3339(),
                             agent: ctx.agent_name.clone(),
@@ -207,8 +279,7 @@ impl Tool for ApproveAndSaveArtifactTool {
                 "exists": existing.is_some(),
                 "key": current_key,
                 "diff": diff,
-                "pipeline": pipeline,
-                "namespace": namespace,
+                "dataset_id": dataset_id,
                 "kind": kind
             }));
         }
@@ -235,17 +306,17 @@ impl Tool for ApproveAndSaveArtifactTool {
             if let Ok(vecs) = model.embed(&[content_final.clone()]) {
                 if let Some(v) = vecs.get(0) {
                     let atype = if kind == "model" { "dbt_model" } else { "dbt_metricflow" };
-                    let dataset_id = format!("{}.{}", pipeline, namespace);
+                    let ds_id = dataset_id.clone();
                     let id = format!(
                         "artifact:{}:{}:{}",
                         if kind == "model" { "model" } else { "metric" },
-                        dataset_id,
+                        ds_id,
                         name_final
                     );
                     let chunk = crate::vector::lance_store::Chunk {
                         id,
                         kind: "artifact".to_string(),
-                        dataset_id,
+                        dataset_id: dataset_id.clone(),
                         field: None,
                         text: content_final.clone(),
                         vector: v.clone(),
@@ -268,7 +339,7 @@ impl Tool for ApproveAndSaveArtifactTool {
                     tid,
                     crate::session::ThreadStep {
                         action: "artifact_saved".to_string(),
-                        args: serde_json::json!({ "kind": kind, "name": name, "pipeline": pipeline, "namespace": namespace }),
+                        args: serde_json::json!({ "kind": kind, "name": name, "dataset_id": dataset_id }),
                         observation: serde_json::json!({ "key": current_key, "status": status, "lines_added": lines_added, "lines_removed": lines_removed }),
                         ts: chrono::Utc::now().to_rfc3339(),
                         agent: ctx.agent_name.clone(),
@@ -279,8 +350,9 @@ impl Tool for ApproveAndSaveArtifactTool {
             // Immediately validate the DBT project and refresh compiled views to guarantee consistency
             let s3_prefix = ctx.keyspace.dbt_prefix(&ctx.scope);
             let validate_tool = crate::suites::data_engineer_suite::tools::dbt_validate::DbtValidateTool;
+            let project_name = format!("{}_project", ctx.scope.project_id.replace('/', "_"));
             let args = json!({
-                "project_name": format!("{}_project", pipeline.replace('/', "_")),
+                "project_name": project_name,
                 "s3_prefix": s3_prefix,
                 "target": "datafusion",
                 "build": true
@@ -384,8 +456,8 @@ fn compute_unified_diff(old: &str, new: &str) -> String {
     out.join("\n")
 }
 
-fn ensure_dataset_comment(yaml_text: &str, pipeline: &str, namespace: &str) -> String {
-    let wanted = format!("# Dataset: {}.{}", pipeline, namespace);
+fn ensure_dataset_comment(yaml_text: &str, dataset_id: &str) -> String {
+    let wanted = format!("# Dataset: {}", dataset_id);
     // If already present (anywhere in the first 5 lines), keep original
     let lines: Vec<&str> = yaml_text.split('\n').collect();
     let scan_end = std::cmp::min(lines.len(), 5);

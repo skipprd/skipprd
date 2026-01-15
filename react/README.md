@@ -12,6 +12,13 @@ cargo run -p react -- serve --port 8787 --log
 
 The server speaks WebSocket on `ws://localhost:8787/` using schemas in `../docs/openapi/ask-ws.yaml`.
 
+### Configuration notes (LLM output size)
+
+The **effective output token limit** is controlled by the environment variable **`LLM_MAX_TOKENS`**.
+
+- When you run `react serve` with a YAML config (e.g. `react/react.yaml`), the loader in `src/config.rs` will **set `LLM_MAX_TOKENS` from `llm.max_tokens` if it is not already set**.
+- If you see errors like `parser_error invalid JSON twice` during large batch scaffolds, your model output is likely being **truncated**. Increase `llm.max_tokens` (or set `LLM_MAX_TOKENS` explicitly) so tool-call JSON can fit (for `gpt-5.x`, **8192** is a reasonable starting point).
+
 ### Core architecture
 
 #### Transport: WebSocket server
