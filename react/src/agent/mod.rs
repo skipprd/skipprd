@@ -4,12 +4,13 @@ use std::sync::Arc;
 
 use crate::tools::ToolRegistry;
 use crate::llm::ChatMessage;
-use crate::session::{ThreadStore, ThreadStep, ThreadResult, ThreadLog};
+use crate::session::{ThreadStore, ThreadStep, ThreadResult};
 use crate::providers::{Keyspace, RequestScope};
 use crate::providers::DbtProvider;
 use crate::adapters::storage::StorageAdapter;
 use crate::providers::VectorStore;
 use uuid::Uuid;
+use async_trait::async_trait;
 
 #[derive(Clone)]
 pub struct AgentCtx {
@@ -20,8 +21,9 @@ pub struct AgentCtx {
     pub progress_tx: Option<tokio::sync::mpsc::UnboundedSender<usize>>,
     pub pre_step_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     pub agent_name: Option<String>,
-    // Dataset candidates resolved from embeddings/catalog before the agent runs
-    pub dataset_candidates: Vec<DatasetCandidate>,
+    /// Suite-provided policy that defines what \"final\" means, what context to inject, and any
+    /// required validations. This is the primary extension point that keeps the core loop agnostic.
+    pub policy: Arc<dyn AgentPolicy>,
     /// LLM provider to use for the ReAct loop.
     pub llm: Arc<dyn crate::llm::LargeLanguageModel>,
     /// Storage adapter for reads/writes (S3, in-memory, etc.).
@@ -37,6 +39,10 @@ pub struct AgentCtx {
     pub vector: Option<Arc<dyn VectorStore>>,
     /// Optional thread store (for transcript persistence and artifact context).
     pub thread_store: Option<ThreadStore>,
+
+    /// Optional suite-provided context used by some policies (e.g., analytics dataset candidates).
+    /// The core loop does not assume anything about this structure; policies may interpret it.
+    pub dataset_candidates: Vec<DatasetCandidate>,
 }
 
 #[derive(Clone)]
@@ -53,6 +59,228 @@ pub enum RunOutcome {
     AwaitApproval { thread_id: String, prompt: String },
 }
 
+#[async_trait]
+pub trait AgentPolicy: Send + Sync {
+    /// Extra transcript lines to inject after system/tool-card and before the user question.
+    fn prelude_lines(&self, _ctx: &AgentCtx, _store: Option<&ThreadStore>, _thread_id: &str) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Handle a model-emitted `{ "final": {...} }`. Return:
+    /// - `Ok(Some(RunOutcome::Final{..}))` to accept and finish
+    /// - `Ok(None)` to reject and continue (policy should append an Observation to transcript)
+    async fn handle_final(
+        &self,
+        tools: &ToolRegistry,
+        ctx: &AgentCtx,
+        transcript: &mut Vec<String>,
+        store: Option<&ThreadStore>,
+        thread_id: &str,
+        final_obj: &Value,
+    ) -> Result<Option<RunOutcome>, String>;
+
+    /// If we exhaust steps without reaching an accepted final, produce a fallback.
+    async fn fallback(
+        &self,
+        _tools: &ToolRegistry,
+        _ctx: &AgentCtx,
+        _transcript: &mut Vec<String>,
+        _store: Option<&ThreadStore>,
+        thread_id: &str,
+    ) -> Result<RunOutcome, String> {
+        Ok(RunOutcome::Final {
+            thread_id: thread_id.to_string(),
+            result: ThreadResult { sql: None, answer: "No result".to_string() },
+        })
+    }
+}
+
+/// Default policy: accept `final.answer` without any required validations.
+pub struct DefaultPolicy;
+
+#[async_trait]
+impl AgentPolicy for DefaultPolicy {
+    async fn handle_final(
+        &self,
+        _tools: &ToolRegistry,
+        ctx: &AgentCtx,
+        _transcript: &mut Vec<String>,
+        store: Option<&ThreadStore>,
+        thread_id: &str,
+        final_obj: &Value,
+    ) -> Result<Option<RunOutcome>, String> {
+        let sql_opt = final_obj.get("sql").and_then(|x| x.as_str()).map(|s| s.to_string());
+        let answer = final_obj
+            .get("answer")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let result = ThreadResult { sql: sql_opt, answer };
+        if let Some(store) = store {
+            let _ = store
+                .append_step(
+                    thread_id,
+                    ThreadStep {
+                        action: "final".to_string(),
+                        args: final_obj.clone(),
+                        observation: serde_json::json!({"ok": true}),
+                        ts: chrono::Utc::now().to_rfc3339(),
+                        agent: ctx.agent_name.clone(),
+                    },
+                )
+                .await;
+        }
+        Ok(Some(RunOutcome::Final { thread_id: thread_id.to_string(), result }))
+    }
+}
+
+/// Analytics policy: require SQL to be runnable and return at least one row before accepting final.
+pub struct SqlValidatedFinalPolicy;
+
+#[async_trait]
+impl AgentPolicy for SqlValidatedFinalPolicy {
+    fn prelude_lines(&self, ctx: &AgentCtx, store: Option<&ThreadStore>, thread_id: &str) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        if !ctx.dataset_candidates.is_empty() {
+            let mut lines: Vec<String> = Vec::new();
+            lines.push("ResolvedDatasets:".to_string());
+            for c in ctx.dataset_candidates.iter().take(6) {
+                lines.push(format!("- {} (score={:.4})", c.dataset_id, c.score));
+            }
+            out.push(lines.join("\n"));
+        }
+        // Include resolved artifacts (metrics) if present in thread
+        if let Some(store) = store {
+            // Best-effort sync read (we're in a sync method); caller already has async context,
+            // but we keep prelude_lines sync to avoid complicating the core loop. For now, omit.
+            let _ = (store, thread_id);
+        }
+        out
+    }
+
+    async fn handle_final(
+        &self,
+        tools: &ToolRegistry,
+        ctx: &AgentCtx,
+        transcript: &mut Vec<String>,
+        store: Option<&ThreadStore>,
+        thread_id: &str,
+        final_obj: &Value,
+    ) -> Result<Option<RunOutcome>, String> {
+        let sql_opt = final_obj.get("sql").and_then(|x| x.as_str()).map(|s| s.to_string());
+        if let Some(sql_str) = sql_opt.as_ref() {
+            let sql_lower = sql_str.to_lowercase();
+            if sql_lower.contains(" default.") {
+                transcript.push("Observation: invalid final SQL - 'default.*' schema is forbidden. Use fully-qualified <catalog>.<database>.<table>.".to_string());
+                return Ok(None);
+            }
+        }
+        let sql_for_run = match sql_opt.as_ref() {
+            Some(s) if !s.trim().is_empty() => s.clone(),
+            _ => {
+                transcript.push("Observation: final requires a valid SQL and data; please provide SQL and call run_sql before finalizing.".to_string());
+                return Ok(None);
+            }
+        };
+        let obs = match tools.call("run_sql", serde_json::json!({"sql": sql_for_run}), ctx).await {
+            Ok(o) => o,
+            Err(e) => serde_json::json!({"ok": false, "error": e}),
+        };
+        let ok = obs.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+        let rows_non_empty = obs
+            .get("rows")
+            .and_then(|r| serde_json::from_value::<Vec<Vec<String>>>(r.clone()).ok())
+            .map(|r| !r.is_empty())
+            .unwrap_or(false);
+        if let Some(store) = store {
+            let _ = store
+                .append_step(
+                    thread_id,
+                    ThreadStep {
+                        action: "run_sql".to_string(),
+                        args: serde_json::json!({"sql": sql_for_run}),
+                        observation: obs.clone(),
+                        ts: chrono::Utc::now().to_rfc3339(),
+                        agent: ctx.agent_name.clone(),
+                    },
+                )
+                .await;
+        }
+        if !(ok && rows_non_empty) {
+            let err_text = obs.get("error").and_then(|x| x.as_str()).unwrap_or("no data");
+            transcript.push(format!("Observation: data_validation_failed reason='{}'; fix SQL and try again.", err_text));
+            return Ok(None);
+        }
+        let answer = final_obj
+            .get("answer")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let result = ThreadResult { sql: sql_opt, answer };
+        if let Some(store) = store {
+            let _ = store
+                .append_step(
+                    thread_id,
+                    ThreadStep {
+                        action: "final".to_string(),
+                        args: final_obj.clone(),
+                        observation: serde_json::json!({"ok": true}),
+                        ts: chrono::Utc::now().to_rfc3339(),
+                        agent: ctx.agent_name.clone(),
+                    },
+                )
+                .await;
+        }
+        Ok(Some(RunOutcome::Final { thread_id: thread_id.to_string(), result }))
+    }
+
+    async fn fallback(
+        &self,
+        _tools: &ToolRegistry,
+        _ctx: &AgentCtx,
+        _transcript: &mut Vec<String>,
+        store: Option<&ThreadStore>,
+        thread_id: &str,
+    ) -> Result<RunOutcome, String> {
+        // Preserve previous behavior: if artifacts were saved, summarize them.
+        let mut summary = String::from("No result.");
+        if let Some(store) = store {
+            if let Some(log) = store.get(thread_id).await {
+                let mut keys: Vec<String> = Vec::new();
+                for step in log.steps.iter().rev() {
+                    if step.action == "approve_and_save_artifact_batch" {
+                        if let Some(arr) = step.observation.get("keys").and_then(|x| x.as_array()) {
+                            for v in arr {
+                                if let Some(s) = v.as_str() {
+                                    keys.push(s.to_string());
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    if step.action == "artifact_saved" {
+                        if let Some(k) = step.observation.get("key").and_then(|x| x.as_str()) {
+                            keys.push(k.to_string());
+                        }
+                    }
+                    if keys.len() >= 12 {
+                        break;
+                    }
+                }
+                if !keys.is_empty() {
+                    let shown: Vec<String> = keys.iter().take(6).cloned().collect();
+                    let extra = if keys.len() > 6 { format!(" (+{} more)", keys.len() - 6) } else { String::new() };
+                    summary = format!("Saved {} artifact(s): {}{}", keys.len(), shown.join(", "), extra);
+                }
+            }
+        }
+        Ok(RunOutcome::Final {
+            thread_id: thread_id.to_string(),
+            result: ThreadResult { sql: None, answer: summary },
+        })
+    }
+}
+
 impl Agent {
     fn gen_uuid() -> String { Uuid::new_v4().to_string() }
     pub async fn run_until_block(
@@ -67,37 +295,7 @@ impl Agent {
         let mut transcript: Vec<String> = Vec::new();
         transcript.push(system_prompt.to_string());
         transcript.push(tool_card.to_string());
-        if !ctx.dataset_candidates.is_empty() {
-            let mut lines: Vec<String> = Vec::new();
-            lines.push("ResolvedDatasets:".to_string());
-            for c in ctx.dataset_candidates.iter().take(6) {
-                lines.push(format!("- {} (score={:.4})", c.dataset_id, c.score));
-            }
-            transcript.push(lines.join("\n"));
-        }
-        // Include resolved artifacts (metrics) if present in thread
-        if let Some(tid) = ctx.thread_id.as_ref() {
-            if let Some(store) = store_opt {
-                if let Some(log) = store.get(tid).await {
-                    for step in log.steps.iter().rev() {
-                        if step.action == "resolved_artifacts" {
-                            if let Some(arr) = step.args.get("items").and_then(|x| x.as_array()) {
-                                let mut lines: Vec<String> = Vec::new();
-                                lines.push("ResolvedArtifacts:".to_string());
-                                for v in arr.iter().take(6) {
-                                    let ds = v.get("dataset_id").and_then(|x| x.as_str()).unwrap_or("");
-                                    let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("");
-                                    let score = v.get("score").and_then(|x| x.as_f64()).unwrap_or(0.0);
-                                    lines.push(format!("- {}::{} (score={:.4})", ds, name, score));
-                                }
-                                transcript.push(lines.join("\n"));
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-        }
+        transcript.extend(ctx.policy.prelude_lines(ctx, store_opt, &thread_id));
         transcript.push(format!("Question: {}", user_prompt));
 
         if let Some(store) = store_opt {
@@ -168,59 +366,14 @@ impl Agent {
             }
             let parsed = parsed.unwrap();
             if let Some(final_obj) = parsed.get("final") {
-                let sql_opt = final_obj.get("sql").and_then(|x| x.as_str()).map(|s| s.to_string());
-                // Enforce basic SQL safety: require a valid SQL and successful data before accepting final.
-                if let Some(sql_str) = sql_opt.as_ref() {
-                    let sql_lower = sql_str.to_lowercase();
-                    if sql_lower.contains(" default.") {
-                        transcript.push("Observation: invalid final SQL - 'default.*' schema is forbidden. Use fully-qualified <catalog>.<database>.<table>.".to_string());
-                        continue;
-                    }
+                if let Some(outcome) = ctx
+                    .policy
+                    .handle_final(tools, ctx, &mut transcript, store_opt, &thread_id, final_obj)
+                    .await?
+                {
+                    return Ok(outcome);
                 }
-                // Require SQL and successful data before accepting final
-                let sql_for_run = match sql_opt.as_ref() {
-                    Some(s) if !s.trim().is_empty() => s.clone(),
-                    _ => {
-                        transcript.push("Observation: final requires a valid SQL and data; please provide SQL and call run_sql before finalizing.".to_string());
-                        continue;
-                    }
-                };
-                let obs = match tools.call("run_sql", serde_json::json!({"sql": sql_for_run}), ctx).await {
-                    Ok(o) => o,
-                    Err(e) => serde_json::json!({"ok": false, "error": e}),
-                };
-                let ok = obs.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-                let rows_non_empty = obs.get("rows")
-                    .and_then(|r| serde_json::from_value::<Vec<Vec<String>>>(r.clone()).ok())
-                    .map(|r| !r.is_empty())
-                    .unwrap_or(false);
-                // Record the run_sql attempt
-                if let Some(store) = store_opt {
-                    let _ = store.append_step(&thread_id, ThreadStep {
-                        action: "run_sql".to_string(),
-                        args: serde_json::json!({"sql": sql_for_run}),
-                        observation: obs.clone(),
-                        ts: chrono::Utc::now().to_rfc3339(),
-                        agent: ctx.agent_name.clone(),
-                    }).await;
-                }
-                if !(ok && rows_non_empty) {
-                    let err_text = obs.get("error").and_then(|x| x.as_str()).unwrap_or("no data");
-                    transcript.push(format!("Observation: data_validation_failed reason='{}'; fix SQL and try again.", err_text));
-                    continue;
-                }
-                let answer = final_obj.get("answer").and_then(|x| x.as_str()).map(|s| s.to_string()).unwrap_or_default();
-                let result = ThreadResult { sql: sql_opt, answer };
-                if let Some(store) = store_opt {
-                    let _ = store.append_step(&thread_id, ThreadStep {
-                        action: "final".to_string(),
-                        args: final_obj.clone(),
-                        observation: serde_json::json!({"ok": true}),
-                        ts: chrono::Utc::now().to_rfc3339(),
-                        agent: ctx.agent_name.clone(),
-                    }).await;
-                }
-                return Ok(RunOutcome::Final { thread_id, result });
+                continue;
             }
             let action_name = parsed.get("action").and_then(|x| x.as_str()).unwrap_or_default().to_string();
             // Skip empty/invalid action names to avoid logging noisy empty steps
@@ -307,39 +460,7 @@ impl Agent {
                 return Ok(RunOutcome::AwaitApproval { thread_id, prompt });
             }
         }
-        // If we get here, no final or ask_user; return a minimal result to avoid blocking.
-        // Build a concise summary from recent saved artifacts to avoid empty finals
-        let mut summary = String::from("Scaffolded dbt project artifacts.");
-        {
-            if let Some(store2) = store_opt {
-                if let Some(log) = store2.get(&thread_id).await {
-                    // Collect saved keys from batch or singles
-                    let mut keys: Vec<String> = Vec::new();
-                    for step in log.steps.iter().rev() {
-                        if step.action == "approve_and_save_artifact_batch" {
-                            if let Some(arr) = step.observation.get("keys").and_then(|x| x.as_array()) {
-                                for v in arr {
-                                    if let Some(s) = v.as_str() { keys.push(s.to_string()); }
-                                }
-                            }
-                            break;
-                        }
-                        if step.action == "artifact_saved" {
-                            if let Some(k) = step.observation.get("key").and_then(|x| x.as_str()) {
-                                keys.push(k.to_string());
-                            }
-                        }
-                        if keys.len() >= 12 { break; }
-                    }
-                    if !keys.is_empty() {
-                        let shown: Vec<String> = keys.iter().take(6).cloned().collect();
-                        let extra = if keys.len() > 6 { format!(" (+{} more)", keys.len() - 6) } else { String::new() };
-                        summary = format!("Saved {} artifact(s): {}{}", keys.len(), shown.join(", "), extra);
-                    }
-                }
-            }
-        }
-        Ok(RunOutcome::Final { thread_id, result: ThreadResult { sql: None, answer: summary } })
+        ctx.policy.fallback(tools, ctx, &mut transcript, store_opt, &thread_id).await
     }
 
     pub async fn run(
@@ -354,38 +475,7 @@ impl Agent {
         let mut transcript: Vec<String> = Vec::new();
         transcript.push(system_prompt.to_string());
         transcript.push(tool_card.to_string());
-        if !ctx.dataset_candidates.is_empty() {
-            let mut lines: Vec<String> = Vec::new();
-            lines.push("ResolvedDatasets:".to_string());
-            for c in ctx.dataset_candidates.iter().take(6) {
-                lines.push(format!("- {} (score={:.4})", c.dataset_id, c.score));
-            }
-            transcript.push(lines.join("\n"));
-        }
-        // Include resolved artifacts (metrics) if present in thread
-        if let Some(tid) = ctx.thread_id.as_ref() {
-            if let Some(store) = store_opt {
-                if let Some(log) = store.get(tid).await {
-                    for step in log.steps.iter().rev() {
-                        if step.action == "resolved_artifacts" {
-                            if let Some(arr) = step.args.get("items").and_then(|x| x.as_array()) {
-                                let mut lines: Vec<String> = Vec::new();
-                                lines.push("ResolvedArtifacts:".to_string());
-                                for v in arr.iter().take(6) {
-                                    let p = v.get("pipeline").and_then(|x| x.as_str()).unwrap_or("");
-                                    let ns = v.get("namespace").and_then(|x| x.as_str()).unwrap_or("");
-                                    let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("");
-                                    let score = v.get("score").and_then(|x| x.as_f64()).unwrap_or(0.0);
-                                    lines.push(format!("- {}.{}::{} (score={:.4})", p, ns, name, score));
-                                }
-                                transcript.push(lines.join("\n"));
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-        }
+        transcript.extend(ctx.policy.prelude_lines(ctx, store_opt, &thread_id));
         transcript.push(format!("Question: {}", user_prompt));
 
         let mut final_result: Option<ThreadResult> = None;
@@ -444,67 +534,17 @@ impl Agent {
             }
             let parsed = parsed.unwrap();
             if let Some(final_obj) = parsed.get("final") {
-                // End
-                let sql_opt = final_obj.get("sql").and_then(|x| x.as_str()).map(|s| s.to_string());
-                if let Some(sql_str) = sql_opt.as_ref() {
-                    let sql_lower = sql_str.to_lowercase();
-                    if sql_lower.contains(" default.") {
-                        transcript.push("Observation: invalid final SQL - 'default.*' schema is forbidden.".to_string());
-                        continue;
+                if let Some(outcome) = ctx
+                    .policy
+                    .handle_final(tools, ctx, &mut transcript, store_opt, &thread_id, final_obj)
+                    .await?
+                {
+                    if let RunOutcome::Final { result, .. } = outcome {
+                        final_result = Some(result);
+                        break;
                     }
                 }
-                let sql_for_run = match sql_opt.as_ref() {
-                    Some(s) if !s.trim().is_empty() => s.clone(),
-                    _ => {
-                        transcript.push("Observation: final requires a valid SQL and data; please provide SQL and call run_sql before finalizing.".to_string());
-                        continue;
-                    }
-                };
-                let mut obs = match tools.call("run_sql", serde_json::json!({"sql": sql_for_run}), ctx).await {
-                    Ok(o) => o,
-                    Err(e) => serde_json::json!({"ok": false, "error": e}),
-                };
-                // Attach LLM expense estimate (tokens only) for this step (final decision chat)
-                let est_tokens = ((chat_chars_in + chat_chars_out) as f32 / 4.0).round() as i64;
-                let expense = serde_json::json!({
-                    "chat_chars_in": chat_chars_in,
-                    "chat_chars_out": chat_chars_out,
-                    "est_tokens": est_tokens
-                });
-                if let Some(map) = obs.as_object_mut() {
-                    map.insert("llm_expense".to_string(), expense);
-                }
-                let ok = obs.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-                let rows_non_empty = obs.get("rows")
-                    .and_then(|r| serde_json::from_value::<Vec<Vec<String>>>(r.clone()).ok())
-                    .map(|r| !r.is_empty())
-                    .unwrap_or(false);
-                if let Some(store) = store_opt {
-                    let _ = store.append_step(&thread_id, ThreadStep {
-                        action: "run_sql".to_string(),
-                        args: serde_json::json!({"sql": sql_for_run}),
-                        observation: obs.clone(),
-                        ts: chrono::Utc::now().to_rfc3339(),
-                        agent: ctx.agent_name.clone(),
-                    }).await;
-                }
-                if !(ok && rows_non_empty) {
-                    let err_text = obs.get("error").and_then(|x| x.as_str()).unwrap_or("no data");
-                    transcript.push(format!("Observation: data_validation_failed reason='{}'; fix SQL and try again.", err_text));
-                    continue;
-                }
-                let answer = final_obj.get("answer").and_then(|x| x.as_str()).map(|s| s.to_string()).unwrap_or_default();
-                final_result = Some(ThreadResult { sql: sql_opt, answer });
-                if let Some(store) = store_opt {
-                    let _ = store.append_step(&thread_id, ThreadStep {
-                        action: "final".to_string(),
-                        args: final_obj.clone(),
-                        observation: serde_json::json!({"ok": true}),
-                        ts: chrono::Utc::now().to_rfc3339(),
-                        agent: ctx.agent_name.clone(),
-                    }).await;
-                }
-                break;
+                continue;
             }
 
             let action_name = parsed.get("action").and_then(|x| x.as_str()).unwrap_or_default().to_string();

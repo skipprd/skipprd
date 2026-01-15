@@ -1,6 +1,7 @@
 use react::suites::shared::tools::sql_run::SqlRunTool;
 use react::tools::Tool;
 use react::agent::AgentCtx;
+use react::agent::DefaultPolicy;
 use serde_json::json;
 use std::sync::Arc;
 use react::providers::{QueryProvider, QueryResult};
@@ -48,7 +49,7 @@ LIMIT 1
 		progress_tx: None,
 		pre_step_tx: None,
 		agent_name: Some("test".to_string()),
-		dataset_candidates: vec![],
+		policy: std::sync::Arc::new(DefaultPolicy),
 		llm: std::sync::Arc::new(NullModel::new()),
 		storage: std::sync::Arc::new(InMemoryStorageAdapter::default()),
 		scope: react::providers::RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() },
@@ -56,6 +57,7 @@ LIMIT 1
 		dbt: None,
 		vector: None,
 		thread_store: None,
+		dataset_candidates: vec![],
 	};
 	let res = tool.call(args, &actx).await.expect("tool call");
 	assert!(res.get("ok").and_then(|x| x.as_bool()).unwrap_or(false), "expected ok response, got {}", res);

@@ -32,6 +32,7 @@ pub fn default_registry() -> SuiteRegistry {
     let mut reg = SuiteRegistry::new();
     reg.register(crate::suites::skippr_ask_suite::SkipprAskSuite);
     reg.register(crate::suites::skippr_model_suite::SkipprModelSuite);
+    reg.register(crate::suites::kb_suite::KbSuite);
     reg
 }
 

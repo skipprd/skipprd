@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::flow_frame::FlowFrame;
-use crate::agent::{Agent, AgentCtx, DatasetCandidate, RunOutcome};
+use crate::agent::{Agent, AgentCtx, DatasetCandidate, RunOutcome, SqlValidatedFinalPolicy};
 use crate::tools::ToolRegistry;
 use crate::suites::preflight::PreflightProvider;
 use crate::suites::{Suite, SuiteCtx};
@@ -77,6 +77,7 @@ impl SkipprAskSuite {
             progress_tx: None,
             pre_step_tx: None,
             agent_name: Some("ask".to_string()),
+            policy: std::sync::Arc::new(SqlValidatedFinalPolicy),
             dataset_candidates: bundle
                 .datasets
                 .iter()

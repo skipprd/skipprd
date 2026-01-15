@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use crate::flow_frame::FlowFrame;
-use crate::agent::{Agent, AgentCtx, DatasetCandidate, RunOutcome};
+use crate::agent::{Agent, AgentCtx, DatasetCandidate, RunOutcome, SqlValidatedFinalPolicy};
 use crate::tools::{Tool, ToolRegistry};
 use crate::suites::preflight::PreflightProvider;
 use crate::suites::{Suite, SuiteCtx};
@@ -124,6 +124,7 @@ impl SkipprModelSuite {
             progress_tx: None,
             pre_step_tx: None,
             agent_name: Some("cleanse".to_string()),
+            policy: std::sync::Arc::new(SqlValidatedFinalPolicy),
             dataset_candidates: bundle
                 .datasets
                 .iter()
@@ -182,6 +183,7 @@ impl SkipprModelSuite {
             progress_tx: None,
             pre_step_tx: None,
             agent_name: Some("model".to_string()),
+            policy: std::sync::Arc::new(SqlValidatedFinalPolicy),
             dataset_candidates: bundle
                 .datasets
                 .iter()

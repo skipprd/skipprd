@@ -29,6 +29,12 @@ Run the server locally (default port 8787 shown; choose any open port):
 cargo run -p react -- serve --port 8787 --log
 ```
 
+## Suites
+
+The `react` server supports multiple suites. The default suite registry currently includes:
+- `skippr_ask` / `skippr_model`: analytics + DBT-oriented suites
+- `kb`: minimal local knowledge-base suite (ingest local `.txt`/`.md` files into vectors and answer questions)
+
 Connect a WebSocket client to:
 
 - `ws://localhost:8787/`
