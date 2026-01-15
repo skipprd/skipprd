@@ -5,8 +5,8 @@ use crate::agent::{Agent, AgentCtx, RunOutcome};
 use crate::flow_frame::FlowFrame;
 use crate::session::ThreadStore;
 use crate::suites::preflight::PreflightProvider;
-use crate::suites::skippr_shared::policy_sql_validated::SqlValidatedPolicy;
-use crate::suites::skippr_shared::types::DatasetCandidate;
+use crate::suites::data_engineer_shared::policy_sql_validated::SqlValidatedPolicy;
+use crate::suites::data_engineer_shared::types::DatasetCandidate;
 use crate::suites::{Suite, SuiteCtx};
 use crate::tools::{Tool, ToolRegistry};
 

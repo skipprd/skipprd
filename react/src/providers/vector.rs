@@ -15,14 +15,14 @@ pub trait VectorStore: Send + Sync {
     async fn delete_project_embeddings(&self, scope: &crate::providers::RequestScope) -> Result<(), String>;
 }
 
-/// Skippr's vector store implementation (LanceDB-on-S3).
+/// Default vector store implementation (LanceDB-on-S3).
 #[derive(Clone)]
-pub struct SkipprLanceVectorStore {
+pub struct LanceVectorStore {
     pub keyspace: Arc<dyn crate::providers::Keyspace>,
     pub scope: crate::providers::RequestScope,
 }
 
-impl SkipprLanceVectorStore {
+impl LanceVectorStore {
     pub fn new(keyspace: Arc<dyn crate::providers::Keyspace>, scope: crate::providers::RequestScope) -> Self {
         Self { keyspace, scope }
     }
@@ -39,7 +39,7 @@ impl SkipprLanceVectorStore {
 }
 
 #[async_trait]
-impl VectorStore for SkipprLanceVectorStore {
+impl VectorStore for LanceVectorStore {
     async fn upsert(&self, scope: &crate::providers::RequestScope, items: &[VectorChunk]) -> Result<(), String> {
         self.store_for(scope).upsert(items).await
     }

@@ -119,7 +119,10 @@ impl AgentPolicy for SqlValidatedPolicy {
         }
         if !(ok && rows_non_empty) {
             let err_text = obs.get("error").and_then(|x| x.as_str()).unwrap_or("no data");
-            transcript.push(format!("Observation: data_validation_failed reason='{}'; fix SQL and try again.", err_text));
+            transcript.push(format!(
+                "Observation: data_validation_failed reason='{}'; fix SQL and try again.",
+                err_text
+            ));
             return Ok(None);
         }
         let answer = final_obj

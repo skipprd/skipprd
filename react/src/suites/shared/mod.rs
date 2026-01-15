@@ -1,3 +1,3 @@
 pub mod tools;
-// NOTE: keep this module suite-agnostic. Skippr-specific policies/types live under `suites::skippr_shared`.
+// NOTE: keep this module suite-agnostic. Suite-specific policies/types live under `suites::data_engineer_shared`.
 

@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
-  title: Skippr Ask WebSocket API
+  title: ReAct WebSocket API
   version: 0.2.0
   description: |
-    WebSocket-based chat threads for Ask. Clients send JSON frames and receive JSON frames.
+    WebSocket-based chat threads for the ReAct server. Clients send JSON frames and receive JSON frames.
     Supported client message types: list, suites, new, open, user, approve, reject, history, seen, delete, resume.
     Server message types: list, suites, thread_assigned, processing, token, final, await_user, await_approval, unread, ok, error, history.
 

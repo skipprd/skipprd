@@ -62,12 +62,12 @@ pub trait DbtProvider: Send + Sync {
 }
 
 #[derive(Clone)]
-pub struct SkipprDbtProvider {
+pub struct DbtProjectProvider {
     pub storage: Arc<dyn StorageAdapter>,
     pub keyspace: Arc<dyn Keyspace>,
 }
 
-impl SkipprDbtProvider {
+impl DbtProjectProvider {
     pub fn new(storage: Arc<dyn StorageAdapter>, keyspace: Arc<dyn Keyspace>) -> Self {
         Self { storage, keyspace }
     }
@@ -176,7 +176,7 @@ fn combine_errors(a: &CmdOut, b: &CmdOut) -> Vec<String> {
     v
 }
 
-impl SkipprDbtProvider {
+impl DbtProjectProvider {
     async fn upload_dir_to_storage(&self, local_dir: &Path, prefix: &str) -> Result<usize, String> {
         if !local_dir.is_dir() {
             return Ok(0);
@@ -212,7 +212,7 @@ impl SkipprDbtProvider {
 }
 
 #[async_trait]
-impl DbtProvider for SkipprDbtProvider {
+impl DbtProvider for DbtProjectProvider {
     async fn ensure_minimal_project(&self, scope: &RequestScope) -> Result<(), String> {
         let project_key = self.keyspace.dbt_project_key(scope);
         if self.storage.head_etag(&project_key).await?.is_some() {

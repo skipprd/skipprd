@@ -175,7 +175,7 @@ pub async fn sync_from_repo_to_s3_and_embeddings(
 	}
 	let mut g = load_global_manifest(storage.clone()).await;
 	let mut updated_projects: Vec<ProjectManifest> = Vec::new();
-	let store = crate::providers::SkipprLanceVectorStore::new(keyspace, scope.clone()).global_dbt_examples_store();
+	let store = crate::providers::LanceVectorStore::new(keyspace, scope.clone()).global_dbt_examples_store();
 	for (project, files) in projects.iter() {
 		let mut pf: Vec<ProjectFile> = Vec::new();
 		let mut changed: Vec<(String, Vec<u8>)> = Vec::new();
@@ -313,7 +313,7 @@ pub async fn search_examples(
 ) -> Result<Vec<ScoredChunk>, String> {
 	let vecs = llm.embed(&[query.to_string()]).map_err(|e| e.to_string())?;
 	let qvec = vecs.get(0).ok_or_else(|| "embed failed".to_string())?;
-	let store = crate::providers::SkipprLanceVectorStore::new(keyspace, scope).global_dbt_examples_store();
+	let store = crate::providers::LanceVectorStore::new(keyspace, scope).global_dbt_examples_store();
 	let res = store.query(qvec, k).await?;
 	Ok(res)
 }

@@ -24,7 +24,7 @@ pub mod shared;
 
 pub mod data_engineer_suite;
 pub mod kb_suite;
-pub mod skippr_shared;
+pub mod data_engineer_shared;
 
 /// Context passed to suites.
 ///

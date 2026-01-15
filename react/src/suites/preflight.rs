@@ -17,7 +17,7 @@ pub trait PreflightProvider: Send + Sync {
     ) -> PreflightBundle;
 }
 
-/// Default Skippr preflight provider, backed by the existing catalog + discovery codepaths.
+/// Default preflight provider, backed by the existing catalog + discovery codepaths.
 #[derive(Default)]
 pub struct CatalogPreflightProvider {
     pub discovery_limits: crate::preflight::discovery::DiscoveryLimits,

@@ -54,12 +54,12 @@ pub trait CatalogProvider: Send + Sync {
     ) -> Result<(), String>;
 }
 
-/// Skippr's catalog provider implementation (current behavior).
+/// Default catalog provider implementation (current behavior).
 ///
-/// This is intentionally Skippr-opinionated (sqlrt registry keys, S3 JSON backing, etc.)
-/// while keeping `react` core generic by accessing it via the `CatalogProvider` trait.
+/// This is opinionated about storage layout (S3 JSON backing, etc.) while keeping `react` core
+/// generic by accessing it via the `CatalogProvider` trait.
 #[derive(Clone)]
-pub struct SkipprCatalogProvider {
+pub struct DefaultCatalogProvider {
     pub storage: Arc<dyn crate::adapters::storage::StorageAdapter>,
     pub keyspace: Arc<dyn crate::providers::Keyspace>,
     pub llm: Arc<dyn crate::llm::LargeLanguageModel>,
@@ -67,7 +67,7 @@ pub struct SkipprCatalogProvider {
     pub llm_batch_size: usize,
 }
 
-impl SkipprCatalogProvider {
+impl DefaultCatalogProvider {
     pub fn new(
         storage: Arc<dyn crate::adapters::storage::StorageAdapter>,
         keyspace: Arc<dyn crate::providers::Keyspace>,
@@ -80,7 +80,7 @@ impl SkipprCatalogProvider {
 }
 
 #[async_trait]
-impl CatalogProvider for SkipprCatalogProvider {
+impl CatalogProvider for DefaultCatalogProvider {
     async fn read_catalog(
         &self,
         scope: &crate::providers::RequestScope,

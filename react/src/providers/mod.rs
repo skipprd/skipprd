@@ -18,14 +18,14 @@ pub mod vector;
 
 pub use catalog::CatalogProvider;
 pub use athena_query::AthenaQueryProvider;
-pub use dbt::{DbtProvider, DbtValidateArgs, DbtValidateResult, SkipprDbtProvider};
+pub use dbt::{DbtProvider, DbtProjectProvider, DbtValidateArgs, DbtValidateResult};
 pub use dataset_catalog_provider::{DatasetCatalogProvider, DatasetId};
 pub use keyspace::{DefaultKeyspace, Keyspace};
 pub use query::{QueryProvider, QueryResult};
 pub use scope::RequestScope;
 pub use secrets::{EnvSecretsProvider, SecretsProvider};
 pub use state::StateStore;
-pub use vector::{SkipprLanceVectorStore, VectorStore};
+pub use vector::{LanceVectorStore, VectorStore};
 
 /// LLM provider is currently identical to the existing `skippr::llm::LargeLanguageModel`.
 /// Suites should depend on this alias so we can evolve the underlying implementation

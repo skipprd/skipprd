@@ -5,9 +5,9 @@ use clap::{Parser, Subcommand};
 use react::adapters::storage::S3StorageAdapter;
 use react::llm;
 use react::providers::{
-    AthenaQueryProvider, DefaultKeyspace, EnvSecretsProvider, SkipprDbtProvider, SkipprLanceVectorStore,
+    AthenaQueryProvider, DbtProjectProvider, DefaultKeyspace, EnvSecretsProvider, LanceVectorStore,
 };
-use react::providers::catalog::SkipprCatalogProvider;
+use react::providers::catalog::DefaultCatalogProvider;
 use react::suites::SuiteCtx;
 
 #[derive(Parser, Debug)]
@@ -88,18 +88,18 @@ async fn main() {
             suite_ctx.datasets = Some(athena);
 
             // Catalog + DBT + vectors
-            suite_ctx.catalog = Some(Arc::new(SkipprCatalogProvider::new(
+            suite_ctx.catalog = Some(Arc::new(DefaultCatalogProvider::new(
                 suite_ctx.storage.clone(),
                 suite_ctx.keyspace.clone(),
                 suite_ctx.llm.clone(),
                 60,
                 8,
             )));
-            suite_ctx.dbt = Some(Arc::new(SkipprDbtProvider::new(
+            suite_ctx.dbt = Some(Arc::new(DbtProjectProvider::new(
                 suite_ctx.storage.clone(),
                 suite_ctx.keyspace.clone(),
             )));
-            suite_ctx.vector = Some(Arc::new(SkipprLanceVectorStore::new(
+            suite_ctx.vector = Some(Arc::new(LanceVectorStore::new(
                 suite_ctx.keyspace.clone(),
                 suite_ctx.scope.clone(),
             )));

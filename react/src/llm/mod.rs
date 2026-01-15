@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-/// High-level abstraction for large language models used by Skipprd.
+/// High-level abstraction for large language models used by the ReAct runtime.
 /// Implementations may be local (llama.cpp) or remote (OpenAI-compatible HTTP).
 pub trait LargeLanguageModel: Send + Sync {
     fn chat(&self, messages: &[ChatMessage]) -> Result<String, String>;
