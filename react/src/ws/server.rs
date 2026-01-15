@@ -10,6 +10,7 @@ use std::collections::{HashMap, VecDeque};
 use chrono::Utc;
 use crate::models as m;
 use crate::session::ThreadStore;
+use crate::session::ThreadLog;
 use crate::suites::registry::SuiteRegistry;
 use crate::suites::SuiteCtx;
 use std::sync::Arc;
@@ -131,10 +132,13 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			for tid in ids {
 				let mut item = api::ListResponseThreadsInner::new(tid.clone());
 				if let Some(log) = store.get(&tid).await {
+					let (suite_id, agent_type) = derive_thread_context(&log);
 					// last_activity
 					let last_ts = log.steps.last().map(|s| s.ts.clone());
 					item.last_activity = last_ts;
 					item.title = log.title.clone();
+					item.suite_id = Some(suite_id);
+					item.agent_type = Some(agent_type);
 					// compute preview from last user or final
 					let mut preview: Option<String> = None;
 					for step in log.steps.iter().rev() {
@@ -165,6 +169,21 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			out.push(serde_json::to_string(&resp).unwrap_or_else(|_| "{\"type\":\"error\",\"error\":\"serialization error\"}".to_string()));
 			state.buffer_last(&out[out.len()-1]);
 		}
+		"suites" => {
+			let _req: Value = v.clone(); // tolerate schema drift; suites request is trivial
+			let suites = build_suites_catalog(&state.reg);
+			let outv = serde_json::json!({
+				"v": 1,
+				"type": "suites",
+				"server_time": now_iso(),
+				"seq": state.next_seq(),
+				"defaultSuiteId": "skippr_ask",
+				"suites": suites,
+			});
+			let s = outv.to_string();
+			state.buffer_last(&s);
+			out.push(s);
+		}
 		"new" => {
 			let req: api::NewRequest = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
 			let cid = req.cid.clone();
@@ -175,6 +194,24 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			let agent = normalize_agent_new(req.agent_type);
 			state.current_suite.insert(thread_id.clone(), suite_id.clone());
 			state.current_agent.insert(thread_id.clone(), agent.clone());
+			// Persist initial suite/agent selection so it survives reconnects
+			{
+				let store = state.thread_store();
+				let _ = store.append_step(&thread_id, crate::session::ThreadStep {
+					action: "switch_suite".to_string(),
+					args: serde_json::json!({"from": null, "to": suite_id.clone()}),
+					observation: serde_json::json!({"ok": true}),
+					ts: chrono::Utc::now().to_rfc3339(),
+					agent: Some(agent.clone()),
+				}).await;
+				let _ = store.append_step(&thread_id, crate::session::ThreadStep {
+					action: "switch_agent".to_string(),
+					args: serde_json::json!({"from": null, "to": agent.clone()}),
+					observation: serde_json::json!({"ok": true}),
+					ts: chrono::Utc::now().to_rfc3339(),
+					agent: Some(agent.clone()),
+				}).await;
+			}
 			// ok
 			let mut ok = api::OkResponse::new(1, m::ok_response::Type::Ok, now_iso());
 			ok.cid = Some(cid.clone());
@@ -272,16 +309,16 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 					}
 					AgentFrame::AwaitApproval { prompt } => {
 						let tseq = state.next_thread_seq(&thread_id);
-						let outv = serde_json::json!({
-							"v": 1,
-							"type": "await_approval",
-							"server_time": now_iso(),
-							"seq": state.next_seq(),
-							"thread_id": thread_id.clone(),
-							"thread_seq": tseq,
-							"prompt": prompt,
-						});
-						let s = outv.to_string();
+						let resp = api::ServerMessage::AwaitApproval(api::AwaitApprovalResponse::new(
+							1,
+							m::await_approval_response::Type::AwaitApproval,
+							now_iso(),
+							state.next_seq(),
+							thread_id.clone(),
+							tseq,
+							prompt,
+						));
+						let s = serde_json::to_string(&resp).unwrap();
 						state.buffer_last(&s);
 						out.push(s);
 					}
@@ -298,13 +335,17 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			let requested_suite = req.suite_id.clone();
 			let requested_agent = normalize_agent_open(req.agent_type);
 
-			// Track suite per-thread (explicit client selection)
-			let current_suite = state.current_suite.get(&thread_id).cloned().unwrap_or_else(|| requested_suite.clone());
+			// Derive current suite/agent from persisted thread log (durable across reconnects)
+			let store = state.thread_store();
+			let (current_suite, current_agent) = match store.get(&thread_id).await {
+				Some(log) => derive_thread_context(&log),
+				None => ("skippr_ask".to_string(), "ask".to_string()),
+			};
+			// Track suite per-thread (explicit client selection) and persist switch if changed
 			if current_suite != requested_suite {
-				let store = state.thread_store();
 				let _ = store.append_step(&thread_id, crate::session::ThreadStep {
 					action: "switch_suite".to_string(),
-					args: serde_json::json!({"from": current_suite, "to": requested_suite}),
+					args: serde_json::json!({"from": current_suite.clone(), "to": requested_suite.clone()}),
 					observation: serde_json::json!({"ok": true}),
 					ts: chrono::Utc::now().to_rfc3339(),
 					agent: Some(requested_agent.clone()),
@@ -312,13 +353,11 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			}
 			state.current_suite.insert(thread_id.clone(), requested_suite.clone());
 
-			let current = state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| requested_agent.clone());
-			if current != requested_agent {
+			if current_agent != requested_agent {
 				// append switch_agent step
-				let store = state.thread_store();
 				let _ = store.append_step(&thread_id, crate::session::ThreadStep {
 					action: "switch_agent".to_string(),
-					args: serde_json::json!({"from": current, "to": requested_agent}),
+					args: serde_json::json!({"from": current_agent.clone(), "to": requested_agent.clone()}),
 					observation: serde_json::json!({"ok": true}),
 					ts: chrono::Utc::now().to_rfc3339(),
 					agent: Some(requested_agent.clone()),
@@ -403,16 +442,16 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 					}
 					AgentFrame::AwaitApproval { prompt } => {
 						let tseq = state.next_thread_seq(&thread_id);
-						let outv = serde_json::json!({
-							"v": 1,
-							"type": "await_approval",
-							"server_time": now_iso(),
-							"seq": state.next_seq(),
-							"thread_id": thread_id.clone(),
-							"thread_seq": tseq,
-							"prompt": prompt,
-						});
-						let s = outv.to_string();
+						let resp = api::ServerMessage::AwaitApproval(api::AwaitApprovalResponse::new(
+							1,
+							m::await_approval_response::Type::AwaitApproval,
+							now_iso(),
+							state.next_seq(),
+							thread_id.clone(),
+							tseq,
+							prompt,
+						));
+						let s = serde_json::to_string(&resp).unwrap();
 						state.buffer_last(&s);
 						out.push(s);
 					}
@@ -425,6 +464,15 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			let text = req.text.clone();
 			if thread_id.is_empty() || text.trim().is_empty() { return Err("thread_id and text required".into()); }
 			if uuid::Uuid::parse_str(&thread_id).is_err() { return Err("invalid thread_id".into()); }
+			// Ensure durable suite/agent state is available after reconnect
+			if !state.current_suite.contains_key(&thread_id) || !state.current_agent.contains_key(&thread_id) {
+				let store = state.thread_store();
+				if let Some(log) = store.get(&thread_id).await {
+					let (suite_id, agent_type) = derive_thread_context(&log);
+					state.current_suite.insert(thread_id.clone(), suite_id);
+					state.current_agent.insert(thread_id.clone(), agent_type);
+				}
+			}
 			let store = state.thread_store();
 			let _ = store.append_step(&thread_id, crate::session::ThreadStep {
 				action: "user".to_string(),
@@ -513,16 +561,16 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 					}
 					AgentFrame::AwaitApproval { prompt } => {
 						let tseq = state.next_thread_seq(&thread_id);
-						let outv = serde_json::json!({
-							"v": 1,
-							"type": "await_approval",
-							"server_time": now_iso(),
-							"seq": state.next_seq(),
-							"thread_id": thread_id.clone(),
-							"thread_seq": tseq,
-							"prompt": prompt,
-						});
-						let s = outv.to_string();
+						let resp = api::ServerMessage::AwaitApproval(api::AwaitApprovalResponse::new(
+							1,
+							m::await_approval_response::Type::AwaitApproval,
+							now_iso(),
+							state.next_seq(),
+							thread_id.clone(),
+							tseq,
+							prompt,
+						));
+						let s = serde_json::to_string(&resp).unwrap();
 						state.buffer_last(&s);
 						out.push(s);
 					}
@@ -547,8 +595,12 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			let store = state.thread_store();
 			let (messages, next_before) = build_history(&store, &thread_id, req.before_thread_seq, req.limit).await;
 			let mut resp = api::HistoryResponse::new(1, m::history_response::Type::History, now_iso(), state.next_seq(), thread_id.clone(), messages);
-			let store = state.thread_store();
-			if let Some(log) = store.get(&thread_id).await { resp.title = log.title; }
+			if let Some(log) = store.get(&thread_id).await {
+				let (suite_id, agent_type) = derive_thread_context(&log);
+				resp.title = log.title;
+				resp.suite_id = Some(suite_id);
+				resp.agent_type = Some(agent_type);
+			}
 			resp.next_before_thread_seq = next_before;
 			let outm = api::ServerMessage::History(resp);
 			let s = serde_json::to_string(&outm).unwrap();
@@ -698,6 +750,68 @@ impl ConnState {
 	}
 }
 
+fn derive_thread_context(log: &ThreadLog) -> (String, String) {
+	// Defaults for back-compat threads with no recorded context.
+	let mut suite_id = "skippr_ask".to_string();
+	let mut agent_type = "ask".to_string();
+	for step in log.steps.iter() {
+		if step.action == "switch_suite" {
+			if let Some(to) = step.args.get("to").and_then(|x| x.as_str()) {
+				if !to.trim().is_empty() {
+					suite_id = to.to_string();
+				}
+			}
+		}
+		if step.action == "switch_agent" {
+			if let Some(to) = step.args.get("to").and_then(|x| x.as_str()) {
+				if !to.trim().is_empty() {
+					agent_type = to.to_string();
+				}
+			}
+		}
+		// Best-effort: if the step recorded an agent, treat it as the latest known mode.
+		if let Some(a) = step.agent.as_ref() {
+			if !a.trim().is_empty() {
+				agent_type = a.to_string();
+			}
+		}
+	}
+	(suite_id, agent_type)
+}
+
+fn build_suites_catalog(reg: &SuiteRegistry) -> Vec<serde_json::Value> {
+	let mut out: Vec<serde_json::Value> = Vec::new();
+	for id in reg.list_ids() {
+		match id {
+			"skippr_ask" => out.push(serde_json::json!({
+				"suiteId": "skippr_ask",
+				"label": "Ask",
+				"allowedAgentTypes": ["ask"],
+				"defaultAgentType": "ask",
+			})),
+			"skippr_model" => out.push(serde_json::json!({
+				"suiteId": "skippr_model",
+				"label": "Model",
+				"allowedAgentTypes": ["cleanse", "model"],
+				"defaultAgentType": "model",
+			})),
+			"kb" => out.push(serde_json::json!({
+				"suiteId": "kb",
+				"label": "KB",
+				"allowedAgentTypes": ["kb"],
+				"defaultAgentType": "kb",
+			})),
+			_ => out.push(serde_json::json!({
+				"suiteId": id,
+				"label": serde_json::Value::Null,
+				"allowedAgentTypes": ["ask"],
+				"defaultAgentType": "ask",
+			})),
+		}
+	}
+	out
+}
+
 async fn process_new(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt<Message> + Unpin)) -> Result<(), String> {
 	let req: api::NewRequest = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
 	let cid = req.cid.clone();
@@ -708,6 +822,24 @@ async fn process_new(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt
 	let agent = normalize_agent_new(req.agent_type);
 	state.current_suite.insert(thread_id.clone(), suite_id.clone());
 	state.current_agent.insert(thread_id.clone(), agent.clone());
+	// Persist initial suite/agent selection so it survives reconnects
+	{
+		let store = state.thread_store();
+		let _ = store.append_step(&thread_id, crate::session::ThreadStep {
+			action: "switch_suite".to_string(),
+			args: serde_json::json!({"from": null, "to": suite_id.clone()}),
+			observation: serde_json::json!({"ok": true}),
+			ts: chrono::Utc::now().to_rfc3339(),
+			agent: Some(agent.clone()),
+		}).await;
+		let _ = store.append_step(&thread_id, crate::session::ThreadStep {
+			action: "switch_agent".to_string(),
+			args: serde_json::json!({"from": null, "to": agent.clone()}),
+			observation: serde_json::json!({"ok": true}),
+			ts: chrono::Utc::now().to_rfc3339(),
+			agent: Some(agent.clone()),
+		}).await;
+	}
 	// ok
 	let mut ok = api::OkResponse::new(1, m::ok_response::Type::Ok, now_iso());
 	ok.cid = Some(cid.clone());
@@ -761,12 +893,16 @@ async fn process_open(v: &Value, state: &mut ConnState, write: &mut (impl SinkEx
 	let requested_suite = req.suite_id.clone();
 	let requested_agent = normalize_agent_open(req.agent_type);
 
-	let current_suite = state.current_suite.get(&thread_id).cloned().unwrap_or_else(|| requested_suite.clone());
+	// Derive current suite/agent from persisted thread log (durable across reconnects)
+	let store = state.thread_store();
+	let (current_suite, current_agent) = match store.get(&thread_id).await {
+		Some(log) => derive_thread_context(&log),
+		None => ("skippr_ask".to_string(), "ask".to_string()),
+	};
 	if current_suite != requested_suite {
-		let store = state.thread_store();
 		let _ = store.append_step(&thread_id, crate::session::ThreadStep {
 			action: "switch_suite".to_string(),
-			args: serde_json::json!({"from": current_suite, "to": requested_suite}),
+			args: serde_json::json!({"from": current_suite.clone(), "to": requested_suite.clone()}),
 			observation: serde_json::json!({"ok": true}),
 			ts: chrono::Utc::now().to_rfc3339(),
 			agent: Some(requested_agent.clone()),
@@ -774,12 +910,10 @@ async fn process_open(v: &Value, state: &mut ConnState, write: &mut (impl SinkEx
 	}
 	state.current_suite.insert(thread_id.clone(), requested_suite.clone());
 
-	let current = state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| requested_agent.clone());
-	if current != requested_agent {
-		let store = state.thread_store();
+	if current_agent != requested_agent {
 		let _ = store.append_step(&thread_id, crate::session::ThreadStep {
 			action: "switch_agent".to_string(),
-			args: serde_json::json!({"from": current, "to": requested_agent}),
+			args: serde_json::json!({"from": current_agent.clone(), "to": requested_agent.clone()}),
 			observation: serde_json::json!({"ok": true}),
 			ts: chrono::Utc::now().to_rfc3339(),
 			agent: Some(requested_agent.clone()),
@@ -830,6 +964,15 @@ async fn process_approve(v: &Value, state: &mut ConnState, write: &mut (impl Sin
 	let thread_id = v.get("thread_id").and_then(|x| x.as_str()).ok_or_else(|| "thread_id required".to_string())?.to_string();
 	if thread_id.is_empty() { return Err("thread_id required".into()); }
 	if uuid::Uuid::parse_str(&thread_id).is_err() { return Err("invalid thread_id".into()); }
+	// Reconnect-safe: derive suite/agent from persisted history if not present in connection state
+	if !state.current_suite.contains_key(&thread_id) || !state.current_agent.contains_key(&thread_id) {
+		let store = state.thread_store();
+		if let Some(log) = store.get(&thread_id).await {
+			let (suite_id, agent_type) = derive_thread_context(&log);
+			state.current_suite.insert(thread_id.clone(), suite_id);
+			state.current_agent.insert(thread_id.clone(), agent_type);
+		}
+	}
 	let suite_id = state
 		.current_suite
 		.get(&thread_id)
@@ -879,6 +1022,15 @@ async fn process_reject(v: &Value, state: &mut ConnState, write: &mut (impl Sink
 	let thread_id = v.get("thread_id").and_then(|x| x.as_str()).ok_or_else(|| "thread_id required".to_string())?.to_string();
 	if thread_id.is_empty() { return Err("thread_id required".into()); }
 	if uuid::Uuid::parse_str(&thread_id).is_err() { return Err("invalid thread_id".into()); }
+	// Reconnect-safe: derive suite/agent from persisted history if not present in connection state
+	if !state.current_suite.contains_key(&thread_id) || !state.current_agent.contains_key(&thread_id) {
+		let store = state.thread_store();
+		if let Some(log) = store.get(&thread_id).await {
+			let (suite_id, agent_type) = derive_thread_context(&log);
+			state.current_suite.insert(thread_id.clone(), suite_id);
+			state.current_agent.insert(thread_id.clone(), agent_type);
+		}
+	}
 	let suite_id = state
 		.current_suite
 		.get(&thread_id)
@@ -929,6 +1081,7 @@ fn normalize_agent_new(a: api::new_request::AgentType) -> String {
 		api::new_request::AgentType::Cleanse => "cleanse".to_string(),
 		api::new_request::AgentType::Model => "model".to_string(),
 		api::new_request::AgentType::Ask => "ask".to_string(),
+		api::new_request::AgentType::Kb => "kb".to_string(),
 	}
 }
 
@@ -937,6 +1090,7 @@ fn normalize_agent_open(a: api::open_request::AgentType) -> String {
 		api::open_request::AgentType::Cleanse => "cleanse".to_string(),
 		api::open_request::AgentType::Model => "model".to_string(),
 		api::open_request::AgentType::Ask => "ask".to_string(),
+		api::open_request::AgentType::Kb => "kb".to_string(),
 	}
 }
 async fn run_agent_with_processing(

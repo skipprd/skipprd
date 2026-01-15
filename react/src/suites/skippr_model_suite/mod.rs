@@ -156,7 +156,7 @@ impl SkipprModelSuite {
                 frames.push(FlowFrame::AwaitUser { prompt });
             }
             Ok(RunOutcome::AwaitApproval { thread_id: _tid, prompt }) => {
-                frames.push(FlowFrame::AwaitUser { prompt });
+                frames.push(FlowFrame::AwaitApproval { prompt });
             }
             Err(e) => return Err(e),
         }

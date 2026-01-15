@@ -12,7 +12,7 @@ use crate::models;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ListResponse {
+pub struct SuitesResponse {
     #[serde(rename = "v")]
     pub v: i32,
     #[serde(rename = "type")]
@@ -21,32 +21,35 @@ pub struct ListResponse {
     pub server_time: String,
     #[serde(rename = "seq")]
     pub seq: i32,
-    /// List of existing threads with summaries
-    #[serde(rename = "threads")]
-    pub threads: Vec<models::ListResponseThreadsInner>,
+    /// Available suites and their allowed agent modes.
+    #[serde(rename = "suites")]
+    pub suites: Vec<models::SuitesResponseSuitesInner>,
+    #[serde(rename = "defaultSuiteId", skip_serializing_if = "Option::is_none")]
+    pub default_suite_id: Option<String>,
 }
 
-impl ListResponse {
-    pub fn new(v: i32, r#type: Type, server_time: String, seq: i32, threads: Vec<models::ListResponseThreadsInner>) -> ListResponse {
-        ListResponse {
+impl SuitesResponse {
+    pub fn new(v: i32, r#type: Type, server_time: String, seq: i32, suites: Vec<models::SuitesResponseSuitesInner>) -> SuitesResponse {
+        SuitesResponse {
             v,
             r#type,
             server_time,
             seq,
-            threads,
+            suites,
+            default_suite_id: None,
         }
     }
 }
 /// 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub enum Type {
-    #[serde(rename = "list")]
-    List,
+    #[serde(rename = "suites")]
+    Suites,
 }
 
 impl Default for Type {
     fn default() -> Type {
-        Self::List
+        Self::Suites
     }
 }
 

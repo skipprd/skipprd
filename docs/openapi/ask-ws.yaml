@@ -1,11 +1,11 @@
 openapi: 3.1.0
 info:
   title: Skippr Ask WebSocket API
-  version: 0.1.1
+  version: 0.2.0
   description: |
     WebSocket-based chat threads for Ask. Clients send JSON frames and receive JSON frames.
-    Supported client message types: list, new, open, user.
-    Server message types: list, final, await_user, ok, error.
+    Supported client message types: list, suites, new, open, user, approve, reject, history, seen, delete, resume.
+    Server message types: list, suites, thread_assigned, processing, token, final, await_user, await_approval, unread, ok, error, history.
 
 servers:
   - url: ws://{host}:{port}/
@@ -44,6 +44,7 @@ components:
     ClientMessage:
       oneOf:
         - $ref: '#/components/schemas/ListRequest'
+        - $ref: '#/components/schemas/SuitesRequest'
         - $ref: '#/components/schemas/NewRequest'
         - $ref: '#/components/schemas/OpenRequest'
         - $ref: '#/components/schemas/UserRequest'
@@ -57,6 +58,7 @@ components:
         propertyName: type
         mapping:
           list: '#/components/schemas/ListRequest'
+          suites: '#/components/schemas/SuitesRequest'
           new: '#/components/schemas/NewRequest'
           open: '#/components/schemas/OpenRequest'
           user: '#/components/schemas/UserRequest'
@@ -70,6 +72,7 @@ components:
     ServerMessage:
       oneOf:
         - $ref: '#/components/schemas/ListResponse'
+        - $ref: '#/components/schemas/SuitesResponse'
         - $ref: '#/components/schemas/FinalResponse'
         - $ref: '#/components/schemas/AwaitUserResponse'
         - $ref: '#/components/schemas/AwaitApprovalResponse'
@@ -84,6 +87,7 @@ components:
         propertyName: type
         mapping:
           list: '#/components/schemas/ListResponse'
+          suites: '#/components/schemas/SuitesResponse'
           final: '#/components/schemas/FinalResponse'
           await_user: '#/components/schemas/AwaitUserResponse'
           await_approval: '#/components/schemas/AwaitApprovalResponse'
@@ -110,10 +114,21 @@ components:
           type: string
           description: Client correlation id (UUID)
 
+    SuitesRequest:
+      type: object
+      additionalProperties: false
+      required: [v, type, cid]
+      properties:
+        v: { type: integer }
+        type: { type: string, enum: [suites] }
+        cid:
+          type: string
+          description: Client correlation id (UUID)
+
     NewRequest:
       type: object
       additionalProperties: false
-      required: [v, type, cid, question]
+      required: [v, type, cid, question, suiteId, agentType]
       properties:
         v:
           type: integer
@@ -125,16 +140,18 @@ components:
         question:
           type: string
           description: User's question to start a new thread
+        suiteId:
+          type: string
+          description: Suite id to use (e.g. skippr_ask | skippr_model | kb)
         agentType:
           type: string
-          description: Agent to use (ask | cleanse | model). Defaults to ask.
-          enum: [ask, cleanse, model]
-          default: ask
+          description: Agent/mode to use (ask | cleanse | model | kb). Required.
+          enum: [ask, cleanse, model, kb]
 
     OpenRequest:
       type: object
       additionalProperties: false
-      required: [v, type, cid, thread_id]
+      required: [v, type, cid, thread_id, suiteId, agentType]
       properties:
         v:
           type: integer
@@ -149,11 +166,13 @@ components:
         question:
           type: string
           description: Optional nudge to resume the thread (default is "Continue.")
+        suiteId:
+          type: string
+          description: Suite id to use (e.g. skippr_ask | skippr_model | kb)
         agentType:
           type: string
           description: Agent to use for this message; if differs from current, a switch_agent step is recorded.
-          enum: [ask, cleanse, model]
-          default: ask
+          enum: [ask, cleanse, model, kb]
 
     UserRequest:
       type: object
@@ -261,6 +280,45 @@ components:
               last_activity: { type: string, nullable: true }
               unread_count: { type: integer, nullable: true }
               last_message_preview: { type: string, nullable: true }
+              suiteId:
+                type: string
+                nullable: true
+                description: Current suite for the thread (derived from thread history)
+              agentType:
+                type: string
+                nullable: true
+                description: Current agent/mode for the thread (derived from thread history)
+
+    SuitesResponse:
+      type: object
+      additionalProperties: false
+      required: [v, type, server_time, seq, suites]
+      properties:
+        v: { type: integer }
+        type: { type: string, enum: [suites] }
+        server_time: { type: string }
+        seq: { type: integer }
+        suites:
+          type: array
+          description: Available suites and their allowed agent modes.
+          items:
+            type: object
+            additionalProperties: false
+            required: [suiteId, allowedAgentTypes]
+            properties:
+              suiteId: { type: string }
+              label: { type: string, nullable: true }
+              allowedAgentTypes:
+                type: array
+                items:
+                  type: string
+                  description: Agent/mode identifier (dynamic)
+              defaultAgentType:
+                type: string
+                nullable: true
+        defaultSuiteId:
+          type: string
+          nullable: true
 
     FinalResponse:
       type: object
@@ -437,6 +495,14 @@ components:
         seq: { type: integer }
         thread_id: { type: string }
         title: { type: string, nullable: true }
+        suiteId:
+          type: string
+          nullable: true
+          description: Current suite for the thread (derived from thread history)
+        agentType:
+          type: string
+          nullable: true
+          description: Current agent/mode for the thread (derived from thread history)
         messages:
           type: array
           items:
@@ -468,6 +534,12 @@ components:
         v: 1
         type: list
         cid: "b2a4c2b5-1d19-4b5c-a0b3-2f8f7a7c9d11"
+    suitesRequest:
+      summary: List available suites
+      value:
+        v: 1
+        type: suites
+        cid: "c2a4c2b5-1d19-4b5c-a0b3-2f8f7a7c9d11"
     listResponse:
       summary: Threads listed
       value:
@@ -480,10 +552,31 @@ components:
             last_activity: "2025-11-16T11:59:30Z"
             unread_count: 0
             last_message_preview: "Hi there!"
+            suiteId: "skippr_ask"
+            agentType: "ask"
           - thread_id: th_1731761111222
             last_activity: "2025-11-16T11:58:10Z"
             unread_count: 2
             last_message_preview: "Can you tell me more?"
+            suiteId: "skippr_model"
+            agentType: "model"
+    suitesResponse:
+      summary: Suites listed
+      value:
+        v: 1
+        type: suites
+        server_time: "2025-11-16T12:00:00Z"
+        seq: 100
+        defaultSuiteId: "default_suite"
+        suites:
+          - suiteId: "default_suite"
+            label: "Default"
+            allowedAgentTypes: ["ask"]
+            defaultAgentType: "ask"
+          - suiteId: "analytics_suite"
+            label: "Analytics"
+            allowedAgentTypes: ["cleanse", "model"]
+            defaultAgentType: "model"
 
     newRequest:
       summary: Start a new thread
@@ -491,6 +584,8 @@ components:
         v: 1
         type: new
         cid: "a1111111-2222-3333-4444-555555555555"
+        suiteId: "skippr_ask"
+        agentType: "ask"
         question: What were total rides last week?
     threadAssigned:
       summary: Server assigned a thread id for the new request

@@ -12,41 +12,35 @@ use crate::models;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ListResponse {
+pub struct SuitesRequest {
     #[serde(rename = "v")]
     pub v: i32,
     #[serde(rename = "type")]
     pub r#type: Type,
-    #[serde(rename = "server_time")]
-    pub server_time: String,
-    #[serde(rename = "seq")]
-    pub seq: i32,
-    /// List of existing threads with summaries
-    #[serde(rename = "threads")]
-    pub threads: Vec<models::ListResponseThreadsInner>,
+    /// Client correlation id (UUID)
+    #[serde(rename = "cid")]
+    pub cid: String,
 }
 
-impl ListResponse {
-    pub fn new(v: i32, r#type: Type, server_time: String, seq: i32, threads: Vec<models::ListResponseThreadsInner>) -> ListResponse {
-        ListResponse {
+impl SuitesRequest {
+    pub fn new(v: i32, r#type: Type, cid: String) -> SuitesRequest {
+        SuitesRequest {
             v,
             r#type,
-            server_time,
-            seq,
-            threads,
+            cid,
         }
     }
 }
 /// 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub enum Type {
-    #[serde(rename = "list")]
-    List,
+    #[serde(rename = "suites")]
+    Suites,
 }
 
 impl Default for Type {
     fn default() -> Type {
-        Self::List
+        Self::Suites
     }
 }
 

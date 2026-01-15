@@ -40,6 +40,15 @@ pub use list_response_threads_inner::ListResponseThreadsInner;
 pub mod list_response;
 pub use list_response::ListResponse;
 
+pub mod suites_request;
+pub use suites_request::SuitesRequest;
+
+pub mod suites_response_suites_inner;
+pub use suites_response_suites_inner::SuitesResponseSuitesInner;
+
+pub mod suites_response;
+pub use suites_response::SuitesResponse;
+
 pub mod new_request;
 pub use new_request::NewRequest;
 

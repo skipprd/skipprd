@@ -10,6 +10,8 @@ Name | Type | Description | Notes
 **seq** | **i32** |  | 
 **thread_id** | **String** |  | 
 **title** | Option<**String**> |  | [optional]
+**suite_id** | Option<**String**> | Current suite for the thread (derived from thread history) | [optional]
+**agent_type** | Option<**String**> | Current agent/mode for the thread (derived from thread history) | [optional]
 **messages** | [**Vec<models::HistoryResponseMessagesInner>**](HistoryResponse_messages_inner.md) |  | 
 **next_before_thread_seq** | Option<**i32**> |  | [optional]
 

@@ -9,7 +9,8 @@ Name | Type | Description | Notes
 **r#type** | **String** |  | 
 **thread_id** | **String** | Existing thread id returned by a previous interaction | 
 **question** | Option<**String**> | Optional nudge to resume the thread (default is \"Continue.\") | [optional]
-**agent_type** | Option<**String**> | Agent to use for this message; if differs from current, a switch_agent step is recorded. | [optional][default to Ask]
+**suite_id** | **String** | Suite id to use (e.g. skippr_ask | skippr_model | kb) | 
+**agent_type** | **String** | Agent to use for this message; if differs from current, a switch_agent step is recorded. | 
 
 [[Back to Model list]](../README.md#documentation-for-models) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to README]](../README.md)
 
