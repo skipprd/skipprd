@@ -53,6 +53,7 @@ async fn provider_write_catalog_uses_keyspace_key_and_roundtrips() {
         fields: vec![],
         structure_index: Default::default(),
         dataset_stats: None,
+        built_at_epoch_secs: None,
     };
 
     provider.write_catalog(&scope, ns, &cat).await.expect("write_catalog");

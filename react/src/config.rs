@@ -45,7 +45,10 @@ use crate::providers::RequestScope;
 ///   athena:
 ///     enabled: true
 ///     workgroup: my_wg
-///     default_database: my_db
+///     # Default database for source discovery + unqualified queries.
+///     source_database: my_db
+///     # Target database (schema) for dbt-modeled outputs.
+///     modeled_database: my_dbt_warehouse
 ///     catalog: AwsDataCatalog
 ///     result_s3: s3://my-query-results/
 ///     discovery_cache_ttl_secs: 120
@@ -135,8 +138,10 @@ pub struct ProvidersFile {
 pub struct AthenaFile {
     pub enabled: Option<bool>,
     pub workgroup: Option<String>,
+    pub region: Option<String>,
     pub result_s3: Option<String>,
-    pub default_database: Option<String>,
+    pub source_database: Option<String>,
+    pub modeled_database: Option<String>,
     pub catalog: Option<String>,
     pub discovery_cache_ttl_secs: Option<u64>,
 }
@@ -212,8 +217,12 @@ pub struct ProvidersResolved {
 pub struct AthenaResolved {
     pub enabled: bool,
     pub workgroup: Option<String>,
+    pub region: Option<String>,
     pub result_s3: Option<String>,
-    pub default_database: Option<String>,
+    /// Default database for source discovery + unqualified queries.
+    pub source_database: Option<String>,
+    /// Target database (schema) for dbt-modeled outputs.
+    pub modeled_database: Option<String>,
     pub catalog: String,
     pub discovery_cache_ttl_secs: u64,
 }
@@ -320,7 +329,12 @@ impl ReactResolvedConfig {
         let ath_workgroup = getenv_nonempty("ATHENA_WORKGROUP")
             .or_else(|| getenv_nonempty("DATA_OUTPUT_ATHENA_WORKGROUP_NAME"))
             .or_else(|| ath_f.workgroup);
-        let ath_default_db = getenv_nonempty("ATHENA_DEFAULT_DATABASE").or_else(|| ath_f.default_database);
+        let ath_region = getenv_nonempty("ATHENA_REGION")
+            .or_else(|| getenv_nonempty("AWS_REGION"))
+            .or_else(|| getenv_nonempty("AWS_DEFAULT_REGION"))
+            .or_else(|| ath_f.region);
+        let ath_source_db = getenv_nonempty("ATHENA_SOURCE_DATABASE").or_else(|| ath_f.source_database);
+        let ath_modeled_db = getenv_nonempty("ATHENA_MODELED_DATABASE").or_else(|| ath_f.modeled_database);
         let ath_catalog = getenv_nonempty("ATHENA_CATALOG").unwrap_or_else(|| ath_f.catalog.unwrap_or_else(|| "AwsDataCatalog".to_string()));
  
         let ath_result_s3 = getenv_nonempty("ATHENA_RESULT_S3").or_else(|| {
@@ -370,8 +384,10 @@ impl ReactResolvedConfig {
                 athena: AthenaResolved {
                     enabled: ath_f.enabled.unwrap_or(true),
                     workgroup: ath_workgroup,
+                    region: ath_region,
                     result_s3: ath_result_s3,
-                    default_database: ath_default_db,
+                    source_database: ath_source_db,
+                    modeled_database: ath_modeled_db,
                     catalog: ath_catalog,
                     discovery_cache_ttl_secs: ath_ttl,
                 },
@@ -417,6 +433,16 @@ impl ReactResolvedConfig {
  
         if let Some(v) = cfg.providers.dbt.profiles_dir.as_ref() { set_env_if_unset("DBT_PROFILES_DIR", v); }
         if let Some(v) = cfg.providers.dbt.target.as_ref() { set_env_if_unset("DBT_TARGET", v); }
+        if let Some(v) = cfg.providers.athena.region.as_ref() {
+            set_env_if_unset("AWS_REGION", v);
+            set_env_if_unset("AWS_DEFAULT_REGION", v);
+        }
+        if let Some(v) = cfg.providers.athena.source_database.as_ref() {
+            set_env_if_unset("ATHENA_SOURCE_DATABASE", v);
+        }
+        if let Some(v) = cfg.providers.athena.modeled_database.as_ref() {
+            set_env_if_unset("ATHENA_MODELED_DATABASE", v);
+        }
         set_env_if_unset("DBT_RUNNER", &cfg.providers.dbt.runner);
         if let Some(v) = cfg.providers.dbt.docker_image.as_ref() { set_env_if_unset("DBT_DOCKER_IMAGE", v); }
         if let Some(v) = cfg.providers.dbt.docker_platform.as_ref() { set_env_if_unset("DBT_DOCKER_PLATFORM", v); }

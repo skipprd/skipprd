@@ -80,6 +80,10 @@ impl CatalogBuilder {
 				entity: String::new(),
 				name: f.name.clone(),
 				data_type: None,
+				root_column: None,
+				field_path: None,
+				structure_kind: None,
+				access_descriptor: None,
 				description: None,
 				synonyms: None,
 				pii_sensitivity: None,
@@ -89,6 +93,10 @@ impl CatalogBuilder {
 			}).collect(),
 			structure_index: std::collections::HashMap::new(),
 			dataset_stats,
+			built_at_epoch_secs: std::time::SystemTime::now()
+				.duration_since(std::time::UNIX_EPOCH)
+				.ok()
+				.map(|d| d.as_secs()),
 		};
 		// Embed per-field stats if provided
 		if let Some(ns) = ns_stats.as_ref() {

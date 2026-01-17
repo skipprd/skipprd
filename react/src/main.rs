@@ -151,7 +151,7 @@ async fn main() {
                         workgroup: cfg.providers.athena.workgroup.clone(),
                         result_output_location: cfg.providers.athena.result_s3.clone(),
                         default_catalog: cfg.providers.athena.catalog.clone(),
-                        default_database: cfg.providers.athena.default_database.clone(),
+                        source_database: cfg.providers.athena.source_database.clone(),
                         discovery_cache_ttl_secs: cfg.providers.athena.discovery_cache_ttl_secs,
                     })
                     .await,

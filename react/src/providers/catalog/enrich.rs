@@ -142,6 +142,14 @@ pub async fn enrich_dataset_with_llm(
                                         entity: String::new(),
                                         name,
                                         data_type: f.get("type").and_then(|x| x.as_str()).map(|s| s.to_string()),
+                                        root_column: f.get("root_column").and_then(|x| x.as_str()).map(|s| s.to_string()),
+                                        field_path: f.get("field_path").and_then(|x| x.as_str()).map(|s| s.to_string()),
+                                        structure_kind: f
+                                            .get("structure_kind")
+                                            .and_then(|x| serde_json::from_value::<super::types::StructureKind>(x.clone()).ok()),
+                                        access_descriptor: f
+                                            .get("access_descriptor")
+                                            .and_then(|x| serde_json::from_value::<super::types::AccessDescriptor>(x.clone()).ok()),
                                         description: desc,
                                         synonyms: syns,
                                         pii_sensitivity: pii,
@@ -160,6 +168,10 @@ pub async fn enrich_dataset_with_llm(
                                     entity: String::new(),
                                     name: f.name.clone(),
                                     data_type: None,
+                                    root_column: None,
+                                    field_path: None,
+                                    structure_kind: None,
+                                    access_descriptor: None,
                                     description: None,
                                     synonyms: None,
                                     pii_sensitivity: None,
@@ -189,6 +201,9 @@ pub async fn enrich_dataset_with_llm(
                     dataset_stats: val
                         .get("dataset_stats")
                         .and_then(|x| serde_json::from_value::<super::types::DatasetStats>(x.clone()).ok()),
+                    built_at_epoch_secs: val
+                        .get("built_at_epoch_secs")
+                        .and_then(|x| x.as_u64()),
                 };
                 // Batched field enrichment
                 let field_names: Vec<String> = catalog.fields.iter().map(|f| f.name.clone()).collect();

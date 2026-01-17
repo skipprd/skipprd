@@ -8,4 +8,5 @@ pub mod dbt_examples;
 pub mod dbt_validate;
 pub mod publish_dbt_to_provider;
 pub mod sql_register;
+pub mod staging_model;
 

@@ -21,7 +21,8 @@ pub struct AthenaSettings {
     pub workgroup: Option<String>,
     pub result_output_location: Option<String>,
     pub default_catalog: String,
-    pub default_database: Option<String>,
+    /// Default database for source discovery + unqualified queries.
+    pub source_database: Option<String>,
     pub discovery_cache_ttl_secs: u64,
 }
 
@@ -31,7 +32,7 @@ struct Inner {
     workgroup: Option<String>,
     result_output_location: Option<String>,
     default_catalog: String,
-    default_database: Option<String>,
+    source_database: Option<String>,
     cache_ttl: Duration,
     cache: RwLock<Cache>,
 }
@@ -60,7 +61,7 @@ impl AthenaQueryProvider {
                 workgroup: settings.workgroup,
                 result_output_location: settings.result_output_location,
                 default_catalog: settings.default_catalog,
-                default_database: settings.default_database,
+                source_database: settings.source_database,
                 cache_ttl: Duration::from_secs(ttl_secs),
                 cache: RwLock::new(Cache::default()),
             }),
@@ -72,13 +73,13 @@ impl AthenaQueryProvider {
     /// Supported env vars (with backward-compatible aliases):
     /// - `ATHENA_WORKGROUP` (alias: `DATA_OUTPUT_ATHENA_WORKGROUP_NAME`)
     /// - `ATHENA_RESULT_S3` (alias: `DATA_OUTPUT_ATHENA_RESULTS_S3_BUCKET` + optional prefix)
-    /// - `ATHENA_DEFAULT_DATABASE`
+    /// - `ATHENA_SOURCE_DATABASE`
     /// - `ATHENA_CATALOG` (default: `AwsDataCatalog`)
     /// - `ATHENA_DISCOVERY_CACHE_TTL_SECS` (default: 120)
     pub async fn from_env() -> Self {
         let workgroup = getenv_nonempty("ATHENA_WORKGROUP")
             .or_else(|| getenv_nonempty("DATA_OUTPUT_ATHENA_WORKGROUP_NAME"));
-        let default_database = getenv_nonempty("ATHENA_DEFAULT_DATABASE");
+        let source_database = getenv_nonempty("ATHENA_SOURCE_DATABASE");
         let default_catalog = getenv("ATHENA_CATALOG", "AwsDataCatalog");
 
         // Prefer a single s3://... output location if provided; else leave None and rely on WG config.
@@ -97,7 +98,7 @@ impl AthenaQueryProvider {
             workgroup,
             result_output_location,
             default_catalog,
-            default_database,
+            source_database,
             discovery_cache_ttl_secs: ttl_secs,
         })
         .await
@@ -118,9 +119,9 @@ impl AthenaQueryProvider {
             1 => {
                 let db = self
                     .inner
-                    .default_database
+                    .source_database
                     .clone()
-                    .ok_or_else(|| "dataset id missing database; set ATHENA_DEFAULT_DATABASE or use <db>.<table>".to_string())?;
+                    .ok_or_else(|| "dataset id missing database; set ATHENA_SOURCE_DATABASE or use <db>.<table>".to_string())?;
                 Ok(DatasetId { catalog: self.inner.default_catalog.clone(), database: db, table: parts[0].to_string() })
             }
             _ => Err("dataset id must be <catalog>.<db>.<table> (or <db>.<table>)".to_string()),
@@ -142,7 +143,7 @@ impl AthenaQueryProvider {
             req = req.work_group(wg);
         }
         // Use explicit database if provided, else fall back to env default.
-        if let Some(db) = database.or(self.inner.default_database.as_deref()) {
+        if let Some(db) = database.or(self.inner.source_database.as_deref()) {
             req = req.query_execution_context(
                 aws_sdk_athena::types::QueryExecutionContext::builder()
                     .database(db)
@@ -195,17 +196,19 @@ impl AthenaQueryProvider {
         }
     }
 
-    async fn fetch_all_rows(&self, qid: &str) -> Result<(Vec<String>, Vec<Vec<String>>), String> {
+    async fn fetch_all_rows(&self, qid: &str) -> Result<(Vec<String>, Vec<Vec<String>>, usize), String> {
         let mut next_token: Option<String> = None;
         let mut header: Vec<String> = Vec::new();
         let mut rows: Vec<Vec<String>> = Vec::new();
         let mut is_first_page = true;
+        let mut pages: usize = 0;
         loop {
             let mut req = self.inner.athena.get_query_results().query_execution_id(qid);
             if let Some(tok) = next_token.as_ref() {
                 req = req.next_token(tok);
             }
             let out = req.send().await.map_err(|e| e.to_string())?;
+            pages += 1;
             if let Some(rs) = out.result_set() {
                 if header.is_empty() {
                     if let Some(md) = rs.result_set_metadata() {
@@ -233,10 +236,14 @@ impl AthenaQueryProvider {
             }
             is_first_page = false;
         }
-        Ok((header, rows))
+        Ok((header, rows, pages))
     }
 
     async fn cached_databases(&self) -> Result<Vec<String>, String> {
+        // If configured with a single source database, scope discovery to it.
+        if let Some(db) = self.inner.source_database.as_ref().filter(|s| !s.trim().is_empty()) {
+            return Ok(vec![db.trim().to_string()]);
+        }
         {
             let cache = self.inner.cache.read().await;
             if let Some((ts, v)) = cache.databases.as_ref() {
@@ -354,14 +361,34 @@ impl AthenaQueryProvider {
 #[async_trait]
 impl QueryProvider for AthenaQueryProvider {
     async fn query(&self, sql: &str) -> Result<QueryResult, String> {
+        let kind = if sql.contains("COUNT(1) AS __cnt") {
+            "row_count"
+        } else if sql.contains(" AS __distinct") || sql.contains(" AS __nulls") {
+            "field_stats"
+        } else if sql.contains("SELECT *") && sql.contains(" LIMIT ") {
+            "sample"
+        } else {
+            "query"
+        };
         let qid = self.start_query(sql, None).await?;
+        tracing::info!(target: "athena", qid = %qid, kind = %kind, "query_started");
         let (elapsed, bytes_scanned) = self.wait_query_succeeded(&qid).await?;
-        let (header, rows) = self.fetch_all_rows(&qid).await?;
+        let (header, rows, pages) = self.fetch_all_rows(&qid).await?;
+        tracing::info!(
+            target: "athena",
+            qid = %qid,
+            kind = %kind,
+            bytes_scanned = bytes_scanned,
+            pages = pages,
+            rows = rows.len(),
+            "query_succeeded"
+        );
         let meta = serde_json::json!({
             "engine": "athena",
             "query_execution_id": qid,
             "elapsed_ms": elapsed.as_millis() as u64,
-            "bytes_scanned": bytes_scanned
+            "bytes_scanned": bytes_scanned,
+            "pages": pages
         });
         Ok(QueryResult { header, rows, meta: Some(meta) })
     }
@@ -411,6 +438,20 @@ impl DatasetCatalogProvider for AthenaQueryProvider {
         // This is intentionally conservative; callers can choose to skip stats for very wide tables.
         let cols = self.cached_schema(dataset).await?;
         let max_fields = max_fields.max(1).min(500);
+        let progress_every: usize = std::env::var("CATALOG_STATS_PROGRESS_EVERY")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(10)
+            .max(1)
+            .min(250);
+        tracing::info!(
+            target: "catalog_stats",
+            dataset = %dataset.fqn(),
+            raw_columns = cols.len(),
+            max_fields = max_fields,
+            progress_every = progress_every,
+            "dataset_stats_start"
+        );
 
         let tbl = Self::quote_table(&dataset.database, &dataset.table);
         // Row count
@@ -447,8 +488,29 @@ impl DatasetCatalogProvider for AthenaQueryProvider {
             }
         }
         expanded.truncate(max_fields);
+        tracing::info!(
+            target: "catalog_stats",
+            dataset = %dataset.fqn(),
+            expanded_fields = expanded.len(),
+            "expanded_fields_ready"
+        );
+
+        let mut attempted: usize = 0;
+        let mut executed: usize = 0;
+        let mut succeeded: usize = 0;
+        let mut failed: usize = 0;
 
         for (path, ty, expr_opt, is_complex) in expanded.into_iter() {
+            attempted += 1;
+            if attempted == 1 || attempted % progress_every == 0 {
+                tracing::info!(
+                    target: "catalog_stats",
+                    dataset = %dataset.fqn(),
+                    done = attempted,
+                    last_field = %path,
+                    "field_stats_progress"
+                );
+            }
             let Some(expr) = expr_opt else {
                 let mut fs = crate::discover::stats::FieldStats::default();
                 fs.total = total_rows;
@@ -503,6 +565,8 @@ impl DatasetCatalogProvider for AthenaQueryProvider {
                 Ok(qr) => qr,
                 Err(e) => {
                     tracing::warn!("athena stats: dataset='{}' field='{}' type='{}' failed: {}", dataset.fqn(), path, ty, e);
+                    executed += 1;
+                    failed += 1;
                     let mut fs = crate::discover::stats::FieldStats::default();
                     fs.total = total_rows;
                     fs.finalize();
@@ -510,6 +574,8 @@ impl DatasetCatalogProvider for AthenaQueryProvider {
                     continue;
                 }
             };
+            executed += 1;
+            succeeded += 1;
             let row = qr.rows.get(0).cloned().unwrap_or_default();
             let mut fs = crate::discover::stats::FieldStats::default();
             fs.total = total_rows;
@@ -525,6 +591,16 @@ impl DatasetCatalogProvider for AthenaQueryProvider {
 
         let mut ds = crate::providers::catalog::types::DatasetStats::default();
         ds.approx_total_rows = total_rows;
+        tracing::info!(
+            target: "catalog_stats",
+            dataset = %dataset.fqn(),
+            approx_total_rows = total_rows,
+            attempted_fields = attempted,
+            executed_queries = executed,
+            succeeded_queries = succeeded,
+            failed_queries = failed,
+            "dataset_stats_done"
+        );
         Ok((ns_stats, ds))
     }
 }

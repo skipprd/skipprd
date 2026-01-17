@@ -349,13 +349,12 @@ impl Tool for ApproveAndSaveArtifactTool {
 
             // Immediately validate the DBT project and refresh compiled views to guarantee consistency
             let s3_prefix = ctx.keyspace.dbt_prefix(&ctx.scope);
-            let validate_tool = crate::suites::data_engineer_suite::tools::dbt_validate::DbtValidateTool;
+            let validate_tool = crate::suites::data_engineer_suite::tools::dbt_validate::DbtValidateTool { datasets: None, catalog: None };
             let project_name = format!("{}_project", ctx.scope.project_id.replace('/', "_"));
             let args = json!({
                 "project_name": project_name,
                 "s3_prefix": s3_prefix,
-                "target": "datafusion",
-                "build": true
+                "build": false
             });
             match validate_tool.call(args, ctx).await {
                 Ok(obs) => {

@@ -30,3 +30,6 @@ openapi-generator-cli-7.9.0.jar
 dbt-examples
 .dbt-build
 .dbt-profiles
+dbt.log
+20260116_001842.sql
+app-dbt

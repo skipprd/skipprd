@@ -44,8 +44,13 @@ pub fn generate_profiles_yml(cfg: &ReactResolvedConfig) -> Result<GeneratedProfi
     match active {
         ActiveWarehouse::Athena => {
             let ath = &cfg.providers.athena;
-            // dbt-athena-adapter expects a region; we defer to env with a safe default.
-            let region_expr = "{{ env_var('AWS_REGION', env_var('AWS_DEFAULT_REGION', 'us-east-1')) }}";
+            // dbt-athena-adapter expects a region.
+            // Prefer explicit configured region (ensures work_group lookup happens in the right region),
+            // otherwise defer to env with a safe default.
+            let region_value = ath
+                .region
+                .clone()
+                .unwrap_or_else(|| "{{ env_var('AWS_REGION', env_var('AWS_DEFAULT_REGION', 'us-east-1')) }}".to_string());
             let s3_staging_dir = ath
                 .result_s3
                 .as_ref()
@@ -53,16 +58,26 @@ pub fn generate_profiles_yml(cfg: &ReactResolvedConfig) -> Result<GeneratedProfi
                 .trim()
                 .to_string();
             let work_group = ath.workgroup.clone();
-            let catalog_name = ath.catalog.clone();
+            // NOTE: dbt-athena adapter config is sensitive to "catalog" vs "database" mappings.
+            // Some versions treat catalog-related keys as aliases of database, causing:
+            // "Got duplicate keys: (catalog) all map to \"database\"".
+            // We keep catalog in `react` config for query qualification, but do NOT emit it into
+            // profiles.yml to avoid adapter conflicts.
+            let _catalog_name = ath.catalog.clone();
 
-            // Deterministic naming: prefer explicit default_database if set, else derive from scope.
+            // dbt-athena mapping (IMPORTANT):
+            // - `database` is the Athena Data Catalog name (e.g. "AwsDataCatalog")
+            // - `schema` is the Athena database within that catalog (e.g. "picnic")
+            //
+            // Previously we incorrectly mapped `default_database` into `database`, which caused:
+            // "GetDataCatalog(Name=<schema>)" and failures like "DataCatalog picnic was not found".
+            let database = ath.catalog.clone();
+            // Deterministic schema: prefer explicit modeled_database if set, else derive from scope.
             let derived_db = derive_scope_db_name(cfg);
-            let database = ath
-                .default_database
+            let schema = ath
+                .modeled_database
                 .clone()
                 .unwrap_or_else(|| derived_db.clone());
-            // Athena uses database as schema; keep in sync.
-            let schema = database.clone();
 
             // Profile name must match dbt_project.yml `profile:` setting.
             // Existing project scaffolding uses `scope.project_id` today.
@@ -84,10 +99,12 @@ pub fn generate_profiles_yml(cfg: &ReactResolvedConfig) -> Result<GeneratedProfi
             out.push_str(&format!("    {}:\n", yaml_escape_key(&target)));
             out.push_str("      type: athena\n");
             out.push_str(&format!("      s3_staging_dir: {}\n", yaml_escape_scalar(&s3_staging_dir)));
-            out.push_str(&format!("      region_name: {}\n", region_expr));
-            out.push_str(&format!("      catalog_name: {}\n", yaml_escape_scalar(&catalog_name)));
+            // Quote the Jinja expression so YAML parses correctly.
+            out.push_str(&format!("      region_name: {}\n", yaml_escape_scalar(&region_value)));
             out.push_str(&format!("      database: {}\n", yaml_escape_scalar(&database)));
             out.push_str(&format!("      schema: {}\n", yaml_escape_scalar(&schema)));
+            // Default concurrency unless overridden elsewhere (env/CLI).
+            out.push_str("      threads: 4\n");
             if let Some(wg) = work_group {
                 if !wg.trim().is_empty() {
                     out.push_str(&format!("      work_group: {}\n", yaml_escape_scalar(wg.trim())));
@@ -151,8 +168,10 @@ mod tests {
                 athena: crate::config::AthenaResolved {
                     enabled: true,
                     workgroup: None,
+                    region: None,
                     result_s3: None,
-                    default_database: None,
+                    source_database: None,
+                    modeled_database: None,
                     catalog: "AwsDataCatalog".to_string(),
                     discovery_cache_ttl_secs: 120,
                 },

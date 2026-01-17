@@ -31,23 +31,25 @@ providers:
   athena:
     enabled: true
     workgroup: picnic
-    default_database: picnic
+    # Region matters for Athena WorkGroups; ensure dbt uses the same region as your WorkGroup.
+    region: eu-west-1
+    # Default database for discovery + unqualified queries.
+    source_database: picnic
+    # Target database for dbt-modeled outputs.
+    modeled_database: picnic_warehouse
     catalog: AwsDataCatalog
     result_s3: s3://asgsdag-datalake/
     discovery_cache_ttl_secs: 120
 
   catalog:
     enabled: true
-    refresh_secs: 60
+    refresh_secs: 10800 # 3 hours
     max_concurrency: 8
 
   dbt:
     enabled: true
-    # Use "docker" to avoid host-python/dbt dependency issues.
-    runner: docker
-    # Pinned official adapter image (example). Choose a version compatible with your DBT project.
-    docker_image: ghcr.io/dbt-labs/dbt-athena:1.8.3
-    docker_mount_aws_dir: true
+    # Run dbt on the host (e.g. local venv), not via Docker.
+    runner: host
     target: athena
 
   vector:

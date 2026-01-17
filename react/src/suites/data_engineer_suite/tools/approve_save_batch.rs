@@ -7,6 +7,22 @@ use tracing::info;
 
 pub struct ApproveAndSaveArtifactBatchTool;
 
+fn yaml_has_top_level_sources(content: &str) -> bool {
+    // Fast path: look for an unindented top-level "sources:" key.
+    if content.lines().any(|l| l.starts_with("sources:")) {
+        return true;
+    }
+    // Best-effort parse (covers cases where "sources:" isn't on its own line first).
+    if let Ok(v) = serde_yaml::from_str::<serde_yaml::Value>(content) {
+        if let Some(map) = v.as_mapping() {
+            return map
+                .keys()
+                .any(|k| k.as_str().map(|s| s == "sources").unwrap_or(false));
+        }
+    }
+    false
+}
+
 fn encode_key_component(s: &str) -> String {
     // Match Keyspace / provider encoding: keep a conservative safe set; percent-encode the rest.
     let mut out = String::with_capacity(s.len());
@@ -108,6 +124,18 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
             let (current_key, version_key, content_type) = if let Some(path) = explicit_path {
                 // Save arbitrary file under provided relative path
                 let rel = path.trim_start_matches('/').to_string();
+                // Guardrail: dbt sources must be defined in ONE place to avoid dbt compilation errors.
+                // If an agent tries to create sources in multiple YAMLs (e.g. models/sources.yml and
+                // models/staging/schema.yml), dbt will fail with duplicate source names.
+                if (rel.ends_with(".yml") || rel.ends_with(".yaml"))
+                    && rel != "models/schema.yml"
+                    && yaml_has_top_level_sources(&content)
+                {
+                    return Err(format!(
+                        "DBT sources must be defined ONLY in models/schema.yml. This file appears to contain a top-level 'sources:' block: {}. Move/merge those sources into models/schema.yml (use artifacts op=get to read existing), then retry.",
+                        rel
+                    ));
+                }
                 let current = format!("{}/{}", base, rel);
                 let ver = String::new();
                 let ct = if rel.ends_with(".sql") {

@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::{io::BufRead, process::Stdio};
 
 use crate::adapters::storage::StorageAdapter;
 use crate::providers::{Keyspace, RequestScope};
@@ -31,12 +32,6 @@ pub struct DbtValidateResult {
 #[async_trait]
 pub trait DbtProvider: Send + Sync {
     async fn ensure_minimal_project(&self, scope: &RequestScope) -> Result<(), String>;
-
-    async fn scaffold_full_project(
-        &self,
-        scope: &RequestScope,
-        dataset_ids: &[String],
-    ) -> Result<Vec<String>, String>;
 
     async fn write_model_sql(
         &self,
@@ -89,14 +84,6 @@ pub struct DbtRunnerConfig {
     pub docker_mount_aws_dir: bool,
 }
 
-fn parse_dataset_id(dataset_id: &str) -> Option<(String, String, String)> {
-    let parts: Vec<&str> = dataset_id.split('.').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    Some((parts[0].to_string(), parts[1].to_string(), parts[2].to_string()))
-}
-
 fn encode_key_component(s: &str) -> String {
     // Same encoding strategy as Keyspace: keep a conservative safe set, percent-encode the rest.
     let mut out = String::with_capacity(s.len());
@@ -110,41 +97,6 @@ fn encode_key_component(s: &str) -> String {
         }
     }
     out
-}
-
-fn make_sources_yaml(dataset_ids: &[String]) -> String {
-    let mut out = String::new();
-    out.push_str("version: 2\n\n");
-    out.push_str("sources:\n");
-    let mut by_db: std::collections::BTreeMap<String, Vec<(String, String)>> = std::collections::BTreeMap::new();
-    for ds in dataset_ids {
-        if let Some((_cat, db, table)) = parse_dataset_id(ds) {
-            by_db.entry(db).or_default().push((table, ds.clone()));
-        }
-    }
-    for (db, tables) in by_db {
-        out.push_str(&format!("  - name: {}\n", db));
-        out.push_str(&format!("    schema: {}\n", db));
-        out.push_str("    tables:\n");
-        for (table, ds_id) in tables {
-            out.push_str(&format!("      - name: {}\n", table));
-            out.push_str(&format!("        meta:\n          dataset_id: \"{}\"\n", ds_id));
-        }
-    }
-    out
-}
-
-fn make_staging_model_sql(dataset_id: &str) -> String {
-    let (_cat, db, table) = parse_dataset_id(dataset_id).unwrap_or(("AwsDataCatalog".into(), "default".into(), dataset_id.to_string()));
-    format!(
-        r#"{{{{ config(materialized="view") }}}}
-
-select *
-from {db}.{table}
-"#,
-        db = db,
-        table = table
-    )
 }
 
 fn write_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -161,22 +113,121 @@ struct CmdOut {
     stderr: String,
 }
 
-fn run_cmd(cmd: &str, args: &[&str], cwd: &Path, envs: &[(&str, String)]) -> CmdOut {
+fn redact_docker_args_for_log(args: &[String]) -> String {
+    // IMPORTANT: docker args can include `-e KEY=VALUE` where VALUE may be a secret.
+    // We redact values after '=' for any token passed to `-e`, and fully redact known AWS secrets.
+    let mut out: Vec<String> = Vec::with_capacity(args.len());
+    let mut next_is_env = false;
+    for a in args.iter() {
+        if next_is_env {
+            next_is_env = false;
+            if let Some((k, _v)) = a.split_once('=') {
+                out.push(format!("{}=***", k));
+            } else {
+                out.push("***".to_string());
+            }
+            continue;
+        }
+        if a == "-e" || a == "--env" {
+            out.push(a.clone());
+            next_is_env = true;
+            continue;
+        }
+        // Also redact inline KEY=VALUE tokens for common AWS secrets if present.
+        if let Some((k, _v)) = a.split_once('=') {
+            let k_uc = k.to_ascii_uppercase();
+            if k_uc.contains("AWS_SECRET_ACCESS_KEY") || k_uc.contains("AWS_SESSION_TOKEN") || k_uc.contains("AWS_ACCESS_KEY_ID") {
+                out.push(format!("{}=***", k));
+                continue;
+            }
+        }
+        out.push(a.clone());
+    }
+    out.join(" ")
+}
+
+fn run_cmd_labeled(cmd: &str, args: &[&str], cwd: &Path, envs: &[(&str, String)], label: &str) -> CmdOut {
+    let started = std::time::Instant::now();
+    tracing::info!(
+        target: "dbt",
+        phase = %label,
+        runner = "host",
+        cmd = %cmd,
+        args = %args.join(" "),
+        "starting"
+    );
     let mut c = std::process::Command::new(cmd);
-    c.args(args).current_dir(cwd);
+    c.args(args)
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     for (k, v) in envs.iter() {
         c.env(k, v);
     }
-    match c.output() {
-        Ok(o) => {
-            let code = o.status.code().unwrap_or(-1);
-            let ok = o.status.success();
-            let stdout = String::from_utf8_lossy(&o.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&o.stderr).to_string();
-            CmdOut { status_ok: ok, code, stdout, stderr }
+
+    let mut child = match c.spawn() {
+        Ok(ch) => ch,
+        Err(e) => {
+            return CmdOut { status_ok: false, code: -1, stdout: String::new(), stderr: format!("spawn error: {}", e) };
         }
-        Err(e) => CmdOut { status_ok: false, code: -1, stdout: String::new(), stderr: format!("spawn error: {}", e) },
+    };
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    let (tx, rx) = std::sync::mpsc::channel::<(bool, String)>(); // (is_stderr, line)
+    if let Some(out) = stdout {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let br = std::io::BufReader::new(out);
+            for line in br.lines().flatten() {
+                let _ = tx.send((false, line));
+            }
+        });
     }
+    if let Some(err) = stderr {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let br = std::io::BufReader::new(err);
+            for line in br.lines().flatten() {
+                let _ = tx.send((true, line));
+            }
+        });
+    }
+    drop(tx);
+
+    let mut out_buf = String::new();
+    let mut err_buf = String::new();
+    for (is_err, line) in rx {
+        if is_err {
+            tracing::info!(target: "dbt", phase = %label, runner = "host", stream = "stderr", "{}", line);
+            err_buf.push_str(&line);
+            err_buf.push('\n');
+        } else {
+            tracing::info!(target: "dbt", phase = %label, runner = "host", stream = "stdout", "{}", line);
+            out_buf.push_str(&line);
+            out_buf.push('\n');
+        }
+    }
+
+    let status = match child.wait() {
+        Ok(s) => s,
+        Err(e) => {
+            return CmdOut { status_ok: false, code: -1, stdout: out_buf, stderr: format!("wait error: {}", e) };
+        }
+    };
+    let code = status.code().unwrap_or(-1);
+    let ok = status.success();
+    tracing::info!(
+        target: "dbt",
+        phase = %label,
+        runner = "host",
+        exit_code = code,
+        ok = ok,
+        duration_ms = started.elapsed().as_millis() as u64,
+        "finished"
+    );
+    CmdOut { status_ok: ok, code, stdout: out_buf, stderr: err_buf }
 }
 
 fn build_docker_run_args(
@@ -275,6 +326,18 @@ fn run_cmd_docker(
     dbt_args: &[&str],
     envs: &[(&str, String)],
 ) -> CmdOut {
+    run_cmd_docker_labeled(runner, project_dir, profiles_dir, dbt_args, envs, "dbt")
+}
+
+fn run_cmd_docker_labeled(
+    runner: &DbtRunnerConfig,
+    project_dir: &Path,
+    profiles_dir: Option<&Path>,
+    dbt_args: &[&str],
+    envs: &[(&str, String)],
+    label: &str,
+) -> CmdOut {
+    let started = std::time::Instant::now();
     let args = match build_docker_run_args(runner, project_dir, profiles_dir, dbt_args, envs) {
         Ok(v) => v,
         Err(e) => {
@@ -282,18 +345,84 @@ fn run_cmd_docker(
         }
     };
 
+    tracing::info!(
+        target: "dbt",
+        phase = %label,
+        runner = "docker",
+        cmd = "docker",
+        args = %redact_docker_args_for_log(&args),
+        "starting"
+    );
+
     let mut c = std::process::Command::new("docker");
-    c.args(&args);
-    match c.output() {
-        Ok(o) => {
-            let code = o.status.code().unwrap_or(-1);
-            let ok = o.status.success();
-            let stdout = String::from_utf8_lossy(&o.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&o.stderr).to_string();
-            CmdOut { status_ok: ok, code, stdout, stderr }
+    c.args(&args)
+        .current_dir(project_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = match c.spawn() {
+        Ok(ch) => ch,
+        Err(e) => {
+            return CmdOut { status_ok: false, code: -1, stdout: String::new(), stderr: format!("spawn error: {}", e) };
         }
-        Err(e) => CmdOut { status_ok: false, code: -1, stdout: String::new(), stderr: format!("spawn error: {}", e) },
+    };
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    let (tx, rx) = std::sync::mpsc::channel::<(bool, String)>(); // (is_stderr, line)
+    if let Some(out) = stdout {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let br = std::io::BufReader::new(out);
+            for line in br.lines().flatten() {
+                let _ = tx.send((false, line));
+            }
+        });
     }
+    if let Some(err) = stderr {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let br = std::io::BufReader::new(err);
+            for line in br.lines().flatten() {
+                let _ = tx.send((true, line));
+            }
+        });
+    }
+    drop(tx);
+
+    let mut out_buf = String::new();
+    let mut err_buf = String::new();
+    for (is_err, line) in rx {
+        if is_err {
+            tracing::info!(target: "dbt", phase = %label, runner = "docker", stream = "stderr", "{}", line);
+            err_buf.push_str(&line);
+            err_buf.push('\n');
+        } else {
+            tracing::info!(target: "dbt", phase = %label, runner = "docker", stream = "stdout", "{}", line);
+            out_buf.push_str(&line);
+            out_buf.push('\n');
+        }
+    }
+
+    let status = match child.wait() {
+        Ok(s) => s,
+        Err(e) => {
+            return CmdOut { status_ok: false, code: -1, stdout: out_buf, stderr: format!("wait error: {}", e) };
+        }
+    };
+    let code = status.code().unwrap_or(-1);
+    let ok = status.success();
+    tracing::info!(
+        target: "dbt",
+        phase = %label,
+        runner = "docker",
+        exit_code = code,
+        ok = ok,
+        duration_ms = started.elapsed().as_millis() as u64,
+        "finished"
+    );
+    CmdOut { status_ok: ok, code, stdout: out_buf, stderr: err_buf }
 }
 
 fn combine_errors(a: &CmdOut, b: &CmdOut) -> Vec<String> {
@@ -349,7 +478,26 @@ impl DbtProvider for DbtProjectProvider {
     async fn ensure_minimal_project(&self, scope: &RequestScope) -> Result<(), String> {
         let project_key = self.keyspace.dbt_project_key(scope);
         if self.storage.head_etag(&project_key).await?.is_some() {
-            return Ok(());
+            // Back-compat / self-heal: if an existing dbt_project.yml is invalid for dbt-core (e.g. has a top-level
+            // `depends_on` key), rewrite it to a minimal valid project file. Otherwise, leave it intact.
+            if let Ok(bytes) = self.storage.get_bytes(&project_key).await {
+                let text = String::from_utf8_lossy(&bytes).to_string();
+                if let Ok(yv) = serde_yaml::from_str::<serde_yaml::Value>(&text) {
+                    if let Some(map) = yv.as_mapping() {
+                        let has_depends_on = map
+                            .keys()
+                            .any(|k| k.as_str().map(|s| s == "depends_on").unwrap_or(false));
+                        if !has_depends_on {
+                            return Ok(());
+                        }
+                    } else {
+                        // Non-mapping YAML: treat as invalid and rewrite.
+                    }
+                } else {
+                    // Unparseable YAML: rewrite.
+                }
+            }
+            // Fall through and rewrite below.
         }
         let name = format!("{}_project", scope.project_id.replace('/', "_"));
         let y = format!(
@@ -359,30 +507,6 @@ impl DbtProvider for DbtProjectProvider {
         );
         self.storage.put_bytes(&project_key, y.as_bytes(), "text/yaml").await?;
         Ok(())
-    }
-
-    async fn scaffold_full_project(
-        &self,
-        scope: &RequestScope,
-        dataset_ids: &[String],
-    ) -> Result<Vec<String>, String> {
-        self.ensure_minimal_project(scope).await?;
-        let mut written: Vec<String> = Vec::new();
-
-        let sources_yaml = make_sources_yaml(dataset_ids);
-        let sources_key = format!("{}models/schema.yml", self.keyspace.dbt_prefix(scope));
-        self.storage.put_bytes(&sources_key, sources_yaml.as_bytes(), "text/yaml").await?;
-        written.push(sources_key);
-
-        for ds in dataset_ids {
-            let dir = encode_key_component(ds);
-            let model_name = format!("stg_{}", dir.replace('.', "_"));
-            let sql_text = make_staging_model_sql(ds);
-            let key = format!("{}models/{}/{}.sql", self.keyspace.dbt_prefix(scope), dir, model_name);
-            self.storage.put_bytes(&key, sql_text.as_bytes(), "text/sql").await?;
-            written.push(key);
-        }
-        Ok(written)
     }
 
     async fn write_model_sql(
@@ -422,9 +546,12 @@ impl DbtProvider for DbtProjectProvider {
             if pref.ends_with('/') { pref } else { format!("{}/", pref) }
         };
 
-        let profiles_dir = args.profiles_dir.clone().or_else(|| std::env::var("DBT_PROFILES_DIR").ok());
+        let profiles_dir = args
+            .profiles_dir
+            .clone()
+            .or_else(|| std::env::var("DBT_PROFILES_DIR").ok());
         let target = if args.target.is_empty() {
-            std::env::var("DBT_TARGET").ok().unwrap_or_else(|| "datafusion".to_string())
+            return Err("dbt validate requires a non-empty target (e.g. 'athena'); no default target exists".to_string());
         } else {
             args.target.clone()
         };
@@ -452,8 +579,55 @@ impl DbtProvider for DbtProjectProvider {
         // Ensure minimal project file if missing
         let proj = root.join("dbt_project.yml");
         if !proj.exists() {
-            let y = format!("name: {}\nversion: '1.0'\nprofile: '{}'\nmodel-paths: ['models']\ntarget-path: 'target'\n", project_name, project_name);
+            // Important: profile name must match the generated `profiles.yml` entry, which is scope.project_id.
+            let y = format!(
+                "name: {}\nversion: '1.0'\nprofile: '{}'\nmodel-paths: ['models']\ntarget-path: 'target'\n",
+                project_name,
+                scope.project_id
+            );
             write_file(&proj, y.as_bytes())?;
+        }
+
+        // Sanitize dbt_project.yml for dbt-core strict schema:
+        // - Remove invalid top-level keys like `depends_on` (seen in some templates).
+        // - Force `profile:` to match scope.project_id so it aligns with generated profiles.yml.
+        // - Persist the sanitized version back to storage so future runs are clean.
+        {
+            let project_key = self.keyspace.dbt_project_key(scope);
+            let raw = std::fs::read_to_string(&proj).unwrap_or_default();
+            let mut changed = false;
+            let mut v: serde_yaml::Value = match serde_yaml::from_str(&raw) {
+                Ok(v) => v,
+                Err(_) => {
+                    changed = true;
+                    serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
+                }
+            };
+            if !matches!(v, serde_yaml::Value::Mapping(_)) {
+                v = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+                changed = true;
+            }
+            let map = v.as_mapping_mut().unwrap();
+            // Remove invalid top-level depends_on
+            let dep_key = serde_yaml::Value::String("depends_on".to_string());
+            if map.remove(&dep_key).is_some() {
+                changed = true;
+            }
+            // Force profile to scope.project_id
+            let prof_key = serde_yaml::Value::String("profile".to_string());
+            let desired_profile = serde_yaml::Value::String(scope.project_id.clone());
+            if map.get(&prof_key) != Some(&desired_profile) {
+                map.insert(prof_key, desired_profile);
+                changed = true;
+            }
+            if changed {
+                let new_text = serde_yaml::to_string(&v).unwrap_or_else(|_| raw.clone());
+                let _ = write_file(&proj, new_text.as_bytes());
+                let _ = self
+                    .storage
+                    .put_bytes(&project_key, new_text.as_bytes(), "text/yaml")
+                    .await;
+            }
         }
 
         let mut envs: Vec<(&str, String)> = Vec::new();
@@ -462,31 +636,31 @@ impl DbtProvider for DbtProjectProvider {
         let use_docker = self.runner.mode.to_lowercase() == "docker";
         let profiles_path = profiles_dir.as_ref().map(|s| Path::new(s));
         let deps_res = if use_docker {
-            run_cmd_docker(&self.runner, &root, profiles_path, &["deps"], &envs)
+            run_cmd_docker_labeled(&self.runner, &root, profiles_path, &["deps"], &envs, "deps")
         } else {
-            run_cmd("dbt", &["deps"], &root, &envs)
+            run_cmd_labeled("dbt", &["deps"], &root, &envs, "deps")
         };
         let parse_res = if use_docker {
-            run_cmd_docker(&self.runner, &root, profiles_path, &["parse"], &envs)
+            run_cmd_docker_labeled(&self.runner, &root, profiles_path, &["parse"], &envs, "parse")
         } else {
-            run_cmd("dbt", &["parse"], &root, &envs)
+            run_cmd_labeled("dbt", &["parse"], &root, &envs, "parse")
         };
         let compile_res = if use_docker {
-            run_cmd_docker(&self.runner, &root, profiles_path, &["compile", "--target", &target], &envs)
+            run_cmd_docker_labeled(&self.runner, &root, profiles_path, &["compile", "--target", &target], &envs, "compile")
         } else {
-            run_cmd("dbt", &["compile", "--target", &target], &root, &envs)
+            run_cmd_labeled("dbt", &["compile", "--target", &target], &root, &envs, "compile")
         };
         let run_or_build_res = if build {
             Some(if use_docker {
-                run_cmd_docker(&self.runner, &root, profiles_path, &["build", "--target", &target], &envs)
+                run_cmd_docker_labeled(&self.runner, &root, profiles_path, &["build", "--target", &target], &envs, "build")
             } else {
-                run_cmd("dbt", &["build", "--target", &target], &root, &envs)
+                run_cmd_labeled("dbt", &["build", "--target", &target], &root, &envs, "build")
             })
         } else if run {
             Some(if use_docker {
-                run_cmd_docker(&self.runner, &root, profiles_path, &["run", "--target", &target], &envs)
+                run_cmd_docker_labeled(&self.runner, &root, profiles_path, &["run", "--target", &target], &envs, "run")
             } else {
-                run_cmd("dbt", &["run", "--target", &target], &root, &envs)
+                run_cmd_labeled("dbt", &["run", "--target", &target], &root, &envs, "run")
             })
         } else {
             None

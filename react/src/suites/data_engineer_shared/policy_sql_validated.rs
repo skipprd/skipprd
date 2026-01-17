@@ -99,6 +99,51 @@ impl AgentPolicy for SqlValidatedPolicy {
         thread_id: &str,
         final_obj: &Value,
     ) -> Result<Option<RunOutcome>, String> {
+        // For DBT-authoring agents, require a successful dbt_validate before allowing final.
+        // This prevents premature finalization after a failed validate/build and forces an
+        // iterative fix → re-validate loop.
+        if matches!(ctx.agent_name.as_deref(), Some("model") | Some("cleanse")) {
+            if let Some(store) = store {
+                if let Some(log) = store.get(thread_id).await {
+                    let mut has_artifacts = false;
+                    for step in log.steps.iter().rev() {
+                        if step.action == "artifact_saved" || step.action == "approve_and_save_artifact_batch" {
+                            has_artifacts = true;
+                            break;
+                        }
+                    }
+                    if has_artifacts {
+                        let mut last_validate: Option<&ThreadStep> = None;
+                        for step in log.steps.iter().rev() {
+                            if step.action == "dbt_validate" {
+                                last_validate = Some(step);
+                                break;
+                            }
+                        }
+                        // Only block finalization if validation was attempted and failed.
+                        // If no dbt_validate has been run yet, allow final; the suite/controller
+                        // may run validation post-run or the agent may run it next.
+                        if let Some(v) = last_validate {
+                            let ok = v.observation.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
+                            let compile_ok = v.observation.get("compile_ok").and_then(|x| x.as_bool()).unwrap_or(false);
+                            if !(ok && compile_ok) {
+                                transcript.push(
+                                    "Observation: dbt_validate_failed; you must fix DBT artifacts and re-run dbt_validate until compile_ok=true before finalizing."
+                                        .to_string(),
+                                );
+                                return Ok(None);
+                            }
+                        }
+                    }
+                }
+            } else {
+                transcript.push(
+                    "Observation: dbt_validate_required; thread_store missing so validation status is unknown. Call dbt_validate before finalizing."
+                        .to_string(),
+                );
+                return Ok(None);
+            }
+        }
         let sql_opt = final_obj.get("sql").and_then(|x| x.as_str()).map(|s| s.to_string());
         if let Some(sql_str) = sql_opt.as_ref() {
             let sql_lower = sql_str.to_lowercase();
@@ -216,3 +261,78 @@ impl AgentPolicy for SqlValidatedPolicy {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapters::storage::InMemoryStorageAdapter;
+    use crate::providers::keyspace::DefaultKeyspace;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn model_final_is_rejected_after_failed_dbt_validate() {
+        let storage = Arc::new(InMemoryStorageAdapter::default());
+        let keyspace = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let scope = crate::providers::RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
+        let store = ThreadStore::new(storage.clone(), scope.clone(), keyspace.clone());
+        let tid = "tid";
+
+        // Simulate an artifact save, then a failed dbt_validate.
+        let _ = store
+            .append_step(
+                tid,
+                ThreadStep {
+                    action: "artifact_saved".to_string(),
+                    args: serde_json::json!({"kind":"model","name":"m","dataset_id":"d"}),
+                    observation: serde_json::json!({"ok": true}),
+                    ts: chrono::Utc::now().to_rfc3339(),
+                    agent: Some("model".to_string()),
+                },
+            )
+            .await;
+        let _ = store
+            .append_step(
+                tid,
+                ThreadStep {
+                    action: "dbt_validate".to_string(),
+                    args: serde_json::json!({}),
+                    observation: serde_json::json!({"ok": false, "compile_ok": false, "errors": ["fail"]}),
+                    ts: chrono::Utc::now().to_rfc3339(),
+                    agent: Some("model".to_string()),
+                },
+            )
+            .await;
+
+        let ctx = crate::agent::AgentCtx {
+            top_k: 1,
+            per_step_timeout_secs: 1,
+            max_steps: 1,
+            thread_id: Some(tid.to_string()),
+            progress_tx: None,
+            pre_step_tx: None,
+            trace_tx: None,
+            agent_name: Some("model".to_string()),
+            policy: Arc::new(crate::agent::DefaultPolicy),
+            llm: crate::llm::create_llm(&crate::llm::LlmConfig::default()),
+            storage,
+            scope,
+            keyspace,
+            query: None,
+            dbt: None,
+            vector: None,
+            thread_store: Some(store.clone()),
+            resolved_config: None,
+        };
+
+        let policy = SqlValidatedPolicy::default();
+        let mut transcript: Vec<String> = Vec::new();
+        let tools = ToolRegistry::new();
+        let final_obj = serde_json::json!({"answer":"x","sql":"SELECT 1 AS ok"});
+
+        let out = policy
+            .handle_final(&tools, &ctx, &mut transcript, Some(&store), tid, &final_obj)
+            .await
+            .unwrap();
+        assert!(out.is_none());
+        assert!(transcript.iter().any(|l| l.contains("dbt_validate_failed")));
+    }
+}

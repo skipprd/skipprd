@@ -76,6 +76,18 @@ pub struct CatalogField {
 	/// Engine-native column type (e.g. Glue/Athena type string).
 	#[serde(rename = "type", skip_serializing_if = "Option::is_none")]
 	pub data_type: Option<String>,
+	/// Top-level column name in the source table (when known).
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub root_column: Option<String>,
+	/// Field path for nested leaves (e.g. `context.session.id`) or the column name for scalars.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub field_path: Option<String>,
+	/// High-level structure kind for this field.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub structure_kind: Option<StructureKind>,
+	/// Provider-agnostic structured access descriptor (not raw SQL).
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub access_descriptor: Option<AccessDescriptor>,
 	pub description: Option<String>,
 	pub synonyms: Option<Vec<String>>,
 	pub pii_sensitivity: Option<String>,
@@ -84,6 +96,25 @@ pub struct CatalogField {
 	pub role: Option<String>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub stats: Option<FieldStatsLite>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StructureKind {
+	Scalar,
+	NestedLeaf,
+	Complex,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AccessDescriptor {
+	/// A single top-level column name.
+	ColumnName { name: String },
+	/// A nested dereference path, represented as a root column and path segments.
+	///
+	/// Example: root=\"context\", path=[\"session\",\"id\"].
+	NestedPath { root: String, path: Vec<String> },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -108,5 +139,10 @@ pub struct DataCatalog {
 	// Dataset-level stats snapshot
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub dataset_stats: Option<DatasetStats>,
+	/// Epoch seconds when this catalog was built/refreshed.
+	///
+	/// Backwards compatible: older stored catalogs won't have this field.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub built_at_epoch_secs: Option<u64>,
 }
 
