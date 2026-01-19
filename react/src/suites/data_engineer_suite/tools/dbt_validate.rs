@@ -121,6 +121,10 @@ impl Tool for DbtValidateTool {
         if let Some(obj) = v.as_object_mut() {
             obj.insert("dialect".to_string(), serde_json::json!(dialect));
             obj.insert("repair_report".to_string(), serde_json::to_value(repair_report).unwrap_or(Value::Null));
+            // Structured runtime/test failures extracted from build/run stdout (if present).
+            // This avoids relying on giant error blobs or tiny brief summaries.
+            let rf = crate::suites::data_engineer_suite::dbt_error::extract_runtime_failures_from_logs(&obj.get("logs").cloned().unwrap_or(Value::Null));
+            obj.insert("runtime_failures".to_string(), serde_json::json!(rf));
         }
         Ok(v)
     }
@@ -220,9 +224,10 @@ mod tests {
                     workgroup: None,
                     region: None,
                     result_s3: Some("s3://x/".to_string()),
-                    source_database: Some("src".to_string()),
-                    modeled_database: Some("wh".to_string()),
-                    catalog: "AwsDataCatalog".to_string(),
+                    source_schema: Some("src".to_string()),
+                    target_catalog: "AwsDataCatalog".to_string(),
+                    silver_schema: Some("src_silver".to_string()),
+                    gold_schema: Some("src_warehouse".to_string()),
                     discovery_cache_ttl_secs: 120,
                 },
                 catalog: crate::config::CatalogResolved { enabled: false, refresh_secs: 60, max_concurrency: 8 },
@@ -230,6 +235,11 @@ mod tests {
                     enabled: true,
                     profiles_dir: None,
                     target: Some("athena".to_string()),
+                    naming: crate::config::DbtNamingResolved {
+                        target_schema: Some("src".to_string()),
+                        silver_suffix: Some("silver".to_string()),
+                        gold_suffix: Some("warehouse".to_string()),
+                    },
                     runner: "host".to_string(),
                     docker_image: None,
                     docker_platform: None,

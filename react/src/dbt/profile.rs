@@ -63,7 +63,7 @@ pub fn generate_profiles_yml(cfg: &ReactResolvedConfig) -> Result<GeneratedProfi
             // "Got duplicate keys: (catalog) all map to \"database\"".
             // We keep catalog in `react` config for query qualification, but do NOT emit it into
             // profiles.yml to avoid adapter conflicts.
-            let _catalog_name = ath.catalog.clone();
+            let _catalog_name = ath.target_catalog.clone();
 
             // dbt-athena mapping (IMPORTANT):
             // - `database` is the Athena Data Catalog name (e.g. "AwsDataCatalog")
@@ -71,13 +71,21 @@ pub fn generate_profiles_yml(cfg: &ReactResolvedConfig) -> Result<GeneratedProfi
             //
             // Previously we incorrectly mapped `default_database` into `database`, which caused:
             // "GetDataCatalog(Name=<schema>)" and failures like "DataCatalog picnic was not found".
-            let database = ath.catalog.clone();
-            // Deterministic schema: prefer explicit modeled_database if set, else derive from scope.
-            let derived_db = derive_scope_db_name(cfg);
-            let schema = ath
-                .modeled_database
+            // dbt-athena mapping (IMPORTANT):
+            // - `database` is the Athena Data Catalog name (e.g. "AwsDataCatalog")
+            // - `schema` is the base schema used by dbt's schema generation macros.
+            //
+            // With the suffix strategy (recommended), dbt materializes into:
+            //   <target_schema>_<tier_suffix>
+            // so `schema` must be the BASE (e.g. "test"), not the final tier schema.
+            let database = ath.target_catalog.clone();
+            let schema = cfg
+                .providers
+                .dbt
+                .naming
+                .target_schema
                 .clone()
-                .unwrap_or_else(|| derived_db.clone());
+                .unwrap_or_else(|| derive_scope_db_name(cfg));
 
             // Profile name must match dbt_project.yml `profile:` setting.
             // Existing project scaffolding uses `scope.project_id` today.
@@ -170,9 +178,10 @@ mod tests {
                     workgroup: None,
                     region: None,
                     result_s3: None,
-                    source_database: None,
-                    modeled_database: None,
-                    catalog: "AwsDataCatalog".to_string(),
+                    source_schema: None,
+                    target_catalog: "AwsDataCatalog".to_string(),
+                    silver_schema: None,
+                    gold_schema: None,
                     discovery_cache_ttl_secs: 120,
                 },
                 catalog: crate::config::CatalogResolved { enabled: false, refresh_secs: 60, max_concurrency: 8 },
@@ -180,6 +189,7 @@ mod tests {
                     enabled: false,
                     profiles_dir: None,
                     target: None,
+                    naming: crate::config::DbtNamingResolved::default(),
                     runner: "host".to_string(),
                     docker_image: None,
                     docker_platform: None,

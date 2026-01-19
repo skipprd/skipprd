@@ -247,6 +247,43 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			let frames = run_agent_and_frames(&thread_id, &question, &suite_id, &agent, &state.reg, &state.suite_ctx).await?;
 			for f in frames {
 				match f {
+					AgentFrame::Review { text, meta } => {
+						let tseq = state.next_thread_seq(&thread_id);
+						let mut rr = api::ReviewResponse::new(
+							1,
+							m::review_response::Type::Review,
+							now_iso(),
+							state.next_seq(),
+							thread_id.clone(),
+							tseq,
+							text.clone(),
+						);
+						if let Some(v) = meta {
+							if let Some(obj) = v.as_object() {
+								let mut hm: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+								for (k, vv) in obj.iter() {
+									hm.insert(k.clone(), vv.clone());
+								}
+								if !hm.is_empty() {
+									rr.meta = Some(hm);
+								}
+							}
+						}
+						let resp = api::ServerMessage::Review(rr.clone());
+						let s = serde_json::to_string(&resp).unwrap();
+						state.buffer_last(&s);
+						out.push(s);
+						{
+							let store = state.thread_store();
+							let _ = store.append_step(&thread_id, crate::session::ThreadStep {
+								action: "review_response".to_string(),
+								args: serde_json::json!({"text": text, "meta": rr.meta}),
+								observation: serde_json::json!({"ok": true}),
+								ts: chrono::Utc::now().to_rfc3339(),
+								agent: Some(agent.clone()),
+							}).await;
+						}
+					}
 					AgentFrame::Final { answer, sql } => {
 						let sql = if agent == "model" || agent == "cleanse" { None } else { sql };
 						// finalize title once using concise summary
@@ -386,6 +423,43 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			let frames = run_agent_and_frames(&thread_id, &question, &suite_id, &agent, &state.reg, &state.suite_ctx).await?;
 			for f in frames {
 				match f {
+					AgentFrame::Review { text, meta } => {
+						let tseq = state.next_thread_seq(&thread_id);
+						let mut rr = api::ReviewResponse::new(
+							1,
+							m::review_response::Type::Review,
+							now_iso(),
+							state.next_seq(),
+							thread_id.clone(),
+							tseq,
+							text.clone(),
+						);
+						if let Some(v) = meta {
+							if let Some(obj) = v.as_object() {
+								let mut hm: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+								for (k, vv) in obj.iter() {
+									hm.insert(k.clone(), vv.clone());
+								}
+								if !hm.is_empty() {
+									rr.meta = Some(hm);
+								}
+							}
+						}
+						let resp = api::ServerMessage::Review(rr.clone());
+						let s = serde_json::to_string(&resp).unwrap();
+						state.buffer_last(&s);
+						out.push(s);
+						{
+							let store = state.thread_store();
+							let _ = store.append_step(&thread_id, crate::session::ThreadStep {
+								action: "review_response".to_string(),
+								args: serde_json::json!({"text": text, "meta": rr.meta}),
+								observation: serde_json::json!({"ok": true}),
+								ts: chrono::Utc::now().to_rfc3339(),
+								agent: Some(agent.clone()),
+							}).await;
+						}
+					}
 					AgentFrame::Final { answer, sql } => {
 						let sql = if agent == "model" || agent == "cleanse" { None } else { sql };
 						// optional token streaming (simple chunking)
@@ -521,6 +595,43 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			let frames = run_agent_and_frames(&thread_id, &q_for_resume, &suite_id, &agent, &state.reg, &state.suite_ctx).await?;
 			for f in frames {
 				match f {
+					AgentFrame::Review { text, meta } => {
+						let tseq = state.next_thread_seq(&thread_id);
+						let mut rr = api::ReviewResponse::new(
+							1,
+							m::review_response::Type::Review,
+							now_iso(),
+							state.next_seq(),
+							thread_id.clone(),
+							tseq,
+							text.clone(),
+						);
+						if let Some(v) = meta {
+							if let Some(obj) = v.as_object() {
+								let mut hm: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+								for (k, vv) in obj.iter() {
+									hm.insert(k.clone(), vv.clone());
+								}
+								if !hm.is_empty() {
+									rr.meta = Some(hm);
+								}
+							}
+						}
+						let resp = api::ServerMessage::Review(rr.clone());
+						let s = serde_json::to_string(&resp).unwrap();
+						state.buffer_last(&s);
+						out.push(s);
+						{
+							let store = state.thread_store();
+							let _ = store.append_step(&thread_id, crate::session::ThreadStep {
+								action: "review_response".to_string(),
+								args: serde_json::json!({"text": text, "meta": rr.meta}),
+								observation: serde_json::json!({"ok": true}),
+								ts: chrono::Utc::now().to_rfc3339(),
+								agent: Some(state.current_agent.get(&thread_id).cloned().unwrap_or_else(|| "ask".to_string())),
+							}).await;
+						}
+					}
 					AgentFrame::Final { answer, sql } => {
 						// optional token streaming (simple chunking); no cid here in generic handler
 						for t in chunk_text(&answer, 24) {
@@ -843,7 +954,7 @@ fn build_suites_catalog(reg: &SuiteRegistry) -> Vec<serde_json::Value> {
 			"data_engineer" => out.push(serde_json::json!({
 				"suiteId": "data_engineer",
 				"label": "Data Engineer",
-				"allowedAgentTypes": ["ask", "model", "cleanse"],
+				"allowedAgentTypes": ["ask", "model", "cleanse", "review", "agent"],
 				"defaultAgentType": "ask",
 			})),
 			"kb" => out.push(serde_json::json!({
@@ -1133,6 +1244,8 @@ fn normalize_agent_new(a: api::new_request::AgentType) -> String {
 		api::new_request::AgentType::Model => "model".to_string(),
 		api::new_request::AgentType::Ask => "ask".to_string(),
 		api::new_request::AgentType::Kb => "kb".to_string(),
+		api::new_request::AgentType::Agent => "agent".to_string(),
+		api::new_request::AgentType::Review => "review".to_string(),
 	}
 }
 
@@ -1142,6 +1255,8 @@ fn normalize_agent_open(a: api::open_request::AgentType) -> String {
 		api::open_request::AgentType::Model => "model".to_string(),
 		api::open_request::AgentType::Ask => "ask".to_string(),
 		api::open_request::AgentType::Kb => "kb".to_string(),
+		api::open_request::AgentType::Agent => "agent".to_string(),
+		api::open_request::AgentType::Review => "review".to_string(),
 	}
 }
 async fn run_agent_with_processing(
@@ -1182,6 +1297,7 @@ fn compact_schema_columns(fields: &[arrow::datatypes::FieldRef]) -> Vec<(String,
 }
 enum AgentFrame {
 	Final { answer: String, sql: Option<String> },
+	Review { text: String, meta: Option<serde_json::Value> },
 	AwaitUser { prompt: String },
 	AwaitApproval { prompt: String },
 }
@@ -1254,6 +1370,7 @@ async fn run_agent_with_processing_suite(
 				let convert = |ff: crate::flow_frame::FlowFrame| -> AgentFrame {
 					match ff {
 						crate::flow_frame::FlowFrame::Final { answer, sql } => AgentFrame::Final { answer, sql },
+						crate::flow_frame::FlowFrame::Review { text, meta } => AgentFrame::Review { text, meta },
 						crate::flow_frame::FlowFrame::AwaitUser { prompt } => AgentFrame::AwaitUser { prompt },
 						crate::flow_frame::FlowFrame::AwaitApproval { prompt } => AgentFrame::AwaitApproval { prompt },
 					}
@@ -1264,6 +1381,53 @@ async fn run_agent_with_processing_suite(
 
 				for f in frames {
 					match f {
+						AgentFrame::Review { text, meta } => {
+							let tseq = state.next_thread_seq(thread_id);
+							let mut resp = api::ReviewResponse::new(
+								1,
+								m::review_response::Type::Review,
+								now_iso(),
+								state.next_seq(),
+								thread_id.to_string(),
+								tseq,
+								text.clone(),
+							);
+							// Convert meta value to ReviewResponse's map type (best-effort).
+							if let Some(v) = meta {
+								if let Some(obj) = v.as_object() {
+									let mut hm: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+									for (k, vv) in obj.iter() {
+										hm.insert(k.clone(), vv.clone());
+									}
+									if !hm.is_empty() {
+										resp.meta = Some(hm);
+									}
+								}
+							}
+							let s = serde_json::to_string(&resp).unwrap();
+							state.buffer_last(&s);
+							tracing::info!("WS -> {}", s);
+							let _ = write.send(Message::Text(s)).await;
+
+							// Persist as its own step so history can show reviewer output.
+							{
+								let store = state.thread_store();
+								let _ = store
+									.append_step(
+										thread_id,
+										crate::session::ThreadStep {
+											action: "review_response".to_string(),
+											args: serde_json::json!({"text": text, "meta": resp.meta}),
+											observation: serde_json::json!({"ok": true}),
+											ts: chrono::Utc::now().to_rfc3339(),
+											agent: Some(agent.to_string()),
+										},
+									)
+									.await;
+							}
+							// Review is non-terminal; continue emitting subsequent frames.
+							continue;
+						}
 						AgentFrame::Final { answer, sql } => {
 							let sql = if agent == "model" || agent == "cleanse" { None } else { sql };
 							for t in chunk_text(&answer, 24) {
@@ -1374,6 +1538,7 @@ async fn run_agent_and_frames(
     let convert = |ff: crate::flow_frame::FlowFrame| -> AgentFrame {
 		match ff {
 			crate::flow_frame::FlowFrame::Final { answer, sql } => AgentFrame::Final { answer, sql },
+			crate::flow_frame::FlowFrame::Review { text, meta } => AgentFrame::Review { text, meta },
 			crate::flow_frame::FlowFrame::AwaitUser { prompt } => AgentFrame::AwaitUser { prompt },
 			crate::flow_frame::FlowFrame::AwaitApproval { prompt } => AgentFrame::AwaitApproval { prompt },
 		}
@@ -1419,7 +1584,7 @@ fn compute_unread_for_log(log: &crate::session::ThreadLog, seen_seq: i32) -> (i3
 			"user" => {
 				tseq += 1;
 			}
-			"final" | "ask_user" | "ask_approval" => {
+			"final" | "ask_user" | "ask_approval" | "review_response" => {
 				tseq += 1;
 				if tseq > seen_seq {
 					assistant_count_after_seen += 1;
@@ -1454,6 +1619,16 @@ async fn build_history(store: &crate::session::ThreadStore, thread_id: &str, bef
 				"final" => {
 					tseq += 1;
 					let content = step.args.get("answer").and_then(|x| x.as_str()).unwrap_or("").to_string();
+					all_msgs.push(api::HistoryResponseMessagesInner {
+						thread_seq: tseq,
+						role: m::history_response_messages_inner::Role::Assistant,
+						content,
+						created_at: step.ts.clone(),
+					});
+				}
+				"review_response" => {
+					tseq += 1;
+					let content = step.args.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string();
 					all_msgs.push(api::HistoryResponseMessagesInner {
 						thread_seq: tseq,
 						role: m::history_response_messages_inner::Role::Assistant,
@@ -1503,5 +1678,83 @@ async fn build_history(store: &crate::session::ThreadStore, thread_id: &str, bef
 		}
 	}
 	(msgs, next_before)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::adapters::storage::InMemoryStorageAdapter;
+	use crate::providers::{DefaultKeyspace, RequestScope};
+	use serde_json::json;
+	use std::sync::Arc;
+
+	#[test]
+	fn normalize_agent_includes_agent_and_review() {
+		assert_eq!(normalize_agent_new(api::new_request::AgentType::Agent), "agent");
+		assert_eq!(normalize_agent_new(api::new_request::AgentType::Review), "review");
+		assert_eq!(normalize_agent_open(api::open_request::AgentType::Agent), "agent");
+		assert_eq!(normalize_agent_open(api::open_request::AgentType::Review), "review");
+	}
+
+	#[test]
+	fn unread_counts_include_review_response() {
+		let log = crate::session::ThreadLog {
+			steps: vec![
+				crate::session::ThreadStep {
+					action: "user".to_string(),
+					args: json!({"text":"hi"}),
+					observation: json!({"ok":true}),
+					ts: "t".to_string(),
+					agent: Some("ask".to_string()),
+				},
+				crate::session::ThreadStep {
+					action: "review_response".to_string(),
+					args: json!({"text":"review text","meta":null}),
+					observation: json!({"ok":true}),
+					ts: "t".to_string(),
+					agent: Some("agent".to_string()),
+				},
+				crate::session::ThreadStep {
+					action: "final".to_string(),
+					args: json!({"answer":"done","sql":null}),
+					observation: json!({"ok":true}),
+					ts: "t".to_string(),
+					agent: Some("agent".to_string()),
+				},
+			],
+			..Default::default()
+		};
+		// No seen messages yet -> both assistant messages should count as unread.
+		let (_max_seq, unread) = compute_unread_for_log(&log, 0);
+		assert_eq!(unread, 2);
+	}
+
+	#[tokio::test]
+	async fn history_includes_review_response_as_assistant_message() {
+		let storage = Arc::new(InMemoryStorageAdapter::default());
+		let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
+		let keyspace = Arc::new(DefaultKeyspace::new("b".to_string()));
+		let store = crate::session::ThreadStore::new(storage, scope, keyspace);
+
+		let tid = "thread1";
+		let _ = store.append_step(tid, crate::session::ThreadStep {
+			action: "user".to_string(),
+			args: json!({"text":"start"}),
+			observation: json!({"ok":true}),
+			ts: chrono::Utc::now().to_rfc3339(),
+			agent: Some("ask".to_string()),
+		}).await;
+
+		let _ = store.append_step(tid, crate::session::ThreadStep {
+			action: "review_response".to_string(),
+			args: json!({"text":"review text","meta":null}),
+			observation: json!({"ok":true}),
+			ts: chrono::Utc::now().to_rfc3339(),
+			agent: Some("agent".to_string()),
+		}).await;
+
+		let (msgs, _next) = build_history(&store, tid, None, Some(50)).await;
+		assert!(msgs.iter().any(|m| m.role == m::history_response_messages_inner::Role::Assistant && m.content == "review text"));
+	}
 }
 

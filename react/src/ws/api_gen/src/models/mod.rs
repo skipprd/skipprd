@@ -19,6 +19,9 @@ pub use final_response_result_chart::FinalResponseResultChart;
 pub mod final_response;
 pub use final_response::FinalResponse;
 
+pub mod review_response;
+pub use review_response::ReviewResponse;
+
 pub mod await_approval_response;
 pub use await_approval_response::AwaitApprovalResponse;
 

@@ -10,10 +10,10 @@ storage:
 scope:
   # From repo-root skippr.yml: skippr.tenant / skippr.workspace
   tenant: picnic
-  workspace: test
+  workspace: dev
 
   # react-specific partition; closest analogue to a skippr pipeline.
-  project_id: app
+  project_id: test
 
 llm:
   # Keep secrets (api keys) in env via EnvSecretsProvider (e.g. LLM_API_KEY).
@@ -33,11 +33,15 @@ providers:
     workgroup: picnic
     # Region matters for Athena WorkGroups; ensure dbt uses the same region as your WorkGroup.
     region: eu-west-1
-    # Default database for discovery + unqualified queries.
-    source_database: picnic
-    # Target database for dbt-modeled outputs.
-    modeled_database: picnic_warehouse
-    catalog: AwsDataCatalog
+    # Athena Data Catalog (Glue) that contains your schemas (databases).
+    # This maps to dbt-athena profile key: `database: AwsDataCatalog`.
+    target_catalog: AwsDataCatalog
+
+    # Bronze/raw schema (Glue database) for discovery + dbt sources.
+    # This maps to dbt-athena profile key: `schema:` when reading raw sources via `source()`.
+    source_schema: test_raw
+
+    # NOTE: silver/gold are configured via DBT suffix naming below (recommended).
     result_s3: s3://asgsdag-datalake/
     discovery_cache_ttl_secs: 120
 
@@ -51,6 +55,48 @@ providers:
     # Run dbt on the host (e.g. local venv), not via Docker.
     runner: host
     target: athena
+
+    # Naming strategy (portable across warehouses):
+    # dbt will materialize into: <target_schema>_<tier_suffix>
+    # This avoids accidental doubled schemas like `test_warehouse_test_warehouse`.
+    naming:
+      # Base schema name (dbt target.schema). Example: `test`
+      target_schema: test
+      # Tier suffixes. Example schemas: `test_silver`, `test_warehouse`
+      silver_suffix: silver
+      gold_suffix: warehouse
+
+    # ---- Future warehouse examples (commented) ----
+    #
+    # BigQuery (dbt-bigquery):
+    # providers:
+    #   bigquery:
+    #     enabled: true
+    #     # Container above schema: GCP project (maps to dbt profile `database:`)
+    #     target_project: my-gcp-project
+    #     # Bronze/raw dataset (maps to dbt `schema:` when reading sources)
+    #     source_schema: raw
+    #     location: EU
+    #
+    # Snowflake (dbt-snowflake):
+    # providers:
+    #   snowflake:
+    #     enabled: true
+    #     # Container above schema: Snowflake database (maps to dbt profile `database:`)
+    #     target_database: ANALYTICS
+    #     # Bronze/raw schema (maps to dbt `schema:` when reading sources)
+    #     source_schema: RAW
+    #     warehouse: COMPUTE_WH
+    #     role: ANALYST
+    #
+    # Postgres (dbt-postgres):
+    # providers:
+    #   postgres:
+    #     enabled: true
+    #     # Container above schema: Postgres database name (maps to dbt profile `dbname:`)
+    #     target_database: analytics
+    #     # Bronze/raw schema (maps to dbt `schema:` when reading sources)
+    #     source_schema: raw
 
   vector:
     enabled: true

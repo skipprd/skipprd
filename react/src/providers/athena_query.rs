@@ -21,8 +21,8 @@ pub struct AthenaSettings {
     pub workgroup: Option<String>,
     pub result_output_location: Option<String>,
     pub default_catalog: String,
-    /// Default database for source discovery + unqualified queries.
-    pub source_database: Option<String>,
+    /// Default schema/database for source discovery + unqualified queries.
+    pub source_schema: Option<String>,
     pub discovery_cache_ttl_secs: u64,
 }
 
@@ -32,7 +32,7 @@ struct Inner {
     workgroup: Option<String>,
     result_output_location: Option<String>,
     default_catalog: String,
-    source_database: Option<String>,
+    source_schema: Option<String>,
     cache_ttl: Duration,
     cache: RwLock<Cache>,
 }
@@ -61,7 +61,7 @@ impl AthenaQueryProvider {
                 workgroup: settings.workgroup,
                 result_output_location: settings.result_output_location,
                 default_catalog: settings.default_catalog,
-                source_database: settings.source_database,
+                source_schema: settings.source_schema,
                 cache_ttl: Duration::from_secs(ttl_secs),
                 cache: RwLock::new(Cache::default()),
             }),
@@ -73,14 +73,14 @@ impl AthenaQueryProvider {
     /// Supported env vars (with backward-compatible aliases):
     /// - `ATHENA_WORKGROUP` (alias: `DATA_OUTPUT_ATHENA_WORKGROUP_NAME`)
     /// - `ATHENA_RESULT_S3` (alias: `DATA_OUTPUT_ATHENA_RESULTS_S3_BUCKET` + optional prefix)
-    /// - `ATHENA_SOURCE_DATABASE`
-    /// - `ATHENA_CATALOG` (default: `AwsDataCatalog`)
+    /// - `ATHENA_SOURCE_SCHEMA` (alias: `ATHENA_SOURCE_DATABASE`)
+    /// - `ATHENA_TARGET_CATALOG` (alias: `ATHENA_CATALOG`, default: `AwsDataCatalog`)
     /// - `ATHENA_DISCOVERY_CACHE_TTL_SECS` (default: 120)
     pub async fn from_env() -> Self {
         let workgroup = getenv_nonempty("ATHENA_WORKGROUP")
             .or_else(|| getenv_nonempty("DATA_OUTPUT_ATHENA_WORKGROUP_NAME"));
-        let source_database = getenv_nonempty("ATHENA_SOURCE_DATABASE");
-        let default_catalog = getenv("ATHENA_CATALOG", "AwsDataCatalog");
+        let source_schema = getenv_nonempty("ATHENA_SOURCE_SCHEMA").or_else(|| getenv_nonempty("ATHENA_SOURCE_DATABASE"));
+        let default_catalog = getenv_nonempty("ATHENA_TARGET_CATALOG").unwrap_or_else(|| getenv("ATHENA_CATALOG", "AwsDataCatalog"));
 
         // Prefer a single s3://... output location if provided; else leave None and rely on WG config.
         let result_output_location = getenv_nonempty("ATHENA_RESULT_S3")
@@ -98,7 +98,7 @@ impl AthenaQueryProvider {
             workgroup,
             result_output_location,
             default_catalog,
-            source_database,
+            source_schema,
             discovery_cache_ttl_secs: ttl_secs,
         })
         .await
@@ -119,9 +119,9 @@ impl AthenaQueryProvider {
             1 => {
                 let db = self
                     .inner
-                    .source_database
+                    .source_schema
                     .clone()
-                    .ok_or_else(|| "dataset id missing database; set ATHENA_SOURCE_DATABASE or use <db>.<table>".to_string())?;
+                    .ok_or_else(|| "dataset id missing database; set ATHENA_SOURCE_SCHEMA or use <db>.<table>".to_string())?;
                 Ok(DatasetId { catalog: self.inner.default_catalog.clone(), database: db, table: parts[0].to_string() })
             }
             _ => Err("dataset id must be <catalog>.<db>.<table> (or <db>.<table>)".to_string()),
@@ -143,7 +143,7 @@ impl AthenaQueryProvider {
             req = req.work_group(wg);
         }
         // Use explicit database if provided, else fall back to env default.
-        if let Some(db) = database.or(self.inner.source_database.as_deref()) {
+        if let Some(db) = database.or(self.inner.source_schema.as_deref()) {
             req = req.query_execution_context(
                 aws_sdk_athena::types::QueryExecutionContext::builder()
                     .database(db)
@@ -241,7 +241,7 @@ impl AthenaQueryProvider {
 
     async fn cached_databases(&self) -> Result<Vec<String>, String> {
         // If configured with a single source database, scope discovery to it.
-        if let Some(db) = self.inner.source_database.as_ref().filter(|s| !s.trim().is_empty()) {
+        if let Some(db) = self.inner.source_schema.as_ref().filter(|s| !s.trim().is_empty()) {
             return Ok(vec![db.trim().to_string()]);
         }
         {

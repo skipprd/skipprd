@@ -99,9 +99,12 @@ impl AgentPolicy for SqlValidatedPolicy {
         thread_id: &str,
         final_obj: &Value,
     ) -> Result<Option<RunOutcome>, String> {
-        // For DBT-authoring agents, require a successful dbt_validate before allowing final.
-        // This prevents premature finalization after a failed validate/build and forces an
-        // iterative fix → re-validate loop.
+        // For DBT-authoring agents, require successful dbt_validate before allowing final.
+        //
+        // IMPORTANT:
+        // - If artifacts were authored, a compile-only validate is not sufficient to finalize; we require
+        //   a runtime validate (build/run) to pass (run_ok=true) unless explicitly overridden.
+        // - This prevents "compiles cleanly" finals that still have runtime/test failures.
         if matches!(ctx.agent_name.as_deref(), Some("model") | Some("cleanse")) {
             if let Some(store) = store {
                 if let Some(log) = store.get(thread_id).await {
@@ -120,19 +123,48 @@ impl AgentPolicy for SqlValidatedPolicy {
                                 break;
                             }
                         }
-                        // Only block finalization if validation was attempted and failed.
-                        // If no dbt_validate has been run yet, allow final; the suite/controller
-                        // may run validation post-run or the agent may run it next.
-                        if let Some(v) = last_validate {
-                            let ok = v.observation.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
-                            let compile_ok = v.observation.get("compile_ok").and_then(|x| x.as_bool()).unwrap_or(false);
-                            if !(ok && compile_ok) {
-                                transcript.push(
-                                    "Observation: dbt_validate_failed; you must fix DBT artifacts and re-run dbt_validate until compile_ok=true before finalizing."
-                                        .to_string(),
-                                );
-                                return Ok(None);
-                            }
+                        // If artifacts were written, we require an explicit dbt_validate step.
+                        // (Suite-level post-run validation is not sufficient for this policy gate.)
+                        let Some(v) = last_validate else {
+                            transcript.push(
+                                "Observation: dbt_validate_required; you must run dbt_validate after writing artifacts before finalizing.".to_string(),
+                            );
+                            return Ok(None);
+                        };
+
+                        let ok = v.observation.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
+                        let compile_ok = v.observation.get("compile_ok").and_then(|x| x.as_bool()).unwrap_or(false);
+                        let run_ok = v.observation.get("run_ok").and_then(|x| x.as_bool());
+                        let build = v.args.get("build").and_then(|x| x.as_bool()).unwrap_or(false);
+                        let run = v.args.get("run").and_then(|x| x.as_bool()).unwrap_or(false);
+                        let runtime_validate = build || run;
+                        let allow_compile_only = std::env::var("DBT_ALLOW_COMPILE_ONLY_FINAL")
+                            .ok()
+                            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                            .unwrap_or(false);
+
+                        if !(ok && compile_ok) {
+                            transcript.push(
+                                "Observation: dbt_validate_failed; you must fix DBT artifacts and re-run dbt_validate until compile_ok=true before finalizing."
+                                    .to_string(),
+                            );
+                            return Ok(None);
+                        }
+
+                        if !runtime_validate && !allow_compile_only {
+                            transcript.push(
+                                "Observation: dbt_validate_incomplete; compile-only validation is not sufficient after authoring DBT artifacts. Re-run dbt_validate with build=true (or run=true) and fix any runtime/test failures before finalizing."
+                                    .to_string(),
+                            );
+                            return Ok(None);
+                        }
+
+                        if runtime_validate && run_ok != Some(true) {
+                            transcript.push(
+                                "Observation: dbt_validate_run_failed; you must fix runtime/test failures and re-run dbt_validate until run_ok=true before finalizing."
+                                    .to_string(),
+                            );
+                            return Ok(None);
                         }
                     }
                 }
@@ -336,3 +368,4 @@ mod tests {
         assert!(transcript.iter().any(|l| l.contains("dbt_validate_failed")));
     }
 }
+

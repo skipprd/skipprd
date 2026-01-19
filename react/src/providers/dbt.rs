@@ -501,7 +501,7 @@ impl DbtProvider for DbtProjectProvider {
         }
         let name = format!("{}_project", scope.project_id.replace('/', "_"));
         let y = format!(
-            "name: {name}\nversion: '1.0'\nprofile: '{project_id}'\nmodel-paths: ['models']\nseed-paths: ['seeds']\nmacro-paths: ['macros']\ntarget-path: 'target'\n",
+            "name: {name}\nversion: '1.0'\nprofile: '{project_id}'\nmodel-paths: ['models']\nseed-paths: ['seeds']\nmacro-paths: ['macros']\ntarget-path: 'target'\n\nmodels:\n  {name}:\n    # Suffix strategy: dbt materializes schemas as <DBT_TARGET_SCHEMA>_<suffix>.\n    # Default all models into GOLD by setting their custom schema name to the gold suffix.\n    +schema: \"{{{{ env_var('DBT_GOLD_SUFFIX', 'warehouse') }}}}\"\n    # Force staging models under models/staging into SILVER.\n    staging:\n      +schema: \"{{{{ env_var('DBT_SILVER_SUFFIX', 'silver') }}}}\"\n",
             name = name,
             project_id = scope.project_id
         );
@@ -581,9 +581,11 @@ impl DbtProvider for DbtProjectProvider {
         if !proj.exists() {
             // Important: profile name must match the generated `profiles.yml` entry, which is scope.project_id.
             let y = format!(
-                "name: {}\nversion: '1.0'\nprofile: '{}'\nmodel-paths: ['models']\ntarget-path: 'target'\n",
+                "name: {}\nversion: '1.0'\nprofile: '{}'\nmodel-paths: ['models']\ntarget-path: 'target'\n\nmodels:\n  {}:\n    # Suffix strategy: dbt materializes schemas as <DBT_TARGET_SCHEMA>_<suffix>.\n    +schema: \"{{{{ env_var('DBT_GOLD_SUFFIX', 'warehouse') }}}}\"\n    staging:\n      +schema: \"{{{{ env_var('DBT_SILVER_SUFFIX', 'silver') }}}}\"\n",
                 project_name,
                 scope.project_id
+                ,
+                project_name
             );
             write_file(&proj, y.as_bytes())?;
         }

@@ -74,6 +74,7 @@ components:
         - $ref: '#/components/schemas/ListResponse'
         - $ref: '#/components/schemas/SuitesResponse'
         - $ref: '#/components/schemas/FinalResponse'
+        - $ref: '#/components/schemas/ReviewResponse'
         - $ref: '#/components/schemas/AwaitUserResponse'
         - $ref: '#/components/schemas/AwaitApprovalResponse'
         - $ref: '#/components/schemas/OkResponse'
@@ -89,6 +90,7 @@ components:
           list: '#/components/schemas/ListResponse'
           suites: '#/components/schemas/SuitesResponse'
           final: '#/components/schemas/FinalResponse'
+          review: '#/components/schemas/ReviewResponse'
           await_user: '#/components/schemas/AwaitUserResponse'
           await_approval: '#/components/schemas/AwaitApprovalResponse'
           ok: '#/components/schemas/OkResponse'
@@ -145,8 +147,8 @@ components:
           description: Suite id to use (e.g. data_engineer | kb)
         agentType:
           type: string
-          description: Agent/mode to use (ask | cleanse | model | kb). Required.
-          enum: [ask, cleanse, model, kb]
+          description: Agent/mode to use (ask | cleanse | model | kb | agent | review). Required.
+          enum: [ask, cleanse, model, kb, agent, review]
 
     OpenRequest:
       type: object
@@ -172,7 +174,7 @@ components:
         agentType:
           type: string
           description: Agent to use for this message; if differs from current, a switch_agent step is recorded.
-          enum: [ask, cleanse, model, kb]
+          enum: [ask, cleanse, model, kb, agent, review]
 
     UserRequest:
       type: object
@@ -374,6 +376,27 @@ components:
                 y:
                   type: array
                   items: { type: string }
+
+    ReviewResponse:
+      type: object
+      additionalProperties: false
+      required: [v, type, server_time, seq, thread_id, thread_seq, text]
+      properties:
+        v: { type: integer }
+        type:
+          type: string
+          enum: [review]
+        server_time: { type: string }
+        seq: { type: integer }
+        thread_id: { type: string }
+        thread_seq: { type: integer }
+        text:
+          type: string
+          description: Read-only reviewer output (red team)
+        meta:
+          type: object
+          nullable: true
+          additionalProperties: true
 
     AwaitUserResponse:
       type: object

@@ -150,8 +150,8 @@ async fn main() {
                     AthenaQueryProvider::from_settings(AthenaSettings {
                         workgroup: cfg.providers.athena.workgroup.clone(),
                         result_output_location: cfg.providers.athena.result_s3.clone(),
-                        default_catalog: cfg.providers.athena.catalog.clone(),
-                        source_database: cfg.providers.athena.source_database.clone(),
+                        default_catalog: cfg.providers.athena.target_catalog.clone(),
+                        source_schema: cfg.providers.athena.source_schema.clone(),
                         discovery_cache_ttl_secs: cfg.providers.athena.discovery_cache_ttl_secs,
                     })
                     .await,

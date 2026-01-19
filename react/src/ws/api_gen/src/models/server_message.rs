@@ -1,7 +1,7 @@
 /*
- * Skippr Ask WebSocket API
+ * ReAct WebSocket API
  *
- * WebSocket-based chat threads for Ask. Clients send JSON frames and receive JSON frames. Supported client message types: list, suites, new, open, user, approve, reject, history, seen, delete, resume. Server message types: list, suites, thread_assigned, processing, token, final, await_user, await_approval, unread, ok, error, history. 
+ * WebSocket-based chat threads for the ReAct server. Clients send JSON frames and receive JSON frames. Supported client message types: list, suites, new, open, user, approve, reject, history, seen, delete, resume. Server message types: list, suites, thread_assigned, processing, token, final, await_user, await_approval, unread, ok, error, history. 
  *
  * The version of the OpenAPI document: 0.2.0
  * 
@@ -20,6 +20,8 @@ pub enum ServerMessage {
     Suites(models::SuitesResponse),
     #[serde(rename="final")]
     Final(models::FinalResponse),
+    #[serde(rename="review")]
+    Review(models::ReviewResponse),
     #[serde(rename="await_user")]
     AwaitUser(models::AwaitUserResponse),
     #[serde(rename="await_approval")]

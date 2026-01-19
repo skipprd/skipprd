@@ -146,6 +146,14 @@ impl Tool for StagingModelTool {
             .map(|c| active_provider_dialect(c.as_ref()))
             .unwrap_or_else(|| "Unknown SQL dialect".to_string());
 
+        // Suffix strategy: set dbt model `schema` to the SILVER suffix (not the full schema name),
+        // so dbt materializes into <DBT_TARGET_SCHEMA>_<silver_suffix>.
+        let silver_db = ctx
+            .resolved_config
+            .as_ref()
+            .and_then(|c| c.providers.dbt.naming.silver_suffix.clone())
+            .unwrap_or_else(|| "silver".to_string());
+
         let mut written: Vec<String> = Vec::new();
         let mut notes: Vec<String> = Vec::new();
 
@@ -167,6 +175,19 @@ impl Tool for StagingModelTool {
                  - Output MUST be valid JSON only.\n\
                  - Produce a dbt model SQL SELECT that reads from the dbt source for this table.\n\
                  - This is SILVER: include sensible cleansing/normalization and stable column naming.\n\
+                 - Use the provided schema_columns types to guide casting and cleansing. Do NOT guess types from names.\n\
+                 - Time-like fields MUST be detected from schema types when possible:\n\
+                   - timestamp/datetime types: timestamp, timestamptz, datetime\n\
+                   - date types: date\n\
+                   If a field is string-typed but appears to encode time values, you may treat it as time-like only if schema_columns or samples strongly indicate it.\n\
+                 - For any time-like field:\n\
+                   - If the source is string-ish: create a `*_raw` expression using trim + nullif-empty so empty strings become NULL deterministically.\n\
+                   - Produce the cleaned output field as a safe cast (Athena/Trino: try_cast(... as timestamp) or try_cast(... as date)).\n\
+                   - Choose ONE explicitly:\n\
+                     (A) Enforce non-null semantics by filtering rows where the cleaned field is NULL, OR\n\
+                     (B) Keep NULLs and add a note recommending a conditional dbt test (with where:) and why.\n\
+                 - IMPORTANT: this model must be built into the SILVER schema suffix \"{silver_db}\".\n\
+                   Include a dbt config block that sets schema to \"{silver_db}\".\n\
                  - Nested fields: use Trino/Athena struct dereference like context.session.id (DO NOT quote the whole path).\n\
                  - If a column name is reserved (e.g. timestamp), quote JUST the identifier (\"timestamp\").\n\
                  - Keep changes aligned with the user's instructions, even if they are unconventional.\n\
@@ -198,7 +219,17 @@ impl Tool for StagingModelTool {
                 continue;
             }
 
-            ctx.storage.put_bytes(&key, parsed.sql.as_bytes(), "text/sql").await?;
+            let mut sql_out = parsed.sql;
+            // Ensure the model lands in the configured SILVER schema suffix even if the LLM forgets.
+            if !sql_out.contains("schema=") && !sql_out.contains("schema =") {
+                sql_out = format!(
+                    "{{{{ config(schema=\"{silver_db}\") }}}}\n\n{body}",
+                    silver_db = silver_db,
+                    body = sql_out.trim()
+                );
+            }
+
+            ctx.storage.put_bytes(&key, sql_out.as_bytes(), "text/sql").await?;
             written.push(key);
             for n in parsed.notes {
                 if !n.trim().is_empty() {

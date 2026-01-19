@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SPEC="${REPO_ROOT}/docs/openapi/ask-ws.yaml"
-OUT_DIR="${REPO_ROOT}/src/ws/api_gen"
+OUT_DIR="${REPO_ROOT}/react/src/ws/api_gen"
 
 mkdir -p "${OUT_DIR}"
 
@@ -14,7 +14,7 @@ run_with_docker() {
 	if command -v docker >/dev/null 2>&1; then
 		echo "Using Docker openapi-generator-cli..."
 		docker run --rm -v "${REPO_ROOT}:/local" openapitools/openapi-generator-cli:v7.9.0 \
-			generate -i /local/docs/openapi/ask-ws.yaml -g rust -o /local/src/ws/api_gen --global-property models
+			generate -i /local/docs/openapi/ask-ws.yaml -g rust -o /local/react/src/ws/api_gen --global-property models
 		return 0
 	else
 		return 1

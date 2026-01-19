@@ -22,3 +22,11 @@ pub fn model_tool_card() -> String {
     crate::prompts::model::model_tool_card()
 }
 
+pub fn review_system_prompt() -> String {
+    crate::prompts::review::system_prompt()
+}
+
+pub fn review_tool_card() -> String {
+    crate::prompts::review::tool_card()
+}
+

@@ -45,11 +45,10 @@ use crate::providers::RequestScope;
 ///   athena:
 ///     enabled: true
 ///     workgroup: my_wg
-///     # Default database for source discovery + unqualified queries.
-///     source_database: my_db
-///     # Target database (schema) for dbt-modeled outputs.
-///     modeled_database: my_dbt_warehouse
-///     catalog: AwsDataCatalog
+///     # Athena Data Catalog (Glue).
+///     target_catalog: AwsDataCatalog
+///     # Bronze/raw schema (Glue database) for discovery + dbt sources.
+///     source_schema: raw
 ///     result_s3: s3://my-query-results/
 ///     discovery_cache_ttl_secs: 120
 ///   catalog:
@@ -58,11 +57,13 @@ use crate::providers::RequestScope;
 ///     max_concurrency: 8
 ///   dbt:
 ///     enabled: true
-///     # Run DBT in a deterministic environment.
-///     runner: docker
-///     docker_image: ghcr.io/dbt-labs/dbt-athena:1.8.3
-///     docker_mount_aws_dir: true
+///     runner: host
 ///     target: athena
+///     naming:
+///       # dbt target.schema (base) and tier suffixes. Example schemas: raw=test_raw, silver=test_silver, gold=test_warehouse
+///       target_schema: test
+///       silver_suffix: silver
+///       gold_suffix: warehouse
 ///   vector:
 ///     enabled: true
 /// ```
@@ -140,9 +141,19 @@ pub struct AthenaFile {
     pub workgroup: Option<String>,
     pub region: Option<String>,
     pub result_s3: Option<String>,
+    /// Bronze/raw schema (preferred name). For Athena this is a Glue database.
+    pub source_schema: Option<String>,
+    /// Back-compat alias for `source_schema`.
     pub source_database: Option<String>,
-    pub modeled_database: Option<String>,
+    /// Athena Data Catalog (preferred name).
+    pub target_catalog: Option<String>,
+    /// Back-compat alias for `target_catalog`.
     pub catalog: Option<String>,
+    /// Legacy explicit full schemas (deprecated when using dbt suffix naming).
+    pub silver_database: Option<String>,
+    pub gold_database: Option<String>,
+    /// Back-compat (deprecated): treated as `silver_database` if `silver_database` is not set.
+    pub modeled_database: Option<String>,
     pub discovery_cache_ttl_secs: Option<u64>,
 }
  
@@ -154,10 +165,18 @@ pub struct CatalogFile {
 }
  
 #[derive(Clone, Debug, Default, Deserialize)]
+pub struct DbtNamingFile {
+    pub target_schema: Option<String>,
+    pub silver_suffix: Option<String>,
+    pub gold_suffix: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
 pub struct DbtFile {
     pub enabled: Option<bool>,
     pub profiles_dir: Option<String>,
     pub target: Option<String>,
+    pub naming: Option<DbtNamingFile>,
     /// DBT runner mode: "host" (default) or "docker".
     pub runner: Option<String>,
     /// Docker image reference to use when runner=="docker".
@@ -219,11 +238,13 @@ pub struct AthenaResolved {
     pub workgroup: Option<String>,
     pub region: Option<String>,
     pub result_s3: Option<String>,
-    /// Default database for source discovery + unqualified queries.
-    pub source_database: Option<String>,
-    /// Target database (schema) for dbt-modeled outputs.
-    pub modeled_database: Option<String>,
-    pub catalog: String,
+    /// Default schema for source discovery + unqualified queries.
+    pub source_schema: Option<String>,
+    /// Athena Data Catalog (Glue). This is dbt-athena profile key `database:`.
+    pub target_catalog: String,
+    /// Back-compat / derived full schemas (may be computed from dbt.naming).
+    pub silver_schema: Option<String>,
+    pub gold_schema: Option<String>,
     pub discovery_cache_ttl_secs: u64,
 }
  
@@ -239,6 +260,7 @@ pub struct DbtResolved {
     pub enabled: bool,
     pub profiles_dir: Option<String>,
     pub target: Option<String>,
+    pub naming: DbtNamingResolved,
     pub runner: String,
     pub docker_image: Option<String>,
     pub docker_platform: Option<String>,
@@ -246,6 +268,13 @@ pub struct DbtResolved {
     pub docker_mount_aws_dir: bool,
 }
  
+#[derive(Clone, Debug, Default)]
+pub struct DbtNamingResolved {
+    pub target_schema: Option<String>,
+    pub silver_suffix: Option<String>,
+    pub gold_suffix: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct VectorResolved {
     pub enabled: bool,
@@ -333,9 +362,24 @@ impl ReactResolvedConfig {
             .or_else(|| getenv_nonempty("AWS_REGION"))
             .or_else(|| getenv_nonempty("AWS_DEFAULT_REGION"))
             .or_else(|| ath_f.region);
-        let ath_source_db = getenv_nonempty("ATHENA_SOURCE_DATABASE").or_else(|| ath_f.source_database);
-        let ath_modeled_db = getenv_nonempty("ATHENA_MODELED_DATABASE").or_else(|| ath_f.modeled_database);
-        let ath_catalog = getenv_nonempty("ATHENA_CATALOG").unwrap_or_else(|| ath_f.catalog.unwrap_or_else(|| "AwsDataCatalog".to_string()));
+        let ath_source_schema = getenv_nonempty("ATHENA_SOURCE_SCHEMA")
+            .or_else(|| getenv_nonempty("ATHENA_SOURCE_DATABASE"))
+            .or_else(|| ath_f.source_schema)
+            .or_else(|| ath_f.source_database);
+        // Back-compat explicit schemas (deprecated when using suffix naming)
+        let ath_silver_schema_legacy = getenv_nonempty("ATHENA_SILVER_DATABASE")
+            .or_else(|| ath_f.silver_database.clone())
+            .or_else(|| getenv_nonempty("ATHENA_MODELED_DATABASE"))
+            .or_else(|| ath_f.modeled_database.clone());
+        let ath_gold_schema_legacy = getenv_nonempty("ATHENA_GOLD_DATABASE").or_else(|| ath_f.gold_database.clone());
+        let ath_target_catalog = getenv_nonempty("ATHENA_TARGET_CATALOG")
+            .or_else(|| getenv_nonempty("ATHENA_CATALOG"))
+            .unwrap_or_else(|| {
+                ath_f
+                    .target_catalog
+                    .or(ath_f.catalog)
+                    .unwrap_or_else(|| "AwsDataCatalog".to_string())
+            });
  
         let ath_result_s3 = getenv_nonempty("ATHENA_RESULT_S3").or_else(|| {
             getenv_nonempty("DATA_OUTPUT_ATHENA_RESULTS_S3_BUCKET").map(|b| format!("s3://{}/", b.trim_end_matches('/')))
@@ -375,6 +419,25 @@ impl ReactResolvedConfig {
                 .or(llmf.top_p),
         };
  
+        // DBT naming (suffix strategy). If configured, dbt will materialize schemas like:
+        //   <target_schema>_<silver_suffix> and <target_schema>_<gold_suffix>
+        let dbt_naming_f = dbt_f.naming.clone().unwrap_or_default();
+        let naming_target_schema = getenv_nonempty("DBT_TARGET_SCHEMA").or(dbt_naming_f.target_schema);
+        let naming_silver_suffix = getenv_nonempty("DBT_SILVER_SUFFIX").or(dbt_naming_f.silver_suffix).or(Some("silver".to_string()));
+        let naming_gold_suffix = getenv_nonempty("DBT_GOLD_SUFFIX").or(dbt_naming_f.gold_suffix).or(Some("warehouse".to_string()));
+
+        // If suffix naming is enabled (target_schema is set), compute derived full schemas for Athena.
+        let (ath_silver_schema, ath_gold_schema) = if let (Some(base), Some(silver_suf), Some(gold_suf)) =
+            (naming_target_schema.clone(), naming_silver_suffix.clone(), naming_gold_suffix.clone())
+        {
+            (
+                Some(format!("{}_{}", base, silver_suf)),
+                Some(format!("{}_{}", base, gold_suf)),
+            )
+        } else {
+            (ath_silver_schema_legacy.clone(), ath_gold_schema_legacy.clone().or_else(|| ath_silver_schema_legacy.clone()))
+        };
+
         let cfg = Self {
             server: ServerResolved { port: server_port },
             storage: StorageResolved { bucket: bucket.clone() },
@@ -386,9 +449,10 @@ impl ReactResolvedConfig {
                     workgroup: ath_workgroup,
                     region: ath_region,
                     result_s3: ath_result_s3,
-                    source_database: ath_source_db,
-                    modeled_database: ath_modeled_db,
-                    catalog: ath_catalog,
+                    source_schema: ath_source_schema,
+                    target_catalog: ath_target_catalog,
+                    silver_schema: ath_silver_schema,
+                    gold_schema: ath_gold_schema,
                     discovery_cache_ttl_secs: ath_ttl,
                 },
                 catalog: CatalogResolved {
@@ -400,6 +464,11 @@ impl ReactResolvedConfig {
                     enabled: dbt_f.enabled.unwrap_or(true),
                     profiles_dir: getenv_nonempty("DBT_PROFILES_DIR").or(dbt_f.profiles_dir),
                     target: getenv_nonempty("DBT_TARGET").or(dbt_f.target),
+                    naming: DbtNamingResolved {
+                        target_schema: naming_target_schema,
+                        silver_suffix: naming_silver_suffix,
+                        gold_suffix: naming_gold_suffix,
+                    },
                     runner: getenv_nonempty("DBT_RUNNER").or(dbt_f.runner).unwrap_or_else(|| "host".to_string()),
                     docker_image: getenv_nonempty("DBT_DOCKER_IMAGE").or(dbt_f.docker_image),
                     docker_platform: getenv_nonempty("DBT_DOCKER_PLATFORM").or(dbt_f.docker_platform),
@@ -437,12 +506,24 @@ impl ReactResolvedConfig {
             set_env_if_unset("AWS_REGION", v);
             set_env_if_unset("AWS_DEFAULT_REGION", v);
         }
-        if let Some(v) = cfg.providers.athena.source_database.as_ref() {
-            set_env_if_unset("ATHENA_SOURCE_DATABASE", v);
+        // Athena env defaults (new names + back-compat aliases)
+        set_env_if_unset("ATHENA_TARGET_CATALOG", &cfg.providers.athena.target_catalog);
+        set_env_if_unset("ATHENA_CATALOG", &cfg.providers.athena.target_catalog);
+        if let Some(v) = cfg.providers.athena.source_schema.as_ref() {
+            set_env_if_unset("ATHENA_SOURCE_SCHEMA", v);
+            set_env_if_unset("ATHENA_SOURCE_DATABASE", v); // back-compat
         }
-        if let Some(v) = cfg.providers.athena.modeled_database.as_ref() {
-            set_env_if_unset("ATHENA_MODELED_DATABASE", v);
+        if let Some(v) = cfg.providers.athena.silver_schema.as_ref() {
+            set_env_if_unset("ATHENA_SILVER_DATABASE", v);
+            set_env_if_unset("ATHENA_MODELED_DATABASE", v); // back-compat
         }
+        if let Some(v) = cfg.providers.athena.gold_schema.as_ref() {
+            set_env_if_unset("ATHENA_GOLD_DATABASE", v);
+        }
+        // DBT naming env defaults (portable)
+        if let Some(v) = cfg.providers.dbt.naming.target_schema.as_ref() { set_env_if_unset("DBT_TARGET_SCHEMA", v); }
+        if let Some(v) = cfg.providers.dbt.naming.silver_suffix.as_ref() { set_env_if_unset("DBT_SILVER_SUFFIX", v); }
+        if let Some(v) = cfg.providers.dbt.naming.gold_suffix.as_ref() { set_env_if_unset("DBT_GOLD_SUFFIX", v); }
         set_env_if_unset("DBT_RUNNER", &cfg.providers.dbt.runner);
         if let Some(v) = cfg.providers.dbt.docker_image.as_ref() { set_env_if_unset("DBT_DOCKER_IMAGE", v); }
         if let Some(v) = cfg.providers.dbt.docker_platform.as_ref() { set_env_if_unset("DBT_DOCKER_PLATFORM", v); }

@@ -236,7 +236,7 @@ impl Tool for PublishDbtToProviderTool {
                     .iter()
                     .map(|r| {
                         let db = if !r.schema.is_empty() { r.schema.clone() } else { r.database.clone() };
-                        format!("{}.{}.{}", cfg.providers.athena.catalog, db, r.identifier)
+                        format!("{}.{}.{}", cfg.providers.athena.target_catalog, db, r.identifier)
                     })
                     .collect::<Vec<_>>();
                 ThreadCacheStore::update_published(tid, &plan_sha256, fqns);
@@ -271,7 +271,7 @@ async fn check_existing_relations(
             } else {
                 r.database.clone()
             };
-            let fqn = format!("{}.{}.{}", cfg.providers.athena.catalog, db, r.identifier);
+            let fqn = format!("{}.{}.{}", cfg.providers.athena.target_catalog, db, r.identifier);
             out.insert(fqn, true);
         }
         return out;
@@ -290,7 +290,7 @@ async fn check_existing_relations(
         } else {
             r.database.clone()
         };
-        let fqn = format!("{}.{}.{}", cfg.providers.athena.catalog, db, r.identifier);
+        let fqn = format!("{}.{}.{}", cfg.providers.athena.target_catalog, db, r.identifier);
         let exists = q.schema(&fqn).await.is_ok();
         out.insert(fqn, exists);
     }
@@ -413,9 +413,10 @@ mod tests {
                     workgroup: None,
                     region: None,
                     result_s3: Some("s3://x/".to_string()),
-                    source_database: None,
-                    modeled_database: None,
-                    catalog: "AwsDataCatalog".to_string(),
+                    source_schema: None,
+                    target_catalog: "AwsDataCatalog".to_string(),
+                    silver_schema: None,
+                    gold_schema: None,
                     discovery_cache_ttl_secs: 120,
                 },
                 catalog: crate::config::CatalogResolved { enabled: false, refresh_secs: 60, max_concurrency: 8 },
@@ -423,6 +424,7 @@ mod tests {
                     enabled: false,
                     profiles_dir: None,
                     target: None,
+                    naming: crate::config::DbtNamingResolved::default(),
                     runner: "host".to_string(),
                     docker_image: None,
                     docker_platform: None,
@@ -513,9 +515,10 @@ mod tests {
                     workgroup: None,
                     region: None,
                     result_s3: Some("s3://x/".to_string()),
-                    source_database: None,
-                    modeled_database: Some("picnic".to_string()),
-                    catalog: "AwsDataCatalog".to_string(),
+                    source_schema: None,
+                    target_catalog: "AwsDataCatalog".to_string(),
+                    silver_schema: Some("picnic_silver".to_string()),
+                    gold_schema: Some("picnic_warehouse".to_string()),
                     discovery_cache_ttl_secs: 120,
                 },
                 catalog: crate::config::CatalogResolved { enabled: false, refresh_secs: 60, max_concurrency: 8 },
@@ -523,6 +526,11 @@ mod tests {
                     enabled: true,
                     profiles_dir: None,
                     target: Some("athena".to_string()),
+                    naming: crate::config::DbtNamingResolved {
+                        target_schema: Some("picnic".to_string()),
+                        silver_suffix: Some("silver".to_string()),
+                        gold_suffix: Some("warehouse".to_string()),
+                    },
                     runner: "host".to_string(),
                     docker_image: None,
                     docker_platform: None,

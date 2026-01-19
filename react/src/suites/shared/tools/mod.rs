@@ -5,4 +5,5 @@ pub mod sql_sample;
 pub mod vect_query;
 pub mod vect_upsert;
 pub mod artifacts;
+pub mod dbt_files;
 

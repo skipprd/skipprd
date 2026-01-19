@@ -218,6 +218,20 @@ impl Tool for ApproveAndSaveArtifactTool {
             }
         }
 
+        // Silver tier guardrail (suffix strategy): when running under the cleanse agent,
+        // ensure models set `schema` to the SILVER suffix even if the authoring path isn't under models/staging/.
+        if kind == "model" && ctx.agent_name.as_deref() == Some("cleanse") {
+            if let Some(silver_suffix) = ctx
+                .resolved_config
+                .as_ref()
+                .and_then(|c| c.providers.dbt.naming.silver_suffix.clone())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+            {
+                content_final = ensure_schema_config(&content_final, &silver_suffix);
+            }
+        }
+
         let (current_key, version_key, content_type) = match kind {
             "model" => {
                 let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
@@ -472,6 +486,19 @@ fn ensure_dataset_comment(yaml_text: &str, dataset_id: &str) -> String {
     out.push('\n');
     out.push_str(yaml_text);
     out
+}
+
+fn ensure_schema_config(sql_text: &str, schema: &str) -> String {
+    let t = sql_text.trim();
+    if t.is_empty() {
+        return sql_text.to_string();
+    }
+    // If the model already sets schema via a config block, do nothing.
+    // (Simple heuristic; avoids trying to parse Jinja.)
+    if t.contains("config(") && (t.contains("schema=") || t.contains("schema =")) {
+        return sql_text.to_string();
+    }
+    format!("{{{{ config(schema=\"{}\") }}}}\n\n{}", schema, t)
 }
 
 #[allow(dead_code)]

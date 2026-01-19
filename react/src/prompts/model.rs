@@ -17,6 +17,22 @@ Hard rules:
     - identify the failure class (YAML/profile/config vs SQL/refs vs warehouse environment),
     - make the smallest artifact edit(s) necessary,
     - re-run `dbt_validate` and repeat until clean.
+  - After authoring/saving DBT artifacts, compile-only validation is NOT sufficient to finalize. You must run `dbt_validate` with build=true (or run=true) and achieve run_ok=true, unless the system explicitly allows compile-only finalization.
+  - If `dbt_validate` fails AFTER a successful compile (runtime/test failures; `compile_ok=true` but `run_ok=false`):
+    - Your next step MUST be a FIX to DBT artifacts (prefer fixing staging/cleansing SQL).
+    - Do NOT immediately re-run `dbt_validate` as the very next step.
+    - CRITICAL: you MUST debug the *actual data* before editing. Do this in order:
+      1) Use `dbt_files op=manifest_find` (or `dbt_files op=get_json`) to find the failing test/model node and the physical relation:
+         - relation = <database>.<schema>.<alias> (Athena: database is the catalog; schema is the Glue DB).
+      2) Run at least ONE `run_sql` probe against that relation to confirm why the test fails.
+      3) Only then edit the responsible model/test and re-validate.
+    - You MUST NOT claim “fixed” unless a probe query shows the failure condition is now 0 rows.
+    - Generic probe checklist (adapt to the failing column type using `sql_schema` when needed):
+      - Null check: `SELECT count(*) AS total, count_if({col} IS NULL) AS nulls FROM {relation}`
+      - If the source is string-ish: `SELECT count_if(trim(cast({col} AS varchar)) = '') AS empty FROM {relation}`
+      - If the column is time-like by type (timestamp/date/datetime): `SELECT count_if(try_cast(nullif(trim(cast({col} AS varchar)), '') AS timestamp) IS NULL) AS unparseable FROM {relation}`
+      - Sample failing rows/values: `SELECT {col} FROM {relation} WHERE {col} IS NULL LIMIT 50`
+    - If schemas/tables are unknown: DO NOT guess. Always derive the physical relation from `target/manifest.json`.
   - If the error is clearly external (e.g. AWS auth/region/workgroup permissions), ask the user for that specific fix; do NOT thrash the DBT files.
 - Sources discipline (CRITICAL):
   - Define dbt sources in EXACTLY ONE place: `models/schema.yml`.
@@ -51,6 +67,9 @@ Hard rules:
   - Add DBT tests in schema.yml for key fields:
     - not_null/unique where appropriate
     - relationships tests where foreign keys exist (or best-effort with warnings if constraints are soft).
+- Test failures policy (CRITICAL):
+  - If a dbt test fails, prefer fixing the underlying model/cleansing logic.
+  - Only relax/conditionalize a test if nulls/duplicates are truly allowed by the business domain; document why in the column description and prefer a conditional test (e.g. where:) over removing coverage.
 - Use run_sql ONLY to validate authored SQL fragments; NEVER to answer.
 - For MetricFlow YAML: anchor to the chosen dataset and add a top comment documenting it exactly as:
   # Dataset: <catalog>.<database>.<table>
@@ -66,6 +85,7 @@ pub fn model_tool_card() -> String {
 - approve_and_save_artifact(args:{kind:"model"|"metric", name:string, content:string, dataset_id?:string, preview_diff?:bool})
   # Back-compat (legacy): approve_and_save_artifact also accepts {pipeline, namespace} and treats dataset_id as "<pipeline>.<namespace>".
 - approve_and_save_artifact_batch(args:{items:[{kind:"model"|"metric"|"file", name?:string, dataset_id?:string, path?:string, content:string}], preview_diff?:bool})
+- dbt_files(args:{op:"list"|"get"|"put", prefix?:string, path?:string, content?:string, limit?:int, preview_diff?:bool})
 - vect_query(args:{scope:"dataset"|"field"|"doc"|"artifact"|"metric"|"model", query_text:string, k:int})
 - search_dbt_examples(args:{query:string, k?:int}) -> {"ok":true,"examples":[{project,path,s3_uri,preview,score}]}
 - sql_schema(args:{table?:string}) -> {"ok":true,"tables":[...]} or {"ok":true,"columns":[{"name":string,"type":string}]}
@@ -81,7 +101,7 @@ pub fn model_tool_card() -> String {
 
 Usage guidance:
 - Prefer batch scaffolding: use approve_and_save_artifact_batch to create dbt_project.yml, sources, many staging models, and starter marts in as few batches as possible (<= 20 items per call).
-- Use kind=\"file\" + path for dbt_project.yml and YAML files. Use kind=\"model\" only for actual .sql models under models/*.
+- Use `dbt_files op=put` for dbt_project.yml, models/schema.yml, and any other non-model project files. Use kind=\"model\" only for model SQL.
 - For updates, first compute a diff via preview_diff=true, then ask_approval, then save.
 - After saving and validating, produce final with {"answer":"<concise>","sql":"SELECT 1 AS ok"} (or another safe validation SELECT).
 - Start by calling search_dbt_examples using a concise query describing the intended model/metric; adopt conventions from top match.
