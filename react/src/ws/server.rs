@@ -9,9 +9,7 @@ use crate::ws::api_gen as api;
 use std::collections::{HashMap, VecDeque};
 use chrono::Utc;
 use crate::models as m;
-use react_core::session::ThreadStore;
-use react_core::session::ThreadLog;
-use react_core::session::ThreadStep;
+use react_core::session::{ThreadStore, ThreadLog, ThreadStep};
 use react_suites::registry::SuiteRegistry;
 use react_suites::SuiteCtx;
 use std::sync::Arc;
@@ -549,7 +547,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 				}
 			}
 			let store = state.thread_store();
-			let _ = store.append_step(&thread_id, ThreadStep {
+		let _ = store.append_step(&thread_id, ThreadStep {
 				action: "user".to_string(),
 				args: serde_json::json!({"text": text}),
 				observation: serde_json::json!({"ok": true}),
@@ -839,7 +837,7 @@ async fn synthesize_title(llm: &react_core::llm::DynLlm, question: &str, answer:
 	let out = tokio::task::spawn_blocking({
 		let llm2 = llm.clone();
 		let p = prompt.clone();
-		move || llm2.chat(&[react_core::llm::ChatMessage { role: "user".into(), content: p }])
+		move || llm2.chat(&[crate::llm::ChatMessage { role: "user".into(), content: p }])
 	}).await;
 	if let Ok(Ok(text)) = out {
 		let t = text.trim();
@@ -1683,7 +1681,7 @@ async fn build_history(store: &ThreadStore, thread_id: &str, before: Option<i32>
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::adapters::storage::InMemoryStorageAdapter;
+	use react_core::storage::InMemoryStorageAdapter;
 	use crate::providers::{DefaultKeyspace, RequestScope};
 	use serde_json::json;
 	use std::sync::Arc;
@@ -1757,4 +1755,3 @@ mod tests {
 		assert!(msgs.iter().any(|m| m.role == m::history_response_messages_inner::Role::Assistant && m.content == "review text"));
 	}
 }
-

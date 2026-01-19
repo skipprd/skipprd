@@ -296,15 +296,16 @@ impl AgentPolicy for SqlValidatedPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::storage::InMemoryStorageAdapter;
-    use react_core::providers::keyspace::DefaultKeyspace;
+    use react_core::storage::InMemoryStorageAdapter;
+    use react_core::keyspace::DefaultKeyspace;
+    use react_core::scope::RequestScope;
     use std::sync::Arc;
 
     #[tokio::test]
     async fn model_final_is_rejected_after_failed_dbt_validate() {
         let storage = Arc::new(InMemoryStorageAdapter::default());
         let keyspace = Arc::new(DefaultKeyspace::new("b".to_string()));
-        let scope = react_core::providers::RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
+        let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
         let store = ThreadStore::new(storage.clone(), scope.clone(), keyspace.clone());
         let tid = "tid";
 
@@ -344,7 +345,7 @@ mod tests {
             trace_tx: None,
             agent_name: Some("model".to_string()),
             policy: Arc::new(react_core::agent::DefaultPolicy),
-            llm: Arc::new(react_core::llm::NullModel),
+            llm: Arc::new(react_core::llm::NullModel::new()),
             storage,
             scope,
             keyspace,

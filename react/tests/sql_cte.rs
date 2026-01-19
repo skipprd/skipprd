@@ -1,12 +1,13 @@
-use react::suites::shared::tools::sql_run::SqlRunTool;
-use react::tools::Tool;
-use react::agent::AgentCtx;
-use react::agent::DefaultPolicy;
+use react_suites::shared::tools::sql_run::SqlRunTool;
+use react_core::tools::Tool;
+use react_core::agent::{AgentCtx, DefaultPolicy};
 use serde_json::json;
 use std::sync::Arc;
-use react::providers::{QueryProvider, QueryResult};
-use react::adapters::storage::InMemoryStorageAdapter;
-use react::llm::NullModel;
+use react_core::providers::{QueryProvider, QueryResult};
+use react_core::storage::InMemoryStorageAdapter;
+use react_core::llm::NullModel;
+use react_core::scope::RequestScope;
+use react_core::keyspace::DefaultKeyspace;
 
 #[derive(Clone)]
 struct DummyQueryProvider;
@@ -53,13 +54,13 @@ LIMIT 1
 		policy: std::sync::Arc::new(DefaultPolicy),
 		llm: std::sync::Arc::new(NullModel::new()),
 		storage: std::sync::Arc::new(InMemoryStorageAdapter::default()),
-		scope: react::providers::RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() },
-		keyspace: std::sync::Arc::new(react::providers::DefaultKeyspace::new("b".into())),
+		scope: RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() },
+		keyspace: std::sync::Arc::new(DefaultKeyspace::new("b".into())),
 		query: None,
 		dbt: None,
 		vector: None,
 		thread_store: None,
-		resolved_config: None,
+		runtime: None,
 	};
 	let res = tool.call(args, &actx).await.expect("tool call");
 	assert!(res.get("ok").and_then(|x| x.as_bool()).unwrap_or(false), "expected ok response, got {}", res);

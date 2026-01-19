@@ -293,11 +293,11 @@ pub async fn remediate_dbt_sql_with_llm(ctx: &AgentCtx, phase: &str) -> Result<R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::storage::InMemoryStorageAdapter;
-    use crate::adapters::storage::StorageAdapter;
-    use crate::agent::DefaultPolicy;
-    use crate::providers::keyspace::DefaultKeyspace;
-    use crate::providers::RequestScope;
+    use react_core::agent::DefaultPolicy;
+    use react_core::keyspace::{DefaultKeyspace, Keyspace};
+    use react_core::scope::RequestScope;
+    use react_core::storage::{InMemoryStorageAdapter, StorageAdapter};
+    use react_core::llm::LargeLanguageModel;
     use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
@@ -307,7 +307,7 @@ mod tests {
         calls: Mutex<usize>,
     }
 
-    impl crate::llm::LargeLanguageModel for MockLlm {
+    impl LargeLanguageModel for MockLlm {
         fn chat(&self, _messages: &[ChatMessage]) -> Result<String, String> {
             let mut c = self.calls.lock().unwrap();
             *c += 1;
@@ -331,24 +331,22 @@ mod tests {
             providers: crate::config::ProvidersResolved {
                 athena: crate::config::AthenaResolved {
                     enabled: true,
-                    workgroup: None,
-                    region: None,
-                    result_s3: Some("s3://x/".to_string()),
-                    source_schema: Some("src".to_string()),
+                    workgroup: "wg".to_string(),
+                    region: "eu-west-1".to_string(),
+                    result_s3: "s3://x/".to_string(),
                     target_catalog: "AwsDataCatalog".to_string(),
-                    silver_schema: Some("src_silver".to_string()),
-                    gold_schema: Some("src_warehouse".to_string()),
+                    source_schema: "src".to_string(),
                     discovery_cache_ttl_secs: 120,
                 },
                 catalog: crate::config::CatalogResolved { enabled: false, refresh_secs: 60, max_concurrency: 8 },
                 dbt: crate::config::DbtResolved {
                     enabled: true,
                     profiles_dir: None,
-                    target: Some("athena".to_string()),
+                    target: "athena".to_string(),
                     naming: crate::config::DbtNamingResolved {
-                        target_schema: Some("src".to_string()),
-                        silver_suffix: Some("silver".to_string()),
-                        gold_suffix: Some("warehouse".to_string()),
+                        target_schema: "src".to_string(),
+                        silver_suffix: "silver".to_string(),
+                        gold_suffix: "warehouse".to_string(),
                     },
                     runner: "host".to_string(),
                     docker_image: None,
@@ -361,9 +359,9 @@ mod tests {
         })
     }
 
-    fn make_ctx(storage: Arc<dyn crate::adapters::storage::StorageAdapter>, llm: Arc<dyn crate::llm::LargeLanguageModel>) -> AgentCtx {
+    fn make_ctx(storage: Arc<dyn StorageAdapter>, llm: Arc<dyn LargeLanguageModel>) -> AgentCtx {
         let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
-        let keyspace: Arc<dyn crate::providers::Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
         AgentCtx {
             top_k: 1,
             per_step_timeout_secs: 1,
@@ -382,14 +380,14 @@ mod tests {
             dbt: None,
             vector: None,
             thread_store: None,
-            resolved_config: Some(minimal_cfg_athena()),
+            runtime: Some(minimal_cfg_athena() as Arc<dyn std::any::Any + Send + Sync>),
         }
     }
 
     #[tokio::test]
     async fn list_sql_keys_filters_target_and_versions() {
         let storage = Arc::new(InMemoryStorageAdapter::default());
-        let llm: Arc<dyn crate::llm::LargeLanguageModel> = Arc::new(MockLlm::default());
+        let llm: Arc<dyn LargeLanguageModel> = Arc::new(MockLlm::default());
         let ctx = make_ctx(storage.clone(), llm);
         let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
         storage.put_bytes(&format!("{}/models/a.sql", base), b"select 1", "text/sql").await.unwrap();
@@ -411,7 +409,7 @@ mod tests {
             "notes": ["ok"]
         })
         .to_string()];
-        let llm: Arc<dyn crate::llm::LargeLanguageModel> = Arc::new(mock);
+        let llm: Arc<dyn LargeLanguageModel> = Arc::new(mock);
         let ctx = make_ctx(storage.clone(), llm);
         storage.put_bytes("t/w/p/dbt/models/m.sql", b"select 1", "text/sql").await.unwrap();
         let rep = remediate_dbt_sql_with_llm(&ctx, "pre_validate").await.unwrap();

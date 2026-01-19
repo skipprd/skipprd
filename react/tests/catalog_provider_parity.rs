@@ -1,15 +1,17 @@
 use std::sync::Arc;
 
-use react::adapters::storage::{InMemoryStorageAdapter, StorageAdapter};
-use react::providers::{DefaultKeyspace, Keyspace, RequestScope};
-use react::providers::catalog::{CatalogProvider, DefaultCatalogProvider};
-use react::providers::catalog::types::{SemanticModel, DataCatalog};
+use react_core::storage::{InMemoryStorageAdapter, StorageAdapter};
+use react_core::keyspace::{DefaultKeyspace, Keyspace};
+use react_core::scope::RequestScope;
+use react_core::providers::{CatalogProvider, SemanticModel, DataCatalog};
+use react_core::llm::{LargeLanguageModel, NullModel};
+use react::providers::catalog::DefaultCatalogProvider;
 
 #[tokio::test]
 async fn provider_write_semantic_uses_keyspace_key_and_roundtrips() {
     let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
     let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("bucket".to_string()));
-    let llm: Arc<dyn react::llm::LargeLanguageModel> = Arc::new(react::llm::NullModel::new());
+    let llm: Arc<dyn LargeLanguageModel> = Arc::new(NullModel::new());
     let provider = DefaultCatalogProvider::new(storage.clone(), keyspace.clone(), llm, 0, 8);
 
     let scope = RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() };
@@ -37,7 +39,7 @@ async fn provider_write_semantic_uses_keyspace_key_and_roundtrips() {
 async fn provider_write_catalog_uses_keyspace_key_and_roundtrips() {
     let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
     let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("bucket".to_string()));
-    let llm: Arc<dyn react::llm::LargeLanguageModel> = Arc::new(react::llm::NullModel::new());
+    let llm: Arc<dyn LargeLanguageModel> = Arc::new(NullModel::new());
     let provider = DefaultCatalogProvider::new(storage.clone(), keyspace.clone(), llm, 0, 8);
 
     let scope = RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() };

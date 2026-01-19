@@ -163,31 +163,30 @@ fn yaml_escape_scalar<S: AsRef<str>>(s: S) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use react_core::scope::RequestScope;
 
     #[test]
     fn generate_athena_profiles_requires_result_s3() {
         let cfg = ReactResolvedConfig {
             server: crate::config::ServerResolved { port: 1 },
             storage: crate::config::StorageResolved { bucket: "b".to_string() },
-            scope: crate::providers::RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() },
+            scope: RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() },
             llm: crate::config::LlmResolved::default(),
             providers: crate::config::ProvidersResolved {
                 athena: crate::config::AthenaResolved {
                     enabled: true,
-                    workgroup: None,
-                    region: None,
-                    result_s3: None,
-                    source_schema: None,
+                    workgroup: "wg".to_string(),
+                    region: "eu-west-1".to_string(),
+                    result_s3: "".to_string(),
                     target_catalog: "AwsDataCatalog".to_string(),
-                    silver_schema: None,
-                    gold_schema: None,
+                    source_schema: "src".to_string(),
                     discovery_cache_ttl_secs: 120,
                 },
                 catalog: crate::config::CatalogResolved { enabled: false, refresh_secs: 60, max_concurrency: 8 },
                 dbt: crate::config::DbtResolved {
                     enabled: false,
                     profiles_dir: None,
-                    target: None,
+                    target: "athena".to_string(),
                     naming: crate::config::DbtNamingResolved::default(),
                     runner: "host".to_string(),
                     docker_image: None,

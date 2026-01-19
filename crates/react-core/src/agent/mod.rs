@@ -148,6 +148,71 @@ impl AgentPolicy for DefaultPolicy {
 impl Agent {
     fn gen_uuid() -> String { Uuid::new_v4().to_string() }
 
+    /// Some model backends emit "JSON-like" text with literal control characters (e.g. raw newlines)
+    /// inside string values. That is invalid JSON and `serde_json` will reject it.
+    ///
+    /// This function repairs ONLY those invalid characters inside string literals by escaping them.
+    /// It is intentionally conservative: it does not try to fix other kinds of malformed JSON.
+    fn escape_control_chars_in_json_strings(s: &str) -> String {
+        let mut out = String::with_capacity(s.len() + 8);
+        let mut in_str = false;
+        let mut esc = false;
+        for ch in s.chars() {
+            if in_str {
+                if esc {
+                    // Preserve whatever was escaped (including escaped newlines like \n).
+                    out.push(ch);
+                    esc = false;
+                    continue;
+                }
+                if ch == '\\' {
+                    out.push(ch);
+                    esc = true;
+                    continue;
+                }
+                match ch {
+                    // Escape raw control characters that are illegal in JSON strings.
+                    '\n' => out.push_str("\\n"),
+                    '\r' => out.push_str("\\r"),
+                    '\t' => out.push_str("\\t"),
+                    '\u{08}' => out.push_str("\\b"),
+                    '\u{0C}' => out.push_str("\\f"),
+                    '"' => {
+                        out.push(ch);
+                        in_str = false;
+                    }
+                    c if (c as u32) < 0x20 => {
+                        // Any remaining control chars -> \u00XX
+                        out.push_str(&format!("\\u{:04x}", c as u32));
+                    }
+                    _ => out.push(ch),
+                }
+                continue;
+            }
+
+            // Not in string
+            if esc {
+                out.push(ch);
+                esc = false;
+                continue;
+            }
+            match ch {
+                '"' => {
+                    out.push(ch);
+                    in_str = true;
+                }
+                '\\' => {
+                    // Outside strings this is still meaningful JSON (e.g. escapes in whitespace-less JSON5-ish),
+                    // but we preserve it.
+                    out.push(ch);
+                    esc = true;
+                }
+                _ => out.push(ch),
+            }
+        }
+        out
+    }
+
     fn minimal_base_for_chunking(transcript: &[String]) -> String {
         // Keep only the last ~50 transcript lines to keep prompt size bounded.
         let keep = 50usize.min(transcript.len());
@@ -276,7 +341,13 @@ impl Agent {
                 let trimmed = raw.trim();
                 // Attempt to extract the first {...} or [...] JSON value by brace matching.
                 if let Some(first) = Self::extract_first_json_value(trimmed) {
-                    serde_json::from_str::<Value>(&first)
+                    // First try strict parse of the extracted value.
+                    if let Ok(v) = serde_json::from_str::<Value>(&first) {
+                        return Ok(v);
+                    }
+                    // Then try a conservative repair: escape control chars inside strings (raw newlines, etc).
+                    let repaired = Self::escape_control_chars_in_json_strings(&first);
+                    serde_json::from_str::<Value>(&repaired)
                         .map_err(|e2| format!("invalid JSON from model: {} (original error: {})", e2, e))
                 } else {
                     Err(format!("invalid JSON from model: {}", e))
@@ -442,6 +513,27 @@ impl Agent {
         }
 
         ctx.policy.fallback(tools, ctx, &mut transcript, store, &tid).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_action_repairs_raw_newlines_inside_json_strings() {
+        // NOTE: This is intentionally invalid JSON: literal newline in the string value.
+        let raw = "{\"final\":{\"answer\":\"line1\nline2\",\"sql\":\"SELECT 1 AS ok\"}}";
+        let v = Agent::parse_action(raw).expect("should repair and parse");
+        let final_obj = v.get("final").expect("final");
+        assert_eq!(
+            final_obj.get("answer").and_then(|x| x.as_str()).unwrap(),
+            "line1\nline2"
+        );
+        assert_eq!(
+            final_obj.get("sql").and_then(|x| x.as_str()).unwrap(),
+            "SELECT 1 AS ok"
+        );
     }
 }
 

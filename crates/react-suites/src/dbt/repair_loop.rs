@@ -237,11 +237,12 @@ pub async fn run_repair_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::storage::InMemoryStorageAdapter;
-    use crate::adapters::storage::StorageAdapter;
-    use crate::llm::{ChatMessage, LargeLanguageModel};
-    use crate::agent::DefaultPolicy;
-    use crate::providers::{DbtValidateArgs, DbtValidateResult, Keyspace, RequestScope};
+    use react_core::agent::DefaultPolicy;
+    use react_core::keyspace::{DefaultKeyspace, Keyspace};
+    use react_core::llm::{ChatMessage, LargeLanguageModel};
+    use react_core::providers::{DbtValidateArgs, DbtValidateResult};
+    use react_core::scope::RequestScope;
+    use react_core::storage::{InMemoryStorageAdapter, StorageAdapter};
     use async_trait::async_trait;
     use std::sync::Mutex;
 
@@ -326,24 +327,22 @@ mod tests {
             providers: crate::config::ProvidersResolved {
                 athena: crate::config::AthenaResolved {
                     enabled: true,
-                    workgroup: None,
-                    region: None,
-                    result_s3: Some("s3://x/".to_string()),
-                    source_schema: Some("src".to_string()),
+                    workgroup: "wg".to_string(),
+                    region: "eu-west-1".to_string(),
+                    result_s3: "s3://x/".to_string(),
                     target_catalog: "AwsDataCatalog".to_string(),
-                    silver_schema: Some("src_silver".to_string()),
-                    gold_schema: Some("src_warehouse".to_string()),
+                    source_schema: "src".to_string(),
                     discovery_cache_ttl_secs: 120,
                 },
                 catalog: crate::config::CatalogResolved { enabled: false, refresh_secs: 60, max_concurrency: 8 },
                 dbt: crate::config::DbtResolved {
                     enabled: true,
                     profiles_dir: None,
-                    target: Some("athena".to_string()),
+                    target: "athena".to_string(),
                     naming: crate::config::DbtNamingResolved {
-                        target_schema: Some("src".to_string()),
-                        silver_suffix: Some("silver".to_string()),
-                        gold_suffix: Some("warehouse".to_string()),
+                        target_schema: "src".to_string(),
+                        silver_suffix: "silver".to_string(),
+                        gold_suffix: "warehouse".to_string(),
                     },
                     runner: "host".to_string(),
                     docker_image: None,
@@ -365,7 +364,7 @@ mod tests {
                 serde_json::json!({"should_remediate": false, "confidence": 0.0, "reason": "not enough information"}).to_string(),
             ]),
         });
-        let keyspace: Arc<dyn Keyspace> = Arc::new(crate::providers::keyspace::DefaultKeyspace::new("b".to_string()));
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
         let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
 
         let ctx = AgentCtx {
@@ -386,7 +385,7 @@ mod tests {
             dbt: None,
             vector: None,
             thread_store: None,
-            resolved_config: Some(minimal_cfg()),
+            runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
         };
 
         struct AlwaysFailDbt;
@@ -441,7 +440,7 @@ mod tests {
             // Should not be called.
             chat_responses: Mutex::new(vec![]),
         });
-        let keyspace: Arc<dyn Keyspace> = Arc::new(crate::providers::keyspace::DefaultKeyspace::new("b".to_string()));
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
         let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
 
         let ctx = AgentCtx {
@@ -462,7 +461,7 @@ mod tests {
             dbt: None,
             vector: None,
             thread_store: None,
-            resolved_config: Some(minimal_cfg()),
+            runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
         };
 
         struct CompileOkRunFailDbt;
@@ -525,7 +524,7 @@ mod tests {
                 serde_json::json!({"should_remediate": true, "confidence": 0.2, "reason": "uncertain"}).to_string(),
             ]),
         });
-        let keyspace: Arc<dyn Keyspace> = Arc::new(crate::providers::keyspace::DefaultKeyspace::new("b".to_string()));
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
         let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
 
         let ctx = AgentCtx {
@@ -546,7 +545,7 @@ mod tests {
             dbt: None,
             vector: None,
             thread_store: None,
-            resolved_config: Some(minimal_cfg()),
+            runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
         };
 
         struct SqlFailureOnceDbt;
@@ -610,7 +609,7 @@ mod tests {
                 serde_json::json!({"changes": [], "notes": []}).to_string(),
             ]),
         });
-        let keyspace: Arc<dyn Keyspace> = Arc::new(crate::providers::keyspace::DefaultKeyspace::new("b".to_string()));
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
         let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
 
         let ctx = AgentCtx {
@@ -631,7 +630,7 @@ mod tests {
             dbt: None,
             vector: None,
             thread_store: None,
-            resolved_config: Some(minimal_cfg()),
+            runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
         };
 
         struct SqlFailureOnceDbt;

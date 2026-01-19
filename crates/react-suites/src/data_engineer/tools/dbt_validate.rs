@@ -136,10 +136,11 @@ impl Tool for DbtValidateTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::storage::InMemoryStorageAdapter;
     use react_core::agent::DefaultPolicy;
-    use crate::dbt::remediate::RemediationReport;
-    use react_core::providers::{DbtProvider, Keyspace, RequestScope};
+    use react_core::providers::DbtProvider;
+    use react_core::keyspace::{DefaultKeyspace, Keyspace};
+    use react_core::scope::RequestScope;
+    use react_core::storage::{InMemoryStorageAdapter, StorageAdapter};
     use async_trait::async_trait;
     use std::sync::{Arc, Mutex};
 
@@ -224,24 +225,22 @@ mod tests {
             providers: crate::config::ProvidersResolved {
                 athena: crate::config::AthenaResolved {
                     enabled: true,
-                    workgroup: None,
-                    region: None,
-                    result_s3: Some("s3://x/".to_string()),
-                    source_schema: Some("src".to_string()),
+                    workgroup: "wg".to_string(),
+                    region: "eu-west-1".to_string(),
+                    result_s3: "s3://x/".to_string(),
                     target_catalog: "AwsDataCatalog".to_string(),
-                    silver_schema: Some("src_silver".to_string()),
-                    gold_schema: Some("src_warehouse".to_string()),
+                    source_schema: "src".to_string(),
                     discovery_cache_ttl_secs: 120,
                 },
                 catalog: crate::config::CatalogResolved { enabled: false, refresh_secs: 60, max_concurrency: 8 },
                 dbt: crate::config::DbtResolved {
                     enabled: true,
                     profiles_dir: None,
-                    target: Some("athena".to_string()),
+                    target: "athena".to_string(),
                     naming: crate::config::DbtNamingResolved {
-                        target_schema: Some("src".to_string()),
-                        silver_suffix: Some("silver".to_string()),
-                        gold_suffix: Some("warehouse".to_string()),
+                        target_schema: "src".to_string(),
+                        silver_suffix: "silver".to_string(),
+                        gold_suffix: "warehouse".to_string(),
                     },
                     runner: "host".to_string(),
                     docker_image: None,
@@ -256,7 +255,7 @@ mod tests {
 
     #[tokio::test]
     async fn dbt_validate_retries_once_after_remediation_on_sql_failure() {
-        let storage: Arc<dyn crate::adapters::storage::StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         // Store one SQL file so remediation scans something.
         storage
             .put_bytes("t/w/p/dbt/models/m.sql", b"select 1", "text/sql")
@@ -274,7 +273,7 @@ mod tests {
                 }).to_string(),
             ]),
         });
-        let keyspace: Arc<dyn Keyspace> = Arc::new(react_core::providers::keyspace::DefaultKeyspace::new("b".to_string()));
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
         let dbt: Arc<dyn DbtProvider> = Arc::new(MockDbtProvider { calls: Mutex::new(0) });
         let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
 
@@ -296,7 +295,7 @@ mod tests {
             dbt: Some(dbt),
             vector: None,
             thread_store: None,
-            resolved_config: Some(minimal_cfg()),
+            runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
         };
 
         let tool = DbtValidateTool { datasets: None, catalog: None };

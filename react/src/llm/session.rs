@@ -36,13 +36,34 @@ impl RouterModel {
 impl LargeLanguageModel for RouterModel {
     fn chat(&self, messages: &[ChatMessage]) -> Result<String, String> {
         let model = crate::helpers::configuration::Config::llm_chat_model().unwrap_or_else(|| "gpt-4o-mini".to_string());
+        // Heuristic: when the caller is asking for machine-readable JSON, enforce JSON output at the
+        // provider level (OpenAI Responses supports `text.format.type = json_object`).
+        //
+        // This prevents occasional invalid "JSON-looking" text like literal newlines inside JSON strings.
+        let mut wants_json = false;
+        for m in messages.iter() {
+            // Only inspect user/system text; assistant messages may contain previous JSON.
+            if !m.role.eq_ignore_ascii_case("user") && !m.role.eq_ignore_ascii_case("system") {
+                continue;
+            }
+            let t = m.content.to_lowercase();
+            if t.contains("respond with strict json")
+                || t.contains("respond with json only")
+                || t.contains("respond with json")
+                || t.contains("strict json only")
+            {
+                wants_json = true;
+                break;
+            }
+        }
+
         let req = crate::llm::types::ChatRequest {
             model,
             messages: messages.iter().map(|m| crate::llm::types::ChatMessage { role: m.role.clone(), content: m.content.clone() }).collect(),
             max_output_tokens: crate::helpers::configuration::Config::getenv("LLM_MAX_TOKENS", "1024").parse().ok(),
             temperature: crate::helpers::configuration::Config::getenv("LLM_TEMPERATURE", "0.2").parse().ok(),
             top_p: crate::helpers::configuration::Config::getenv("LLM_TOP_P", "1.0").parse().ok(),
-            response_format: None,
+            response_format: if wants_json { Some(serde_json::json!({"type":"json_object"})) } else { None },
             thread_id: None,
         };
         let r = self.router.chat(&req)?;

@@ -19,9 +19,15 @@ struct RespReq {
     max_output_tokens: Option<i32>,
 }
 #[derive(Serialize)]
-struct RespText { format: RespFormat }
-#[derive(Serialize)]
-struct RespFormat { #[serde(rename="type")] r#type: String }
+struct RespText {
+    /// The OpenAI Responses API `text.format` object.
+    ///
+    /// Examples:
+    /// - `{ "type": "text" }`
+    /// - `{ "type": "json_object" }`
+    /// - `{ "type": "json_schema", "name": "...", "schema": {...}, "strict": true }`
+    format: serde_json::Value
+}
 #[derive(Deserialize)]
 struct RespResp {
     #[serde(default)]
@@ -57,10 +63,18 @@ impl Adapter for OpenAIResponsesAdapter {
         if msgs.is_empty() {
             msgs.push(RespMsg { role: "user".to_string(), content: vec![RespPart { r#type: "input_text".to_string(), text: String::new() }] });
         }
+
+        // Default to plain text, but allow callers to request structured output via `response_format`.
+        // This maps directly to the Responses API `text.format` object.
+        let format = req
+            .response_format
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({"type":"text"}));
+
         let body = RespReq {
             model: req.model.clone(),
             input: msgs,
-            text: Some(RespText { format: RespFormat { r#type: "text".to_string() } }),
+            text: Some(RespText { format }),
             max_output_tokens: req.max_output_tokens.map(|v| v as i32),
         };
         Ok(ProviderHttpRequest {
@@ -101,6 +115,56 @@ impl Adapter for OpenAIResponsesAdapter {
         let vecs: Vec<Vec<f32>> = obj.data.into_iter().map(|d| d.embedding).collect();
         let dim = vecs.get(0).map(|v| v.len()).unwrap_or(0);
         Ok(EmbedResponse { vectors: vecs, dim })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_chat_http_passes_response_format_to_text_format() {
+        let ad = OpenAIResponsesAdapter::new();
+        let req = ChatRequest {
+            model: "gpt-4.1-mini".to_string(),
+            messages: vec![ChatMessage { role: "user".to_string(), content: "hi".to_string() }],
+            max_output_tokens: None,
+            temperature: None,
+            top_p: None,
+            response_format: Some(serde_json::json!({"type":"json_object"})),
+            thread_id: None,
+        };
+        let http = ad.build_chat_http(&req).expect("build");
+        assert_eq!(http.url, "/v1/responses");
+        let fmt = http
+            .body
+            .get("text").and_then(|t| t.get("format"))
+            .and_then(|f| f.get("type"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        assert_eq!(fmt, "json_object");
+    }
+
+    #[test]
+    fn build_chat_http_defaults_to_text_format() {
+        let ad = OpenAIResponsesAdapter::new();
+        let req = ChatRequest {
+            model: "gpt-4.1-mini".to_string(),
+            messages: vec![ChatMessage { role: "user".to_string(), content: "hi".to_string() }],
+            max_output_tokens: None,
+            temperature: None,
+            top_p: None,
+            response_format: None,
+            thread_id: None,
+        };
+        let http = ad.build_chat_http(&req).expect("build");
+        let fmt = http
+            .body
+            .get("text").and_then(|t| t.get("format"))
+            .and_then(|f| f.get("type"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        assert_eq!(fmt, "text");
     }
 }
 

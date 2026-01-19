@@ -394,11 +394,11 @@ fn resolved_config(ctx: &AgentCtx) -> Result<&ReactResolvedConfig, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::storage::InMemoryStorageAdapter;
     use react_core::agent::DefaultPolicy;
     use react_core::providers::DbtProvider;
-    use react_core::providers::Keyspace;
-    use react_core::providers::RequestScope;
+    use react_core::keyspace::{DefaultKeyspace, Keyspace};
+    use react_core::scope::RequestScope;
+    use react_core::storage::{InMemoryStorageAdapter, StorageAdapter};
     use async_trait::async_trait;
     use std::sync::Arc;
 
@@ -417,25 +417,23 @@ mod tests {
         let cfg = crate::config::ReactResolvedConfig {
             server: crate::config::ServerResolved { port: 1 },
             storage: crate::config::StorageResolved { bucket: "b".to_string() },
-            scope: react_core::providers::RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() },
+            scope: RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() },
             llm: crate::config::LlmResolved::default(),
             providers: crate::config::ProvidersResolved {
                 athena: crate::config::AthenaResolved {
                     enabled: true,
-                    workgroup: None,
-                    region: None,
-                    result_s3: Some("s3://x/".to_string()),
-                    source_schema: None,
+                    workgroup: "wg".to_string(),
+                    region: "eu-west-1".to_string(),
+                    result_s3: "s3://x/".to_string(),
                     target_catalog: "AwsDataCatalog".to_string(),
-                    silver_schema: None,
-                    gold_schema: None,
+                    source_schema: "src".to_string(),
                     discovery_cache_ttl_secs: 120,
                 },
                 catalog: crate::config::CatalogResolved { enabled: false, refresh_secs: 60, max_concurrency: 8 },
                 dbt: crate::config::DbtResolved {
                     enabled: false,
                     profiles_dir: None,
-                    target: None,
+                    target: "athena".to_string(),
                     naming: crate::config::DbtNamingResolved::default(),
                     runner: "host".to_string(),
                     docker_image: None,
@@ -458,7 +456,7 @@ mod tests {
     }
 
     struct MockDbtProvider {
-        storage: Arc<dyn crate::adapters::storage::StorageAdapter>,
+        storage: Arc<dyn StorageAdapter>,
         keyspace: Arc<dyn Keyspace>,
     }
 
@@ -512,8 +510,8 @@ mod tests {
     #[tokio::test]
     async fn publish_always_requires_approval_before_build() {
         let storage = Arc::new(InMemoryStorageAdapter::default());
-        let keyspace: Arc<dyn Keyspace> = Arc::new(react_core::providers::keyspace::DefaultKeyspace::new("b".to_string()));
-        let scope = react_core::providers::RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
         let dbt: Arc<dyn DbtProvider> = Arc::new(MockDbtProvider { storage: storage.clone(), keyspace: keyspace.clone() });
 
         let cfg = Arc::new(crate::config::ReactResolvedConfig {
@@ -524,24 +522,22 @@ mod tests {
             providers: crate::config::ProvidersResolved {
                 athena: crate::config::AthenaResolved {
                     enabled: true,
-                    workgroup: None,
-                    region: None,
-                    result_s3: Some("s3://x/".to_string()),
-                    source_schema: None,
+                    workgroup: "wg".to_string(),
+                    region: "eu-west-1".to_string(),
+                    result_s3: "s3://x/".to_string(),
                     target_catalog: "AwsDataCatalog".to_string(),
-                    silver_schema: Some("picnic_silver".to_string()),
-                    gold_schema: Some("picnic_warehouse".to_string()),
+                    source_schema: "picnic".to_string(),
                     discovery_cache_ttl_secs: 120,
                 },
                 catalog: crate::config::CatalogResolved { enabled: false, refresh_secs: 60, max_concurrency: 8 },
                 dbt: crate::config::DbtResolved {
                     enabled: true,
                     profiles_dir: None,
-                    target: Some("athena".to_string()),
+                    target: "athena".to_string(),
                     naming: crate::config::DbtNamingResolved {
-                        target_schema: Some("picnic".to_string()),
-                        silver_suffix: Some("silver".to_string()),
-                        gold_suffix: Some("warehouse".to_string()),
+                        target_schema: "picnic".to_string(),
+                        silver_suffix: "silver".to_string(),
+                        gold_suffix: "warehouse".to_string(),
                     },
                     runner: "host".to_string(),
                     docker_image: None,
@@ -563,7 +559,7 @@ mod tests {
             trace_tx: None,
             agent_name: Some("model".to_string()),
             policy: Arc::new(DefaultPolicy),
-            llm: Arc::new(react_core::llm::NullModel),
+            llm: Arc::new(react_core::llm::NullModel::new()),
             storage,
             scope,
             keyspace,

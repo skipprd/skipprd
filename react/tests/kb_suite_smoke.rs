@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use react::agent::{Agent, AgentCtx, AgentPolicy, DefaultPolicy, Interrupt, RunOutcome};
-use react::adapters::storage::InMemoryStorageAdapter;
-use react::llm::{ChatMessage, LargeLanguageModel};
-use react::session::ThreadStore;
-use react::tools::ToolRegistry;
-use react::tools::Tool;
+use react_core::agent::{Agent, AgentCtx, AgentPolicy, DefaultPolicy, Interrupt, RunOutcome};
+use react_core::storage::InMemoryStorageAdapter;
+use react_core::llm::{ChatMessage, LargeLanguageModel};
+use react_core::session::ThreadStore;
+use react_core::tools::{ToolRegistry, Tool};
+use react_core::scope::RequestScope;
+use react_core::keyspace::DefaultKeyspace;
 use serde_json::Value;
 
 struct FixedJsonModel {
@@ -30,7 +31,7 @@ impl Tool for AskUserTool {
     fn name(&self) -> &'static str {
         "ask_user"
     }
-    async fn call(&self, _args: Value, _ctx: &react::agent::AgentCtx) -> Result<Value, String> {
+    async fn call(&self, _args: Value, _ctx: &react_core::agent::AgentCtx) -> Result<Value, String> {
         Ok(serde_json::json!({"ok": true, "prompt": "hi"}))
     }
 }
@@ -50,7 +51,7 @@ impl AgentPolicy for InterruptOnAskUser {
     async fn handle_final(
         &self,
         _tools: &ToolRegistry,
-        _ctx: &react::agent::AgentCtx,
+        _ctx: &react_core::agent::AgentCtx,
         _transcript: &mut Vec<String>,
         _store: Option<&ThreadStore>,
         _thread_id: &str,
@@ -77,13 +78,13 @@ async fn agent_default_policy_accepts_final_without_sql() {
         policy: Arc::new(DefaultPolicy),
         llm,
         storage: Arc::new(InMemoryStorageAdapter::default()),
-        scope: react::providers::RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() },
-        keyspace: Arc::new(react::providers::DefaultKeyspace::new("b".into())),
+        scope: RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() },
+        keyspace: Arc::new(DefaultKeyspace::new("b".into())),
         query: None,
         dbt: None,
         vector: None,
         thread_store: None,
-        resolved_config: None,
+        runtime: None,
     };
     let reg = ToolRegistry::new();
     let out = Agent::run_until_block(&reg, &ctx, "sys", "tools", "q").await.expect("run");
@@ -113,13 +114,13 @@ async fn agent_does_not_special_case_ask_user_tool_name() {
         policy: Arc::new(DefaultPolicy),
         llm,
         storage: Arc::new(InMemoryStorageAdapter::default()),
-        scope: react::providers::RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() },
-        keyspace: Arc::new(react::providers::DefaultKeyspace::new("b".into())),
+        scope: RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() },
+        keyspace: Arc::new(DefaultKeyspace::new("b".into())),
         query: None,
         dbt: None,
         vector: None,
         thread_store: None,
-        resolved_config: None,
+        runtime: None,
     };
     let mut reg = ToolRegistry::new();
     reg.register(AskUserTool);
@@ -147,13 +148,13 @@ async fn agent_interrupts_only_when_policy_requests_it() {
         policy: Arc::new(InterruptOnAskUser),
         llm,
         storage: Arc::new(InMemoryStorageAdapter::default()),
-        scope: react::providers::RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() },
-        keyspace: Arc::new(react::providers::DefaultKeyspace::new("b".into())),
+        scope: RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() },
+        keyspace: Arc::new(DefaultKeyspace::new("b".into())),
         query: None,
         dbt: None,
         vector: None,
         thread_store: None,
-        resolved_config: None,
+        runtime: None,
     };
     let mut reg = ToolRegistry::new();
     reg.register(AskUserTool);
@@ -166,7 +167,7 @@ async fn agent_interrupts_only_when_policy_requests_it() {
 
 #[test]
 fn default_registry_includes_kb_suite() {
-    let reg = react::suites::registry::default_registry();
+    let reg = react_suites::default_registry();
     let ids = reg.list_ids();
     assert!(ids.contains(&"kb"), "expected 'kb' in suite registry, got {:?}", ids);
 }

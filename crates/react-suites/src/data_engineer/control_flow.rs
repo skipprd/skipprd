@@ -1,0 +1,425 @@
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::timeout;
+use tracing::warn;
+ 
+use react_core::agent::AgentCtx;
+use react_core::providers::DbtValidateArgs;
+use react_core::session::{ThreadLog, ThreadStep, ThreadStore};
+use react_core::tools::Tool;
+ 
+use crate::config;
+use crate::dbt;
+use crate::shared::tools::dbt_files::DbtFilesTool;
+ 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Phase {
+    Preflight,
+    CleanseAuthor,
+    CleanseValidate,
+    CleanseReview,
+    ModelAuthor,
+    ModelValidate,
+    ModelReview,
+    PublishAwaitApproval,
+    Publish,
+    PostPublishReview,
+    Done,
+}
+ 
+impl Phase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Phase::Preflight => "preflight",
+            Phase::CleanseAuthor => "cleanse_author",
+            Phase::CleanseValidate => "cleanse_validate",
+            Phase::CleanseReview => "cleanse_review",
+            Phase::ModelAuthor => "model_author",
+            Phase::ModelValidate => "model_validate",
+            Phase::ModelReview => "model_review",
+            Phase::PublishAwaitApproval => "publish_await_approval",
+            Phase::Publish => "publish",
+            Phase::PostPublishReview => "post_publish_review",
+            Phase::Done => "done",
+        }
+    }
+ 
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "preflight" => Some(Phase::Preflight),
+            "cleanse_author" => Some(Phase::CleanseAuthor),
+            "cleanse_validate" => Some(Phase::CleanseValidate),
+            "cleanse_review" => Some(Phase::CleanseReview),
+            "model_author" => Some(Phase::ModelAuthor),
+            "model_validate" => Some(Phase::ModelValidate),
+            "model_review" => Some(Phase::ModelReview),
+            "publish_await_approval" => Some(Phase::PublishAwaitApproval),
+            "publish" => Some(Phase::Publish),
+            "post_publish_review" => Some(Phase::PostPublishReview),
+            "done" => Some(Phase::Done),
+            _ => None,
+        }
+    }
+}
+ 
+pub fn phase_from_log(log: Option<&ThreadLog>) -> Phase {
+    let Some(log) = log else { return Phase::Preflight };
+    for step in log.steps.iter().rev() {
+        if step.action != "phase" {
+            continue;
+        }
+        let p = step
+            .args
+            .get("phase")
+            .and_then(|v| v.as_str())
+            .and_then(Phase::from_str);
+        if let Some(p) = p {
+            return p;
+        }
+    }
+    Phase::Preflight
+}
+ 
+pub async fn append_phase(store: &ThreadStore, thread_id: &str, agent: Option<String>, phase: Phase) {
+    let _ = store
+        .append_step(
+            thread_id,
+            ThreadStep {
+                action: "phase".to_string(),
+                args: serde_json::json!({ "phase": phase.as_str() }),
+                observation: serde_json::json!({ "ok": true }),
+                ts: chrono::Utc::now().to_rfc3339(),
+                agent,
+            },
+        )
+        .await;
+}
+ 
+#[derive(Clone, Debug, Default)]
+pub struct DerivedGuardState {
+    pub last_validate_failed: bool,
+    pub mutated_since_fail: bool,
+    pub probe_required: bool,
+    pub probe_satisfied: bool,
+}
+ 
+fn is_mutation_step(step: &ThreadStep) -> bool {
+    match step.action.as_str() {
+        "approve_and_save_artifact" | "approve_and_save_artifact_batch" | "staging_model" => true,
+        "dbt_files" => step
+            .args
+            .get("op")
+            .and_then(|v| v.as_str())
+            .map(|s| s == "put")
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+ 
+fn looks_like_data_probe_sql(sql: &str) -> bool {
+    let s = sql.trim().trim_end_matches(';').trim().to_lowercase();
+    if s.is_empty() {
+        return false;
+    }
+    // trivial validation queries should not satisfy probes
+    let toks: Vec<&str> = s.split_whitespace().collect();
+    if toks == ["select", "1"] {
+        return false;
+    }
+    // allow SELECT 1 AS ok
+    if toks.len() == 4 && toks[0] == "select" && toks[1] == "1" && toks[2] == "as" {
+        return false;
+    }
+    toks.iter().any(|t| *t == "from")
+}
+ 
+pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
+    let mut out = DerivedGuardState::default();
+    let Some(log) = log else { return out };
+ 
+    // Find most recent dbt_validate.
+    let mut last_validate_idx: Option<usize> = None;
+    for (i, step) in log.steps.iter().enumerate().rev() {
+        if step.action == "dbt_validate" {
+            last_validate_idx = Some(i);
+            break;
+        }
+    }
+    let Some(vidx) = last_validate_idx else { return out };
+    let vstep = &log.steps[vidx];
+ 
+    let ok = vstep.observation.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
+    let compile_ok = vstep
+        .observation
+        .get("compile_ok")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
+    let run_ok = vstep.observation.get("run_ok").and_then(|x| x.as_bool());
+    let build = vstep.args.get("build").and_then(|x| x.as_bool()).unwrap_or(false);
+    let run = vstep.args.get("run").and_then(|x| x.as_bool()).unwrap_or(false);
+    let runtime_validate = build || run;
+ 
+    let ok_for_clear = if runtime_validate {
+        ok && compile_ok && run_ok == Some(true)
+    } else {
+        ok && compile_ok
+    };
+    out.last_validate_failed = !ok_for_clear;
+ 
+    // Probe requirement: compile ok but runtime failed with runtime_failures present.
+    if runtime_validate && compile_ok && run_ok == Some(false) {
+        let has_runtime_failures = vstep
+            .observation
+            .get("runtime_failures")
+            .and_then(|v| v.as_array())
+            .map(|a| !a.is_empty())
+            .unwrap_or(false);
+        if has_runtime_failures {
+            out.probe_required = true;
+        }
+    }
+ 
+    // Scan forward from validate for mutations / probes.
+    for step in log.steps.iter().skip(vidx + 1) {
+        let ok = step.observation.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
+        if ok && is_mutation_step(step) {
+            out.mutated_since_fail = true;
+        }
+        if out.probe_required && ok && step.action == "run_sql" {
+            let sql = step.args.get("sql").and_then(|x| x.as_str()).unwrap_or("");
+            if looks_like_data_probe_sql(sql) {
+                out.probe_satisfied = true;
+            }
+        }
+    }
+ 
+    // If probe has been satisfied, clear requirement (for gating).
+    if out.probe_satisfied {
+        out.probe_required = false;
+    }
+    out
+}
+ 
+pub struct DeterministicDbtValidateOnce;
+ 
+impl DeterministicDbtValidateOnce {
+    pub async fn run(
+        ctx: &AgentCtx,
+        build: bool,
+        run: bool,
+        dataset_ids: Option<&[String]>,
+    ) -> Result<Value, String> {
+        let dbt = ctx.dbt.as_ref().ok_or_else(|| "dbt provider missing".to_string())?;
+        let Some(cfg) = config::resolved_config_from_ctx(ctx) else {
+            return Err("resolved_config missing (needed to generate profiles.yml deterministically)".to_string());
+        };
+        let gen = dbt::profile::generate_profiles_yml(cfg)?;
+        let td = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let profiles_dir = td.path().to_string_lossy().to_string();
+        let profiles_path = td.path().join("profiles.yml");
+        std::fs::write(&profiles_path, gen.profiles_yml.as_bytes()).map_err(|e| e.to_string())?;
+ 
+        let res = dbt
+            .validate_project(
+                &ctx.scope,
+                &DbtValidateArgs {
+                    project_name: "data_engineer".to_string(),
+                    profiles_dir: Some(profiles_dir),
+                    target: gen.target,
+                    run,
+                    build,
+                },
+            )
+            .await?;
+ 
+        let mut v = serde_json::to_value(res)
+            .unwrap_or_else(|_| serde_json::json!({"ok": false, "error": "failed to serialize result"}));
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert(
+                "dialect".to_string(),
+                serde_json::json!(dbt::remediate::active_provider_dialect(cfg)),
+            );
+            // Keep parity with dbt_validate tool output, but do NOT mutate/repair here.
+            let rf = crate::data_engineer::dbt_error::extract_runtime_failures_from_logs(
+                &obj.get("logs").cloned().unwrap_or(Value::Null),
+            );
+            obj.insert("runtime_failures".to_string(), serde_json::json!(rf));
+            if let Some(ds) = dataset_ids {
+                obj.insert("dataset_ids".to_string(), serde_json::json!(ds));
+            }
+        }
+        Ok(v)
+    }
+}
+ 
+pub async fn call_and_record_tool(
+    store: &ThreadStore,
+    thread_id: &str,
+    agent: Option<String>,
+    tool: &dyn Tool,
+    args: Value,
+    ctx: &AgentCtx,
+    timeout_secs: u64,
+) -> Value {
+    let obs = match timeout(
+        Duration::from_secs(timeout_secs.max(1)),
+        tool.call(args.clone(), ctx),
+    )
+    .await
+    {
+        Ok(r) => r.unwrap_or_else(|e| serde_json::json!({"ok": false, "error": e})),
+        Err(_) => serde_json::json!({"ok": false, "error": "tool timeout"}),
+    };
+    let _ = store
+        .append_step(
+            thread_id,
+            ThreadStep {
+                action: tool.name().to_string(),
+                args,
+                observation: obs.clone(),
+                ts: chrono::Utc::now().to_rfc3339(),
+                agent,
+            },
+        )
+        .await;
+    obs
+}
+ 
+/// Deterministic authoring invariant: ensure there is at least one model SQL file in `models/`.
+pub async fn invariant_has_any_models(ctx: &AgentCtx) -> Result<bool, String> {
+    let tool = DbtFilesTool;
+    let obs = tool
+        .call(serde_json::json!({"op":"list","prefix":"models/","limit":500}), ctx)
+        .await
+        .unwrap_or_else(|e| serde_json::json!({"ok": false, "error": e}));
+    if obs.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        warn!("dbt_files list failed: {:?}", obs.get("error"));
+        return Ok(false);
+    }
+    let items = obs.get("items").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let mut n_sql = 0usize;
+    for it in items {
+        let Some(p) = it.get("path").and_then(|v| v.as_str()) else { continue };
+        if p.starts_with("models/") && p.ends_with(".sql") && !p.contains("/_versions/") {
+            n_sql += 1;
+        }
+    }
+    Ok(n_sql > 0)
+}
+
+/// Deterministic invariant: dbt_project.yml exists in the scoped dbt project.
+pub async fn invariant_has_dbt_project(ctx: &AgentCtx) -> Result<bool, String> {
+    let tool = DbtFilesTool;
+    let obs = tool
+        .call(serde_json::json!({"op":"get","path":"dbt_project.yml","max_chars":2000}), ctx)
+        .await
+        .unwrap_or_else(|e| serde_json::json!({"ok": false, "error": e}));
+    Ok(obs.get("ok").and_then(|v| v.as_bool()) == Some(true))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn step(action: &str, args: Value, observation: Value) -> ThreadStep {
+        ThreadStep {
+            action: action.to_string(),
+            args,
+            observation,
+            ts: chrono::Utc::now().to_rfc3339(),
+            agent: Some("test".to_string()),
+        }
+    }
+
+    #[test]
+    fn phase_is_derived_from_last_phase_step() {
+        let log = ThreadLog {
+            steps: vec![
+                step("phase", serde_json::json!({"phase":"preflight"}), serde_json::json!({"ok":true})),
+                step("phase", serde_json::json!({"phase":"model_author"}), serde_json::json!({"ok":true})),
+            ],
+            result: None,
+            title: None,
+            title_finalized: false,
+        };
+        assert_eq!(phase_from_log(Some(&log)), Phase::ModelAuthor);
+    }
+
+    #[test]
+    fn guard_blocks_validate_until_mutation_after_failure() {
+        let log = ThreadLog {
+            steps: vec![
+                step(
+                    "dbt_validate",
+                    serde_json::json!({"build": true}),
+                    serde_json::json!({"ok": false, "compile_ok": false, "run_ok": false, "errors":["x"]}),
+                ),
+                // no mutation after
+            ],
+            result: None,
+            title: None,
+            title_finalized: false,
+        };
+        let g = derive_guard_state(Some(&log));
+        assert!(g.last_validate_failed);
+        assert!(!g.mutated_since_fail);
+    }
+
+    #[test]
+    fn guard_clears_block_after_mutation() {
+        let log = ThreadLog {
+            steps: vec![
+                step(
+                    "dbt_validate",
+                    serde_json::json!({"build": true}),
+                    serde_json::json!({"ok": false, "compile_ok": false, "run_ok": false, "errors":["x"]}),
+                ),
+                step(
+                    "dbt_files",
+                    serde_json::json!({"op":"put","path":"models/a.sql","content":"select 1"}),
+                    serde_json::json!({"ok": true}),
+                ),
+            ],
+            result: None,
+            title: None,
+            title_finalized: false,
+        };
+        let g = derive_guard_state(Some(&log));
+        assert!(g.last_validate_failed);
+        assert!(g.mutated_since_fail);
+    }
+
+    #[test]
+    fn guard_requires_probe_after_runtime_failure_and_accepts_probe_sql() {
+        let log = ThreadLog {
+            steps: vec![
+                step(
+                    "dbt_validate",
+                    serde_json::json!({"build": true}),
+                    serde_json::json!({
+                        "ok": false,
+                        "compile_ok": true,
+                        "run_ok": false,
+                        "runtime_failures": [{"name":"t","failures":1}],
+                        "errors":["Runtime Error: test failed"]
+                    }),
+                ),
+                step(
+                    "run_sql",
+                    serde_json::json!({"sql":"SELECT count(*) FROM AwsDataCatalog.db.t"}),
+                    serde_json::json!({"ok": true, "rows":[["1"]]}),
+                ),
+            ],
+            result: None,
+            title: None,
+            title_finalized: false,
+        };
+        let g = derive_guard_state(Some(&log));
+        assert!(!g.probe_required, "probe_required should be cleared once satisfied");
+        assert!(g.probe_satisfied);
+    }
+}
+ 
