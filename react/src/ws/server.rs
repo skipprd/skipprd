@@ -9,11 +9,11 @@ use crate::ws::api_gen as api;
 use std::collections::{HashMap, VecDeque};
 use chrono::Utc;
 use crate::models as m;
-use crate::session::ThreadStore;
-use crate::session::ThreadLog;
-use crate::session::ThreadStep;
-use crate::suites::registry::SuiteRegistry;
-use crate::suites::SuiteCtx;
+use react_core::session::ThreadStore;
+use react_core::session::ThreadLog;
+use react_core::session::ThreadStep;
+use react_suites::registry::SuiteRegistry;
+use react_suites::SuiteCtx;
 use std::sync::Arc;
 
 // Steering prompts removed for model agent; model runs eagerly without awaiting user choice.
@@ -23,7 +23,7 @@ use std::sync::Arc;
 /// This is the preferred entrypoint for keeping `react` runtime generic: callers
 /// decide how to build configuration, storage roots, credentials, etc.
 pub async fn start_with_ctx(port: u16, suite_ctx: SuiteCtx) -> Result<(), String> {
-    let reg = Arc::new(crate::suites::registry::default_registry());
+    let reg = Arc::new(react_suites::default_registry());
     let addr = format!("0.0.0.0:{}", port);
     let listener = TcpListener::bind(&addr).await.map_err(|e| e.to_string())?;
     tracing::info!("WebSocket server listening on ws://{}", addr);
@@ -198,14 +198,14 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			// Persist initial suite/agent selection so it survives reconnects
 			{
 				let store = state.thread_store();
-				let _ = store.append_step(&thread_id, crate::session::ThreadStep {
+				let _ = store.append_step(&thread_id, ThreadStep {
 					action: "switch_suite".to_string(),
 					args: serde_json::json!({"from": null, "to": suite_id.clone()}),
 					observation: serde_json::json!({"ok": true}),
 					ts: chrono::Utc::now().to_rfc3339(),
 					agent: Some(agent.clone()),
 				}).await;
-				let _ = store.append_step(&thread_id, crate::session::ThreadStep {
+				let _ = store.append_step(&thread_id, ThreadStep {
 					action: "switch_agent".to_string(),
 					args: serde_json::json!({"from": null, "to": agent.clone()}),
 					observation: serde_json::json!({"ok": true}),
@@ -234,7 +234,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			// record initial user question in thread history
 			{
 				let store = state.thread_store();
-				let _ = store.append_step(&thread_id, crate::session::ThreadStep {
+				let _ = store.append_step(&thread_id, ThreadStep {
 					action: "user".to_string(),
 					args: serde_json::json!({"text": question}),
 					observation: serde_json::json!({"ok": true}),
@@ -275,7 +275,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 						out.push(s);
 						{
 							let store = state.thread_store();
-							let _ = store.append_step(&thread_id, crate::session::ThreadStep {
+							let _ = store.append_step(&thread_id, ThreadStep {
 								action: "review_response".to_string(),
 								args: serde_json::json!({"text": text, "meta": rr.meta}),
 								observation: serde_json::json!({"ok": true}),
@@ -309,7 +309,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 						// Append final_response step with the exact payload sent
 						{
 							let store = state.thread_store();
-							let _ = store.append_step(&thread_id, crate::session::ThreadStep {
+							let _ = store.append_step(&thread_id, ThreadStep {
 								action: "final_response".to_string(),
 								args: serde_json::json!({"answer": answer, "sql": sql, "data": null, "chart": null}),
 								observation: serde_json::json!({"ok": true}),
@@ -336,7 +336,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 						// persist gate in thread
 						{
 							let store = state.thread_store();
-							let _ = store.append_step(&thread_id, crate::session::ThreadStep {
+							let _ = store.append_step(&thread_id, ThreadStep {
 								action: "await_user".to_string(),
 								args: serde_json::json!({"prompt": prompt}),
 								observation: serde_json::json!({"ok": true}),
@@ -381,7 +381,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			};
 			// Track suite per-thread (explicit client selection) and persist switch if changed
 			if current_suite != requested_suite {
-				let _ = store.append_step(&thread_id, crate::session::ThreadStep {
+				let _ = store.append_step(&thread_id, ThreadStep {
 					action: "switch_suite".to_string(),
 					args: serde_json::json!({"from": current_suite.clone(), "to": requested_suite.clone()}),
 					observation: serde_json::json!({"ok": true}),
@@ -393,7 +393,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 
 			if current_agent != requested_agent {
 				// append switch_agent step
-				let _ = store.append_step(&thread_id, crate::session::ThreadStep {
+				let _ = store.append_step(&thread_id, ThreadStep {
 					action: "switch_agent".to_string(),
 					args: serde_json::json!({"from": current_agent.clone(), "to": requested_agent.clone()}),
 					observation: serde_json::json!({"ok": true}),
@@ -451,7 +451,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 						out.push(s);
 						{
 							let store = state.thread_store();
-							let _ = store.append_step(&thread_id, crate::session::ThreadStep {
+							let _ = store.append_step(&thread_id, ThreadStep {
 								action: "review_response".to_string(),
 								args: serde_json::json!({"text": text, "meta": rr.meta}),
 								observation: serde_json::json!({"ok": true}),
@@ -479,7 +479,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 						// Append final_response step with the exact payload sent
 						{
 							let store = state.thread_store();
-							let _ = store.append_step(&thread_id, crate::session::ThreadStep {
+							let _ = store.append_step(&thread_id, ThreadStep {
 								action: "final_response".to_string(),
 								args: serde_json::json!({"answer": answer, "sql": sql, "data": null, "chart": null}),
 								observation: serde_json::json!({"ok": true}),
@@ -506,7 +506,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 						// persist gate in thread
 						{
 							let store = state.thread_store();
-							let _ = store.append_step(&thread_id, crate::session::ThreadStep {
+							let _ = store.append_step(&thread_id, ThreadStep {
 								action: "await_user".to_string(),
 								args: serde_json::json!({"prompt": prompt}),
 								observation: serde_json::json!({"ok": true}),
@@ -549,7 +549,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 				}
 			}
 			let store = state.thread_store();
-			let _ = store.append_step(&thread_id, crate::session::ThreadStep {
+			let _ = store.append_step(&thread_id, ThreadStep {
 				action: "user".to_string(),
 				args: serde_json::json!({"text": text}),
 				observation: serde_json::json!({"ok": true}),
@@ -623,7 +623,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 						out.push(s);
 						{
 							let store = state.thread_store();
-							let _ = store.append_step(&thread_id, crate::session::ThreadStep {
+							let _ = store.append_step(&thread_id, ThreadStep {
 								action: "review_response".to_string(),
 								args: serde_json::json!({"text": text, "meta": rr.meta}),
 								observation: serde_json::json!({"ok": true}),
@@ -649,7 +649,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 						// Append final_response step with the exact payload sent
 						{
 							let store = state.thread_store();
-							let _ = store.append_step(&thread_id, crate::session::ThreadStep {
+							let _ = store.append_step(&thread_id, ThreadStep {
 								action: "final_response".to_string(),
 								args: serde_json::json!({"answer": answer, "sql": sql, "data": null, "chart": null}),
 								observation: serde_json::json!({"ok": true}),
@@ -830,7 +830,7 @@ fn truncate_title(s: &str, max_chars: usize) -> String {
 	}
 }
 
-async fn synthesize_title(llm: &crate::providers::DynLlmProvider, question: &str, answer: &str) -> String {
+async fn synthesize_title(llm: &react_core::llm::DynLlm, question: &str, answer: &str) -> String {
 	// Try LLM to produce a concise title (<= 8 words), else fallback to truncated question
 	let prompt = format!(
 		"Create a very short, descriptive chat title (≤ 8 words).\nRules: plain text only, no quotes, no punctuation beyond spaces, title case.\nQuestion: {}\nAnswer: {}\nTitle:",
@@ -839,7 +839,7 @@ async fn synthesize_title(llm: &crate::providers::DynLlmProvider, question: &str
 	let out = tokio::task::spawn_blocking({
 		let llm2 = llm.clone();
 		let p = prompt.clone();
-		move || llm2.chat(&[crate::llm::ChatMessage { role: "user".into(), content: p }])
+		move || llm2.chat(&[react_core::llm::ChatMessage { role: "user".into(), content: p }])
 	}).await;
 	if let Ok(Ok(text)) = out {
 		let t = text.trim();
@@ -987,14 +987,14 @@ async fn process_new(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt
 	// Persist initial suite/agent selection so it survives reconnects
 	{
 		let store = state.thread_store();
-		let _ = store.append_step(&thread_id, crate::session::ThreadStep {
+		let _ = store.append_step(&thread_id, ThreadStep {
 			action: "switch_suite".to_string(),
 			args: serde_json::json!({"from": null, "to": suite_id.clone()}),
 			observation: serde_json::json!({"ok": true}),
 			ts: chrono::Utc::now().to_rfc3339(),
 			agent: Some(agent.clone()),
 		}).await;
-		let _ = store.append_step(&thread_id, crate::session::ThreadStep {
+		let _ = store.append_step(&thread_id, ThreadStep {
 			action: "switch_agent".to_string(),
 			args: serde_json::json!({"from": null, "to": agent.clone()}),
 			observation: serde_json::json!({"ok": true}),
@@ -1033,7 +1033,7 @@ async fn process_new(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt
 	// record initial user question in thread history
 	{
 		let store = state.thread_store();
-		let _ = store.append_step(&thread_id, crate::session::ThreadStep {
+		let _ = store.append_step(&thread_id, ThreadStep {
 			action: "user".to_string(),
 			args: serde_json::json!({"text": question}),
 			observation: serde_json::json!({"ok": true}),
@@ -1062,7 +1062,7 @@ async fn process_open(v: &Value, state: &mut ConnState, write: &mut (impl SinkEx
 		None => ("data_engineer".to_string(), "ask".to_string()),
 	};
 	if current_suite != requested_suite {
-		let _ = store.append_step(&thread_id, crate::session::ThreadStep {
+		let _ = store.append_step(&thread_id, ThreadStep {
 			action: "switch_suite".to_string(),
 			args: serde_json::json!({"from": current_suite.clone(), "to": requested_suite.clone()}),
 			observation: serde_json::json!({"ok": true}),
@@ -1073,7 +1073,7 @@ async fn process_open(v: &Value, state: &mut ConnState, write: &mut (impl SinkEx
 	state.current_suite.insert(thread_id.clone(), requested_suite.clone());
 
 	if current_agent != requested_agent {
-		let _ = store.append_step(&thread_id, crate::session::ThreadStep {
+		let _ = store.append_step(&thread_id, ThreadStep {
 			action: "switch_agent".to_string(),
 			args: serde_json::json!({"from": current_agent.clone(), "to": requested_agent.clone()}),
 			observation: serde_json::json!({"ok": true}),
@@ -1109,7 +1109,7 @@ async fn process_open(v: &Value, state: &mut ConnState, write: &mut (impl SinkEx
 	// if user supplied a prompt on open, record it
 	if !question.trim().is_empty() {
 		let store = state.thread_store();
-		let _ = store.append_step(&thread_id, crate::session::ThreadStep {
+		let _ = store.append_step(&thread_id, ThreadStep {
 			action: "user".to_string(),
 			args: serde_json::json!({"text": question}),
 			observation: serde_json::json!({"ok": true}),
@@ -1167,7 +1167,7 @@ async fn process_approve(v: &Value, state: &mut ConnState, write: &mut (impl Sin
 	// append user=approve step
 	{
 		let store = state.thread_store();
-		let _ = store.append_step(&thread_id, crate::session::ThreadStep {
+		let _ = store.append_step(&thread_id, ThreadStep {
 			action: "user".to_string(),
 			args: serde_json::json!({"text": "approve"}),
 			observation: serde_json::json!({"ok": true}),
@@ -1225,7 +1225,7 @@ async fn process_reject(v: &Value, state: &mut ConnState, write: &mut (impl Sink
 	// append user=reject step
 	{
 		let store = state.thread_store();
-		let _ = store.append_step(&thread_id, crate::session::ThreadStep {
+		let _ = store.append_step(&thread_id, ThreadStep {
 			action: "user".to_string(),
 			args: serde_json::json!({"text": "reject"}),
 			observation: serde_json::json!({"ok": true}),
@@ -1367,12 +1367,12 @@ async fn run_agent_with_processing_suite(
 					Ok(Err(e)) => return Err(e),
 					Err(e) => return Err(format!("agent task failed: {}", e)),
 				};
-				let convert = |ff: crate::flow_frame::FlowFrame| -> AgentFrame {
+				let convert = |ff: react_suites::FlowFrame| -> AgentFrame {
 					match ff {
-						crate::flow_frame::FlowFrame::Final { answer, sql } => AgentFrame::Final { answer, sql },
-						crate::flow_frame::FlowFrame::Review { text, meta } => AgentFrame::Review { text, meta },
-						crate::flow_frame::FlowFrame::AwaitUser { prompt } => AgentFrame::AwaitUser { prompt },
-						crate::flow_frame::FlowFrame::AwaitApproval { prompt } => AgentFrame::AwaitApproval { prompt },
+						react_suites::FlowFrame::Final { answer, sql } => AgentFrame::Final { answer, sql },
+						react_suites::FlowFrame::Review { text, meta } => AgentFrame::Review { text, meta },
+						react_suites::FlowFrame::AwaitUser { prompt } => AgentFrame::AwaitUser { prompt },
+						react_suites::FlowFrame::AwaitApproval { prompt } => AgentFrame::AwaitApproval { prompt },
 					}
 				};
 				let frames = frames.into_iter().map(convert).collect::<Vec<_>>();
@@ -1415,7 +1415,7 @@ async fn run_agent_with_processing_suite(
 								let _ = store
 									.append_step(
 										thread_id,
-										crate::session::ThreadStep {
+										ThreadStep {
 											action: "review_response".to_string(),
 											args: serde_json::json!({"text": text, "meta": resp.meta}),
 											observation: serde_json::json!({"ok": true}),
@@ -1459,7 +1459,7 @@ async fn run_agent_with_processing_suite(
 								let _ = store
 									.append_step(
 										thread_id,
-										crate::session::ThreadStep {
+										ThreadStep {
 											action: "final_response".to_string(),
 											args: serde_json::json!({"answer": answer, "sql": sql, "data": null, "chart": null}),
 											observation: serde_json::json!({"ok": true}),
@@ -1535,12 +1535,12 @@ async fn run_agent_and_frames(
 	sctx: &SuiteCtx,
 ) -> Result<Vec<AgentFrame>, String> {
 	// Delegate to suites
-    let convert = |ff: crate::flow_frame::FlowFrame| -> AgentFrame {
+    let convert = |ff: react_suites::FlowFrame| -> AgentFrame {
 		match ff {
-			crate::flow_frame::FlowFrame::Final { answer, sql } => AgentFrame::Final { answer, sql },
-			crate::flow_frame::FlowFrame::Review { text, meta } => AgentFrame::Review { text, meta },
-			crate::flow_frame::FlowFrame::AwaitUser { prompt } => AgentFrame::AwaitUser { prompt },
-			crate::flow_frame::FlowFrame::AwaitApproval { prompt } => AgentFrame::AwaitApproval { prompt },
+			react_suites::FlowFrame::Final { answer, sql } => AgentFrame::Final { answer, sql },
+			react_suites::FlowFrame::Review { text, meta } => AgentFrame::Review { text, meta },
+			react_suites::FlowFrame::AwaitUser { prompt } => AgentFrame::AwaitUser { prompt },
+			react_suites::FlowFrame::AwaitApproval { prompt } => AgentFrame::AwaitApproval { prompt },
 		}
 	};
 	let suite = reg
@@ -1575,7 +1575,7 @@ fn chunk_text(s: &str, max_chunk: usize) -> Vec<String> {
 	out
 }
 
-fn compute_unread_for_log(log: &crate::session::ThreadLog, seen_seq: i32) -> (i32, i32) {
+fn compute_unread_for_log(log: &ThreadLog, seen_seq: i32) -> (i32, i32) {
 	let mut tseq: i32 = 0;
 	let mut assistant_count_after_seen: i32 = 0;
 	let mut last_assistant_seq: i32 = 0;
@@ -1597,7 +1597,7 @@ fn compute_unread_for_log(log: &crate::session::ThreadLog, seen_seq: i32) -> (i3
 	(last_assistant_seq, assistant_count_after_seen)
 }
 
-async fn build_history(store: &crate::session::ThreadStore, thread_id: &str, before: Option<i32>, limit_opt: Option<i32>) -> (Vec<api::HistoryResponseMessagesInner>, Option<i32>) {
+async fn build_history(store: &ThreadStore, thread_id: &str, before: Option<i32>, limit_opt: Option<i32>) -> (Vec<api::HistoryResponseMessagesInner>, Option<i32>) {
 	let mut msgs: Vec<api::HistoryResponseMessagesInner> = Vec::new();
 	let mut next_before: Option<i32> = None;
 	let limit = limit_opt.unwrap_or(50).max(1);
@@ -1698,23 +1698,23 @@ mod tests {
 
 	#[test]
 	fn unread_counts_include_review_response() {
-		let log = crate::session::ThreadLog {
+		let log = ThreadLog {
 			steps: vec![
-				crate::session::ThreadStep {
+				ThreadStep {
 					action: "user".to_string(),
 					args: json!({"text":"hi"}),
 					observation: json!({"ok":true}),
 					ts: "t".to_string(),
 					agent: Some("ask".to_string()),
 				},
-				crate::session::ThreadStep {
+				ThreadStep {
 					action: "review_response".to_string(),
 					args: json!({"text":"review text","meta":null}),
 					observation: json!({"ok":true}),
 					ts: "t".to_string(),
 					agent: Some("agent".to_string()),
 				},
-				crate::session::ThreadStep {
+				ThreadStep {
 					action: "final".to_string(),
 					args: json!({"answer":"done","sql":null}),
 					observation: json!({"ok":true}),
@@ -1734,10 +1734,10 @@ mod tests {
 		let storage = Arc::new(InMemoryStorageAdapter::default());
 		let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
 		let keyspace = Arc::new(DefaultKeyspace::new("b".to_string()));
-		let store = crate::session::ThreadStore::new(storage, scope, keyspace);
+		let store = ThreadStore::new(storage, scope, keyspace);
 
 		let tid = "thread1";
-		let _ = store.append_step(tid, crate::session::ThreadStep {
+		let _ = store.append_step(tid, ThreadStep {
 			action: "user".to_string(),
 			args: json!({"text":"start"}),
 			observation: json!({"ok":true}),
@@ -1745,7 +1745,7 @@ mod tests {
 			agent: Some("ask".to_string()),
 		}).await;
 
-		let _ = store.append_step(tid, crate::session::ThreadStep {
+		let _ = store.append_step(tid, ThreadStep {
 			action: "review_response".to_string(),
 			args: json!({"text":"review text","meta":null}),
 			observation: json!({"ok":true}),

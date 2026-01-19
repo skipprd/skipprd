@@ -6929,6 +6929,8 @@ dependencies = [
  "once_cell",
  "parquet",
  "rand 0.8.5",
+ "react-core",
+ "react-suites",
  "regex",
  "serde",
  "serde_derive",
@@ -6945,6 +6947,39 @@ dependencies = [
  "tungstenite",
  "ureq",
  "uuid 1.18.1",
+ "walkdir",
+]
+
+[[package]]
+name = "react-core"
+version = "0.0.0-git"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "dashmap 5.5.3",
+ "once_cell",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+ "uuid 1.18.1",
+]
+
+[[package]]
+name = "react-suites"
+version = "0.0.0-git"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "react-core",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracing",
  "walkdir",
 ]
 

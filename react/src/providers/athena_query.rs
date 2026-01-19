@@ -8,7 +8,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
-use crate::providers::{DatasetCatalogProvider, DatasetId, QueryProvider, QueryResult};
+use crate::providers::dataset_catalog_provider::{DatasetCatalogProvider, DatasetId};
+use crate::providers::{QueryProvider, QueryResult};
 
 #[derive(Clone)]
 pub struct AthenaQueryProvider {

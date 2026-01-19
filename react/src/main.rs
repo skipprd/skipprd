@@ -5,11 +5,11 @@ use std::path::Path;
 
 use react::adapters::storage::S3StorageAdapter;
 use react::llm;
-use react::providers::{
-    AthenaQueryProvider, AthenaSettings, DbtProjectProvider, DefaultKeyspace, EnvSecretsProvider, LanceVectorStore,
-};
+use react::providers::{AthenaQueryProvider, AthenaSettings};
+use react_suites::SuiteCtx;
+use react::providers::{DefaultKeyspace, EnvSecretsProvider, DbtProjectProvider, LanceVectorStore};
+use react::providers::dbt::DbtRunnerConfig;
 use react::providers::catalog::DefaultCatalogProvider;
-use react::suites::SuiteCtx;
 
 #[derive(Parser, Debug)]
 #[command(name = "react")]
@@ -142,7 +142,44 @@ async fn main() {
             let llm = llm::create_llm(&llm::config_from_resolved(&cfg));
 
             let mut suite_ctx = SuiteCtx::new(storage, secrets, llm, cfg.scope.clone(), keyspace.clone());
-            suite_ctx.resolved_config = Some(Arc::new(cfg.clone()));
+            suite_ctx.resolved_config = Some(Arc::new(react_suites::ReactResolvedConfig {
+                server: react_suites::config::ServerResolved { port: cfg.server.port },
+                storage: react_suites::config::StorageResolved { bucket: cfg.storage.bucket.clone() },
+                scope: cfg.scope.clone(),
+                llm: react_suites::config::LlmResolved::default(),
+                providers: react_suites::config::ProvidersResolved {
+                    athena: react_suites::config::AthenaResolved {
+                        enabled: cfg.providers.athena.enabled,
+	                        workgroup: cfg.providers.athena.workgroup.clone().unwrap_or_default(),
+	                        region: cfg.providers.athena.region.clone().unwrap_or_default(),
+	                        result_s3: cfg.providers.athena.result_s3.clone().unwrap_or_default(),
+                        discovery_cache_ttl_secs: cfg.providers.athena.discovery_cache_ttl_secs,
+                        target_catalog: cfg.providers.athena.target_catalog.clone(),
+	                        source_schema: cfg.providers.athena.source_schema.clone().unwrap_or_default(),
+                    },
+                    catalog: react_suites::config::CatalogResolved {
+                        enabled: cfg.providers.catalog.enabled,
+                        refresh_secs: cfg.providers.catalog.refresh_secs,
+                        max_concurrency: cfg.providers.catalog.max_concurrency,
+                    },
+                    dbt: react_suites::config::DbtResolved {
+                        enabled: cfg.providers.dbt.enabled,
+                        profiles_dir: cfg.providers.dbt.profiles_dir.clone(),
+	                        target: cfg.providers.dbt.target.clone().unwrap_or_default(),
+                        naming: react_suites::config::DbtNamingResolved {
+	                            target_schema: cfg.providers.dbt.naming.target_schema.clone().unwrap_or_default(),
+	                            silver_suffix: cfg.providers.dbt.naming.silver_suffix.clone().unwrap_or_default(),
+	                            gold_suffix: cfg.providers.dbt.naming.gold_suffix.clone().unwrap_or_default(),
+                        },
+	                        runner: cfg.providers.dbt.runner.clone(),
+                        docker_image: cfg.providers.dbt.docker_image.clone(),
+                        docker_platform: cfg.providers.dbt.docker_platform.clone(),
+                        docker_network: cfg.providers.dbt.docker_network.clone(),
+                        docker_mount_aws_dir: cfg.providers.dbt.docker_mount_aws_dir,
+                    },
+                    vector: react_suites::config::VectorResolved { enabled: cfg.providers.vector.enabled },
+                },
+            }));
 
             // Query + dataset discovery (Athena/Glue)
             if cfg.providers.athena.enabled {
@@ -157,36 +194,39 @@ async fn main() {
                     .await,
                 );
                 suite_ctx.query = Some(athena.clone());
-                suite_ctx.datasets = Some(athena);
+                suite_ctx.datasets = Some(athena.clone());
             }
 
-            // Catalog + DBT + vectors
+            // Catalog provider (storage-backed), optional but strongly recommended for UX and speed.
             if cfg.providers.catalog.enabled {
-                suite_ctx.catalog = Some(Arc::new(DefaultCatalogProvider::new(
+                let cat = Arc::new(DefaultCatalogProvider::new(
                     suite_ctx.storage.clone(),
-                    suite_ctx.keyspace.clone(),
+                    keyspace.clone(),
                     suite_ctx.llm.clone(),
-                    cfg.providers.catalog.refresh_secs,
-                    cfg.providers.catalog.max_concurrency,
-                )));
+                    30,
+                    6,
+                ));
+                suite_ctx.catalog = Some(cat);
             }
+
+            // Vector store (LanceDB on S3), optional but enables dataset/artifact search.
+            if cfg.providers.vector.enabled {
+                suite_ctx.vector = Some(Arc::new(LanceVectorStore::new(keyspace.clone(), cfg.scope.clone())));
+            }
+
+            // DBT provider (host/docker runner), required for dbt_validate/build/publish workflows.
             if cfg.providers.dbt.enabled {
+                let runner = DbtRunnerConfig {
+                    mode: cfg.providers.dbt.runner.clone(),
+                    docker_image: cfg.providers.dbt.docker_image.clone(),
+                    docker_platform: cfg.providers.dbt.docker_platform.clone(),
+                    docker_network: cfg.providers.dbt.docker_network.clone(),
+                    docker_mount_aws_dir: cfg.providers.dbt.docker_mount_aws_dir,
+                };
                 suite_ctx.dbt = Some(Arc::new(DbtProjectProvider::new(
                     suite_ctx.storage.clone(),
-                    suite_ctx.keyspace.clone(),
-                    react::providers::dbt::DbtRunnerConfig {
-                        mode: cfg.providers.dbt.runner.clone(),
-                        docker_image: cfg.providers.dbt.docker_image.clone(),
-                        docker_platform: cfg.providers.dbt.docker_platform.clone(),
-                        docker_network: cfg.providers.dbt.docker_network.clone(),
-                        docker_mount_aws_dir: cfg.providers.dbt.docker_mount_aws_dir,
-                    },
-                )));
-            }
-            if cfg.providers.vector.enabled {
-                suite_ctx.vector = Some(Arc::new(LanceVectorStore::new(
-                    suite_ctx.keyspace.clone(),
-                    suite_ctx.scope.clone(),
+                    keyspace.clone(),
+                    runner,
                 )));
             }
 

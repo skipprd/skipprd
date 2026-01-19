@@ -93,7 +93,11 @@ impl LanceDbStore {
             use lancedb::query::ExecutableQuery;
             use lancedb::query::QueryBase;
             let db = lancedb::connect(&self.uri).execute().await.map_err(|e| format!("{:?}", e))?;
-            let tbl = db.open_table("embeddings").execute().await.map_err(|e| format!("{:?}", e))?;
+            // If the dataset/table doesn't exist yet (fresh install), treat as empty results.
+            let tbl = match db.open_table("embeddings").execute().await {
+                Ok(t) => t,
+                Err(_) => return Ok(Vec::new()),
+            };
             let q = tbl.vector_search(query_vec.to_vec()).map_err(|e| format!("{:?}", e))?.limit(k as usize);
             let mut stream = q.execute().await.map_err(|e| format!("{:?}", e))?;
             use futures::StreamExt;
@@ -140,7 +144,11 @@ impl LanceDbStore {
     pub async fn delete_thread_embeddings(&self, thread_id: &str) -> Result<(), String> {
             // Best-effort deletion by id pattern containing thread identifier
             let db = lancedb::connect(&self.uri).execute().await.map_err(|e| format!("{:?}", e))?;
-            let tbl = db.open_table("embeddings").execute().await.map_err(|e| format!("{:?}", e))?;
+            // If embeddings table doesn't exist, nothing to delete.
+            let tbl = match db.open_table("embeddings").execute().await {
+                Ok(t) => t,
+                Err(_) => return Ok(()),
+            };
             // Attempt a predicate delete on id LIKE pattern
             let pred = format!("id LIKE '%:{}:%'", thread_id);
             match tbl.delete(pred.as_str()).await {
@@ -152,7 +160,11 @@ impl LanceDbStore {
     pub async fn delete_pipeline_embeddings(&self) -> Result<(), String> {
             // Best-effort wipe of all rows in the embeddings table.
             let db = lancedb::connect(&self.uri).execute().await.map_err(|e| format!("{:?}", e))?;
-            let tbl = db.open_table("embeddings").execute().await.map_err(|e| format!("{:?}", e))?;
+            // If embeddings table doesn't exist, nothing to delete.
+            let tbl = match db.open_table("embeddings").execute().await {
+                Ok(t) => t,
+                Err(_) => return Ok(()),
+            };
             // Predicate that matches all rows.
             match tbl.delete("id IS NOT NULL").await {
                 Ok(_) => Ok(()),

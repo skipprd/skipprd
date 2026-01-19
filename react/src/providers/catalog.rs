@@ -13,46 +13,7 @@ pub mod utils;
 
 pub use types::{DataCatalog, SemanticModel};
 
-#[async_trait]
-pub trait CatalogProvider: Send + Sync {
-    async fn read_catalog(
-        &self,
-        scope: &crate::providers::RequestScope,
-        dataset_id: &str,
-    ) -> Result<Option<DataCatalog>, String>;
-    async fn write_catalog(
-        &self,
-        scope: &crate::providers::RequestScope,
-        dataset_id: &str,
-        catalog: &DataCatalog,
-    ) -> Result<(), String>;
-
-    async fn infer_semantic(
-        &self,
-        scope: &crate::providers::RequestScope,
-        dataset_id: &str,
-    ) -> Result<SemanticModel, String>;
-    async fn write_semantic(
-        &self,
-        scope: &crate::providers::RequestScope,
-        dataset_id: &str,
-        semantic: &SemanticModel,
-    ) -> Result<(), String>;
-
-    async fn build_all_with_progress(
-        &self,
-        scope: &crate::providers::RequestScope,
-        query: &dyn crate::providers::DatasetCatalogProvider,
-        dataset_ids: &HashMap<String, crate::discover::Metadata>,
-        progress: Option<&crate::helpers::progress::ProgressUi>,
-    ) -> Result<(), String>;
-
-    async fn run_llm_enrichment_all(
-        &self,
-        scope: &crate::providers::RequestScope,
-        dataset_ids: &HashMap<String, crate::discover::Metadata>,
-    ) -> Result<(), String>;
-}
+use react_core::providers::CatalogProvider;
 
 /// Default catalog provider implementation (current behavior).
 ///
@@ -128,7 +89,7 @@ impl CatalogProvider for DefaultCatalogProvider {
     async fn build_all_with_progress(
         &self,
         scope: &crate::providers::RequestScope,
-        query: &dyn crate::providers::DatasetCatalogProvider,
+        query: &dyn crate::providers::dataset_catalog_provider::DatasetCatalogProvider,
         dataset_ids: &HashMap<String, crate::discover::Metadata>,
         progress: Option<&crate::helpers::progress::ProgressUi>,
     ) -> Result<(), String> {

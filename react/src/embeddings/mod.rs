@@ -43,7 +43,7 @@ pub async fn sync_pipeline(
     let _ = keyspace.clone(); // keyspace is used for DBT artifact scanning below.
 
     // Build items (datasets + fields) and upsert in manageable batches
-    let mut items: Vec<crate::vector::lance_store::Chunk> = Vec::new();
+    let mut items: Vec<react_core::providers::VectorChunk> = Vec::new();
     let epoch = chrono::Utc::now().timestamp() as u64;
     for ns in dataset_ids.iter() {
         // Catalog
@@ -114,7 +114,7 @@ pub async fn sync_pipeline(
                         "field:{} role:{} syn:{} desc:{}{}",
                         name, role, synonyms, fdesc, stats_snip
                     );
-                    items.push(crate::vector::lance_store::Chunk {
+                    items.push(react_core::providers::VectorChunk {
                         id: format!("field:{}:{}", ns, name),
                         kind: "field".to_string(),
                         dataset_id: ns.clone(),
@@ -169,7 +169,7 @@ pub async fn sync_pipeline(
                 }
             };
             info!("Embeddings: ns='{}' dataset_text: {}", ns, preview);
-            items.push(crate::vector::lance_store::Chunk {
+            items.push(react_core::providers::VectorChunk {
                 id: format!("dataset:{}", ns),
                 kind: "dataset".to_string(),
                 dataset_id: ns.clone(),
@@ -209,7 +209,7 @@ pub async fn sync_pipeline(
                     if let Ok(bytes) = storage.get_bytes(&k).await {
                         let text = String::from_utf8_lossy(&bytes).to_string();
                         let atype = infer_type_from_key(&k, sc.type_hint);
-                        items.push(crate::vector::lance_store::Chunk {
+                        items.push(react_core::providers::VectorChunk {
                             id: format!("artifact:{}:{}:{}", atype, ns, extract_artifact_name(&k)),
                             kind: "artifact".to_string(),
                             dataset_id: ns.clone(),
@@ -228,7 +228,7 @@ pub async fn sync_pipeline(
                 let key = format!("{}/{}", base, fname);
                 if let Ok(bytes) = storage.get_bytes(&key).await {
                     let text = String::from_utf8_lossy(&bytes).to_string();
-                    items.push(crate::vector::lance_store::Chunk {
+                    items.push(react_core::providers::VectorChunk {
                         id: format!("artifact:{}:{}:{}", *tname, ns, fname),
                         kind: "artifact".to_string(),
                         dataset_id: ns.clone(),

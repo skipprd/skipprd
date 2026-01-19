@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{io::BufRead, process::Stdio};
@@ -7,54 +6,7 @@ use std::{io::BufRead, process::Stdio};
 use crate::adapters::storage::StorageAdapter;
 use crate::providers::{Keyspace, RequestScope};
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct DbtValidateArgs {
-    pub project_name: String,
-    pub profiles_dir: Option<String>,
-    pub target: String,
-    pub run: bool,
-    pub build: bool,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct DbtValidateResult {
-    pub ok: bool,
-    pub deps_ok: bool,
-    pub parse_ok: bool,
-    pub compile_ok: bool,
-    pub run_ok: Option<bool>,
-    pub uploaded_target_files: usize,
-    pub errors: Vec<String>,
-    pub warnings: Vec<String>,
-    pub logs: serde_json::Value,
-}
-
-#[async_trait]
-pub trait DbtProvider: Send + Sync {
-    async fn ensure_minimal_project(&self, scope: &RequestScope) -> Result<(), String>;
-
-    async fn write_model_sql(
-        &self,
-        scope: &RequestScope,
-        dataset_id: &str,
-        name: &str,
-        sql: &str,
-    ) -> Result<String, String>;
-
-    async fn write_metricflow_yaml(
-        &self,
-        scope: &RequestScope,
-        dataset_id: &str,
-        name: &str,
-        yaml_text: &str,
-    ) -> Result<String, String>;
-
-    async fn validate_project(
-        &self,
-        scope: &RequestScope,
-        args: &DbtValidateArgs,
-    ) -> Result<DbtValidateResult, String>;
-}
+use react_core::providers::{DbtProvider, DbtValidateArgs, DbtValidateResult};
 
 #[derive(Clone)]
 pub struct DbtProjectProvider {

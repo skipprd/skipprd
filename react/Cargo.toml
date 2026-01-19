@@ -30,6 +30,8 @@ itertools = "0.12"
 lazy_static = "1.4.0"
 hex = "0.4.3"
 ureq = { version = "2", features = ["json"] }
+react-core = { path = "../crates/react-core" }
+react-suites = { path = "../crates/react-suites" }
 
 # AWS (Athena/Glue provider + S3 storage)
 aws-config = "1.5.1"

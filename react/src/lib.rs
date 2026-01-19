@@ -1,29 +1,18 @@
 //! ReAct agent runtime (library).
 //!
-//! Suites must live under `react/suites`.
+//! Runtime crate (CLI + WS server + concrete provider implementations).
 
 pub mod adapters;
 pub mod config;
 pub mod helpers;
-pub mod discover;
 pub mod llm;
 pub mod models;
-
-pub mod suites;
-
+pub mod providers;
 pub mod ws;
 
-pub mod providers;
-
-pub mod agent;
-pub mod session;
-pub mod tools;
-pub mod flow_frame;
-pub mod util;
-
+// Concrete implementations and utilities used by runtime wiring.
 pub mod vector;
-pub mod dbt;
 pub mod embeddings;
-pub mod prompts;
-pub mod preflight;
+pub mod util;
+pub mod discover;
 

@@ -7,7 +7,7 @@ pub struct CatalogBuilder;
 
 impl CatalogBuilder {
 	pub async fn build_with_stats(
-		dataset: &crate::providers::DatasetId,
+		dataset: &crate::providers::dataset_catalog_provider::DatasetId,
         ns_stats: Option<crate::discover::stats::DatasetFieldStats>,
 		dataset_stats: Option<super::types::DatasetStats>,
 	) -> DataCatalog {

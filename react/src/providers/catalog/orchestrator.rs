@@ -7,7 +7,7 @@ pub struct Orchestrator;
 
 impl Orchestrator {
     pub async fn build_all_with_progress(
-        query: &dyn crate::providers::DatasetCatalogProvider,
+        query: &dyn crate::providers::dataset_catalog_provider::DatasetCatalogProvider,
         dataset_ids: &HashMap<String, crate::discover::Metadata>,
         progress: Option<&crate::helpers::progress::ProgressUi>,
     ) -> Result<Vec<(String, super::types::DataCatalog)>, String> {
@@ -17,7 +17,7 @@ impl Orchestrator {
         } else {
             let requested: HashSet<String> = dataset_ids.keys().cloned().collect();
             let mut found: HashSet<String> = HashSet::new();
-            let mut filtered: Vec<crate::providers::DatasetId> = Vec::new();
+            let mut filtered: Vec<crate::providers::dataset_catalog_provider::DatasetId> = Vec::new();
             for ds in datasets.into_iter() {
                 let fqn = ds.fqn();
                 if requested.contains(&fqn) {

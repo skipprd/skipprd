@@ -1,17 +1,5 @@
+pub use react_core::llm::{LargeLanguageModel, ChatMessage};
 use std::sync::Arc;
-
-/// High-level abstraction for large language models used by the ReAct runtime.
-/// Implementations may be local (llama.cpp) or remote (OpenAI-compatible HTTP).
-pub trait LargeLanguageModel: Send + Sync {
-    fn chat(&self, messages: &[ChatMessage]) -> Result<String, String>;
-    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String>;
-}
-
-#[derive(Clone, Debug)]
-pub struct ChatMessage {
-    pub role: String,  // "system" | "user" | "assistant"
-    pub content: String,
-}
 
 #[derive(Clone, Debug)]
 pub enum LlmProviderType {
