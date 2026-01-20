@@ -11,6 +11,59 @@ use react_core::llm::ChatMessage;
 use react_core::providers::DatasetCatalogProvider;
 use react_core::tools::Tool;
 
+fn extract_string_arg(args: &Value, key: &str) -> Option<String> {
+    args.get(key)
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn resolve_dataset_ids(args: &Value) -> Result<Vec<String>, String> {
+    // Required shape: dataset_ids: [ ... ]
+    let mut out: Vec<String> = args
+        .get("dataset_ids")
+        .and_then(|x| x.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    out.sort();
+    out.dedup();
+    if out.is_empty() {
+        return Err(
+            "staging_model requires args.dataset_ids (string[]) where each item is <catalog>.<schema>.<table>. Refusing to default to all datasets."
+                .to_string(),
+        );
+    }
+    // Validate format early to avoid silent no-ops.
+    for ds in out.iter() {
+        if parse_dataset_id(ds).is_none() {
+            return Err(format!(
+                "invalid dataset_id '{ds}'. Expected <catalog>.<schema>.<table> (e.g. AwsDataCatalog.test_raw.raw_customers)."
+            ));
+        }
+    }
+    Ok(out)
+}
+
+fn resolve_instructions(args: &Value) -> String {
+    // Prefer "instructions", but accept common aliases used in prompts/logs.
+    extract_string_arg(args, "instructions")
+        .or_else(|| extract_string_arg(args, "user_instructions"))
+        .unwrap_or_default()
+}
+
+fn resolve_direct_sql(args: &Value) -> Option<String> {
+    // Accept common keys used by agents/prompts.
+    extract_string_arg(args, "sql")
+        .or_else(|| extract_string_arg(args, "staging_model"))
+        .or_else(|| extract_string_arg(args, "expression"))
+}
+
 #[derive(Clone)]
 pub struct StagingModelTool {
     pub datasets: Option<Arc<dyn DatasetCatalogProvider>>,
@@ -100,36 +153,10 @@ impl Tool for StagingModelTool {
         let query = ctx.query.as_ref().ok_or_else(|| "query provider missing".to_string())?;
         let dbt = ctx.dbt.as_ref().ok_or_else(|| "dbt provider missing".to_string())?;
 
-        // Resolve dataset_ids: explicit list or all discovered.
-        let mut dataset_ids: Vec<String> = args
-            .get("dataset_ids")
-            .and_then(|x| x.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
-                    .filter(|s| !s.is_empty())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        // Resolve datasets explicitly; NEVER default to all datasets.
+        let dataset_ids = resolve_dataset_ids(&args)?;
 
-        if dataset_ids.is_empty() {
-            let ds_provider = self
-                .datasets
-                .as_ref()
-                .ok_or_else(|| "datasets provider missing (cannot default to all datasets)".to_string())?;
-            let ds = ds_provider.list_datasets().await?;
-            dataset_ids = ds.into_iter().map(|d| d.fqn()).collect();
-        }
-
-        dataset_ids.sort();
-        dataset_ids.dedup();
-
-        let instructions = args
-            .get("instructions")
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string();
+        let instructions = resolve_instructions(&args);
 
         // Ensure minimal dbt project exists before writing artifacts.
         let _ = dbt.ensure_minimal_project(&ctx.scope).await;
@@ -153,8 +180,49 @@ impl Tool for StagingModelTool {
         let mut written: Vec<String> = Vec::new();
         let mut notes: Vec<String> = Vec::new();
 
+        // Optional fast-path: direct write mode. If SQL is provided, we write exactly one dataset's model
+        // without calling the LLM (avoids extra OpenAI calls and reduces timeout risk).
+        if let Some(mut sql_out) = resolve_direct_sql(&args) {
+            if dataset_ids.len() != 1 {
+                return Err("staging_model direct-write requires exactly one dataset (use a single-item args.dataset_ids).".to_string());
+            }
+            let ds = &dataset_ids[0];
+            let rel_path = staging_model_rel_path_for_dataset(ds).ok_or_else(|| {
+                format!("unable to derive model path for dataset_id '{ds}' (expected <catalog>.<schema>.<table>)")
+            })?;
+            let key = format!("{}/{}", base, rel_path);
+
+            // Ensure the model lands in the configured SILVER schema suffix even if the caller forgot.
+            if !sql_out.contains("schema=") && !sql_out.contains("schema =") {
+                sql_out = format!(
+                    "{{{{ config(schema=\"{silver_db}\") }}}}\n\n{body}",
+                    silver_db = silver_db,
+                    body = sql_out.trim()
+                );
+            }
+            ctx.storage.put_bytes(&key, sql_out.as_bytes(), "text/sql").await?;
+            written.push(key);
+
+            info!(
+                target: "staging_model",
+                datasets = dataset_ids.len(),
+                written = written.len(),
+                "staging_model finished (direct-write)"
+            );
+
+            return Ok(serde_json::json!({
+                "ok": true,
+                "datasets": dataset_ids.len(),
+                "written_keys": written,
+                "schema_key": schema_key,
+                "notes": [],
+            }));
+        }
+
         for ds in dataset_ids.iter() {
-            let Some(rel_path) = staging_model_rel_path_for_dataset(ds) else { continue };
+            let rel_path = staging_model_rel_path_for_dataset(ds).ok_or_else(|| {
+                format!("unable to derive model path for dataset_id '{ds}' (expected <catalog>.<schema>.<table>)")
+            })?;
             let key = format!("{}/{}", base, rel_path);
 
             let cols = query.schema(ds).await.unwrap_or_default();
@@ -261,6 +329,45 @@ impl Tool for StagingModelTool {
             "schema_key": schema_key,
             "notes": out_notes,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_dataset_ids_accepts_dataset_ids_array() {
+        let args = serde_json::json!({"dataset_ids":["AwsDataCatalog.test_raw.raw_orders","AwsDataCatalog.test_raw.raw_orders"]});
+        let got = resolve_dataset_ids(&args).expect("ok");
+        assert_eq!(got, vec!["AwsDataCatalog.test_raw.raw_orders".to_string()]);
+    }
+
+    #[test]
+    fn resolve_dataset_ids_rejects_missing() {
+        let args = serde_json::json!({});
+        let err = resolve_dataset_ids(&args).unwrap_err();
+        assert!(err.contains("requires args.dataset_ids"));
+        assert!(err.contains("Refusing to default"));
+    }
+
+    #[test]
+    fn resolve_dataset_ids_rejects_invalid_format() {
+        let args = serde_json::json!({"dataset_ids":["test_raw__raw_customers"]});
+        let err = resolve_dataset_ids(&args).unwrap_err();
+        assert!(err.contains("invalid dataset_id"));
+    }
+
+    #[test]
+    fn resolve_direct_sql_prefers_sql_then_staging_model_then_expression() {
+        let a = serde_json::json!({"sql":"select 1"});
+        assert_eq!(resolve_direct_sql(&a).as_deref(), Some("select 1"));
+
+        let b = serde_json::json!({"staging_model":"select 2"});
+        assert_eq!(resolve_direct_sql(&b).as_deref(), Some("select 2"));
+
+        let c = serde_json::json!({"expression":"select 3"});
+        assert_eq!(resolve_direct_sql(&c).as_deref(), Some("select 3"));
     }
 }
 

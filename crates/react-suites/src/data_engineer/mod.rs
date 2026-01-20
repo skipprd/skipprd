@@ -47,6 +47,21 @@ impl AgentPolicy for InterruptOnlyPolicy {
         None
     }
 
+    fn timeout_for_tool(&self, action_name: &str) -> Option<u64> {
+        // Keep base tool timeouts snappy, but raise for known-slow operations.
+        match action_name {
+            // Can involve an inner LLM call + writes.
+            "staging_model" => Some(60),
+            // Warehouse queries can legitimately take >10s.
+            "run_sql" => Some(60),
+            // Batch writes can be larger.
+            "approve_and_save_artifact_batch" => Some(60),
+            // Storage reads/writes sometimes hit network latency.
+            "dbt_files" => Some(30),
+            _ => None,
+        }
+    }
+
     async fn handle_final(
         &self,
         tools: &ToolRegistry,
@@ -103,7 +118,9 @@ impl DataEngineerSuite {
     fn allow_ask_approval_in_phase(log: Option<&react_core::session::ThreadLog>, phase: control_flow::Phase) -> bool {
         let Some(log) = log else { return true };
         let Some(start) = Self::phase_start_idx(log, phase) else { return true };
-        for step in log.steps.iter().skip(start + 1).rev() {
+        // Monotonic: once approval/reject is seen within this phase, never allow ask_approval again
+        // (even if later user messages are "continue", "ok", etc).
+        for step in log.steps.iter().skip(start + 1) {
             if step.action != "user" {
                 continue;
             }
@@ -117,7 +134,6 @@ impl DataEngineerSuite {
             if t == "approve" || t == "reject" {
                 return false;
             }
-            break;
         }
         true
     }
@@ -218,7 +234,6 @@ impl DataEngineerSuite {
             sql_stats::SqlStatsTool,
             vect_query::VectQueryTool,
         };
-        use std::sync::Arc;
 
         /// Thread-derived guard: blocks repeated dbt_validate after failure until a mutation occurs,
         /// and enforces a data probe after runtime (build/run) failures.
@@ -396,7 +411,6 @@ impl DataEngineerSuite {
                 }
                 reg.register(tools::approve_save::ApproveAndSaveArtifactTool);
                 reg.register(tools::approve_save_batch::ApproveAndSaveArtifactBatchTool);
-                reg.register(tools::staging_model::StagingModelTool { datasets: sctx.datasets.clone() });
 
                 if hard_mutation_only {
                     // Put-only dbt_files to avoid "read-only thrash" when we require a mutation next.
@@ -418,7 +432,6 @@ impl DataEngineerSuite {
 
                     tools_card_lines = vec![
                         "Allowed tools (authoring phase; HARD constraint: mutation required next):",
-                        "- staging_model(args:{...})",
                         "- approve_and_save_artifact(args:{kind,name,content,dataset_id?,preview_diff?})",
                         "- approve_and_save_artifact_batch(args:{items:[...],preview_diff?})",
                         "- dbt_files(args:{op:\"put\",path:string,content:string,preview_diff?:bool})",
@@ -429,6 +442,7 @@ impl DataEngineerSuite {
                     ];
                 } else {
                     // Normal authoring: allow read/explore + probes.
+                    reg.register(tools::staging_model::StagingModelTool { datasets: sctx.datasets.clone() });
                     reg.register(SqlRunTool { query: query.clone() });
                     reg.register(tools::dbt_examples::SearchDbtExamplesTool);
                     reg.register(DbtFilesTool);
@@ -441,7 +455,8 @@ impl DataEngineerSuite {
                         "- sql_stats(args:{table:string, field:string}) (requires field; no table-only mode)",
                         "- sql_sample(args:{table:string, field:string, k:int}) (top values for a FIELD; not a row sampler)",
                         "- run_sql(args:{sql:string}) (use this to sample rows: SELECT * FROM <table> LIMIT 20)",
-                        "- staging_model(args:{...})",
+                        "- staging_model(args:{dataset_ids:[string], instructions?:string, sql?:string|staging_model?:string|expression?:string})",
+                        "  - IMPORTANT: you MUST provide dataset_ids. This tool will NOT default to all datasets.",
                         "- approve_and_save_artifact(args:{kind,name,content,dataset_id?,preview_diff?})",
                         "- approve_and_save_artifact_batch(args:{items:[...],preview_diff?})",
                         "- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"put\", path?:string, prefix?:string, content?:string, pointer?:string, limit?:int, max_chars?:int, preview_diff?:bool})",
@@ -776,7 +791,33 @@ impl DataEngineerSuite {
                     }
                     // Ensure minimal dbt project exists.
                     if let Some(dbt) = sctx.dbt.as_ref() {
-                        let _ = dbt.ensure_minimal_project(&sctx.scope).await;
+                        if let Err(e) = dbt.ensure_minimal_project(&sctx.scope).await {
+                            let key = sctx.keyspace.dbt_project_key(&sctx.scope);
+                            return Ok(vec![FlowFrame::AwaitUser {
+                                prompt: format!(
+                                    "Failed to create the DBT project in storage.\n\nExpected file:\n- {key}\n\nError:\n{e}\n\nThis is usually an S3 permission/prefix issue. Fix the runtime’s storage configuration/IAM permissions so it can write the project root, then retry."
+                                ),
+                            }]);
+                        }
+                    }
+                    // Hard gate: dbt_project.yml MUST exist before we proceed, otherwise we will loop in authoring.
+                    let key = sctx.keyspace.dbt_project_key(&sctx.scope);
+                    match sctx.storage.head_etag(&key).await {
+                        Ok(Some(_)) => {}
+                        Ok(None) => {
+                            return Ok(vec![FlowFrame::AwaitUser {
+                                prompt: format!(
+                                    "DBT project is incomplete: `dbt_project.yml` is missing in storage.\n\nExpected file:\n- {key}\n\nI can see models being written under `models/`, but without `dbt_project.yml` the suite cannot validate/build and will keep re-authoring.\n\nFix the runtime’s storage configuration/IAM permissions so it can write the DBT project root (not just `models/`), then retry."
+                                ),
+                            }]);
+                        }
+                        Err(e) => {
+                            return Ok(vec![FlowFrame::AwaitUser {
+                                prompt: format!(
+                                    "Unable to verify presence of `dbt_project.yml` in storage.\n\nExpected file:\n- {key}\n\nError:\n{e}\n\nFix the runtime’s storage configuration/IAM permissions, then retry."
+                                ),
+                            }]);
+                        }
                     }
                     // Persist transition.
                     control_flow::append_phase(&thread_store, thread_id, Some("agent".to_string()), Phase::CleanseAuthor).await;
@@ -785,7 +826,6 @@ impl DataEngineerSuite {
 
                 Phase::CleanseAuthor | Phase::ModelAuthor => {
                     let is_cleanse = phase == Phase::CleanseAuthor;
-                    let agent_name = if is_cleanse { "cleanse" } else { "model" };
                     let sys = crate::util::time_context::with_time_context(if is_cleanse {
                         prompts::cleanse_system_prompt()
                     } else {
@@ -800,7 +840,9 @@ impl DataEngineerSuite {
                         progress_tx: None,
                         pre_step_tx: None,
                         trace_tx: sctx.trace_tx.clone(),
-                        agent_name: Some(agent_name.to_string()),
+                        // IMPORTANT: always record a single agent label for agent-mode runs.
+                        // Phase selection (cleanse vs model) is handled by the deterministic outer loop and prompts.
+                        agent_name: Some("agent".to_string()),
                         // IMPORTANT: in agent-mode, the deterministic outer loop enforces validation/invariants.
                         // We still keep strict ask_user/ask_approval interrupts.
                         policy: std::sync::Arc::new(InterruptOnlyPolicy),
@@ -855,6 +897,30 @@ impl DataEngineerSuite {
                             if !has_proj || !has_models {
                                 // Stay in the same authoring phase; the next pass will be prompted with invariant context.
                                 continue;
+                            }
+                            // Hard gate: if validate previously failed, do not advance unless a successful mutation
+                            // (and any required probes) have been recorded since that failure.
+                            let latest_log = thread_store.get(thread_id).await;
+                            match control_flow::gate_authoring_to_validate(latest_log.as_ref()) {
+                                control_flow::AuthoringGate::Allow => {}
+                                control_flow::AuthoringGate::AwaitUser { prompt } => {
+                                    return Ok(vec![FlowFrame::AwaitUser { prompt }]);
+                                }
+                                control_flow::AuthoringGate::Block { reason } => {
+                                    let _ = thread_store
+                                        .append_step(
+                                            thread_id,
+                                            react_core::session::ThreadStep {
+                                                action: "guard_block".to_string(),
+                                                args: serde_json::json!({"phase": phase.as_str()}),
+                                                observation: serde_json::json!({"ok": false, "reason": reason}),
+                                                ts: chrono::Utc::now().to_rfc3339(),
+                                                agent: Some("agent".to_string()),
+                                            },
+                                        )
+                                        .await;
+                                    continue;
+                                }
                             }
                             control_flow::append_phase(
                                 &thread_store,
@@ -1386,6 +1452,7 @@ mod tests {
         let guard = crate::data_engineer::control_flow::DerivedGuardState {
             last_validate_failed: true,
             mutated_since_fail: false,
+            mutation_failures_since_validate: 0,
             probe_required: false,
             probe_satisfied: false,
         };
@@ -1402,6 +1469,50 @@ mod tests {
 
         // dbt_files get should be blocked (put-only wrapper)
         assert!(reg.call("dbt_files", serde_json::json!({"op":"get","path":"dbt_project.yml"}), &actx).await.is_err());
+    }
+
+    #[test]
+    fn allow_ask_approval_is_monotonic_within_phase() {
+        use crate::data_engineer::control_flow::Phase;
+        use react_core::session::ThreadLog;
+
+        let log = ThreadLog {
+            steps: vec![
+                react_core::session::ThreadStep {
+                    action: "phase".to_string(),
+                    args: serde_json::json!({"phase":"cleanse_author"}),
+                    observation: serde_json::json!({"ok":true}),
+                    ts: "t".to_string(),
+                    agent: Some("agent".to_string()),
+                },
+                react_core::session::ThreadStep {
+                    action: "ask_approval".to_string(),
+                    args: serde_json::json!({"prompt":"p"}),
+                    observation: serde_json::json!({"ok":true}),
+                    ts: "t".to_string(),
+                    agent: Some("agent".to_string()),
+                },
+                react_core::session::ThreadStep {
+                    action: "user".to_string(),
+                    args: serde_json::json!({"text":"approve"}),
+                    observation: serde_json::json!({"ok":true}),
+                    ts: "t".to_string(),
+                    agent: Some("agent".to_string()),
+                },
+                // Later user chatter must not re-enable ask_approval.
+                react_core::session::ThreadStep {
+                    action: "user".to_string(),
+                    args: serde_json::json!({"text":"continue"}),
+                    observation: serde_json::json!({"ok":true}),
+                    ts: "t".to_string(),
+                    agent: Some("agent".to_string()),
+                },
+            ],
+            result: None,
+            title: None,
+            title_finalized: false,
+        };
+        assert_eq!(DataEngineerSuite::allow_ask_approval_in_phase(Some(&log), Phase::CleanseAuthor), false);
     }
 }
 

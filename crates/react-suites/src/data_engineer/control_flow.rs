@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
 use tracing::warn;
@@ -102,6 +101,7 @@ pub async fn append_phase(store: &ThreadStore, thread_id: &str, agent: Option<St
 pub struct DerivedGuardState {
     pub last_validate_failed: bool,
     pub mutated_since_fail: bool,
+    pub mutation_failures_since_validate: usize,
     pub probe_required: bool,
     pub probe_satisfied: bool,
 }
@@ -185,8 +185,13 @@ pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
     // Scan forward from validate for mutations / probes.
     for step in log.steps.iter().skip(vidx + 1) {
         let ok = step.observation.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
-        if ok && is_mutation_step(step) {
-            out.mutated_since_fail = true;
+        if is_mutation_step(step) {
+            if ok {
+                out.mutated_since_fail = true;
+            } else if !out.mutated_since_fail {
+                // Count only consecutive failures until we see a successful mutation.
+                out.mutation_failures_since_validate = out.mutation_failures_since_validate.saturating_add(1);
+            }
         }
         if out.probe_required && ok && step.action == "run_sql" {
             let sql = step.args.get("sql").and_then(|x| x.as_str()).unwrap_or("");
@@ -201,6 +206,42 @@ pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
         out.probe_required = false;
     }
     out
+}
+
+#[derive(Clone, Debug)]
+pub enum AuthoringGate {
+    Allow,
+    Block { reason: String },
+    AwaitUser { prompt: String },
+}
+
+/// Single source of truth for whether we may advance from an authoring phase into a validate phase.
+///
+/// This intentionally enforces suite-level invariants (mutation/probe requirements) in code,
+/// rather than relying on prompt-only instructions.
+pub fn gate_authoring_to_validate(log: Option<&ThreadLog>) -> AuthoringGate {
+    let g = derive_guard_state(log);
+    if g.last_validate_failed && !g.mutated_since_fail {
+        if g.mutation_failures_since_validate >= 3 {
+            return AuthoringGate::AwaitUser {
+                prompt: format!(
+                    "I tried to apply a mutating fix after a failed dbt_validate, but the mutation step failed {} times in a row (often due to tool timeouts or storage write failures).\n\nPlease check:\n- The runtime can write DBT files to storage (S3 prefix/permissions)\n- The agent tool timeout is sufficient for your environment\n\nThen retry. If you want a quick deterministic fix path, use `dbt_files op=put` to edit the failing model SQL directly.",
+                    g.mutation_failures_since_validate
+                ),
+            };
+        }
+        return AuthoringGate::Block {
+            reason: "A DBT validation previously failed and no successful mutation has been recorded since that failure. Apply a mutating fix (e.g. dbt_files op=put / approve_and_save_artifact(_batch)) before re-validating."
+                .to_string(),
+        };
+    }
+    if g.probe_required && !g.probe_satisfied {
+        return AuthoringGate::Block {
+            reason: "Runtime validation previously failed after compile and a data probe is required. Run meaningful run_sql probes (not SELECT 1) to diagnose the failing relation before re-validating."
+                .to_string(),
+        };
+    }
+    AuthoringGate::Allow
 }
  
 pub struct DeterministicDbtValidateOnce;
@@ -366,6 +407,7 @@ mod tests {
         let g = derive_guard_state(Some(&log));
         assert!(g.last_validate_failed);
         assert!(!g.mutated_since_fail);
+        assert_eq!(g.mutation_failures_since_validate, 0);
     }
 
     #[test]
@@ -390,6 +432,43 @@ mod tests {
         let g = derive_guard_state(Some(&log));
         assert!(g.last_validate_failed);
         assert!(g.mutated_since_fail);
+    }
+
+    #[test]
+    fn gate_awaits_user_after_three_failed_mutations() {
+        let log = ThreadLog {
+            steps: vec![
+                step(
+                    "dbt_validate",
+                    serde_json::json!({"build": true}),
+                    serde_json::json!({"ok": false, "compile_ok": false, "run_ok": false, "errors":["x"]}),
+                ),
+                step(
+                    "staging_model",
+                    serde_json::json!({"dataset_id":"AwsDataCatalog.test_raw.raw_customers"}),
+                    serde_json::json!({"ok": false, "error": "tool timeout"}),
+                ),
+                step(
+                    "staging_model",
+                    serde_json::json!({"dataset_id":"AwsDataCatalog.test_raw.raw_customers"}),
+                    serde_json::json!({"ok": false, "error": "tool timeout"}),
+                ),
+                step(
+                    "dbt_files",
+                    serde_json::json!({"op":"put","path":"models/x.sql","content":"select 1"}),
+                    serde_json::json!({"ok": false, "error": "tool timeout"}),
+                ),
+            ],
+            result: None,
+            title: None,
+            title_finalized: false,
+        };
+        match gate_authoring_to_validate(Some(&log)) {
+            AuthoringGate::AwaitUser { prompt } => {
+                assert!(prompt.contains("failed 3 times"));
+            }
+            other => panic!("expected AwaitUser, got {:?}", other),
+        }
     }
 
     #[test]

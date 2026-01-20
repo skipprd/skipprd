@@ -77,6 +77,15 @@ pub trait AgentPolicy: Send + Sync {
         None
     }
 
+    /// Optional per-tool timeout override (in seconds).
+    ///
+    /// By default, tool calls are bounded by `AgentCtx.per_step_timeout_secs`. Suites can raise the
+    /// timeout for known-slow tools (e.g. warehouse queries or LLM-backed generators) without
+    /// globally increasing the timeout for every tool.
+    fn timeout_for_tool(&self, _action_name: &str) -> Option<u64> {
+        None
+    }
+
     /// Handle a model-emitted `{ \"final\": {...} }`. Return:
     /// - `Ok(Some(RunOutcome::Final{..}))` to accept and finish
     /// - `Ok(None)` to reject and continue (policy should append an Observation to transcript)
@@ -464,8 +473,13 @@ impl Agent {
             let args = action.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
 
             info!("agent action: {}", action_name);
+            let timeout_secs = ctx
+                .policy
+                .timeout_for_tool(action_name)
+                .unwrap_or(ctx.per_step_timeout_secs)
+                .max(1);
             let obs = match tokio::time::timeout(
-                std::time::Duration::from_secs(ctx.per_step_timeout_secs),
+                std::time::Duration::from_secs(timeout_secs),
                 tools.call(action_name, args.clone(), ctx),
             )
             .await
@@ -519,6 +533,116 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keyspace::DefaultKeyspace;
+    use crate::scope::RequestScope;
+    use crate::storage::InMemoryStorageAdapter;
+    use crate::tools::ToolRegistry;
+    use async_trait::async_trait;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    struct ScriptedModel {
+        replies: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl crate::llm::LargeLanguageModel for ScriptedModel {
+        fn chat(&self, _messages: &[crate::llm::ChatMessage]) -> Result<String, String> {
+            let mut g = self.replies.lock().map_err(|_| "mutex poisoned".to_string())?;
+            if g.is_empty() {
+                return Err("no more replies".to_string());
+            }
+            Ok(g.remove(0))
+        }
+
+        fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+            Ok(vec![])
+        }
+    }
+
+    struct TimeoutPolicy {
+        inner: DefaultPolicy,
+        secs: u64,
+    }
+
+    #[async_trait]
+    impl AgentPolicy for TimeoutPolicy {
+        fn timeout_for_tool(&self, _action_name: &str) -> Option<u64> {
+            Some(self.secs)
+        }
+
+        async fn handle_final(
+            &self,
+            tools: &ToolRegistry,
+            ctx: &AgentCtx,
+            transcript: &mut Vec<String>,
+            store: Option<&crate::session::ThreadStore>,
+            thread_id: &str,
+            final_obj: &serde_json::Value,
+        ) -> Result<Option<RunOutcome>, String> {
+            self.inner
+                .handle_final(tools, ctx, transcript, store, thread_id, final_obj)
+                .await
+        }
+    }
+
+    struct SlowTool;
+
+    #[async_trait]
+    impl crate::tools::Tool for SlowTool {
+        fn name(&self) -> &'static str {
+            "slow_tool"
+        }
+
+        async fn call(&self, _args: Value, _ctx: &AgentCtx) -> Result<Value, String> {
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            Ok(serde_json::json!({"ok": true}))
+        }
+    }
+
+    #[tokio::test]
+    async fn per_tool_timeout_override_is_used() {
+        let llm = Arc::new(ScriptedModel {
+            replies: Arc::new(Mutex::new(vec![
+                "{\"action\":\"slow_tool\",\"args\":{}}".to_string(),
+                "{\"final\":{\"answer\":\"ok\",\"sql\":\"SELECT 1 AS ok\"}}".to_string(),
+            ])),
+        });
+        let storage = Arc::new(InMemoryStorageAdapter::default());
+        let keyspace = Arc::new(DefaultKeyspace::new("bucket".to_string()));
+        let scope = RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() };
+
+        let mut reg = ToolRegistry::new();
+        reg.register(SlowTool);
+
+        let ctx = AgentCtx {
+            top_k: 1,
+            per_step_timeout_secs: 1,
+            max_steps: 4,
+            thread_id: Some("tid".to_string()),
+            progress_tx: None,
+            pre_step_tx: None,
+            trace_tx: None,
+            agent_name: Some("test".to_string()),
+            policy: Arc::new(TimeoutPolicy { inner: DefaultPolicy, secs: 3 }),
+            llm,
+            storage,
+            scope,
+            keyspace,
+            query: None,
+            dbt: None,
+            vector: None,
+            thread_store: None,
+            runtime: None,
+        };
+
+        let out = Agent::run_until_block(&reg, &ctx, "sys", "tools", "q")
+            .await
+            .expect("ok");
+        match out {
+            RunOutcome::Final { result, .. } => assert_eq!(result.answer, "ok"),
+            _ => panic!("expected final outcome"),
+        }
+    }
 
     #[test]
     fn parse_action_repairs_raw_newlines_inside_json_strings() {

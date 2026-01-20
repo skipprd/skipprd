@@ -80,9 +80,22 @@ impl StorageAdapter for S3StorageAdapter {
             .bucket(&self.bucket)
             .key(key)
             .send()
-            .await
-            .map_err(|e| format!("{:?}", e))?;
-        Ok(resp.e_tag().map(|s| s.to_string()))
+            .await;
+
+        match resp {
+            Ok(r) => Ok(r.e_tag().map(|s| s.to_string())),
+            Err(e) => {
+                // IMPORTANT: "object missing" should be treated as "no etag" (Ok(None)),
+                // not a hard error. Many callers use `head_etag` for existence checks.
+                //
+                // S3 can return either NoSuchKey or NotFound depending on context.
+                let s = format!("{:?}", e);
+                if s.contains("NoSuchKey") || s.contains("NotFound") {
+                    return Ok(None);
+                }
+                Err(s)
+            }
+        }
     }
 
     async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, String> {

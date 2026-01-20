@@ -190,7 +190,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			if question.trim().is_empty() { return Err("question required".into()); }
 			let thread_id = Uuid::new_v4().to_string();
 			let suite_id = req.suite_id.clone();
-			let agent = normalize_agent_new(req.agent_type);
+			let agent = normalize_agent_new(req.agent_type)?;
 			state.current_suite.insert(thread_id.clone(), suite_id.clone());
 			state.current_agent.insert(thread_id.clone(), agent.clone());
 			// Persist initial suite/agent selection so it survives reconnects
@@ -369,7 +369,7 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			if uuid::Uuid::parse_str(&thread_id).is_err() { return Err("invalid thread_id".into()); }
 			let question = req.question.clone().unwrap_or_else(|| "Continue.".to_string());
 			let requested_suite = req.suite_id.clone();
-			let requested_agent = normalize_agent_open(req.agent_type);
+			let requested_agent = normalize_agent_open(req.agent_type)?;
 
 			// Derive current suite/agent from persisted thread log (durable across reconnects)
 			let store = state.thread_store();
@@ -935,12 +935,6 @@ fn derive_thread_context(log: &ThreadLog) -> (String, String) {
 				}
 			}
 		}
-		// Best-effort: if the step recorded an agent, treat it as the latest known mode.
-		if let Some(a) = step.agent.as_ref() {
-			if !a.trim().is_empty() {
-				agent_type = a.to_string();
-			}
-		}
 	}
 	(suite_id, agent_type)
 }
@@ -952,7 +946,7 @@ fn build_suites_catalog(reg: &SuiteRegistry) -> Vec<serde_json::Value> {
 			"data_engineer" => out.push(serde_json::json!({
 				"suiteId": "data_engineer",
 				"label": "Data Engineer",
-				"allowedAgentTypes": ["ask", "model", "cleanse", "review", "agent"],
+				"allowedAgentTypes": ["ask", "agent", "review"],
 				"defaultAgentType": "ask",
 			})),
 			"kb" => out.push(serde_json::json!({
@@ -979,7 +973,7 @@ async fn process_new(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt
 	if question.trim().is_empty() { return Err("question required".into()); }
 	let thread_id = Uuid::new_v4().to_string();
 	let suite_id = req.suite_id.clone();
-	let agent = normalize_agent_new(req.agent_type);
+	let agent = normalize_agent_new(req.agent_type)?;
 	state.current_suite.insert(thread_id.clone(), suite_id.clone());
 	state.current_agent.insert(thread_id.clone(), agent.clone());
 	// Persist initial suite/agent selection so it survives reconnects
@@ -1051,7 +1045,7 @@ async fn process_open(v: &Value, state: &mut ConnState, write: &mut (impl SinkEx
 	if uuid::Uuid::parse_str(&thread_id).is_err() { return Err("invalid thread_id".into()); }
 	let question = req.question.clone().unwrap_or_else(|| "Continue.".to_string());
 	let requested_suite = req.suite_id.clone();
-	let requested_agent = normalize_agent_open(req.agent_type);
+	let requested_agent = normalize_agent_open(req.agent_type)?;
 
 	// Derive current suite/agent from persisted thread log (durable across reconnects)
 	let store = state.thread_store();
@@ -1236,25 +1230,30 @@ async fn process_reject(v: &Value, state: &mut ConnState, write: &mut (impl Sink
 }
 // normalize_agent removed (unused)
 
-fn normalize_agent_new(a: api::new_request::AgentType) -> String {
+fn normalize_agent_new(a: api::new_request::AgentType) -> Result<String, String> {
 	match a {
-		api::new_request::AgentType::Cleanse => "cleanse".to_string(),
-		api::new_request::AgentType::Model => "model".to_string(),
-		api::new_request::AgentType::Ask => "ask".to_string(),
-		api::new_request::AgentType::Kb => "kb".to_string(),
-		api::new_request::AgentType::Agent => "agent".to_string(),
-		api::new_request::AgentType::Review => "review".to_string(),
+		api::new_request::AgentType::Ask => Ok("ask".to_string()),
+		api::new_request::AgentType::Agent => Ok("agent".to_string()),
+		api::new_request::AgentType::Review => Ok("review".to_string()),
+		api::new_request::AgentType::Kb => Ok("kb".to_string()),
+		// No legacy modes: remove cleanse/model from WS-facing agent types.
+		api::new_request::AgentType::Cleanse | api::new_request::AgentType::Model => Err(
+			"agent_type 'cleanse'/'model' is no longer supported; use agent_type='agent' and let phases handle cleanse vs model."
+				.to_string(),
+		),
 	}
 }
 
-fn normalize_agent_open(a: api::open_request::AgentType) -> String {
+fn normalize_agent_open(a: api::open_request::AgentType) -> Result<String, String> {
 	match a {
-		api::open_request::AgentType::Cleanse => "cleanse".to_string(),
-		api::open_request::AgentType::Model => "model".to_string(),
-		api::open_request::AgentType::Ask => "ask".to_string(),
-		api::open_request::AgentType::Kb => "kb".to_string(),
-		api::open_request::AgentType::Agent => "agent".to_string(),
-		api::open_request::AgentType::Review => "review".to_string(),
+		api::open_request::AgentType::Ask => Ok("ask".to_string()),
+		api::open_request::AgentType::Agent => Ok("agent".to_string()),
+		api::open_request::AgentType::Review => Ok("review".to_string()),
+		api::open_request::AgentType::Kb => Ok("kb".to_string()),
+		api::open_request::AgentType::Cleanse | api::open_request::AgentType::Model => Err(
+			"agent_type 'cleanse'/'model' is no longer supported; use agent_type='agent' and let phases handle cleanse vs model."
+				.to_string(),
+		),
 	}
 }
 async fn run_agent_with_processing(
@@ -1688,10 +1687,50 @@ mod tests {
 
 	#[test]
 	fn normalize_agent_includes_agent_and_review() {
-		assert_eq!(normalize_agent_new(api::new_request::AgentType::Agent), "agent");
-		assert_eq!(normalize_agent_new(api::new_request::AgentType::Review), "review");
-		assert_eq!(normalize_agent_open(api::open_request::AgentType::Agent), "agent");
-		assert_eq!(normalize_agent_open(api::open_request::AgentType::Review), "review");
+		assert_eq!(normalize_agent_new(api::new_request::AgentType::Agent).unwrap(), "agent");
+		assert_eq!(normalize_agent_new(api::new_request::AgentType::Review).unwrap(), "review");
+		assert_eq!(normalize_agent_open(api::open_request::AgentType::Agent).unwrap(), "agent");
+		assert_eq!(normalize_agent_open(api::open_request::AgentType::Review).unwrap(), "review");
+		assert!(normalize_agent_new(api::new_request::AgentType::Cleanse).is_err());
+		assert!(normalize_agent_new(api::new_request::AgentType::Model).is_err());
+		assert!(normalize_agent_open(api::open_request::AgentType::Cleanse).is_err());
+		assert!(normalize_agent_open(api::open_request::AgentType::Model).is_err());
+	}
+
+	#[test]
+	fn derive_thread_context_ignores_step_agent_labels() {
+		let log = ThreadLog {
+			steps: vec![
+				ThreadStep {
+					action: "switch_suite".to_string(),
+					args: json!({"from": null, "to": "data_engineer"}),
+					observation: json!({"ok":true}),
+					ts: "t".to_string(),
+					agent: Some("agent".to_string()),
+				},
+				ThreadStep {
+					action: "switch_agent".to_string(),
+					args: json!({"from": null, "to": "agent"}),
+					observation: json!({"ok":true}),
+					ts: "t".to_string(),
+					agent: Some("agent".to_string()),
+				},
+				// Inner phase/tool steps may record agent labels like "cleanse" — these must NOT
+				// override the user-selected agent_type derived from switch_agent.
+				ThreadStep {
+					action: "sql_schema".to_string(),
+					args: json!({}),
+					observation: json!({"ok":true}),
+					ts: "t".to_string(),
+					agent: Some("cleanse".to_string()),
+				},
+			],
+			result: None,
+			title: None,
+			title_finalized: false,
+		};
+		let (_suite, agent_type) = derive_thread_context(&log);
+		assert_eq!(agent_type, "agent");
 	}
 
 	#[test]
