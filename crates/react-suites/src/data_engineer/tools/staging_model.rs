@@ -7,6 +7,7 @@ use tracing::info;
 
 use react_core::agent::AgentCtx;
 use crate::dbt::remediate::active_provider_dialect;
+use crate::data_engineer::schema_yml;
 use react_core::llm::ChatMessage;
 use react_core::providers::DatasetCatalogProvider;
 use react_core::tools::Tool;
@@ -89,37 +90,70 @@ fn parse_dataset_id(dataset_id: &str) -> Option<(String, String, String)> {
     Some((parts[0].to_string(), parts[1].to_string(), parts[2].to_string()))
 }
 
+fn strip_jinja_macros_in_sql_comments(sql: &str) -> (String, usize) {
+    // DBT/Jinja can evaluate macros even inside SQL comments depending on adapter parsing.
+    // We defensively strip comment segments that contain Jinja tokens.
+    let mut removed = 0usize;
+
+    // 1) Remove line comments that contain Jinja tokens
+    let mut lines_out: Vec<String> = Vec::new();
+    for line in sql.lines() {
+        let t = line.trim_start();
+        let is_line_comment = t.starts_with("--");
+        let has_jinja = t.contains("{{") || t.contains("{%") || t.contains("}}") || t.contains("%}");
+        if is_line_comment && has_jinja {
+            removed += 1;
+            continue;
+        }
+        lines_out.push(line.to_string());
+    }
+    let mut s = lines_out.join("\n");
+
+    // 2) Remove block comments that contain Jinja tokens (best-effort, non-nested)
+    loop {
+        let Some(start) = s.find("/*") else { break };
+        let Some(end_rel) = s[start + 2..].find("*/") else { break };
+        let end = start + 2 + end_rel + 2;
+        let block = &s[start..end];
+        let has_jinja = block.contains("{{") || block.contains("{%") || block.contains("}}") || block.contains("%}");
+        if has_jinja {
+            removed += 1;
+            s.replace_range(start..end, "");
+            continue;
+        }
+        // Skip past this block and continue scanning after it.
+        let after = end.min(s.len());
+        let rest = s[after..].to_string();
+        let mut prefix = s[..after].to_string();
+        // Move scan window: replace s with rest, but keep prefix in an accumulator-like way.
+        // Simpler: break out and do a second pass without removing non-jinja blocks.
+        // (we already handled jinja blocks above)
+        prefix.push_str(&rest);
+        s = prefix;
+        break;
+    }
+
+    (s, removed)
+}
+
+fn contains_expected_source_call(sql: &str, expected_db: &str, expected_table: &str) -> bool {
+    let lc = sql.to_lowercase();
+    let db = expected_db.to_lowercase();
+    let table = expected_table.to_lowercase();
+    // Common spellings; keep intentionally simple and robust.
+    let patterns = [
+        format!("source('{}','{}')", db, table),
+        format!("source('{}', '{}')", db, table),
+        format!("source(\"{}\",\"{}\")", db, table),
+        format!("source(\"{}\", \"{}\")", db, table),
+    ];
+    patterns.iter().any(|p| lc.contains(p))
+}
+
 fn staging_model_rel_path_for_dataset(dataset_id: &str) -> Option<String> {
     let (_cat, db, table) = parse_dataset_id(dataset_id)?;
     let name = format!("stg_{}__{}", sanitize_ident(&db), sanitize_ident(&table));
     Some(format!("models/staging/{}.sql", name))
-}
-
-fn make_sources_yaml_from_dataset_ids(dataset_ids: &[String]) -> String {
-    // Keep sources in ONE place: models/schema.yml.
-    // Strategy: group by (catalog, database), emit each table under that source.
-    let mut out = String::new();
-    out.push_str("version: 2\n\n");
-    out.push_str("sources:\n");
-
-    let mut by_cat_db: std::collections::BTreeMap<(String, String), Vec<String>> = std::collections::BTreeMap::new();
-    for ds in dataset_ids {
-        if let Some((cat, db, table)) = parse_dataset_id(ds) {
-            by_cat_db.entry((cat, db)).or_default().push(table);
-        }
-    }
-    for ((cat, db), mut tables) in by_cat_db {
-        tables.sort();
-        tables.dedup();
-        out.push_str(&format!("  - name: {}\n", db));
-        out.push_str(&format!("    database: {}\n", cat));
-        out.push_str(&format!("    schema: {}\n", db));
-        out.push_str("    tables:\n");
-        for t in tables {
-            out.push_str(&format!("      - name: {}\n", t));
-        }
-    }
-    out
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -161,11 +195,37 @@ impl Tool for StagingModelTool {
         // Ensure minimal dbt project exists before writing artifacts.
         let _ = dbt.ensure_minimal_project(&ctx.scope).await;
 
-        // Keep sources in models/schema.yml (deterministic).
-        let schema_yml = make_sources_yaml_from_dataset_ids(&dataset_ids);
+        // Keep sources in models/schema.yml (monotonic merge; never overwrite existing sources).
         let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
         let schema_key = format!("{}/models/schema.yml", base);
-        let _ = ctx.storage.put_bytes(&schema_key, schema_yml.as_bytes(), "text/yaml").await;
+        let existing_schema: Option<String> = match ctx.storage.get_bytes(&schema_key).await {
+            Ok(bytes) => Some(String::from_utf8_lossy(&bytes).to_string()),
+            Err(_) => None,
+        };
+        let merged = match schema_yml::merge_sources_yaml(existing_schema.as_deref(), &dataset_ids) {
+            Ok(s) => s,
+            Err(e) => {
+                // Preserve the prior content if it existed but was not parseable/mergeable.
+                if let Some(prev) = existing_schema.as_ref() {
+                    let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+                    let backup_key = format!("{}/models/schema.yml.bak.{}.yml", base, ts);
+                    let _ = ctx
+                        .storage
+                        .put_bytes(&backup_key, prev.as_bytes(), "text/yaml")
+                        .await;
+                }
+                // Fall back to canonical sources for the requested dataset_ids only.
+                let canonical = schema_yml::sources_yaml_from_dataset_ids(&dataset_ids)?;
+                info!(target: "staging_model", "models/schema.yml merge failed; wrote canonical sources only");
+                // Include original merge error to aid debugging.
+                let _ = e;
+                canonical
+            }
+        };
+        let _ = ctx
+            .storage
+            .put_bytes(&schema_key, merged.as_bytes(), "text/yaml")
+            .await;
 
         let dialect = crate::config::resolved_config_from_ctx(ctx)
             .map(active_provider_dialect)
@@ -187,6 +247,8 @@ impl Tool for StagingModelTool {
                 return Err("staging_model direct-write requires exactly one dataset (use a single-item args.dataset_ids).".to_string());
             }
             let ds = &dataset_ids[0];
+            let (_cat, expected_db, expected_table) = parse_dataset_id(ds)
+                .ok_or_else(|| format!("invalid dataset_id '{ds}' (expected <catalog>.<schema>.<table>)"))?;
             let rel_path = staging_model_rel_path_for_dataset(ds).ok_or_else(|| {
                 format!("unable to derive model path for dataset_id '{ds}' (expected <catalog>.<schema>.<table>)")
             })?;
@@ -199,6 +261,22 @@ impl Tool for StagingModelTool {
                     silver_db = silver_db,
                     body = sql_out.trim()
                 );
+            }
+
+            let (sql_sanitized, removed) = strip_jinja_macros_in_sql_comments(&sql_out);
+            if removed > 0 {
+                sql_out = sql_sanitized;
+            }
+            let has_any_source = sql_out.to_lowercase().contains("source(");
+            if !has_any_source {
+                return Err(format!(
+                    "staging_model requires using a dbt source(). Expected to read from: {{ source(\"{expected_db}\", \"{expected_table}\") }} (derived from dataset_id {ds})."
+                ));
+            }
+            if !contains_expected_source_call(&sql_out, &expected_db, &expected_table) {
+                return Err(format!(
+                    "staging_model produced a source() call that does not match the expected source/table for dataset_id {ds}. Expected: {{ source(\"{expected_db}\", \"{expected_table}\") }}."
+                ));
             }
             ctx.storage.put_bytes(&key, sql_out.as_bytes(), "text/sql").await?;
             written.push(key);
@@ -224,6 +302,8 @@ impl Tool for StagingModelTool {
                 format!("unable to derive model path for dataset_id '{ds}' (expected <catalog>.<schema>.<table>)")
             })?;
             let key = format!("{}/{}", base, rel_path);
+            let (_cat, expected_db, expected_table) = parse_dataset_id(ds)
+                .ok_or_else(|| format!("invalid dataset_id '{ds}' (expected <catalog>.<schema>.<table>)"))?;
 
             let cols = query.schema(ds).await.unwrap_or_default();
             let cols_json: Vec<Value> = cols
@@ -238,6 +318,7 @@ impl Tool for StagingModelTool {
                  Requirements:\n\
                  - Output MUST be valid JSON only.\n\
                  - Produce a dbt model SQL SELECT that reads from the dbt source for this table.\n\
+                 - CRITICAL: You MUST read from: FROM {{{{ source(\"{expected_db}\", \"{expected_table}\") }}}} (do not invent any other source name).\n\
                  - This is SILVER: include sensible cleansing/normalization and stable column naming.\n\
                  - Use the provided schema_columns types to guide casting and cleansing. Do NOT guess types from names.\n\
                  - Time-like fields MUST be detected from schema types when possible:\n\
@@ -291,6 +372,20 @@ impl Tool for StagingModelTool {
                     silver_db = silver_db,
                     body = sql_out.trim()
                 );
+            }
+
+            let (sql_sanitized, _removed) = strip_jinja_macros_in_sql_comments(&sql_out);
+            sql_out = sql_sanitized;
+            let has_any_source = sql_out.to_lowercase().contains("source(");
+            if !has_any_source {
+                return Err(format!(
+                    "staging_model requires using a dbt source(). Expected to read from: {{ source(\"{expected_db}\", \"{expected_table}\") }} (derived from dataset_id {ds})."
+                ));
+            }
+            if !contains_expected_source_call(&sql_out, &expected_db, &expected_table) {
+                return Err(format!(
+                    "staging_model produced a source() call that does not match the expected source/table for dataset_id {ds}. Expected: {{ source(\"{expected_db}\", \"{expected_table}\") }}."
+                ));
             }
 
             ctx.storage.put_bytes(&key, sql_out.as_bytes(), "text/sql").await?;
@@ -368,6 +463,24 @@ mod tests {
 
         let c = serde_json::json!({"expression":"select 3"});
         assert_eq!(resolve_direct_sql(&c).as_deref(), Some("select 3"));
+    }
+
+    #[test]
+    fn strip_jinja_macros_in_line_comment() {
+        let sql = "-- {{ source('x','y') }}\nselect 1";
+        let (out, removed) = strip_jinja_macros_in_sql_comments(sql);
+        assert_eq!(removed, 1);
+        assert!(out.contains("select 1"));
+        assert!(!out.contains("source('x'"));
+    }
+
+    #[test]
+    fn contains_expected_source_call_accepts_common_formats() {
+        let sql1 = "select * from {{ source('test_raw','raw_orders') }}";
+        let sql2 = "select * from {{ source(\"test_raw\", \"raw_orders\") }}";
+        assert!(contains_expected_source_call(sql1, "test_raw", "raw_orders"));
+        assert!(contains_expected_source_call(sql2, "test_raw", "raw_orders"));
+        assert!(!contains_expected_source_call(sql2, "test_raw", "raw_customers"));
     }
 }
 

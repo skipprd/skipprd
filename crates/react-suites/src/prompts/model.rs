@@ -82,7 +82,10 @@ Hard rules:
 pub fn model_tool_card() -> String {
     r#"Tools:
 - artifacts(args:{op:"list", dataset_id?:string, type?:"model"|"metric", limit?:int} | {op:"get", dataset_id:string, type:"model"|"metric", name:string})
-- approve_and_save_artifact(args:{kind:"model"|"metric", name:string, content:string, dataset_id?:string, preview_diff?:bool})
+- approve_and_save_artifact(args:{kind:"model"|"metric", name:string, content:string, dataset_id?:string, dataset_ids?:[string], preview_diff?:bool})
+  # NOTE: approve_and_save_artifact accepts EITHER:
+  # - dataset_id (preferred when specifying a single dataset), OR
+  # - dataset_ids with exactly one item (len==1) to reduce tool-call shape errors.
   # Back-compat (legacy): approve_and_save_artifact also accepts {pipeline, namespace} and treats dataset_id as "<pipeline>.<namespace>".
 - approve_and_save_artifact_batch(args:{items:[{kind:"model"|"metric"|"file", name?:string, dataset_id?:string, path?:string, content:string}], preview_diff?:bool})
 - dbt_files(args:{op:"list"|"get"|"put", prefix?:string, path?:string, content?:string, limit?:int, preview_diff?:bool})
@@ -94,10 +97,13 @@ pub fn model_tool_card() -> String {
 - run_sql(args:{sql:string}) -> {"ok":true,"header":[string], "rows":[[string]]} or {"ok":false,"error":string}
 - ask_user(args:{prompt:string}) -> {"ok":true,"prompt":string}
 - ask_approval(args:{prompt:string}) -> {"ok":true,"prompt":string}
-- dbt_validate(args:{project_name?:string, profiles_dir?:string, target?:string, build?:bool, run?:bool})
-- publish_dbt_to_provider(args:{target?:string, confirm?:bool})
+- dbt_validate(args:{project_name?:string, profiles_dir?:string, target?:string, dataset_ids?:[string], build?:bool, run?:bool})
+- publish_dbt_to_provider(args:{target?:string, dataset_ids?:[string], confirm?:bool})
  - sql_register(args:{dataset_ids:[string]}) -> {"ok":true,"count":int}
- - catalog_note(args:{dataset_id:string, field?:string, text:string, tags?:[string], preview?:boolean})
+ - catalog_note(args:{dataset_id?:string, dataset_ids?:[string], field?:string, text:string, tags?:[string], preview?:boolean})
+   # NOTE: catalog_note accepts EITHER:
+   # - dataset_id (preferred), OR
+   # - dataset_ids with exactly one item (len==1).
 
 Usage guidance:
 - Prefer batch scaffolding: use approve_and_save_artifact_batch to create dbt_project.yml, sources, many staging models, and starter marts in as few batches as possible (<= 20 items per call).

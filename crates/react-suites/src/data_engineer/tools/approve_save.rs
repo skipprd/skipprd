@@ -32,6 +32,32 @@ fn parse_dataset_id(dataset_id: &str) -> Option<(String, String, String)> {
     Some((parts[0].to_string(), parts[1].to_string(), parts[2].to_string()))
 }
 
+fn resolve_single_dataset_id_from_args(args: &Value) -> Result<Option<String>, String> {
+    // Accept explicit dataset_id OR dataset_ids with exactly one entry.
+    if let Some(s) = args.get("dataset_id").and_then(|x| x.as_str()) {
+        let t = s.trim();
+        if !t.is_empty() {
+            return Ok(Some(t.to_string()));
+        }
+    }
+    if let Some(arr) = args.get("dataset_ids").and_then(|x| x.as_array()) {
+        let mut vals: Vec<String> = arr
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
+            .filter(|s| !s.is_empty())
+            .collect();
+        vals.sort();
+        vals.dedup();
+        if vals.len() == 1 {
+            return Ok(Some(vals.remove(0)));
+        }
+        if vals.len() > 1 {
+            return Err("approve_and_save_artifact accepts a single dataset target; provide args.dataset_id OR args.dataset_ids with exactly one item.".to_string());
+        }
+    }
+    Ok(None)
+}
+
 #[async_trait]
 impl Tool for ApproveAndSaveArtifactTool {
     fn name(&self) -> &'static str {
@@ -60,20 +86,15 @@ impl Tool for ApproveAndSaveArtifactTool {
 
         // Refactor: dataset_id replaces legacy (pipeline, namespace).
         // Back-compat: accept either args.dataset_id or args.pipeline+args.namespace.
-        let explicit_dataset_id = args
-            .get("dataset_id")
-            .and_then(|x| x.as_str())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                let p = args.get("pipeline").and_then(|x| x.as_str()).unwrap_or("").trim();
-                let ns = args.get("namespace").and_then(|x| x.as_str()).unwrap_or("").trim();
-                if !p.is_empty() && !ns.is_empty() {
-                    Some(format!("{}.{}", p, ns))
-                } else {
-                    None
-                }
-            });
+        let explicit_dataset_id = resolve_single_dataset_id_from_args(&args)?.or_else(|| {
+            let p = args.get("pipeline").and_then(|x| x.as_str()).unwrap_or("").trim();
+            let ns = args.get("namespace").and_then(|x| x.as_str()).unwrap_or("").trim();
+            if !p.is_empty() && !ns.is_empty() {
+                Some(format!("{}.{}", p, ns))
+            } else {
+                None
+            }
+        });
 
         // Load candidates from thread's resolved_datasets (new or legacy shape)
         let mut candidates: Vec<String> = Vec::new();
@@ -402,6 +423,32 @@ impl Tool for ApproveAndSaveArtifactTool {
         }
 
         Ok(serde_json::json!({"ok": true, "key": current_key, "status": status, "lines_added": lines_added, "lines_removed": lines_removed}))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_single_dataset_id_from_args_accepts_dataset_id() {
+        let args = serde_json::json!({"dataset_id":"AwsDataCatalog.test_raw.raw_customers"});
+        let got = resolve_single_dataset_id_from_args(&args).expect("ok");
+        assert_eq!(got.as_deref(), Some("AwsDataCatalog.test_raw.raw_customers"));
+    }
+
+    #[test]
+    fn resolve_single_dataset_id_from_args_accepts_dataset_ids_len1() {
+        let args = serde_json::json!({"dataset_ids":["AwsDataCatalog.test_raw.raw_customers"]});
+        let got = resolve_single_dataset_id_from_args(&args).expect("ok");
+        assert_eq!(got.as_deref(), Some("AwsDataCatalog.test_raw.raw_customers"));
+    }
+
+    #[test]
+    fn resolve_single_dataset_id_from_args_rejects_dataset_ids_len_gt1() {
+        let args = serde_json::json!({"dataset_ids":["a.b.c","d.e.f"]});
+        let err = resolve_single_dataset_id_from_args(&args).unwrap_err();
+        assert!(err.contains("exactly one"));
     }
 }
 

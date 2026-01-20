@@ -6,6 +6,32 @@ use react_core::tools::Tool;
 
 pub struct CatalogNoteTool;
 
+fn resolve_single_dataset_id(args: &Value) -> Result<String, String> {
+    // Preferred: dataset_id
+    if let Some(s) = args.get("dataset_id").and_then(|x| x.as_str()) {
+        let t = s.trim();
+        if !t.is_empty() {
+            return Ok(t.to_string());
+        }
+    }
+    // Back/alt compat: dataset_ids with exactly one entry
+    if let Some(arr) = args.get("dataset_ids").and_then(|x| x.as_array()) {
+        let mut vals: Vec<String> = arr
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
+            .filter(|s| !s.is_empty())
+            .collect();
+        vals.dedup();
+        if vals.len() == 1 {
+            return Ok(vals.remove(0));
+        }
+        if vals.len() > 1 {
+            return Err("catalog_note accepts a single dataset target; provide args.dataset_id OR args.dataset_ids with exactly one item.".to_string());
+        }
+    }
+    Err("dataset_id required (or dataset_ids with exactly one item)".to_string())
+}
+
 #[async_trait]
 impl Tool for CatalogNoteTool {
     fn name(&self) -> &'static str {
@@ -13,16 +39,8 @@ impl Tool for CatalogNoteTool {
     }
 
     async fn call(&self, args: Value, ctx: &AgentCtx) -> Result<Value, String> {
-        // Engine-agnostic: require dataset_id ("<catalog>.<database>.<table>") for catalog attachment.
-        let dataset_id = args
-            .get("dataset_id")
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        if dataset_id.is_empty() {
-            return Err("dataset_id required".to_string());
-        }
+        // Engine-agnostic: attach notes to one dataset ("<catalog>.<database>.<table>").
+        let dataset_id = resolve_single_dataset_id(&args)?;
         let field_opt = args.get("field").and_then(|x| x.as_str()).map(|s| s.to_string());
         let text = args.get("text").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
         if text.is_empty() {
@@ -218,6 +236,32 @@ impl Tool for CatalogNoteTool {
 
         let est_tokens = ((chat_in_chars + chat_out_chars) as f32 / 4.0).round() as i64;
         Ok(serde_json::json!({"ok": true, "curated": { "digest": digest, "facts": curated }, "key": catalog_key, "llm_expense": {"chat_chars_in": chat_in_chars, "chat_chars_out": chat_out_chars, "est_tokens": est_tokens}}))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_single_dataset_id_accepts_dataset_id() {
+        let args = serde_json::json!({"dataset_id":"AwsDataCatalog.test_raw.raw_customers"});
+        let got = resolve_single_dataset_id(&args).expect("ok");
+        assert_eq!(got, "AwsDataCatalog.test_raw.raw_customers");
+    }
+
+    #[test]
+    fn resolve_single_dataset_id_accepts_dataset_ids_len1() {
+        let args = serde_json::json!({"dataset_ids":["AwsDataCatalog.test_raw.raw_customers"]});
+        let got = resolve_single_dataset_id(&args).expect("ok");
+        assert_eq!(got, "AwsDataCatalog.test_raw.raw_customers");
+    }
+
+    #[test]
+    fn resolve_single_dataset_id_rejects_dataset_ids_len_gt1() {
+        let args = serde_json::json!({"dataset_ids":["a.b.c","d.e.f"]});
+        let err = resolve_single_dataset_id(&args).unwrap_err();
+        assert!(err.contains("exactly one"));
     }
 }
 

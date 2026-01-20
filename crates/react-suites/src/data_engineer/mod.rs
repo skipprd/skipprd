@@ -19,6 +19,7 @@ pub mod prompts;
 pub mod tools;
 pub mod dbt_error;
 pub mod control_flow;
+pub mod schema_yml;
 
 /// Agent-mode policy: preserve strict interrupts (ask_user/ask_approval), but otherwise accept finals.
 struct InterruptOnlyPolicy;

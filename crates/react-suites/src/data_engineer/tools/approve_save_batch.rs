@@ -4,6 +4,7 @@ use serde_json::Value;
 use react_core::agent::AgentCtx;
 use react_core::tools::Tool;
 use tracing::info;
+use crate::data_engineer::schema_yml;
 
 pub struct ApproveAndSaveArtifactBatchTool;
 
@@ -212,7 +213,29 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
             let dbt = ctx.dbt.as_ref().ok_or_else(|| "dbt provider missing".to_string())?;
             let _ = dbt.ensure_minimal_project(&ctx.scope).await;
 
-            ctx.storage.put_bytes(&current_key, content.as_bytes(), content_type).await?;
+            // Special-case: never overwrite models/schema.yml; always merge sources monotonically.
+            // This avoids loops where dbt sources "disappear" between iterative edits.
+            if current_key.ends_with("/models/schema.yml") || current_key.ends_with("models/schema.yml") {
+                let merged = match schema_yml::merge_schema_yml(existing.as_deref(), &content) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        // Preserve prior content under a backup key if present, then fall back to provided content.
+                        if let Some(prev) = existing.as_ref() {
+                            let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
+                            let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+                            let backup_key = format!("{}/models/schema.yml.bak.{}.yml", base, ts);
+                            let _ = ctx.storage.put_bytes(&backup_key, prev.as_bytes(), "text/yaml").await;
+                        }
+                        let _ = e;
+                        content.clone()
+                    }
+                };
+                ctx.storage
+                    .put_bytes(&current_key, merged.as_bytes(), "text/yaml")
+                    .await?;
+            } else {
+                ctx.storage.put_bytes(&current_key, content.as_bytes(), content_type).await?;
+            }
             if !version_key.is_empty() {
                 let _ = ctx.storage.put_bytes(&version_key, content.as_bytes(), content_type).await;
             }
