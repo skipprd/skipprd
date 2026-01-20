@@ -12,7 +12,7 @@ use crate::models;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ThreadAssignedResponse {
+pub struct SuiteProgressResponse {
     #[serde(rename = "v")]
     pub v: i32,
     #[serde(rename = "type")]
@@ -21,34 +21,53 @@ pub struct ThreadAssignedResponse {
     pub server_time: String,
     #[serde(rename = "seq")]
     pub seq: i32,
-    #[serde(rename = "cid")]
-    pub cid: String,
     #[serde(rename = "thread_id")]
     pub thread_id: String,
+    #[serde(rename = "thread_seq", skip_serializing_if = "Option::is_none")]
+    pub thread_seq: Option<i32>,
+    #[serde(rename = "for_cid", skip_serializing_if = "Option::is_none")]
+    pub for_cid: Option<String>,
+    /// Suite id currently running (e.g. data_engineer)
+    #[serde(rename = "suiteId")]
+    pub suite_id: String,
+    /// Ordered list of phases for the current suite (best-effort)
+    #[serde(rename = "phases")]
+    pub phases: Vec<String>,
+    /// Phases considered complete (best-effort)
+    #[serde(rename = "completed")]
+    pub completed: Vec<String>,
+    /// Current phase name
+    #[serde(rename = "current")]
+    pub current: String,
 }
 
-impl ThreadAssignedResponse {
-    pub fn new(v: i32, r#type: Type, server_time: String, seq: i32, cid: String, thread_id: String) -> ThreadAssignedResponse {
-        ThreadAssignedResponse {
+impl SuiteProgressResponse {
+    pub fn new(v: i32, r#type: Type, server_time: String, seq: i32, thread_id: String, suite_id: String, phases: Vec<String>, completed: Vec<String>, current: String) -> SuiteProgressResponse {
+        SuiteProgressResponse {
             v,
             r#type,
             server_time,
             seq,
-            cid,
             thread_id,
+            thread_seq: None,
+            for_cid: None,
+            suite_id,
+            phases,
+            completed,
+            current,
         }
     }
 }
 /// 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub enum Type {
-    #[serde(rename = "thread_assigned")]
-    ThreadAssigned,
+    #[serde(rename = "suite_progress")]
+    SuiteProgress,
 }
 
 impl Default for Type {
     fn default() -> Type {
-        Self::ThreadAssigned
+        Self::SuiteProgress
     }
 }
 

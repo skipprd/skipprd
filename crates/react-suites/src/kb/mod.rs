@@ -81,6 +81,11 @@ impl Suite for KbSuite {
         "kb"
     }
 
+    fn phase_order(&self, _agent_type: &str) -> Vec<String> {
+        // kb suite does not expose internal phases (single-pass).
+        Vec::new()
+    }
+
     async fn handle_new(
         &self,
         thread_id: &str,

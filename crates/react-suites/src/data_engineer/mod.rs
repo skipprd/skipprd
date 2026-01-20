@@ -1345,6 +1345,30 @@ impl Suite for DataEngineerSuite {
         "data_engineer"
     }
 
+    fn phase_order(&self, agent_type: &str) -> Vec<String> {
+        // Only expose phases for agent-mode; other modes are single-pass.
+        if agent_type != "agent" {
+            return Vec::new();
+        }
+        use crate::data_engineer::control_flow::Phase;
+        vec![
+            Phase::Preflight.as_str(),
+            Phase::CleanseAuthor.as_str(),
+            Phase::CleanseValidate.as_str(),
+            Phase::CleanseReview.as_str(),
+            Phase::ModelAuthor.as_str(),
+            Phase::ModelValidate.as_str(),
+            Phase::ModelReview.as_str(),
+            Phase::PublishAwaitApproval.as_str(),
+            Phase::Publish.as_str(),
+            Phase::PostPublishReview.as_str(),
+            Phase::Done.as_str(),
+        ]
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect()
+    }
+
     async fn handle_new(
         &self,
         thread_id: &str,

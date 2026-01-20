@@ -789,6 +789,40 @@ fn summarize_step(step: &ThreadStep) -> String {
 	format!("ts={} agent={} action={} args={} obs={}", step.ts, agent, step.action, args, obs)
 }
 
+fn derive_current_phase_from_steps(steps: &[ThreadStep]) -> String {
+	for step in steps.iter().rev() {
+		if step.action != "phase" {
+			continue;
+		}
+		if let Some(p) = step.args.get("phase").and_then(|v| v.as_str()) {
+			let t = p.trim();
+			if !t.is_empty() {
+				return t.to_string();
+			}
+		}
+	}
+	"preflight".to_string()
+}
+
+fn derive_completed_phases(order: &[String], current: &str) -> Vec<String> {
+	let mut completed: Vec<String> = Vec::new();
+	if order.is_empty() {
+		return completed;
+	}
+	let mut idx: Option<usize> = None;
+	for (i, p) in order.iter().enumerate() {
+		if p == current {
+			idx = Some(i);
+			break;
+		}
+	}
+	let upto = idx.unwrap_or(0);
+	for p in order.iter().take(upto) {
+		completed.push(p.clone());
+	}
+	completed
+}
+
 async fn log_thread_steps_if_enabled(store: &ThreadStore, thread_id: &str, reason: &str) {
 	if !env_truthy("REACT_LOG_THREAD_STEPS") {
 		return;
@@ -974,6 +1008,7 @@ async fn process_new(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt
 	let thread_id = Uuid::new_v4().to_string();
 	let suite_id = req.suite_id.clone();
 	let agent = normalize_agent_new(req.agent_type)?;
+	let trace_enabled = req.trace.unwrap_or(false);
 	state.current_suite.insert(thread_id.clone(), suite_id.clone());
 	state.current_agent.insert(thread_id.clone(), agent.clone());
 	// Persist initial suite/agent selection so it survives reconnects
@@ -1034,7 +1069,7 @@ async fn process_new(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt
 		}).await;
 		let _ = store.set_title_if_absent(&thread_id, &truncate_title(&question, 64)).await;
 	}
-	run_agent_with_processing(&thread_id, &question, &suite_id, &agent, &cid, state, write, m::processing_response::Stage::Queued).await
+	run_agent_with_processing(&thread_id, &question, &suite_id, &agent, &cid, trace_enabled, true, state, write, m::processing_response::Stage::Queued).await
 }
 
 async fn process_open(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt<Message> + Unpin)) -> Result<(), String> {
@@ -1046,6 +1081,7 @@ async fn process_open(v: &Value, state: &mut ConnState, write: &mut (impl SinkEx
 	let question = req.question.clone().unwrap_or_else(|| "Continue.".to_string());
 	let requested_suite = req.suite_id.clone();
 	let requested_agent = normalize_agent_open(req.agent_type)?;
+	let trace_enabled = req.trace.unwrap_or(false);
 
 	// Derive current suite/agent from persisted thread log (durable across reconnects)
 	let store = state.thread_store();
@@ -1110,7 +1146,7 @@ async fn process_open(v: &Value, state: &mut ConnState, write: &mut (impl SinkEx
 		}).await;
 		let _ = store.set_title_if_absent(&thread_id, &truncate_title(&question, 64)).await;
 	}
-	run_agent_with_processing(&thread_id, &question, &suite_id, &agent, &cid, state, write, m::processing_response::Stage::Queued).await
+	run_agent_with_processing(&thread_id, &question, &suite_id, &agent, &cid, trace_enabled, false, state, write, m::processing_response::Stage::Queued).await
 }
 
 async fn process_approve(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt<Message> + Unpin)) -> Result<(), String> {
@@ -1168,7 +1204,7 @@ async fn process_approve(v: &Value, state: &mut ConnState, write: &mut (impl Sin
 		}).await;
 	}
 	tracing::info!("approve: thread_id={} agent={}", thread_id, agent);
-	run_agent_with_processing(&thread_id, "Continue.", &suite_id, &agent, &cid, state, write, m::processing_response::Stage::Queued).await
+	run_agent_with_processing(&thread_id, "Continue.", &suite_id, &agent, &cid, false, false, state, write, m::processing_response::Stage::Queued).await
 }
 
 async fn process_reject(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt<Message> + Unpin)) -> Result<(), String> {
@@ -1226,7 +1262,7 @@ async fn process_reject(v: &Value, state: &mut ConnState, write: &mut (impl Sink
 		}).await;
 	}
 	tracing::info!("reject: thread_id={} agent={}", thread_id, agent);
-	run_agent_with_processing(&thread_id, "Continue.", &suite_id, &agent, &cid, state, write, m::processing_response::Stage::Queued).await
+	run_agent_with_processing(&thread_id, "Continue.", &suite_id, &agent, &cid, false, false, state, write, m::processing_response::Stage::Queued).await
 }
 // normalize_agent removed (unused)
 
@@ -1262,6 +1298,8 @@ async fn run_agent_with_processing(
 	suite_id: &str,
 	agent: &str,
 	cid: &str,
+	trace_enabled: bool,
+	is_new: bool,
 	state: &mut ConnState,
 	write: &mut (impl SinkExt<Message> + Unpin),
 	initial_stage: m::processing_response::Stage,
@@ -1269,7 +1307,7 @@ async fn run_agent_with_processing(
 	// Suite-based runner. We intentionally keep this simple: the suite owns prompts/tools and the core
 	// WS server only handles message I/O. Step-level progress streaming can be reintroduced later by
 	// threading progress channels through the suite runner.
-	return run_agent_with_processing_suite(thread_id, question, suite_id, agent, cid, state, write, initial_stage).await;
+	return run_agent_with_processing_suite(thread_id, question, suite_id, agent, cid, trace_enabled, is_new, state, write, initial_stage).await;
 	}
 fn compact_schema_columns(fields: &[arrow::datatypes::FieldRef]) -> Vec<(String, String)> {
 	use arrow::datatypes::{Field, DataType};
@@ -1292,6 +1330,41 @@ fn compact_schema_columns(fields: &[arrow::datatypes::FieldRef]) -> Vec<(String,
 	}
 	out
 }
+
+fn trace_line_to_text(line: &str) -> Option<String> {
+	// Avoid leaking prompts/tool-cards/system text; only stream toolcall/observation summaries.
+	let s = line.trim();
+	if s.starts_with("System:") || s.starts_with("Tools:") || s.starts_with("User:") {
+		return None;
+	}
+	if let Some(rest) = s.strip_prefix("Assistant:") {
+		// Try to parse the action JSON and emit a compact tool call line.
+		if let Ok(v) = serde_json::from_str::<serde_json::Value>(rest.trim()) {
+			if let Some(action) = v.get("action").and_then(|x| x.as_str()) {
+				return Some(format!("tool_call {action}"));
+			}
+			if v.get("final").is_some() {
+				return None;
+			}
+		}
+		return None;
+	}
+	if let Some(rest) = s.strip_prefix("Observation:") {
+		if let Ok(v) = serde_json::from_str::<serde_json::Value>(rest.trim()) {
+			let ok = v.get("ok").and_then(|x| x.as_bool());
+			let err = v.get("error").and_then(|x| x.as_str()).unwrap_or("");
+			return Some(match ok {
+				Some(true) => "tool_ok".to_string(),
+				Some(false) => {
+					if err.is_empty() { "tool_error".to_string() } else { format!("tool_error: {err}") }
+				}
+				None => "tool_observation".to_string(),
+			});
+		}
+		return Some("tool_observation".to_string());
+	}
+	None
+}
 enum AgentFrame {
 	Final { answer: String, sql: Option<String> },
 	Review { text: String, meta: Option<serde_json::Value> },
@@ -1305,20 +1378,12 @@ async fn run_agent_with_processing_suite(
 	suite_id: &str,
 	agent: &str,
 	cid: &str,
+	trace_enabled: bool,
+	is_new: bool,
 	state: &mut ConnState,
 	write: &mut (impl SinkExt<Message> + Unpin),
 	_initial_stage: m::processing_response::Stage,
 ) -> Result<(), String> {
-	// Optional trace streaming: allow the agent loop to emit short debug lines and forward them
-	// to the client as `processing` frames (extra field `message`).
-	let trace_enabled = std::env::var("REACT_TRACE")
-		.ok()
-		.map(|v| {
-			let vv = v.trim().to_lowercase();
-			vv == "1" || vv == "true" || vv == "yes"
-		})
-		.unwrap_or(false);
-
 	let (trace_tx, mut trace_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 	let mut sctx2 = state.suite_ctx.clone();
 	if trace_enabled {
@@ -1330,30 +1395,77 @@ async fn run_agent_with_processing_suite(
 		.get(suite_id)
 		.ok_or_else(|| format!("invalid suite_id '{}'", suite_id))?
 		.clone();
+	let suite_for_progress = suite.clone();
 	let thread_id_s = thread_id.to_string();
 	let q_s = question.to_string();
 	let agent_s = agent.to_string();
 
-	let agent_task = tokio::spawn(async move { suite.handle_open(&thread_id_s, &q_s, &agent_s, &sctx2).await });
+	let agent_task = tokio::spawn(async move {
+		if is_new {
+			suite.handle_new(&thread_id_s, &q_s, &agent_s, &sctx2).await
+		} else {
+			suite.handle_open(&thread_id_s, &q_s, &agent_s, &sctx2).await
+		}
+	});
 	tokio::pin!(agent_task);
+
+	// Emit suite phase/progress frames while the suite is running (best-effort polling).
+	// This is intentionally cheap and decoupled: the suite already records `phase` steps in the thread log.
+	let phases_order = suite_for_progress.phase_order(agent);
+	let mut last_phase_sent: Option<String> = None;
+	let mut phase_tick = tokio::time::interval(std::time::Duration::from_millis(250));
+	phase_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
 	// While the suite/agent is running, forward trace lines (if enabled).
 	loop {
 		tokio::select! {
+			_ = phase_tick.tick() => {
+				if phases_order.is_empty() {
+					continue;
+				}
+				let store = state.thread_store();
+				let phase = match store.get(thread_id).await {
+					Some(log) => derive_current_phase_from_steps(&log.steps),
+					None => "preflight".to_string(),
+				};
+				if last_phase_sent.as_deref() == Some(phase.as_str()) {
+					continue;
+				}
+				last_phase_sent = Some(phase.clone());
+				let completed = derive_completed_phases(&phases_order, &phase);
+				let mut sp = api::SuiteProgressResponse::new(
+					1,
+					m::suite_progress_response::Type::SuiteProgress,
+					now_iso(),
+					state.next_seq(),
+					thread_id.to_string(),
+					suite_id.to_string(),
+					phases_order.clone(),
+					completed,
+					phase,
+				);
+				sp.for_cid = Some(cid.to_string());
+				let s = serde_json::to_string(&sp).unwrap();
+				state.buffer_last(&s);
+				tracing::info!("WS -> {}", s);
+				let _ = write.send(Message::Text(s)).await;
+			}
 			Some(line) = trace_rx.recv() => {
 				if !trace_enabled { continue; }
-				let msg = if line.len() > 260 { format!("{}…", &line[..260]) } else { line };
-				let outv = serde_json::json!({
-					"v": 1,
-					"type": "processing",
-					"server_time": now_iso(),
-					"seq": state.next_seq(),
-					"thread_id": thread_id,
-					"for_cid": cid,
-					"stage": "processing",
-					"message": msg,
-				});
-				let s = outv.to_string();
+				let Some(mut text) = trace_line_to_text(&line) else { continue };
+				if text.len() > 500 {
+					text = format!("{}…", &text[..500]);
+				}
+				let mut tr = api::TraceResponse::new(
+					1,
+					m::trace_response::Type::Trace,
+					now_iso(),
+					state.next_seq(),
+					thread_id.to_string(),
+					text,
+				);
+				tr.for_cid = Some(cid.to_string());
+				let s = serde_json::to_string(&tr).unwrap();
 				state.buffer_last(&s);
 				tracing::info!("WS -> {}", s);
 				let _ = write.send(Message::Text(s)).await;
@@ -1764,6 +1876,23 @@ mod tests {
 		// No seen messages yet -> both assistant messages should count as unread.
 		let (_max_seq, unread) = compute_unread_for_log(&log, 0);
 		assert_eq!(unread, 2);
+	}
+
+	#[test]
+	fn trace_line_filter_does_not_leak_prompts() {
+		assert_eq!(trace_line_to_text("System: secret prompt"), None);
+		assert_eq!(trace_line_to_text("Tools: huge tool card"), None);
+		assert_eq!(trace_line_to_text("User: hello"), None);
+
+		assert_eq!(
+			trace_line_to_text("Assistant: {\"action\":\"run_sql\",\"args\":{\"sql\":\"select 1\"}}").as_deref(),
+			Some("tool_call run_sql")
+		);
+
+		assert_eq!(
+			trace_line_to_text("Observation: {\"ok\":true}").as_deref(),
+			Some("tool_ok")
+		);
 	}
 
 	#[tokio::test]

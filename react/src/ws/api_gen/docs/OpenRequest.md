@@ -11,6 +11,7 @@ Name | Type | Description | Notes
 **question** | Option<**String**> | Optional nudge to resume the thread (default is \"Continue.\") | [optional]
 **suite_id** | **String** | Suite id to use (e.g. data_engineer | kb) | 
 **agent_type** | **String** | Agent to use for this message; if differs from current, a switch_agent step is recorded. | 
+**trace** | Option<**bool**> | If true, stream lightweight trace frames (tool activity) while the agent runs. | [optional]
 
 [[Back to Model list]](../README.md#documentation-for-models) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to README]](../README.md)
 

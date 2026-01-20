@@ -483,4 +483,3 @@ mod tests {
         assert!(!contains_expected_source_call(sql2, "test_raw", "raw_customers"));
     }
 }
-

@@ -22,6 +22,12 @@ pub use final_response::FinalResponse;
 pub mod review_response;
 pub use review_response::ReviewResponse;
 
+pub mod trace_response;
+pub use trace_response::TraceResponse;
+
+pub mod suite_progress_response;
+pub use suite_progress_response::SuiteProgressResponse;
+
 pub mod await_approval_response;
 pub use await_approval_response::AwaitApprovalResponse;
 

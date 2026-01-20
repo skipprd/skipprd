@@ -12,47 +12,50 @@ use crate::models;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ErrorResponse {
+pub struct TraceResponse {
     #[serde(rename = "v")]
     pub v: i32,
     #[serde(rename = "type")]
     pub r#type: Type,
     #[serde(rename = "server_time")]
     pub server_time: String,
-    #[serde(rename = "error")]
-    pub error: String,
-    /// One of rate_limited
-    #[serde(rename = "code", skip_serializing_if = "Option::is_none")]
-    pub code: Option<String>,
-    #[serde(rename = "cid", skip_serializing_if = "Option::is_none")]
-    pub cid: Option<String>,
-    #[serde(rename = "retry_after_ms", skip_serializing_if = "Option::is_none")]
-    pub retry_after_ms: Option<i32>,
+    #[serde(rename = "seq")]
+    pub seq: i32,
+    #[serde(rename = "thread_id")]
+    pub thread_id: String,
+    #[serde(rename = "thread_seq", skip_serializing_if = "Option::is_none")]
+    pub thread_seq: Option<i32>,
+    #[serde(rename = "for_cid", skip_serializing_if = "Option::is_none")]
+    pub for_cid: Option<String>,
+    /// Lightweight trace line (tool call / observation), suitable for UI streaming. No prompts or hidden reasoning.
+    #[serde(rename = "text")]
+    pub text: String,
 }
 
-impl ErrorResponse {
-    pub fn new(v: i32, r#type: Type, server_time: String, error: String) -> ErrorResponse {
-        ErrorResponse {
+impl TraceResponse {
+    pub fn new(v: i32, r#type: Type, server_time: String, seq: i32, thread_id: String, text: String) -> TraceResponse {
+        TraceResponse {
             v,
             r#type,
             server_time,
-            error,
-            code: None,
-            cid: None,
-            retry_after_ms: None,
+            seq,
+            thread_id,
+            thread_seq: None,
+            for_cid: None,
+            text,
         }
     }
 }
 /// 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub enum Type {
-    #[serde(rename = "error")]
-    Error,
+    #[serde(rename = "trace")]
+    Trace,
 }
 
 impl Default for Type {
     fn default() -> Type {
-        Self::Error
+        Self::Trace
     }
 }
 

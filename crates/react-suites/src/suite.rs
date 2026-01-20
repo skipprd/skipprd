@@ -105,6 +105,18 @@ impl Default for SuiteCtx {
 pub trait Suite: Send + Sync {
     fn id(&self) -> &'static str;
 
+    /// Optional suite-specific phase ordering for UI progress.
+    ///
+    /// The core runtime/server must not hardcode business-domain phases.
+    /// Suites that have meaningful internal phases (e.g. data_engineer agent-mode FSM) can override this.
+    ///
+    /// Return:
+    /// - Ordered phase names (snake_case strings)
+    /// - Or empty vec if the suite does not expose phases.
+    fn phase_order(&self, _agent_type: &str) -> Vec<String> {
+        Vec::new()
+    }
+
     async fn handle_new(
         &self,
         thread_id: &str,
