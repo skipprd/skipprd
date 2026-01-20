@@ -190,7 +190,7 @@ impl DataEngineerSuite {
              - Batch scaffolding: use approve_and_save_artifact_batch to write MANY files, but keep each call small enough to fit the output limit.\n\
                - Hard cap: <= 20 items per approve_and_save_artifact_batch call.\n\
                - If you need more files, do multiple batch-save tool calls over multiple steps.\n\
-               - IMPORTANT: use `dbt_files op=put` for real DBT project files (e.g. path='dbt_project.yml', 'models/schema.yml', 'models/staging/stg_<table>.sql', 'models/core/...'). Use approve_and_save_artifact(_batch) only for models/metrics.\n\
+              - IMPORTANT: use `dbt_files op=put` for real DBT project files (e.g. path='dbt_project.yml', 'models/schema.yml', and staging SQL like 'models/staging/stg_<table>.sql' (or 'models/staging/stg_<schema>__<table>.sql' to avoid collisions), 'models/core/...'). Use approve_and_save_artifact(_batch) only for models/metrics.\n\
              - After saving artifacts: ALWAYS validate with dbt_validate. If validate fails, iterate (edit artifacts, re-validate) until clean.\n\
              - When validation is clean: call publish_dbt_to_provider to materialize curated relations in the active warehouse provider.\n\
                - If publish returns await_approval: ask the user to approve; on approval, re-run publish_dbt_to_provider with confirm=true.\n\
@@ -217,7 +217,7 @@ impl DataEngineerSuite {
              - Batch scaffolding: use approve_and_save_artifact_batch to write MANY files, but keep each call small enough to fit the output limit.\n\
                - Hard cap: <= 20 items per approve_and_save_artifact_batch call.\n\
                - If you need more files, do multiple batch-save tool calls over multiple steps.\n\
-               - Use `dbt_files op=put` for dbt_project.yml and YAML (especially models/schema.yml). Use approve_and_save_artifact(_batch) only for models/metrics.\n\
+              - Use `dbt_files op=put` for dbt_project.yml and YAML (especially models/schema.yml). For staging SQL, prefer 'models/staging/stg_<table>.sql' but use 'models/staging/stg_<schema>__<table>.sql' to avoid collisions.\n\
              - After saving artifacts: ALWAYS validate with dbt_validate. If validate fails, iterate (edit artifacts, re-validate) until clean.\n\
              - When validation is clean: call publish_dbt_to_provider (views by default; propose tables/incremental with rationale and await approval).\n\
              - Use catalog_note to record notable cleansing decisions and assumptions (preview if material).",

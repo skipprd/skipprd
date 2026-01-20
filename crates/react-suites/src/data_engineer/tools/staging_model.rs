@@ -90,6 +90,68 @@ fn parse_dataset_id(dataset_id: &str) -> Option<(String, String, String)> {
     Some((parts[0].to_string(), parts[1].to_string(), parts[2].to_string()))
 }
 
+fn staging_model_name_simple(expected_table: &str) -> String {
+    format!("stg_{}", sanitize_ident(expected_table))
+}
+
+fn staging_model_name_scoped(expected_db: &str, expected_table: &str) -> String {
+    format!(
+        "stg_{}__{}",
+        sanitize_ident(expected_db),
+        sanitize_ident(expected_table)
+    )
+}
+
+/// Resolve a collision-free staging model name for a dataset.
+///
+/// Strategy (in priority order):
+/// - If a canonical `stg_<table>` already exists, reuse it (stable upgrades).
+/// - Else if a scoped `stg_<schema>__<table>` already exists, reuse it (back-compat).
+/// - Else prefer `stg_<table>` unless it would collide in this call (already used) or in the
+///   existing project. If it would collide, use `stg_<schema>__<table>`.
+/// - As a last resort (pathological collisions), append a numeric suffix.
+fn resolve_staging_model_name(
+    expected_db: &str,
+    expected_table: &str,
+    existing_names: &HashSet<String>,
+    used_names: &HashSet<String>,
+) -> String {
+    let simple = staging_model_name_simple(expected_table);
+    let scoped = staging_model_name_scoped(expected_db, expected_table);
+
+    // Reuse existing models where possible to keep behavior stable over time.
+    if existing_names.contains(&simple) && !used_names.contains(&simple) {
+        return simple;
+    }
+    if existing_names.contains(&scoped) && !used_names.contains(&scoped) {
+        return scoped;
+    }
+
+    // Prefer simple name unless it would collide.
+    let simple_collides = used_names.contains(&simple) || existing_names.contains(&simple);
+    let scoped_collides = used_names.contains(&scoped) || existing_names.contains(&scoped);
+
+    if !simple_collides {
+        return simple;
+    }
+    if !scoped_collides {
+        return scoped;
+    }
+
+    // Last resort: ensure uniqueness by suffixing.
+    for i in 2..=99usize {
+        let cand = format!("{}_{}", scoped, i);
+        if !used_names.contains(&cand) && !existing_names.contains(&cand) {
+            return cand;
+        }
+    }
+    scoped
+}
+
+fn staging_model_rel_path_for_name(model_name: &str) -> String {
+    format!("models/staging/{}.sql", model_name)
+}
+
 fn strip_jinja_macros_in_sql_comments(sql: &str) -> (String, usize) {
     // DBT/Jinja can evaluate macros even inside SQL comments depending on adapter parsing.
     // We defensively strip comment segments that contain Jinja tokens.
@@ -150,10 +212,51 @@ fn contains_expected_source_call(sql: &str, expected_db: &str, expected_table: &
     patterns.iter().any(|p| lc.contains(p))
 }
 
-fn staging_model_rel_path_for_dataset(dataset_id: &str) -> Option<String> {
-    let (_cat, db, table) = parse_dataset_id(dataset_id)?;
-    let name = format!("stg_{}__{}", sanitize_ident(&db), sanitize_ident(&table));
-    Some(format!("models/staging/{}.sql", name))
+fn normalize_jinja_config_tags(sql: &str) -> String {
+    // dbt config is a macro call, not a Jinja tag. Convert common mistaken usage:
+    //   {% config(...) %}  ->  {{ config(...) }}
+    let mut out: Vec<String> = Vec::new();
+    for line in sql.lines() {
+        let t = line.trim();
+        if t.starts_with("{%") && t.contains("config(") && t.ends_with("%}") {
+            let mut s = line.to_string();
+            s = s.replacen("{%", "{{", 1);
+            // Replace only the final closing token on this line.
+            if let Some(pos) = s.rfind("%}") {
+                s.replace_range(pos..pos + 2, "}}");
+            }
+            out.push(s);
+            continue;
+        }
+        out.push(line.to_string());
+    }
+    out.join("\n")
+}
+
+fn strip_all_config_lines(sql: &str) -> String {
+    // Remove config-only lines; we will inject a canonical single config line at top.
+    let mut out: Vec<String> = Vec::new();
+    for line in sql.lines() {
+        let t = line.trim();
+        let is_config_line = (t.starts_with("{{") || t.starts_with("{%")) && t.contains("config(");
+        if is_config_line {
+            continue;
+        }
+        out.push(line.to_string());
+    }
+    out.join("\n")
+}
+
+fn ensure_model_config(sql: &str, schema_suffix: &str, alias: &str) -> String {
+    let sql = normalize_jinja_config_tags(sql);
+    let body = strip_all_config_lines(&sql).trim().to_string();
+    if body.is_empty() {
+        return format!("{{{{ config(schema=\"{}\", alias=\"{}\") }}}}\n", schema_suffix, alias);
+    }
+    format!(
+        "{{{{ config(schema=\"{}\", alias=\"{}\") }}}}\n\n{}",
+        schema_suffix, alias, body
+    )
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -237,6 +340,26 @@ impl Tool for StagingModelTool {
             .map(|c| c.providers.dbt.naming.silver_suffix.clone())
             .unwrap_or_else(|| "silver".to_string());
 
+        // Discover existing staging model names to keep naming stable across runs.
+        let staging_prefix = format!("{}/models/staging/", base);
+        let mut existing_model_names: HashSet<String> = HashSet::new();
+        if let Ok(keys) = ctx.storage.list_prefix(&staging_prefix).await {
+            for k in keys {
+                if !k.ends_with(".sql") {
+                    continue;
+                }
+                if k.contains("/_versions/") {
+                    continue;
+                }
+                let file = k.rsplit('/').next().unwrap_or("").trim();
+                let stem = file.strip_suffix(".sql").unwrap_or(file).trim();
+                if !stem.is_empty() {
+                    existing_model_names.insert(stem.to_string());
+                }
+            }
+        }
+        let mut used_model_names: HashSet<String> = HashSet::new();
+
         let mut written: Vec<String> = Vec::new();
         let mut notes: Vec<String> = Vec::new();
 
@@ -249,19 +372,12 @@ impl Tool for StagingModelTool {
             let ds = &dataset_ids[0];
             let (_cat, expected_db, expected_table) = parse_dataset_id(ds)
                 .ok_or_else(|| format!("invalid dataset_id '{ds}' (expected <catalog>.<schema>.<table>)"))?;
-            let rel_path = staging_model_rel_path_for_dataset(ds).ok_or_else(|| {
-                format!("unable to derive model path for dataset_id '{ds}' (expected <catalog>.<schema>.<table>)")
-            })?;
+            let model_name = resolve_staging_model_name(&expected_db, &expected_table, &existing_model_names, &used_model_names);
+            let rel_path = staging_model_rel_path_for_name(&model_name);
             let key = format!("{}/{}", base, rel_path);
 
-            // Ensure the model lands in the configured SILVER schema suffix even if the caller forgot.
-            if !sql_out.contains("schema=") && !sql_out.contains("schema =") {
-                sql_out = format!(
-                    "{{{{ config(schema=\"{silver_db}\") }}}}\n\n{body}",
-                    silver_db = silver_db,
-                    body = sql_out.trim()
-                );
-            }
+            // Force a canonical config: schema suffix + alias (prevents dbt identifier collisions).
+            sql_out = ensure_model_config(&sql_out, &silver_db, &model_name);
 
             let (sql_sanitized, removed) = strip_jinja_macros_in_sql_comments(&sql_out);
             if removed > 0 {
@@ -298,12 +414,12 @@ impl Tool for StagingModelTool {
         }
 
         for ds in dataset_ids.iter() {
-            let rel_path = staging_model_rel_path_for_dataset(ds).ok_or_else(|| {
-                format!("unable to derive model path for dataset_id '{ds}' (expected <catalog>.<schema>.<table>)")
-            })?;
-            let key = format!("{}/{}", base, rel_path);
             let (_cat, expected_db, expected_table) = parse_dataset_id(ds)
                 .ok_or_else(|| format!("invalid dataset_id '{ds}' (expected <catalog>.<schema>.<table>)"))?;
+            let model_name = resolve_staging_model_name(&expected_db, &expected_table, &existing_model_names, &used_model_names);
+            used_model_names.insert(model_name.clone());
+            let rel_path = staging_model_rel_path_for_name(&model_name);
+            let key = format!("{}/{}", base, rel_path);
 
             let cols = query.schema(ds).await.unwrap_or_default();
             let cols_json: Vec<Value> = cols
@@ -333,6 +449,7 @@ impl Tool for StagingModelTool {
                      (B) Keep NULLs and add a note recommending a conditional dbt test (with where:) and why.\n\
                  - IMPORTANT: this model must be built into the SILVER schema suffix \"{silver_db}\".\n\
                    Include a dbt config block that sets schema to \"{silver_db}\".\n\
+                 - IMPORTANT: Do NOT set a dbt alias. The suite will enforce a canonical alias to avoid collisions.\n\
                  - Nested fields: use Trino/Athena struct dereference like context.session.id (DO NOT quote the whole path).\n\
                  - If a column name is reserved (e.g. timestamp), quote JUST the identifier (\"timestamp\").\n\
                  - Keep changes aligned with the user's instructions, even if they are unconventional.\n\
@@ -365,14 +482,8 @@ impl Tool for StagingModelTool {
             }
 
             let mut sql_out = parsed.sql;
-            // Ensure the model lands in the configured SILVER schema suffix even if the LLM forgets.
-            if !sql_out.contains("schema=") && !sql_out.contains("schema =") {
-                sql_out = format!(
-                    "{{{{ config(schema=\"{silver_db}\") }}}}\n\n{body}",
-                    silver_db = silver_db,
-                    body = sql_out.trim()
-                );
-            }
+            // Force a canonical config: schema suffix + alias (prevents dbt identifier collisions).
+            sql_out = ensure_model_config(&sql_out, &silver_db, &model_name);
 
             let (sql_sanitized, _removed) = strip_jinja_macros_in_sql_comments(&sql_out);
             sql_out = sql_sanitized;
@@ -481,5 +592,29 @@ mod tests {
         assert!(contains_expected_source_call(sql1, "test_raw", "raw_orders"));
         assert!(contains_expected_source_call(sql2, "test_raw", "raw_orders"));
         assert!(!contains_expected_source_call(sql2, "test_raw", "raw_customers"));
+    }
+
+    #[test]
+    fn resolve_staging_model_name_reuses_existing_simple() {
+        let existing = HashSet::from(["stg_raw_orders".to_string()]);
+        let used = HashSet::new();
+        let got = resolve_staging_model_name("test_raw", "raw_orders", &existing, &used);
+        assert_eq!(got, "stg_raw_orders");
+    }
+
+    #[test]
+    fn resolve_staging_model_name_defaults_to_simple_when_no_collision() {
+        let existing = HashSet::new();
+        let used = HashSet::new();
+        let got = resolve_staging_model_name("test_raw", "raw_orders", &existing, &used);
+        assert_eq!(got, "stg_raw_orders");
+    }
+
+    #[test]
+    fn resolve_staging_model_name_falls_back_to_scoped_on_collision() {
+        let existing = HashSet::from(["stg_raw_orders".to_string()]);
+        let used = HashSet::from(["stg_raw_orders".to_string()]);
+        let got = resolve_staging_model_name("test_raw", "raw_orders", &existing, &used);
+        assert_eq!(got, "stg_test_raw__raw_orders");
     }
 }
