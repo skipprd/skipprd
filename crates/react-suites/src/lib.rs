@@ -8,7 +8,6 @@ pub mod suite;
 pub mod flow_frame;
 pub mod kb;
 pub mod config;
-pub mod shared;
 pub mod data_engineer_shared;
 pub mod data_engineer;
 pub mod preflight;

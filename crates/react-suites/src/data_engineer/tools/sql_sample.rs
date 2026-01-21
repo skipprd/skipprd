@@ -41,4 +41,3 @@ impl Tool for SqlSampleTool {
         }
     }
 }
-

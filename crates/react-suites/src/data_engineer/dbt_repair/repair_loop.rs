@@ -1,7 +1,7 @@
 use react_core::agent::AgentCtx;
-use crate::dbt::remediate::active_provider_dialect;
-use crate::dbt::remediate::list_sql_keys_for_scope;
-use crate::dbt::remediate::remediate_dbt_sql_keys_with_llm;
+use super::remediate::active_provider_dialect;
+use super::remediate::list_sql_keys_for_scope;
+use super::remediate::remediate_dbt_sql_keys_with_llm;
 use react_core::providers::{CatalogProvider, DatasetCatalogProvider, DbtProvider, DbtValidateArgs, DbtValidateResult};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -51,7 +51,7 @@ fn extract_sql_rel_paths_from_dbt_errors(errors: &[String]) -> Vec<String> {
                 let end = abs + end_rel + ".sql".len();
                 let rel = s[abs..end]
                     .trim()
-                    .trim_matches(|c| c == '(' || c == ')' || c == '"' || c == '\'');
+                    .trim_matches(|c| c == '(' || c == ')' || c == '\"' || c == '\'');
                 if rel.starts_with("models/") && rel.ends_with(".sql") {
                     out.push(rel.to_string());
                 }
@@ -165,7 +165,7 @@ pub async fn run_repair_loop(
                 "validate"
             };
 
-            if let Ok(dec) = crate::dbt::remediate::llm_should_remediate_sql(ctx, &dialect, phase, &brief) {
+            if let Ok(dec) = super::remediate::llm_should_remediate_sql(ctx, &dialect, phase, &brief) {
                 llm_decision_should = Some(dec.should_remediate);
                 llm_decision_conf = Some(dec.confidence);
                 llm_decision_reason = Some(dec.reason.clone());
@@ -678,4 +678,3 @@ mod tests {
         assert_eq!(rep.iterations[0].llm_changed_files, 0);
     }
 }
-

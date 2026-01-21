@@ -126,4 +126,3 @@ fn encode_key_component(s: &str) -> String {
     }
     out
 }
-

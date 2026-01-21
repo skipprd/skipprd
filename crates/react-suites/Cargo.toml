@@ -16,3 +16,5 @@ tempfile = "3.10"
 tracing = "0.1"
 
 react-core = { path = "../react-core" }
+diffy = "0.4.2"
+hex = "0.4.3"

@@ -88,7 +88,7 @@ pub fn model_tool_card() -> String {
   # - dataset_ids with exactly one item (len==1) to reduce tool-call shape errors.
   # Back-compat (legacy): approve_and_save_artifact also accepts {pipeline, namespace} and treats dataset_id as "<pipeline>.<namespace>".
 - approve_and_save_artifact_batch(args:{items:[{kind:"model"|"metric"|"file", name?:string, dataset_id?:string, path?:string, content:string}], preview_diff?:bool})
-- dbt_files(args:{op:"list"|"get"|"put", prefix?:string, path?:string, content?:string, limit?:int, preview_diff?:bool})
+- dbt_files(args:{op:"list"|"get"|"get_json"|"manifest_find"|"patch", prefix?:string, path?:string, patch_text?:string, content?:string, base_sha256?:string, create_if_missing?:bool, pointer?:string, limit?:int, preview_diff?:bool, max_chars?:int})
 - vect_query(args:{scope:"dataset"|"field"|"doc"|"artifact"|"metric"|"model", query_text:string, k:int})
 - search_dbt_examples(args:{query:string, k?:int}) -> {"ok":true,"examples":[{project,path,s3_uri,preview,score}]}
 - sql_schema(args:{table?:string}) -> {"ok":true,"tables":[...]} or {"ok":true,"columns":[{"name":string,"type":string}]}
@@ -107,7 +107,8 @@ pub fn model_tool_card() -> String {
 
 Usage guidance:
 - Prefer batch scaffolding: use approve_and_save_artifact_batch to create dbt_project.yml, sources, many staging models, and starter marts in as few batches as possible (<= 20 items per call).
-- Use `dbt_files op=put` for dbt_project.yml, models/schema.yml, and any other non-model project files. Use kind=\"model\" only for model SQL.
+- Use `dbt_files op=patch` for dbt_project.yml, packages.yml, models/schema.yml, and any other non-model project files. Use kind=\"model\" only for model SQL.
+- If you reference any package macros, ensure packages.yml includes the required packages and run dbt deps.
 - For updates, first compute a diff via preview_diff=true, then ask_approval, then save.
 - After saving and validating, produce final with {"answer":"<concise>","sql":"SELECT 1 AS ok"} (or another safe validation SELECT).
 - Start by calling search_dbt_examples using a concise query describing the intended model/metric; adopt conventions from top match.

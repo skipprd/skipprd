@@ -50,4 +50,3 @@ impl Tool for SqlSchemaTool {
         }
     }
 }
-

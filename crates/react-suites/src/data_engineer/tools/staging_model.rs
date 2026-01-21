@@ -6,8 +6,8 @@ use std::sync::Arc;
 use tracing::info;
 
 use react_core::agent::AgentCtx;
-use crate::dbt::remediate::active_provider_dialect;
-use crate::data_engineer::schema_yml;
+use crate::data_engineer::dbt_repair::remediate::active_provider_dialect;
+use crate::data_engineer::project_fs;
 use react_core::llm::ChatMessage;
 use react_core::providers::DatasetCatalogProvider;
 use react_core::tools::Tool;
@@ -106,52 +106,6 @@ fn staging_model_rel_path_for_name(model_name: &str) -> String {
     format!("models/staging/{}.sql", model_name)
 }
 
-fn strip_jinja_macros_in_sql_comments(sql: &str) -> (String, usize) {
-    // DBT/Jinja can evaluate macros even inside SQL comments depending on adapter parsing.
-    // We defensively strip comment segments that contain Jinja tokens.
-    let mut removed = 0usize;
-
-    // 1) Remove line comments that contain Jinja tokens
-    let mut lines_out: Vec<String> = Vec::new();
-    for line in sql.lines() {
-        let t = line.trim_start();
-        let is_line_comment = t.starts_with("--");
-        let has_jinja = t.contains("{{") || t.contains("{%") || t.contains("}}") || t.contains("%}");
-        if is_line_comment && has_jinja {
-            removed += 1;
-            continue;
-        }
-        lines_out.push(line.to_string());
-    }
-    let mut s = lines_out.join("\n");
-
-    // 2) Remove block comments that contain Jinja tokens (best-effort, non-nested)
-    loop {
-        let Some(start) = s.find("/*") else { break };
-        let Some(end_rel) = s[start + 2..].find("*/") else { break };
-        let end = start + 2 + end_rel + 2;
-        let block = &s[start..end];
-        let has_jinja = block.contains("{{") || block.contains("{%") || block.contains("}}") || block.contains("%}");
-        if has_jinja {
-            removed += 1;
-            s.replace_range(start..end, "");
-            continue;
-        }
-        // Skip past this block and continue scanning after it.
-        let after = end.min(s.len());
-        let rest = s[after..].to_string();
-        let mut prefix = s[..after].to_string();
-        // Move scan window: replace s with rest, but keep prefix in an accumulator-like way.
-        // Simpler: break out and do a second pass without removing non-jinja blocks.
-        // (we already handled jinja blocks above)
-        prefix.push_str(&rest);
-        s = prefix;
-        break;
-    }
-
-    (s, removed)
-}
-
 fn contains_expected_source_call(sql: &str, expected_db: &str, expected_table: &str) -> bool {
     let lc = sql.to_lowercase();
     let db = expected_db.to_lowercase();
@@ -181,135 +135,6 @@ fn matching_staging_rel_paths_by_source(
             }
         })
         .collect()
-}
-
-fn normalize_jinja_config_tags(sql: &str) -> String {
-    // dbt config is a macro call, not a Jinja tag. Convert common mistaken usage:
-    //   {% config(...) %}  ->  {{ config(...) }}
-    let mut out: Vec<String> = Vec::new();
-    for line in sql.lines() {
-        let t = line.trim();
-        if t.starts_with("{%") && t.contains("config(") && t.ends_with("%}") {
-            let mut s = line.to_string();
-            s = s.replacen("{%", "{{", 1);
-            // Replace only the final closing token on this line.
-            if let Some(pos) = s.rfind("%}") {
-                s.replace_range(pos..pos + 2, "}}");
-            }
-            out.push(s);
-            continue;
-        }
-        out.push(line.to_string());
-    }
-    out.join("\n")
-}
-
-fn strip_all_config_lines(sql: &str) -> String {
-    // Remove config-only lines; we will inject a canonical single config line at top.
-    let mut out: Vec<String> = Vec::new();
-    for line in sql.lines() {
-        let t = line.trim();
-        let is_config_line = (t.starts_with("{{") || t.starts_with("{%")) && t.contains("config(");
-        if is_config_line {
-            continue;
-        }
-        out.push(line.to_string());
-    }
-    out.join("\n")
-}
-
-fn strip_orphaned_leading_fragments(sql: &str) -> (String, usize) {
-    // Some LLM outputs include stray fragments like:
-    //   schema='silver'
-    //   ) }}
-    // which are invalid SQL and will cause Athena/Trino parse errors.
-    //
-    // We keep an initial canonical config line if present, then drop non-SQL junk lines
-    // until we reach a real SQL statement (WITH/SELECT) or a comment.
-    let mut removed = 0usize;
-    let mut out: Vec<String> = Vec::new();
-
-    let mut saw_sql_start = false;
-    let mut kept_config = false;
-
-    for line in sql.lines() {
-        let t = line.trim();
-        let tl = t.to_lowercase();
-
-        // Preserve the canonical dbt config line (once) if present.
-        if !kept_config && t.starts_with("{{") && t.contains("config(") && t.ends_with("}}") {
-            out.push(line.to_string());
-            kept_config = true;
-            continue;
-        }
-
-        if saw_sql_start {
-            out.push(line.to_string());
-            continue;
-        }
-
-        // Allow leading blank lines to be re-inserted later.
-        if t.is_empty() {
-            continue;
-        }
-
-        // Allow leading comments (but strip any that look like orphaned Jinja fragments).
-        let is_comment = t.starts_with("--") || t.starts_with("/*");
-        if is_comment {
-            // If the comment contains Jinja tokens, it will be stripped later by
-            // strip_jinja_macros_in_sql_comments(). Here we only guard against
-            // obvious orphaned fragment noise.
-            if (t.contains("}}") && !t.contains("{{")) || tl.starts_with("schema") || tl.starts_with("alias") {
-                removed += 1;
-                continue;
-            }
-            out.push(line.to_string());
-            continue;
-        }
-
-        // Detect real SQL start.
-        if tl.starts_with("with") || tl.starts_with("select") {
-            saw_sql_start = true;
-            out.push(line.to_string());
-            continue;
-        }
-
-        // Drop obvious orphaned fragments before SQL begins.
-        let looks_like_orphaned_jinja = t.contains("}}") && !t.contains("{{");
-        let looks_like_schema_assign = tl.starts_with("schema") || tl.starts_with("alias");
-        let looks_like_jinja_tag = t.starts_with('{') && (t.contains("}}") || t.contains("%}"));
-        if looks_like_orphaned_jinja || looks_like_schema_assign || looks_like_jinja_tag {
-            removed += 1;
-            continue;
-        }
-
-        // Any other non-empty non-comment line before SQL is suspect; drop it.
-        removed += 1;
-    }
-
-    // Ensure a single blank line between config and SQL/comments when config exists.
-    if kept_config {
-        // Insert blank line after first line if there are subsequent lines and the next is not blank.
-        if out.len() >= 2 && !out[1].trim().is_empty() {
-            out.insert(1, "".to_string());
-        } else if out.len() == 1 {
-            // Config only; keep as-is.
-        }
-    }
-
-    (out.join("\n"), removed)
-}
-
-fn ensure_model_config(sql: &str, schema_suffix: &str, alias: &str) -> String {
-    let sql = normalize_jinja_config_tags(sql);
-    let body = strip_all_config_lines(&sql).trim().to_string();
-    if body.is_empty() {
-        return format!("{{{{ config(schema=\"{}\", alias=\"{}\") }}}}\n", schema_suffix, alias);
-    }
-    format!(
-        "{{{{ config(schema=\"{}\", alias=\"{}\") }}}}\n\n{}",
-        schema_suffix, alias, body
-    )
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -360,38 +185,39 @@ impl Tool for StagingModelTool {
             }));
         }
 
-        // Keep sources in models/schema.yml (monotonic merge; never overwrite existing sources).
+        // Ensure models/schema.yml exists; patch pipeline will deterministically rebuild sources.
         let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
-        let schema_key = format!("{}/models/schema.yml", base);
+        let schema_rel = "models/schema.yml".to_string();
+        let schema_key = format!("{}/{}", base, schema_rel);
         let existing_schema: Option<String> = match ctx.storage.get_bytes(&schema_key).await {
             Ok(bytes) => Some(String::from_utf8_lossy(&bytes).to_string()),
             Err(_) => None,
         };
-        let merged = match schema_yml::merge_sources_yaml(existing_schema.as_deref(), &dataset_ids) {
-            Ok(s) => s,
+        let seed = existing_schema.clone().unwrap_or_else(|| "version: 2\n".to_string());
+        let patch_text = project_fs::create_patch_text(existing_schema.as_deref().unwrap_or(""), &seed);
+        let outcome = match project_fs::apply_patch(
+            ctx,
+            self.datasets.as_ref(),
+            &schema_rel,
+            &patch_text,
+            None,
+            true,
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
             Err(e) => {
-                // Preserve the prior content if it existed but was not parseable/mergeable.
-                if let Some(prev) = existing_schema.as_ref() {
-                    let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-                    let backup_key = format!("{}/models/schema.yml.bak.{}.yml", base, ts);
-                    let _ = ctx
-                        .storage
-                        .put_bytes(&backup_key, prev.as_bytes(), "text/yaml")
-                        .await;
-                }
-                // Fall back to canonical sources for the requested dataset_ids only.
-                let canonical = schema_yml::sources_yaml_from_dataset_ids(&dataset_ids)?;
-                info!(target: "staging_model", "models/schema.yml merge failed; wrote canonical sources only");
-                // Include original merge error to aid debugging.
-                let _ = e;
-                canonical
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "datasets": dataset_ids.len(),
+                    "written_keys": [],
+                    "schema_key": schema_key,
+                    "notes": [],
+                    "errors": [format!("failed to patch models/schema.yml: {e}")],
+                }));
             }
         };
-        if let Err(e) = ctx
-            .storage
-            .put_bytes(&schema_key, merged.as_bytes(), "text/yaml")
-            .await
-        {
+        if let Err(e) = ctx.storage.put_bytes(&schema_key, outcome.content.as_bytes(), "text/yaml").await {
             return Ok(serde_json::json!({
                 "ok": false,
                 "datasets": dataset_ids.len(),
@@ -405,12 +231,6 @@ impl Tool for StagingModelTool {
         let dialect = crate::config::resolved_config_from_ctx(ctx)
             .map(active_provider_dialect)
             .unwrap_or_else(|| "Unknown SQL dialect".to_string());
-
-        // Suffix strategy: set dbt model `schema` to the SILVER suffix (not the full schema name),
-        // so dbt materializes into <DBT_TARGET_SCHEMA>_<silver_suffix>.
-        let silver_db = crate::config::resolved_config_from_ctx(ctx)
-            .map(|c| c.providers.dbt.naming.silver_suffix.clone())
-            .unwrap_or_else(|| "silver".to_string());
 
         // Discover existing staging model files so we can update by semantic identity (source()),
         // not by filename (prevents duplicate staging models for the same dataset).
@@ -448,7 +268,7 @@ impl Tool for StagingModelTool {
 
         // Optional fast-path: direct write mode. If SQL is provided, we write exactly one dataset's model
         // without calling the LLM (avoids extra OpenAI calls and reduces timeout risk).
-        if let Some(mut sql_out) = resolve_direct_sql(&args) {
+        if let Some(sql_out) = resolve_direct_sql(&args) {
             if dataset_ids.len() != 1 {
                 return Err("staging_model direct-write requires exactly one dataset (use a single-item args.dataset_ids).".to_string());
             }
@@ -492,17 +312,6 @@ impl Tool for StagingModelTool {
                 .unwrap_or_else(|| staging_model_rel_path_for_name(&canonical_name));
             let key = format!("{}/{}", base, rel_path);
 
-            // Force a canonical config: schema suffix + alias (prevents dbt identifier collisions).
-            sql_out = ensure_model_config(&sql_out, &silver_db, &canonical_name);
-
-            let (sql_sanitized, removed) = strip_jinja_macros_in_sql_comments(&sql_out);
-            if removed > 0 {
-                sql_out = sql_sanitized;
-            }
-            let (sql_sanitized, removed2) = strip_orphaned_leading_fragments(&sql_out);
-            if removed2 > 0 {
-                sql_out = sql_sanitized;
-            }
             let has_any_source = sql_out.to_lowercase().contains("source(");
             if !has_any_source {
                 errors.push(format!(
@@ -530,7 +339,16 @@ impl Tool for StagingModelTool {
                     "errors": errors,
                 }));
             }
-            ctx.storage.put_bytes(&key, sql_out.as_bytes(), "text/sql").await?;
+            let existing = ctx
+                .storage
+                .get_bytes(&key)
+                .await
+                .ok()
+                .map(|b| String::from_utf8_lossy(&b).to_string())
+                .unwrap_or_default();
+            let patch_text = project_fs::create_patch_text(&existing, &sql_out);
+            let outcome = project_fs::apply_patch(ctx, None, &rel_path, &patch_text, None, true).await?;
+            ctx.storage.put_bytes(&key, outcome.content.as_bytes(), "text/sql").await?;
             written.push(key);
 
             info!(
@@ -604,9 +422,7 @@ impl Tool for StagingModelTool {
                    - Choose ONE explicitly:\n\
                      (A) Enforce non-null semantics by filtering rows where the cleaned field is NULL, OR\n\
                      (B) Keep NULLs and add a note recommending a conditional dbt test (with where:) and why.\n\
-                 - IMPORTANT: this model must be built into the SILVER schema suffix \"{silver_db}\".\n\
-                   Include a dbt config block that sets schema to \"{silver_db}\".\n\
-                 - IMPORTANT: Do NOT set a dbt alias. The suite will enforce a canonical alias to avoid collisions.\n\
+                 - IMPORTANT: Do NOT include a dbt config block or alias; the suite enforces canonical config/alias deterministically.\n\
                  - Nested fields: use Trino/Athena struct dereference like context.session.id (DO NOT quote the whole path).\n\
                  - If a column name is reserved (e.g. timestamp), quote JUST the identifier (\"timestamp\").\n\
                  - Keep changes aligned with the user's instructions, even if they are unconventional.\n\
@@ -650,14 +466,7 @@ impl Tool for StagingModelTool {
                 continue;
             }
 
-            let mut sql_out = parsed.sql;
-            // Force a canonical config: schema suffix + alias (prevents dbt identifier collisions).
-            sql_out = ensure_model_config(&sql_out, &silver_db, &canonical_name);
-
-            let (sql_sanitized, _removed) = strip_jinja_macros_in_sql_comments(&sql_out);
-            sql_out = sql_sanitized;
-            let (sql_sanitized, _removed2) = strip_orphaned_leading_fragments(&sql_out);
-            sql_out = sql_sanitized;
+            let sql_out = parsed.sql;
             let has_any_source = sql_out.to_lowercase().contains("source(");
             if !has_any_source {
                 errors.push(format!(
@@ -672,7 +481,16 @@ impl Tool for StagingModelTool {
                 continue;
             }
 
-            ctx.storage.put_bytes(&key, sql_out.as_bytes(), "text/sql").await?;
+            let existing = ctx
+                .storage
+                .get_bytes(&key)
+                .await
+                .ok()
+                .map(|b| String::from_utf8_lossy(&b).to_string())
+                .unwrap_or_default();
+            let patch_text = project_fs::create_patch_text(&existing, &sql_out);
+            let outcome = project_fs::apply_patch(ctx, None, &rel_path, &patch_text, None, true).await?;
+            ctx.storage.put_bytes(&key, outcome.content.as_bytes(), "text/sql").await?;
             written.push(key);
             for n in parsed.notes {
                 if !n.trim().is_empty() {
@@ -748,39 +566,6 @@ mod tests {
 
         let c = serde_json::json!({"expression":"select 3"});
         assert_eq!(resolve_direct_sql(&c).as_deref(), Some("select 3"));
-    }
-
-    #[test]
-    fn strip_jinja_macros_in_line_comment() {
-        let sql = "-- {{ source('x','y') }}\nselect 1";
-        let (out, removed) = strip_jinja_macros_in_sql_comments(sql);
-        assert_eq!(removed, 1);
-        assert!(out.contains("select 1"));
-        assert!(!out.contains("source('x'"));
-    }
-
-    #[test]
-    fn strip_orphaned_leading_fragments_removes_schema_and_orphaned_jinja() {
-        let sql = r#"{{ config(schema="silver", alias="stg_raw_orders") }}
-
-schema='silver'
-) }}
-
-with source as (
-  select 1 as x
-)
-select * from source;
-"#;
-        let (out, removed) = strip_orphaned_leading_fragments(sql);
-        assert!(removed >= 2);
-        // Config kept
-        assert!(out.lines().next().unwrap_or("").contains("config("));
-        // Orphaned junk removed
-        assert!(!out.contains("schema='silver'"));
-        assert!(!out.lines().any(|l| l.trim() == ") }}"));
-        // SQL preserved
-        assert!(out.to_lowercase().contains("with source as"));
-        assert!(out.to_lowercase().contains("select * from source"));
     }
 
     #[test]

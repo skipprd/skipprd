@@ -37,4 +37,3 @@ impl Tool for VectUpsertTool {
         Ok(serde_json::json!({"ok": true, "count": items.len()}))
     }
 }
-

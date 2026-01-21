@@ -240,44 +240,18 @@ impl Tool for ApproveAndSaveArtifactTool {
             }
         }
 
-        // Silver tier guardrail (suffix strategy): when running under the cleanse agent,
-        // ensure models set `schema` to the SILVER suffix even if the authoring path isn't under models/staging/.
-        if kind == "model" && ctx.agent_name.as_deref() == Some("cleanse") {
-            if let Some(silver_suffix) = crate::config::resolved_config_from_ctx(ctx)
-                .map(|c| c.providers.dbt.naming.silver_suffix.clone())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-            {
-                content_final = ensure_schema_config(&content_final, &silver_suffix);
-            }
-        }
-
-        let (current_key, version_key, content_type) = match kind {
+        let (current_key, content_type) = match kind {
             "model" => {
                 let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
                 let dir = encode_key_component(&dataset_id);
                 let current = format!("{}/models/{}/{}.sql", base, dir, name_final);
-                let ver = format!(
-                    "{}/models/{}/_versions/{}/{}.sql",
-                    base,
-                    dir,
-                    name_final,
-                    chrono::Utc::now().format("%Y%m%d_%H%M%S")
-                );
-                (current, ver, "text/sql")
+                (current, "text/sql")
             }
             _ => {
                 let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
                 let dir = encode_key_component(&dataset_id);
                 let current = format!("{}/metrics/{}/{}.yaml", base, dir, name_final);
-                let ver = format!(
-                    "{}/metrics/{}/_versions/{}/{}.yaml",
-                    base,
-                    dir,
-                    name_final,
-                    chrono::Utc::now().format("%Y%m%d_%H%M%S")
-                );
-                (current, ver, "text/yaml")
+                (current, "text/yaml")
             }
         };
 
@@ -288,7 +262,23 @@ impl Tool for ApproveAndSaveArtifactTool {
         };
 
         if preview_diff {
-            let diff = compute_unified_diff(existing.as_deref().unwrap_or(""), &content_final);
+            let patch_text = crate::data_engineer::project_fs::create_patch_text(
+                existing.as_deref().unwrap_or(""),
+                &content_final,
+            );
+            let rel_path = current_key
+                .strip_prefix(&(ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string() + "/"))
+                .unwrap_or(&current_key)
+                .to_string();
+            let outcome = crate::data_engineer::project_fs::apply_patch(
+                ctx,
+                None,
+                &rel_path,
+                &patch_text,
+                None,
+                true,
+            )
+            .await?;
             // Log focus step for auditing which artifact is being considered
             if let Some(tid) = ctx.thread_id.as_ref() {
                 let store = ctx
@@ -312,7 +302,7 @@ impl Tool for ApproveAndSaveArtifactTool {
                 "ok": true,
                 "exists": existing.is_some(),
                 "key": current_key,
-                "diff": diff,
+                "diff": outcome.diff,
                 "dataset_id": dataset_id,
                 "kind": kind
             }));
@@ -324,15 +314,21 @@ impl Tool for ApproveAndSaveArtifactTool {
             return Ok(serde_json::json!({"ok": false, "error": format!("failed to ensure minimal dbt project: {e}")}));
         }
 
-        let (lines_added, lines_removed) = diff_stats(existing.as_deref().unwrap_or(""), &content_final);
-        let status = if existing.is_some() { "modified" } else { "added" };
+        let patch_text = crate::data_engineer::project_fs::create_patch_text(
+            existing.as_deref().unwrap_or(""),
+            &content_final,
+        );
+        let rel_path = current_key
+            .strip_prefix(&(ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string() + "/"))
+            .unwrap_or(&current_key)
+            .to_string();
+        let outcome = crate::data_engineer::project_fs::apply_patch(ctx, None, &rel_path, &patch_text, None, true).await?;
+        let status = if outcome.existed { "modified" } else { "added" };
 
-        // Save current (stable name)
-        ctx.storage.put_bytes(&current_key, content_final.as_bytes(), content_type).await?;
-        // Save versioned copy
-        if let Err(e) = ctx.storage.put_bytes(&version_key, content_final.as_bytes(), content_type).await {
-            warnings.push(format!("failed to write versioned artifact {}: {}", version_key, e));
-        }
+        // Save patched content (single canonical path)
+        ctx.storage
+            .put_bytes(&current_key, outcome.content.as_bytes(), content_type)
+            .await?;
 
         info!("Artifact saved: kind={} key={}", kind, current_key);
 
@@ -379,7 +375,7 @@ impl Tool for ApproveAndSaveArtifactTool {
                     react_core::session::ThreadStep {
                         action: "artifact_saved".to_string(),
                         args: serde_json::json!({ "kind": kind, "name": name, "dataset_id": dataset_id }),
-                        observation: serde_json::json!({ "key": current_key, "status": status, "lines_added": lines_added, "lines_removed": lines_removed }),
+                        observation: serde_json::json!({ "key": current_key, "status": status, "lines_added": outcome.lines_added, "lines_removed": outcome.lines_removed }),
                         ts: chrono::Utc::now().to_rfc3339(),
                         agent: ctx.agent_name.clone(),
                     },
@@ -429,7 +425,7 @@ impl Tool for ApproveAndSaveArtifactTool {
             }
         }
 
-        Ok(serde_json::json!({"ok": true, "key": current_key, "status": status, "lines_added": lines_added, "lines_removed": lines_removed, "warnings": warnings}))
+        Ok(serde_json::json!({"ok": true, "key": current_key, "status": status, "lines_added": outcome.lines_added, "lines_removed": outcome.lines_removed, "warnings": warnings}))
     }
 }
 
@@ -459,67 +455,6 @@ mod tests {
     }
 }
 
-fn diff_stats(old: &str, new: &str) -> (usize, usize) {
-    let old_lines: Vec<&str> = old.split('\n').collect();
-    let new_lines: Vec<&str> = new.split('\n').collect();
-    let mut added = 0usize;
-    let mut removed = 0usize;
-    let mut i = 0usize;
-    let mut j = 0usize;
-    while i < old_lines.len() || j < new_lines.len() {
-        if i < old_lines.len() && j < new_lines.len() {
-            if old_lines[i] == new_lines[j] {
-                i += 1;
-                j += 1;
-            } else {
-                removed += 1;
-                added += 1;
-                i += 1;
-                j += 1;
-            }
-        } else if i < old_lines.len() {
-            removed += 1;
-            i += 1;
-        } else {
-            added += 1;
-            j += 1;
-        }
-    }
-    (added, removed)
-}
-
-fn compute_unified_diff(old: &str, new: &str) -> String {
-    // Simple line-wise diff; not minimal but sufficient for preview
-    let old_lines: Vec<&str> = old.split('\n').collect();
-    let new_lines: Vec<&str> = new.split('\n').collect();
-    let mut out: Vec<String> = Vec::new();
-    out.push("--- original".to_string());
-    out.push("+++ modified".to_string());
-    let mut i = 0usize;
-    let mut j = 0usize;
-    while i < old_lines.len() || j < new_lines.len() {
-        if i < old_lines.len() && j < new_lines.len() {
-            if old_lines[i] == new_lines[j] {
-                out.push(format!(" {}", old_lines[i]));
-                i += 1;
-                j += 1;
-            } else {
-                out.push(format!("- {}", old_lines[i]));
-                out.push(format!("+ {}", new_lines[j]));
-                i += 1;
-                j += 1;
-            }
-        } else if i < old_lines.len() {
-            out.push(format!("- {}", old_lines[i]));
-            i += 1;
-        } else {
-            out.push(format!("+ {}", new_lines[j]));
-            j += 1;
-        }
-    }
-    out.join("\n")
-}
-
 fn ensure_dataset_comment(yaml_text: &str, dataset_id: &str) -> String {
     let wanted = format!("# Dataset: {}", dataset_id);
     // If already present (anywhere in the first 5 lines), keep original
@@ -537,19 +472,6 @@ fn ensure_dataset_comment(yaml_text: &str, dataset_id: &str) -> String {
     out.push('\n');
     out.push_str(yaml_text);
     out
-}
-
-fn ensure_schema_config(sql_text: &str, schema: &str) -> String {
-    let t = sql_text.trim();
-    if t.is_empty() {
-        return sql_text.to_string();
-    }
-    // If the model already sets schema via a config block, do nothing.
-    // (Simple heuristic; avoids trying to parse Jinja.)
-    if t.contains("config(") && (t.contains("schema=") || t.contains("schema =")) {
-        return sql_text.to_string();
-    }
-    format!("{{{{ config(schema=\"{}\") }}}}\n\n{}", schema, t)
 }
 
 #[allow(dead_code)]

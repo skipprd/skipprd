@@ -11,7 +11,7 @@ use react_core::tools::Tool;
  
 use crate::config;
 use crate::dbt;
-use crate::shared::tools::dbt_files::DbtFilesTool;
+use crate::data_engineer::tools::dbt_files::DbtFilesTool;
  
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -335,13 +335,13 @@ pub fn gate_authoring_to_validate(log: Option<&ThreadLog>) -> AuthoringGate {
         if g.mutation_failures_since_validate >= 3 {
             return AuthoringGate::AwaitUser {
                 prompt: format!(
-                    "I tried to apply a mutating fix after a failed dbt_validate, but the mutation step failed {} times in a row (often due to tool timeouts or storage write failures).\n\nPlease check:\n- The runtime can write DBT files to storage (S3 prefix/permissions)\n- The agent tool timeout is sufficient for your environment\n\nThen retry. If you want a quick deterministic fix path, use `dbt_files op=put` to edit the failing model SQL directly.",
+                    "I tried to apply a mutating fix after a failed dbt_validate, but the mutation step failed {} times in a row (often due to tool timeouts or storage write failures).\n\nPlease check:\n- The runtime can write DBT files to storage (S3 prefix/permissions)\n- The agent tool timeout is sufficient for your environment\n\nThen retry. If you want a quick deterministic fix path, use `dbt_files op=patch` to edit the failing model SQL directly.",
                     g.mutation_failures_since_validate
                 ),
             };
         }
         return AuthoringGate::Block {
-            reason: "A DBT validation previously failed and no successful mutation has been recorded since that failure. Apply a mutating fix (e.g. dbt_files op=put / approve_and_save_artifact(_batch)) before re-validating."
+            reason: "A DBT validation previously failed and no successful mutation has been recorded since that failure. Apply a mutating fix (e.g. dbt_files op=patch / approve_and_save_artifact(_batch)) before re-validating."
                 .to_string(),
         };
     }
@@ -415,7 +415,7 @@ impl DeterministicDbtValidateOnce {
         if let Some(obj) = v.as_object_mut() {
             obj.insert(
                 "dialect".to_string(),
-                serde_json::json!(dbt::remediate::active_provider_dialect(cfg)),
+                serde_json::json!(crate::data_engineer::dbt_repair::remediate::active_provider_dialect(cfg)),
             );
             // Keep parity with dbt_validate tool output, but do NOT mutate/repair here.
             let rf = crate::data_engineer::dbt_error::extract_runtime_failures_from_logs(
@@ -465,7 +465,7 @@ pub async fn call_and_record_tool(
  
 /// Deterministic authoring invariant: ensure there is at least one model SQL file in `models/`.
 pub async fn invariant_has_any_models(ctx: &AgentCtx) -> Result<bool, String> {
-    let tool = DbtFilesTool;
+    let tool = DbtFilesTool { datasets: None };
     let obs = tool
         .call(serde_json::json!({"op":"list","prefix":"models/","limit":500}), ctx)
         .await
@@ -487,7 +487,7 @@ pub async fn invariant_has_any_models(ctx: &AgentCtx) -> Result<bool, String> {
 
 /// Deterministic invariant: dbt_project.yml exists in the scoped dbt project.
 pub async fn invariant_has_dbt_project(ctx: &AgentCtx) -> Result<bool, String> {
-    let tool = DbtFilesTool;
+    let tool = DbtFilesTool { datasets: None };
     let obs = tool
         .call(serde_json::json!({"op":"get","path":"dbt_project.yml","max_chars":2000}), ctx)
         .await

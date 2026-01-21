@@ -1,12 +1,15 @@
 use async_trait::async_trait;
 use serde_json::Value;
+use std::sync::Arc;
 
 use react_core::agent::AgentCtx;
+use react_core::providers::DatasetCatalogProvider;
 use react_core::tools::Tool;
 use tracing::info;
-use crate::data_engineer::schema_yml;
 
-pub struct ApproveAndSaveArtifactBatchTool;
+pub struct ApproveAndSaveArtifactBatchTool {
+    pub datasets: Option<Arc<dyn DatasetCatalogProvider>>,
+}
 
 fn yaml_has_top_level_sources(content: &str) -> bool {
     // Fast path: look for an unindented top-level "sources:" key.
@@ -39,38 +42,6 @@ fn encode_key_component(s: &str) -> String {
     out
 }
 
-fn compute_unified_diff(old: &str, new: &str) -> String {
-    // Simple line-wise diff
-    let old_lines: Vec<&str> = old.split('\n').collect();
-    let new_lines: Vec<&str> = new.split('\n').collect();
-    let mut out: Vec<String> = Vec::new();
-    out.push("--- original".to_string());
-    out.push("+++ modified".to_string());
-    let mut i = 0usize;
-    let mut j = 0usize;
-    while i < old_lines.len() || j < new_lines.len() {
-        if i < old_lines.len() && j < new_lines.len() {
-            if old_lines[i] == new_lines[j] {
-                out.push(format!(" {}", old_lines[i]));
-                i += 1;
-                j += 1;
-            } else {
-                out.push(format!("- {}", old_lines[i]));
-                out.push(format!("+ {}", new_lines[j]));
-                i += 1;
-                j += 1;
-            }
-        } else if i < old_lines.len() {
-            out.push(format!("- {}", old_lines[i]));
-            i += 1;
-        } else {
-            out.push(format!("+ {}", new_lines[j]));
-            j += 1;
-        }
-    }
-    out.join("\n")
-}
-
 #[async_trait]
 impl Tool for ApproveAndSaveArtifactBatchTool {
     fn name(&self) -> &'static str {
@@ -90,7 +61,7 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
         let mut out_diffs: Vec<Value> = Vec::new();
         let mut out_keys: Vec<String> = Vec::new();
         let mut out_files: Vec<Value> = Vec::new();
-        let mut warnings: Vec<String> = Vec::new();
+        let warnings: Vec<String> = Vec::new();
 
         for it in items {
             let kind = it.get("kind").and_then(|x| x.as_str()).unwrap_or("");
@@ -123,7 +94,7 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
             let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
 
             // Derive path and type
-            let (current_key, version_key, content_type) = if let Some(path) = explicit_path {
+            let (current_key, content_type, rel_path) = if let Some(path) = explicit_path {
                 // Save arbitrary file under provided relative path
                 let rel = path.trim_start_matches('/').to_string();
                 // Guardrail: dbt sources must be defined in ONE place to avoid dbt compilation errors.
@@ -139,7 +110,6 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
                     ));
                 }
                 let current = format!("{}/{}", base, rel);
-                let ver = String::new();
                 let ct = if rel.ends_with(".sql") {
                     "text/sql"
                 } else if rel.ends_with(".yaml") || rel.ends_with(".yml") {
@@ -149,42 +119,31 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
                 } else {
                     "text/plain"
                 };
-                (current, ver, ct)
+                (current, ct, rel)
             } else if kind == "model" {
                 // Special-case: dbt schema.yml
                 if dataset_id == "models" && name == "schema" && content.trim_start().to_lowercase().starts_with("version:")
                 {
-                    let current = format!("{}/models/schema.yml", base);
-                    (current, String::new(), "text/yaml")
+                    let rel = "models/schema.yml".to_string();
+                    let current = format!("{}/{}", base, rel);
+                    (current, "text/yaml", rel)
                 } else {
                     if dataset_id.is_empty() || name.is_empty() {
                         return Err("model items require {dataset_id,name} (or use kind='file' with a path)".to_string());
                     }
                     let dir = encode_key_component(&dataset_id);
-                    let current = format!("{}/models/{}/{}.sql", base, dir, name);
-                    let ver = format!(
-                        "{}/models/{}/_versions/{}/{}.sql",
-                        base,
-                        dir,
-                        name,
-                        chrono::Utc::now().format("%Y%m%d_%H%M%S")
-                    );
-                    (current, ver, "text/sql")
+                    let rel = format!("models/{}/{}.sql", dir, name);
+                    let current = format!("{}/{}", base, rel);
+                    (current, "text/sql", rel)
                 }
             } else if kind == "metric" {
                 if dataset_id.is_empty() || name.is_empty() {
                     return Err("metric items require {dataset_id,name} (or use kind='file' with a path)".to_string());
                 }
                 let dir = encode_key_component(&dataset_id);
-                let current = format!("{}/metrics/{}/{}.yaml", base, dir, name);
-                let ver = format!(
-                    "{}/metrics/{}/_versions/{}/{}.yaml",
-                    base,
-                    dir,
-                    name,
-                    chrono::Utc::now().format("%Y%m%d_%H%M%S")
-                );
-                (current, ver, "text/yaml")
+                let rel = format!("metrics/{}/{}.yaml", dir, name);
+                let current = format!("{}/{}", base, rel);
+                (current, "text/yaml", rel)
             } else {
                 return Err("file kind requires a 'path'".to_string());
             };
@@ -195,17 +154,28 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
             };
 
             if preview {
-                let diff = compute_unified_diff(existing.as_deref().unwrap_or(""), &content);
-                let (lines_added, lines_removed) = diff_stats(existing.as_deref().unwrap_or(""), &content);
+                let patch_text = crate::data_engineer::project_fs::create_patch_text(
+                    existing.as_deref().unwrap_or(""),
+                    &content,
+                );
+                let outcome = crate::data_engineer::project_fs::apply_patch(
+                    ctx,
+                    self.datasets.as_ref(),
+                    &rel_path,
+                    &patch_text,
+                    None,
+                    true,
+                )
+                .await?;
                 out_diffs.push(serde_json::json!({
                     "name": name,
                     "dataset_id": dataset_id,
                     "kind": kind,
                     "key": current_key,
-                    "diff": diff,
+                    "diff": outcome.diff,
                     "exists": existing.is_some(),
-                    "lines_added": lines_added,
-                    "lines_removed": lines_removed
+                    "lines_added": outcome.lines_added,
+                    "lines_removed": outcome.lines_removed
                 }));
                 continue;
             }
@@ -222,44 +192,31 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
                 }));
             }
 
-            // Special-case: never overwrite models/schema.yml; always merge sources monotonically.
-            // This avoids loops where dbt sources "disappear" between iterative edits.
-            if current_key.ends_with("/models/schema.yml") || current_key.ends_with("models/schema.yml") {
-                let merged = match schema_yml::merge_schema_yml(existing.as_deref(), &content) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        // Preserve prior content under a backup key if present, then fall back to provided content.
-                        if let Some(prev) = existing.as_ref() {
-                            let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
-                            let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-                            let backup_key = format!("{}/models/schema.yml.bak.{}.yml", base, ts);
-                            let _ = ctx.storage.put_bytes(&backup_key, prev.as_bytes(), "text/yaml").await;
-                        }
-                        let _ = e;
-                        content.clone()
-                    }
-                };
-                ctx.storage
-                    .put_bytes(&current_key, merged.as_bytes(), "text/yaml")
-                    .await?;
-            } else {
-                ctx.storage.put_bytes(&current_key, content.as_bytes(), content_type).await?;
-            }
-            if !version_key.is_empty() {
-                if let Err(e) = ctx.storage.put_bytes(&version_key, content.as_bytes(), content_type).await {
-                    warnings.push(format!("failed to write versioned artifact {}: {}", version_key, e));
-                }
-            }
+            let patch_text = crate::data_engineer::project_fs::create_patch_text(
+                existing.as_deref().unwrap_or(""),
+                &content,
+            );
+            let outcome = crate::data_engineer::project_fs::apply_patch(
+                ctx,
+                self.datasets.as_ref(),
+                &rel_path,
+                &patch_text,
+                None,
+                true,
+            )
+            .await?;
+            ctx.storage
+                .put_bytes(&current_key, outcome.content.as_bytes(), content_type)
+                .await?;
             info!("Artifact saved (batch): kind={} key={}", kind, current_key);
             out_keys.push(current_key.clone());
 
-            let (lines_added, lines_removed) = diff_stats(existing.as_deref().unwrap_or(""), &content);
-            let status = if existing.is_some() { "modified" } else { "added" };
+            let status = if outcome.existed { "modified" } else { "added" };
             out_files.push(serde_json::json!({
                 "key": current_key,
                 "status": status,
-                "lines_added": lines_added,
-                "lines_removed": lines_removed
+                "lines_added": outcome.lines_added,
+                "lines_removed": outcome.lines_removed
             }));
         }
 
@@ -268,34 +225,5 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
         }
         Ok(serde_json::json!({"ok": true, "keys": out_keys, "files": out_files, "warnings": warnings}))
     }
-}
-
-fn diff_stats(old: &str, new: &str) -> (usize, usize) {
-    let old_lines: Vec<&str> = old.split('\n').collect();
-    let new_lines: Vec<&str> = new.split('\n').collect();
-    let mut added = 0usize;
-    let mut removed = 0usize;
-    let mut i = 0usize;
-    let mut j = 0usize;
-    while i < old_lines.len() || j < new_lines.len() {
-        if i < old_lines.len() && j < new_lines.len() {
-            if old_lines[i] == new_lines[j] {
-                i += 1;
-                j += 1;
-            } else {
-                removed += 1;
-                added += 1;
-                i += 1;
-                j += 1;
-            }
-        } else if i < old_lines.len() {
-            removed += 1;
-            i += 1;
-        } else {
-            added += 1;
-            j += 1;
-        }
-    }
-    (added, removed)
 }
 

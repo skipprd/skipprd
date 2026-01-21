@@ -32,4 +32,3 @@ impl Tool for SqlRunTool {
         }
     }
 }
-

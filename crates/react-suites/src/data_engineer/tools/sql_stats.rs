@@ -85,4 +85,3 @@ fn parse_dataset_id_strict(s: &str) -> Result<DatasetId, String> {
         table: parts[2].to_string(),
     })
 }
-

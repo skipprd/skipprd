@@ -90,7 +90,7 @@ impl Tool for DbtValidateTool {
             .runtime
             .as_ref()
             .and_then(|_| crate::config::resolved_config_from_ctx(ctx))
-            .map(crate::dbt::remediate::active_provider_dialect)
+                .map(crate::data_engineer::dbt_repair::remediate::active_provider_dialect)
             .unwrap_or_else(|| "Unknown SQL dialect".to_string());
 
         let max_iters: usize = std::env::var("DBT_REPAIR_MAX_ITERS")
@@ -100,7 +100,7 @@ impl Tool for DbtValidateTool {
             .max(1)
             .min(25);
 
-        let (res, repair_report) = crate::dbt::repair_loop::run_repair_loop(
+        let (res, repair_report) = crate::data_engineer::dbt_repair::repair_loop::run_repair_loop(
             ctx,
             dbt,
             &react_core::providers::DbtValidateArgs {
@@ -262,13 +262,14 @@ mod tests {
             .await
             .unwrap();
 
+        let patch_text = crate::data_engineer::project_fs::create_patch_text("select 1", "select 1\n");
         let llm: Arc<dyn react_core::llm::LargeLanguageModel> = Arc::new(MockLlm {
             chat_responses: Mutex::new(vec![
                 // Decision: confident dialect/syntax issue -> run remediation
                 serde_json::json!({"should_remediate": true, "confidence": 0.95, "reason": "dialect/syntax mismatch likely"}).to_string(),
                 // Remediation response
                 serde_json::json!({
-                    "changes": [{"key":"t/w/p/dbt/models/m.sql","new_content":"select 1","reason":"noop"}],
+                    "changes": [{"key":"t/w/p/dbt/models/m.sql","patch_text":patch_text,"reason":"noop"}],
                     "notes": []
                 }).to_string(),
             ]),
@@ -305,7 +306,7 @@ mod tests {
             .unwrap();
         assert_eq!(obs.get("ok").and_then(|v| v.as_bool()), Some(true));
         // Repair report should exist (best-effort)
-        let _r: Option<crate::dbt::repair_loop::RepairReport> = obs
+        let _r: Option<crate::data_engineer::dbt_repair::repair_loop::RepairReport> = obs
             .get("repair_report")
             .and_then(|v| serde_json::from_value(v.clone()).ok());
     }

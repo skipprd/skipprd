@@ -63,7 +63,7 @@ impl Tool for PublishDbtToProviderTool {
         fs::write(&p, gen.profiles_yml.as_bytes()).map_err(|e| e.to_string())?;
 
         // Eagerly repair/refresh + compile until the project compiles cleanly (bounded).
-        let (compile_res, compile_repair) = crate::dbt::repair_loop::run_repair_loop(
+        let (compile_res, compile_repair) = crate::data_engineer::dbt_repair::repair_loop::run_repair_loop(
             ctx,
             dbt,
             &react_core::providers::DbtValidateArgs {
@@ -85,7 +85,7 @@ impl Tool for PublishDbtToProviderTool {
                 "ok": false,
                 "stage": "compile",
                 "result": compile_res,
-                "dialect": crate::dbt::remediate::active_provider_dialect(cfg),
+                "dialect": crate::data_engineer::dbt_repair::remediate::active_provider_dialect(cfg),
                 "repair_report": compile_repair
             }));
         }
@@ -148,7 +148,7 @@ impl Tool for PublishDbtToProviderTool {
                 "manifest_sha256": plan_sha256,
                 "raw_manifest_sha256": raw_manifest_sha256,
                 "relations": relations,
-                "dialect": crate::dbt::remediate::active_provider_dialect(cfg),
+                "dialect": crate::data_engineer::dbt_repair::remediate::active_provider_dialect(cfg),
                 "repair_report": compile_repair
             }));
         }
@@ -184,7 +184,7 @@ impl Tool for PublishDbtToProviderTool {
                 "raw_manifest_sha256": raw_manifest_sha256,
                 "relations": relations,
                 "exists": exists,
-                "dialect": crate::dbt::remediate::active_provider_dialect(cfg),
+                "dialect": crate::data_engineer::dbt_repair::remediate::active_provider_dialect(cfg),
                 "repair_report": compile_repair
             }));
         } else {
@@ -200,7 +200,7 @@ impl Tool for PublishDbtToProviderTool {
         }
 
         // Run dbt build to publish, with eager repair until success (bounded).
-        let (build_res, build_repair) = crate::dbt::repair_loop::run_repair_loop(
+        let (build_res, build_repair) = crate::data_engineer::dbt_repair::repair_loop::run_repair_loop(
             ctx,
             dbt,
             &react_core::providers::DbtValidateArgs {
@@ -222,7 +222,7 @@ impl Tool for PublishDbtToProviderTool {
                 "ok": false,
                 "stage": "build",
                 "result": build_res,
-                "dialect": crate::dbt::remediate::active_provider_dialect(cfg),
+                "dialect": crate::data_engineer::dbt_repair::remediate::active_provider_dialect(cfg),
                 "repair_report": build_repair
             }));
         }
@@ -249,7 +249,7 @@ impl Tool for PublishDbtToProviderTool {
             "raw_manifest_sha256": raw_manifest_sha256,
             "relations": relations,
             "dbt": build_res,
-            "dialect": crate::dbt::remediate::active_provider_dialect(cfg),
+            "dialect": crate::data_engineer::dbt_repair::remediate::active_provider_dialect(cfg),
             "repair_report": build_repair
         }))
     }

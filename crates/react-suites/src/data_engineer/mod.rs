@@ -19,7 +19,8 @@ pub mod prompts;
 pub mod tools;
 pub mod dbt_error;
 pub mod control_flow;
-pub mod schema_yml;
+pub mod project_fs;
+pub mod dbt_repair;
 
 /// Agent-mode policy: preserve strict interrupts (ask_user/ask_approval), but otherwise accept finals.
 struct InterruptOnlyPolicy;
@@ -370,7 +371,7 @@ impl DataEngineerSuite {
              - Batch scaffolding: use approve_and_save_artifact_batch to write MANY files, but keep each call small enough to fit the output limit.\n\
                - Hard cap: <= 20 items per approve_and_save_artifact_batch call.\n\
                - If you need more files, do multiple batch-save tool calls over multiple steps.\n\
-              - IMPORTANT: use `dbt_files op=put` for real DBT project files (e.g. path='dbt_project.yml', 'models/schema.yml', and staging SQL like 'models/staging/stg_<table>.sql' (or 'models/staging/stg_<schema>__<table>.sql' to avoid collisions), 'models/core/...'). Use approve_and_save_artifact(_batch) only for models/metrics.\n\
+             - IMPORTANT: use `dbt_files op=patch` for real DBT project files (e.g. path='dbt_project.yml', 'packages.yml', 'models/schema.yml', and staging SQL like 'models/staging/stg_<table>.sql' (or 'models/staging/stg_<schema>__<table>.sql' to avoid collisions), 'models/core/...'). Use approve_and_save_artifact(_batch) only for models/metrics.\n\
              - After saving artifacts: ALWAYS validate with dbt_validate. If validate fails, iterate (edit artifacts, re-validate) until clean.\n\
              - When validation is clean: call publish_dbt_to_provider to materialize curated relations in the active warehouse provider.\n\
                - If publish returns await_approval: ask the user to approve; on approval, re-run publish_dbt_to_provider with confirm=true.\n\
@@ -397,7 +398,7 @@ impl DataEngineerSuite {
              - Batch scaffolding: use approve_and_save_artifact_batch to write MANY files, but keep each call small enough to fit the output limit.\n\
                - Hard cap: <= 20 items per approve_and_save_artifact_batch call.\n\
                - If you need more files, do multiple batch-save tool calls over multiple steps.\n\
-              - Use `dbt_files op=put` for dbt_project.yml and YAML (especially models/schema.yml). For staging SQL, prefer 'models/staging/stg_<table>.sql' but use 'models/staging/stg_<schema>__<table>.sql' to avoid collisions.\n\
+             - Use `dbt_files op=patch` for dbt_project.yml, packages.yml, and YAML (especially models/schema.yml). For staging SQL, prefer 'models/staging/stg_<table>.sql' but use 'models/staging/stg_<schema>__<table>.sql' to avoid collisions.\n\
              - After saving artifacts: ALWAYS validate with dbt_validate. If validate fails, iterate (edit artifacts, re-validate) until clean.\n\
              - When validation is clean: call publish_dbt_to_provider (views by default; propose tables/incremental with rationale and await approval).\n\
              - Use catalog_note to record notable cleansing decisions and assumptions (preview if material).",
@@ -406,7 +407,7 @@ impl DataEngineerSuite {
     }
 
     fn build_tools(agent_type: &str, sctx: &SuiteCtx) -> Result<ToolRegistry, String> {
-        use crate::shared::tools::{
+        use crate::data_engineer::tools::{
             artifacts::ArtifactsTool,
             dbt_files::DbtFilesTool,
             sql_run::SqlRunTool,
@@ -434,7 +435,7 @@ impl DataEngineerSuite {
                     if guard.last_validate_failed && !guard.mutated_since_fail {
                         return Err(
                             "dbt_validate is blocked after a failed validation until you APPLY A FIX to the dbt project.\n\
-                             Next step must be a mutating fix action (e.g. `staging_model` or `dbt_files op=put` or approve_and_save_artifact_batch to update schema/tests)."
+                             Next step must be a mutating fix action (e.g. `staging_model` or `dbt_files op=patch` or approve_and_save_artifact_batch to update schema/tests)."
                                 .to_string(),
                         );
                     }
@@ -484,13 +485,13 @@ impl DataEngineerSuite {
                     fn name(&self) -> &'static str { "dbt_files" }
                     async fn call(&self, args: serde_json::Value, ctx: &react_core::agent::AgentCtx) -> Result<serde_json::Value, String> {
                         let op = args.get("op").and_then(|x| x.as_str()).unwrap_or("get");
-                        if op == "put" {
+                        if op == "patch" {
                             return Err("dbt_files is read-only for review; use op='get' or op='list'".to_string());
                         }
                         self.inner.call(args, ctx).await
                     }
                 }
-                registry.register(ReadOnlyDbtFilesTool { inner: DbtFilesTool });
+                registry.register(ReadOnlyDbtFilesTool { inner: DbtFilesTool { datasets: sctx.datasets.clone() } });
                 registry.register(ArtifactsTool);
             }
             // cleanse uses shared tools + authoring/validation/publish loop
@@ -499,14 +500,14 @@ impl DataEngineerSuite {
                 registry.register(tools::ask_user::AskUserTool);
                 registry.register(tools::ask_approval::AskApprovalTool);
                 registry.register(tools::approve_save::ApproveAndSaveArtifactTool);
-                registry.register(tools::approve_save_batch::ApproveAndSaveArtifactBatchTool);
+                registry.register(tools::approve_save_batch::ApproveAndSaveArtifactBatchTool { datasets: sctx.datasets.clone() });
                 registry.register(tools::dbt_examples::SearchDbtExamplesTool);
                 registry.register(tools::staging_model::StagingModelTool { datasets: sctx.datasets.clone() });
                 registry.register(ThreadDerivedDbtValidateTool { inner: tools::dbt_validate::DbtValidateTool { datasets: sctx.datasets.clone(), catalog: sctx.catalog.clone() } });
                 registry.register(tools::publish_dbt_to_provider::PublishDbtToProviderTool { datasets: sctx.datasets.clone(), catalog: sctx.catalog.clone() });
                 registry.register(tools::sql_register::SqlRegisterTool);
                 registry.register(tools::catalog_note::CatalogNoteTool);
-                registry.register(DbtFilesTool);
+                registry.register(DbtFilesTool { datasets: sctx.datasets.clone() });
                 registry.register(ArtifactsTool);
             }
             // ask uses shared tools + user/approval interrupts + artifacts
@@ -514,7 +515,7 @@ impl DataEngineerSuite {
                 registry.register(SqlRunTool { query: query.clone() });
                 registry.register(tools::ask_user::AskUserTool);
                 registry.register(tools::ask_approval::AskApprovalTool);
-                registry.register(DbtFilesTool);
+                registry.register(DbtFilesTool { datasets: sctx.datasets.clone() });
                 registry.register(ArtifactsTool);
             }
             // model uses ask tools + artifact authoring + dbt helpers + artifacts
@@ -523,14 +524,14 @@ impl DataEngineerSuite {
                 registry.register(tools::ask_user::AskUserTool);
                 registry.register(tools::ask_approval::AskApprovalTool);
                 registry.register(tools::approve_save::ApproveAndSaveArtifactTool);
-                registry.register(tools::approve_save_batch::ApproveAndSaveArtifactBatchTool);
+                registry.register(tools::approve_save_batch::ApproveAndSaveArtifactBatchTool { datasets: sctx.datasets.clone() });
                 registry.register(tools::dbt_examples::SearchDbtExamplesTool);
                 registry.register(tools::staging_model::StagingModelTool { datasets: sctx.datasets.clone() });
                 registry.register(ThreadDerivedDbtValidateTool { inner: tools::dbt_validate::DbtValidateTool { datasets: sctx.datasets.clone(), catalog: sctx.catalog.clone() } });
                 registry.register(tools::publish_dbt_to_provider::PublishDbtToProviderTool { datasets: sctx.datasets.clone(), catalog: sctx.catalog.clone() });
                 registry.register(tools::sql_register::SqlRegisterTool);
                 registry.register(tools::catalog_note::CatalogNoteTool);
-                registry.register(DbtFilesTool);
+                registry.register(DbtFilesTool { datasets: sctx.datasets.clone() });
                 registry.register(ArtifactsTool);
             }
         }
@@ -544,7 +545,7 @@ impl DataEngineerSuite {
         allow_ask_approval: bool,
         sctx: &SuiteCtx,
     ) -> Result<(ToolRegistry, String), String> {
-        use crate::shared::tools::{
+        use crate::data_engineer::tools::{
             artifacts::ArtifactsTool,
             dbt_files::DbtFilesTool,
             sql_run::SqlRunTool,
@@ -591,10 +592,10 @@ impl DataEngineerSuite {
                     reg.register(tools::ask_approval::AskApprovalTool);
                 }
                 reg.register(tools::approve_save::ApproveAndSaveArtifactTool);
-                reg.register(tools::approve_save_batch::ApproveAndSaveArtifactBatchTool);
+                reg.register(tools::approve_save_batch::ApproveAndSaveArtifactBatchTool { datasets: sctx.datasets.clone() });
 
                 if hard_mutation_only {
-                    // Put-only dbt_files to avoid "read-only thrash" when we require a mutation next.
+                    // Patch-only dbt_files to avoid "read-only thrash" when we require a mutation next.
                     struct PutOnlyDbtFilesTool {
                         inner: DbtFilesTool,
                     }
@@ -603,19 +604,19 @@ impl DataEngineerSuite {
                         fn name(&self) -> &'static str { "dbt_files" }
                         async fn call(&self, args: serde_json::Value, ctx: &react_core::agent::AgentCtx) -> Result<serde_json::Value, String> {
                             let op = args.get("op").and_then(|x| x.as_str()).unwrap_or("get");
-                            if op != "put" {
-                                return Err("dbt_files is put-only right now (a mutating fix is required before any further validation).".to_string());
+                            if op != "patch" {
+                                return Err("dbt_files is patch-only right now (a mutating fix is required before any further validation).".to_string());
                             }
                             self.inner.call(args, ctx).await
                         }
                     }
-                    reg.register(PutOnlyDbtFilesTool { inner: DbtFilesTool });
+                    reg.register(PutOnlyDbtFilesTool { inner: DbtFilesTool { datasets: sctx.datasets.clone() } });
 
                     tools_card_lines = vec![
                         "Allowed tools (authoring phase; HARD constraint: mutation required next):",
                         "- approve_and_save_artifact(args:{kind,name,content,dataset_id?,preview_diff?})",
                         "- approve_and_save_artifact_batch(args:{items:[...],preview_diff?})",
-                        "- dbt_files(args:{op:\"put\",path:string,content:string,preview_diff?:bool})",
+                        "- dbt_files(args:{op:\"patch\",path:string,patch_text?:string,content?:string,base_sha256?:string,create_if_missing?:bool,preview_diff?:bool})",
                         "- ask_user(args:{prompt:string})",
                         "- ask_approval(args:{prompt:string}) (only if registered; otherwise forbidden in this phase)",
                         "",
@@ -626,7 +627,7 @@ impl DataEngineerSuite {
                     reg.register(tools::staging_model::StagingModelTool { datasets: sctx.datasets.clone() });
                     reg.register(SqlRunTool { query: query.clone() });
                     reg.register(tools::dbt_examples::SearchDbtExamplesTool);
-                    reg.register(DbtFilesTool);
+                    reg.register(DbtFilesTool { datasets: sctx.datasets.clone() });
 
                     tools_card_lines = vec![
                         "Allowed tools (authoring phase):",
@@ -640,7 +641,7 @@ impl DataEngineerSuite {
                         "  - IMPORTANT: you MUST provide dataset_ids. This tool will NOT default to all datasets.",
                         "- approve_and_save_artifact(args:{kind,name,content,dataset_id?,preview_diff?})",
                         "- approve_and_save_artifact_batch(args:{items:[...],preview_diff?})",
-                        "- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"put\", path?:string, prefix?:string, content?:string, pointer?:string, limit?:int, max_chars?:int, preview_diff?:bool})",
+                        "- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\", path?:string, prefix?:string, patch_text?:string, content?:string, base_sha256?:string, create_if_missing?:bool, pointer?:string, limit?:int, max_chars?:int, preview_diff?:bool})",
                         "- ask_user(args:{prompt:string})",
                         "- ask_approval(args:{prompt:string}) (only if registered; otherwise forbidden in this phase)",
                         "",
@@ -660,13 +661,13 @@ impl DataEngineerSuite {
                     fn name(&self) -> &'static str { "dbt_files" }
                     async fn call(&self, args: serde_json::Value, ctx: &react_core::agent::AgentCtx) -> Result<serde_json::Value, String> {
                         let op = args.get("op").and_then(|x| x.as_str()).unwrap_or("get");
-                        if op == "put" {
+                        if op == "patch" {
                             return Err("dbt_files is read-only in review phases; use op='get' or op='list'".to_string());
                         }
                         self.inner.call(args, ctx).await
                     }
                 }
-                reg.register(ReadOnlyDbtFilesTool { inner: DbtFilesTool });
+                reg.register(ReadOnlyDbtFilesTool { inner: DbtFilesTool { datasets: sctx.datasets.clone() } });
 
                 tools_card_lines = vec![
                     "Allowed tools (review phase, read-only):",
@@ -1094,7 +1095,7 @@ impl DataEngineerSuite {
                     // Deterministic invariant: do not allow leaving authoring without any models.
                     let has_models = control_flow::invariant_has_any_models(&actx).await.unwrap_or(false);
                     if !has_models {
-                        q.push_str("\n\nIMPORTANT: invariant failed: there are no DBT model SQL files yet. Your first task is to create at least one staging model under models/ using staging_model or dbt_files op=put.");
+                        q.push_str("\n\nIMPORTANT: invariant failed: there are no DBT model SQL files yet. Your first task is to create at least one staging model under models/ using staging_model or dbt_files op=patch.");
                     }
 
                     match Agent::run_until_block(&registry, &actx, &sys, &tools_card, &q).await {
@@ -1700,7 +1701,7 @@ impl DataEngineerSuite {
                                - If string-ish: SELECT count_if(trim(cast({{col}} AS varchar)) = '') AS empty FROM {{relation}}\n\
                                - If time-like by type: SELECT count_if(try_cast(nullif(trim(cast({{col}} AS varchar)), '') AS timestamp) IS NULL) AS unparseable FROM {{relation}}\n\
                                - Sample failing: SELECT {{col}} FROM {{relation}} WHERE {{col}} IS NULL LIMIT 50\n\
-                             - Apply a fix using `staging_model` or `dbt_files op=put`.\n\
+                             - Apply a fix using `staging_model` or `dbt_files op=patch`.\n\
                              - You MUST NOT claim fixed unless a probe query shows the failure condition is now 0 rows.\n\
                              Only AFTER applying a fix should you re-run `dbt_validate` with build=true.",
                             attempt + 1,

@@ -3,6 +3,7 @@ use crate::config::ReactResolvedConfig;
 use react_core::llm::ChatMessage;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -39,7 +40,7 @@ struct LlmRemediationResponse {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct LlmChange {
     key: String,
-    new_content: String,
+    patch_text: String,
     #[serde(default)]
     reason: Option<String>,
 }
@@ -68,6 +69,13 @@ fn now_epoch_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+fn sha256_hex(s: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(s.as_bytes());
+    let out = hasher.finalize();
+    hex::encode(out)
 }
 
 fn parse_json_from_llm(text: &str) -> Result<Value, String> {
@@ -211,6 +219,10 @@ pub async fn remediate_dbt_sql_keys_with_llm(ctx: &AgentCtx, phase: &str, keys: 
             .iter()
             .map(|(k, c)| serde_json::json!({ "key": k, "content": c }))
             .collect();
+        let mut content_by_key: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for (k, c) in batch.iter() {
+            content_by_key.insert(k.clone(), c.clone());
+        }
 
         // Strict JSON-only contract so we can apply changes deterministically.
         let sys = format!(
@@ -223,7 +235,7 @@ pub async fn remediate_dbt_sql_keys_with_llm(ctx: &AgentCtx, phase: &str, keys: 
              - Do not invent new tables/columns.\n\
              - Output MUST be valid JSON only (no markdown, no commentary).\n\
              Output schema:\n\
-             {{\"changes\":[{{\"key\":\"...\",\"new_content\":\"...\",\"reason\":\"...\"}}],\"notes\":[\"...\"]}}\n\
+             {{\"changes\":[{{\"key\":\"...\",\"patch_text\":\"...\",\"reason\":\"...\"}}],\"notes\":[\"...\"]}}\n\
              Only include a file in changes if you actually modify it.\n"
         );
         let user = serde_json::json!({
@@ -258,8 +270,27 @@ pub async fn remediate_dbt_sql_keys_with_llm(ctx: &AgentCtx, phase: &str, keys: 
             if !keys.iter().any(|k| k == &ch.key) {
                 continue;
             }
+            let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
+            let rel = ch
+                .key
+                .strip_prefix(&(base.clone() + "/"))
+                .ok_or_else(|| format!("remediation key not under dbt prefix: {}", ch.key))?
+                .to_string();
+            let expected_base = content_by_key
+                .get(&ch.key)
+                .map(|s| sha256_hex(s))
+                .unwrap_or_else(|| String::new());
+            let outcome = crate::data_engineer::project_fs::apply_patch(
+                ctx,
+                None,
+                &rel,
+                &ch.patch_text,
+                if expected_base.is_empty() { None } else { Some(expected_base.as_str()) },
+                false,
+            )
+            .await?;
             ctx.storage
-                .put_bytes(&ch.key, ch.new_content.as_bytes(), "text/sql")
+                .put_bytes(&outcome.key, outcome.content.as_bytes(), "text/sql")
                 .await?;
             report.changed_files += 1;
             report.changes.push(RemediationChange {
@@ -401,10 +432,11 @@ mod tests {
     #[tokio::test]
     async fn remediation_applies_llm_changes_to_storage() {
         let storage = Arc::new(InMemoryStorageAdapter::default());
-        let mut mock = MockLlm::default();
+        let mock = MockLlm::default();
+        let patch_text = crate::data_engineer::project_fs::create_patch_text("select 1", "select 2");
         *mock.chat_responses.lock().unwrap() = vec![serde_json::json!({
             "changes": [
-                {"key":"t/w/p/dbt/models/m.sql","new_content":"select 2","reason":"minimal"}
+                {"key":"t/w/p/dbt/models/m.sql","patch_text":patch_text,"reason":"minimal"}
             ],
             "notes": ["ok"]
         })
@@ -415,7 +447,8 @@ mod tests {
         let rep = remediate_dbt_sql_with_llm(&ctx, "pre_validate").await.unwrap();
         assert_eq!(rep.changed_files, 1);
         let bytes = storage.get_bytes("t/w/p/dbt/models/m.sql").await.unwrap();
-        assert_eq!(String::from_utf8_lossy(&bytes), "select 2");
+        let got = String::from_utf8_lossy(&bytes);
+        assert!(got.contains("select 2"));
+        assert!(got.contains("config(schema=\"warehouse\""));
     }
 }
-

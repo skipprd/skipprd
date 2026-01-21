@@ -14,7 +14,7 @@ impl Tool for VectQueryTool {
         let query_text = args.get("query_text").and_then(|x| x.as_str()).unwrap_or("");
         let k = args.get("k").and_then(|x| x.as_u64()).unwrap_or(100) as usize;
 
-        let mut embed_chars: usize = query_text.len();
+        let embed_chars: usize = query_text.len();
         let vec = match ctx.llm.embed(&[query_text.to_string()]) {
             Ok(mut v) => v.pop().unwrap_or_default(),
             Err(e) => {
@@ -76,4 +76,3 @@ impl Tool for VectQueryTool {
         Ok(serde_json::json!({"ok": true, "items": items, "llm_expense": {"embed_chars": embed_chars, "est_tokens": est_tokens}}))
     }
 }
-
