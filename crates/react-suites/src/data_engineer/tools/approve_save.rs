@@ -83,6 +83,7 @@ impl Tool for ApproveAndSaveArtifactTool {
             return Err("content required".to_string());
         }
         let preview_diff = args.get("preview_diff").and_then(|x| x.as_bool()).unwrap_or(false);
+        let mut warnings: Vec<String> = Vec::new();
 
         // Refactor: dataset_id replaces legacy (pipeline, namespace).
         // Back-compat: accept either args.dataset_id or args.pipeline+args.namespace.
@@ -319,7 +320,9 @@ impl Tool for ApproveAndSaveArtifactTool {
 
         // Ensure minimal dbt project scaffolding exists before first save
         let dbt = ctx.dbt.as_ref().ok_or_else(|| "dbt provider missing".to_string())?;
-        let _ = dbt.ensure_minimal_project(&ctx.scope).await;
+        if let Err(e) = dbt.ensure_minimal_project(&ctx.scope).await {
+            return Ok(serde_json::json!({"ok": false, "error": format!("failed to ensure minimal dbt project: {e}")}));
+        }
 
         let (lines_added, lines_removed) = diff_stats(existing.as_deref().unwrap_or(""), &content_final);
         let status = if existing.is_some() { "modified" } else { "added" };
@@ -327,7 +330,9 @@ impl Tool for ApproveAndSaveArtifactTool {
         // Save current (stable name)
         ctx.storage.put_bytes(&current_key, content_final.as_bytes(), content_type).await?;
         // Save versioned copy
-        let _ = ctx.storage.put_bytes(&version_key, content_final.as_bytes(), content_type).await;
+        if let Err(e) = ctx.storage.put_bytes(&version_key, content_final.as_bytes(), content_type).await {
+            warnings.push(format!("failed to write versioned artifact {}: {}", version_key, e));
+        }
 
         info!("Artifact saved: kind={} key={}", kind, current_key);
 
@@ -355,7 +360,9 @@ impl Tool for ApproveAndSaveArtifactTool {
                         meta: serde_json::json!({"type": atype, "path": current_key}),
                         epoch: chrono::Utc::now().timestamp() as u64,
                     };
-                    let _ = vector.upsert(&ctx.scope, &[chunk]).await;
+                    if let Err(e) = vector.upsert(&ctx.scope, &[chunk]).await {
+                        warnings.push(format!("vector upsert failed: {}", e));
+                    }
                 }
             }
         }
@@ -422,7 +429,7 @@ impl Tool for ApproveAndSaveArtifactTool {
             }
         }
 
-        Ok(serde_json::json!({"ok": true, "key": current_key, "status": status, "lines_added": lines_added, "lines_removed": lines_removed}))
+        Ok(serde_json::json!({"ok": true, "key": current_key, "status": status, "lines_added": lines_added, "lines_removed": lines_removed, "warnings": warnings}))
     }
 }
 

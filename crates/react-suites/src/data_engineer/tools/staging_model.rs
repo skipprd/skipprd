@@ -247,6 +247,88 @@ fn strip_all_config_lines(sql: &str) -> String {
     out.join("\n")
 }
 
+fn strip_orphaned_leading_fragments(sql: &str) -> (String, usize) {
+    // Some LLM outputs include stray fragments like:
+    //   schema='silver'
+    //   ) }}
+    // which are invalid SQL and will cause Athena/Trino parse errors.
+    //
+    // We keep an initial canonical config line if present, then drop non-SQL junk lines
+    // until we reach a real SQL statement (WITH/SELECT) or a comment.
+    let mut removed = 0usize;
+    let mut out: Vec<String> = Vec::new();
+
+    let mut saw_sql_start = false;
+    let mut kept_config = false;
+
+    for line in sql.lines() {
+        let t = line.trim();
+        let tl = t.to_lowercase();
+
+        // Preserve the canonical dbt config line (once) if present.
+        if !kept_config && t.starts_with("{{") && t.contains("config(") && t.ends_with("}}") {
+            out.push(line.to_string());
+            kept_config = true;
+            continue;
+        }
+
+        if saw_sql_start {
+            out.push(line.to_string());
+            continue;
+        }
+
+        // Allow leading blank lines to be re-inserted later.
+        if t.is_empty() {
+            continue;
+        }
+
+        // Allow leading comments (but strip any that look like orphaned Jinja fragments).
+        let is_comment = t.starts_with("--") || t.starts_with("/*");
+        if is_comment {
+            // If the comment contains Jinja tokens, it will be stripped later by
+            // strip_jinja_macros_in_sql_comments(). Here we only guard against
+            // obvious orphaned fragment noise.
+            if (t.contains("}}") && !t.contains("{{")) || tl.starts_with("schema") || tl.starts_with("alias") {
+                removed += 1;
+                continue;
+            }
+            out.push(line.to_string());
+            continue;
+        }
+
+        // Detect real SQL start.
+        if tl.starts_with("with") || tl.starts_with("select") {
+            saw_sql_start = true;
+            out.push(line.to_string());
+            continue;
+        }
+
+        // Drop obvious orphaned fragments before SQL begins.
+        let looks_like_orphaned_jinja = t.contains("}}") && !t.contains("{{");
+        let looks_like_schema_assign = tl.starts_with("schema") || tl.starts_with("alias");
+        let looks_like_jinja_tag = t.starts_with('{') && (t.contains("}}") || t.contains("%}"));
+        if looks_like_orphaned_jinja || looks_like_schema_assign || looks_like_jinja_tag {
+            removed += 1;
+            continue;
+        }
+
+        // Any other non-empty non-comment line before SQL is suspect; drop it.
+        removed += 1;
+    }
+
+    // Ensure a single blank line between config and SQL/comments when config exists.
+    if kept_config {
+        // Insert blank line after first line if there are subsequent lines and the next is not blank.
+        if out.len() >= 2 && !out[1].trim().is_empty() {
+            out.insert(1, "".to_string());
+        } else if out.len() == 1 {
+            // Config only; keep as-is.
+        }
+    }
+
+    (out.join("\n"), removed)
+}
+
 fn ensure_model_config(sql: &str, schema_suffix: &str, alias: &str) -> String {
     let sql = normalize_jinja_config_tags(sql);
     let body = strip_all_config_lines(&sql).trim().to_string();
@@ -296,7 +378,16 @@ impl Tool for StagingModelTool {
         let instructions = resolve_instructions(&args);
 
         // Ensure minimal dbt project exists before writing artifacts.
-        let _ = dbt.ensure_minimal_project(&ctx.scope).await;
+        if let Err(e) = dbt.ensure_minimal_project(&ctx.scope).await {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "datasets": dataset_ids.len(),
+                "written_keys": [],
+                "schema_key": Value::Null,
+                "notes": [],
+                "errors": [format!("failed to ensure minimal dbt project: {e}")],
+            }));
+        }
 
         // Keep sources in models/schema.yml (monotonic merge; never overwrite existing sources).
         let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
@@ -325,10 +416,20 @@ impl Tool for StagingModelTool {
                 canonical
             }
         };
-        let _ = ctx
+        if let Err(e) = ctx
             .storage
             .put_bytes(&schema_key, merged.as_bytes(), "text/yaml")
-            .await;
+            .await
+        {
+            return Ok(serde_json::json!({
+                "ok": false,
+                "datasets": dataset_ids.len(),
+                "written_keys": [],
+                "schema_key": schema_key,
+                "notes": [],
+                "errors": [format!("failed to write models/schema.yml: {e}")],
+            }));
+        }
 
         let dialect = crate::config::resolved_config_from_ctx(ctx)
             .map(active_provider_dialect)
@@ -362,6 +463,7 @@ impl Tool for StagingModelTool {
 
         let mut written: Vec<String> = Vec::new();
         let mut notes: Vec<String> = Vec::new();
+        let mut errors: Vec<String> = Vec::new();
 
         // Optional fast-path: direct write mode. If SQL is provided, we write exactly one dataset's model
         // without calling the LLM (avoids extra OpenAI calls and reduces timeout risk).
@@ -383,16 +485,36 @@ impl Tool for StagingModelTool {
             if removed > 0 {
                 sql_out = sql_sanitized;
             }
+            let (sql_sanitized, removed2) = strip_orphaned_leading_fragments(&sql_out);
+            if removed2 > 0 {
+                sql_out = sql_sanitized;
+            }
             let has_any_source = sql_out.to_lowercase().contains("source(");
             if !has_any_source {
-                return Err(format!(
+                errors.push(format!(
                     "staging_model requires using a dbt source(). Expected to read from: {{ source(\"{expected_db}\", \"{expected_table}\") }} (derived from dataset_id {ds})."
                 ));
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "datasets": dataset_ids.len(),
+                    "written_keys": written,
+                    "schema_key": schema_key,
+                    "notes": [],
+                    "errors": errors,
+                }));
             }
             if !contains_expected_source_call(&sql_out, &expected_db, &expected_table) {
-                return Err(format!(
+                errors.push(format!(
                     "staging_model produced a source() call that does not match the expected source/table for dataset_id {ds}. Expected: {{ source(\"{expected_db}\", \"{expected_table}\") }}."
                 ));
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "datasets": dataset_ids.len(),
+                    "written_keys": written,
+                    "schema_key": schema_key,
+                    "notes": [],
+                    "errors": errors,
+                }));
             }
             ctx.storage.put_bytes(&key, sql_out.as_bytes(), "text/sql").await?;
             written.push(key);
@@ -473,11 +595,23 @@ impl Tool for StagingModelTool {
                 ])
                 .map_err(|e| format!("staging_model LLM call failed: {}", e))?;
 
-            let v = parse_json_from_llm(&resp_text)?;
-            let parsed: LlmStagingResponse =
-                serde_json::from_value(v).map_err(|e| format!("failed to parse staging_model JSON: {}", e))?;
+            let v = match parse_json_from_llm(&resp_text) {
+                Ok(v) => v,
+                Err(e) => {
+                    errors.push(format!("{ds}: failed to parse LLM JSON: {e}"));
+                    continue;
+                }
+            };
+            let parsed: LlmStagingResponse = match serde_json::from_value(v) {
+                Ok(p) => p,
+                Err(e) => {
+                    errors.push(format!("{ds}: failed to parse staging_model JSON: {e}"));
+                    continue;
+                }
+            };
 
             if parsed.sql.trim().is_empty() {
+                errors.push(format!("{ds}: LLM returned empty sql"));
                 continue;
             }
 
@@ -487,16 +621,20 @@ impl Tool for StagingModelTool {
 
             let (sql_sanitized, _removed) = strip_jinja_macros_in_sql_comments(&sql_out);
             sql_out = sql_sanitized;
+            let (sql_sanitized, _removed2) = strip_orphaned_leading_fragments(&sql_out);
+            sql_out = sql_sanitized;
             let has_any_source = sql_out.to_lowercase().contains("source(");
             if !has_any_source {
-                return Err(format!(
-                    "staging_model requires using a dbt source(). Expected to read from: {{ source(\"{expected_db}\", \"{expected_table}\") }} (derived from dataset_id {ds})."
+                errors.push(format!(
+                    "{ds}: staging_model requires using a dbt source(). Expected: {{ source(\"{expected_db}\", \"{expected_table}\") }}."
                 ));
+                continue;
             }
             if !contains_expected_source_call(&sql_out, &expected_db, &expected_table) {
-                return Err(format!(
-                    "staging_model produced a source() call that does not match the expected source/table for dataset_id {ds}. Expected: {{ source(\"{expected_db}\", \"{expected_table}\") }}."
+                errors.push(format!(
+                    "{ds}: produced a source() call that does not match expected. Expected: {{ source(\"{expected_db}\", \"{expected_table}\") }}."
                 ));
+                continue;
             }
 
             ctx.storage.put_bytes(&key, sql_out.as_bytes(), "text/sql").await?;
@@ -529,11 +667,12 @@ impl Tool for StagingModelTool {
         }
 
         Ok(serde_json::json!({
-            "ok": true,
+            "ok": errors.is_empty(),
             "datasets": dataset_ids.len(),
             "written_keys": written,
             "schema_key": schema_key,
             "notes": out_notes,
+            "errors": errors,
         }))
     }
 }
@@ -583,6 +722,30 @@ mod tests {
         assert_eq!(removed, 1);
         assert!(out.contains("select 1"));
         assert!(!out.contains("source('x'"));
+    }
+
+    #[test]
+    fn strip_orphaned_leading_fragments_removes_schema_and_orphaned_jinja() {
+        let sql = r#"{{ config(schema="silver", alias="stg_raw_orders") }}
+
+schema='silver'
+) }}
+
+with source as (
+  select 1 as x
+)
+select * from source;
+"#;
+        let (out, removed) = strip_orphaned_leading_fragments(sql);
+        assert!(removed >= 2);
+        // Config kept
+        assert!(out.lines().next().unwrap_or("").contains("config("));
+        // Orphaned junk removed
+        assert!(!out.contains("schema='silver'"));
+        assert!(!out.lines().any(|l| l.trim() == ") }}"));
+        // SQL preserved
+        assert!(out.to_lowercase().contains("with source as"));
+        assert!(out.to_lowercase().contains("select * from source"));
     }
 
     #[test]

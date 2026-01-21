@@ -526,9 +526,12 @@ impl DataEngineerSuite {
             if !has_any {
                 tracing::info!("data_engineer: no existing catalog found; building catalogs/stats for all datasets");
                 let empty: HashMap<String, react_core::discover::Metadata> = HashMap::new();
-                let _ = cat
+                if let Err(e) = cat
                     .build_all_with_progress(&sctx.scope, datasets.as_ref(), &empty, None)
-                    .await;
+                    .await
+                {
+                    tracing::warn!("data_engineer: catalog bootstrap failed: {}", e);
+                }
             }
         }
     }
@@ -877,6 +880,17 @@ impl DataEngineerSuite {
                         q.push_str("\n\nLast dbt_validate summary (most recent):\n");
                         q.push_str(b);
                     }
+                    // Surface the most recent suite-level guard block reason (if any) to help auto-fix.
+                    if let Some(ref l) = log {
+                        if let Some(last_block) = l.steps.iter().rev().find(|s| s.action == "guard_block") {
+                            if let Some(reason) = last_block.observation.get("reason").and_then(|v| v.as_str()) {
+                                if !reason.trim().is_empty() {
+                                    q.push_str("\n\nSuite guard note (must resolve before validate):\n");
+                                    q.push_str(reason.trim());
+                                }
+                            }
+                        }
+                    }
                     if guard.last_validate_failed && !guard.mutated_since_fail {
                         q.push_str("\n\nConstraint: your next steps must APPLY A MUTATING FIX before attempting dbt_validate again.");
                     }
@@ -898,6 +912,30 @@ impl DataEngineerSuite {
                             if !has_proj || !has_models {
                                 // Stay in the same authoring phase; the next pass will be prompted with invariant context.
                                 continue;
+                            }
+                            // New guard: do not advance if this authoring phase has unresolved mutation/tool failures.
+                            // Auto-loop in authoring so the agent can fix deterministically.
+                            let latest_log = thread_store.get(thread_id).await;
+                            match control_flow::gate_authoring_completion(latest_log.as_ref(), phase) {
+                                control_flow::AuthoringGate::Allow => {}
+                                control_flow::AuthoringGate::AwaitUser { prompt } => {
+                                    return Ok(vec![FlowFrame::AwaitUser { prompt }]);
+                                }
+                                control_flow::AuthoringGate::Block { reason } => {
+                                    let _ = thread_store
+                                        .append_step(
+                                            thread_id,
+                                            react_core::session::ThreadStep {
+                                                action: "guard_block".to_string(),
+                                                args: serde_json::json!({"phase": phase.as_str(), "kind": "authoring_completion"}),
+                                                observation: serde_json::json!({"ok": false, "reason": reason}),
+                                                ts: chrono::Utc::now().to_rfc3339(),
+                                                agent: Some("agent".to_string()),
+                                            },
+                                        )
+                                        .await;
+                                    continue;
+                                }
                             }
                             // Hard gate: if validate previously failed, do not advance unless a successful mutation
                             // (and any required probes) have been recorded since that failure.

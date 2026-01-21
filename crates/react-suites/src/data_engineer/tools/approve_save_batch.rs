@@ -90,6 +90,7 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
         let mut out_diffs: Vec<Value> = Vec::new();
         let mut out_keys: Vec<String> = Vec::new();
         let mut out_files: Vec<Value> = Vec::new();
+        let mut warnings: Vec<String> = Vec::new();
 
         for it in items {
             let kind = it.get("kind").and_then(|x| x.as_str()).unwrap_or("");
@@ -211,7 +212,15 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
 
             // Ensure minimal project file
             let dbt = ctx.dbt.as_ref().ok_or_else(|| "dbt provider missing".to_string())?;
-            let _ = dbt.ensure_minimal_project(&ctx.scope).await;
+            if let Err(e) = dbt.ensure_minimal_project(&ctx.scope).await {
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "error": format!("failed to ensure minimal dbt project: {e}"),
+                    "keys": out_keys,
+                    "files": out_files,
+                    "warnings": warnings,
+                }));
+            }
 
             // Special-case: never overwrite models/schema.yml; always merge sources monotonically.
             // This avoids loops where dbt sources "disappear" between iterative edits.
@@ -237,7 +246,9 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
                 ctx.storage.put_bytes(&current_key, content.as_bytes(), content_type).await?;
             }
             if !version_key.is_empty() {
-                let _ = ctx.storage.put_bytes(&version_key, content.as_bytes(), content_type).await;
+                if let Err(e) = ctx.storage.put_bytes(&version_key, content.as_bytes(), content_type).await {
+                    warnings.push(format!("failed to write versioned artifact {}: {}", version_key, e));
+                }
             }
             info!("Artifact saved (batch): kind={} key={}", kind, current_key);
             out_keys.push(current_key.clone());
@@ -255,7 +266,7 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
         if preview {
             return Ok(serde_json::json!({"ok": true, "diffs": out_diffs}));
         }
-        Ok(serde_json::json!({"ok": true, "keys": out_keys, "files": out_files}))
+        Ok(serde_json::json!({"ok": true, "keys": out_keys, "files": out_files, "warnings": warnings}))
     }
 }
 

@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use serde_json::Value;
+use tracing::warn;
 
 use react_core::agent::AgentCtx;
 use react_core::tools::Tool;
@@ -231,7 +232,10 @@ impl Tool for CatalogNoteTool {
                 meta: serde_json::json!({"scope":"catalog", "level": if field_opt.is_some() { "field" } else { "dataset" }, "tags": tags }),
                 epoch,
             };
-            let _ = vector.upsert(&ctx.scope, &[chunk]).await;
+            if let Err(e) = vector.upsert(&ctx.scope, &[chunk]).await {
+                // Non-fatal, but never silent.
+                warn!("catalog_note: vector upsert failed: {}", e);
+            }
         }
 
         let est_tokens = ((chat_in_chars + chat_out_chars) as f32 / 4.0).round() as i64;

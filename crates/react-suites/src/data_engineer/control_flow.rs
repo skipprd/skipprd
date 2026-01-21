@@ -215,6 +215,51 @@ pub enum AuthoringGate {
     AwaitUser { prompt: String },
 }
 
+fn phase_start_idx(log: &ThreadLog, phase: Phase) -> Option<usize> {
+    for (i, step) in log.steps.iter().enumerate().rev() {
+        if step.action != "phase" {
+            continue;
+        }
+        let p = step
+            .args
+            .get("phase")
+            .and_then(|v| v.as_str())
+            .and_then(Phase::from_str);
+        if p == Some(phase) {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn unresolved_mutation_failures_in_phase(log: &ThreadLog, phase: Phase) -> Vec<String> {
+    // Collect failures since the last successful mutation in the current phase.
+    // If a successful mutation occurs, it "clears" prior failures.
+    let Some(start) = phase_start_idx(log, phase) else { return Vec::new() };
+
+    let mut failures: Vec<String> = Vec::new();
+    for step in log.steps.iter().skip(start + 1) {
+        if !is_mutation_step(step) {
+            continue;
+        }
+        let ok = step.observation.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
+        if ok {
+            failures.clear();
+            continue;
+        }
+        let err = step
+            .observation
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
+        failures.push(format!("{}: {}", step.action, err));
+        if failures.len() >= 10 {
+            break;
+        }
+    }
+    failures
+}
+
 /// Single source of truth for whether we may advance from an authoring phase into a validate phase.
 ///
 /// This intentionally enforces suite-level invariants (mutation/probe requirements) in code,
@@ -242,6 +287,30 @@ pub fn gate_authoring_to_validate(log: Option<&ThreadLog>) -> AuthoringGate {
         };
     }
     AuthoringGate::Allow
+}
+
+/// Gate authoring completion itself (before advancing phases) on unresolved tool/mutation failures
+/// in the current authoring phase. This prevents the suite from moving forward after a failing
+/// mutation (e.g., staging_model/tool timeouts), even if the agent produced a Final response.
+pub fn gate_authoring_completion(log: Option<&ThreadLog>, phase: Phase) -> AuthoringGate {
+    let Some(log) = log else { return AuthoringGate::Allow };
+    match phase {
+        Phase::CleanseAuthor | Phase::ModelAuthor => {}
+        _ => return AuthoringGate::Allow,
+    }
+
+    let failures = unresolved_mutation_failures_in_phase(log, phase);
+    if failures.is_empty() {
+        return AuthoringGate::Allow;
+    }
+    let mut msg = String::new();
+    msg.push_str("Unresolved mutation/tool failures occurred in this authoring phase. Fix these before advancing to validation:\n");
+    for f in failures.iter().take(6) {
+        msg.push_str("- ");
+        msg.push_str(f);
+        msg.push('\n');
+    }
+    AuthoringGate::Block { reason: msg.trim().to_string() }
 }
  
 pub struct DeterministicDbtValidateOnce;
@@ -468,6 +537,77 @@ mod tests {
                 assert!(prompt.contains("failed 3 times"));
             }
             other => panic!("expected AwaitUser, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn gate_authoring_completion_allows_when_no_unresolved_mutation_failures() {
+        let log = ThreadLog {
+            steps: vec![
+                step("phase", serde_json::json!({"phase":"cleanse_author"}), serde_json::json!({"ok":true})),
+                step(
+                    "staging_model",
+                    serde_json::json!({"dataset_ids":["AwsDataCatalog.test_raw.raw_orders"]}),
+                    serde_json::json!({"ok": true}),
+                ),
+            ],
+            result: None,
+            title: None,
+            title_finalized: false,
+        };
+        match gate_authoring_completion(Some(&log), Phase::CleanseAuthor) {
+            AuthoringGate::Allow => {}
+            other => panic!("expected Allow, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn gate_authoring_completion_blocks_when_last_mutation_failed_in_phase() {
+        let log = ThreadLog {
+            steps: vec![
+                step("phase", serde_json::json!({"phase":"model_author"}), serde_json::json!({"ok":true})),
+                step(
+                    "staging_model",
+                    serde_json::json!({"dataset_ids":["AwsDataCatalog.test_raw.raw_orders"]}),
+                    serde_json::json!({"ok": false, "error":"bad sql"}),
+                ),
+            ],
+            result: None,
+            title: None,
+            title_finalized: false,
+        };
+        match gate_authoring_completion(Some(&log), Phase::ModelAuthor) {
+            AuthoringGate::Block { reason } => {
+                assert!(reason.contains("staging_model"));
+                assert!(reason.contains("bad sql"));
+            }
+            other => panic!("expected Block, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn gate_authoring_completion_clears_failures_after_successful_mutation() {
+        let log = ThreadLog {
+            steps: vec![
+                step("phase", serde_json::json!({"phase":"model_author"}), serde_json::json!({"ok":true})),
+                step(
+                    "staging_model",
+                    serde_json::json!({"dataset_ids":["AwsDataCatalog.test_raw.raw_orders"]}),
+                    serde_json::json!({"ok": false, "error":"timeout"}),
+                ),
+                step(
+                    "staging_model",
+                    serde_json::json!({"dataset_ids":["AwsDataCatalog.test_raw.raw_orders"]}),
+                    serde_json::json!({"ok": true}),
+                ),
+            ],
+            result: None,
+            title: None,
+            title_finalized: false,
+        };
+        match gate_authoring_completion(Some(&log), Phase::ModelAuthor) {
+            AuthoringGate::Allow => {}
+            other => panic!("expected Allow, got {:?}", other),
         }
     }
 
