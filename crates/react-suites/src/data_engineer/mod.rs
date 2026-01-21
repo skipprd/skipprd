@@ -148,6 +148,184 @@ impl DataEngineerSuite {
         serde_json::from_str::<ReviewMeta>(json_text).ok()
     }
 
+    fn strip_meta_line(answer: &str) -> String {
+        let mut lines = answer.lines();
+        let first = lines.next().unwrap_or("").trim();
+        if first.starts_with("META:") {
+            lines.collect::<Vec<&str>>().join("\n").trim().to_string()
+        } else {
+            answer.trim().to_string()
+        }
+    }
+
+    fn is_mutation_step_for_review(step: &react_core::session::ThreadStep) -> bool {
+        match step.action.as_str() {
+            "approve_and_save_artifact" | "approve_and_save_artifact_batch" | "staging_model" => true,
+            "dbt_files" => step
+                .args
+                .get("op")
+                .and_then(|v| v.as_str())
+                .map(|op| op == "put")
+                .unwrap_or(false),
+            _ => false,
+        }
+    }
+
+    fn compact_mutation_summary(step: &react_core::session::ThreadStep) -> serde_json::Value {
+        let ok = step
+            .observation
+            .get("ok")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let action = step.action.clone();
+
+        let args = match step.action.as_str() {
+            "dbt_files" => serde_json::json!({
+                "op": step.args.get("op"),
+                "path": step.args.get("path"),
+            }),
+            "approve_and_save_artifact" => serde_json::json!({
+                "kind": step.args.get("kind"),
+                "name": step.args.get("name"),
+                "dataset_id": step.args.get("dataset_id"),
+            }),
+            "approve_and_save_artifact_batch" => {
+                let names: Vec<serde_json::Value> = step
+                    .args
+                    .get("items")
+                    .and_then(|v| v.as_array())
+                    .map(|items| {
+                        items
+                            .iter()
+                            .take(6)
+                            .filter_map(|it| it.get("name").cloned())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                serde_json::json!({
+                    "items_count": step.args.get("items").and_then(|v| v.as_array()).map(|a| a.len()),
+                    "names_head": names,
+                })
+            }
+            "staging_model" => serde_json::json!({
+                "dataset_ids": step.args.get("dataset_ids"),
+                "written_keys": step.observation.get("written_keys"),
+            }),
+            _ => step.args.clone(),
+        };
+
+        serde_json::json!({
+            "action": action,
+            "ok": ok,
+            "args": args,
+        })
+    }
+
+    fn build_review_question_with_context(
+        question: &str,
+        phase: control_flow::Phase,
+        log: Option<&react_core::session::ThreadLog>,
+    ) -> String {
+        let mut base = match phase {
+            control_flow::Phase::CleanseReview => format!(
+                "Review the DBT project after cleanse/staging work. Identify any issues or improvements to apply.\n\nOriginal goal:\n{}",
+                question
+            ),
+            control_flow::Phase::ModelReview => format!(
+                "Review the DBT project after modeling (core/gold) work. Identify any issues or improvements to apply.\n\nOriginal goal:\n{}",
+                question
+            ),
+            _ => format!(
+                "Final review after publish. Identify any remaining actionable improvements.\n\nOriginal goal:\n{}",
+                question
+            ),
+        };
+
+        let Some(log) = log else { return base };
+
+        // Current entry reason (last phase step is authoritative for why we are in this phase).
+        let entry = log.steps.iter().rev().find(|s| s.action == "phase");
+        let entry_reason_code = entry.and_then(|s| s.args.get("reason_code")).and_then(|v| v.as_str());
+        let entry_reason_detail = entry.and_then(|s| s.args.get("reason_detail")).cloned().unwrap_or(serde_json::Value::Null);
+
+        // Prior review context: last phase transition emitted from a review decision.
+        let mut prior_review_block: Option<String> = None;
+        let mut mutations_since: Vec<serde_json::Value> = Vec::new();
+
+        if let Some((idx, step)) = log.steps.iter().enumerate().rev().find(|(_, s)| {
+            if s.action != "phase" {
+                return false;
+            }
+            matches!(
+                s.args.get("reason_code").and_then(|v| v.as_str()),
+                Some("review_actionable_true") | Some("review_actionable_false")
+            )
+        }) {
+            let rd = step.args.get("reason_detail").cloned().unwrap_or(serde_json::Value::Null);
+            let review_phase = rd.get("review_phase").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let meta = rd.get("meta").cloned().unwrap_or(serde_json::Value::Null);
+            let ans = rd.get("answer").and_then(|v| v.as_str()).unwrap_or("");
+            let excerpt = {
+                let cleaned = Self::strip_meta_line(ans);
+                let max = 700usize;
+                if cleaned.len() > max {
+                    format!("{}...", &cleaned[..max])
+                } else {
+                    cleaned
+                }
+            };
+
+            prior_review_block = Some(format!(
+                "Previous review decision:\n- review_phase: {review_phase}\n- meta: {meta}\n- excerpt: {excerpt}",
+                review_phase = review_phase,
+                meta = meta,
+                excerpt = excerpt.replace('\n', " "),
+            ));
+
+            // Mutations since that review decision.
+            for step in log.steps.iter().skip(idx + 1) {
+                if Self::is_mutation_step_for_review(step) {
+                    mutations_since.push(Self::compact_mutation_summary(step));
+                    if mutations_since.len() >= 12 {
+                        break;
+                    }
+                }
+            }
+        }
+
+        let mut ctx_lines: Vec<String> = Vec::new();
+        if let Some(prior) = prior_review_block {
+            ctx_lines.push(prior);
+        }
+        if !mutations_since.is_empty() {
+            ctx_lines.push(format!(
+                "What changed since previous review (mutations, newest-first not guaranteed):\n{}",
+                mutations_since
+                    .iter()
+                    .map(|v| format!("- {}", v))
+                    .collect::<Vec<String>>()
+                    .join("\n")
+            ));
+        }
+        if entry_reason_code.is_some() || !entry_reason_detail.is_null() {
+            ctx_lines.push(format!(
+                "Why we are reviewing now:\n- entry_reason_code: {}\n- entry_reason_detail: {}",
+                entry_reason_code.unwrap_or("null"),
+                entry_reason_detail
+            ));
+        }
+
+        if !ctx_lines.is_empty() {
+            base = format!(
+                "Review context (from thread history):\n{}\n\n{}",
+                ctx_lines.join("\n\n"),
+                base
+            );
+        }
+
+        base
+    }
+
     fn validate_agent_type(agent_type: &str) -> Result<(), String> {
         match agent_type {
             "ask" | "model" | "cleanse" | "review" | "agent" => Ok(()),
@@ -161,10 +339,12 @@ impl DataEngineerSuite {
     fn inject_review_question(question: &str) -> String {
         format!(
             "Review request: {}.\n\
-             Act as a read-only red-team reviewer for the current DBT project.\n\
+             Act as a read-only, practical reviewer for the current DBT project.\n\
              - Stay read-only (no edits/publish).\n\
              - Use artifacts and schema tools to ground feedback.\n\
-             - Provide prioritized, dataset-scoped improvements.\n\
+             - Prioritize business value over academic correctness; avoid pedantic nitpicks.\n\
+             - Recommend changes/tests only when they materially improve correctness, reduce business risk, or improve analyst usability.\n\
+             - Provide prioritized, dataset-scoped improvements (few, high-impact).\n\
              - IMPORTANT: Re-check the CURRENT project state (prefer target/manifest.json + models/schema.yml). If your feedback is substantially unchanged from the prior iteration, set META.actionable=false (do not repeat the same advice).",
             question
         )
@@ -824,7 +1004,20 @@ impl DataEngineerSuite {
                         }
                     }
                     // Persist transition.
-                    control_flow::append_phase(&thread_store, thread_id, Some("agent".to_string()), Phase::CleanseAuthor).await;
+                    control_flow::append_phase_with_reason(
+                        &thread_store,
+                        thread_id,
+                        Some("agent".to_string()),
+                        Some(Phase::Preflight),
+                        Phase::CleanseAuthor,
+                        Some("preflight_ok"),
+                        Some(serde_json::json!({
+                            "dbt_project_key": key,
+                            "has_query_provider": sctx.query.is_some(),
+                            "has_dbt_provider": sctx.dbt.is_some(),
+                        })),
+                    )
+                    .await;
                     continue;
                 }
 
@@ -922,18 +1115,35 @@ impl DataEngineerSuite {
                                     return Ok(vec![FlowFrame::AwaitUser { prompt }]);
                                 }
                                 control_flow::AuthoringGate::Block { reason } => {
-                                    let _ = thread_store
-                                        .append_step(
-                                            thread_id,
-                                            react_core::session::ThreadStep {
-                                                action: "guard_block".to_string(),
-                                                args: serde_json::json!({"phase": phase.as_str(), "kind": "authoring_completion"}),
-                                                observation: serde_json::json!({"ok": false, "reason": reason}),
-                                                ts: chrono::Utc::now().to_rfc3339(),
-                                                agent: Some("agent".to_string()),
-                                            },
-                                        )
-                                        .await;
+                                    let ts = chrono::Utc::now().to_rfc3339();
+                                    let step = react_core::session::ThreadStep {
+                                        action: "guard_block".to_string(),
+                                        args: serde_json::json!({"phase": phase.as_str(), "kind": "authoring_completion"}),
+                                        observation: serde_json::json!({"ok": false, "reason": reason.clone()}),
+                                        ts,
+                                        agent: Some("agent".to_string()),
+                                    };
+                                    let _ = thread_store.append_step(thread_id, step.clone()).await;
+                                    let trigger_step_idx = thread_store
+                                        .get(thread_id)
+                                        .await
+                                        .map(|l| l.steps.len().saturating_sub(1))
+                                        .unwrap_or(0);
+                                    control_flow::append_phase_with_reason(
+                                        &thread_store,
+                                        thread_id,
+                                        Some("agent".to_string()),
+                                        Some(phase),
+                                        phase,
+                                        Some("phase_blocked"),
+                                        Some(serde_json::json!({
+                                            "kind": "authoring_completion",
+                                            "reason": reason,
+                                            "trigger_step_idx": trigger_step_idx,
+                                            "trigger_step": step,
+                                        })),
+                                    )
+                                    .await;
                                     continue;
                                 }
                             }
@@ -946,26 +1156,59 @@ impl DataEngineerSuite {
                                     return Ok(vec![FlowFrame::AwaitUser { prompt }]);
                                 }
                                 control_flow::AuthoringGate::Block { reason } => {
-                                    let _ = thread_store
-                                        .append_step(
-                                            thread_id,
-                                            react_core::session::ThreadStep {
-                                                action: "guard_block".to_string(),
-                                                args: serde_json::json!({"phase": phase.as_str()}),
-                                                observation: serde_json::json!({"ok": false, "reason": reason}),
-                                                ts: chrono::Utc::now().to_rfc3339(),
-                                                agent: Some("agent".to_string()),
-                                            },
-                                        )
-                                        .await;
+                                    let ts = chrono::Utc::now().to_rfc3339();
+                                    let step = react_core::session::ThreadStep {
+                                        action: "guard_block".to_string(),
+                                        args: serde_json::json!({"phase": phase.as_str(), "kind": "authoring_to_validate"}),
+                                        observation: serde_json::json!({"ok": false, "reason": reason.clone()}),
+                                        ts,
+                                        agent: Some("agent".to_string()),
+                                    };
+                                    let _ = thread_store.append_step(thread_id, step.clone()).await;
+                                    let trigger_step_idx = thread_store
+                                        .get(thread_id)
+                                        .await
+                                        .map(|l| l.steps.len().saturating_sub(1))
+                                        .unwrap_or(0);
+                                    control_flow::append_phase_with_reason(
+                                        &thread_store,
+                                        thread_id,
+                                        Some("agent".to_string()),
+                                        Some(phase),
+                                        phase,
+                                        Some("phase_blocked"),
+                                        Some(serde_json::json!({
+                                            "kind": "authoring_to_validate",
+                                            "reason": reason,
+                                            "trigger_step_idx": trigger_step_idx,
+                                            "trigger_step": step,
+                                        })),
+                                    )
+                                    .await;
                                     continue;
                                 }
                             }
-                            control_flow::append_phase(
+                            let to_phase = if is_cleanse { Phase::CleanseValidate } else { Phase::ModelValidate };
+                            control_flow::append_phase_with_reason(
                                 &thread_store,
                                 thread_id,
                                 Some("agent".to_string()),
-                                if is_cleanse { Phase::CleanseValidate } else { Phase::ModelValidate },
+                                Some(phase),
+                                to_phase,
+                                Some("authoring_complete"),
+                                Some(serde_json::json!({
+                                    "invariants": {
+                                        "has_dbt_project_yml": has_proj,
+                                        "has_any_models": has_models,
+                                    },
+                                    "guard_state": {
+                                        "last_validate_failed": guard.last_validate_failed,
+                                        "mutated_since_fail": guard.mutated_since_fail,
+                                        "mutation_failures_since_validate": guard.mutation_failures_since_validate,
+                                        "probe_required": guard.probe_required,
+                                        "probe_satisfied": guard.probe_satisfied,
+                                    }
+                                })),
                             )
                             .await;
                             continue;
@@ -997,11 +1240,23 @@ impl DataEngineerSuite {
                     let compile_ok = obs.get("compile_ok").and_then(|v| v.as_bool()).unwrap_or(false);
                     let run_ok = obs.get("run_ok").and_then(|v| v.as_bool()).unwrap_or(false);
                     if ok && compile_ok && run_ok {
-                        control_flow::append_phase(
+                        let trigger_step_idx = thread_store
+                            .get(thread_id)
+                            .await
+                            .map(|l| l.steps.len().saturating_sub(1))
+                            .unwrap_or(0);
+                        let to_phase = if phase == Phase::CleanseValidate { Phase::CleanseReview } else { Phase::ModelReview };
+                        control_flow::append_phase_with_reason(
                             &thread_store,
                             thread_id,
                             Some("agent".to_string()),
-                            if phase == Phase::CleanseValidate { Phase::CleanseReview } else { Phase::ModelReview },
+                            Some(phase),
+                            to_phase,
+                            Some("validate_pass"),
+                            Some(serde_json::json!({
+                                "dbt_validate_observation": obs,
+                                "dbt_validate_step_idx": trigger_step_idx,
+                            })),
                         )
                         .await;
                         continue;
@@ -1024,37 +1279,53 @@ impl DataEngineerSuite {
                     }
 
                     // Validation failed -> go back to corresponding author phase.
-                    control_flow::append_phase(
+                    let trigger_step_idx = thread_store
+                        .get(thread_id)
+                        .await
+                        .map(|l| l.steps.len().saturating_sub(1))
+                        .unwrap_or(0);
+                    let to_phase = if phase == Phase::CleanseValidate { Phase::CleanseAuthor } else { Phase::ModelAuthor };
+                    control_flow::append_phase_with_reason(
                         &thread_store,
                         thread_id,
                         Some("agent".to_string()),
-                        if phase == Phase::CleanseValidate { Phase::CleanseAuthor } else { Phase::ModelAuthor },
+                        Some(phase),
+                        to_phase,
+                        Some("validate_fail"),
+                        Some(serde_json::json!({
+                            "dbt_validate_observation": obs,
+                            "dbt_validate_step_idx": trigger_step_idx,
+                            "errors": errs,
+                        })),
                     )
                     .await;
                     continue;
                 }
 
                 Phase::CleanseReview | Phase::ModelReview | Phase::PostPublishReview => {
-                    let review_q = match phase {
-                        Phase::CleanseReview => format!(
-                            "Review the DBT project after cleanse/staging work. Identify any issues or improvements to apply.\n\nOriginal goal:\n{}",
-                            question
-                        ),
-                        Phase::ModelReview => format!(
-                            "Review the DBT project after modeling (core/gold) work. Identify any issues or improvements to apply.\n\nOriginal goal:\n{}",
-                            question
-                        ),
-                        _ => format!(
-                            "Final review after publish. Identify any remaining actionable improvements.\n\nOriginal goal:\n{}",
-                            question
-                        ),
-                    };
+                    let review_q = Self::build_review_question_with_context(question, phase, log.as_ref());
                     let frames = Self::run_review(thread_id, &review_q, sctx).await?;
                     let first = frames.into_iter().next().unwrap_or(FlowFrame::Final { answer: "".to_string(), sql: None });
                     let (answer, _sql) = match first {
                         FlowFrame::Final { answer, sql } => (answer, sql),
                         other => return Ok(vec![other]),
                     };
+
+                    // Best-effort: capture the review final step as the trigger for phase transitions.
+                    let (trigger_step_idx, trigger_step) = thread_store
+                        .get(thread_id)
+                        .await
+                        .and_then(|l| {
+                            let idx = l.steps.len().saturating_sub(1);
+                            l.steps.last().cloned().map(|s| (idx, s))
+                        })
+                        .unwrap_or((0, react_core::session::ThreadStep {
+                            action: "unknown".to_string(),
+                            args: serde_json::Value::Null,
+                            observation: serde_json::json!({"ok": false, "reason":"missing thread step"}),
+                            ts: chrono::Utc::now().to_rfc3339(),
+                            agent: Some("agent".to_string()),
+                        }));
 
                     let meta = Self::parse_review_meta(&answer).unwrap_or(ReviewMeta {
                         actionable: false,
@@ -1078,7 +1349,26 @@ impl DataEngineerSuite {
                             Phase::PostPublishReview => Phase::Done,
                             _ => Phase::Done,
                         };
-                        control_flow::append_phase(&thread_store, thread_id, Some("agent".to_string()), next).await;
+                        control_flow::append_phase_with_reason(
+                            &thread_store,
+                            thread_id,
+                            Some("agent".to_string()),
+                            Some(phase),
+                            next,
+                            Some("review_actionable_false"),
+                            Some(serde_json::json!({
+                                "review_phase": phase.as_str(),
+                                "meta": {
+                                    "actionable": meta.actionable,
+                                    "dataset_ids": meta.dataset_ids,
+                                    "tier": meta.tier,
+                                },
+                                "answer": answer,
+                                "trigger_step_idx": trigger_step_idx,
+                                "trigger_step": trigger_step,
+                            })),
+                        )
+                        .await;
                         continue;
                     }
 
@@ -1089,7 +1379,26 @@ impl DataEngineerSuite {
                     } else {
                         Phase::ModelAuthor
                     };
-                    control_flow::append_phase(&thread_store, thread_id, Some("agent".to_string()), back).await;
+                    control_flow::append_phase_with_reason(
+                        &thread_store,
+                        thread_id,
+                        Some("agent".to_string()),
+                        Some(phase),
+                        back,
+                        Some("review_actionable_true"),
+                        Some(serde_json::json!({
+                            "review_phase": phase.as_str(),
+                            "meta": {
+                                "actionable": meta.actionable,
+                                "dataset_ids": meta.dataset_ids,
+                                "tier": meta.tier,
+                            },
+                            "answer": answer,
+                            "trigger_step_idx": trigger_step_idx,
+                            "trigger_step": trigger_step,
+                        })),
+                    )
+                    .await;
                     continue;
                 }
 
@@ -1104,7 +1413,18 @@ impl DataEngineerSuite {
                                 }]);
                             }
                             if t == "approve" {
-                                control_flow::append_phase(&thread_store, thread_id, Some("agent".to_string()), Phase::Publish).await;
+                                control_flow::append_phase_with_reason(
+                                    &thread_store,
+                                    thread_id,
+                                    Some("agent".to_string()),
+                                    Some(Phase::PublishAwaitApproval),
+                                    Phase::Publish,
+                                    Some("user_approved_publish"),
+                                    Some(serde_json::json!({
+                                        "last_user_step": last_user,
+                                    })),
+                                )
+                                .await;
                                 continue;
                             }
                         }
@@ -1125,7 +1445,18 @@ impl DataEngineerSuite {
                     let ok = obs.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
                     let stage = obs.get("stage").and_then(|v| v.as_str()).unwrap_or("");
                     if ok && (stage == "published" || stage == "no_change") {
-                        control_flow::append_phase(&thread_store, thread_id, Some("agent".to_string()), Phase::PostPublishReview).await;
+                        control_flow::append_phase_with_reason(
+                            &thread_store,
+                            thread_id,
+                            Some("agent".to_string()),
+                            Some(Phase::PublishAwaitApproval),
+                            Phase::PostPublishReview,
+                            Some("publish_success"),
+                            Some(serde_json::json!({
+                                "publish_observation": obs,
+                            })),
+                        )
+                        .await;
                         continue;
                     }
                     if ok && stage == "await_approval" {
@@ -1133,7 +1464,18 @@ impl DataEngineerSuite {
                         return Ok(vec![FlowFrame::AwaitApproval { prompt }]);
                     }
                     // Publish failed: send back to model authoring to fix.
-                    control_flow::append_phase(&thread_store, thread_id, Some("agent".to_string()), Phase::ModelAuthor).await;
+                    control_flow::append_phase_with_reason(
+                        &thread_store,
+                        thread_id,
+                        Some("agent".to_string()),
+                        Some(Phase::PublishAwaitApproval),
+                        Phase::ModelAuthor,
+                        Some("publish_fail"),
+                        Some(serde_json::json!({
+                            "publish_observation": obs,
+                        })),
+                    )
+                    .await;
                     continue;
                 }
 
@@ -1164,11 +1506,33 @@ impl DataEngineerSuite {
                     let ok = obs.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
                     let stage = obs.get("stage").and_then(|v| v.as_str()).unwrap_or("");
                     if ok && (stage == "published" || stage == "no_change") {
-                        control_flow::append_phase(&thread_store, thread_id, Some("agent".to_string()), Phase::PostPublishReview).await;
+                        control_flow::append_phase_with_reason(
+                            &thread_store,
+                            thread_id,
+                            Some("agent".to_string()),
+                            Some(Phase::Publish),
+                            Phase::PostPublishReview,
+                            Some("publish_confirmed_success"),
+                            Some(serde_json::json!({
+                                "publish_observation": obs,
+                            })),
+                        )
+                        .await;
                         continue;
                     }
                     // Failed publish -> back to model authoring.
-                    control_flow::append_phase(&thread_store, thread_id, Some("agent".to_string()), Phase::ModelAuthor).await;
+                    control_flow::append_phase_with_reason(
+                        &thread_store,
+                        thread_id,
+                        Some("agent".to_string()),
+                        Some(Phase::Publish),
+                        Phase::ModelAuthor,
+                        Some("publish_confirmed_fail"),
+                        Some(serde_json::json!({
+                            "publish_observation": obs,
+                        })),
+                    )
+                    .await;
                     continue;
                 }
 
@@ -1576,6 +1940,61 @@ mod tests {
             title_finalized: false,
         };
         assert_eq!(DataEngineerSuite::allow_ask_approval_in_phase(Some(&log), Phase::CleanseAuthor), false);
+    }
+
+    #[test]
+    fn review_question_includes_prior_review_and_mutation_diff_when_available() {
+        use crate::data_engineer::control_flow::Phase;
+        use react_core::session::{ThreadLog, ThreadStep};
+
+        let prior_review_answer = "META:{\"actionable\":true,\"dataset_ids\":[\"x\"],\"tier\":\"silver\"}\n\nPlease add tests.";
+        let prior_review_transition = ThreadStep {
+            action: "phase".to_string(),
+            args: serde_json::json!({
+                "phase":"cleanse_author",
+                "from_phase":"cleanse_review",
+                "reason_code":"review_actionable_true",
+                "reason_detail": {
+                    "review_phase":"cleanse_review",
+                    "meta": {"actionable": true, "dataset_ids": ["x"], "tier":"silver"},
+                    "answer": prior_review_answer
+                }
+            }),
+            observation: serde_json::json!({"ok":true}),
+            ts: "t".to_string(),
+            agent: Some("agent".to_string()),
+        };
+
+        let log = ThreadLog {
+            steps: vec![
+                prior_review_transition,
+                ThreadStep {
+                    action: "staging_model".to_string(),
+                    args: serde_json::json!({"dataset_ids":["AwsDataCatalog.test_raw.raw_orders"]}),
+                    observation: serde_json::json!({"ok": true, "written_keys":["k1"]}),
+                    ts: "t".to_string(),
+                    agent: Some("agent".to_string()),
+                },
+                ThreadStep {
+                    action: "phase".to_string(),
+                    args: serde_json::json!({"phase":"cleanse_review","from_phase":"cleanse_validate","reason_code":"validate_pass","reason_detail":{"dbt_validate_step_idx": 1}}),
+                    observation: serde_json::json!({"ok":true}),
+                    ts: "t".to_string(),
+                    agent: Some("agent".to_string()),
+                },
+            ],
+            result: None,
+            title: None,
+            title_finalized: false,
+        };
+
+        let q = DataEngineerSuite::build_review_question_with_context("orig goal", Phase::CleanseReview, Some(&log));
+        assert!(q.contains("Review context"), "should include context header");
+        assert!(q.contains("Previous review decision"), "should include prior review block");
+        assert!(q.contains("What changed since previous review"), "should include mutation diff");
+        assert!(q.contains("staging_model"), "should mention mutation action");
+        assert!(q.contains("validate_pass"), "should include entry reason");
+        assert!(q.contains("Original goal"), "should retain original goal section");
     }
 }
 

@@ -90,62 +90,16 @@ fn parse_dataset_id(dataset_id: &str) -> Option<(String, String, String)> {
     Some((parts[0].to_string(), parts[1].to_string(), parts[2].to_string()))
 }
 
-fn staging_model_name_simple(expected_table: &str) -> String {
-    format!("stg_{}", sanitize_ident(expected_table))
-}
-
-fn staging_model_name_scoped(expected_db: &str, expected_table: &str) -> String {
+/// Canonical, deterministic staging model name for a dataset_id <catalog>.<schema>.<table>.
+///
+/// We own the output DBs and require a strict 1:1 mapping, so this is intentionally stable:
+/// `stg_<schema>_<table>` (single underscore join, both sides sanitized).
+fn canonical_staging_model_name(expected_db: &str, expected_table: &str) -> String {
     format!(
-        "stg_{}__{}",
+        "stg_{}_{}",
         sanitize_ident(expected_db),
         sanitize_ident(expected_table)
     )
-}
-
-/// Resolve a collision-free staging model name for a dataset.
-///
-/// Strategy (in priority order):
-/// - If a canonical `stg_<table>` already exists, reuse it (stable upgrades).
-/// - Else if a scoped `stg_<schema>__<table>` already exists, reuse it (back-compat).
-/// - Else prefer `stg_<table>` unless it would collide in this call (already used) or in the
-///   existing project. If it would collide, use `stg_<schema>__<table>`.
-/// - As a last resort (pathological collisions), append a numeric suffix.
-fn resolve_staging_model_name(
-    expected_db: &str,
-    expected_table: &str,
-    existing_names: &HashSet<String>,
-    used_names: &HashSet<String>,
-) -> String {
-    let simple = staging_model_name_simple(expected_table);
-    let scoped = staging_model_name_scoped(expected_db, expected_table);
-
-    // Reuse existing models where possible to keep behavior stable over time.
-    if existing_names.contains(&simple) && !used_names.contains(&simple) {
-        return simple;
-    }
-    if existing_names.contains(&scoped) && !used_names.contains(&scoped) {
-        return scoped;
-    }
-
-    // Prefer simple name unless it would collide.
-    let simple_collides = used_names.contains(&simple) || existing_names.contains(&simple);
-    let scoped_collides = used_names.contains(&scoped) || existing_names.contains(&scoped);
-
-    if !simple_collides {
-        return simple;
-    }
-    if !scoped_collides {
-        return scoped;
-    }
-
-    // Last resort: ensure uniqueness by suffixing.
-    for i in 2..=99usize {
-        let cand = format!("{}_{}", scoped, i);
-        if !used_names.contains(&cand) && !existing_names.contains(&cand) {
-            return cand;
-        }
-    }
-    scoped
 }
 
 fn staging_model_rel_path_for_name(model_name: &str) -> String {
@@ -210,6 +164,23 @@ fn contains_expected_source_call(sql: &str, expected_db: &str, expected_table: &
         format!("source(\"{}\", \"{}\")", db, table),
     ];
     patterns.iter().any(|p| lc.contains(p))
+}
+
+fn matching_staging_rel_paths_by_source(
+    staging_files: &[(String, String)],
+    expected_db: &str,
+    expected_table: &str,
+) -> Vec<String> {
+    staging_files
+        .iter()
+        .filter_map(|(rel_path, content)| {
+            if contains_expected_source_call(content, expected_db, expected_table) {
+                Some(rel_path.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn normalize_jinja_config_tags(sql: &str) -> String {
@@ -441,9 +412,11 @@ impl Tool for StagingModelTool {
             .map(|c| c.providers.dbt.naming.silver_suffix.clone())
             .unwrap_or_else(|| "silver".to_string());
 
-        // Discover existing staging model names to keep naming stable across runs.
+        // Discover existing staging model files so we can update by semantic identity (source()),
+        // not by filename (prevents duplicate staging models for the same dataset).
         let staging_prefix = format!("{}/models/staging/", base);
-        let mut existing_model_names: HashSet<String> = HashSet::new();
+        let mut staging_files: Vec<(String, String)> = Vec::new(); // (rel_path, content)
+        let mut unreadable_staging_rel_paths: Vec<String> = Vec::new();
         if let Ok(keys) = ctx.storage.list_prefix(&staging_prefix).await {
             for k in keys {
                 if !k.ends_with(".sql") {
@@ -452,14 +425,22 @@ impl Tool for StagingModelTool {
                 if k.contains("/_versions/") {
                     continue;
                 }
-                let file = k.rsplit('/').next().unwrap_or("").trim();
-                let stem = file.strip_suffix(".sql").unwrap_or(file).trim();
-                if !stem.is_empty() {
-                    existing_model_names.insert(stem.to_string());
+                // Convert storage key -> project-relative path (models/staging/<name>.sql)
+                let rel_path = k
+                    .strip_prefix(&(base.clone() + "/"))
+                    .unwrap_or(k.as_str())
+                    .to_string();
+                match ctx.storage.get_bytes(&k).await {
+                    Ok(bytes) => {
+                        let content = String::from_utf8_lossy(&bytes).to_string();
+                        staging_files.push((rel_path, content));
+                    }
+                    Err(_) => {
+                        unreadable_staging_rel_paths.push(rel_path);
+                    }
                 }
             }
         }
-        let mut used_model_names: HashSet<String> = HashSet::new();
 
         let mut written: Vec<String> = Vec::new();
         let mut notes: Vec<String> = Vec::new();
@@ -474,12 +455,45 @@ impl Tool for StagingModelTool {
             let ds = &dataset_ids[0];
             let (_cat, expected_db, expected_table) = parse_dataset_id(ds)
                 .ok_or_else(|| format!("invalid dataset_id '{ds}' (expected <catalog>.<schema>.<table>)"))?;
-            let model_name = resolve_staging_model_name(&expected_db, &expected_table, &existing_model_names, &used_model_names);
-            let rel_path = staging_model_rel_path_for_name(&model_name);
+            let canonical_name = canonical_staging_model_name(&expected_db, &expected_table);
+
+            let matches = matching_staging_rel_paths_by_source(&staging_files, &expected_db, &expected_table);
+            if matches.len() > 1 {
+                errors.push(format!(
+                    "{ds}: multiple staging models reference the same source({expected_db},{expected_table}); refusing to write. Conflicts: {:?}",
+                    matches
+                ));
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "datasets": dataset_ids.len(),
+                    "written_keys": written,
+                    "schema_key": schema_key,
+                    "notes": [],
+                    "errors": errors,
+                }));
+            }
+            if matches.is_empty() && !unreadable_staging_rel_paths.is_empty() {
+                errors.push(format!(
+                    "{ds}: unable to reliably determine whether an existing staging model already targets this source because some staging files were unreadable. Unreadable: {:?}",
+                    unreadable_staging_rel_paths
+                ));
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "datasets": dataset_ids.len(),
+                    "written_keys": written,
+                    "schema_key": schema_key,
+                    "notes": [],
+                    "errors": errors,
+                }));
+            }
+            let rel_path = matches
+                .get(0)
+                .cloned()
+                .unwrap_or_else(|| staging_model_rel_path_for_name(&canonical_name));
             let key = format!("{}/{}", base, rel_path);
 
             // Force a canonical config: schema suffix + alias (prevents dbt identifier collisions).
-            sql_out = ensure_model_config(&sql_out, &silver_db, &model_name);
+            sql_out = ensure_model_config(&sql_out, &silver_db, &canonical_name);
 
             let (sql_sanitized, removed) = strip_jinja_macros_in_sql_comments(&sql_out);
             if removed > 0 {
@@ -538,9 +552,30 @@ impl Tool for StagingModelTool {
         for ds in dataset_ids.iter() {
             let (_cat, expected_db, expected_table) = parse_dataset_id(ds)
                 .ok_or_else(|| format!("invalid dataset_id '{ds}' (expected <catalog>.<schema>.<table>)"))?;
-            let model_name = resolve_staging_model_name(&expected_db, &expected_table, &existing_model_names, &used_model_names);
-            used_model_names.insert(model_name.clone());
-            let rel_path = staging_model_rel_path_for_name(&model_name);
+            let canonical_name = canonical_staging_model_name(&expected_db, &expected_table);
+
+            let matches = matching_staging_rel_paths_by_source(&staging_files, &expected_db, &expected_table);
+            if matches.len() > 1 {
+                errors.push(format!(
+                    "{ds}: multiple staging models reference the same source({expected_db},{expected_table}); refusing to write. Conflicts: {:?}",
+                    matches
+                ));
+                continue;
+            }
+            if matches.is_empty() && !unreadable_staging_rel_paths.is_empty() {
+                errors.push(format!(
+                    "{ds}: unable to reliably determine whether an existing staging model already targets this source because some staging files were unreadable. Unreadable: {:?}",
+                    unreadable_staging_rel_paths
+                ));
+                continue;
+            }
+
+            // Exactly 1 match -> update in place (even if filename isn't canonical).
+            // No matches -> create at canonical path.
+            let rel_path = matches
+                .get(0)
+                .cloned()
+                .unwrap_or_else(|| staging_model_rel_path_for_name(&canonical_name));
             let key = format!("{}/{}", base, rel_path);
 
             let cols = query.schema(ds).await.unwrap_or_default();
@@ -617,7 +652,7 @@ impl Tool for StagingModelTool {
 
             let mut sql_out = parsed.sql;
             // Force a canonical config: schema suffix + alias (prevents dbt identifier collisions).
-            sql_out = ensure_model_config(&sql_out, &silver_db, &model_name);
+            sql_out = ensure_model_config(&sql_out, &silver_db, &canonical_name);
 
             let (sql_sanitized, _removed) = strip_jinja_macros_in_sql_comments(&sql_out);
             sql_out = sql_sanitized;
@@ -758,26 +793,38 @@ select * from source;
     }
 
     #[test]
-    fn resolve_staging_model_name_reuses_existing_simple() {
-        let existing = HashSet::from(["stg_raw_orders".to_string()]);
-        let used = HashSet::new();
-        let got = resolve_staging_model_name("test_raw", "raw_orders", &existing, &used);
-        assert_eq!(got, "stg_raw_orders");
+    fn canonical_staging_model_name_is_deterministic_schema_table() {
+        let got = canonical_staging_model_name("test_raw", "raw_orders");
+        assert_eq!(got, "stg_test_raw_raw_orders");
+        assert!(!got.contains("__"));
     }
 
     #[test]
-    fn resolve_staging_model_name_defaults_to_simple_when_no_collision() {
-        let existing = HashSet::new();
-        let used = HashSet::new();
-        let got = resolve_staging_model_name("test_raw", "raw_orders", &existing, &used);
-        assert_eq!(got, "stg_raw_orders");
+    fn matching_staging_rel_paths_by_source_finds_exactly_one() {
+        let files = vec![
+            (
+                "models/staging/stg_x.sql".to_string(),
+                "select * from {{ source('test_raw','raw_orders') }}".to_string(),
+            ),
+            ("models/staging/stg_y.sql".to_string(), "select 1".to_string()),
+        ];
+        let got = matching_staging_rel_paths_by_source(&files, "test_raw", "raw_orders");
+        assert_eq!(got, vec!["models/staging/stg_x.sql".to_string()]);
     }
 
     #[test]
-    fn resolve_staging_model_name_falls_back_to_scoped_on_collision() {
-        let existing = HashSet::from(["stg_raw_orders".to_string()]);
-        let used = HashSet::from(["stg_raw_orders".to_string()]);
-        let got = resolve_staging_model_name("test_raw", "raw_orders", &existing, &used);
-        assert_eq!(got, "stg_test_raw__raw_orders");
+    fn matching_staging_rel_paths_by_source_detects_duplicates() {
+        let files = vec![
+            (
+                "models/staging/a.sql".to_string(),
+                "select * from {{ source('test_raw','raw_orders') }}".to_string(),
+            ),
+            (
+                "models/staging/b.sql".to_string(),
+                "select * from {{ source(\"test_raw\", \"raw_orders\") }}".to_string(),
+            ),
+        ];
+        let got = matching_staging_rel_paths_by_source(&files, "test_raw", "raw_orders");
+        assert_eq!(got.len(), 2);
     }
 }

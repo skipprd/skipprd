@@ -83,12 +83,77 @@ pub fn phase_from_log(log: Option<&ThreadLog>) -> Phase {
 }
  
 pub async fn append_phase(store: &ThreadStore, thread_id: &str, agent: Option<String>, phase: Phase) {
+    // Best-effort: infer the previous phase if one exists; otherwise use null.
+    let prev_phase = store
+        .get(thread_id)
+        .await
+        .and_then(|log| {
+            log.steps
+                .iter()
+                .rev()
+                .find(|s| s.action == "phase")
+                .and_then(|s| s.args.get("phase"))
+                .and_then(|v| v.as_str())
+                .and_then(Phase::from_str)
+        });
+
+    append_phase_with_reason(
+        store,
+        thread_id,
+        agent,
+        prev_phase,
+        phase,
+        Some("phase_set"),
+        Some(serde_json::json!({
+            "derived_from_log": prev_phase.is_some(),
+        })),
+    )
+    .await;
+}
+
+/// Append a phase marker step with explicit transition reasoning.
+///
+/// This is intentionally verbose: `reason_detail` is stored inline in the thread log so
+/// debugging has full context without needing to cross-reference other stores.
+pub async fn append_phase_with_reason(
+    store: &ThreadStore,
+    thread_id: &str,
+    agent: Option<String>,
+    from_phase: Option<Phase>,
+    phase: Phase,
+    reason_code: Option<&str>,
+    reason_detail: Option<Value>,
+) {
+    let mut args = serde_json::Map::new();
+    args.insert("phase".to_string(), serde_json::json!(phase.as_str()));
+    // Always include these fields to keep thread JSON debuggable without inference.
+    args.insert(
+        "from_phase".to_string(),
+        match from_phase {
+            Some(fp) => serde_json::json!(fp.as_str()),
+            None => Value::Null,
+        },
+    );
+    args.insert(
+        "reason_code".to_string(),
+        match reason_code {
+            Some(rc) => serde_json::json!(rc),
+            None => Value::Null,
+        },
+    );
+    args.insert(
+        "reason_detail".to_string(),
+        match reason_detail {
+            Some(rd) => rd,
+            None => Value::Null,
+        },
+    );
     let _ = store
         .append_step(
             thread_id,
             ThreadStep {
                 action: "phase".to_string(),
-                args: serde_json::json!({ "phase": phase.as_str() }),
+                args: Value::Object(args),
                 observation: serde_json::json!({ "ok": true }),
                 ts: chrono::Utc::now().to_rfc3339(),
                 agent,
@@ -639,6 +704,74 @@ mod tests {
         let g = derive_guard_state(Some(&log));
         assert!(!g.probe_required, "probe_required should be cleared once satisfied");
         assert!(g.probe_satisfied);
+    }
+
+    #[tokio::test]
+    async fn append_phase_with_reason_records_complete_reason_fields() {
+        use react_core::keyspace::DefaultKeyspace;
+        use react_core::scope::RequestScope;
+        use react_core::storage::InMemoryStorageAdapter;
+        use std::sync::Arc;
+
+        let storage = Arc::new(InMemoryStorageAdapter::default());
+        let scope = RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() };
+        let keyspace = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let store = ThreadStore::new(storage, scope, keyspace);
+
+        append_phase_with_reason(
+            &store,
+            "tid",
+            Some("agent".to_string()),
+            Some(Phase::Preflight),
+            Phase::CleanseAuthor,
+            Some("preflight_ok"),
+            Some(serde_json::json!({"x": 1, "nested": {"y": "z"}})),
+        )
+        .await;
+
+        let log = store.get("tid").await.expect("thread log should exist");
+        let last = log.steps.last().expect("last step exists");
+        assert_eq!(last.action, "phase");
+        assert_eq!(last.args.get("phase").and_then(|v| v.as_str()), Some("cleanse_author"));
+        assert!(last.args.get("from_phase").is_some());
+        assert!(last.args.get("reason_code").is_some());
+        assert!(last.args.get("reason_detail").is_some());
+        assert_eq!(last.args.get("from_phase").and_then(|v| v.as_str()), Some("preflight"));
+        assert_eq!(last.args.get("reason_code").and_then(|v| v.as_str()), Some("preflight_ok"));
+        assert_eq!(last.args.get("reason_detail").and_then(|v| v.get("x")).and_then(|v| v.as_i64()), Some(1));
+        assert_eq!(
+            last.args
+                .get("reason_detail")
+                .and_then(|v| v.get("nested"))
+                .and_then(|v| v.get("y"))
+                .and_then(|v| v.as_str()),
+            Some("z")
+        );
+    }
+
+    #[tokio::test]
+    async fn append_phase_with_reason_includes_null_fields_when_absent() {
+        use react_core::keyspace::DefaultKeyspace;
+        use react_core::scope::RequestScope;
+        use react_core::storage::InMemoryStorageAdapter;
+        use std::sync::Arc;
+
+        let storage = Arc::new(InMemoryStorageAdapter::default());
+        let scope = RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() };
+        let keyspace = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let store = ThreadStore::new(storage, scope, keyspace);
+
+        append_phase_with_reason(&store, "tid2", Some("agent".to_string()), None, Phase::CleanseAuthor, None, None).await;
+        let log = store.get("tid2").await.expect("thread log should exist");
+        let last = log.steps.last().expect("last step exists");
+        assert_eq!(last.action, "phase");
+        assert_eq!(last.args.get("phase").and_then(|v| v.as_str()), Some("cleanse_author"));
+        assert!(last.args.get("from_phase").is_some());
+        assert!(last.args.get("reason_code").is_some());
+        assert!(last.args.get("reason_detail").is_some());
+        assert!(last.args.get("from_phase").unwrap().is_null());
+        assert!(last.args.get("reason_code").unwrap().is_null());
+        assert!(last.args.get("reason_detail").unwrap().is_null());
     }
 }
  
