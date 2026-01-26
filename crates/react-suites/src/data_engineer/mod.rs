@@ -10,7 +10,7 @@ use crate::data_engineer_shared::policy_sql_validated::SqlValidatedPolicy;
 use crate::data_engineer_shared::types::DatasetCandidate;
 use crate::suite::{Suite, SuiteCtx};
 use react_core::tools::{Tool, ToolRegistry};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 pub struct DataEngineerSuite;
@@ -21,6 +21,10 @@ pub mod dbt_error;
 pub mod control_flow;
 pub mod project_fs;
 pub mod dbt_repair;
+pub mod naming;
+pub mod patch_protocol;
+pub mod project_files;
+pub mod plan;
 
 /// Agent-mode policy: preserve strict interrupts (ask_user/ask_approval), but otherwise accept finals.
 struct InterruptOnlyPolicy;
@@ -53,7 +57,9 @@ impl AgentPolicy for InterruptOnlyPolicy {
         // Keep base tool timeouts snappy, but raise for known-slow operations.
         match action_name {
             // Can involve an inner LLM call + writes.
-            "staging_model" => Some(60),
+            "staging_model" => Some(600),
+            // Can involve multiple storage reads + an inner LLM call + writes.
+            "gold_model" => Some(120),
             // Warehouse queries can legitimately take >10s.
             "run_sql" => Some(60),
             // Batch writes can be larger.
@@ -79,6 +85,17 @@ impl AgentPolicy for InterruptOnlyPolicy {
     }
 }
 
+#[cfg(test)]
+mod interrupt_only_policy_tests {
+    use super::*;
+
+    #[test]
+    fn interrupt_only_policy_overrides_gold_model_timeout() {
+        let p = InterruptOnlyPolicy;
+        assert_eq!(p.timeout_for_tool("gold_model"), Some(120));
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct ReviewMeta {
     #[serde(default)]
@@ -95,19 +112,19 @@ enum AuthoringKind {
     Model,
 }
 
+#[derive(Clone, Debug)]
+enum AllowedBatch {
+    CleanseDatasetIds(Vec<String>),
+    ModelItemNames(Vec<String>),
+}
+
 impl DataEngineerSuite {
     fn phase_start_idx(log: &react_core::session::ThreadLog, phase: control_flow::Phase) -> Option<usize> {
         for (i, step) in log.steps.iter().enumerate().rev() {
-            if step.action != "phase" {
-                continue;
-            }
-            let p = step
-                .args
-                .get("phase")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if p == phase.as_str() {
-                return Some(i);
+            if let react_core::session::ThreadStep::Phase { phase: p, .. } = step {
+                if p == phase.as_str() {
+                    return Some(i);
+                }
             }
         }
         None
@@ -123,22 +140,39 @@ impl DataEngineerSuite {
         // Monotonic: once approval/reject is seen within this phase, never allow ask_approval again
         // (even if later user messages are "continue", "ok", etc).
         for step in log.steps.iter().skip(start + 1) {
-            if step.action != "user" {
+            let react_core::session::ThreadStep::User { text, .. } = step else {
                 continue;
-            }
-            let t = step
-                .args
-                .get("text")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .trim()
-                .to_lowercase();
+            };
+            let t = text.trim().to_lowercase();
             if t == "approve" || t == "reject" {
                 return false;
             }
         }
         true
     }
+
+    async fn has_any_gold_model_sql(actx: &AgentCtx) -> bool {
+        let base = actx.keyspace.dbt_prefix(&actx.scope).trim_end_matches('/').to_string();
+        let prefixes = [
+            format!("{}/models/core/", base),
+            format!("{}/models/marts/", base),
+        ];
+        for pref in prefixes.iter() {
+            if let Ok(keys) = actx.storage.list_prefix(pref).await {
+                for k in keys {
+                    if !k.ends_with(".sql") {
+                        continue;
+                    }
+                    if k.contains("/_versions/") {
+                        continue;
+                    }
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn parse_review_meta(answer: &str) -> Option<ReviewMeta> {
         let first = answer.lines().next()?.trim();
         let prefix = "META:";
@@ -160,65 +194,89 @@ impl DataEngineerSuite {
     }
 
     fn is_mutation_step_for_review(step: &react_core::session::ThreadStep) -> bool {
-        match step.action.as_str() {
-            "approve_and_save_artifact" | "approve_and_save_artifact_batch" | "staging_model" => true,
-            "dbt_files" => step
-                .args
-                .get("op")
-                .and_then(|v| v.as_str())
-                .map(|op| op == "put")
-                .unwrap_or(false),
+        match step {
+            react_core::session::ThreadStep::ArtifactSaved { .. } => true,
+            react_core::session::ThreadStep::Tool { name, args, .. } => match name.as_str() {
+                "approve_and_save_artifact" | "approve_and_save_artifact_batch" | "staging_model" => true,
+                "dbt_files" => args
+                    .get("op")
+                    .and_then(|v| v.as_str())
+                    .map(|op| op == "put")
+                    .unwrap_or(false),
+                _ => false,
+            },
             _ => false,
         }
     }
 
     fn compact_mutation_summary(step: &react_core::session::ThreadStep) -> serde_json::Value {
-        let ok = step
-            .observation
-            .get("ok")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let action = step.action.clone();
-
-        let args = match step.action.as_str() {
-            "dbt_files" => serde_json::json!({
-                "op": step.args.get("op"),
-                "path": step.args.get("path"),
-            }),
-            "approve_and_save_artifact" => serde_json::json!({
-                "kind": step.args.get("kind"),
-                "name": step.args.get("name"),
-                "dataset_id": step.args.get("dataset_id"),
-            }),
-            "approve_and_save_artifact_batch" => {
-                let names: Vec<serde_json::Value> = step
-                    .args
-                    .get("items")
-                    .and_then(|v| v.as_array())
-                    .map(|items| {
-                        items
-                            .iter()
-                            .take(6)
-                            .filter_map(|it| it.get("name").cloned())
-                            .collect()
-                    })
-                    .unwrap_or_default();
+        let (action, ok, args_v) = match step {
+            react_core::session::ThreadStep::ArtifactSaved {
+                kind,
+                name,
+                dataset_id,
+                key,
+                status,
+                lines_added,
+                lines_removed,
+                observation,
+                ..
+            } => (
+                "artifact_saved".to_string(),
+                observation.ok,
                 serde_json::json!({
-                    "items_count": step.args.get("items").and_then(|v| v.as_array()).map(|a| a.len()),
-                    "names_head": names,
-                })
+                    "kind": kind,
+                    "name": name,
+                    "dataset_id": dataset_id,
+                    "key": key,
+                    "status": status,
+                    "lines_added": lines_added,
+                    "lines_removed": lines_removed,
+                }),
+            ),
+            react_core::session::ThreadStep::Tool { name, args, observation, .. } => {
+                let args_v = match name.as_str() {
+                    "dbt_files" => serde_json::json!({
+                        "op": args.get("op"),
+                        "path": args.get("path"),
+                    }),
+                    "approve_and_save_artifact" => serde_json::json!({
+                        "kind": args.get("kind"),
+                        "name": args.get("name"),
+                        "dataset_id": args.get("dataset_id"),
+                    }),
+                    "approve_and_save_artifact_batch" => {
+                        let names: Vec<serde_json::Value> = args
+                            .get("items")
+                            .and_then(|v| v.as_array())
+                            .map(|items| {
+                                items
+                                    .iter()
+                                    .take(6)
+                                    .filter_map(|it| it.get("name").cloned())
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        serde_json::json!({
+                            "items_count": args.get("items").and_then(|v| v.as_array()).map(|a| a.len()),
+                            "names_head": names,
+                        })
+                    }
+                    "staging_model" => serde_json::json!({
+                        "dataset_ids": args.get("dataset_ids"),
+                        "written_keys": observation.extra.get("written_keys"),
+                    }),
+                    _ => args.clone(),
+                };
+                (name.clone(), observation.ok, args_v)
             }
-            "staging_model" => serde_json::json!({
-                "dataset_ids": step.args.get("dataset_ids"),
-                "written_keys": step.observation.get("written_keys"),
-            }),
-            _ => step.args.clone(),
+            other => ("unknown".to_string(), true, serde_json::to_value(other).unwrap_or(serde_json::Value::Null)),
         };
 
         serde_json::json!({
             "action": action,
             "ok": ok,
-            "args": args,
+            "args": args_v,
         })
     }
 
@@ -245,24 +303,33 @@ impl DataEngineerSuite {
         let Some(log) = log else { return base };
 
         // Current entry reason (last phase step is authoritative for why we are in this phase).
-        let entry = log.steps.iter().rev().find(|s| s.action == "phase");
-        let entry_reason_code = entry.and_then(|s| s.args.get("reason_code")).and_then(|v| v.as_str());
-        let entry_reason_detail = entry.and_then(|s| s.args.get("reason_detail")).cloned().unwrap_or(serde_json::Value::Null);
+        let entry = log.steps.iter().rev().find_map(|s| match s {
+            react_core::session::ThreadStep::Phase { reason_code, reason_detail, .. } => {
+                Some((reason_code.as_deref(), reason_detail.as_ref()))
+            }
+            _ => None,
+        });
+        let entry_reason_code: Option<&str> = entry.and_then(|(rc, _)| rc);
+        let entry_reason_detail: serde_json::Value = entry
+            .and_then(|(_, rd)| rd.cloned())
+            .unwrap_or(serde_json::Value::Null);
 
         // Prior review context: last phase transition emitted from a review decision.
         let mut prior_review_block: Option<String> = None;
         let mut mutations_since: Vec<serde_json::Value> = Vec::new();
 
-        if let Some((idx, step)) = log.steps.iter().enumerate().rev().find(|(_, s)| {
-            if s.action != "phase" {
-                return false;
+        if let Some((idx, step)) = log.steps.iter().enumerate().rev().find(|(_, s)| match s {
+            react_core::session::ThreadStep::Phase { reason_code: Some(rc), .. } => {
+                rc == "review_actionable_true" || rc == "review_actionable_false"
             }
-            matches!(
-                s.args.get("reason_code").and_then(|v| v.as_str()),
-                Some("review_actionable_true") | Some("review_actionable_false")
-            )
+            _ => false,
         }) {
-            let rd = step.args.get("reason_detail").cloned().unwrap_or(serde_json::Value::Null);
+            let rd = match step {
+                react_core::session::ThreadStep::Phase { reason_detail, .. } => {
+                    reason_detail.clone().unwrap_or(serde_json::Value::Null)
+                }
+                _ => serde_json::Value::Null,
+            };
             let review_phase = rd.get("review_phase").and_then(|v| v.as_str()).unwrap_or("unknown");
             let meta = rd.get("meta").cloned().unwrap_or(serde_json::Value::Null);
             let ans = rd.get("answer").and_then(|v| v.as_str()).unwrap_or("");
@@ -361,18 +428,29 @@ impl DataEngineerSuite {
              - Tiers:\n\
                - Silver = DBT staging models (cleansed/normalized) written by `staging_model` and materialized into the configured Athena silver database.\n\
                - Gold = DBT marts/final models materialized into the configured Athena gold database.\n\
-             - Silver/staging is LLM-authored and iterative: use `staging_model` to author/update staging models (cleansing + nested field extraction) before writing core/gold models.\n\
+             - Gold focus: author ONLY gold/core/mart models in this phase, and only SELECT from silver/staging models (use ref('stg_*')).\n\
+             - Do NOT reference raw/bronze sources in gold model SQL.\n\
+             - You MAY investigate raw/bronze via sql_schema/sql_sample/sql_stats/vect_query/run_sql to detect missing data, but treat raw as discovery only.\n\
+             - If you find useful raw fields/tables missing in silver, request a silver expansion:\n\
+               - Use ask_approval to list the missing tables/fields to add to silver.\n\
+               - After approval, use staging_model (or dbt_files op=patch) to add them to silver BEFORE continuing gold.\n\
              - Search DBT examples (search_dbt_examples) and adopt conventions from the top match.\n\
              - Model relationships and flow:\n\
                - Identify join keys (user/profile/account/session/device identifiers) across the approved tables using sql_schema + sql_sample/sql_stats.\n\
                - Identify event time fields and ordering semantics; do NOT assume the timestamp column name.\n\
                - For event-style datasets, prefer building a core/funnel mart that sequences events per entity and computes step completion + step-to-step durations.\n\
-               - Add dbt tests (not_null/unique/relationships) for the chosen keys and important timestamps.\n\
-             - Batch scaffolding: use approve_and_save_artifact_batch to write MANY files, but keep each call small enough to fit the output limit.\n\
-               - Hard cap: <= 20 items per approve_and_save_artifact_batch call.\n\
-               - If you need more files, do multiple batch-save tool calls over multiple steps.\n\
-             - IMPORTANT: use `dbt_files op=patch` for real DBT project files (e.g. path='dbt_project.yml', 'packages.yml', 'models/schema.yml', and staging SQL like 'models/staging/stg_<table>.sql' (or 'models/staging/stg_<schema>__<table>.sql' to avoid collisions), 'models/core/...'). Use approve_and_save_artifact(_batch) only for models/metrics.\n\
-             - After saving artifacts: ALWAYS validate with dbt_validate. If validate fails, iterate (edit artifacts, re-validate) until clean.\n\
+              - Add dbt tests (not_null/unique/relationships) for the chosen keys and important timestamps.\n\
+              - IMPORTANT: be data-aware and permissive: NEVER add unconditional not_null on parsed/cast timestamp fields produced via try_cast; instead use conditional tests with where: anchored on the raw value being present (and document why).\n\
+             - Batch scaffolding: use dbt_files op=patch to write MANY files, but keep each call small enough to fit the output limit.\n\
+               - If you need more files, do multiple dbt_files calls over multiple steps.\n\
+             - IMPORTANT: use `dbt_files op=patch` for ALL DBT project files (e.g. path='dbt_project.yml', 'packages.yml', 'models/schema.yml', and model SQL).\n\
+             - IMPORTANT (gold progress): you MUST author gold models under `models/marts/` or `models/core/` in this phase.\n\
+               - Prefer `gold_model` to write marts in batches of up to 5 models per call.\n\
+               - Gold models MUST ONLY select from silver/staging via ref('stg_*') and MUST NOT use source().\n\
+             - Staging/silver naming is STRICT and deterministic:\n\
+               - Staging models MUST be written to: 'models/staging/stg_<source_schema>_<source_table>.sql' (single underscores, sanitized).\n\
+               - Do NOT invent alternate naming schemes (no stg_<table>, no double-underscore variants). If a table already exists, you are updating it, not creating a new one.\n\
+             - NOTE: In suite agent-mode runs, validation/publish may be handled by deterministic suite phases. Follow the current tool card; if dbt_validate/publish are not available, focus on authoring and let the suite validate/publish later.\n\
              - When validation is clean: call publish_dbt_to_provider to materialize curated relations in the active warehouse provider.\n\
                - If publish returns await_approval: ask the user to approve; on approval, re-run publish_dbt_to_provider with confirm=true.\n\
                - Default materialization is view; if you believe table or incremental is better, propose it with rationale and await approval before changing materializations.\n\
@@ -391,14 +469,20 @@ impl DataEngineerSuite {
              - Do NOT assume table names.\n\
              - If embeddings/vect search yields no candidates, call sql_schema with no args to list tables.\n\
              - Hybrid selection: propose a shortlist of tables (with brief reasons based on schema/stats), then ask_approval to confirm the table list before writing any artifacts.\n\
+             - Coverage requirement: include ALL raw/bronze tables in scope by default, and include all valid fields from those tables in silver.\n\
+               - Do NOT drop columns; preserve raw values (e.g., *_raw) and add cleaned/cast columns alongside them.\n\
+               - If a field is unusable, keep the raw column and add a best-effort cleaned column with safe casting/normalization.\n\
              - Model relationships and flow:\n\
                - Identify join keys (user/profile/account/session/device identifiers) and timestamp fields using sql_schema + sql_sample/sql_stats.\n\
                - Prefer staged normalization (consistent key/timestamp names) to make downstream joins reliable.\n\
-               - Add dbt tests (not_null/unique/relationships) for chosen keys and key timestamps.\n\
-             - Batch scaffolding: use approve_and_save_artifact_batch to write MANY files, but keep each call small enough to fit the output limit.\n\
-               - Hard cap: <= 20 items per approve_and_save_artifact_batch call.\n\
-               - If you need more files, do multiple batch-save tool calls over multiple steps.\n\
-             - Use `dbt_files op=patch` for dbt_project.yml, packages.yml, and YAML (especially models/schema.yml). For staging SQL, prefer 'models/staging/stg_<table>.sql' but use 'models/staging/stg_<schema>__<table>.sql' to avoid collisions.\n\
+              - Add dbt tests (not_null/unique/relationships) for chosen keys and key timestamps.\n\
+              - IMPORTANT: be data-aware and permissive: NEVER add unconditional not_null on parsed/cast timestamp fields produced via try_cast; instead use conditional tests with where: anchored on the raw value being present (and document why).\n\
+             - Batch scaffolding: use dbt_files op=patch to write MANY files, but keep each call small enough to fit the output limit.\n\
+               - If you need more files, do multiple dbt_files calls over multiple steps.\n\
+             - Use `dbt_files op=patch` for ALL DBT project files (dbt_project.yml, packages.yml, models/schema.yml, and staging SQL).\n\
+             - Staging/silver naming is STRICT and deterministic:\n\
+               - Staging models MUST be written to: 'models/staging/stg_<source_schema>_<source_table>.sql' (single underscores, sanitized).\n\
+               - Do NOT invent alternate naming schemes (no stg_<table>, no double-underscore variants). If a table already exists, you are updating it, not creating a new one.\n\
              - After saving artifacts: ALWAYS validate with dbt_validate. If validate fails, iterate (edit artifacts, re-validate) until clean.\n\
              - When validation is clean: call publish_dbt_to_provider (views by default; propose tables/incremental with rationale and await approval).\n\
              - Use catalog_note to record notable cleansing decisions and assumptions (preview if material).",
@@ -430,12 +514,12 @@ impl DataEngineerSuite {
                 let run = args.get("run").and_then(|v| v.as_bool()).unwrap_or(false);
                 let runtime_validate = build || run;
                 if let (Some(store), Some(tid)) = (ctx.thread_store.as_ref(), ctx.thread_id.as_deref()) {
-                    let log = store.get(tid).await;
+                    let log = store.get(tid).await.ok();
                     let guard = crate::data_engineer::control_flow::derive_guard_state(log.as_ref());
                     if guard.last_validate_failed && !guard.mutated_since_fail {
                         return Err(
                             "dbt_validate is blocked after a failed validation until you APPLY A FIX to the dbt project.\n\
-                             Next step must be a mutating fix action (e.g. `staging_model` or `dbt_files op=patch` or approve_and_save_artifact_batch to update schema/tests)."
+                             Next step must be a mutating fix action (e.g. `staging_model` or `dbt_files op=patch` to update schema/tests)."
                                 .to_string(),
                         );
                     }
@@ -499,8 +583,6 @@ impl DataEngineerSuite {
                 registry.register(SqlRunTool { query: query.clone() });
                 registry.register(tools::ask_user::AskUserTool);
                 registry.register(tools::ask_approval::AskApprovalTool);
-                registry.register(tools::approve_save::ApproveAndSaveArtifactTool);
-                registry.register(tools::approve_save_batch::ApproveAndSaveArtifactBatchTool { datasets: sctx.datasets.clone() });
                 registry.register(tools::dbt_examples::SearchDbtExamplesTool);
                 registry.register(tools::staging_model::StagingModelTool { datasets: sctx.datasets.clone() });
                 registry.register(ThreadDerivedDbtValidateTool { inner: tools::dbt_validate::DbtValidateTool { datasets: sctx.datasets.clone(), catalog: sctx.catalog.clone() } });
@@ -523,10 +605,9 @@ impl DataEngineerSuite {
                 registry.register(SqlRunTool { query: query.clone() });
                 registry.register(tools::ask_user::AskUserTool);
                 registry.register(tools::ask_approval::AskApprovalTool);
-                registry.register(tools::approve_save::ApproveAndSaveArtifactTool);
-                registry.register(tools::approve_save_batch::ApproveAndSaveArtifactBatchTool { datasets: sctx.datasets.clone() });
                 registry.register(tools::dbt_examples::SearchDbtExamplesTool);
                 registry.register(tools::staging_model::StagingModelTool { datasets: sctx.datasets.clone() });
+                registry.register(tools::gold_model::GoldModelTool);
                 registry.register(ThreadDerivedDbtValidateTool { inner: tools::dbt_validate::DbtValidateTool { datasets: sctx.datasets.clone(), catalog: sctx.catalog.clone() } });
                 registry.register(tools::publish_dbt_to_provider::PublishDbtToProviderTool { datasets: sctx.datasets.clone(), catalog: sctx.catalog.clone() });
                 registry.register(tools::sql_register::SqlRegisterTool);
@@ -542,8 +623,9 @@ impl DataEngineerSuite {
     fn build_tools_for_phase(
         phase: control_flow::Phase,
         guard: &control_flow::DerivedGuardState,
-        allow_ask_approval: bool,
+        _allow_ask_approval: bool,
         sctx: &SuiteCtx,
+        allowed_batch: Option<AllowedBatch>,
     ) -> Result<(ToolRegistry, String), String> {
         use crate::data_engineer::tools::{
             artifacts::ArtifactsTool,
@@ -577,9 +659,44 @@ impl DataEngineerSuite {
         reg.register(VectQueryTool);
         reg.register(ArtifactsTool);
 
-        let mut tools_card_lines: Vec<&'static str> = Vec::new();
+        let tools_card_lines: Vec<&'static str>;
 
         match phase {
+            control_flow::Phase::CleansePlan | control_flow::Phase::ModelPlan => {
+                // Plan phases: read-only discovery + (optional) probes. No dbt file mutations.
+                reg.register(tools::ask_user::AskUserTool);
+                reg.register(SqlRunTool { query: query.clone() });
+                reg.register(tools::dbt_examples::SearchDbtExamplesTool);
+
+                // Read-only dbt_files (no patch).
+                struct ReadOnlyDbtFilesTool {
+                    inner: DbtFilesTool,
+                }
+                #[async_trait::async_trait]
+                impl react_core::tools::Tool for ReadOnlyDbtFilesTool {
+                    fn name(&self) -> &'static str { "dbt_files" }
+                    async fn call(&self, args: serde_json::Value, ctx: &react_core::agent::AgentCtx) -> Result<serde_json::Value, String> {
+                        let op = args.get("op").and_then(|x| x.as_str()).unwrap_or("get");
+                        if op == "patch" {
+                            return Err("dbt_files is read-only in plan phases; use op='get' or op='list'".to_string());
+                        }
+                        self.inner.call(args, ctx).await
+                    }
+                }
+                reg.register(ReadOnlyDbtFilesTool { inner: DbtFilesTool { datasets: sctx.datasets.clone() } });
+
+                tools_card_lines = vec![
+                    "Allowed tools (plan phase, read-only):",
+                    "- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\", path?:string, prefix?:string, pointer?:string, limit?:int, max_chars?:int})",
+                    "  - IMPORTANT: use args.op (NOT args.type). For list use args.prefix (NOT path:\".\").",
+                    "- sql_schema / sql_stats / sql_sample / vect_query (discovery context)",
+                    "- run_sql (targeted probes)",
+                    "- artifacts",
+                    "- ask_user",
+                    "",
+                    "Not available: staging_model, gold_model, dbt_files patch, dbt_validate, publish_dbt_to_provider.",
+                ];
+            }
             control_flow::Phase::CleanseAuthor | control_flow::Phase::ModelAuthor => {
                 // Authoring phases: allow investigation + mutations; validation/publish are suite-driven.
                 //
@@ -588,11 +705,6 @@ impl DataEngineerSuite {
                 let hard_mutation_only = guard.last_validate_failed && !guard.mutated_since_fail;
 
                 reg.register(tools::ask_user::AskUserTool);
-                if allow_ask_approval {
-                    reg.register(tools::ask_approval::AskApprovalTool);
-                }
-                reg.register(tools::approve_save::ApproveAndSaveArtifactTool);
-                reg.register(tools::approve_save_batch::ApproveAndSaveArtifactBatchTool { datasets: sctx.datasets.clone() });
 
                 if hard_mutation_only {
                     // Patch-only dbt_files to avoid "read-only thrash" when we require a mutation next.
@@ -614,17 +726,88 @@ impl DataEngineerSuite {
 
                     tools_card_lines = vec![
                         "Allowed tools (authoring phase; HARD constraint: mutation required next):",
-                        "- approve_and_save_artifact(args:{kind,name,content,dataset_id?,preview_diff?})",
-                        "- approve_and_save_artifact_batch(args:{items:[...],preview_diff?})",
-                        "- dbt_files(args:{op:\"patch\",path:string,patch_text?:string,content?:string,base_sha256?:string,create_if_missing?:bool,preview_diff?:bool})",
+                        "- dbt_files(args:{op:\"patch\",patch_text:string,path?:string,preview_diff?:bool})",
                         "- ask_user(args:{prompt:string})",
-                        "- ask_approval(args:{prompt:string}) (only if registered; otherwise forbidden in this phase)",
                         "",
                         "Not available: read/explore tools, dbt_validate, publish_dbt_to_provider.",
                     ];
                 } else {
                     // Normal authoring: allow read/explore + probes.
-                    reg.register(tools::staging_model::StagingModelTool { datasets: sctx.datasets.clone() });
+                    if phase == control_flow::Phase::CleanseAuthor {
+                        if let Some(AllowedBatch::CleanseDatasetIds(allowed)) = allowed_batch.clone() {
+                            struct BatchStagingModelTool {
+                                inner: tools::staging_model::StagingModelTool,
+                                allowed: Vec<String>,
+                            }
+                            #[async_trait::async_trait]
+                            impl react_core::tools::Tool for BatchStagingModelTool {
+                                fn name(&self) -> &'static str { "staging_model" }
+                                async fn call(&self, args: serde_json::Value, ctx: &react_core::agent::AgentCtx) -> Result<serde_json::Value, String> {
+                                    let mut got: Vec<String> = args
+                                        .get("dataset_ids")
+                                        .and_then(|v| v.as_array())
+                                        .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.trim().to_string())).collect())
+                                        .unwrap_or_default();
+                                    got.sort();
+                                    got.dedup();
+                                    let mut allowed = self.allowed.clone();
+                                    allowed.sort();
+                                    allowed.dedup();
+                                    if got != allowed {
+                                        return Err(format!(
+                                            "staging_model is plan-batched right now. You must call staging_model with dataset_ids exactly equal to the next approved batch (max 5). Expected: {:?}. Got: {:?}.",
+                                            allowed, got
+                                        ));
+                                    }
+                                    self.inner.call(args, ctx).await
+                                }
+                            }
+                            reg.register(BatchStagingModelTool {
+                                inner: tools::staging_model::StagingModelTool { datasets: sctx.datasets.clone() },
+                                allowed,
+                            });
+                        } else {
+                            reg.register(tools::staging_model::StagingModelTool { datasets: sctx.datasets.clone() });
+                        }
+                    }
+                    if phase == control_flow::Phase::ModelAuthor {
+                        if let Some(AllowedBatch::ModelItemNames(allowed)) = allowed_batch.clone() {
+                            struct BatchGoldModelTool {
+                                inner: tools::gold_model::GoldModelTool,
+                                allowed: Vec<String>,
+                            }
+                            #[async_trait::async_trait]
+                            impl react_core::tools::Tool for BatchGoldModelTool {
+                                fn name(&self) -> &'static str { "gold_model" }
+                                async fn call(&self, args: serde_json::Value, ctx: &react_core::agent::AgentCtx) -> Result<serde_json::Value, String> {
+                                    let mut got: Vec<String> = args
+                                        .get("items")
+                                        .and_then(|v| v.as_array())
+                                        .map(|a| {
+                                            a.iter()
+                                                .filter_map(|it| it.get("name").and_then(|n| n.as_str()).map(|s| s.trim().to_string()))
+                                                .collect::<Vec<_>>()
+                                        })
+                                        .unwrap_or_default();
+                                    got.sort();
+                                    got.dedup();
+                                    let mut allowed = self.allowed.clone();
+                                    allowed.sort();
+                                    allowed.dedup();
+                                    if got != allowed {
+                                        return Err(format!(
+                                            "gold_model is plan-batched right now. You must call gold_model with items exactly equal to the next approved batch (max 5). Expected names: {:?}. Got: {:?}.",
+                                            allowed, got
+                                        ));
+                                    }
+                                    self.inner.call(args, ctx).await
+                                }
+                            }
+                            reg.register(BatchGoldModelTool { inner: tools::gold_model::GoldModelTool, allowed });
+                        } else {
+                            reg.register(tools::gold_model::GoldModelTool);
+                        }
+                    }
                     reg.register(SqlRunTool { query: query.clone() });
                     reg.register(tools::dbt_examples::SearchDbtExamplesTool);
                     reg.register(DbtFilesTool { datasets: sctx.datasets.clone() });
@@ -639,11 +822,10 @@ impl DataEngineerSuite {
                         "- run_sql(args:{sql:string}) (use this to sample rows: SELECT * FROM <table> LIMIT 20)",
                         "- staging_model(args:{dataset_ids:[string], instructions?:string, sql?:string|staging_model?:string|expression?:string})",
                         "  - IMPORTANT: you MUST provide dataset_ids. This tool will NOT default to all datasets.",
-                        "- approve_and_save_artifact(args:{kind,name,content,dataset_id?,preview_diff?})",
-                        "- approve_and_save_artifact_batch(args:{items:[...],preview_diff?})",
-                        "- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\", path?:string, prefix?:string, patch_text?:string, content?:string, base_sha256?:string, create_if_missing?:bool, pointer?:string, limit?:int, max_chars?:int, preview_diff?:bool})",
+                        "- gold_model(args:{items:[{name:string, folder?:\"marts\"|\"core\", goal?:string, description?:string, inputs:[string], instructions?:string}]})",
+                        "  - IMPORTANT: max 5 items per call. Gold MUST use ref('stg_*') only; NO source().",
+                        "- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\", path?:string, prefix?:string, patch_text?:string, pointer?:string, limit?:int, max_chars?:int, preview_diff?:bool})",
                         "- ask_user(args:{prompt:string})",
-                        "- ask_approval(args:{prompt:string}) (only if registered; otherwise forbidden in this phase)",
                         "",
                         "Not available in this phase: dbt_validate, publish_dbt_to_provider (suite handles these deterministically).",
                     ];
@@ -899,7 +1081,7 @@ impl DataEngineerSuite {
         AgentCtx {
             top_k: 30,
             per_step_timeout_secs: 10,
-            max_steps: 1,
+            max_steps: 6,
             thread_id: Some(thread_id.to_string()),
             progress_tx: None,
             pre_step_tx: None,
@@ -925,38 +1107,79 @@ impl DataEngineerSuite {
         use control_flow::{DerivedGuardState, Phase};
         Self::ensure_catalog_bootstrap(sctx).await;
 
+        // Phase-step budget is reset when we make clear forward progress (phase advances).
+        // This prevents aborting a healthy thread that is steadily moving through phases,
+        // while still bounding degenerate loops.
         let max_phase_steps: usize = std::env::var("AGENT_MAX_PHASE_STEPS")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(24)
-            .max(6)
-            .min(200);
+            .unwrap_or(60)
+            .max(12)
+            .min(400);
+
+        let phase_index = |p: Phase| -> usize {
+            match p {
+                Phase::Preflight => 0,
+                Phase::CleansePlan => 1,
+                Phase::CleanseAuthor => 2,
+                Phase::CleanseValidate => 3,
+                Phase::CleanseReview => 4,
+                Phase::ModelPlan => 5,
+                Phase::ModelAuthor => 6,
+                Phase::ModelValidate => 7,
+                Phase::ModelReview => 8,
+                Phase::PublishAwaitApproval => 9,
+                Phase::Publish => 10,
+                Phase::PostPublishReview => 11,
+                Phase::Done => 12,
+            }
+        };
 
         let thread_store = ThreadStore::new(sctx.storage.clone(), sctx.scope.clone(), sctx.keyspace.clone());
 
         let mut out_frames: Vec<FlowFrame> = Vec::new();
 
-        for _ in 0..max_phase_steps {
-            let log = thread_store.get(thread_id).await;
+        let mut remaining_steps = max_phase_steps;
+        let mut total_steps: usize = 0;
+        let mut max_phase_idx_seen: usize = 0;
+
+        while remaining_steps > 0 {
+            total_steps += 1;
+            remaining_steps = remaining_steps.saturating_sub(1);
+
+            let log = thread_store.get(thread_id).await.ok();
             let phase = control_flow::phase_from_log(log.as_ref());
+            let idx = phase_index(phase);
+            if idx > max_phase_idx_seen {
+                max_phase_idx_seen = idx;
+                // Reset the budget when we advance phases (i.e. not looping).
+                remaining_steps = max_phase_steps;
+            }
             let guard: DerivedGuardState = control_flow::derive_guard_state(log.as_ref());
-            let allow_ask_approval = Self::allow_ask_approval_in_phase(log.as_ref(), phase);
+            let allow_ask_approval = match phase {
+                // Plan phases may require multiple approval prompts across iterations (reject -> revise -> ask again).
+                Phase::CleansePlan | Phase::ModelPlan => true,
+                _ => Self::allow_ask_approval_in_phase(log.as_ref(), phase),
+            };
 
             // Helper: most recent dbt_validate error brief (for prompt grounding).
             let mut last_validate_brief: Option<String> = None;
+            let mut last_validate_failed_models: Vec<serde_json::Value> = Vec::new();
             if let Some(ref l) = log {
                 for step in l.steps.iter().rev() {
-                    if step.action != "dbt_validate" {
+                    let react_core::session::ThreadStep::Tool { name, observation, .. } = step else {
+                        continue;
+                    };
+                    if name != "dbt_validate" {
                         continue;
                     }
-                    let errs: Vec<String> = step
-                        .observation
-                        .get("errors")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok())
-                        .unwrap_or_default();
-                    if !errs.is_empty() {
-                        last_validate_brief = Some(dbt_error::compact_brief(&errs, 6, 1200));
+                    if !observation.errors.is_empty() {
+                        last_validate_brief = Some(dbt_error::compact_brief(&observation.errors, 6, 1200));
                     }
+                    // Best-effort: extract failing model(s) from dbt stdout so the authoring LLM
+                    // can target a specific file even when plan batches are already complete.
+                    let logs_v = observation.extra.get("logs").cloned().unwrap_or(serde_json::Value::Null);
+                    last_validate_failed_models = dbt_error::extract_failed_models_from_logs(&logs_v);
                     break;
                 }
             }
@@ -1010,7 +1233,7 @@ impl DataEngineerSuite {
                         thread_id,
                         Some("agent".to_string()),
                         Some(Phase::Preflight),
-                        Phase::CleanseAuthor,
+                        Phase::CleansePlan,
                         Some("preflight_ok"),
                         Some(serde_json::json!({
                             "dbt_project_key": key,
@@ -1018,8 +1241,445 @@ impl DataEngineerSuite {
                             "has_dbt_provider": sctx.dbt.is_some(),
                         })),
                     )
-                    .await;
+                    .await?;
                     continue;
+                }
+
+                Phase::CleansePlan | Phase::ModelPlan => {
+                    // Plan phases are read-only discovery + plan authoring. They persist an approved
+                    // plan to storage and then drive the subsequent authoring phase deterministically.
+                    let is_cleanse = phase == Phase::CleansePlan;
+                    let actx = Self::agent_tool_ctx(thread_id, sctx);
+
+                    // If the user already approved an existing draft, mark it approved and proceed.
+                    if let Some(ref l) = log {
+                        if let Some(start) = Self::phase_start_idx(l, phase) {
+                            if let Some(last_user) = l
+                                .steps
+                                .iter()
+                                .skip(start + 1)
+                                .rev()
+                                .find(|s| matches!(s, react_core::session::ThreadStep::User { .. }))
+                            {
+                                let t = match last_user {
+                                    react_core::session::ThreadStep::User { text, .. } => text.trim().to_lowercase(),
+                                    _ => String::new(),
+                                };
+                                if t == "approve" {
+                                    if is_cleanse {
+                                        if let Some(mut p) = crate::data_engineer::plan::load_cleanse_plan(&actx).await {
+                                            if p.status == crate::data_engineer::plan::PlanStatus::Draft {
+                                                p.status = crate::data_engineer::plan::PlanStatus::Approved;
+                                                let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &p).await;
+                                            }
+                                        }
+                                    } else {
+                                        if let Some(mut p) = crate::data_engineer::plan::load_model_plan(&actx).await {
+                                            if p.status == crate::data_engineer::plan::PlanStatus::Draft {
+                                                p.status = crate::data_engineer::plan::PlanStatus::Approved;
+                                                let _ = crate::data_engineer::plan::save_model_plan(&actx, &p).await;
+                                            }
+                                        }
+                                    }
+
+                                    let next = if is_cleanse { Phase::CleanseAuthor } else { Phase::ModelAuthor };
+                                    control_flow::append_phase_with_reason(
+                                        &thread_store,
+                                        thread_id,
+                                        Some("agent".to_string()),
+                                        Some(phase),
+                                        next,
+                                        Some("plan_approved"),
+                                        Some(serde_json::json!({ "user_step": last_user })),
+                                    )
+                                    .await?;
+                                    continue;
+                                }
+                                if t == "reject" {
+                                    if is_cleanse {
+                                        if let Some(mut p) = crate::data_engineer::plan::load_cleanse_plan(&actx).await {
+                                            p.status = crate::data_engineer::plan::PlanStatus::Cancelled;
+                                            let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &p).await;
+                                        }
+                                    } else {
+                                        if let Some(mut p) = crate::data_engineer::plan::load_model_plan(&actx).await {
+                                            p.status = crate::data_engineer::plan::PlanStatus::Cancelled;
+                                            let _ = crate::data_engineer::plan::save_model_plan(&actx, &p).await;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // If an approved plan already exists (oldest active plan for this thread), move forward (idempotent).
+                    if is_cleanse {
+                        if let Some(p) = crate::data_engineer::plan::load_cleanse_plan(&actx).await {
+                            if matches!(p.status, crate::data_engineer::plan::PlanStatus::Approved | crate::data_engineer::plan::PlanStatus::Completed) {
+                                control_flow::append_phase_with_reason(
+                                    &thread_store,
+                                    thread_id,
+                                    Some("agent".to_string()),
+                                    Some(phase),
+                                    Phase::CleanseAuthor,
+                                    Some("plan_already_approved"),
+                                    Some(serde_json::json!({ "status": format!("{:?}", p.status) })),
+                                )
+                                .await;
+                                continue;
+                            }
+                        }
+                    } else {
+                        if let Some(p) = crate::data_engineer::plan::load_model_plan(&actx).await {
+                            if matches!(p.status, crate::data_engineer::plan::PlanStatus::Approved | crate::data_engineer::plan::PlanStatus::Completed) {
+                                control_flow::append_phase_with_reason(
+                                    &thread_store,
+                                    thread_id,
+                                    Some("agent".to_string()),
+                                    Some(phase),
+                                    Phase::ModelAuthor,
+                                    Some("plan_already_approved"),
+                                    Some(serde_json::json!({ "status": format!("{:?}", p.status) })),
+                                )
+                                .await;
+                                continue;
+                            }
+                        }
+                    }
+
+                    // If there is an existing draft plan (oldest active), re-ask approval rather than creating a new plan.
+                    if is_cleanse {
+                        if let Some(p) = crate::data_engineer::plan::load_cleanse_plan(&actx).await {
+                            if p.status == crate::data_engineer::plan::PlanStatus::Draft {
+                                let prompt = format!(
+                                    "{}\n\nApprove this cleanse plan? Reply \"approve\" or \"reject\".\n\n(Plan saved to: {})",
+                                    crate::data_engineer::plan::summarize_cleanse_plan(&p, 30),
+                                    p.plan_key
+                                );
+                                return Ok(vec![FlowFrame::AwaitApproval { prompt }]);
+                            }
+                        }
+                    } else {
+                        if let Some(p) = crate::data_engineer::plan::load_model_plan(&actx).await {
+                            if p.status == crate::data_engineer::plan::PlanStatus::Draft {
+                                let prompt = format!(
+                                    "{}\n\nApprove this model plan? Reply \"approve\" or \"reject\".\n\n(Plan saved to: {})",
+                                    crate::data_engineer::plan::summarize_model_plan(&p, 30),
+                                    p.plan_key
+                                );
+                                return Ok(vec![FlowFrame::AwaitApproval { prompt }]);
+                            }
+                        }
+                    }
+
+                    // Generate a new draft plan via LLM and then ask the user to approve it.
+                    Self::ensure_catalog_bootstrap(sctx).await;
+                    // Deterministic bootstrap: ensure the plan phase ALWAYS has grounded context recorded
+                    // in the thread history. This prevents LLM loops that repeatedly call dbt_files list
+                    // and never reach sql_schema/evidence, which would trip the plan_grounding guard.
+                    //
+                    // Important: we do NOT decide the plan here; we just provide enough reality to
+                    // ground the LLM's plan authoring.
+                    let mut bootstrap_summary: Option<String> = None;
+                    if let Some(ref l) = log {
+                        let start = Self::phase_start_idx(l, phase).unwrap_or(0);
+                        let mut saw_dbt_files = false;
+                        let mut saw_sql_schema = false;
+                        let mut saw_evidence = false;
+                        for s in l.steps.iter().skip(start + 1) {
+                            if let react_core::session::ThreadStep::Tool { name, .. } = s {
+                                match name.as_str() {
+                                    "dbt_files" => saw_dbt_files = true,
+                                    "sql_schema" => saw_sql_schema = true,
+                                    "sql_stats" | "sql_sample" | "run_sql" => saw_evidence = true,
+                                    _ => {}
+                                }
+                            }
+                        }
+                        if !(saw_dbt_files && saw_sql_schema && saw_evidence) {
+                            // Bootstrap calls are intentionally conservative: list models (may be empty),
+                            // read core config files, list datasets, and run a minimal probe on one table.
+                            let query = sctx
+                                .query
+                                .as_ref()
+                                .ok_or_else(|| "query provider missing".to_string())?
+                                .clone();
+                            let dbt_files_tool = tools::dbt_files::DbtFilesTool { datasets: sctx.datasets.clone() };
+                            let sql_schema_tool = tools::sql_schema::SqlSchemaTool {
+                                query: query.clone(),
+                                datasets: sctx.datasets.clone(),
+                                catalog: sctx.catalog.clone(),
+                            };
+                            let run_sql_tool = tools::sql_run::SqlRunTool { query: query.clone() };
+
+                            let models_list = control_flow::call_and_record_tool(
+                                &thread_store,
+                                thread_id,
+                                Some("agent".to_string()),
+                                &dbt_files_tool,
+                                serde_json::json!({"op":"list","prefix":"models/","limit":500}),
+                                &actx,
+                                30,
+                            )
+                            .await;
+                            let _dbt_project = control_flow::call_and_record_tool(
+                                &thread_store,
+                                thread_id,
+                                Some("agent".to_string()),
+                                &dbt_files_tool,
+                                serde_json::json!({"op":"get","path":"dbt_project.yml","max_chars":4000}),
+                                &actx,
+                                30,
+                            )
+                            .await;
+                            let _packages = control_flow::call_and_record_tool(
+                                &thread_store,
+                                thread_id,
+                                Some("agent".to_string()),
+                                &dbt_files_tool,
+                                serde_json::json!({"op":"get","path":"packages.yml","max_chars":4000}),
+                                &actx,
+                                30,
+                            )
+                            .await;
+                            let _schema_yml = control_flow::call_and_record_tool(
+                                &thread_store,
+                                thread_id,
+                                Some("agent".to_string()),
+                                &dbt_files_tool,
+                                serde_json::json!({"op":"get","path":"models/schema.yml","max_chars":6000}),
+                                &actx,
+                                30,
+                            )
+                            .await;
+
+                            let tables_obs = control_flow::call_and_record_tool(
+                                &thread_store,
+                                thread_id,
+                                Some("agent".to_string()),
+                                &sql_schema_tool,
+                                serde_json::json!({}),
+                                &actx,
+                                30,
+                            )
+                            .await;
+                            let tables: Vec<String> = tables_obs
+                                .get("tables")
+                                .and_then(|v| v.as_array())
+                                .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+                                .unwrap_or_default();
+
+                            let mut probed: Option<String> = None;
+                            if let Some(first) = tables.first() {
+                                let _cols = control_flow::call_and_record_tool(
+                                    &thread_store,
+                                    thread_id,
+                                    Some("agent".to_string()),
+                                    &sql_schema_tool,
+                                    serde_json::json!({"table": first}),
+                                    &actx,
+                                    30,
+                                )
+                                .await;
+                                let _cnt = control_flow::call_and_record_tool(
+                                    &thread_store,
+                                    thread_id,
+                                    Some("agent".to_string()),
+                                    &run_sql_tool,
+                                    serde_json::json!({"sql": format!("SELECT count(*) AS total FROM {}", first)}),
+                                    &actx,
+                                    60,
+                                )
+                                .await;
+                                probed = Some(first.clone());
+                            }
+
+                            let model_count = models_list
+                                .get("items")
+                                .and_then(|v| v.as_array())
+                                .map(|a| a.len())
+                                .unwrap_or(0);
+                            let mut head_tables = tables.clone();
+                            head_tables.truncate(10);
+                            bootstrap_summary = Some(format!(
+                                "Deterministic bootstrap (suite-provided):\n- models/ listed: {} item(s)\n- tables discovered (head): {:?}\n- probed table for evidence: {:?}\n\nIf models/ is empty, that's OK; proceed using sql_schema discovery.",
+                                model_count,
+                                head_tables,
+                                probed
+                            ));
+                        }
+                    }
+                    let sys = crate::util::time_context::with_time_context(if is_cleanse {
+                        prompts::cleanse_plan_system_prompt()
+                    } else {
+                        prompts::model_plan_system_prompt()
+                    });
+                    let (registry, tools_card) = Self::build_tools_for_phase(phase, &guard, allow_ask_approval, sctx, None)?;
+
+                    let mut q = if is_cleanse {
+                        format!(
+                            "Create a SILVER/cleanse execution plan (batched in groups of 5).\n\nOriginal goal:\n{}\n",
+                            question
+                        )
+                    } else {
+                        format!(
+                            "Create a GOLD/model execution plan (batched in groups of 5) based ONLY on existing silver/staging models.\n\nOriginal goal:\n{}\n",
+                            question
+                        )
+                    };
+                    // If this plan phase was entered because review produced actionable feedback,
+                    // include that feedback verbatim to ground the new plan.
+                    if let Some(ref l) = log {
+                        if let Some(step) = l.steps.iter().rev().find(|s| match s {
+                            react_core::session::ThreadStep::Phase { phase: p, .. } => p == phase.as_str(),
+                            _ => false,
+                        }) {
+                            let (reason_code, reason_detail) = match step {
+                                react_core::session::ThreadStep::Phase { reason_code, reason_detail, .. } => {
+                                    (reason_code.as_deref().unwrap_or(""), reason_detail.as_ref())
+                                }
+                                _ => ("", None),
+                            };
+                            if reason_code == "review_actionable_true" {
+                                if let Some(ans) = reason_detail
+                                    .and_then(|v| v.get("answer"))
+                                    .and_then(|v| v.as_str())
+                                {
+                                    if !ans.trim().is_empty() {
+                                        q.push_str("\nReview feedback to incorporate in this plan:\n");
+                                        q.push_str(ans.trim());
+                                        q.push('\n');
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Some(ref brief) = last_validate_brief {
+                        q.push_str("\nLast dbt_validate error summary (if any):\n");
+                        q.push_str(brief);
+                        q.push('\n');
+                    }
+                    if let Some(bs) = bootstrap_summary.as_ref() {
+                        q.push_str("\n\n");
+                        q.push_str(bs);
+                        q.push('\n');
+                    }
+
+                    match Agent::run_until_block(&registry, &actx, &sys, &tools_card, &q).await {
+                        Ok(RunOutcome::Final { thread_id: _tid, result }) => {
+                            // Deterministic enforcement: planning must be grounded in actual project state.
+                            // Require at least:
+                            // - 1 dbt_files call
+                            // - 1 sql_schema call
+                            // - 1 of (sql_stats/sql_sample/run_sql)
+                            if let Ok(ref l) = thread_store.get(thread_id).await {
+                                let start = Self::phase_start_idx(l, phase).unwrap_or(0);
+                                let mut saw_dbt_files = false;
+                                let mut saw_sql_schema = false;
+                                let mut saw_evidence = false;
+                                for s in l.steps.iter().skip(start + 1) {
+                                    if let react_core::session::ThreadStep::Tool { name, .. } = s {
+                                        match name.as_str() {
+                                            "dbt_files" => saw_dbt_files = true,
+                                            "sql_schema" => saw_sql_schema = true,
+                                            "sql_stats" | "sql_sample" | "run_sql" => saw_evidence = true,
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                                if !(saw_dbt_files && saw_sql_schema && saw_evidence) {
+                                    // Stay in plan phase and re-run with a hard reminder.
+                                    let miss = format!(
+                                        "Plan is missing required grounding steps.\n\
+                                         Required before finalizing a plan:\n\
+                                         - dbt_files (inventory existing dbt project)\n\
+                                         - sql_schema (list tables)\n\
+                                         - evidence via sql_stats/sql_sample/run_sql\n\n\
+                                         Seen: dbt_files={saw_dbt_files}, sql_schema={saw_sql_schema}, evidence={saw_evidence}\n\
+                                         Please retry plan generation and include those discovery steps."
+                                    );
+                                    let ts = chrono::Utc::now().to_rfc3339();
+                                    let step = react_core::session::ThreadStep::GuardBlock {
+                                        phase: phase.as_str().to_string(),
+                                        kind: "plan_grounding".to_string(),
+                                        reason: miss.clone(),
+                                        observation: react_core::session::Observation::fail(vec![miss.clone()]),
+                                        ts,
+                                        agent: "agent".to_string(),
+                                    };
+                                    let _ = thread_store.append_step(thread_id, step.clone()).await;
+                                    control_flow::append_phase_with_reason(
+                                        &thread_store,
+                                        thread_id,
+                                        Some("agent".to_string()),
+                                        Some(phase),
+                                        phase,
+                                        Some("phase_blocked"),
+                                        Some(serde_json::json!({
+                                            "kind": "plan_grounding",
+                                            "reason": miss,
+                                            "trigger_step": step,
+                                        })),
+                                    )
+                                    .await?;
+                                    continue;
+                                }
+                            }
+
+                            let Some(v) = crate::data_engineer::plan::parse_plan_json(&result.answer) else {
+                                return Ok(vec![FlowFrame::AwaitUser {
+                                    prompt: "Plan phase failed: final.answer must be valid JSON for the plan. Please retry.".to_string(),
+                                }]);
+                            };
+                            if is_cleanse {
+                                let mut plan: crate::data_engineer::plan::CleansePlan = serde_json::from_value(v)
+                                    .map_err(|e| format!("invalid cleanse plan JSON: {e}"))?;
+                                plan.status = crate::data_engineer::plan::PlanStatus::Draft;
+                                plan.plan_key = crate::data_engineer::plan::new_cleanse_plan_key(&actx);
+                                // Capture a cheap snapshot for “current project as-is” provenance.
+                                plan.project_snapshot = serde_json::json!({
+                                    "dbt_prefix": actx.keyspace.dbt_prefix(&actx.scope),
+                                    "dbt_project_yml_etag": actx.storage.head_etag(&actx.keyspace.dbt_project_key(&actx.scope)).await.ok().flatten(),
+                                });
+                                crate::data_engineer::plan::save_cleanse_plan(&actx, &plan).await?;
+                                let prompt = format!(
+                                    "{}\n\nApprove this cleanse plan? Reply \"approve\" or \"reject\".\n\n(Plan saved to: {})",
+                                    crate::data_engineer::plan::summarize_cleanse_plan(&plan, 30),
+                                    plan.plan_key
+                                );
+                                return Ok(vec![FlowFrame::AwaitApproval { prompt }]);
+                            } else {
+                                let mut plan: crate::data_engineer::plan::ModelPlan = serde_json::from_value(v)
+                                    .map_err(|e| format!("invalid model plan JSON: {e}"))?;
+                                plan.status = crate::data_engineer::plan::PlanStatus::Draft;
+                                plan.plan_key = crate::data_engineer::plan::new_model_plan_key(&actx);
+                                plan.project_snapshot = serde_json::json!({
+                                    "dbt_prefix": actx.keyspace.dbt_prefix(&actx.scope),
+                                    "dbt_project_yml_etag": actx.storage.head_etag(&actx.keyspace.dbt_project_key(&actx.scope)).await.ok().flatten(),
+                                });
+                                crate::data_engineer::plan::save_model_plan(&actx, &plan).await?;
+                                let prompt = format!(
+                                    "{}\n\nApprove this model plan? Reply \"approve\" or \"reject\".\n\n(Plan saved to: {})",
+                                    crate::data_engineer::plan::summarize_model_plan(&plan, 30),
+                                    plan.plan_key
+                                );
+                                return Ok(vec![FlowFrame::AwaitApproval { prompt }]);
+                            }
+                        }
+                        Ok(RunOutcome::AwaitUser { thread_id: _tid, prompt }) => {
+                            return Ok(vec![FlowFrame::AwaitUser { prompt }]);
+                        }
+                        Ok(RunOutcome::AwaitApproval { thread_id: _tid, prompt }) => {
+                            // Planning should not directly request approval via tools; the suite does it.
+                            return Ok(vec![FlowFrame::AwaitUser {
+                                prompt: format!(
+                                    "Plan phase requested approval internally, which is not allowed. Please retry.\n\nPrompt:\n{}",
+                                    prompt
+                                ),
+                            }]);
+                        }
+                        Err(e) => return Err(e),
+                    }
                 }
 
                 Phase::CleanseAuthor | Phase::ModelAuthor => {
@@ -1029,7 +1689,6 @@ impl DataEngineerSuite {
                     } else {
                         prompts::model_system_prompt()
                     });
-                    let (registry, tools_card) = Self::build_tools_for_phase(phase, &guard, allow_ask_approval, sctx)?;
                     let actx = AgentCtx {
                         top_k: 30,
                         per_step_timeout_secs: 10,
@@ -1058,30 +1717,267 @@ impl DataEngineerSuite {
                             .map(|c| c as Arc<dyn std::any::Any + Send + Sync>),
                     };
 
+                    // Plan-driven batching: load the approved plan, update progress from the thread log,
+                    // and compute the exact next batch to execute (max 5).
+                    let (plan_context, allowed_batch): (String, Option<AllowedBatch>) = if is_cleanse {
+                        let mut plan = match crate::data_engineer::plan::load_cleanse_plan(&actx).await {
+                            Some(p) => p,
+                            None => {
+                                // No plan => go back to planning.
+                                control_flow::append_phase_with_reason(
+                                    &thread_store,
+                                    thread_id,
+                                    Some("agent".to_string()),
+                                    Some(phase),
+                                    Phase::CleansePlan,
+                                    Some("missing_plan"),
+                                    Some(serde_json::json!({})),
+                                )
+                                .await;
+                                continue;
+                            }
+                        };
+                        if let Some(ref l) = log {
+                            crate::data_engineer::plan::update_cleanse_progress_from_log(&mut plan, l);
+                            let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &plan).await;
+                        }
+                        if plan.status != crate::data_engineer::plan::PlanStatus::Approved
+                            && plan.status != crate::data_engineer::plan::PlanStatus::Completed
+                        {
+                            control_flow::append_phase_with_reason(
+                                &thread_store,
+                                thread_id,
+                                Some("agent".to_string()),
+                                Some(phase),
+                                Phase::CleansePlan,
+                                Some("plan_not_approved"),
+                                Some(serde_json::json!({ "status": format!("{:?}", plan.status) })),
+                            )
+                            .await;
+                            continue;
+                        }
+                        let next = crate::data_engineer::plan::cleanse_next_batch(&plan);
+                        if next.is_empty() {
+                            // If validation previously failed, do NOT bounce straight back to validate.
+                            // Run a repair authoring pass grounded in the failing model/file evidence.
+                            if guard.last_validate_failed {
+                                let mut ctx = format!(
+                                    "Approved cleanse plan (stored at: {}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch, or call staging_model if you can identify the source dataset):\n",
+                                    plan.plan_key
+                                );
+                                if !last_validate_failed_models.is_empty() {
+                                    for fm in last_validate_failed_models.iter().take(6) {
+                                        let name = fm.get("name").and_then(|v| v.as_str()).unwrap_or("unknown_model");
+                                        let file = fm.get("file").and_then(|v| v.as_str()).unwrap_or("(unknown file)");
+                                        ctx.push_str(&format!("- {} ({})\n", name, file));
+                                    }
+                                } else if let Some(ref brief) = last_validate_brief {
+                                    ctx.push_str("- (unknown failing model) — see last dbt_validate summary below.\n");
+                                    ctx.push_str("\nLast dbt_validate summary:\n");
+                                    ctx.push_str(brief);
+                                    ctx.push('\n');
+                                } else {
+                                    ctx.push_str("- (unknown failing model) — no failing-model evidence found.\n");
+                                }
+                                (
+                                    ctx,
+                                    None, // allow freeform dbt_files patching for targeted repair
+                                )
+                            } else {
+                                // All plan tasks are done; advance to validate.
+                                control_flow::append_phase_with_reason(
+                                    &thread_store,
+                                    thread_id,
+                                    Some("agent".to_string()),
+                                    Some(phase),
+                                    Phase::CleanseValidate,
+                                    Some("plan_tasks_done"),
+                                    Some(serde_json::json!({ "plan_key": plan.plan_key })),
+                                )
+                                .await;
+                                continue;
+                            }
+                        } else {
+                            (
+                                format!(
+                                "Approved cleanse plan (stored at: {}).\nNext batch (MUST execute exactly these dataset_ids, max 5):\n- {}",
+                                plan.plan_key,
+                                next.join("\n- ")
+                                ),
+                                Some(AllowedBatch::CleanseDatasetIds(next.clone())),
+                            )
+                        }
+                    } else {
+                        let mut plan = match crate::data_engineer::plan::load_model_plan(&actx).await {
+                            Some(p) => p,
+                            None => {
+                                control_flow::append_phase_with_reason(
+                                    &thread_store,
+                                    thread_id,
+                                    Some("agent".to_string()),
+                                    Some(phase),
+                                    Phase::ModelPlan,
+                                    Some("missing_plan"),
+                                    Some(serde_json::json!({})),
+                                )
+                                .await;
+                                continue;
+                            }
+                        };
+                        if let Some(ref l) = log {
+                            crate::data_engineer::plan::update_model_progress_from_log(&mut plan, l);
+                            let _ = crate::data_engineer::plan::save_model_plan(&actx, &plan).await;
+                        }
+                        if plan.status != crate::data_engineer::plan::PlanStatus::Approved
+                            && plan.status != crate::data_engineer::plan::PlanStatus::Completed
+                        {
+                            control_flow::append_phase_with_reason(
+                                &thread_store,
+                                thread_id,
+                                Some("agent".to_string()),
+                                Some(phase),
+                                Phase::ModelPlan,
+                                Some("plan_not_approved"),
+                                Some(serde_json::json!({ "status": format!("{:?}", plan.status) })),
+                            )
+                            .await;
+                            continue;
+                        }
+                        let next_names = crate::data_engineer::plan::model_next_batch(&plan);
+                        if next_names.is_empty() {
+                            if guard.last_validate_failed {
+                                // Same repair-mode behavior as cleanse: run authoring to patch failing files.
+                                let mut ctx = format!(
+                                    "Approved model plan (stored at: {}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch):\n",
+                                    plan.plan_key
+                                );
+                                if !last_validate_failed_models.is_empty() {
+                                    for fm in last_validate_failed_models.iter().take(6) {
+                                        let name = fm.get("name").and_then(|v| v.as_str()).unwrap_or("unknown_model");
+                                        let file = fm.get("file").and_then(|v| v.as_str()).unwrap_or("(unknown file)");
+                                        ctx.push_str(&format!("- {} ({})\n", name, file));
+                                    }
+                                } else if let Some(ref brief) = last_validate_brief {
+                                    ctx.push_str("- (unknown failing model) — see last dbt_validate summary below.\n");
+                                    ctx.push_str("\nLast dbt_validate summary:\n");
+                                    ctx.push_str(brief);
+                                    ctx.push('\n');
+                                } else {
+                                    ctx.push_str("- (unknown failing model) — no failing-model evidence found.\n");
+                                }
+                                (ctx, None)
+                            } else {
+                                control_flow::append_phase_with_reason(
+                                    &thread_store,
+                                    thread_id,
+                                    Some("agent".to_string()),
+                                    Some(phase),
+                                    Phase::ModelValidate,
+                                    Some("plan_tasks_done"),
+                                    Some(serde_json::json!({ "plan_key": plan.plan_key })),
+                                )
+                                .await;
+                                continue;
+                            }
+                        } else {
+                            let allowed = Some(AllowedBatch::ModelItemNames(next_names.clone()));
+                            // Include task details for the next batch so the LLM can call gold_model with full args.
+                            let mut details: Vec<String> = Vec::new();
+                            for n in next_names.iter() {
+                                if let Some(t) = plan.tasks.iter().find(|t| t.name == *n) {
+                                    details.push(format!(
+                                        "- name: {}\n  folder: {}\n  goal: {}\n  inputs: {:?}",
+                                        t.name, t.folder, t.goal, t.inputs
+                                    ));
+                                } else {
+                                    details.push(format!("- name: {}", n));
+                                }
+                            }
+                            (
+                                format!(
+                                "Approved model plan (stored at: {}).\nNext batch (MUST execute exactly these model names, max 5):\n{}\n\nCall gold_model with items matching the batch above (and use ONLY ref('stg_*') inputs).",
+                                plan.plan_key,
+                                details.join("\n")
+                                ),
+                                allowed,
+                            )
+                        }
+                    };
+
+                    let (registry, tools_card) =
+                        Self::build_tools_for_phase(phase, &guard, allow_ask_approval, sctx, allowed_batch.clone())?;
+
                     // Ground the next authoring pass with last validation summary (if any) and guard state.
                     let mut q = if is_cleanse {
                         Self::inject_cleanse_question(question)
                     } else {
                         Self::inject_model_question(question)
                     };
+                    if !is_cleanse {
+                        // Ground gold authoring with the current silver inventory so the agent
+                        // can reliably build marts from existing stg_* models (no guessing).
+                        let base = actx.keyspace.dbt_prefix(&actx.scope).trim_end_matches('/').to_string();
+                        let pref = format!("{}/models/staging/", base);
+                        if let Ok(keys) = actx.storage.list_prefix(&pref).await {
+                            let mut rels: Vec<String> = keys
+                                .into_iter()
+                                .filter(|k| k.ends_with(".sql") && !k.contains("/_versions/"))
+                                .filter_map(|k| k.strip_prefix(&(base.clone() + "/")).map(|s| s.to_string()))
+                                .collect();
+                            rels.sort();
+                            rels.dedup();
+                            let mut names: Vec<String> = rels
+                                .into_iter()
+                                .filter_map(|rel| {
+                                    std::path::Path::new(&rel)
+                                        .file_stem()
+                                        .map(|s| s.to_string_lossy().to_string())
+                                })
+                                .collect();
+                            names.sort();
+                            names.dedup();
+                            if !names.is_empty() {
+                                q.push_str("\n\nCurrent staged silver models (use ref('stg_*') from these):\n");
+                                for n in names.into_iter().take(60) {
+                                    q.push_str("- ");
+                                    q.push_str(&n);
+                                    q.push('\n');
+                                }
+                            }
+                        }
+                    }
                     q.push_str("\n\nNOTE: In agent mode, validation and publish are handled by the suite phases. Do not call dbt_validate or publish tools; focus on authoring fixes and models.");
                     q.push_str("\nIMPORTANT: Tool-call argument shapes are strict. In particular: vect_query uses args.query_text (NOT args.query) and scope must be \"dataset\"|\"field\"|\"doc\"|\"artifact\"|\"metric\"|\"model\".");
                     q.push_str("\nIMPORTANT: sql_stats and sql_sample both require args.field. To sample rows, use run_sql with a LIMIT.");
-                    if !allow_ask_approval {
-                        q.push_str("\nIMPORTANT: Approval for this phase has already been recorded. You MUST NOT call ask_approval again; proceed with scaffolding.");
-                    }
+                    q.push_str("\nIMPORTANT: This authoring phase is plan-driven. Execute the approved plan batches. Do NOT ask for approval; approvals happen in plan phases.");
+                    q.push_str("\n\nPlan context:\n");
+                    q.push_str(&plan_context);
                     if let Some(b) = last_validate_brief.as_ref() {
                         q.push_str("\n\nLast dbt_validate summary (most recent):\n");
                         q.push_str(b);
                     }
+                    if !last_validate_failed_models.is_empty() {
+                        q.push_str("\n\nFailing DBT model targets (from dbt stdout):\n");
+                        for fm in last_validate_failed_models.iter().take(6) {
+                            let name = fm.get("name").and_then(|v| v.as_str()).unwrap_or("unknown_model");
+                            let file = fm.get("file").and_then(|v| v.as_str()).unwrap_or("(unknown file)");
+                            q.push_str("- ");
+                            q.push_str(name);
+                            q.push_str(" (");
+                            q.push_str(file);
+                            q.push_str(")\n");
+                        }
+                        q.push_str("Fix these first (prefer patching the listed file paths).\n");
+                    }
                     // Surface the most recent suite-level guard block reason (if any) to help auto-fix.
                     if let Some(ref l) = log {
-                        if let Some(last_block) = l.steps.iter().rev().find(|s| s.action == "guard_block") {
-                            if let Some(reason) = last_block.observation.get("reason").and_then(|v| v.as_str()) {
-                                if !reason.trim().is_empty() {
-                                    q.push_str("\n\nSuite guard note (must resolve before validate):\n");
-                                    q.push_str(reason.trim());
-                                }
+                        if let Some(reason) = l.steps.iter().rev().find_map(|s| match s {
+                            react_core::session::ThreadStep::GuardBlock { reason, .. } => Some(reason.as_str()),
+                            _ => None,
+                        }) {
+                            if !reason.trim().is_empty() {
+                                q.push_str("\n\nSuite guard note (must resolve before validate):\n");
+                                q.push_str(reason.trim());
                             }
                         }
                     }
@@ -1100,6 +1996,21 @@ impl DataEngineerSuite {
 
                     match Agent::run_until_block(&registry, &actx, &sys, &tools_card, &q).await {
                         Ok(RunOutcome::Final { .. }) => {
+                            // Update plan progress based on newly recorded tool steps.
+                            if let Ok(latest) = thread_store.get(thread_id).await {
+                                if is_cleanse {
+                                    if let Some(mut p) = crate::data_engineer::plan::load_cleanse_plan(&actx).await {
+                                        crate::data_engineer::plan::update_cleanse_progress_from_log(&mut p, &latest);
+                                        let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &p).await;
+                                    }
+                                } else {
+                                    if let Some(mut p) = crate::data_engineer::plan::load_model_plan(&actx).await {
+                                        crate::data_engineer::plan::update_model_progress_from_log(&mut p, &latest);
+                                        let _ = crate::data_engineer::plan::save_model_plan(&actx, &p).await;
+                                    }
+                                }
+                            }
+
                             // Deterministic invariants: don't advance phases unless the project actually exists.
                             let has_proj = control_flow::invariant_has_dbt_project(&actx).await.unwrap_or(false);
                             let has_models = control_flow::invariant_has_any_models(&actx).await.unwrap_or(false);
@@ -1109,7 +2020,7 @@ impl DataEngineerSuite {
                             }
                             // New guard: do not advance if this authoring phase has unresolved mutation/tool failures.
                             // Auto-loop in authoring so the agent can fix deterministically.
-                            let latest_log = thread_store.get(thread_id).await;
+                            let latest_log = thread_store.get(thread_id).await.ok();
                             match control_flow::gate_authoring_completion(latest_log.as_ref(), phase) {
                                 control_flow::AuthoringGate::Allow => {}
                                 control_flow::AuthoringGate::AwaitUser { prompt } => {
@@ -1117,17 +2028,19 @@ impl DataEngineerSuite {
                                 }
                                 control_flow::AuthoringGate::Block { reason } => {
                                     let ts = chrono::Utc::now().to_rfc3339();
-                                    let step = react_core::session::ThreadStep {
-                                        action: "guard_block".to_string(),
-                                        args: serde_json::json!({"phase": phase.as_str(), "kind": "authoring_completion"}),
-                                        observation: serde_json::json!({"ok": false, "reason": reason.clone()}),
+                                    let step = react_core::session::ThreadStep::GuardBlock {
+                                        phase: phase.as_str().to_string(),
+                                        kind: "authoring_completion".to_string(),
+                                        reason: reason.clone(),
+                                        observation: react_core::session::Observation::fail(vec![reason.clone()]),
                                         ts,
-                                        agent: Some("agent".to_string()),
+                                        agent: "agent".to_string(),
                                     };
                                     let _ = thread_store.append_step(thread_id, step.clone()).await;
                                     let trigger_step_idx = thread_store
                                         .get(thread_id)
                                         .await
+                                        .ok()
                                         .map(|l| l.steps.len().saturating_sub(1))
                                         .unwrap_or(0);
                                     control_flow::append_phase_with_reason(
@@ -1144,13 +2057,13 @@ impl DataEngineerSuite {
                                             "trigger_step": step,
                                         })),
                                     )
-                                    .await;
+                                    .await?;
                                     continue;
                                 }
                             }
                             // Hard gate: if validate previously failed, do not advance unless a successful mutation
                             // (and any required probes) have been recorded since that failure.
-                            let latest_log = thread_store.get(thread_id).await;
+                            let latest_log = thread_store.get(thread_id).await.ok();
                             match control_flow::gate_authoring_to_validate(latest_log.as_ref()) {
                                 control_flow::AuthoringGate::Allow => {}
                                 control_flow::AuthoringGate::AwaitUser { prompt } => {
@@ -1158,17 +2071,19 @@ impl DataEngineerSuite {
                                 }
                                 control_flow::AuthoringGate::Block { reason } => {
                                     let ts = chrono::Utc::now().to_rfc3339();
-                                    let step = react_core::session::ThreadStep {
-                                        action: "guard_block".to_string(),
-                                        args: serde_json::json!({"phase": phase.as_str(), "kind": "authoring_to_validate"}),
-                                        observation: serde_json::json!({"ok": false, "reason": reason.clone()}),
+                                    let step = react_core::session::ThreadStep::GuardBlock {
+                                        phase: phase.as_str().to_string(),
+                                        kind: "authoring_to_validate".to_string(),
+                                        reason: reason.clone(),
+                                        observation: react_core::session::Observation::fail(vec![reason.clone()]),
                                         ts,
-                                        agent: Some("agent".to_string()),
+                                        agent: "agent".to_string(),
                                     };
                                     let _ = thread_store.append_step(thread_id, step.clone()).await;
                                     let trigger_step_idx = thread_store
                                         .get(thread_id)
                                         .await
+                                        .ok()
                                         .map(|l| l.steps.len().saturating_sub(1))
                                         .unwrap_or(0);
                                     control_flow::append_phase_with_reason(
@@ -1185,10 +2100,68 @@ impl DataEngineerSuite {
                                             "trigger_step": step,
                                         })),
                                     )
-                                    .await;
+                                    .await?;
                                     continue;
                                 }
                             }
+
+                            // Model authoring must actually produce at least one gold model SQL file.
+                            // Without this, we can "succeed" in silver but never create any gold schema objects.
+                            if !is_cleanse {
+                                let actx = Self::agent_tool_ctx(thread_id, sctx);
+                                if !Self::has_any_gold_model_sql(&actx).await {
+                                    let reason = "No gold models were found under models/core/ or models/marts/ after ModelAuthor. Gold must be explicitly authored (marts/core SQL) before validating/publishing.";
+                                    let ts = chrono::Utc::now().to_rfc3339();
+                                    let step = react_core::session::ThreadStep::GuardBlock {
+                                        phase: phase.as_str().to_string(),
+                                        kind: "missing_gold_models".to_string(),
+                                        reason: reason.to_string(),
+                                        observation: react_core::session::Observation::fail(vec![reason.to_string()]),
+                                        ts,
+                                        agent: "agent".to_string(),
+                                    };
+                                    let _ = thread_store.append_step(thread_id, step.clone()).await;
+                                    let trigger_step_idx = thread_store
+                                        .get(thread_id)
+                                        .await
+                                        .ok()
+                                        .map(|l| l.steps.len().saturating_sub(1))
+                                        .unwrap_or(0);
+                                    control_flow::append_phase_with_reason(
+                                        &thread_store,
+                                        thread_id,
+                                        Some("agent".to_string()),
+                                        Some(phase),
+                                        phase,
+                                        Some("phase_blocked"),
+                                        Some(serde_json::json!({
+                                            "kind": "missing_gold_models",
+                                            "reason": reason,
+                                            "expected_prefixes": ["models/core/", "models/marts/"],
+                                            "trigger_step_idx": trigger_step_idx,
+                                            "trigger_step": step,
+                                        })),
+                                    )
+                                    .await?;
+                                    continue;
+                                }
+                            }
+
+                            // Plan-driven authoring: do NOT advance to validate until the approved plan's tasks are done.
+                            if is_cleanse {
+                                if let Some(p) = crate::data_engineer::plan::load_cleanse_plan(&actx).await {
+                                    if !crate::data_engineer::plan::cleanse_all_done(&p) {
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                if let Some(p) = crate::data_engineer::plan::load_model_plan(&actx).await {
+                                    if !crate::data_engineer::plan::model_all_done(&p) {
+                                        continue;
+                                    }
+                                }
+                            }
+
                             let to_phase = if is_cleanse { Phase::CleanseValidate } else { Phase::ModelValidate };
                             control_flow::append_phase_with_reason(
                                 &thread_store,
@@ -1211,7 +2184,7 @@ impl DataEngineerSuite {
                                     }
                                 })),
                             )
-                            .await;
+                            .await?;
                             continue;
                         }
                         Ok(RunOutcome::AwaitUser { prompt, .. }) => return Ok(vec![FlowFrame::AwaitUser { prompt }]),
@@ -1227,13 +2200,13 @@ impl DataEngineerSuite {
                     let _ = thread_store
                         .append_step(
                             thread_id,
-                            react_core::session::ThreadStep {
-                                action: "dbt_validate".to_string(),
+                            react_core::session::ThreadStep::Tool {
+                                name: "dbt_validate".to_string(),
                                 args: serde_json::json!({"build": true}),
-                                observation: obs.clone(),
+                                observation: react_core::session::ToolObservation::normalize(obs.clone()),
                                 ts: chrono::Utc::now().to_rfc3339(),
-                                agent: Some("agent".to_string()),
-                            },
+                                agent: "agent".to_string(),
+                            }
                         )
                         .await;
 
@@ -1241,6 +2214,19 @@ impl DataEngineerSuite {
                     let compile_ok = obs.get("compile_ok").and_then(|v| v.as_bool()).unwrap_or(false);
                     let run_ok = obs.get("run_ok").and_then(|v| v.as_bool()).unwrap_or(false);
                     if ok && compile_ok && run_ok {
+                        // Mark the active plan completed only after validate passes.
+                        if phase == Phase::CleanseValidate {
+                            if let Some(mut p) = crate::data_engineer::plan::load_cleanse_plan(&actx).await {
+                                p.status = crate::data_engineer::plan::PlanStatus::Completed;
+                                let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &p).await;
+                            }
+                        } else {
+                            if let Some(mut p) = crate::data_engineer::plan::load_model_plan(&actx).await {
+                                p.status = crate::data_engineer::plan::PlanStatus::Completed;
+                                let _ = crate::data_engineer::plan::save_model_plan(&actx, &p).await;
+                            }
+                        }
+
                         let trigger_step_idx = thread_store
                             .get(thread_id)
                             .await
@@ -1277,6 +2263,144 @@ impl DataEngineerSuite {
                                 brief
                             ),
                         }]);
+                    }
+
+                    // Plan-driven repair: if validation failed, reopen the failing item(s) so authoring
+                    // runs a targeted fix pass instead of bouncing validate<->author with an empty batch.
+                    //
+                    // We infer failing models from dbt stdout lines like:
+                    // `Failure in model <name> (models/.../<name>.sql)`
+                    let failing_models: Vec<serde_json::Value> = dbt_error::extract_failed_models_from_logs(
+                        &obs.get("logs").cloned().unwrap_or(serde_json::Value::Null),
+                    );
+                    let brief = dbt_error::compact_brief(&errs, 6, 1200);
+                    if !failing_models.is_empty() {
+                        if phase == Phase::CleanseValidate {
+                            if let Some(mut p) = crate::data_engineer::plan::load_cleanse_plan(&actx).await {
+                                let mut reopened: Vec<String> = Vec::new();
+                                let mut want_model_names: Vec<String> = Vec::new();
+                                let mut want_file_stems: Vec<String> = Vec::new();
+                                for fm in failing_models.iter() {
+                                    if let Some(n) = fm.get("name").and_then(|v| v.as_str()) {
+                                        want_model_names.push(n.to_string());
+                                    }
+                                    if let Some(f) = fm.get("file").and_then(|v| v.as_str()) {
+                                        if let Some(stem) = std::path::Path::new(f)
+                                            .file_stem()
+                                            .map(|s| s.to_string_lossy().to_string())
+                                        {
+                                            want_file_stems.push(stem);
+                                        }
+                                    }
+                                }
+                                want_model_names.sort();
+                                want_model_names.dedup();
+                                want_file_stems.sort();
+                                want_file_stems.dedup();
+
+                                for t in p.tasks.iter_mut() {
+                                    let mut expected_name: Option<String> = None;
+                                    if let Some(ref rel) = t.expected_model_path {
+                                        expected_name = std::path::Path::new(rel)
+                                            .file_stem()
+                                            .map(|s| s.to_string_lossy().to_string());
+                                    }
+                                    if expected_name.is_none() {
+                                        let parts: Vec<&str> = t.dataset_id.split('.').collect();
+                                        if parts.len() == 3 {
+                                            expected_name = Some(crate::data_engineer::naming::canonical_staging_model_name(
+                                                parts[1],
+                                                parts[2],
+                                            ));
+                                        }
+                                    }
+                                    let Some(expected) = expected_name else { continue };
+                                    if want_model_names.contains(&expected) || want_file_stems.contains(&expected) {
+                                        t.status = crate::data_engineer::plan::TaskStatus::InProgress;
+                                        let note = format!("Reopened due to dbt_validate failure:\n{}", brief.trim());
+                                        if !t.notes.iter().any(|n| n.trim() == note.trim()) {
+                                            t.notes.push(note);
+                                        }
+                                        reopened.push(t.dataset_id.clone());
+                                    }
+                                }
+                                reopened.sort();
+                                reopened.dedup();
+                                if !reopened.is_empty() {
+                                    let mut plan_note = format!(
+                                        "validate_fail reopened {} staging task(s): {}",
+                                        reopened.len(),
+                                        reopened.join(", ")
+                                    );
+                                    if !want_model_names.is_empty() {
+                                        plan_note.push_str(&format!("\nFailing model(s): {}", want_model_names.join(", ")));
+                                    }
+                                    if p.project_snapshot.is_null() {
+                                        p.project_snapshot = serde_json::json!({});
+                                    }
+                                    if let Some(obj) = p.project_snapshot.as_object_mut() {
+                                        let arr = obj
+                                            .entry("validate_fail_notes")
+                                            .or_insert_with(|| serde_json::Value::Array(vec![]));
+                                        if let Some(a) = arr.as_array_mut() {
+                                            a.push(serde_json::Value::String(plan_note));
+                                            // Keep bounded.
+                                            while a.len() > 10 {
+                                                a.remove(0);
+                                            }
+                                        }
+                                    }
+                                    let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &p).await;
+                                }
+                            }
+                        } else {
+                            // Model (gold) plan: reopen failing model tasks by model name/file stem match.
+                            if let Some(mut p) = crate::data_engineer::plan::load_model_plan(&actx).await {
+                                let mut want_names: HashSet<String> = HashSet::new();
+                                for fm in failing_models.iter() {
+                                    if let Some(n) = fm.get("name").and_then(|v| v.as_str()) {
+                                        want_names.insert(n.to_string());
+                                    }
+                                    if let Some(f) = fm.get("file").and_then(|v| v.as_str()) {
+                                        if let Some(stem) = std::path::Path::new(f)
+                                            .file_stem()
+                                            .map(|s| s.to_string_lossy().to_string())
+                                        {
+                                            want_names.insert(stem);
+                                        }
+                                    }
+                                }
+                                let mut reopened: Vec<String> = Vec::new();
+                                for t in p.tasks.iter_mut() {
+                                    let mut expected: Option<String> = None;
+                                    if !t.name.trim().is_empty() {
+                                        expected = Some(t.name.trim().to_string());
+                                    }
+                                    if let Some(ref rel) = t.expected_model_path {
+                                        if let Some(stem) = std::path::Path::new(rel)
+                                            .file_stem()
+                                            .map(|s| s.to_string_lossy().to_string())
+                                        {
+                                            expected = Some(stem);
+                                        }
+                                    }
+                                    let Some(exp) = expected else { continue };
+                                    if want_names.contains(&exp) {
+                                        t.status = crate::data_engineer::plan::TaskStatus::InProgress;
+                                        let note = format!("Reopened due to dbt_validate failure:\n{}", brief.trim());
+                                        if !t.notes.iter().any(|n| n.trim() == note.trim()) {
+                                            t.notes.push(note);
+                                        }
+                                        reopened.push(t.name.clone());
+                                    }
+                                }
+                                reopened.sort();
+                                reopened.dedup();
+                                if !reopened.is_empty() {
+                                    let _ = crate::data_engineer::plan::save_model_plan(&actx, &p).await;
+                                }
+                            }
+                        }
                     }
 
                     // Validation failed -> go back to corresponding author phase.
@@ -1316,17 +2440,24 @@ impl DataEngineerSuite {
                     let (trigger_step_idx, trigger_step) = thread_store
                         .get(thread_id)
                         .await
+                        .ok()
                         .and_then(|l| {
                             let idx = l.steps.len().saturating_sub(1);
                             l.steps.last().cloned().map(|s| (idx, s))
                         })
-                        .unwrap_or((0, react_core::session::ThreadStep {
-                            action: "unknown".to_string(),
-                            args: serde_json::Value::Null,
-                            observation: serde_json::json!({"ok": false, "reason":"missing thread step"}),
-                            ts: chrono::Utc::now().to_rfc3339(),
-                            agent: Some("agent".to_string()),
-                        }));
+                        .unwrap_or((
+                            0,
+                            react_core::session::ThreadStep::GuardBlock {
+                                phase: "unknown".to_string(),
+                                kind: "missing_thread_step".to_string(),
+                                reason: "missing thread step".to_string(),
+                                observation: react_core::session::Observation::fail(vec![
+                                    "missing thread step".to_string(),
+                                ]),
+                                ts: chrono::Utc::now().to_rfc3339(),
+                                agent: "agent".to_string(),
+                            },
+                        ));
 
                     let meta = Self::parse_review_meta(&answer).unwrap_or(ReviewMeta {
                         actionable: false,
@@ -1345,7 +2476,7 @@ impl DataEngineerSuite {
                     if !meta.actionable {
                         // Move forward in the deterministic pipeline.
                         let next = match phase {
-                            Phase::CleanseReview => Phase::ModelAuthor,
+                            Phase::CleanseReview => Phase::ModelPlan,
                             Phase::ModelReview => Phase::PublishAwaitApproval,
                             Phase::PostPublishReview => Phase::Done,
                             _ => Phase::Done,
@@ -1376,9 +2507,9 @@ impl DataEngineerSuite {
                     // Actionable review -> route back to appropriate authoring phase.
                     let tier = meta.tier.trim().to_lowercase();
                     let back = if tier == "silver" {
-                        Phase::CleanseAuthor
+                        Phase::CleansePlan
                     } else {
-                        Phase::ModelAuthor
+                        Phase::ModelPlan
                     };
                     control_flow::append_phase_with_reason(
                         &thread_store,
@@ -1406,8 +2537,11 @@ impl DataEngineerSuite {
                 Phase::PublishAwaitApproval => {
                     // If the most recent persisted user action is "reject", stop and ask for guidance.
                     if let Some(ref l) = log {
-                        if let Some(last_user) = l.steps.iter().rev().find(|s| s.action == "user") {
-                            let t = last_user.args.get("text").and_then(|v| v.as_str()).unwrap_or("").trim().to_lowercase();
+                        if let Some(last_user) = l.steps.iter().rev().find(|s| matches!(s, react_core::session::ThreadStep::User { .. })) {
+                            let t = match last_user {
+                                react_core::session::ThreadStep::User { text, .. } => text.trim().to_lowercase(),
+                                _ => String::new(),
+                            };
                             if t == "reject" {
                                 return Ok(vec![FlowFrame::AwaitUser {
                                     prompt: "Publish was rejected. Provide guidance (e.g. restrict dataset_ids, change materializations, or adjust models) and then re-run agent.".to_string(),
@@ -1425,7 +2559,7 @@ impl DataEngineerSuite {
                                         "last_user_step": last_user,
                                     })),
                                 )
-                                .await;
+                                .await?;
                                 continue;
                             }
                         }
@@ -1483,8 +2617,11 @@ impl DataEngineerSuite {
                 Phase::Publish => {
                     // Only proceed if the last user action is "approve".
                     if let Some(ref l) = log {
-                        if let Some(last_user) = l.steps.iter().rev().find(|s| s.action == "user") {
-                            let t = last_user.args.get("text").and_then(|v| v.as_str()).unwrap_or("").trim().to_lowercase();
+                        if let Some(last_user) = l.steps.iter().rev().find(|s| matches!(s, react_core::session::ThreadStep::User { .. })) {
+                            let t = match last_user {
+                                react_core::session::ThreadStep::User { text, .. } => text.trim().to_lowercase(),
+                                _ => String::new(),
+                            };
                             if t != "approve" {
                                 return Ok(vec![FlowFrame::AwaitApproval {
                                     prompt: "Publish requires explicit approval. Click Approve to continue.".to_string(),
@@ -1553,7 +2690,9 @@ impl DataEngineerSuite {
         }
 
         Ok(vec![FlowFrame::AwaitUser {
-            prompt: "Agent reached max phase transitions without completing. Please review thread history and retry with more specific instructions.".to_string(),
+            prompt: format!(
+                "Agent reached the phase-step budget without completing.\n\nBudget:\n- max_steps_per_progress={max_phase_steps}\n- total_steps={total_steps}\n\nThis usually indicates a loop (repeatedly re-entering the same phase without durable progress). Review thread history and retry with more specific instructions, or increase AGENT_MAX_PHASE_STEPS."
+            ),
         }])
     }
 
@@ -1756,9 +2895,11 @@ impl Suite for DataEngineerSuite {
         use crate::data_engineer::control_flow::Phase;
         vec![
             Phase::Preflight.as_str(),
+            Phase::CleansePlan.as_str(),
             Phase::CleanseAuthor.as_str(),
             Phase::CleanseValidate.as_str(),
             Phase::CleanseReview.as_str(),
+            Phase::ModelPlan.as_str(),
             Phase::ModelAuthor.as_str(),
             Phase::ModelValidate.as_str(),
             Phase::ModelReview.as_str(),
@@ -1889,6 +3030,7 @@ mod tests {
             &guard,
             true,
             &sctx,
+            None,
         )
             .expect("build_tools_for_phase should succeed");
 
@@ -1899,6 +3041,62 @@ mod tests {
         assert!(reg.call("dbt_files", serde_json::json!({"op":"get","path":"dbt_project.yml"}), &actx).await.is_err());
     }
 
+    #[tokio::test]
+    async fn plan_batched_staging_model_rejects_wrong_dataset_ids_before_inner_call() {
+        let mut sctx = SuiteCtx::default();
+        sctx.query = Some(Arc::new(MockQuery));
+        let actx = DataEngineerSuite::agent_tool_ctx("t", &sctx);
+
+        let guard = crate::data_engineer::control_flow::DerivedGuardState::default();
+        let (reg, _card) = DataEngineerSuite::build_tools_for_phase(
+            crate::data_engineer::control_flow::Phase::CleanseAuthor,
+            &guard,
+            true,
+            &sctx,
+            Some(super::AllowedBatch::CleanseDatasetIds(vec![
+                "AwsDataCatalog.db.t1".to_string(),
+            ])),
+        )
+        .expect("build_tools_for_phase should succeed");
+
+        let err = reg
+            .call(
+                "staging_model",
+                serde_json::json!({"dataset_ids":["AwsDataCatalog.db.t2"]}),
+                &actx,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("plan-batched"));
+    }
+
+    #[tokio::test]
+    async fn plan_batched_gold_model_rejects_wrong_items_before_inner_call() {
+        let mut sctx = SuiteCtx::default();
+        sctx.query = Some(Arc::new(MockQuery));
+        let actx = DataEngineerSuite::agent_tool_ctx("t", &sctx);
+
+        let guard = crate::data_engineer::control_flow::DerivedGuardState::default();
+        let (reg, _card) = DataEngineerSuite::build_tools_for_phase(
+            crate::data_engineer::control_flow::Phase::ModelAuthor,
+            &guard,
+            true,
+            &sctx,
+            Some(super::AllowedBatch::ModelItemNames(vec!["fct_orders".to_string()])),
+        )
+        .expect("build_tools_for_phase should succeed");
+
+        let err = reg
+            .call(
+                "gold_model",
+                serde_json::json!({"items":[{"name":"dim_users","inputs":["stg_x"]}]}),
+                &actx,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("plan-batched"));
+    }
+
     #[test]
     fn allow_ask_approval_is_monotonic_within_phase() {
         use crate::data_engineer::control_flow::Phase;
@@ -1906,39 +3104,36 @@ mod tests {
 
         let log = ThreadLog {
             steps: vec![
-                react_core::session::ThreadStep {
-                    action: "phase".to_string(),
-                    args: serde_json::json!({"phase":"cleanse_author"}),
-                    observation: serde_json::json!({"ok":true}),
+                react_core::session::ThreadStep::Phase {
+                    phase: "cleanse_author".to_string(),
+                    from_phase: None,
+                    reason_code: None,
+                    reason_detail: None,
+                    observation: react_core::session::Observation::ok(),
                     ts: "t".to_string(),
-                    agent: Some("agent".to_string()),
+                    agent: "agent".to_string(),
                 },
-                react_core::session::ThreadStep {
-                    action: "ask_approval".to_string(),
-                    args: serde_json::json!({"prompt":"p"}),
-                    observation: serde_json::json!({"ok":true}),
+                react_core::session::ThreadStep::AskApproval {
+                    prompt: "p".to_string(),
+                    observation: react_core::session::Observation::ok(),
                     ts: "t".to_string(),
-                    agent: Some("agent".to_string()),
+                    agent: "agent".to_string(),
                 },
-                react_core::session::ThreadStep {
-                    action: "user".to_string(),
-                    args: serde_json::json!({"text":"approve"}),
-                    observation: serde_json::json!({"ok":true}),
+                react_core::session::ThreadStep::User {
+                    text: "approve".to_string(),
+                    observation: react_core::session::Observation::ok(),
                     ts: "t".to_string(),
-                    agent: Some("agent".to_string()),
+                    agent: "agent".to_string(),
                 },
                 // Later user chatter must not re-enable ask_approval.
-                react_core::session::ThreadStep {
-                    action: "user".to_string(),
-                    args: serde_json::json!({"text":"continue"}),
-                    observation: serde_json::json!({"ok":true}),
+                react_core::session::ThreadStep::User {
+                    text: "continue".to_string(),
+                    observation: react_core::session::Observation::ok(),
                     ts: "t".to_string(),
-                    agent: Some("agent".to_string()),
+                    agent: "agent".to_string(),
                 },
             ],
-            result: None,
-            title: None,
-            title_finalized: false,
+            ..Default::default()
         };
         assert_eq!(DataEngineerSuite::allow_ask_approval_in_phase(Some(&log), Phase::CleanseAuthor), false);
     }
@@ -1949,44 +3144,41 @@ mod tests {
         use react_core::session::{ThreadLog, ThreadStep};
 
         let prior_review_answer = "META:{\"actionable\":true,\"dataset_ids\":[\"x\"],\"tier\":\"silver\"}\n\nPlease add tests.";
-        let prior_review_transition = ThreadStep {
-            action: "phase".to_string(),
-            args: serde_json::json!({
-                "phase":"cleanse_author",
-                "from_phase":"cleanse_review",
-                "reason_code":"review_actionable_true",
-                "reason_detail": {
-                    "review_phase":"cleanse_review",
-                    "meta": {"actionable": true, "dataset_ids": ["x"], "tier":"silver"},
-                    "answer": prior_review_answer
-                }
-            }),
-            observation: serde_json::json!({"ok":true}),
+        let prior_review_transition = ThreadStep::Phase {
+            phase: "cleanse_author".to_string(),
+            from_phase: Some("cleanse_review".to_string()),
+            reason_code: Some("review_actionable_true".to_string()),
+            reason_detail: Some(serde_json::json!({
+                "review_phase":"cleanse_review",
+                "meta": {"actionable": true, "dataset_ids": ["x"], "tier":"silver"},
+                "answer": prior_review_answer
+            })),
+            observation: react_core::session::Observation::ok(),
             ts: "t".to_string(),
-            agent: Some("agent".to_string()),
+            agent: "agent".to_string(),
         };
 
         let log = ThreadLog {
             steps: vec![
                 prior_review_transition,
-                ThreadStep {
-                    action: "staging_model".to_string(),
+                ThreadStep::Tool {
+                    name: "staging_model".to_string(),
                     args: serde_json::json!({"dataset_ids":["AwsDataCatalog.test_raw.raw_orders"]}),
-                    observation: serde_json::json!({"ok": true, "written_keys":["k1"]}),
+                    observation: react_core::session::ToolObservation::normalize(serde_json::json!({"ok": true, "written_keys":["k1"]})),
                     ts: "t".to_string(),
-                    agent: Some("agent".to_string()),
+                    agent: "agent".to_string(),
                 },
-                ThreadStep {
-                    action: "phase".to_string(),
-                    args: serde_json::json!({"phase":"cleanse_review","from_phase":"cleanse_validate","reason_code":"validate_pass","reason_detail":{"dbt_validate_step_idx": 1}}),
-                    observation: serde_json::json!({"ok":true}),
+                ThreadStep::Phase {
+                    phase: "cleanse_review".to_string(),
+                    from_phase: Some("cleanse_validate".to_string()),
+                    reason_code: Some("validate_pass".to_string()),
+                    reason_detail: Some(serde_json::json!({"dbt_validate_step_idx": 1})),
+                    observation: react_core::session::Observation::ok(),
                     ts: "t".to_string(),
-                    agent: Some("agent".to_string()),
+                    agent: "agent".to_string(),
                 },
             ],
-            result: None,
-            title: None,
-            title_finalized: false,
+            ..Default::default()
         };
 
         let q = DataEngineerSuite::build_review_question_with_context("orig goal", Phase::CleanseReview, Some(&log));

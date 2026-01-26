@@ -41,7 +41,7 @@ pub async fn search_examples(
     k: usize,
 ) -> Result<Vec<ScoredVectorChunk>, String> {
     let vector = vector.ok_or_else(|| "vector provider missing (dbt examples search requires embeddings)".to_string())?;
-    let mut v = llm
+    let v = llm
         .embed(&[query.to_string()])
         .map_err(|e| e.to_string())?
         .pop()

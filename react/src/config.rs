@@ -3,6 +3,7 @@ use std::fs;
 use std::path::Path;
  
 use crate::providers::RequestScope;
+use react_core::providers::{DEFAULT_ATHENA_MAX_CONCURRENCY, clamp_athena_concurrency};
 
 /// # `react` configuration
 ///
@@ -141,6 +142,8 @@ pub struct AthenaFile {
     pub workgroup: Option<String>,
     pub region: Option<String>,
     pub result_s3: Option<String>,
+    /// Max number of in-flight Athena queries to allow (soft-limited by Athena/workgroup).
+    pub max_concurrency: Option<usize>,
     /// Bronze/raw schema (preferred name). For Athena this is a Glue database.
     pub source_schema: Option<String>,
     /// Back-compat alias for `source_schema`.
@@ -238,6 +241,7 @@ pub struct AthenaResolved {
     pub workgroup: Option<String>,
     pub region: Option<String>,
     pub result_s3: Option<String>,
+    pub max_concurrency: usize,
     /// Default schema for source discovery + unqualified queries.
     pub source_schema: Option<String>,
     /// Athena Data Catalog (Glue). This is dbt-athena profile key `database:`.
@@ -385,6 +389,13 @@ impl ReactResolvedConfig {
             getenv_nonempty("DATA_OUTPUT_ATHENA_RESULTS_S3_BUCKET").map(|b| format!("s3://{}/", b.trim_end_matches('/')))
         }).or_else(|| ath_f.result_s3);
  
+        let ath_conc_env = getenv_nonempty("ATHENA_MAX_CONCURRENCY").and_then(|v| v.parse::<usize>().ok());
+        let ath_max_concurrency = clamp_athena_concurrency(
+            ath_conc_env
+                .or(ath_f.max_concurrency)
+                .unwrap_or(DEFAULT_ATHENA_MAX_CONCURRENCY),
+        );
+
         let ttl_env = getenv_nonempty("ATHENA_DISCOVERY_CACHE_TTL_SECS").and_then(|v| v.parse::<u64>().ok());
         let ath_ttl = ttl_env
             .or(ath_f.discovery_cache_ttl_secs)
@@ -449,6 +460,7 @@ impl ReactResolvedConfig {
                     workgroup: ath_workgroup,
                     region: ath_region,
                     result_s3: ath_result_s3,
+                    max_concurrency: ath_max_concurrency,
                     source_schema: ath_source_schema,
                     target_catalog: ath_target_catalog,
                     silver_schema: ath_silver_schema,

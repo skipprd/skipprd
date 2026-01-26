@@ -5,7 +5,7 @@ use std::any::Any;
 
 use crate::tools::ToolRegistry;
 use crate::llm::ChatMessage;
-use crate::session::{ThreadStore, ThreadStep, ThreadResult};
+use crate::session::{Observation, ThreadStore, ThreadStep, ThreadResult, ToolObservation};
 use crate::keyspace::Keyspace;
 use crate::providers::{QueryProvider, DbtProvider, VectorStore};
 use crate::storage::StorageAdapter;
@@ -130,23 +130,33 @@ impl AgentPolicy for DefaultPolicy {
         final_obj: &Value,
     ) -> Result<Option<RunOutcome>, String> {
         let sql_opt = final_obj.get("sql").and_then(|x| x.as_str()).map(|s| s.to_string());
-        let answer = final_obj
-            .get("answer")
-            .and_then(|x| x.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_default();
+        // Many suites expect `final.answer` to be machine-readable (e.g. plan JSON).
+        // Accept both:
+        // - string answers (typical conversational output)
+        // - JSON answers (object/array/number/bool/null), which we serialize to compact JSON text
+        //   so downstream code can parse it from `ThreadResult.answer: String`.
+        let answer = match final_obj.get("answer") {
+            Some(Value::String(s)) => s.to_string(),
+            Some(v) => serde_json::to_string(v).unwrap_or_default(),
+            None => String::new(),
+        };
         let result = ThreadResult { sql: sql_opt, answer };
         if let Some(store) = store {
+            let agent = ctx
+                .agent_name
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
+            let ts = chrono::Utc::now().to_rfc3339();
             let _ = store
                 .append_step(
                     thread_id,
-                    ThreadStep {
-                        action: "final".to_string(),
-                        args: final_obj.clone(),
-                        observation: serde_json::json!({"ok": true}),
-                        ts: chrono::Utc::now().to_rfc3339(),
-                        agent: ctx.agent_name.clone(),
-                    },
+                    ThreadStep::Final {
+                        answer: result.answer.clone(),
+                        sql: result.sql.clone(),
+                        observation: Observation::ok(),
+                        ts,
+                        agent,
+                    }
                 )
                 .await;
         }
@@ -467,7 +477,7 @@ impl Agent {
 
             let Some(action_name) = action.get("action").and_then(|x| x.as_str()) else {
                 warn!("model output missing action/final");
-                Self::transcript_add(&mut transcript, "Observation: {\"ok\":false,\"error\":\"missing action\"}".to_string(), &ctx.trace_tx);
+                Self::transcript_add(&mut transcript, "Observation: {\"ok\":false,\"errors\":[\"missing action\"]}".to_string(), &ctx.trace_tx);
                 continue;
             };
             let args = action.get("args").cloned().unwrap_or_else(|| serde_json::json!({}));
@@ -478,34 +488,39 @@ impl Agent {
                 .timeout_for_tool(action_name)
                 .unwrap_or(ctx.per_step_timeout_secs)
                 .max(1);
-            let obs = match tokio::time::timeout(
+            let raw_obs = match tokio::time::timeout(
                 std::time::Duration::from_secs(timeout_secs),
                 tools.call(action_name, args.clone(), ctx),
             )
             .await
             {
-                Ok(r) => r.unwrap_or_else(|e| serde_json::json!({"ok": false, "error": e})),
-                Err(_) => serde_json::json!({"ok": false, "error": "tool timeout"}),
+                Ok(r) => r.unwrap_or_else(|e| serde_json::json!({"ok": false, "errors": [e]})),
+                Err(_) => serde_json::json!({"ok": false, "errors": ["tool timeout"]}),
             };
+            let obs_env = ToolObservation::normalize(raw_obs.clone());
+            let agent = ctx
+                .agent_name
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
 
             // Persist step if store exists.
             if let Some(store) = store {
                 let _ = store
                     .append_step(
                         &tid,
-                        ThreadStep {
-                            action: action_name.to_string(),
+                        ThreadStep::Tool {
+                            name: action_name.to_string(),
                             args: args.clone(),
-                            observation: obs.clone(),
+                            observation: obs_env,
                             ts: chrono::Utc::now().to_rfc3339(),
-                            agent: ctx.agent_name.clone(),
-                        },
+                            agent: agent.clone(),
+                        }
                     )
                     .await;
             }
 
             // Policy may turn this tool into an interrupt.
-            if let Some(int) = ctx.policy.interrupt_for_action(action_name, &args, &obs) {
+            if let Some(int) = ctx.policy.interrupt_for_action(action_name, &args, &raw_obs) {
                 match int {
                     Interrupt::AwaitUser { prompt } => return Ok(RunOutcome::AwaitUser { thread_id: tid, prompt }),
                     Interrupt::AwaitApproval { prompt } => return Ok(RunOutcome::AwaitApproval { thread_id: tid, prompt }),
@@ -515,7 +530,14 @@ impl Agent {
             Self::transcript_add(&mut transcript, format!("Assistant: {}", raw), &ctx.trace_tx);
 
             // Special case: if tool produced a *very large* error blob, do a chunked follow-up action.
-            if let Some(err) = obs.get("error").and_then(|v| v.as_str()) {
+            let err_opt: Option<String> = raw_obs
+                .get("errors")
+                .and_then(|v| v.as_array())
+                .and_then(|arr| arr.get(0))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| raw_obs.get("error").and_then(|v| v.as_str()).map(|s| s.to_string()));
+            if let Some(err) = err_opt.as_deref() {
                 if err.len() >= 10_000 {
                     if let Ok(raw2) = Self::llm_action_via_chunked_errors(ctx, &transcript, step_idx, err).await {
                         Self::transcript_add(&mut transcript, format!("Assistant: {}", raw2), &ctx.trace_tx);
@@ -523,7 +545,7 @@ impl Agent {
                 }
             }
 
-            Self::transcript_add(&mut transcript, format!("Observation: {}", obs), &ctx.trace_tx);
+            Self::transcript_add(&mut transcript, format!("Observation: {}", raw_obs), &ctx.trace_tx);
         }
 
         ctx.policy.fallback(tools, ctx, &mut transcript, store, &tid).await
@@ -640,6 +662,52 @@ mod tests {
             .expect("ok");
         match out {
             RunOutcome::Final { result, .. } => assert_eq!(result.answer, "ok"),
+            _ => panic!("expected final outcome"),
+        }
+    }
+
+    #[tokio::test]
+    async fn final_answer_accepts_json_values_by_serializing_to_string() {
+        let llm = Arc::new(ScriptedModel {
+            replies: Arc::new(Mutex::new(vec![
+                "{\"final\":{\"answer\":{\"hello\":\"world\",\"n\":1},\"sql\":\"SELECT 1 AS ok\"}}".to_string(),
+            ])),
+        });
+        let storage = Arc::new(InMemoryStorageAdapter::default());
+        let keyspace = Arc::new(DefaultKeyspace::new("bucket".to_string()));
+        let scope = RequestScope { tenant: "t".into(), workspace: "w".into(), project_id: "p".into() };
+
+        let reg = ToolRegistry::new();
+        let ctx = AgentCtx {
+            top_k: 1,
+            per_step_timeout_secs: 1,
+            max_steps: 2,
+            thread_id: Some("tid".to_string()),
+            progress_tx: None,
+            pre_step_tx: None,
+            trace_tx: None,
+            agent_name: Some("test".to_string()),
+            policy: Arc::new(DefaultPolicy),
+            llm,
+            storage,
+            scope,
+            keyspace,
+            query: None,
+            dbt: None,
+            vector: None,
+            thread_store: None,
+            runtime: None,
+        };
+
+        let out = Agent::run_until_block(&reg, &ctx, "sys", "tools", "q")
+            .await
+            .expect("ok");
+        match out {
+            RunOutcome::Final { result, .. } => {
+                let v: Value = serde_json::from_str(&result.answer).expect("answer should be json text");
+                assert_eq!(v.get("hello").and_then(|x| x.as_str()), Some("world"));
+                assert_eq!(v.get("n").and_then(|x| x.as_i64()), Some(1));
+            }
             _ => panic!("expected final outcome"),
         }
     }

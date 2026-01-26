@@ -39,7 +39,7 @@ pub fn active_warehouse(cfg: &ReactResolvedConfig) -> Result<ActiveWarehouse, St
 /// - No secrets are written (AWS credentials remain env-driven/default chain).
 /// - Uses provider-native adapter config shape.
 /// - Uses deterministic database/schema naming derived from scope (unless overridden by provider config).
-pub fn generate_profiles_yml(cfg: &ReactResolvedConfig) -> Result<GeneratedProfiles, String> {
+pub fn generate_profiles_yml(cfg: &ReactResolvedConfig, threads: Option<usize>) -> Result<GeneratedProfiles, String> {
     let active = active_warehouse(cfg)?;
     match active {
         ActiveWarehouse::Athena => {
@@ -109,8 +109,9 @@ pub fn generate_profiles_yml(cfg: &ReactResolvedConfig) -> Result<GeneratedProfi
             out.push_str(&format!("      region_name: {}\n", yaml_escape_scalar(&region_value)));
             out.push_str(&format!("      database: {}\n", yaml_escape_scalar(&database)));
             out.push_str(&format!("      schema: {}\n", yaml_escape_scalar(&schema)));
-            // Default concurrency unless overridden elsewhere (env/CLI).
-            out.push_str("      threads: 4\n");
+            if let Some(t) = threads {
+                out.push_str(&format!("      threads: {}\n", t.max(1)));
+            }
             if !work_group.trim().is_empty() {
                 out.push_str(&format!(
                     "      work_group: {}\n",
@@ -197,7 +198,7 @@ mod tests {
                 vector: crate::config::VectorResolved { enabled: false },
             },
         };
-        let err = generate_profiles_yml(&cfg).unwrap_err();
+        let err = generate_profiles_yml(&cfg, None).unwrap_err();
         assert!(err.contains("result_s3"));
     }
 }

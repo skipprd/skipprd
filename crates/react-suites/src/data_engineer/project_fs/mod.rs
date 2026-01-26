@@ -1,12 +1,16 @@
 use serde_json::Value;
 use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use diffy::Patch;
 use react_core::agent::AgentCtx;
 use react_core::providers::{DatasetCatalogProvider, DatasetId};
+
+use crate::data_engineer::naming;
+use crate::data_engineer::project_files;
 
 #[derive(Debug)]
 pub struct PatchOutcome {
@@ -15,6 +19,8 @@ pub struct PatchOutcome {
     pub existed: bool,
     pub base_sha256: String,
     pub new_sha256: String,
+    /// Canonical git-style unified diff (single-file).
+    pub git_patch: String,
     pub diff: String,
     pub lines_added: usize,
     pub lines_removed: usize,
@@ -25,10 +31,185 @@ pub fn create_patch_text(old: &str, new: &str) -> String {
     diffy::create_patch(old, new).to_string()
 }
 
+/// Create a git-style unified diff for a single file.
+///
+/// This is intended for deterministic/internal patch generation (not LLM authoring).
+/// For new files, it uses `--- /dev/null` which is required by the patch protocol.
+pub fn create_git_patch_text(old: &str, new: &str, rel_path: &str, existed: bool) -> Result<String, String> {
+    let rel = normalize_rel_path(rel_path)?;
+    let base = diffy::create_patch(old, new).to_string();
+    let mut lines: Vec<&str> = base.lines().collect();
+    if lines.len() < 2 {
+        return Err("failed to generate patch: missing header lines".to_string());
+    }
+
+    // diffy uses: "--- original" and "+++ modified"
+    // Replace with git-style file headers.
+    lines[0] = if existed {
+        // NOTE: path prefix is informational only; apply logic keys off the rel_path we pass around.
+        // Keep a/ and b/ to match standard diffs.
+        // (apply_patch_bundle strips preamble but keeps these lines)
+        // Example: --- a/models/foo.sql
+        //          +++ b/models/foo.sql
+        // This also keeps patches compatible with git tooling for debugging.
+        // We do not attempt to preserve timestamps.
+        ""
+    } else {
+        ""
+    };
+
+    // Build final output explicitly rather than trying to mutate &str slices.
+    let header_old = if existed {
+        format!("--- a/{}", rel)
+    } else {
+        "--- /dev/null".to_string()
+    };
+    let header_new = format!("+++ b/{}", rel);
+    let mut out: Vec<String> = Vec::new();
+    out.push(format!("diff --git a/{0} b/{0}", rel));
+    if !existed {
+        out.push("new file mode 100644".to_string());
+    }
+    out.push(header_old);
+    out.push(header_new);
+    // Skip the first two diffy header lines.
+    for l in base.lines().skip(2) {
+        out.push(l.to_string());
+    }
+    Ok(out.join("\n"))
+}
+
+fn split_lines_preserve_trailing_newline(s: &str) -> (Vec<String>, bool) {
+    let had_trailing_newline = s.ends_with('\n');
+    let mut lines: Vec<String> = s.split('\n').map(|x| x.to_string()).collect();
+    // `split('\n')` produces a trailing empty segment when the string ends with '\n'.
+    if had_trailing_newline {
+        if let Some(last) = lines.last() {
+            if last.is_empty() {
+                lines.pop();
+            }
+        }
+    }
+    (lines, had_trailing_newline)
+}
+
+fn join_lines_preserve_trailing_newline(lines: &[String], had_trailing_newline: bool) -> String {
+    let mut out = lines.join("\n");
+    if had_trailing_newline {
+        out.push('\n');
+    }
+    out
+}
+
+/// Apply a 1-based inclusive line replacement to a text blob.
+///
+/// Supports insertion by specifying `start_line == end_line + 1`.
+pub fn apply_replace_range(old_text: &str, start_line: usize, end_line: usize, new_text: &str) -> Result<String, String> {
+    let (mut lines, had_trailing_newline) = split_lines_preserve_trailing_newline(old_text);
+    let n = lines.len();
+    if start_line == 0 {
+        return Err("start_line must be >= 1".to_string());
+    }
+    if end_line > n {
+        return Err(format!("end_line out of bounds: {} > {}", end_line, n));
+    }
+    if start_line > n + 1 {
+        return Err(format!("start_line out of bounds: {} > {}", start_line, n + 1));
+    }
+    if start_line > end_line + 1 {
+        return Err(format!("invalid range: start_line {} > end_line {} + 1", start_line, end_line));
+    }
+
+    // Convert to 0-based indices in the current line vector.
+    let start_idx = start_line - 1;
+    let end_idx_excl = end_line; // inclusive end_line -> exclusive index in 0-based vec
+
+    let mut new_lines: Vec<String> = new_text.split('\n').map(|x| x.to_string()).collect();
+    // Preserve explicit trailing newline in the replacement block as an extra empty line.
+    // (split already keeps the trailing empty segment).
+    if !new_text.ends_with('\n') {
+        // If there was no trailing newline, `split` will not have produced a trailing empty segment.
+        // This is fine; no change required.
+    }
+
+    lines.splice(start_idx..end_idx_excl, new_lines.drain(..));
+    Ok(join_lines_preserve_trailing_newline(&lines, had_trailing_newline))
+}
+
+#[derive(Clone, Debug)]
+pub struct ReplaceListEdit {
+    pub start_line: usize,
+    pub end_line: usize,
+    pub new_text: String,
+}
+
+/// Apply multiple non-overlapping line edits to a text blob.
+///
+/// Edits are 1-based inclusive and may represent insertions when `start_line == end_line + 1`.
+pub fn apply_replace_list(old_text: &str, edits: &[ReplaceListEdit]) -> Result<String, String> {
+    let (mut lines, had_trailing_newline) = split_lines_preserve_trailing_newline(old_text);
+    let n = lines.len();
+    if edits.is_empty() {
+        return Ok(old_text.to_string());
+    }
+
+    let mut sorted: Vec<ReplaceListEdit> = edits.to_vec();
+    sorted.sort_by(|a, b| a.start_line.cmp(&b.start_line).then(a.end_line.cmp(&b.end_line)));
+
+    // Validate and check overlaps in 1-based coordinates.
+    let mut prev_end: Option<usize> = None;
+    for e in sorted.iter() {
+        if e.start_line == 0 {
+            return Err("start_line must be >= 1".to_string());
+        }
+        if e.end_line > n {
+            return Err(format!("end_line out of bounds: {} > {}", e.end_line, n));
+        }
+        if e.start_line > n + 1 {
+            return Err(format!("start_line out of bounds: {} > {}", e.start_line, n + 1));
+        }
+        if e.start_line > e.end_line + 1 {
+            return Err(format!(
+                "invalid range: start_line {} > end_line {} + 1",
+                e.start_line, e.end_line
+            ));
+        }
+        if let Some(pe) = prev_end {
+            // Allow adjacent, disallow overlap.
+            // For insertion, end_line may be start_line-1; treat that as a zero-width span at start_line.
+            let cur_start_effective = if e.start_line == e.end_line + 1 {
+                e.start_line
+            } else {
+                e.start_line
+            };
+            if cur_start_effective <= pe {
+                return Err("replace_list edits overlap".to_string());
+            }
+        }
+        // For insertion, treat it as ending at start_line-1; otherwise inclusive end_line.
+        let effective_end = if e.start_line == e.end_line + 1 {
+            e.start_line - 1
+        } else {
+            e.end_line
+        };
+        prev_end = Some(effective_end);
+    }
+
+    // Apply bottom-to-top to avoid line shifts.
+    for e in sorted.iter().rev() {
+        let start_idx = e.start_line - 1;
+        let end_idx_excl = e.end_line;
+        let mut new_lines: Vec<String> = e.new_text.split('\n').map(|x| x.to_string()).collect();
+        lines.splice(start_idx..end_idx_excl, new_lines.drain(..));
+    }
+
+    Ok(join_lines_preserve_trailing_newline(&lines, had_trailing_newline))
+}
+
 pub fn normalize_rel_path(rel: &str) -> Result<String, String> {
     let rel = rel.trim().trim_start_matches("./").to_string();
     if !is_allowed_rel_path(&rel) {
-        return Err("path not allowed; only dbt project files under models/, seeds/, macros/, snapshots/, analyses/, tests/, target/ (or dbt_project.yml / packages.yml) are permitted".to_string());
+        return Err("path not allowed; only relative paths within the dbt project are permitted (no absolute paths, no '..' traversal)".to_string());
     }
     Ok(rel.replace('\\', "/"))
 }
@@ -170,14 +351,17 @@ pub async fn apply_patch(
     path: &str,
     patch_text: &str,
     base_sha256: Option<&str>,
-    create_if_missing: bool,
 ) -> Result<PatchOutcome, String> {
     let rel = normalize_rel_path(path)?;
     let key = join_storage_key(ctx, &rel);
     let existing = ctx.storage.get_bytes(&key).await.ok().map(|b| String::from_utf8_lossy(&b).to_string());
     let existed = existing.is_some();
-    if !existed && !create_if_missing {
-        return Err("file does not exist; set create_if_missing=true to create via patch".to_string());
+    let is_new_file_patch = patch_text.lines().any(|l| l.trim() == "--- /dev/null");
+    if !existed && !is_new_file_patch {
+        return Err(
+            "file does not exist; creation must be expressed in the patch (git-style): include '--- /dev/null' and '+++ b/<path>'"
+                .to_string(),
+        );
     }
     let old = existing.unwrap_or_default();
     let base_hash = sha256_hex(&old);
@@ -186,10 +370,46 @@ pub async fn apply_patch(
             return Err(format!("base_sha256 mismatch; expected {}, got {}", expected, base_hash));
         }
     }
-    let patch = Patch::from_str(patch_text).map_err(|e| format!("invalid patch: {}", e))?;
-    let mut new_content = diffy::apply(&old, &patch).map_err(|e| format!("patch apply failed: {}", e))?;
+    // Accept git-style patches (with optional preamble) by stripping down to the unified diff section
+    // (`---`/`+++` + hunks) before feeding into diffy.
+    let unified = strip_git_preamble_to_unified(patch_text)?;
+    // diffy::Patch borrows from the patch text, so keep any repaired patch text alive
+    // for the duration of parsing + apply.
+    let mut patch_src: Cow<'_, str> = Cow::Borrowed(&unified);
+    let patch = match Patch::from_str(patch_src.as_ref()) {
+        Ok(p) => p,
+        Err(e) => {
+            let emsg = e.to_string();
+            // Common LLM failure mode: incorrect hunk header counts or malformed hunk headers.
+            //
+            // diffy is strict and will reject mismatches with various error strings (including
+            // "Hunks not in order or overlap"). Attempt a deterministic repair by recomputing hunk
+            // counts and rewriting headers once, regardless of the specific parse error message.
+            let fixed = repair_unified_hunk_headers(&unified);
+            if fixed != unified {
+                patch_src = Cow::Owned(fixed);
+                Patch::from_str(patch_src.as_ref()).map_err(|e2| format!("invalid patch: {}", e2))?
+            } else {
+                return Err(format!("invalid patch: {}", emsg));
+            }
+        }
+    };
+    let mut new_content = match diffy::apply(&old, &patch) {
+        Ok(c) => c,
+        Err(e) => {
+            // Fallback: if the patch looks like a full-file rewrite (single hunk replacing the full file),
+            // reconstruct the new content directly from the hunk body. This is much more robust for
+            // large/chaotic files where context matching often fails.
+            if let Some(repl) = try_reconstruct_full_file_replacement(patch_src.as_ref(), &old) {
+                repl
+            } else {
+                return Err(format!("patch apply failed: {}", e));
+            }
+        }
+    };
     new_content = postprocess_content(ctx, datasets, &rel, &new_content).await?;
 
+    let git_patch = create_git_patch_text(&old, &new_content, &rel, existed)?;
     let diff = compute_unified_diff(&old, &new_content);
     let (lines_added, lines_removed) = diff_stats(&old, &new_content);
     let new_hash = sha256_hex(&new_content);
@@ -199,11 +419,287 @@ pub async fn apply_patch(
         existed,
         base_sha256: base_hash,
         new_sha256: new_hash,
+        git_patch,
         diff,
         lines_added,
         lines_removed,
         content: new_content,
     })
+}
+
+#[derive(Clone, Debug)]
+struct ParsedFilePatch {
+    rel_path: String,
+    patch_text: String,
+}
+
+fn parse_hunk_range(part: &str, sign: char) -> Option<(usize, usize)> {
+    let p = part.trim();
+    let p = p.strip_prefix(sign)?;
+    let mut it = p.splitn(2, ',');
+    let start = it.next()?.trim().parse::<usize>().ok()?;
+    let count = match it.next() {
+        Some(c) => c.trim().parse::<usize>().ok()?,
+        None => 1usize,
+    };
+    Some((start, count))
+}
+
+/// If a unified diff patch is effectively "replace the whole file", extract the intended
+/// resulting file contents directly from the patch hunk(s).
+///
+/// This is a fallback for strict diff application failures where the patch can't be applied
+/// due to context mismatches, but the patch clearly contains the entire new file content.
+fn try_reconstruct_full_file_replacement(unified: &str, old: &str) -> Option<String> {
+    // Identify all hunk headers.
+    let lines: Vec<&str> = unified.lines().collect();
+    let mut hunk_idxs: Vec<usize> = Vec::new();
+    for (i, l) in lines.iter().enumerate() {
+        if l.starts_with("@@") {
+            hunk_idxs.push(i);
+        }
+    }
+    if hunk_idxs.len() != 1 {
+        return None;
+    }
+    let i = hunk_idxs[0];
+    let header = lines[i];
+    let after = header.trim_start_matches("@@").trim_start();
+    let end_idx = after.find("@@")?;
+    let ranges = after[..end_idx].trim();
+    let parts: Vec<&str> = ranges.split_whitespace().collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let (old_start, old_count) = parse_hunk_range(parts[0], '-')?;
+    let (new_start, _new_count) = parse_hunk_range(parts[1], '+')?;
+
+    // Conservative "whole file" check: hunk starts at (or before) first line, and claims to cover
+    // at least the current file length. We use split('\n') to match other parts of this module.
+    let old_lines_len = old.split('\n').count();
+    if old_start > 1 || new_start > 1 {
+        return None;
+    }
+    if old_count + 1 < old_lines_len {
+        // +1 tolerance for trailing newline / last empty split segment.
+        return None;
+    }
+
+    // Extract resulting lines from hunk body: keep ' ' and '+' lines, drop '-' lines.
+    let mut out_lines: Vec<String> = Vec::new();
+    let mut j = i + 1;
+    while j < lines.len() {
+        let l = lines[j];
+        if l.starts_with("@@") {
+            break;
+        }
+        if l.starts_with('\\') {
+            j += 1;
+            continue;
+        }
+        match l.chars().next().unwrap_or(' ') {
+            '+' | ' ' => {
+                // Strip the leading marker
+                out_lines.push(l[1..].to_string());
+            }
+            '-' => {}
+            _ => {}
+        }
+        j += 1;
+    }
+    Some(out_lines.join("\n"))
+}
+
+/// Repair unified diff hunks by recomputing their line counts from the hunk bodies.
+///
+/// This is a best-effort normalization for strict patch parsers (diffy). It preserves hunk start
+/// positions, and only rewrites the `-a,b +c,d` counts to match the actual hunk body.
+fn repair_unified_hunk_headers(unified: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let lines: Vec<&str> = unified.lines().collect();
+    let mut i = 0usize;
+    while i < lines.len() {
+        let line = lines[i];
+        if !line.starts_with("@@") {
+            out.push(line.to_string());
+            i += 1;
+            continue;
+        }
+
+        // Parse header like: @@ -0,0 +1,62 @@
+        // Keep any suffix after the closing @@ (rare, but valid).
+        let after = line.trim_start_matches("@@").trim_start();
+        let Some(end_idx) = after.find("@@") else {
+            out.push(line.to_string());
+            i += 1;
+            continue;
+        };
+        let ranges = after[..end_idx].trim();
+        let suffix = &after[end_idx + 2..]; // may be empty
+        let parts: Vec<&str> = ranges.split_whitespace().collect();
+        if parts.len() < 2 {
+            out.push(line.to_string());
+            i += 1;
+            continue;
+        }
+        let Some((old_start, _old_count_decl)) = parse_hunk_range(parts[0], '-') else {
+            out.push(line.to_string());
+            i += 1;
+            continue;
+        };
+        let Some((new_start, _new_count_decl)) = parse_hunk_range(parts[1], '+') else {
+            out.push(line.to_string());
+            i += 1;
+            continue;
+        };
+
+        // Count lines in the hunk body until next hunk header or EOF.
+        let mut old_count = 0usize;
+        let mut new_count = 0usize;
+        let mut j = i + 1;
+        while j < lines.len() {
+            let l = lines[j];
+            if l.starts_with("@@") {
+                break;
+            }
+            if l.starts_with('\\') {
+                // "\ No newline at end of file" — doesn't count toward either side.
+                j += 1;
+                continue;
+            }
+            match l.chars().next().unwrap_or(' ') {
+                '-' => old_count += 1,
+                '+' => new_count += 1,
+                ' ' => {
+                    old_count += 1;
+                    new_count += 1;
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+
+        let fixed = format!("@@ -{old_start},{old_count} +{new_start},{new_count} @@{suffix}");
+        out.push(fixed);
+        i += 1;
+        continue;
+    }
+    out.join("\n")
+}
+
+fn strip_git_preamble_to_unified(patch_chunk: &str) -> Result<String, String> {
+    // Accept common git-style headers, but only keep the unified diff section (---/+++ + hunks),
+    // which `diffy` can parse and apply.
+    let mut out: Vec<String> = Vec::new();
+    let mut started = false;
+    for line in patch_chunk.lines() {
+        let t = line.trim_end_matches('\r');
+        if !started {
+            if t.starts_with("--- ") {
+                started = true;
+                out.push(t.to_string());
+            }
+            continue;
+        }
+        // Drop git metadata lines that can appear between diff --git and ---/+++ in some patches.
+        if t.starts_with("diff --git ")
+            || t.starts_with("index ")
+            || t.starts_with("new file mode ")
+            || t.starts_with("deleted file mode ")
+            || t.starts_with("similarity index ")
+            || t.starts_with("rename from ")
+            || t.starts_with("rename to ")
+        {
+            continue;
+        }
+        out.push(t.to_string());
+    }
+    if out.is_empty() {
+        return Err("invalid patch bundle: could not find unified diff header line starting with '--- '".to_string());
+    }
+    Ok(out.join("\n"))
+}
+
+fn parse_patch_target_rel_path(patch_chunk: &str) -> Result<String, String> {
+    // Prefer the +++ header (git-style uses +++ b/<path>).
+    for line in patch_chunk.lines() {
+        let t = line.trim_end_matches('\r');
+        if let Some(rest) = t.strip_prefix("+++ ") {
+            let p = rest.trim();
+            if p == "/dev/null" {
+                continue;
+            }
+            let p = p.strip_prefix("b/").unwrap_or(p);
+            return normalize_rel_path(p);
+        }
+    }
+    // Fallback: diff --git a/<path> b/<path>
+    for line in patch_chunk.lines() {
+        let t = line.trim_end_matches('\r');
+        if let Some(rest) = t.strip_prefix("diff --git ") {
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            if parts.len() >= 2 {
+                let b = parts[1].trim();
+                let b = b.strip_prefix("b/").unwrap_or(b);
+                return normalize_rel_path(b);
+            }
+        }
+    }
+    Err("invalid patch bundle: could not determine target path (missing +++ b/<path> or diff --git ...)".to_string())
+}
+
+fn split_git_patch_bundle(patch_text: &str) -> Result<Vec<ParsedFilePatch>, String> {
+    let s = patch_text.trim();
+    if s.is_empty() {
+        return Err("patch_text is empty".to_string());
+    }
+
+    // If we see explicit git file separators, split by them. Otherwise treat as a single-file patch.
+    let has_diff_git = s.lines().any(|l| l.trim_start().starts_with("diff --git "));
+    if !has_diff_git {
+        let rel = parse_patch_target_rel_path(s)?;
+        let unified = strip_git_preamble_to_unified(s)?;
+        return Ok(vec![ParsedFilePatch { rel_path: rel, patch_text: unified }]);
+    }
+
+    let mut chunks: Vec<String> = Vec::new();
+    let mut cur: Vec<String> = Vec::new();
+    for line in s.lines() {
+        let is_sep = line.trim_start().starts_with("diff --git ");
+        if is_sep && !cur.is_empty() {
+            chunks.push(cur.join("\n"));
+            cur.clear();
+        }
+        cur.push(line.to_string());
+    }
+    if !cur.is_empty() {
+        chunks.push(cur.join("\n"));
+    }
+
+    let mut out: Vec<ParsedFilePatch> = Vec::new();
+    for ch in chunks {
+        let rel = parse_patch_target_rel_path(&ch)?;
+        let unified = strip_git_preamble_to_unified(&ch)?;
+        out.push(ParsedFilePatch { rel_path: rel, patch_text: unified });
+    }
+    if out.is_empty() {
+        return Err("patch bundle contained no file diffs".to_string());
+    }
+    Ok(out)
+}
+
+pub async fn apply_patch_bundle(
+    ctx: &AgentCtx,
+    datasets: Option<&std::sync::Arc<dyn DatasetCatalogProvider>>,
+    patch_text: &str,
+) -> Result<Vec<PatchOutcome>, String> {
+    let files = split_git_patch_bundle(patch_text)?;
+    let mut outcomes: Vec<PatchOutcome> = Vec::new();
+    for f in files {
+        let out = apply_patch(ctx, datasets, &f.rel_path, &f.patch_text, None).await?;
+        outcomes.push(out);
+    }
+    Ok(outcomes)
 }
 
 pub fn compute_unified_diff(old: &str, new: &str) -> String {
@@ -277,19 +773,9 @@ fn is_allowed_rel_path(rel: &str) -> bool {
     if rel.contains("..") {
         return false;
     }
-    if rel == "dbt_project.yml" || rel == "packages.yml" {
-        return true;
-    }
-    let allowed_prefixes = [
-        "models/",
-        "seeds/",
-        "macros/",
-        "snapshots/",
-        "analyses/",
-        "tests/",
-        "target/",
-    ];
-    allowed_prefixes.iter().any(|p| rel.starts_with(p))
+    // Allow any in-project file now that all writes go through patch/diff application
+    // and are scoped to the configured dbt storage prefix.
+    true
 }
 
 fn sha256_hex(s: &str) -> String {
@@ -305,16 +791,28 @@ async fn postprocess_content(
     rel: &str,
     content: &str,
 ) -> Result<String, String> {
-    if rel == "packages.yml" {
+    if rel == project_files::PACKAGES_YML {
         return postprocess_packages_yml(content);
     }
-    if rel == "models/schema.yml" {
+    if rel == project_files::MODELS_SCHEMA_YML {
         return postprocess_schema_yml(ctx, datasets, content).await;
     }
     if rel.starts_with("models/") && rel.ends_with(".sql") {
         return postprocess_model_sql(ctx, rel, content);
     }
     Ok(content.to_string())
+}
+
+/// Canonicalize `models/schema.yml` content.
+///
+/// This is used when we want deterministic schema.yml normalization (e.g. rebuilding sources from
+/// the dataset catalog) without requiring the caller to go through a patch-apply cycle.
+pub async fn canonicalize_schema_yml(
+    ctx: &AgentCtx,
+    datasets: Option<&std::sync::Arc<dyn DatasetCatalogProvider>>,
+    content: &str,
+) -> Result<String, String> {
+    postprocess_schema_yml(ctx, datasets, content).await
 }
 
 async fn postprocess_schema_yml(
@@ -466,11 +964,55 @@ fn sources_value_from_dataset_ids(dss: &[DatasetId]) -> YamlValue {
 }
 
 fn postprocess_model_sql(ctx: &AgentCtx, rel: &str, content: &str) -> Result<String, String> {
+    validate_model_sql_identity(rel, content)?;
     let cfg = crate::config::resolved_config_from_ctx(ctx)
         .ok_or_else(|| "resolved_config missing for model SQL postprocess".to_string())?;
     let suffix = tier_suffix_for_path(rel, &cfg).ok_or_else(|| "unable to infer tier suffix for model path".to_string())?;
     let alias = model_alias_from_rel(rel).ok_or_else(|| "unable to infer model alias from path".to_string())?;
     Ok(rewrite_config_header(content, &suffix, &alias))
+}
+
+fn validate_model_sql_identity(rel: &str, content: &str) -> Result<(), String> {
+    // Only validate dbt model SQL files.
+    if !rel.starts_with("models/") || !rel.ends_with(".sql") {
+        return Ok(());
+    }
+
+    // Staging/silver: enforce strict 1:1 mapping between model file and source().
+    if rel.starts_with("models/staging/") {
+        let sources = naming::extract_source_calls(content);
+        if sources.is_empty() {
+            return Err(format!(
+                "invalid staging model SQL at '{}': staging models must contain exactly one dbt source() call and be written to the canonical path models/staging/stg_<source_schema>_<source_table>.sql",
+                rel
+            ));
+        }
+        if sources.len() != 1 {
+            return Err(format!(
+                "invalid staging model SQL at '{}': staging models must reference exactly ONE source(schema, table). Found: {:?}",
+                rel, sources
+            ));
+        }
+        let (schema, table) = &sources[0];
+        let canonical = naming::canonical_staging_rel_path(schema, table);
+        if rel != canonical {
+            return Err(format!(
+                "invalid staging model path: staging model for source(\"{}\",\"{}\") must be written to '{}' (canonical), but attempted to write '{}'. Rename the file to the canonical path (no alternate naming schemes are permitted).",
+                schema, table, canonical, rel
+            ));
+        }
+        return Ok(());
+    }
+
+    // Gold/core/marts: must not read from raw/bronze sources.
+    let sources = naming::extract_source_calls(content);
+    if !sources.is_empty() {
+        return Err(format!(
+            "invalid gold/core model SQL at '{}': gold models must NOT reference dbt source() (raw/bronze). Use ref('stg_*') to read from silver. Found source() call(s): {:?}",
+            rel, sources
+        ));
+    }
+    Ok(())
 }
 
 fn tier_suffix_for_path(rel: &str, cfg: &crate::config::ReactResolvedConfig) -> Option<String> {
@@ -626,12 +1168,67 @@ mod tests {
     async fn apply_patch_creates_file_and_injects_config() {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let ctx = make_ctx(storage);
-        let patch_text = create_patch_text("", "select 1");
-        let outcome = apply_patch(&ctx, None, "models/staging/stg_orders.sql", &patch_text, None, true)
+        let sql = "select * from {{ source('test_raw','raw_orders') }}";
+        let patch_text = create_git_patch_text("", sql, "models/staging/stg_test_raw_raw_orders.sql", false).expect("patch");
+        let outcome = apply_patch(
+            &ctx,
+            None,
+            "models/staging/stg_test_raw_raw_orders.sql",
+            &patch_text,
+            None,
+        )
             .await
             .expect("apply patch");
         assert!(outcome.content.contains("config(schema=\"silver\""));
-        assert!(outcome.content.contains("alias=\"stg_orders\""));
+        assert!(outcome.content.contains("alias=\"stg_test_raw_raw_orders\""));
+        assert!(outcome.content.to_ascii_lowercase().contains("source('test_raw','raw_orders')"));
+    }
+
+    #[tokio::test]
+    async fn apply_patch_rejects_misnamed_staging_model_path() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage);
+        let sql = "select * from {{ source('test_raw','raw_orders') }}";
+        let patch_text = create_git_patch_text("", sql, "models/staging/stg_wrong.sql", false).expect("patch");
+        let err = apply_patch(&ctx, None, "models/staging/stg_wrong.sql", &patch_text, None)
+            .await
+            .unwrap_err();
+        assert!(err.contains("must be written to"));
+        assert!(err.contains("models/staging/stg_test_raw_raw_orders.sql"));
+    }
+
+    #[tokio::test]
+    async fn apply_patch_rejects_staging_with_multiple_sources() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage);
+        let sql = r#"
+select * from {{ source('test_raw','raw_orders') }}
+union all
+select * from {{ source('test_raw','raw_customers') }}
+"#;
+        let patch_text = create_git_patch_text("", sql, "models/staging/stg_test_raw_raw_orders.sql", false).expect("patch");
+        let err = apply_patch(
+            &ctx,
+            None,
+            "models/staging/stg_test_raw_raw_orders.sql",
+            &patch_text,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("exactly ONE source"));
+    }
+
+    #[tokio::test]
+    async fn apply_patch_rejects_gold_model_using_source() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage);
+        let sql = "select * from {{ source('test_raw','raw_orders') }}";
+        let patch_text = create_git_patch_text("", sql, "models/marts/fct_orders.sql", false).expect("patch");
+        let err = apply_patch(&ctx, None, "models/marts/fct_orders.sql", &patch_text, None)
+            .await
+            .unwrap_err();
+        assert!(err.contains("gold models must NOT reference dbt source()"));
     }
 
     #[tokio::test]
@@ -645,14 +1242,79 @@ mod tests {
             ],
         });
         let existing = "version: 2\nmodels:\n  - name: stg_raw_customers\n";
-        let patch_text = create_patch_text("", existing);
-        let outcome = apply_patch(&ctx, Some(&datasets), "models/schema.yml", &patch_text, None, true)
+        let patch_text = create_git_patch_text("", existing, "models/schema.yml", false).expect("patch");
+        let outcome = apply_patch(&ctx, Some(&datasets), "models/schema.yml", &patch_text, None)
             .await
             .expect("apply patch");
         let v: YamlValue = serde_yaml::from_str(&outcome.content).expect("valid yaml");
         let map = v.as_mapping().expect("mapping root");
         assert!(map.contains_key(&YamlValue::String("models".to_string())));
         assert!(map.contains_key(&YamlValue::String("sources".to_string())));
+    }
+
+    #[test]
+    fn replace_range_replaces_middle_and_preserves_trailing_newline() {
+        let old = "a\nb\nc\nd\n";
+        let out = apply_replace_range(old, 2, 3, "X\nY").expect("replace");
+        assert_eq!(out, "a\nX\nY\nd\n");
+    }
+
+    #[test]
+    fn replace_range_inserts_at_start_with_end_line_zero() {
+        let old = "b\nc\n";
+        let out = apply_replace_range(old, 1, 0, "a").expect("insert");
+        assert_eq!(out, "a\nb\nc\n");
+    }
+
+    #[test]
+    fn replace_list_applies_multiple_non_overlapping_edits() {
+        let old = "a\nb\nc\nd\n";
+        let out = apply_replace_list(
+            old,
+            &[
+                ReplaceListEdit { start_line: 2, end_line: 2, new_text: "B".to_string() },
+                ReplaceListEdit { start_line: 4, end_line: 4, new_text: "D".to_string() },
+            ],
+        )
+        .expect("replace_list");
+        assert_eq!(out, "a\nB\nc\nD\n");
+    }
+
+    #[test]
+    fn replace_list_rejects_overlaps() {
+        let old = "a\nb\nc\n";
+        let err = apply_replace_list(
+            old,
+            &[
+                ReplaceListEdit { start_line: 1, end_line: 2, new_text: "x".to_string() },
+                ReplaceListEdit { start_line: 2, end_line: 3, new_text: "y".to_string() },
+            ],
+        )
+        .unwrap_err();
+        assert!(err.contains("overlap"));
+    }
+
+    #[tokio::test]
+    async fn apply_patch_repairs_hunk_counts_for_new_file() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage);
+
+        // Note: the hunk header intentionally lies about how many lines are added.
+        // `apply_patch` should repair the header counts and apply successfully.
+        let rel = "models/staging/stg_test_raw_raw_orders.sql";
+        let patch_text = [
+            "diff --git a/models/staging/stg_test_raw_raw_orders.sql b/models/staging/stg_test_raw_raw_orders.sql",
+            "new file mode 100644",
+            "--- /dev/null",
+            "+++ b/models/staging/stg_test_raw_raw_orders.sql",
+            "@@ -0,0 +1,99 @@",
+            "+select *",
+            "+from {{ source('test_raw','raw_orders') }}",
+        ]
+        .join("\n");
+
+        let outcome = apply_patch(&ctx, None, rel, &patch_text, None).await.expect("apply patch");
+        assert!(outcome.content.contains("source('test_raw','raw_orders')"));
     }
 
     #[tokio::test]
@@ -668,8 +1330,8 @@ packages:
   - package: dbt-labs/dbt_utils
     version: [">=1.0.0", "<2.0.0"]
 "#;
-        let patch_text = create_patch_text("", raw);
-        let outcome = apply_patch(&ctx, None, "packages.yml", &patch_text, None, true)
+        let patch_text = create_git_patch_text("", raw, "packages.yml", false).expect("patch");
+        let outcome = apply_patch(&ctx, None, "packages.yml", &patch_text, None)
             .await
             .expect("apply patch");
         let v: YamlValue = serde_yaml::from_str(&outcome.content).expect("valid yaml");
@@ -691,8 +1353,8 @@ packages:
     async fn apply_patch_rejects_base_sha_mismatch() {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let ctx = make_ctx(storage);
-        let patch_text = create_patch_text("", "select 1");
-        let err = apply_patch(&ctx, None, "models/staging/stg_orders.sql", &patch_text, Some("bad"), true)
+        let patch_text = create_git_patch_text("", "select 1", "models/staging/stg_orders.sql", false).expect("patch");
+        let err = apply_patch(&ctx, None, "models/staging/stg_orders.sql", &patch_text, Some("bad"))
             .await
             .unwrap_err();
         assert!(err.contains("base_sha256 mismatch"));

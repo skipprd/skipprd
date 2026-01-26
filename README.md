@@ -8,20 +8,20 @@
   - Compiled artifacts uploaded to `<tenant>/<workspace>/<project_id>/dbt/target/` after successful `dbt compile`/`dbt build`.
 # Skippr
 
-## OpenAPI schema-first (Ask WebSocket)
+## OpenAPI schema-first (ReAct WebSocket)
 
-To generate Rust models from the Ask WebSocket OpenAPI schema and (optionally) wire updates:
+To generate Rust models from the ReAct WebSocket OpenAPI schema and (optionally) wire updates:
 
-1. Ensure the spec is present at `docs/openapi/ask-ws.yaml`.
+1. Ensure the canonical spec is present at `ask-ws.yaml`.
 2. Use the helper script to run OpenAPI Generator (Docker or local jar):
 
 ```bash
 scripts/gen-openapi.sh
 ```
 
-This will generate Rust models under `src/ws/api_gen/`. Only `components/schemas` are used for model generation. The WebSocket path exists for documentation. The server additionally enforces strict request validation and UUID v4 thread IDs.
+This will generate Rust models under `react/src/ws/api_gen/`. Only `components/schemas` are used for model generation. The WebSocket path exists for documentation. The server additionally enforces strict request validation and UUID v4 thread IDs.
 
-## Start the WebSocket server (Ask API)
+## Start the WebSocket server (ReAct API)
 
 Run the server locally (default port 8787 shown; choose any open port):
 
@@ -39,28 +39,28 @@ Connect a WebSocket client to:
 
 - `ws://localhost:8787/`
 
-Send JSON frames matching `docs/openapi/ask-ws.yaml`. Example requests:
+Send JSON frames matching `ask-ws.yaml`. Example requests:
 
 ```json
-{"type":"list"}
+{"v":1,"type":"list","cid":"b2a4c2b5-1d19-4b5c-a0b3-2f8f7a7c9d11"}
 ```
 
 ```json
-{"type":"new","question":"What were total rides last week?"}
+{"v":1,"type":"new","cid":"a1111111-2222-3333-4444-555555555555","suiteId":"data_engineer","agentType":"ask","question":"What were total rides last week?"}
 ```
 
 ```json
-{"type":"open","thread_id":"<uuid>","question":"Continue."}
+{"v":1,"type":"open","cid":"a1111111-2222-3333-4444-555555555555","thread_id":"<uuid>","suiteId":"data_engineer","agentType":"ask","question":"Continue."}
 ```
 
 ```json
-{"type":"user","thread_id":"<uuid>","text":"We rent e-bikes in NYC and care about weekend demand."}
+{"v":1,"type":"user","cid":"b1111111-2222-3333-4444-555555555555","thread_id":"<uuid>","text":"We rent e-bikes in NYC and care about weekend demand."}
 ```
 
 Notes:
 - No authentication is required (for now).
 - The server strictly rejects unknown properties and uses UUID v4 thread IDs.
-- Full schemas and examples are in `docs/openapi/ask-ws.yaml`.
+- Full schemas and examples are in `ask-ws.yaml`.
 
 ### What is Skippr?
 

@@ -97,38 +97,10 @@ impl Tool for ApproveAndSaveArtifactTool {
             }
         });
 
-        // Load candidates from thread's resolved_datasets (new or legacy shape)
+        // Hard cutover: require explicit dataset_id; do not infer from thread history.
         let mut candidates: Vec<String> = Vec::new();
-        if let Some(tid) = ctx.thread_id.as_ref() {
-            let store = ctx
-                .thread_store
-                .as_ref()
-                .ok_or_else(|| "thread_store not configured".to_string())?;
-            if let Some(log) = store.get(tid).await {
-                for step in log.steps.iter().rev() {
-                    if step.action == "resolved_datasets" {
-                        if let Some(arr) = step.args.get("candidates").and_then(|x| x.as_array()) {
-                            for v in arr {
-                                // New: {dataset_id}
-                                if let Some(ds) = v.get("dataset_id").and_then(|x| x.as_str()) {
-                                    let t = ds.trim();
-                                    if !t.is_empty() {
-                                        candidates.push(t.to_string());
-                                        continue;
-                                    }
-                                }
-                                // Legacy: {pipeline, namespace} -> dataset_id
-                                let p = v.get("pipeline").and_then(|x| x.as_str()).unwrap_or("").trim();
-                                let ns = v.get("namespace").and_then(|x| x.as_str()).unwrap_or("").trim();
-                                if !p.is_empty() && !ns.is_empty() {
-                                    candidates.push(format!("{}.{}", p, ns));
-                                }
-                            }
-                        }
-                        break;
-                    }
-                }
-            }
+        if let Some(ref ds) = explicit_dataset_id {
+            candidates.push(ds.clone());
         }
 
         let mut dataset_id: String = if let Some(ds) = explicit_dataset_id {
@@ -194,41 +166,30 @@ impl Tool for ApproveAndSaveArtifactTool {
                 .thread_store
                 .as_ref()
                 .ok_or_else(|| "thread_store not configured".to_string())?;
-            if let Some(log) = store.get(tid).await {
+            if let Ok(log) = store.get(tid).await {
                 for step in log.steps.iter().rev() {
-                    if step.action == "artifact_focus" {
-                        let exists_true = step.observation.get("exists").and_then(|v| v.as_bool()).unwrap_or(false);
-                        if exists_true {
-                            let fk = step.args.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-                            let fname = step.args.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    if let react_core::session::ThreadStep::ArtifactFocus {
+                        kind: fk,
+                        name: fname,
+                        dataset_id: fds,
+                        exists,
+                        ..
+                    } = step
+                    {
+                        if *exists {
                             if fk != kind {
                                 return Err(format!(
                                     "Focused artifact kind is '{}'; cannot save kind '{}'. Update the focused artifact in place.",
                                     fk, kind
                                 ));
                             }
-                            let fds = step
-                                .args
-                                .get("dataset_id")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.trim().to_string())
-                                .filter(|s| !s.is_empty())
-                                .or_else(|| {
-                                    // Legacy focus: {pipeline,namespace}
-                                    let fp = step.args.get("pipeline").and_then(|v| v.as_str()).unwrap_or("").trim();
-                                    let fns = step.args.get("namespace").and_then(|v| v.as_str()).unwrap_or("").trim();
-                                    if !fp.is_empty() && !fns.is_empty() {
-                                        Some(format!("{}.{}", fp, fns))
-                                    } else {
-                                        None
-                                    }
-                                });
-                            if fname.is_empty() || fds.is_none() {
+                            let Some(fds) = fds.as_ref() else { break };
+                            if fname.trim().is_empty() {
                                 break;
                             }
                             // Override target to focused artifact
                             name_final = fname.to_string();
-                            dataset_id = fds.unwrap();
+                            dataset_id = fds.to_string();
                             // Ensure metric YAML comment reflects focused dataset if metric
                             if kind == "metric" {
                                 content_final = ensure_dataset_comment(&content_final, &dataset_id);
@@ -262,21 +223,22 @@ impl Tool for ApproveAndSaveArtifactTool {
         };
 
         if preview_diff {
-            let patch_text = crate::data_engineer::project_fs::create_patch_text(
-                existing.as_deref().unwrap_or(""),
-                &content_final,
-            );
             let rel_path = current_key
                 .strip_prefix(&(ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string() + "/"))
                 .unwrap_or(&current_key)
                 .to_string();
+            let patch_text = crate::data_engineer::project_fs::create_git_patch_text(
+                existing.as_deref().unwrap_or(""),
+                &content_final,
+                &rel_path,
+                existing.is_some(),
+            )?;
             let outcome = crate::data_engineer::project_fs::apply_patch(
                 ctx,
                 None,
                 &rel_path,
                 &patch_text,
                 None,
-                true,
             )
             .await?;
             // Log focus step for auditing which artifact is being considered
@@ -285,16 +247,22 @@ impl Tool for ApproveAndSaveArtifactTool {
                     .thread_store
                     .as_ref()
                     .ok_or_else(|| "thread_store not configured".to_string())?;
+                let agent = ctx
+                    .agent_name
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string());
                 let _ = store
                     .append_step(
                         tid,
-                        react_core::session::ThreadStep {
-                            action: "artifact_focus".to_string(),
-                            args: serde_json::json!({ "kind": kind, "name": name, "dataset_id": dataset_id }),
-                            observation: serde_json::json!({ "exists": existing.is_some() }),
+                        react_core::session::ThreadStep::ArtifactFocus {
+                            kind: kind.to_string(),
+                            name: name.to_string(),
+                            dataset_id: Some(dataset_id.clone()),
+                            exists: existing.is_some(),
+                            observation: react_core::session::Observation::ok(),
                             ts: chrono::Utc::now().to_rfc3339(),
-                            agent: ctx.agent_name.clone(),
-                        },
+                            agent,
+                        }
                     )
                     .await;
             }
@@ -314,15 +282,17 @@ impl Tool for ApproveAndSaveArtifactTool {
             return Ok(serde_json::json!({"ok": false, "error": format!("failed to ensure minimal dbt project: {e}")}));
         }
 
-        let patch_text = crate::data_engineer::project_fs::create_patch_text(
-            existing.as_deref().unwrap_or(""),
-            &content_final,
-        );
         let rel_path = current_key
             .strip_prefix(&(ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string() + "/"))
             .unwrap_or(&current_key)
             .to_string();
-        let outcome = crate::data_engineer::project_fs::apply_patch(ctx, None, &rel_path, &patch_text, None, true).await?;
+        let patch_text = crate::data_engineer::project_fs::create_git_patch_text(
+            existing.as_deref().unwrap_or(""),
+            &content_final,
+            &rel_path,
+            existing.is_some(),
+        )?;
+        let outcome = crate::data_engineer::project_fs::apply_patch(ctx, None, &rel_path, &patch_text, None).await?;
         let status = if outcome.existed { "modified" } else { "added" };
 
         // Save patched content (single canonical path)
@@ -369,16 +339,25 @@ impl Tool for ApproveAndSaveArtifactTool {
                 .thread_store
                 .as_ref()
                 .ok_or_else(|| "thread_store not configured".to_string())?;
+            let agent = ctx
+                .agent_name
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
             let _ = store
                 .append_step(
                     tid,
-                    react_core::session::ThreadStep {
-                        action: "artifact_saved".to_string(),
-                        args: serde_json::json!({ "kind": kind, "name": name, "dataset_id": dataset_id }),
-                        observation: serde_json::json!({ "key": current_key, "status": status, "lines_added": outcome.lines_added, "lines_removed": outcome.lines_removed }),
+                    react_core::session::ThreadStep::ArtifactSaved {
+                        kind: kind.to_string(),
+                        name: name.to_string(),
+                        dataset_id: Some(dataset_id.clone()),
+                        key: current_key.clone(),
+                        status: status.to_string(),
+                        lines_added: outcome.lines_added as u64,
+                        lines_removed: outcome.lines_removed as u64,
+                        observation: react_core::session::Observation::ok(),
                         ts: chrono::Utc::now().to_rfc3339(),
-                        agent: ctx.agent_name.clone(),
-                    },
+                        agent: agent.clone(),
+                    }
                 )
                 .await;
 
@@ -397,13 +376,13 @@ impl Tool for ApproveAndSaveArtifactTool {
                     let _ = store
                         .append_step(
                             tid,
-                            react_core::session::ThreadStep {
-                                action: "dbt_validate".to_string(),
+                            react_core::session::ThreadStep::Tool {
+                                name: "dbt_validate".to_string(),
                                 args: serde_json::json!({"s3_prefix": s3_prefix, "build": true}),
-                                observation: obs,
+                                observation: react_core::session::ToolObservation::normalize(obs),
                                 ts: chrono::Utc::now().to_rfc3339(),
-                                agent: ctx.agent_name.clone(),
-                            },
+                                agent: agent.clone(),
+                            }
                         )
                         .await;
                 }
@@ -412,13 +391,15 @@ impl Tool for ApproveAndSaveArtifactTool {
                     let _ = store
                         .append_step(
                             tid,
-                            react_core::session::ThreadStep {
-                                action: "dbt_validate".to_string(),
+                            react_core::session::ThreadStep::Tool {
+                                name: "dbt_validate".to_string(),
                                 args: serde_json::json!({"s3_prefix": s3_prefix, "build": true}),
-                                observation: serde_json::json!({"ok": false, "error": e}),
+                                observation: react_core::session::ToolObservation::normalize(
+                                    serde_json::json!({"ok": false, "errors": [e]}),
+                                ),
                                 ts: chrono::Utc::now().to_rfc3339(),
-                                agent: ctx.agent_name.clone(),
-                            },
+                                agent: agent.clone(),
+                            }
                         )
                         .await;
                 }

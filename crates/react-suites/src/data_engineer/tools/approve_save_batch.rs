@@ -7,6 +7,8 @@ use react_core::providers::DatasetCatalogProvider;
 use react_core::tools::Tool;
 use tracing::info;
 
+use crate::data_engineer::project_files;
+
 pub struct ApproveAndSaveArtifactBatchTool {
     pub datasets: Option<Arc<dyn DatasetCatalogProvider>>,
 }
@@ -101,11 +103,12 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
                 // If an agent tries to create sources in multiple YAMLs (e.g. models/sources.yml and
                 // models/staging/schema.yml), dbt will fail with duplicate source names.
                 if (rel.ends_with(".yml") || rel.ends_with(".yaml"))
-                    && rel != "models/schema.yml"
+                    && rel != project_files::MODELS_SCHEMA_YML
                     && yaml_has_top_level_sources(&content)
                 {
                     return Err(format!(
-                        "DBT sources must be defined ONLY in models/schema.yml. This file appears to contain a top-level 'sources:' block: {}. Move/merge those sources into models/schema.yml (use artifacts op=get to read existing), then retry.",
+                        "DBT sources must be defined ONLY in {0}. This file appears to contain a top-level 'sources:' block: {1}. Move/merge those sources into {0} (use artifacts op=get to read existing), then retry.",
+                        project_files::MODELS_SCHEMA_YML,
                         rel
                     ));
                 }
@@ -124,7 +127,7 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
                 // Special-case: dbt schema.yml
                 if dataset_id == "models" && name == "schema" && content.trim_start().to_lowercase().starts_with("version:")
                 {
-                    let rel = "models/schema.yml".to_string();
+                    let rel = project_files::MODELS_SCHEMA_YML.to_string();
                     let current = format!("{}/{}", base, rel);
                     (current, "text/yaml", rel)
                 } else {
@@ -154,17 +157,18 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
             };
 
             if preview {
-                let patch_text = crate::data_engineer::project_fs::create_patch_text(
+                let patch_text = crate::data_engineer::project_fs::create_git_patch_text(
                     existing.as_deref().unwrap_or(""),
                     &content,
-                );
+                    &rel_path,
+                    existing.is_some(),
+                )?;
                 let outcome = crate::data_engineer::project_fs::apply_patch(
                     ctx,
                     self.datasets.as_ref(),
                     &rel_path,
                     &patch_text,
                     None,
-                    true,
                 )
                 .await?;
                 out_diffs.push(serde_json::json!({
@@ -192,17 +196,18 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
                 }));
             }
 
-            let patch_text = crate::data_engineer::project_fs::create_patch_text(
+            let patch_text = crate::data_engineer::project_fs::create_git_patch_text(
                 existing.as_deref().unwrap_or(""),
                 &content,
-            );
+                &rel_path,
+                existing.is_some(),
+            )?;
             let outcome = crate::data_engineer::project_fs::apply_patch(
                 ctx,
                 self.datasets.as_ref(),
                 &rel_path,
                 &patch_text,
                 None,
-                true,
             )
             .await?;
             ctx.storage

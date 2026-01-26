@@ -35,7 +35,8 @@ impl Tool for PublishDbtToProviderTool {
             .min(25);
 
         // Enforce single active warehouse provider for publishing.
-        let gen = crate::dbt::profile::generate_profiles_yml(cfg)?;
+        let threads = ctx.query.as_ref().map(|q| q.max_concurrency());
+        let gen = crate::dbt::profile::generate_profiles_yml(cfg, threads)?;
         let provider_target = args
             .get("target")
             .and_then(|x| x.as_str())
@@ -114,18 +115,17 @@ impl Tool for PublishDbtToProviderTool {
         let tid = ctx.thread_id.clone().unwrap_or_default();
         if !tid.is_empty() {
             if let Some(store) = ctx.thread_store.as_ref() {
-                if let Some(log) = store.get(&tid).await {
+                if let Ok(log) = store.get(&tid).await {
                     for step in log.steps.iter().rev() {
-                        if step.action != "publish_dbt_to_provider" {
+                        let react_core::session::ThreadStep::Tool { name, observation, .. } = step else {
+                            continue;
+                        };
+                        if name != "publish_dbt_to_provider" {
                             continue;
                         }
-                        let stage = step
-                            .observation
-                            .get("stage")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        let d = step
-                            .observation
+                        let stage = observation.extra.get("stage").and_then(|v| v.as_str()).unwrap_or("");
+                        let d = observation
+                            .extra
                             .get("manifest_sha256")
                             .and_then(|v| v.as_str())
                             .map(|s| s.to_string());

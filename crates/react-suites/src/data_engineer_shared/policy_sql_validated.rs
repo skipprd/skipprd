@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use react_core::agent::{AgentPolicy, Interrupt, RunOutcome};
-use react_core::session::{ThreadCacheStore, ThreadResult, ThreadStep, ThreadStore};
+use react_core::session::{Observation, ThreadCacheStore, ThreadResult, ThreadStep, ThreadStore, ToolObservation};
 use react_core::tools::ToolRegistry;
 
 use super::types::DatasetCandidate;
@@ -107,18 +107,25 @@ impl AgentPolicy for SqlValidatedPolicy {
         // - This prevents "compiles cleanly" finals that still have runtime/test failures.
         if matches!(ctx.agent_name.as_deref(), Some("model") | Some("cleanse")) {
             if let Some(store) = store {
-                if let Some(log) = store.get(thread_id).await {
+                if let Ok(log) = store.get(thread_id).await {
                     let mut has_artifacts = false;
                     for step in log.steps.iter().rev() {
-                        if step.action == "artifact_saved" || step.action == "approve_and_save_artifact_batch" {
-                            has_artifacts = true;
-                            break;
+                        match step {
+                            ThreadStep::ArtifactSaved { .. } => {
+                                has_artifacts = true;
+                                break;
+                            }
+                            ThreadStep::Tool { name, .. } if name == "approve_and_save_artifact_batch" => {
+                                has_artifacts = true;
+                                break;
+                            }
+                            _ => {}
                         }
                     }
                     if has_artifacts {
                         let mut last_validate: Option<&ThreadStep> = None;
                         for step in log.steps.iter().rev() {
-                            if step.action == "dbt_validate" {
+                            if matches!(step, ThreadStep::Tool { name, .. } if name == "dbt_validate") {
                                 last_validate = Some(step);
                                 break;
                             }
@@ -132,11 +139,21 @@ impl AgentPolicy for SqlValidatedPolicy {
                             return Ok(None);
                         };
 
-                        let ok = v.observation.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
-                        let compile_ok = v.observation.get("compile_ok").and_then(|x| x.as_bool()).unwrap_or(false);
-                        let run_ok = v.observation.get("run_ok").and_then(|x| x.as_bool());
-                        let build = v.args.get("build").and_then(|x| x.as_bool()).unwrap_or(false);
-                        let run = v.args.get("run").and_then(|x| x.as_bool()).unwrap_or(false);
+                        let (ok, compile_ok, run_ok, build, run) = match v {
+                            ThreadStep::Tool { args, observation, .. } => {
+                                let ok = observation.ok;
+                                let compile_ok = observation
+                                    .extra
+                                    .get("compile_ok")
+                                    .and_then(|x| x.as_bool())
+                                    .unwrap_or(false);
+                                let run_ok = observation.extra.get("run_ok").and_then(|x| x.as_bool());
+                                let build = args.get("build").and_then(|x| x.as_bool()).unwrap_or(false);
+                                let run = args.get("run").and_then(|x| x.as_bool()).unwrap_or(false);
+                                (ok, compile_ok, run_ok, build, run)
+                            }
+                            _ => (false, false, None, false, false),
+                        };
                         let runtime_validate = build || run;
                         let allow_compile_only = std::env::var("DBT_ALLOW_COMPILE_ONLY_FINAL")
                             .ok()
@@ -193,7 +210,7 @@ impl AgentPolicy for SqlValidatedPolicy {
         };
         let obs = match tools.call("run_sql", serde_json::json!({"sql": sql_for_run}), ctx).await {
             Ok(o) => o,
-            Err(e) => serde_json::json!({"ok": false, "error": e}),
+            Err(e) => serde_json::json!({"ok": false, "errors": [e]}),
         };
         let ok = obs.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
         let rows_non_empty = obs
@@ -202,21 +219,30 @@ impl AgentPolicy for SqlValidatedPolicy {
             .map(|r| !r.is_empty())
             .unwrap_or(false);
         if let Some(store) = store {
+            let agent = ctx
+                .agent_name
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
             let _ = store
                 .append_step(
                     thread_id,
-                    ThreadStep {
-                        action: "run_sql".to_string(),
+                    ThreadStep::Tool {
+                        name: "run_sql".to_string(),
                         args: serde_json::json!({"sql": sql_for_run}),
-                        observation: obs.clone(),
+                        observation: ToolObservation::normalize(obs.clone()),
                         ts: chrono::Utc::now().to_rfc3339(),
-                        agent: ctx.agent_name.clone(),
-                    },
+                        agent,
+                    }
                 )
                 .await;
         }
         if !(ok && rows_non_empty) {
-            let err_text = obs.get("error").and_then(|x| x.as_str()).unwrap_or("no data");
+            let err_text = obs
+                .get("errors")
+                .and_then(|x| x.as_array())
+                .and_then(|a| a.get(0))
+                .and_then(|v| v.as_str())
+                .unwrap_or("no data");
             transcript.push(format!(
                 "Observation: data_validation_failed reason='{}'; fix SQL and try again.",
                 err_text
@@ -230,16 +256,20 @@ impl AgentPolicy for SqlValidatedPolicy {
             .unwrap_or_default();
         let result = ThreadResult { sql: sql_opt, answer };
         if let Some(store) = store {
+            let agent = ctx
+                .agent_name
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
             let _ = store
                 .append_step(
                     thread_id,
-                    ThreadStep {
-                        action: "final".to_string(),
-                        args: final_obj.clone(),
-                        observation: serde_json::json!({"ok": true}),
+                    ThreadStep::Final {
+                        answer: result.answer.clone(),
+                        sql: result.sql.clone(),
+                        observation: Observation::ok(),
                         ts: chrono::Utc::now().to_rfc3339(),
-                        agent: ctx.agent_name.clone(),
-                    },
+                        agent,
+                    }
                 )
                 .await;
         }
@@ -257,23 +287,24 @@ impl AgentPolicy for SqlValidatedPolicy {
         // Preserve previous behavior: if artifacts were saved, summarize them.
         let mut summary = String::from("No result.");
         if let Some(store) = store {
-            if let Some(log) = store.get(thread_id).await {
+            if let Ok(log) = store.get(thread_id).await {
                 let mut keys: Vec<String> = Vec::new();
                 for step in log.steps.iter().rev() {
-                    if step.action == "approve_and_save_artifact_batch" {
-                        if let Some(arr) = step.observation.get("keys").and_then(|x| x.as_array()) {
-                            for v in arr {
-                                if let Some(s) = v.as_str() {
-                                    keys.push(s.to_string());
+                    match step {
+                        ThreadStep::Tool { name, observation, .. } if name == "approve_and_save_artifact_batch" => {
+                            if let Some(arr) = observation.extra.get("keys").and_then(|x| x.as_array()) {
+                                for v in arr {
+                                    if let Some(s) = v.as_str() {
+                                        keys.push(s.to_string());
+                                    }
                                 }
                             }
+                            break;
                         }
-                        break;
-                    }
-                    if step.action == "artifact_saved" {
-                        if let Some(k) = step.observation.get("key").and_then(|x| x.as_str()) {
-                            keys.push(k.to_string());
+                        ThreadStep::ArtifactSaved { key, .. } => {
+                            keys.push(key.to_string());
                         }
+                        _ => {}
                     }
                     if keys.len() >= 12 {
                         break;
@@ -313,25 +344,30 @@ mod tests {
         let _ = store
             .append_step(
                 tid,
-                ThreadStep {
-                    action: "artifact_saved".to_string(),
-                    args: serde_json::json!({"kind":"model","name":"m","dataset_id":"d"}),
-                    observation: serde_json::json!({"ok": true}),
+                ThreadStep::ArtifactSaved {
+                    kind: "model".to_string(),
+                    name: "m".to_string(),
+                    dataset_id: Some("d".to_string()),
+                    key: "dbt/models/d/m.sql".to_string(),
+                    status: "added".to_string(),
+                    lines_added: 1,
+                    lines_removed: 0,
+                    observation: Observation::ok(),
                     ts: chrono::Utc::now().to_rfc3339(),
-                    agent: Some("model".to_string()),
-                },
+                    agent: "model".to_string(),
+                }
             )
             .await;
         let _ = store
             .append_step(
                 tid,
-                ThreadStep {
-                    action: "dbt_validate".to_string(),
+                ThreadStep::Tool {
+                    name: "dbt_validate".to_string(),
                     args: serde_json::json!({}),
-                    observation: serde_json::json!({"ok": false, "compile_ok": false, "errors": ["fail"]}),
+                    observation: ToolObservation::normalize(serde_json::json!({"ok": false, "compile_ok": false, "errors": ["fail"]})),
                     ts: chrono::Utc::now().to_rfc3339(),
-                    agent: Some("model".to_string()),
-                },
+                    agent: "model".to_string(),
+                }
             )
             .await;
 

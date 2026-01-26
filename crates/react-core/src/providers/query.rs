@@ -17,5 +17,12 @@ pub trait QueryProvider: Send + Sync {
     async fn query(&self, sql: &str) -> Result<QueryResult, String>;
     async fn schema(&self, dataset_fqn: &str) -> Result<Vec<(String, String)>, String>;
     async fn sample(&self, dataset_fqn: &str, limit: usize) -> Result<Vec<Vec<String>>, String>;
+
+    /// Max in-flight queries the provider is configured to allow.
+    ///
+    /// Suites should treat this as the canonical concurrency limit for query batching.
+    fn max_concurrency(&self) -> usize {
+        crate::providers::limits::DEFAULT_ATHENA_MAX_CONCURRENCY
+    }
 }
 

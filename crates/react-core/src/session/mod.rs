@@ -3,34 +3,250 @@ use serde_json::Value;
 use once_cell::sync::OnceCell;
 use dashmap::DashMap;
 use std::time::Instant;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use crate::storage::StorageAdapter;
 use crate::keyspace::Keyspace;
 use crate::scope::RequestScope;
 
+pub const THREAD_SCHEMA_VERSION: u32 = 2;
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct ThreadStep {
-    pub action: String,
-    pub args: Value,
-    pub observation: Value,
-    pub ts: String,
+#[serde(deny_unknown_fields)]
+pub struct Observation {
+    pub ok: bool,
+    pub errors: Vec<String>,
     #[serde(default)]
-    pub agent: Option<String>,
+    pub warnings: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+impl Observation {
+    pub fn ok() -> Self {
+        Self { ok: true, errors: Vec::new(), warnings: Vec::new() }
+    }
+
+    pub fn fail(errors: Vec<String>) -> Self {
+        Self { ok: false, errors, warnings: Vec::new() }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ToolObservation {
+    pub ok: bool,
+    pub errors: Vec<String>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    /// Tool-specific payload (written_keys, rows, etc.).
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl ToolObservation {
+    pub fn ok(extra: BTreeMap<String, Value>) -> Self {
+        Self { ok: true, errors: Vec::new(), warnings: Vec::new(), extra }
+    }
+
+    pub fn fail(errors: Vec<String>, extra: BTreeMap<String, Value>) -> Self {
+        Self { ok: false, errors, warnings: Vec::new(), extra }
+    }
+
+    /// Convert any legacy tool output `Value` into the canonical envelope:
+    /// - `errors` is ALWAYS present (even if 0/1)
+    /// - legacy `error: string` is converted into `errors: [error]` and removed from `extra`
+    pub fn normalize(v: Value) -> Self {
+        let mut extra: BTreeMap<String, Value> = match v {
+            Value::Object(m) => m.into_iter().collect(),
+            other => {
+                let mut m = BTreeMap::new();
+                m.insert("raw".to_string(), other);
+                m
+            }
+        };
+
+        let ok = extra
+            .get("ok")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+
+        let errors = if let Some(Value::Array(arr)) = extra.get("errors") {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .filter(|s| !s.trim().is_empty())
+                .collect::<Vec<_>>()
+        } else if let Some(err) = extra.get("error").and_then(|x| x.as_str()) {
+            let s = err.trim().to_string();
+            if s.is_empty() { Vec::new() } else { vec![s] }
+        } else {
+            Vec::new()
+        };
+
+        let warnings = if let Some(Value::Array(arr)) = extra.get("warnings") {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .filter(|s| !s.trim().is_empty())
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+
+        // Remove canonical envelope keys from extra (and legacy `error`).
+        extra.remove("ok");
+        extra.remove("errors");
+        extra.remove("warnings");
+        extra.remove("error");
+
+        // If this is a failure and we still have no errors, force one.
+        let mut errors = errors;
+        if !ok && errors.is_empty() {
+            errors.push("unknown error".to_string());
+        }
+
+        Self { ok, errors, warnings, extra }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ThreadStep {
+    SwitchSuite {
+        from: Option<String>,
+        to: String,
+        observation: Observation,
+        ts: String,
+        agent: String,
+    },
+    SwitchAgent {
+        from: Option<String>,
+        to: String,
+        observation: Observation,
+        ts: String,
+        agent: String,
+    },
+    User {
+        text: String,
+        observation: Observation,
+        ts: String,
+        agent: String,
+    },
+    Tool {
+        name: String,
+        args: Value,
+        observation: ToolObservation,
+        ts: String,
+        agent: String,
+    },
+    Phase {
+        phase: String,
+        from_phase: Option<String>,
+        reason_code: Option<String>,
+        reason_detail: Option<Value>,
+        observation: Observation,
+        ts: String,
+        agent: String,
+    },
+    GuardBlock {
+        phase: String,
+        kind: String,
+        reason: String,
+        observation: Observation,
+        ts: String,
+        agent: String,
+    },
+    ArtifactFocus {
+        kind: String,
+        name: String,
+        dataset_id: Option<String>,
+        exists: bool,
+        observation: Observation,
+        ts: String,
+        agent: String,
+    },
+    ArtifactSaved {
+        kind: String,
+        name: String,
+        dataset_id: Option<String>,
+        key: String,
+        status: String,
+        lines_added: u64,
+        lines_removed: u64,
+        observation: Observation,
+        ts: String,
+        agent: String,
+    },
+    AskUser {
+        prompt: String,
+        observation: Observation,
+        ts: String,
+        agent: String,
+    },
+    AskApproval {
+        prompt: String,
+        observation: Observation,
+        ts: String,
+        agent: String,
+    },
+    ReviewResponse {
+        text: String,
+        #[serde(default)]
+        meta: Option<Value>,
+        observation: Observation,
+        ts: String,
+        agent: String,
+    },
+    Final {
+        answer: String,
+        #[serde(default)]
+        sql: Option<String>,
+        observation: Observation,
+        ts: String,
+        agent: String,
+    },
+}
+
+impl ThreadStep {
+    pub fn ts(&self) -> &str {
+        match self {
+            ThreadStep::SwitchSuite { ts, .. } => ts,
+            ThreadStep::SwitchAgent { ts, .. } => ts,
+            ThreadStep::User { ts, .. } => ts,
+            ThreadStep::Tool { ts, .. } => ts,
+            ThreadStep::Phase { ts, .. } => ts,
+            ThreadStep::GuardBlock { ts, .. } => ts,
+            ThreadStep::ArtifactFocus { ts, .. } => ts,
+            ThreadStep::ArtifactSaved { ts, .. } => ts,
+            ThreadStep::AskUser { ts, .. } => ts,
+            ThreadStep::AskApproval { ts, .. } => ts,
+            ThreadStep::ReviewResponse { ts, .. } => ts,
+            ThreadStep::Final { ts, .. } => ts,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct ThreadLog {
+    pub schema_version: u32,
     pub steps: Vec<ThreadStep>,
     pub result: Option<ThreadResult>,
-    #[serde(default)]
     pub title: Option<String>,
-    #[serde(default)]
     pub title_finalized: bool,
 }
 
+impl Default for ThreadLog {
+    fn default() -> Self {
+        Self {
+            schema_version: THREAD_SCHEMA_VERSION,
+            steps: Vec::new(),
+            result: None,
+            title: None,
+            title_finalized: false,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct ThreadResult {
     pub sql: Option<String>,
     pub answer: String,
@@ -128,16 +344,20 @@ impl ThreadStore {
     pub async fn append_step(&self, thread_id: &str, step: ThreadStep) -> Result<(), String> {
         let key = self.key(thread_id);
         // Try cache first to avoid extra GETs
-        let mut log = match cache().get(thread_id) {
-            Some(entry) => entry.log.clone(),
-            None => {
-                if let Ok(v) = self.storage.get_json(&key).await {
-                    serde_json::from_value::<ThreadLog>(v).unwrap_or_default()
-                } else {
-                    ThreadLog::default()
-                }
-            }
+        let mut log = if let Some(entry) = cache().get(thread_id) {
+            entry.log.clone()
+        } else if let Ok(v) = self.storage.get_json(&key).await {
+            serde_json::from_value::<ThreadLog>(v)
+                .map_err(|e| format!("failed to parse thread log: {e}"))?
+        } else {
+            ThreadLog::default()
         };
+        if log.schema_version != THREAD_SCHEMA_VERSION {
+            return Err(format!(
+                "thread schema_version mismatch: expected {}, got {}",
+                THREAD_SCHEMA_VERSION, log.schema_version
+            ));
+        }
         log.steps.push(step);
         let val = serde_json::to_value(&log).map_err(|e| e.to_string())?;
         self.storage.put_json(&key, &val).await?;
@@ -146,31 +366,24 @@ impl ThreadStore {
         Ok(())
     }
 
-    pub async fn get(&self, thread_id: &str) -> Option<ThreadLog> {
+    pub async fn get(&self, thread_id: &str) -> Result<ThreadLog, String> {
         let key = self.key(thread_id);
         // Serve from cache if fresh (5 seconds)
         if let Some(entry) = cache().get(thread_id) {
             if entry.ts.elapsed().as_secs() < 5 {
-                return Some(entry.log.clone());
+                return Ok(entry.log.clone());
             }
         }
-        if let Ok(v) = self.storage.get_json(&key).await {
-            let mut log_opt = serde_json::from_value::<ThreadLog>(v).ok();
-            if let Some(ref mut log) = log_opt {
-                // Back-compat: default missing agent to "ask"
-                for step in log.steps.iter_mut() {
-                    if step.agent.is_none() {
-                        step.agent = Some("ask".to_string());
-                    }
-                }
-            }
-            if let Some(ref log) = log_opt {
-                cache().insert(thread_id.to_string(), CacheEntry { log: log.clone(), ts: Instant::now() });
-            }
-            log_opt
-        } else {
-            None
+        let v = self.storage.get_json(&key).await.map_err(|e| e.to_string())?;
+        let log = serde_json::from_value::<ThreadLog>(v).map_err(|e| format!("failed to parse thread log: {e}"))?;
+        if log.schema_version != THREAD_SCHEMA_VERSION {
+            return Err(format!(
+                "thread schema_version mismatch: expected {}, got {}",
+                THREAD_SCHEMA_VERSION, log.schema_version
+            ));
         }
+        cache().insert(thread_id.to_string(), CacheEntry { log: log.clone(), ts: Instant::now() });
+        Ok(log)
     }
 
     pub async fn list(&self) -> Vec<String> {
@@ -195,7 +408,19 @@ impl ThreadStore {
 
     pub async fn set_title_if_absent(&self, thread_id: &str, title: &str) -> Result<(), String> {
         let key = self.key(thread_id);
-        let mut log = cache().get(thread_id).map(|e| e.log.clone()).unwrap_or_else(|| ThreadLog::default());
+        let mut log = match cache().get(thread_id) {
+            Some(e) => e.log.clone(),
+            None => {
+                let v = self.storage.get_json(&key).await.map_err(|e| e.to_string())?;
+                serde_json::from_value::<ThreadLog>(v).map_err(|e| format!("failed to parse thread log: {e}"))?
+            }
+        };
+        if log.schema_version != THREAD_SCHEMA_VERSION {
+            return Err(format!(
+                "thread schema_version mismatch: expected {}, got {}",
+                THREAD_SCHEMA_VERSION, log.schema_version
+            ));
+        }
         if log.title.is_none() || log.title.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
             log.title = Some(title.to_string());
             let val = serde_json::to_value(&log).map_err(|e| e.to_string())?;
@@ -207,7 +432,19 @@ impl ThreadStore {
 
     pub async fn finalize_title(&self, thread_id: &str, title: &str) -> Result<(), String> {
         let key = self.key(thread_id);
-        let mut log = cache().get(thread_id).map(|e| e.log.clone()).unwrap_or_else(|| ThreadLog::default());
+        let mut log = match cache().get(thread_id) {
+            Some(e) => e.log.clone(),
+            None => {
+                let v = self.storage.get_json(&key).await.map_err(|e| e.to_string())?;
+                serde_json::from_value::<ThreadLog>(v).map_err(|e| format!("failed to parse thread log: {e}"))?
+            }
+        };
+        if log.schema_version != THREAD_SCHEMA_VERSION {
+            return Err(format!(
+                "thread schema_version mismatch: expected {}, got {}",
+                THREAD_SCHEMA_VERSION, log.schema_version
+            ));
+        }
         if !log.title_finalized {
             log.title = Some(title.to_string());
             log.title_finalized = true;
@@ -219,3 +456,50 @@ impl ThreadStore {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_observation_normalizes_legacy_error_field_into_errors_array() {
+        let obs = ToolObservation::normalize(serde_json::json!({"ok": false, "error": "boom"}));
+        assert!(!obs.ok);
+        assert_eq!(obs.errors, vec!["boom".to_string()]);
+        assert!(!obs.extra.contains_key("error"));
+    }
+
+    #[test]
+    fn thread_log_v1_missing_schema_version_fails_to_deserialize() {
+        // This mimics the old v1 persisted shape: no schema_version, and stringly-typed steps.
+        let v1 = serde_json::json!({
+            "steps": [{
+                "action": "user",
+                "args": {"text": "hi"},
+                "observation": {"ok": true},
+                "ts": "t",
+                "agent": "ask"
+            }],
+            "result": null
+        });
+        assert!(serde_json::from_value::<ThreadLog>(v1).is_err());
+    }
+
+    #[test]
+    fn unknown_fields_in_thread_step_fail_to_deserialize() {
+        let bad = serde_json::json!({
+            "schema_version": THREAD_SCHEMA_VERSION,
+            "steps": [{
+                "type": "user",
+                "text": "hi",
+                "observation": { "ok": true, "errors": [], "warnings": [] },
+                "ts": "t",
+                "agent": "ask",
+                "unexpected": 123
+            }],
+            "result": null,
+            "title": null,
+            "title_finalized": false
+        });
+        assert!(serde_json::from_value::<ThreadLog>(bad).is_err());
+    }
+}

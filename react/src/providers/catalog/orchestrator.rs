@@ -46,12 +46,9 @@ impl Orchestrator {
         datasets.sort_by(|a, b| a.fqn().cmp(&b.fqn()));
         info!("ORCHESTRATOR: discovered {} dataset(s)", datasets.len());
 
-        let dataset_concurrency: usize = std::env::var("CATALOG_BUILD_DATASET_CONCURRENCY")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(4)
-            .max(1)
-            .min(16);
+        // Canonical query concurrency is owned by the provider. Keep batching aligned so we don't
+        // create unbounded in-flight work.
+        let dataset_concurrency = query.max_concurrency().max(1);
         let stats_progress_every: usize = std::env::var("CATALOG_STATS_PROGRESS_EVERY")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())

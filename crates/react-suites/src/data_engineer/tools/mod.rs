@@ -1,8 +1,10 @@
 pub mod ask_approval;
 pub mod ask_user;
 
-pub mod approve_save;
-pub mod approve_save_batch;
+// Internal-only deterministic persistence helpers (NOT exposed as editing tools).
+// These are intentionally not re-exported and not registered in the tool registry.
+mod approve_save;
+mod approve_save_batch;
 pub mod artifacts;
 pub mod catalog_note;
 pub mod dbt_files;
@@ -17,4 +19,5 @@ pub mod sql_stats;
 pub mod staging_model;
 pub mod vect_query;
 pub mod vect_upsert;
+pub mod gold_model;
 

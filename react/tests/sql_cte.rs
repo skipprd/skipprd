@@ -1,4 +1,4 @@
-use react_suites::shared::tools::sql_run::SqlRunTool;
+use react_suites::data_engineer::tools::sql_run::SqlRunTool;
 use react_core::tools::Tool;
 use react_core::agent::{AgentCtx, DefaultPolicy};
 use serde_json::json;

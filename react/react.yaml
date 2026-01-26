@@ -4,16 +4,12 @@ server:
   port: 8787
 
 storage:
-  # From repo-root skippr.yml: skippr.skippr_s3_bucket
   bucket: asgsdag-datalake
 
 scope:
-  # From repo-root skippr.yml: skippr.tenant / skippr.workspace
   tenant: picnic
   workspace: dev
-
-  # react-specific partition; closest analogue to a skippr pipeline.
-  project_id: test
+  project_id: picnic
 
 llm:
   # Keep secrets (api keys) in env via EnvSecretsProvider (e.g. LLM_API_KEY).
@@ -39,11 +35,13 @@ providers:
 
     # Bronze/raw schema (Glue database) for discovery + dbt sources.
     # This maps to dbt-athena profile key: `schema:` when reading raw sources via `source()`.
-    source_schema: test_raw
+    source_schema: picnic
 
     # NOTE: silver/gold are configured via DBT suffix naming below (recommended).
     result_s3: s3://asgsdag-datalake/
     discovery_cache_ttl_secs: 120
+    # Max in-flight Athena queries (soft limit is often ~20; keep a buffer).
+    max_concurrency: 15
 
   catalog:
     enabled: true
@@ -61,10 +59,10 @@ providers:
     # This avoids accidental doubled schemas like `test_warehouse_test_warehouse`.
     naming:
       # Base schema name (dbt target.schema). Example: `test`
-      target_schema: test
+      target_schema: picnic
       # Tier suffixes. Example schemas: `test_silver`, `test_warehouse`
       silver_suffix: silver
-      gold_suffix: warehouse
+      gold_suffix: gold
 
     # ---- Future warehouse examples (commented) ----
     #

@@ -10,7 +10,7 @@ From the workspace root:
 cargo run -p react -- serve --port 8787 --log
 ```
 
-The server speaks WebSocket on `ws://localhost:8787/` using schemas in `../docs/openapi/ask-ws.yaml`.
+The server speaks WebSocket on `ws://localhost:8787/` using schemas in `../ask-ws.yaml`.
 
 ### Configuration notes (LLM output size)
 

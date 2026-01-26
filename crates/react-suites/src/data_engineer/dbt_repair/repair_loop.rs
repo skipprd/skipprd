@@ -1,10 +1,106 @@
 use react_core::agent::AgentCtx;
 use super::remediate::active_provider_dialect;
 use super::remediate::list_sql_keys_for_scope;
-use super::remediate::remediate_dbt_sql_keys_with_llm;
+use super::remediate::remediate_dbt_failures_grounded_with_llm;
+use super::remediate::RemediationDiff;
 use react_core::providers::{CatalogProvider, DatasetCatalogProvider, DbtProvider, DbtValidateArgs, DbtValidateResult};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
+
+fn errors_look_like_missing_dbt_utils(errors: &[String]) -> bool {
+    let s = errors.join("\n").to_lowercase();
+    if !s.contains("dbt_utils") {
+        return false;
+    }
+    s.contains("is undefined")
+        || s.contains("could not find macro")
+        || (s.contains("macro") && s.contains("not found"))
+}
+
+async fn ensure_dbt_utils_package(ctx: &AgentCtx) -> Result<Option<RemediationDiff>, String> {
+    // Returns Some(diff) if packages.yml was mutated.
+    let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
+    let key = format!("{}/packages.yml", base);
+    let existing_opt = ctx
+        .storage
+        .get_bytes(&key)
+        .await
+        .ok()
+        .map(|b| String::from_utf8_lossy(&b).to_string());
+    let existed = existing_opt.is_some();
+    let existing = existing_opt.unwrap_or_default();
+
+    let mut root = if existing.trim().is_empty() {
+        YamlMapping::new()
+    } else {
+        let v: YamlValue = serde_yaml::from_str(&existing).map_err(|e| format!("packages.yml parse error: {}", e))?;
+        match v {
+            YamlValue::Mapping(m) => m,
+            _ => return Err("packages.yml must be a YAML mapping at top level".to_string()),
+        }
+    };
+
+    let packages_seq = match root.get(&YamlValue::String("packages".to_string())) {
+        Some(YamlValue::Sequence(seq)) => seq.clone(),
+        Some(_) => return Err("packages.yml 'packages' must be a list".to_string()),
+        None => Vec::new(),
+    };
+
+    let mut has_utils = false;
+    for item in packages_seq.iter() {
+        let Some(m) = item.as_mapping() else { continue };
+        let pkg = m
+            .get(&YamlValue::String("package".to_string()))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if pkg == "dbt-labs/dbt_utils" {
+            has_utils = true;
+            break;
+        }
+    }
+    if has_utils {
+        return Ok(None);
+    }
+
+    let mut new_seq = packages_seq;
+    let mut entry = YamlMapping::new();
+    entry.insert(
+        YamlValue::String("package".to_string()),
+        YamlValue::String("dbt-labs/dbt_utils".to_string()),
+    );
+    // Conservative version range compatible with modern dbt (normalized by postprocess).
+    entry.insert(
+        YamlValue::String("version".to_string()),
+        YamlValue::Sequence(vec![
+            YamlValue::String(">=1.0.0".to_string()),
+            YamlValue::String("<2.0.0".to_string()),
+        ]),
+    );
+    new_seq.push(YamlValue::Mapping(entry));
+    root.insert(YamlValue::String("packages".to_string()), YamlValue::Sequence(new_seq));
+
+    let new_content = serde_yaml::to_string(&YamlValue::Mapping(root)).map_err(|e| e.to_string())?;
+    let patch_text =
+        crate::data_engineer::project_fs::create_git_patch_text(&existing, &new_content, "packages.yml", existed)?;
+    let outcome = crate::data_engineer::project_fs::apply_patch(ctx, None, "packages.yml", &patch_text, None).await?;
+    ctx.storage
+        .put_bytes(&outcome.key, outcome.content.as_bytes(), "text/yaml")
+        .await?;
+    if outcome.base_sha256 == outcome.new_sha256 {
+        return Ok(None);
+    }
+    Ok(Some(RemediationDiff {
+        key: outcome.key.clone(),
+        rel_path: outcome.rel_path.clone(),
+        base_sha256: outcome.base_sha256.clone(),
+        new_sha256: outcome.new_sha256.clone(),
+        lines_added: outcome.lines_added,
+        lines_removed: outcome.lines_removed,
+        diff: super::remediate::truncate_diff(&outcome.git_patch, 8_000),
+    }))
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RepairIteration {
@@ -13,6 +109,12 @@ pub struct RepairIteration {
     pub rewritten_models: usize,
     pub catalog_refreshed: bool,
     pub llm_changed_files: usize,
+    #[serde(default)]
+    pub changed_keys: Vec<String>,
+    #[serde(default)]
+    pub change_diffs: Vec<RemediationDiff>,
+    #[serde(default)]
+    pub notes: Vec<String>,
     pub dbt_ok: bool,
     pub compile_ok: bool,
     pub run_ok: Option<bool>,
@@ -105,54 +207,59 @@ pub async fn run_repair_loop(
         let _ = (datasets, catalog, dataset_ids); // reserved for future targeted catalog refresh
         let catalog_refreshed = false;
 
-        // Early-stop: runtime/run/build failures after successful compile are not good candidates
-        // for SQL dialect remediation. Surface the dbt result directly.
-        if (args.run || args.build) && res.compile_ok && matches!(res.run_ok, Some(false)) {
-            tracing::info!(
-                target: "dbt_repair_loop",
-                iteration = i + 1,
-                dialect = %dialect,
-                "stopping early: run/build failed after successful compile (no SQL repair)"
-            );
+        // Deterministic packages auto-repair for common missing-macro cases (e.g. dbt_utils).
+        // This is safe because packages.yml is normalized/deduped by project_fs postprocess.
+        if errors_look_like_missing_dbt_utils(&res.errors) {
+            let diff = ensure_dbt_utils_package(ctx).await.ok().flatten();
+            let mutated = diff.is_some();
+            let diffs: Vec<RemediationDiff> = diff.into_iter().collect();
             report.iterations.push(RepairIteration {
                 iteration: i + 1,
                 scanned_models: 0,
                 rewritten_models: 0,
                 catalog_refreshed,
-                llm_changed_files: 0,
+                llm_changed_files: if mutated { 1 } else { 0 },
+                changed_keys: diffs.iter().map(|d| d.key.clone()).collect(),
+                change_diffs: diffs,
+                notes: if mutated { vec!["deterministic: added dbt-labs/dbt_utils to packages.yml".to_string()] } else { vec![] },
                 dbt_ok: res.ok,
                 compile_ok: res.compile_ok,
                 run_ok: res.run_ok,
                 unresolved_columns,
                 errors: res.errors.clone(),
             });
-            report.stopped_reason = Some("run_failed_no_repair".to_string());
+            if mutated {
+                // Next validate_project should run dbt deps as part of validation.
+                if i + 1 == max_it {
+                    report.stopped_reason = Some("max_iterations".to_string());
+                    return Ok((res, report));
+                }
+                continue;
+            }
+            // No mutation possible -> treat as no progress.
+            report.stopped_reason = Some("packages_no_progress".to_string());
             return Ok((res, report));
         }
 
-        // LLM remediation is expensive and risky: only run if the LLM itself reports high confidence
-        // that the errors are due to dialect/syntax incompatibility for the configured provider.
-        let min_conf: f32 = std::env::var("DBT_REPAIR_LLM_CONFIDENCE_MIN")
-            .ok()
-            .and_then(|v| v.parse::<f32>().ok())
-            .unwrap_or(0.85)
-            .max(0.0)
-            .min(1.0);
-        let mut llm_changed_files: usize = 0;
-        let mut llm_decision_reason: Option<String> = None;
-        let mut llm_decision_conf: Option<f32> = None;
-        let mut llm_decision_should: Option<bool> = None;
-
-        // Skip LLM remediation for clearly non-SQL classes.
-        let allow_llm_check = matches!(
+        let allow_llm_repair = matches!(
             class,
             crate::data_engineer::dbt_error::DbtErrorClass::SqlFailure
                 | crate::data_engineer::dbt_error::DbtErrorClass::SqlOrModel
                 | crate::data_engineer::dbt_error::DbtErrorClass::Unknown
         );
 
-        if allow_llm_check {
-            let brief = crate::data_engineer::dbt_error::compact_brief(&res.errors, 6, 900);
+        let mut llm_changed_files: usize = 0;
+        let mut changed_keys: Vec<String> = Vec::new();
+        let mut change_diffs: Vec<RemediationDiff> = Vec::new();
+        let mut notes: Vec<String> = Vec::new();
+        if allow_llm_repair && !res.ok {
+            // Scope to failing file(s) when possible; otherwise scan all model SQL keys.
+            let rels = extract_sql_rel_paths_from_dbt_errors(&res.errors);
+            let mut keys = storage_keys_for_rel_paths(ctx, &rels);
+            if keys.is_empty() {
+                keys = list_sql_keys_for_scope(ctx).await.unwrap_or_default();
+            }
+
             let phase = if args.build {
                 "build"
             } else if args.run {
@@ -165,19 +272,23 @@ pub async fn run_repair_loop(
                 "validate"
             };
 
-            if let Ok(dec) = super::remediate::llm_should_remediate_sql(ctx, &dialect, phase, &brief) {
-                llm_decision_should = Some(dec.should_remediate);
-                llm_decision_conf = Some(dec.confidence);
-                llm_decision_reason = Some(dec.reason.clone());
-                if dec.should_remediate && dec.confidence >= min_conf {
-                    // Best-effort remediation; scope to failing file(s) when possible.
-                    let rels = extract_sql_rel_paths_from_dbt_errors(&res.errors);
-                    let mut keys = storage_keys_for_rel_paths(ctx, &rels);
-                    if keys.is_empty() {
-                        keys = list_sql_keys_for_scope(ctx).await.unwrap_or_default();
+            let rem = remediate_dbt_failures_grounded_with_llm(
+                ctx,
+                &format!("repair_loop_grounded_{phase}"),
+                &res.errors,
+                &keys,
+                datasets,
+            )
+            .await
+            .ok();
+            llm_changed_files = rem.as_ref().map(|r| r.changed_files).unwrap_or(0);
+            if let Some(r) = rem.as_ref() {
+                notes.extend(r.notes.clone());
+                change_diffs.extend(r.diffs.clone());
+                for ch in r.changes.iter() {
+                    if ch.changed && !ch.key.trim().is_empty() {
+                        changed_keys.push(ch.key.clone());
                     }
-                    let llm_report = remediate_dbt_sql_keys_with_llm(ctx, "repair_loop", &keys).await.ok();
-                    llm_changed_files = llm_report.as_ref().map(|r| r.changed_files).unwrap_or(0);
                 }
             }
         }
@@ -187,12 +298,8 @@ pub async fn run_repair_loop(
             iteration = i + 1,
             dialect = %dialect,
             error_class = ?class,
-            llm_should_remediate = llm_decision_should,
-            llm_confidence = llm_decision_conf,
-            llm_min_confidence = min_conf,
             llm_changed_files = llm_changed_files,
-            "repair decision (llm_reason={})",
-            llm_decision_reason.as_deref().unwrap_or("")
+            "repair decision (grounded_llm)"
         );
 
         report.iterations.push(RepairIteration {
@@ -201,6 +308,9 @@ pub async fn run_repair_loop(
             rewritten_models: 0,
             catalog_refreshed,
             llm_changed_files,
+            changed_keys,
+            change_diffs,
+            notes,
             dbt_ok: res.ok,
             compile_ok: res.compile_ok,
             run_ok: res.run_ok,
@@ -221,7 +331,7 @@ pub async fn run_repair_loop(
 
         // If we made no progress this iteration, stop.
         if !catalog_refreshed && llm_changed_files == 0 {
-            report.stopped_reason = Some("no_progress".to_string());
+            report.stopped_reason = Some("llm_no_progress".to_string());
             return Ok((res, report));
         }
 
@@ -430,15 +540,15 @@ mod tests {
 
         assert!(!res.ok);
         assert_eq!(rep.iterations_run, 1);
-        assert_eq!(rep.stopped_reason.as_deref(), Some("no_progress"));
+        assert_eq!(rep.stopped_reason.as_deref(), Some("llm_no_progress"));
     }
 
     #[tokio::test]
     async fn repair_loop_stops_on_runtime_run_failure_after_compile() {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let llm: Arc<dyn LargeLanguageModel> = Arc::new(MockLlm {
-            // Should not be called.
-            chat_responses: Mutex::new(vec![]),
+            // Grounded repair is now always attempted for SQL-ish failures; return no-op changes.
+            chat_responses: Mutex::new(vec![serde_json::json!({"changes": [], "notes": ["no-op"]}).to_string()]),
         });
         let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
         let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
@@ -506,7 +616,126 @@ mod tests {
 
         assert!(!res.ok);
         assert_eq!(rep.iterations_run, 1);
-        assert_eq!(rep.stopped_reason.as_deref(), Some("run_failed_no_repair"));
+        assert_eq!(rep.stopped_reason.as_deref(), Some("llm_no_progress"));
+    }
+
+    #[tokio::test]
+    async fn repair_loop_attempts_unresolved_column_remediation_on_run_failure() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        // Seed a staging SQL file that uses struct dereference (will fail if the raw column is literal dotted).
+        let base_key = "t/w/p/dbt/models/staging/stg_src_events.sql";
+        let old_sql = r#"select context.session.id as session_id from {{ source('src','events') }}"#;
+        storage
+            .put_bytes(base_key, old_sql.as_bytes(), "text/sql")
+            .await
+            .unwrap();
+
+        let fixed_sql = r#"select "context.session.id" as session_id from {{ source('src','events') }}"#;
+        let patch_text = crate::data_engineer::project_fs::create_git_patch_text(
+            old_sql,
+            fixed_sql,
+            "models/staging/stg_src_events.sql",
+            true,
+        )
+        .expect("patch");
+        let llm: Arc<dyn LargeLanguageModel> = Arc::new(MockLlm {
+            chat_responses: Mutex::new(vec![
+                serde_json::json!({
+                    "changes": [
+                        {"key": base_key, "patch_text": patch_text, "reason": "quote literal dotted column"}
+                    ],
+                    "notes": ["applied quoted identifier for dotted column"]
+                })
+                .to_string(),
+            ]),
+        });
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
+
+        let ctx = AgentCtx {
+            top_k: 1,
+            per_step_timeout_secs: 1,
+            max_steps: 1,
+            thread_id: None,
+            progress_tx: None,
+            pre_step_tx: None,
+            trace_tx: None,
+            agent_name: Some("test".to_string()),
+            policy: Arc::new(DefaultPolicy),
+            llm,
+            storage: storage.clone(),
+            scope: scope.clone(),
+            keyspace,
+            query: None,
+            dbt: None,
+            vector: None,
+            thread_store: None,
+            runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
+        };
+
+        struct RunFailThenOkDbt {
+            calls: Mutex<usize>,
+        }
+        #[async_trait]
+        impl DbtProvider for RunFailThenOkDbt {
+            async fn ensure_minimal_project(&self, _scope: &RequestScope) -> Result<(), String> { Ok(()) }
+            async fn write_model_sql(&self, _scope: &RequestScope, _dataset_id: &str, _name: &str, _sql: &str) -> Result<String, String> { Ok("k".to_string()) }
+            async fn write_metricflow_yaml(&self, _scope: &RequestScope, _dataset_id: &str, _name: &str, _yaml_text: &str) -> Result<String, String> { Ok("k".to_string()) }
+            async fn validate_project(&self, _scope: &RequestScope, _args: &DbtValidateArgs) -> Result<DbtValidateResult, String> {
+                let mut c = self.calls.lock().unwrap();
+                *c += 1;
+                if *c == 1 {
+                    return Ok(DbtValidateResult {
+                        ok: false,
+                        deps_ok: true,
+                        parse_ok: true,
+                        compile_ok: true,
+                        run_ok: Some(false),
+                        uploaded_target_files: 0,
+                        errors: vec![format!("Runtime Error: Column 'context.session.id' cannot be resolved (models/staging/stg_src_events.sql)")],
+                        warnings: vec![],
+                        logs: serde_json::json!({}),
+                    });
+                }
+                Ok(DbtValidateResult {
+                    ok: true,
+                    deps_ok: true,
+                    parse_ok: true,
+                    compile_ok: true,
+                    run_ok: Some(true),
+                    uploaded_target_files: 0,
+                    errors: vec![],
+                    warnings: vec![],
+                    logs: serde_json::json!({}),
+                })
+            }
+        }
+
+        let dbt: Arc<dyn DbtProvider> = Arc::new(RunFailThenOkDbt { calls: Mutex::new(0) });
+        let (_res, rep) = run_repair_loop(
+            &ctx,
+            &dbt,
+            &DbtValidateArgs {
+                project_name: "data_engineer".to_string(),
+                profiles_dir: None,
+                target: "athena".to_string(),
+                run: false,
+                build: true,
+            },
+            3,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // First iteration should have applied an LLM change rather than stopping early.
+        assert!(rep.iterations.len() >= 2);
+        assert_eq!(rep.iterations[0].llm_changed_files, 1);
+        let bytes = storage.get_bytes(base_key).await.unwrap();
+        let got = String::from_utf8_lossy(&bytes);
+        assert!(got.contains("\"context.session.id\""));
     }
 
     #[tokio::test]
@@ -676,5 +905,103 @@ mod tests {
         assert_eq!(rep.iterations_run, 1);
         // Remediation ran but made no changes; still should not crash.
         assert_eq!(rep.iterations[0].llm_changed_files, 0);
+    }
+
+    #[tokio::test]
+    async fn repair_loop_auto_adds_dbt_utils_package_on_missing_macro_error() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let llm: Arc<dyn LargeLanguageModel> = Arc::new(MockLlm {
+            // Should not be called for deterministic packages fix.
+            chat_responses: Mutex::new(vec![]),
+        });
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
+
+        let ctx = AgentCtx {
+            top_k: 1,
+            per_step_timeout_secs: 1,
+            max_steps: 1,
+            thread_id: None,
+            progress_tx: None,
+            pre_step_tx: None,
+            trace_tx: None,
+            agent_name: Some("test".to_string()),
+            policy: Arc::new(DefaultPolicy),
+            llm,
+            storage: storage.clone(),
+            scope: scope.clone(),
+            keyspace,
+            query: None,
+            dbt: None,
+            vector: None,
+            thread_store: None,
+            runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
+        };
+
+        struct MissingMacroThenOkDbt {
+            calls: Mutex<usize>,
+        }
+        #[async_trait]
+        impl DbtProvider for MissingMacroThenOkDbt {
+            async fn ensure_minimal_project(&self, _scope: &RequestScope) -> Result<(), String> { Ok(()) }
+            async fn write_model_sql(&self, _scope: &RequestScope, _dataset_id: &str, _name: &str, _sql: &str) -> Result<String, String> { Ok("k".to_string()) }
+            async fn write_metricflow_yaml(&self, _scope: &RequestScope, _dataset_id: &str, _name: &str, _yaml_text: &str) -> Result<String, String> { Ok("k".to_string()) }
+            async fn validate_project(&self, _scope: &RequestScope, _args: &DbtValidateArgs) -> Result<DbtValidateResult, String> {
+                let mut c = self.calls.lock().unwrap();
+                *c += 1;
+                if *c == 1 {
+                    return Ok(DbtValidateResult {
+                        ok: false,
+                        deps_ok: true,
+                        parse_ok: true,
+                        compile_ok: false,
+                        run_ok: None,
+                        uploaded_target_files: 0,
+                        errors: vec!["Compilation Error: 'dbt_utils' is undefined".to_string()],
+                        warnings: vec![],
+                        logs: serde_json::json!({}),
+                    });
+                }
+                Ok(DbtValidateResult {
+                    ok: true,
+                    deps_ok: true,
+                    parse_ok: true,
+                    compile_ok: true,
+                    run_ok: Some(true),
+                    uploaded_target_files: 0,
+                    errors: vec![],
+                    warnings: vec![],
+                    logs: serde_json::json!({}),
+                })
+            }
+        }
+
+        let dbt: Arc<dyn DbtProvider> = Arc::new(MissingMacroThenOkDbt { calls: Mutex::new(0) });
+        let (_res, rep) = run_repair_loop(
+            &ctx,
+            &dbt,
+            &DbtValidateArgs {
+                project_name: "data_engineer".to_string(),
+                profiles_dir: None,
+                target: "athena".to_string(),
+                run: false,
+                build: false,
+            },
+            3,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // packages.yml should now exist and include dbt_utils.
+        let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
+        let key = format!("{}/packages.yml", base);
+        let bytes = storage.get_bytes(&key).await.unwrap();
+        let got = String::from_utf8_lossy(&bytes);
+        assert!(got.to_lowercase().contains("dbt-labs/dbt_utils"));
+        assert!(rep.iterations.len() >= 2);
+        assert_eq!(rep.iterations[0].llm_changed_files, 1);
     }
 }

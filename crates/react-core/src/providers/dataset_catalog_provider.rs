@@ -31,5 +31,12 @@ pub trait DatasetCatalogProvider: Send + Sync {
         dataset: &DatasetId,
         max_fields: usize,
     ) -> Result<(crate::discover::stats::DatasetFieldStats, crate::providers::catalog::types::DatasetStats), String>;
+
+    /// Max in-flight queries the underlying provider is configured to allow.
+    ///
+    /// Suites should treat this as the canonical concurrency limit for query batching.
+    fn max_concurrency(&self) -> usize {
+        crate::providers::limits::DEFAULT_ATHENA_MAX_CONCURRENCY
+    }
 }
 

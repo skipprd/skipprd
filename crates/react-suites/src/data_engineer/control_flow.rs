@@ -6,7 +6,7 @@ use tracing::warn;
  
 use react_core::agent::AgentCtx;
 use react_core::providers::DbtValidateArgs;
-use react_core::session::{ThreadLog, ThreadStep, ThreadStore};
+use react_core::session::{Observation, ThreadLog, ThreadStep, ThreadStore, ToolObservation};
 use react_core::tools::Tool;
  
 use crate::config;
@@ -17,9 +17,11 @@ use crate::data_engineer::tools::dbt_files::DbtFilesTool;
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
     Preflight,
+    CleansePlan,
     CleanseAuthor,
     CleanseValidate,
     CleanseReview,
+    ModelPlan,
     ModelAuthor,
     ModelValidate,
     ModelReview,
@@ -33,9 +35,11 @@ impl Phase {
     pub fn as_str(&self) -> &'static str {
         match self {
             Phase::Preflight => "preflight",
+            Phase::CleansePlan => "cleanse_plan",
             Phase::CleanseAuthor => "cleanse_author",
             Phase::CleanseValidate => "cleanse_validate",
             Phase::CleanseReview => "cleanse_review",
+            Phase::ModelPlan => "model_plan",
             Phase::ModelAuthor => "model_author",
             Phase::ModelValidate => "model_validate",
             Phase::ModelReview => "model_review",
@@ -49,9 +53,11 @@ impl Phase {
     pub fn from_str(s: &str) -> Option<Self> {
         match s.trim().to_lowercase().as_str() {
             "preflight" => Some(Phase::Preflight),
+            "cleanse_plan" => Some(Phase::CleansePlan),
             "cleanse_author" => Some(Phase::CleanseAuthor),
             "cleanse_validate" => Some(Phase::CleanseValidate),
             "cleanse_review" => Some(Phase::CleanseReview),
+            "model_plan" => Some(Phase::ModelPlan),
             "model_author" => Some(Phase::ModelAuthor),
             "model_validate" => Some(Phase::ModelValidate),
             "model_review" => Some(Phase::ModelReview),
@@ -67,35 +73,28 @@ impl Phase {
 pub fn phase_from_log(log: Option<&ThreadLog>) -> Phase {
     let Some(log) = log else { return Phase::Preflight };
     for step in log.steps.iter().rev() {
-        if step.action != "phase" {
-            continue;
-        }
-        let p = step
-            .args
-            .get("phase")
-            .and_then(|v| v.as_str())
-            .and_then(Phase::from_str);
-        if let Some(p) = p {
-            return p;
+        if let ThreadStep::Phase { phase, .. } = step {
+            if let Some(p) = Phase::from_str(phase) {
+                return p;
+            }
         }
     }
     Phase::Preflight
 }
  
-pub async fn append_phase(store: &ThreadStore, thread_id: &str, agent: Option<String>, phase: Phase) {
+pub async fn append_phase(
+    store: &ThreadStore,
+    thread_id: &str,
+    agent: Option<String>,
+    phase: Phase,
+) -> Result<(), String> {
     // Best-effort: infer the previous phase if one exists; otherwise use null.
-    let prev_phase = store
-        .get(thread_id)
-        .await
-        .and_then(|log| {
-            log.steps
-                .iter()
-                .rev()
-                .find(|s| s.action == "phase")
-                .and_then(|s| s.args.get("phase"))
-                .and_then(|v| v.as_str())
-                .and_then(Phase::from_str)
-        });
+    let prev_phase = store.get(thread_id).await.ok().and_then(|log| {
+        log.steps.iter().rev().find_map(|s| match s {
+            ThreadStep::Phase { phase, .. } => Phase::from_str(phase),
+            _ => None,
+        })
+    });
 
     append_phase_with_reason(
         store,
@@ -108,7 +107,7 @@ pub async fn append_phase(store: &ThreadStore, thread_id: &str, agent: Option<St
             "derived_from_log": prev_phase.is_some(),
         })),
     )
-    .await;
+    .await
 }
 
 /// Append a phase marker step with explicit transition reasoning.
@@ -123,43 +122,22 @@ pub async fn append_phase_with_reason(
     phase: Phase,
     reason_code: Option<&str>,
     reason_detail: Option<Value>,
-) {
-    let mut args = serde_json::Map::new();
-    args.insert("phase".to_string(), serde_json::json!(phase.as_str()));
-    // Always include these fields to keep thread JSON debuggable without inference.
-    args.insert(
-        "from_phase".to_string(),
-        match from_phase {
-            Some(fp) => serde_json::json!(fp.as_str()),
-            None => Value::Null,
-        },
-    );
-    args.insert(
-        "reason_code".to_string(),
-        match reason_code {
-            Some(rc) => serde_json::json!(rc),
-            None => Value::Null,
-        },
-    );
-    args.insert(
-        "reason_detail".to_string(),
-        match reason_detail {
-            Some(rd) => rd,
-            None => Value::Null,
-        },
-    );
-    let _ = store
+) -> Result<(), String> {
+    let agent = agent.unwrap_or_else(|| "unknown".to_string());
+    store
         .append_step(
             thread_id,
-            ThreadStep {
-                action: "phase".to_string(),
-                args: Value::Object(args),
-                observation: serde_json::json!({ "ok": true }),
+            ThreadStep::Phase {
+                phase: phase.as_str().to_string(),
+                from_phase: from_phase.map(|p| p.as_str().to_string()),
+                reason_code: reason_code.map(|s| s.to_string()),
+                reason_detail,
+                observation: Observation::ok(),
                 ts: chrono::Utc::now().to_rfc3339(),
                 agent,
             },
         )
-        .await;
+        .await
 }
  
 #[derive(Clone, Debug, Default)]
@@ -172,18 +150,74 @@ pub struct DerivedGuardState {
 }
  
 fn is_mutation_step(step: &ThreadStep) -> bool {
-    match step.action.as_str() {
-        "approve_and_save_artifact" | "approve_and_save_artifact_batch" | "staging_model" => true,
-        "dbt_files" => step
-            .args
-            .get("op")
-            .and_then(|v| v.as_str())
-            .map(|s| s == "put")
-            .unwrap_or(false),
+    match step {
+        ThreadStep::Tool { name, args, .. } => match name.as_str() {
+            "approve_and_save_artifact"
+            | "approve_and_save_artifact_batch"
+            | "staging_model"
+            | "gold_model" => true,
+            "dbt_files" => args
+                .get("op")
+                .and_then(|v| v.as_str())
+                .map(|s| s == "patch")
+                .unwrap_or(false),
+            _ => false,
+        },
         _ => false,
     }
 }
  
+fn is_effective_mutation_step(step: &ThreadStep) -> bool {
+    if !is_mutation_step(step) {
+        return false;
+    }
+
+    let ThreadStep::Tool { name, args, observation, .. } = step else { return false };
+    match name.as_str() {
+        // These tools are inherently mutating if they succeed.
+        "approve_and_save_artifact" | "approve_and_save_artifact_batch" => observation.ok,
+        // staging_model is only a real mutation if it wrote at least one file.
+        "staging_model" | "gold_model" => observation
+            .extra
+            .get("written_keys")
+            .and_then(|v| v.as_array())
+            .map(|a| !a.is_empty())
+            .unwrap_or(false),
+        "dbt_files" => {
+            // preview_diff means no write occurred; do not treat as a mutation.
+            let preview = args.get("preview_diff").and_then(|x| x.as_bool()).unwrap_or(false);
+            if preview {
+                return false;
+            }
+            if !observation.ok {
+                return false;
+            }
+            // Prefer explicit mutated signal when available.
+            if let Some(m) = observation.extra.get("mutated").and_then(|x| x.as_bool()) {
+                return m;
+            }
+            // Fallback: infer from postprocessed content hashes / diff stats.
+            let base = observation
+                .extra
+                .get("base_sha256")
+                .and_then(|x| x.as_str())
+                .unwrap_or("");
+            let newv = observation
+                .extra
+                .get("new_sha256")
+                .and_then(|x| x.as_str())
+                .unwrap_or("");
+            if !base.is_empty() && !newv.is_empty() {
+                return base != newv;
+            }
+            let added = observation.extra.get("lines_added").and_then(|x| x.as_u64()).unwrap_or(0);
+            let removed = observation.extra.get("lines_removed").and_then(|x| x.as_u64()).unwrap_or(0);
+            (added + removed) > 0
+        }
+        _ => false,
+    }
+}
+
 fn looks_like_data_probe_sql(sql: &str) -> bool {
     let s = sql.trim().trim_end_matches(';').trim().to_lowercase();
     if s.is_empty() {
@@ -208,7 +242,7 @@ pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
     // Find most recent dbt_validate.
     let mut last_validate_idx: Option<usize> = None;
     for (i, step) in log.steps.iter().enumerate().rev() {
-        if step.action == "dbt_validate" {
+        if matches!(step, ThreadStep::Tool { name, .. } if name == "dbt_validate") {
             last_validate_idx = Some(i);
             break;
         }
@@ -216,15 +250,15 @@ pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
     let Some(vidx) = last_validate_idx else { return out };
     let vstep = &log.steps[vidx];
  
-    let ok = vstep.observation.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
-    let compile_ok = vstep
-        .observation
-        .get("compile_ok")
-        .and_then(|x| x.as_bool())
-        .unwrap_or(false);
-    let run_ok = vstep.observation.get("run_ok").and_then(|x| x.as_bool());
-    let build = vstep.args.get("build").and_then(|x| x.as_bool()).unwrap_or(false);
-    let run = vstep.args.get("run").and_then(|x| x.as_bool()).unwrap_or(false);
+    let (vargs, vobs) = match vstep {
+        ThreadStep::Tool { args, observation, .. } => (args, observation),
+        _ => return out,
+    };
+    let ok = vobs.ok;
+    let compile_ok = vobs.extra.get("compile_ok").and_then(|x| x.as_bool()).unwrap_or(false);
+    let run_ok = vobs.extra.get("run_ok").and_then(|x| x.as_bool());
+    let build = vargs.get("build").and_then(|x| x.as_bool()).unwrap_or(false);
+    let run = vargs.get("run").and_then(|x| x.as_bool()).unwrap_or(false);
     let runtime_validate = build || run;
  
     let ok_for_clear = if runtime_validate {
@@ -234,10 +268,31 @@ pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
     };
     out.last_validate_failed = !ok_for_clear;
  
+    // If dbt_validate ran its internal repair loop and mutated files, treat that as a mutation
+    // associated with the failing validation attempt. Without this, the suite can deadlock on
+    // the "mutate after failure" guard even though dbt_validate already applied repairs.
+    if out.last_validate_failed {
+        if let Some(rr) = vobs.extra.get("repair_report") {
+            let mut any_changed = false;
+            if let Some(iters) = rr.get("iterations").and_then(|v| v.as_array()) {
+                for it in iters {
+                    let n = it.get("llm_changed_files").and_then(|v| v.as_u64()).unwrap_or(0);
+                    if n > 0 {
+                        any_changed = true;
+                        break;
+                    }
+                }
+            }
+            if any_changed {
+                out.mutated_since_fail = true;
+            }
+        }
+    }
+
     // Probe requirement: compile ok but runtime failed with runtime_failures present.
     if runtime_validate && compile_ok && run_ok == Some(false) {
-        let has_runtime_failures = vstep
-            .observation
+        let has_runtime_failures = vobs
+            .extra
             .get("runtime_failures")
             .and_then(|v| v.as_array())
             .map(|a| !a.is_empty())
@@ -249,19 +304,30 @@ pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
  
     // Scan forward from validate for mutations / probes.
     for step in log.steps.iter().skip(vidx + 1) {
-        let ok = step.observation.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
         if is_mutation_step(step) {
+            let ok = match step {
+                ThreadStep::Tool { observation, .. } => observation.ok,
+                _ => false,
+            };
             if ok {
-                out.mutated_since_fail = true;
+                if is_effective_mutation_step(step) {
+                    out.mutated_since_fail = true;
+                }
+                // ok-but-ineffective (preview/no-op) is intentionally NOT treated as a mutation or a failure.
             } else if !out.mutated_since_fail {
-                // Count only consecutive failures until we see a successful mutation.
-                out.mutation_failures_since_validate = out.mutation_failures_since_validate.saturating_add(1);
+                // Count only consecutive tool failures until we see a successful mutation.
+                out.mutation_failures_since_validate =
+                    out.mutation_failures_since_validate.saturating_add(1);
             }
         }
-        if out.probe_required && ok && step.action == "run_sql" {
-            let sql = step.args.get("sql").and_then(|x| x.as_str()).unwrap_or("");
-            if looks_like_data_probe_sql(sql) {
-                out.probe_satisfied = true;
+        if out.probe_required {
+            if let ThreadStep::Tool { name, args, observation, .. } = step {
+                if observation.ok && name == "run_sql" {
+                    let sql = args.get("sql").and_then(|x| x.as_str()).unwrap_or("");
+                    if looks_like_data_probe_sql(sql) {
+                        out.probe_satisfied = true;
+                    }
+                }
             }
         }
     }
@@ -282,16 +348,11 @@ pub enum AuthoringGate {
 
 fn phase_start_idx(log: &ThreadLog, phase: Phase) -> Option<usize> {
     for (i, step) in log.steps.iter().enumerate().rev() {
-        if step.action != "phase" {
-            continue;
-        }
-        let p = step
-            .args
-            .get("phase")
-            .and_then(|v| v.as_str())
-            .and_then(Phase::from_str);
-        if p == Some(phase) {
-            return Some(i);
+        if let ThreadStep::Phase { phase: p, .. } = step {
+            let got = Phase::from_str(p);
+            if got == Some(phase) {
+                return Some(i);
+            }
         }
     }
     None
@@ -307,17 +368,20 @@ fn unresolved_mutation_failures_in_phase(log: &ThreadLog, phase: Phase) -> Vec<S
         if !is_mutation_step(step) {
             continue;
         }
-        let ok = step.observation.get("ok").and_then(|x| x.as_bool()).unwrap_or(false);
+        let (name, obs) = match step {
+            ThreadStep::Tool { name, observation, .. } => (name.as_str(), observation),
+            _ => continue,
+        };
+        let ok = obs.ok;
         if ok {
-            failures.clear();
+            if is_effective_mutation_step(step) {
+                failures.clear();
+            }
+            // ok-but-ineffective is not a failure; it just doesn't clear prior failures.
             continue;
         }
-        let err = step
-            .observation
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown error");
-        failures.push(format!("{}: {}", step.action, err));
+        let err = obs.errors.first().map(|s| s.as_str()).unwrap_or("unknown error");
+        failures.push(format!("{}: {}", name, err));
         if failures.len() >= 10 {
             break;
         }
@@ -341,7 +405,7 @@ pub fn gate_authoring_to_validate(log: Option<&ThreadLog>) -> AuthoringGate {
             };
         }
         return AuthoringGate::Block {
-            reason: "A DBT validation previously failed and no successful mutation has been recorded since that failure. Apply a mutating fix (e.g. dbt_files op=patch / approve_and_save_artifact(_batch)) before re-validating."
+            reason: "A DBT validation previously failed and no successful mutation has been recorded since that failure. Apply a mutating fix (e.g. dbt_files op=patch or staging_model) before re-validating."
                 .to_string(),
         };
     }
@@ -391,7 +455,8 @@ impl DeterministicDbtValidateOnce {
         let Some(cfg) = config::resolved_config_from_ctx(ctx) else {
             return Err("resolved_config missing (needed to generate profiles.yml deterministically)".to_string());
         };
-        let gen = dbt::profile::generate_profiles_yml(cfg)?;
+        let threads = ctx.query.as_ref().map(|q| q.max_concurrency());
+        let gen = dbt::profile::generate_profiles_yml(cfg, threads)?;
         let td = tempfile::tempdir().map_err(|e| e.to_string())?;
         let profiles_dir = td.path().to_string_lossy().to_string();
         let profiles_path = td.path().join("profiles.yml");
@@ -439,28 +504,30 @@ pub async fn call_and_record_tool(
     ctx: &AgentCtx,
     timeout_secs: u64,
 ) -> Value {
-    let obs = match timeout(
+    let raw = match timeout(
         Duration::from_secs(timeout_secs.max(1)),
         tool.call(args.clone(), ctx),
     )
     .await
     {
-        Ok(r) => r.unwrap_or_else(|e| serde_json::json!({"ok": false, "error": e})),
-        Err(_) => serde_json::json!({"ok": false, "error": "tool timeout"}),
+        Ok(r) => r.unwrap_or_else(|e| serde_json::json!({"ok": false, "errors": [e]})),
+        Err(_) => serde_json::json!({"ok": false, "errors": ["tool timeout"]}),
     };
+    let obs = ToolObservation::normalize(raw.clone());
+    let agent = agent.unwrap_or_else(|| "unknown".to_string());
     let _ = store
         .append_step(
             thread_id,
-            ThreadStep {
-                action: tool.name().to_string(),
+            ThreadStep::Tool {
+                name: tool.name().to_string(),
                 args,
-                observation: obs.clone(),
+                observation: obs,
                 ts: chrono::Utc::now().to_rfc3339(),
                 agent,
-            },
+            }
         )
         .await;
-    obs
+    raw
 }
  
 /// Deterministic authoring invariant: ensure there is at least one model SQL file in `models/`.
@@ -500,12 +567,28 @@ mod tests {
     use super::*;
 
     fn step(action: &str, args: Value, observation: Value) -> ThreadStep {
-        ThreadStep {
-            action: action.to_string(),
-            args,
-            observation,
-            ts: chrono::Utc::now().to_rfc3339(),
-            agent: Some("test".to_string()),
+        let ts = chrono::Utc::now().to_rfc3339();
+        match action {
+            "phase" => ThreadStep::Phase {
+                phase: args
+                    .get("phase")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                from_phase: args.get("from_phase").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                reason_code: args.get("reason_code").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                reason_detail: args.get("reason_detail").cloned(),
+                observation: Observation::ok(),
+                ts,
+                agent: "test".to_string(),
+            },
+            _ => ThreadStep::Tool {
+                name: action.to_string(),
+                args,
+                observation: ToolObservation::normalize(observation),
+                ts,
+                agent: "test".to_string(),
+            },
         }
     }
 
@@ -516,9 +599,7 @@ mod tests {
                 step("phase", serde_json::json!({"phase":"preflight"}), serde_json::json!({"ok":true})),
                 step("phase", serde_json::json!({"phase":"model_author"}), serde_json::json!({"ok":true})),
             ],
-            result: None,
-            title: None,
-            title_finalized: false,
+            ..Default::default()
         };
         assert_eq!(phase_from_log(Some(&log)), Phase::ModelAuthor);
     }
@@ -534,9 +615,7 @@ mod tests {
                 ),
                 // no mutation after
             ],
-            result: None,
-            title: None,
-            title_finalized: false,
+            ..Default::default()
         };
         let g = derive_guard_state(Some(&log));
         assert!(g.last_validate_failed);
@@ -555,17 +634,68 @@ mod tests {
                 ),
                 step(
                     "dbt_files",
-                    serde_json::json!({"op":"put","path":"models/a.sql","content":"select 1"}),
-                    serde_json::json!({"ok": true}),
+                    serde_json::json!({"op":"patch","path":"models/a.sql","content":"select 1"}),
+                    serde_json::json!({"ok": true, "mutated": true}),
                 ),
             ],
-            result: None,
-            title: None,
-            title_finalized: false,
+            ..Default::default()
         };
         let g = derive_guard_state(Some(&log));
         assert!(g.last_validate_failed);
         assert!(g.mutated_since_fail);
+    }
+
+    #[test]
+    fn guard_clears_block_after_gold_model_mutation() {
+        let log = ThreadLog {
+            steps: vec![
+                step(
+                    "dbt_validate",
+                    serde_json::json!({"build": true}),
+                    serde_json::json!({"ok": false, "compile_ok": false, "run_ok": false, "errors":["x"]}),
+                ),
+                step(
+                    "gold_model",
+                    serde_json::json!({"items":[{"name":"fct_x"}]}),
+                    serde_json::json!({"ok": true, "written_keys": ["k"]}),
+                ),
+            ],
+            ..Default::default()
+        };
+        let g = derive_guard_state(Some(&log));
+        assert!(g.last_validate_failed);
+        assert!(g.mutated_since_fail);
+    }
+
+    #[test]
+    fn guard_treats_dbt_validate_repairs_as_mutation_even_when_validate_failed() {
+        let log = ThreadLog {
+            steps: vec![
+                step(
+                    "dbt_validate",
+                    serde_json::json!({"build": true}),
+                    serde_json::json!({
+                        "ok": false,
+                        "compile_ok": true,
+                        "run_ok": false,
+                        "errors": ["Runtime Error: x"],
+                        "repair_report": {
+                            "dialect": "Amazon Athena (engine v3 / Trino SQL)",
+                            "max_iterations": 8,
+                            "iterations_run": 1,
+                            "iterations": [
+                                {"iteration": 1, "llm_changed_files": 1}
+                            ],
+                            "stopped_reason": "llm_no_progress"
+                        }
+                    }),
+                ),
+            ],
+            ..Default::default()
+        };
+        let g = derive_guard_state(Some(&log));
+        assert!(g.last_validate_failed);
+        assert!(g.mutated_since_fail, "dbt_validate repairs should count as mutation to avoid deadlock");
     }
 
     #[test]
@@ -589,13 +719,11 @@ mod tests {
                 ),
                 step(
                     "dbt_files",
-                    serde_json::json!({"op":"put","path":"models/x.sql","content":"select 1"}),
+                    serde_json::json!({"op":"patch","path":"models/x.sql","content":"select 1"}),
                     serde_json::json!({"ok": false, "error": "tool timeout"}),
                 ),
             ],
-            result: None,
-            title: None,
-            title_finalized: false,
+            ..Default::default()
         };
         match gate_authoring_to_validate(Some(&log)) {
             AuthoringGate::AwaitUser { prompt } => {
@@ -616,9 +744,7 @@ mod tests {
                     serde_json::json!({"ok": true}),
                 ),
             ],
-            result: None,
-            title: None,
-            title_finalized: false,
+            ..Default::default()
         };
         match gate_authoring_completion(Some(&log), Phase::CleanseAuthor) {
             AuthoringGate::Allow => {}
@@ -637,9 +763,7 @@ mod tests {
                     serde_json::json!({"ok": false, "error":"bad sql"}),
                 ),
             ],
-            result: None,
-            title: None,
-            title_finalized: false,
+            ..Default::default()
         };
         match gate_authoring_completion(Some(&log), Phase::ModelAuthor) {
             AuthoringGate::Block { reason } => {
@@ -663,12 +787,10 @@ mod tests {
                 step(
                     "staging_model",
                     serde_json::json!({"dataset_ids":["AwsDataCatalog.test_raw.raw_orders"]}),
-                    serde_json::json!({"ok": true}),
+                    serde_json::json!({"ok": true, "written_keys": ["k"]}),
                 ),
             ],
-            result: None,
-            title: None,
-            title_finalized: false,
+            ..Default::default()
         };
         match gate_authoring_completion(Some(&log), Phase::ModelAuthor) {
             AuthoringGate::Allow => {}
@@ -697,9 +819,7 @@ mod tests {
                     serde_json::json!({"ok": true, "rows":[["1"]]}),
                 ),
             ],
-            result: None,
-            title: None,
-            title_finalized: false,
+            ..Default::default()
         };
         let g = derive_guard_state(Some(&log));
         assert!(!g.probe_required, "probe_required should be cleared once satisfied");
@@ -731,20 +851,16 @@ mod tests {
 
         let log = store.get("tid").await.expect("thread log should exist");
         let last = log.steps.last().expect("last step exists");
-        assert_eq!(last.action, "phase");
-        assert_eq!(last.args.get("phase").and_then(|v| v.as_str()), Some("cleanse_author"));
-        assert!(last.args.get("from_phase").is_some());
-        assert!(last.args.get("reason_code").is_some());
-        assert!(last.args.get("reason_detail").is_some());
-        assert_eq!(last.args.get("from_phase").and_then(|v| v.as_str()), Some("preflight"));
-        assert_eq!(last.args.get("reason_code").and_then(|v| v.as_str()), Some("preflight_ok"));
-        assert_eq!(last.args.get("reason_detail").and_then(|v| v.get("x")).and_then(|v| v.as_i64()), Some(1));
+        let ThreadStep::Phase { phase, from_phase, reason_code, reason_detail, .. } = last else {
+            panic!("expected Phase step");
+        };
+        assert_eq!(phase.as_str(), "cleanse_author");
+        assert_eq!(from_phase.as_deref(), Some("preflight"));
+        assert_eq!(reason_code.as_deref(), Some("preflight_ok"));
+        let rd = reason_detail.as_ref().expect("reason_detail should exist");
+        assert_eq!(rd.get("x").and_then(|v| v.as_i64()), Some(1));
         assert_eq!(
-            last.args
-                .get("reason_detail")
-                .and_then(|v| v.get("nested"))
-                .and_then(|v| v.get("y"))
-                .and_then(|v| v.as_str()),
+            rd.get("nested").and_then(|v| v.get("y")).and_then(|v| v.as_str()),
             Some("z")
         );
     }
@@ -764,14 +880,13 @@ mod tests {
         append_phase_with_reason(&store, "tid2", Some("agent".to_string()), None, Phase::CleanseAuthor, None, None).await;
         let log = store.get("tid2").await.expect("thread log should exist");
         let last = log.steps.last().expect("last step exists");
-        assert_eq!(last.action, "phase");
-        assert_eq!(last.args.get("phase").and_then(|v| v.as_str()), Some("cleanse_author"));
-        assert!(last.args.get("from_phase").is_some());
-        assert!(last.args.get("reason_code").is_some());
-        assert!(last.args.get("reason_detail").is_some());
-        assert!(last.args.get("from_phase").unwrap().is_null());
-        assert!(last.args.get("reason_code").unwrap().is_null());
-        assert!(last.args.get("reason_detail").unwrap().is_null());
+        let ThreadStep::Phase { phase, from_phase, reason_code, reason_detail, .. } = last else {
+            panic!("expected Phase step");
+        };
+        assert_eq!(phase.as_str(), "cleanse_author");
+        assert!(from_phase.is_none());
+        assert!(reason_code.is_none());
+        assert!(reason_detail.is_none());
     }
 }
  

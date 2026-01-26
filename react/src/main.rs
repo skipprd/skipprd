@@ -189,6 +189,7 @@ async fn main() {
                         result_output_location: cfg.providers.athena.result_s3.clone(),
                         default_catalog: cfg.providers.athena.target_catalog.clone(),
                         source_schema: cfg.providers.athena.source_schema.clone(),
+                        max_concurrency: cfg.providers.athena.max_concurrency,
                         discovery_cache_ttl_secs: cfg.providers.athena.discovery_cache_ttl_secs,
                     })
                     .await,

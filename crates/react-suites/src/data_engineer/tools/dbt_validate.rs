@@ -62,7 +62,8 @@ impl Tool for DbtValidateTool {
         let mut _tmp: Option<tempfile::TempDir> = None;
         if profiles_dir.is_none() {
             if let Some(cfg) = crate::config::resolved_config_from_ctx(ctx) {
-                if let Ok(gen) = crate::dbt::profile::generate_profiles_yml(cfg) {
+                let threads = ctx.query.as_ref().map(|q| q.max_concurrency());
+                if let Ok(gen) = crate::dbt::profile::generate_profiles_yml(cfg, threads) {
                     let td = tempfile::tempdir().map_err(|e| e.to_string())?;
                     let mut p = PathBuf::from(td.path());
                     p.push("profiles.yml");
@@ -262,16 +263,23 @@ mod tests {
             .await
             .unwrap();
 
-        let patch_text = crate::data_engineer::project_fs::create_patch_text("select 1", "select 1\n");
         let llm: Arc<dyn react_core::llm::LargeLanguageModel> = Arc::new(MockLlm {
             chat_responses: Mutex::new(vec![
-                // Decision: confident dialect/syntax issue -> run remediation
-                serde_json::json!({"should_remediate": true, "confidence": 0.95, "reason": "dialect/syntax mismatch likely"}).to_string(),
-                // Remediation response
+                // Grounded remediation response: apply a minimal formatting change so the repair loop makes progress.
                 serde_json::json!({
-                    "changes": [{"key":"t/w/p/dbt/models/m.sql","patch_text":patch_text,"reason":"noop"}],
+                    "changes": [{
+                        "key":"t/w/p/dbt/models/m.sql",
+                        "patch_text": crate::data_engineer::project_fs::create_git_patch_text(
+                            "select 1",
+                            "select 1\\n",
+                            "models/m.sql",
+                            true
+                        ).expect("patch"),
+                        "reason":"minimal change to trigger retry"
+                    }],
                     "notes": []
-                }).to_string(),
+                })
+                .to_string(),
             ]),
         });
         let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));

@@ -5,12 +5,32 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
+use react_core::providers::{DatasetCatalogProvider, DatasetId};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct RemediationChange {
     pub key: String,
     pub reason: Option<String>,
     pub changed: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct RemediationDiff {
+    pub key: String,
+    #[serde(default)]
+    pub rel_path: String,
+    #[serde(default)]
+    pub base_sha256: String,
+    #[serde(default)]
+    pub new_sha256: String,
+    #[serde(default)]
+    pub lines_added: usize,
+    #[serde(default)]
+    pub lines_removed: usize,
+    /// Truncated git-style unified diff for debugging. Omitted/empty when not available.
+    #[serde(default)]
+    pub diff: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -21,12 +41,25 @@ pub struct RemediationReport {
     pub changed_files: usize,
     #[serde(default)]
     pub changes: Vec<RemediationChange>,
+    /// Per-file diff metadata for each applied change (sha256 + line counts + truncated diff).
+    #[serde(default)]
+    pub diffs: Vec<RemediationDiff>,
     #[serde(default)]
     pub notes: Vec<String>,
     #[serde(default)]
     pub skipped: bool,
     #[serde(default)]
     pub error: Option<String>,
+}
+
+pub(crate) fn truncate_diff(s: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    if s.len() <= max_chars {
+        return s.to_string();
+    }
+    format!("{}…", &s[..max_chars])
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -286,7 +319,6 @@ pub async fn remediate_dbt_sql_keys_with_llm(ctx: &AgentCtx, phase: &str, keys: 
                 &rel,
                 &ch.patch_text,
                 if expected_base.is_empty() { None } else { Some(expected_base.as_str()) },
-                false,
             )
             .await?;
             ctx.storage
@@ -319,6 +351,522 @@ pub async fn remediate_dbt_sql_keys_with_llm(ctx: &AgentCtx, phase: &str, keys: 
 pub async fn remediate_dbt_sql_with_llm(ctx: &AgentCtx, phase: &str) -> Result<RemediationReport, String> {
     let keys = list_sql_keys_for_scope(ctx).await?;
     remediate_dbt_sql_keys_with_llm(ctx, phase, &keys).await
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+struct GroundedRepairResponse {
+    #[serde(default)]
+    changes: Vec<GroundedRepairChange>,
+    #[serde(default)]
+    notes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct GroundedRepairChange {
+    key: String,
+    patch_text: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+async fn best_effort_samples_for_source(
+    ctx: &AgentCtx,
+    source_schema: &str,
+    source_table: &str,
+    limit: usize,
+) -> Option<Value> {
+    let cfg = crate::config::resolved_config_from_ctx(ctx);
+    let catalog = cfg
+        .map(|c| c.providers.athena.target_catalog.clone())
+        .unwrap_or_else(|| "AwsDataCatalog".to_string());
+    let fqn = format!("{}.{}.{}", catalog, source_schema, source_table);
+
+    let Some(q) = ctx.query.as_ref() else { return None };
+    if limit == 0 {
+        return None;
+    }
+
+    let header: Vec<String> = q
+        .schema(&fqn)
+        .await
+        .ok()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(n, _t)| n)
+        .collect();
+
+    let rows = q.sample(&fqn, limit).await.ok()?;
+    Some(serde_json::json!({
+        "dataset_fqn": fqn,
+        "limit": limit,
+        "header": header,
+        "rows": rows
+    }))
+}
+
+fn errors_suggest_uncertainty(errors: &[String]) -> bool {
+    let s = crate::data_engineer::dbt_error::compact_brief(errors, 8, 2000).to_lowercase();
+    // Any of these typically indicate we must rely on ground truth schema and/or real data.
+    s.contains("cannot be resolved")
+        || s.contains("$operator$cast(row")
+        || s.contains("cast(row")
+        || s.contains("json_extract")
+        || s.contains("mismatched input")
+        || s.contains("cannot cast")
+}
+
+/// Single, grounded LLM repair pass for dbt failures.
+///
+/// Contract:
+/// - Provide immutable facts (dialect, errors, failing + related files, source schemas, optional samples).
+/// - LLM must return ONLY JSON and ONLY propose edits required to fix the provided errors.
+/// - LLM returns git-style unified diffs (patch_text) per changed key; we apply patches deterministically.
+pub async fn remediate_dbt_failures_grounded_with_llm(
+    ctx: &AgentCtx,
+    phase: &str,
+    errors: &[String],
+    keys: &[String],
+    datasets: Option<&Arc<dyn DatasetCatalogProvider>>,
+) -> Result<RemediationReport, String> {
+    let Some(cfg) = crate::config::resolved_config_from_ctx(ctx) else {
+        return Ok(RemediationReport {
+            dialect: "Unknown SQL dialect".to_string(),
+            phase: phase.to_string(),
+            scanned_files: 0,
+            changed_files: 0,
+            skipped: true,
+            error: Some("resolved_config missing".to_string()),
+            ..Default::default()
+        });
+    };
+    let dialect = active_provider_dialect(cfg);
+
+    let mut keys: Vec<String> = keys.iter().cloned().collect();
+    keys.sort();
+    keys.dedup();
+
+    // Only consider keys under dbt prefix and never in target/_versions.
+    let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
+    keys.retain(|k| k.starts_with(&(base.clone() + "/")) && !k.contains("/target/") && !k.contains("/_versions/"));
+
+    // Add core project context files if present (editable, but must be justified by the error).
+    for rel in crate::data_engineer::project_files::CORE_PROJECT_CONTEXT_FILES.iter() {
+        let k = format!("{}/{}", base, rel);
+        if !keys.iter().any(|x| x == &k) {
+            if ctx.storage.get_bytes(&k).await.is_ok() {
+                keys.push(k);
+            }
+        }
+    }
+    keys.sort();
+    keys.dedup();
+
+    let scanned_files = keys.len();
+    if scanned_files == 0 {
+        return Ok(RemediationReport {
+            dialect,
+            phase: phase.to_string(),
+            scanned_files,
+            changed_files: 0,
+            skipped: true,
+            ..Default::default()
+        });
+    }
+
+    // Load contents.
+    let mut files: Vec<Value> = Vec::new();
+    let mut content_by_key: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for k in keys.iter() {
+        let bytes = ctx.storage.get_bytes(k).await.unwrap_or_default();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        if text.trim().is_empty() {
+            continue;
+        }
+        let rel_path = k
+            .strip_prefix(&(base.clone() + "/"))
+            .unwrap_or(k)
+            .to_string();
+        files.push(serde_json::json!({
+            "key": k,
+            "rel_path": rel_path,
+            "content": text
+        }));
+        content_by_key.insert(k.clone(), files.last().unwrap().get("content").and_then(|v| v.as_str()).unwrap_or("").to_string());
+    }
+
+    // Collect source schema facts for any source() calls we can detect.
+    let mut sources_set: std::collections::BTreeSet<(String, String)> = std::collections::BTreeSet::new();
+    for f in files.iter() {
+        let Some(content) = f.get("content").and_then(|v| v.as_str()) else { continue };
+        for (src_schema, src_table) in crate::data_engineer::naming::extract_source_calls(content).into_iter() {
+            if !src_schema.trim().is_empty() && !src_table.trim().is_empty() {
+                sources_set.insert((src_schema, src_table));
+            }
+        }
+    }
+
+    let include_samples = errors_suggest_uncertainty(errors);
+    let mut sources: Vec<Value> = Vec::new();
+    for (source_schema, source_table) in sources_set.into_iter() {
+        let schema_cols: Vec<Value> = best_effort_schema_columns_for_source(ctx, datasets, &source_schema, &source_table)
+            .await
+            .into_iter()
+            .map(|(n, t)| serde_json::json!({"name": n, "type": t}))
+            .collect();
+        let samples = if include_samples {
+            best_effort_samples_for_source(ctx, &source_schema, &source_table, 5).await
+        } else {
+            None
+        };
+        sources.push(serde_json::json!({
+            "source_schema": source_schema,
+            "source_table": source_table,
+            "schema_columns": schema_cols,
+            "data_samples": samples
+        }));
+    }
+
+    let error_brief = crate::data_engineer::dbt_error::compact_brief(errors, 8, 2400);
+
+    let sys = format!(
+        "You are a meticulous dbt auto-repair assistant.\n\
+         Task: fix the provided dbt validation/build errors by proposing the smallest necessary edits.\n\
+         Dialect: {dialect}\n\
+         \n\
+         IMMUTABLE FACTS:\n\
+         - The warehouse schema facts in `sources[].schema_columns` are authoritative.\n\
+         - If `sources[].data_samples` is present, treat it as ground truth evidence of real data values/types.\n\
+         \n\
+         CRITICAL RULES:\n\
+         - Only fix the errors provided. Do NOT refactor, rename, or delete unrelated models/sources/macros.\n\
+         - Prefer minimal edits (quote identifiers, adjust casts, use correct struct dereference) over rewrites.\n\
+         - Do NOT invent tables/columns.\n\
+         - If you are not absolutely sure the change is correct given the provided schema and data samples, return NO changes and explain what additional evidence would be required.\n\
+         - Output MUST be valid JSON only (no markdown, no commentary).\n\
+         Output schema:\n\
+         {{\"changes\":[{{\"key\":\"...\",\"patch_text\":\"...\",\"reason\":\"...\"}}],\"notes\":[\"...\"]}}\n\
+         Only include a file in changes if you actually modify it.\n"
+    );
+
+    let user = serde_json::json!({
+        "phase": phase,
+        "dbt_error_brief": error_brief,
+        "errors": errors,
+        "files": files,
+        "sources": sources
+    })
+    .to_string();
+
+    let resp_text = ctx
+        .llm
+        .chat(&[
+            ChatMessage { role: "system".to_string(), content: sys },
+            ChatMessage { role: "user".to_string(), content: user },
+        ])
+        .map_err(|e| format!("grounded dbt repair LLM call failed: {}", e))?;
+
+    let v = parse_json_from_llm(&resp_text)?;
+    let parsed: GroundedRepairResponse =
+        serde_json::from_value(v).map_err(|e| format!("failed to parse grounded repair JSON: {}", e))?;
+
+    let mut report = RemediationReport {
+        dialect: dialect.clone(),
+        phase: phase.to_string(),
+        scanned_files,
+        ..Default::default()
+    };
+    for n in parsed.notes.iter() {
+        if !n.trim().is_empty() {
+            report.notes.push(n.clone());
+        }
+    }
+
+    for ch in parsed.changes.into_iter() {
+        if ch.key.trim().is_empty() {
+            continue;
+        }
+        if !content_by_key.contains_key(&ch.key) {
+            // Safety: only apply to provided keys.
+            continue;
+        }
+        let rel = ch
+            .key
+            .strip_prefix(&(base.clone() + "/"))
+            .ok_or_else(|| format!("remediation key not under dbt prefix: {}", ch.key))?
+            .to_string();
+        let existing = content_by_key.get(&ch.key).cloned().unwrap_or_default();
+        let expected_base = sha256_hex(&existing);
+        let outcome =
+            crate::data_engineer::project_fs::apply_patch(ctx, None, &rel, &ch.patch_text, Some(expected_base.as_str()))
+                .await?;
+        ctx.storage
+            .put_bytes(&outcome.key, outcome.content.as_bytes(), "text/sql")
+            .await?;
+
+        report.changed_files += 1;
+        report.changes.push(RemediationChange {
+            key: ch.key,
+            reason: ch.reason,
+            changed: true,
+        });
+        report.diffs.push(RemediationDiff {
+            key: outcome.key.clone(),
+            rel_path: outcome.rel_path.clone(),
+            base_sha256: outcome.base_sha256.clone(),
+            new_sha256: outcome.new_sha256.clone(),
+            lines_added: outcome.lines_added,
+            lines_removed: outcome.lines_removed,
+            diff: truncate_diff(&outcome.git_patch, 8_000),
+        });
+    }
+
+    if report.changed_files > 0 {
+        report.notes.push(format!("remediation_epoch_secs={}", now_epoch_secs()));
+    }
+
+    Ok(report)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+struct LlmUnresolvedColumnsResponse {
+    #[serde(default)]
+    changes: Vec<LlmUnresolvedColumnsChange>,
+    #[serde(default)]
+    notes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct LlmUnresolvedColumnsChange {
+    key: String,
+    patch_text: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+async fn best_effort_schema_columns_for_source(
+    ctx: &AgentCtx,
+    datasets: Option<&Arc<dyn DatasetCatalogProvider>>,
+    source_schema: &str,
+    source_table: &str,
+) -> Vec<(String, String)> {
+    let cfg = crate::config::resolved_config_from_ctx(ctx);
+    let catalog = cfg
+        .map(|c| c.providers.athena.target_catalog.clone())
+        .unwrap_or_else(|| "AwsDataCatalog".to_string());
+
+    // Prefer the query provider if present (ground truth for the current warehouse connection).
+    if let Some(q) = ctx.query.as_ref() {
+        let ds_id = format!("{}.{}.{}", catalog, source_schema, source_table);
+        if let Ok(cols) = q.schema(&ds_id).await {
+            return cols;
+        }
+    }
+
+    // Fall back to dataset catalog provider (may be cached/partial).
+    if let Some(ds) = datasets {
+        let did = DatasetId {
+            catalog,
+            database: source_schema.to_string(),
+            table: source_table.to_string(),
+        };
+        if let Ok(cols) = ds.get_dataset_schema(&did).await {
+            return cols;
+        }
+    }
+
+    vec![]
+}
+
+pub async fn remediate_unresolved_columns_with_llm(
+    ctx: &AgentCtx,
+    phase: &str,
+    errors: &[String],
+    unresolved_columns: &[String],
+    keys: &[String],
+    datasets: Option<&Arc<dyn DatasetCatalogProvider>>,
+) -> Result<RemediationReport, String> {
+    let Some(cfg) = crate::config::resolved_config_from_ctx(ctx) else {
+        return Ok(RemediationReport {
+            dialect: "Unknown SQL dialect".to_string(),
+            phase: phase.to_string(),
+            scanned_files: 0,
+            changed_files: 0,
+            skipped: true,
+            error: Some("resolved_config missing".to_string()),
+            ..Default::default()
+        });
+    };
+    let dialect = active_provider_dialect(cfg);
+
+    let mut keys: Vec<String> = keys.iter().cloned().collect();
+    keys.sort();
+    keys.dedup();
+    let scanned_files = keys.len();
+    if scanned_files == 0 || unresolved_columns.is_empty() {
+        return Ok(RemediationReport {
+            dialect,
+            phase: phase.to_string(),
+            scanned_files,
+            changed_files: 0,
+            skipped: true,
+            ..Default::default()
+        });
+    }
+
+    // Only consider model SQL files under models/ (never target/ or versions).
+    let keys: Vec<String> = keys
+        .into_iter()
+        .filter(|k| k.contains("/models/") && k.ends_with(".sql") && !k.contains("/target/") && !k.contains("/_versions/"))
+        .collect();
+
+    // Load files and pre-filter to those that mention the unresolved token(s).
+    let mut candidates: Vec<Value> = Vec::new();
+    let mut content_by_key: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for k in keys.iter() {
+        let bytes = ctx.storage.get_bytes(k).await.unwrap_or_default();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        if text.trim().is_empty() {
+            continue;
+        }
+        let mut hit = false;
+        for col in unresolved_columns.iter() {
+            let c = col.trim();
+            if c.is_empty() {
+                continue;
+            }
+            if text.contains(c) {
+                hit = true;
+                break;
+            }
+        }
+        if !hit {
+            continue;
+        }
+
+        let sources = crate::data_engineer::naming::extract_source_calls(&text);
+        let (source_schema, source_table) = if sources.len() == 1 {
+            (sources[0].0.clone(), sources[0].1.clone())
+        } else {
+            ("".to_string(), "".to_string())
+        };
+
+        let schema_cols: Vec<Value> = if !source_schema.is_empty() && !source_table.is_empty() {
+            best_effort_schema_columns_for_source(ctx, datasets, &source_schema, &source_table)
+                .await
+                .into_iter()
+                .map(|(n, t)| serde_json::json!({"name": n, "type": t}))
+                .collect()
+        } else {
+            vec![]
+        };
+
+        candidates.push(serde_json::json!({
+            "key": k,
+            "content": text,
+            "source_schema": source_schema,
+            "source_table": source_table,
+            "schema_columns": schema_cols
+        }));
+        content_by_key.insert(k.clone(), candidates.last().unwrap().get("content").and_then(|v| v.as_str()).unwrap_or("").to_string());
+    }
+
+    if candidates.is_empty() {
+        return Ok(RemediationReport {
+            dialect,
+            phase: phase.to_string(),
+            scanned_files,
+            changed_files: 0,
+            skipped: true,
+            ..Default::default()
+        });
+    }
+
+    let error_brief = crate::data_engineer::dbt_error::compact_brief(errors, 6, 900);
+
+    // Strict JSON-only contract. LLM returns patch_text; we apply patches deterministically.
+    let sys = format!(
+        "You are a meticulous dbt SQL auto-remediation assistant.\n\
+         Task: fix unresolved column errors from Trino/Athena like: Column 'x' cannot be resolved.\n\
+         Dialect: {dialect}\n\
+         Constraints:\n\
+         - Only fix the unresolved column reference form; do not change business logic.\n\
+         - Do not invent new tables/columns.\n\
+         - If the unresolved column token contains dots and schema_columns contains an EXACT matching column name, treat it as a literal column name and quote it as a single identifier (e.g. \\\"context.session.id\\\").\n\
+         - Only use struct dereference (e.g. context.session.id) when schema_columns indicate a struct/row parent exists AND there is no exact dotted column name.\n\
+         - Return ONLY valid JSON (no markdown, no commentary).\n\
+         Output schema:\n\
+         {{\"changes\":[{{\"key\":\"...\",\"patch_text\":\"...\",\"reason\":\"...\"}}],\"notes\":[\"...\"]}}\n\
+         Only include a file in changes if you actually modify it.\n"
+    );
+
+    let user = serde_json::json!({
+        "phase": phase,
+        "dbt_error_brief": error_brief,
+        "unresolved_columns": unresolved_columns,
+        "files": candidates
+    })
+    .to_string();
+
+    let resp_text = ctx
+        .llm
+        .chat(&[
+            ChatMessage { role: "system".to_string(), content: sys },
+            ChatMessage { role: "user".to_string(), content: user },
+        ])
+        .map_err(|e| format!("unresolved-column remediation LLM call failed: {}", e))?;
+
+    let v = parse_json_from_llm(&resp_text)?;
+    let parsed: LlmUnresolvedColumnsResponse =
+        serde_json::from_value(v).map_err(|e| format!("failed to parse unresolved-columns remediation JSON: {}", e))?;
+
+    let mut report = RemediationReport {
+        dialect: dialect.clone(),
+        phase: phase.to_string(),
+        scanned_files,
+        ..Default::default()
+    };
+    for n in parsed.notes.iter() {
+        if !n.trim().is_empty() {
+            report.notes.push(n.clone());
+        }
+    }
+
+    for ch in parsed.changes.into_iter() {
+        if ch.key.trim().is_empty() {
+            continue;
+        }
+        if !content_by_key.contains_key(&ch.key) {
+            continue;
+        }
+        let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
+        let rel = ch
+            .key
+            .strip_prefix(&(base.clone() + "/"))
+            .ok_or_else(|| format!("remediation key not under dbt prefix: {}", ch.key))?
+            .to_string();
+
+        let existing = content_by_key.get(&ch.key).cloned().unwrap_or_default();
+        let expected_base = sha256_hex(&existing);
+        let outcome =
+            crate::data_engineer::project_fs::apply_patch(ctx, None, &rel, &ch.patch_text, Some(expected_base.as_str()))
+                .await?;
+        ctx.storage
+            .put_bytes(&outcome.key, outcome.content.as_bytes(), "text/sql")
+            .await?;
+
+        report.changed_files += 1;
+        report.changes.push(RemediationChange {
+            key: ch.key,
+            reason: ch.reason,
+            changed: true,
+        });
+    }
+
+    if report.changed_files > 0 {
+        report.notes.push(format!("remediation_epoch_secs={}", now_epoch_secs()));
+    }
+
+    Ok(report)
 }
 
 #[cfg(test)]

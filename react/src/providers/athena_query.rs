@@ -7,9 +7,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
+use tokio::sync::Semaphore;
 
 use crate::providers::dataset_catalog_provider::{DatasetCatalogProvider, DatasetId};
 use crate::providers::{QueryProvider, QueryResult};
+use react_core::providers::{DEFAULT_ATHENA_MAX_CONCURRENCY, clamp_athena_concurrency};
 
 #[derive(Clone)]
 pub struct AthenaQueryProvider {
@@ -24,6 +26,8 @@ pub struct AthenaSettings {
     pub default_catalog: String,
     /// Default schema/database for source discovery + unqualified queries.
     pub source_schema: Option<String>,
+    /// Max number of in-flight Athena queries to allow (soft-limited by Athena/workgroup).
+    pub max_concurrency: usize,
     pub discovery_cache_ttl_secs: u64,
 }
 
@@ -34,6 +38,8 @@ struct Inner {
     result_output_location: Option<String>,
     default_catalog: String,
     source_schema: Option<String>,
+    max_concurrency: usize,
+    limiter: Arc<Semaphore>,
     cache_ttl: Duration,
     cache: RwLock<Cache>,
 }
@@ -49,6 +55,11 @@ impl AthenaQueryProvider {
     /// Create from explicit settings using the standard AWS credential chain.
     pub async fn from_settings(settings: AthenaSettings) -> Self {
         let ttl_secs = settings.discovery_cache_ttl_secs.max(5).min(3600);
+        let max_concurrency = clamp_athena_concurrency(if settings.max_concurrency == 0 {
+            DEFAULT_ATHENA_MAX_CONCURRENCY
+        } else {
+            settings.max_concurrency
+        });
         let aws_cfg = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .load()
             .await;
@@ -63,6 +74,8 @@ impl AthenaQueryProvider {
                 result_output_location: settings.result_output_location,
                 default_catalog: settings.default_catalog,
                 source_schema: settings.source_schema,
+                max_concurrency,
+                limiter: Arc::new(Semaphore::new(max_concurrency)),
                 cache_ttl: Duration::from_secs(ttl_secs),
                 cache: RwLock::new(Cache::default()),
             }),
@@ -76,6 +89,7 @@ impl AthenaQueryProvider {
     /// - `ATHENA_RESULT_S3` (alias: `DATA_OUTPUT_ATHENA_RESULTS_S3_BUCKET` + optional prefix)
     /// - `ATHENA_SOURCE_SCHEMA` (alias: `ATHENA_SOURCE_DATABASE`)
     /// - `ATHENA_TARGET_CATALOG` (alias: `ATHENA_CATALOG`, default: `AwsDataCatalog`)
+    /// - `ATHENA_MAX_CONCURRENCY` (default: 15, cap: 20)
     /// - `ATHENA_DISCOVERY_CACHE_TTL_SECS` (default: 120)
     pub async fn from_env() -> Self {
         let workgroup = getenv_nonempty("ATHENA_WORKGROUP")
@@ -94,12 +108,17 @@ impl AthenaQueryProvider {
         let ttl_secs: u64 = getenv("ATHENA_DISCOVERY_CACHE_TTL_SECS", "120")
             .parse::<u64>()
             .unwrap_or(120);
+        let max_concurrency: usize = std::env::var("ATHENA_MAX_CONCURRENCY")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_ATHENA_MAX_CONCURRENCY);
 
         Self::from_settings(AthenaSettings {
             workgroup,
             result_output_location,
             default_catalog,
             source_schema,
+            max_concurrency,
             discovery_cache_ttl_secs: ttl_secs,
         })
         .await
@@ -362,6 +381,15 @@ impl AthenaQueryProvider {
 #[async_trait]
 impl QueryProvider for AthenaQueryProvider {
     async fn query(&self, sql: &str) -> Result<QueryResult, String> {
+        // Global throttle: cap in-flight Athena queries to avoid soft-limit failures and reduce timeouts.
+        let _permit = self
+            .inner
+            .limiter
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| "athena query limiter closed".to_string())?;
+
         let kind = if sql.contains("COUNT(1) AS __cnt") {
             "row_count"
         } else if sql.contains(" AS __distinct") || sql.contains(" AS __nulls") {
@@ -405,6 +433,10 @@ impl QueryProvider for AthenaQueryProvider {
         let sql = format!("SELECT * FROM {} LIMIT {}", Self::quote_table(&ds.database, &ds.table), lim);
         let qr = self.query(&sql).await?;
         Ok(qr.rows)
+    }
+
+    fn max_concurrency(&self) -> usize {
+        self.inner.max_concurrency
     }
 }
 
@@ -603,6 +635,10 @@ impl DatasetCatalogProvider for AthenaQueryProvider {
             "dataset_stats_done"
         );
         Ok((ns_stats, ds))
+    }
+
+    fn max_concurrency(&self) -> usize {
+        self.inner.max_concurrency
     }
 }
 
