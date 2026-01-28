@@ -1100,6 +1100,7 @@ fn map_task_status(s: de_plan::TaskStatus) -> api::PlanTaskStatus {
 		de_plan::TaskStatus::InProgress => api::PlanTaskStatus::InProgress,
 		de_plan::TaskStatus::Done => api::PlanTaskStatus::Done,
 		de_plan::TaskStatus::Blocked => api::PlanTaskStatus::Blocked,
+		de_plan::TaskStatus::NeedsUpdate => api::PlanTaskStatus::NeedsUpdate,
 	}
 }
 

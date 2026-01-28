@@ -433,7 +433,8 @@ impl DataEngineerSuite {
              - You MAY investigate raw/bronze via sql_schema/sql_sample/sql_stats/vect_query/run_sql to detect missing data, but treat raw as discovery only.\n\
              - If you find useful raw fields/tables missing in silver, request a silver expansion:\n\
                - Use ask_approval to list the missing tables/fields to add to silver.\n\
-               - After approval, use staging_model (or dbt_files op=patch) to add them to silver BEFORE continuing gold.\n\
+               - After approval, if apply_next_cleanse_batch is available (plan-batched mode), use it to execute the next approved silver batch deterministically.\n\
+                 Otherwise, use staging_model (or dbt_files op=patch) to add them to silver BEFORE continuing gold.\n\
              - Search DBT examples (search_dbt_examples) and adopt conventions from the top match.\n\
              - Model relationships and flow:\n\
                - Identify join keys (user/profile/account/session/device identifiers) across the approved tables using sql_schema + sql_sample/sql_stats.\n\
@@ -445,7 +446,8 @@ impl DataEngineerSuite {
                - If you need more files, do multiple dbt_files calls over multiple steps.\n\
              - IMPORTANT: use `dbt_files op=patch` for ALL DBT project files (e.g. path='dbt_project.yml', 'packages.yml', 'models/schema.yml', and model SQL).\n\
              - IMPORTANT (gold progress): you MUST author gold models under `models/marts/` or `models/core/` in this phase.\n\
-               - Prefer `gold_model` to write marts in batches of up to 5 models per call.\n\
+               - Prefer apply_next_model_batch when available (plan-batched mode) so the suite executes the approved batch deterministically (do NOT supply items).\n\
+               - Otherwise, prefer `gold_model` to write marts in batches of up to 5 models per call.\n\
                - Gold models MUST ONLY select from silver/staging via ref('stg_*') and MUST NOT use source().\n\
              - Staging/silver naming is STRICT and deterministic:\n\
                - Staging models MUST be written to: 'models/staging/stg_<source_schema>_<source_table>.sql' (single underscores, sanitized).\n\
@@ -464,7 +466,8 @@ impl DataEngineerSuite {
             "Cleansing goal: {}.\n\
              Act as a proactive DBT Engineer focused on producing a curated silver tier.\n\
              - Prefer DBT models over ad-hoc SQL; author staging models and tests.\n\
-             - Use `staging_model` to author/update staging models (cleansing + nested field extraction). Treat user instructions as authoritative constraints.\n\
+             - Prefer apply_next_cleanse_batch when available (plan-batched mode) so the suite executes the approved batch deterministically (do NOT supply dataset_ids).\n\
+               Otherwise, use `staging_model` to author/update staging models (cleansing + nested field extraction). Treat user instructions as authoritative constraints.\n\
              - Silver tier must land in the configured Athena silver database.\n\
              - Do NOT assume table names.\n\
              - If embeddings/vect search yields no candidates, call sql_schema with no args to list tables.\n\
@@ -735,75 +738,20 @@ impl DataEngineerSuite {
                     // Normal authoring: allow read/explore + probes.
                     if phase == control_flow::Phase::CleanseAuthor {
                         if let Some(AllowedBatch::CleanseDatasetIds(allowed)) = allowed_batch.clone() {
-                            struct BatchStagingModelTool {
-                                inner: tools::staging_model::StagingModelTool,
-                                allowed: Vec<String>,
-                            }
-                            #[async_trait::async_trait]
-                            impl react_core::tools::Tool for BatchStagingModelTool {
-                                fn name(&self) -> &'static str { "staging_model" }
-                                async fn call(&self, args: serde_json::Value, ctx: &react_core::agent::AgentCtx) -> Result<serde_json::Value, String> {
-                                    let mut got: Vec<String> = args
-                                        .get("dataset_ids")
-                                        .and_then(|v| v.as_array())
-                                        .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.trim().to_string())).collect())
-                                        .unwrap_or_default();
-                                    got.sort();
-                                    got.dedup();
-                                    let mut allowed = self.allowed.clone();
-                                    allowed.sort();
-                                    allowed.dedup();
-                                    if got != allowed {
-                                        return Err(format!(
-                                            "staging_model is plan-batched right now. You must call staging_model with dataset_ids exactly equal to the next approved batch (max 5). Expected: {:?}. Got: {:?}.",
-                                            allowed, got
-                                        ));
-                                    }
-                                    self.inner.call(args, ctx).await
-                                }
-                            }
-                            reg.register(BatchStagingModelTool {
-                                inner: tools::staging_model::StagingModelTool { datasets: sctx.datasets.clone() },
-                                allowed,
-                            });
+							// Deterministic plan-batched execution: LLM MUST NOT supply dataset_ids.
+							// The tool derives the exact next approved batch from the persisted plan.
+							let _ = allowed; // used only as an enablement signal
+							reg.register(tools::apply_next_batch::ApplyNextCleanseBatchTool { datasets: sctx.datasets.clone() });
                         } else {
                             reg.register(tools::staging_model::StagingModelTool { datasets: sctx.datasets.clone() });
                         }
                     }
                     if phase == control_flow::Phase::ModelAuthor {
                         if let Some(AllowedBatch::ModelItemNames(allowed)) = allowed_batch.clone() {
-                            struct BatchGoldModelTool {
-                                inner: tools::gold_model::GoldModelTool,
-                                allowed: Vec<String>,
-                            }
-                            #[async_trait::async_trait]
-                            impl react_core::tools::Tool for BatchGoldModelTool {
-                                fn name(&self) -> &'static str { "gold_model" }
-                                async fn call(&self, args: serde_json::Value, ctx: &react_core::agent::AgentCtx) -> Result<serde_json::Value, String> {
-                                    let mut got: Vec<String> = args
-                                        .get("items")
-                                        .and_then(|v| v.as_array())
-                                        .map(|a| {
-                                            a.iter()
-                                                .filter_map(|it| it.get("name").and_then(|n| n.as_str()).map(|s| s.trim().to_string()))
-                                                .collect::<Vec<_>>()
-                                        })
-                                        .unwrap_or_default();
-                                    got.sort();
-                                    got.dedup();
-                                    let mut allowed = self.allowed.clone();
-                                    allowed.sort();
-                                    allowed.dedup();
-                                    if got != allowed {
-                                        return Err(format!(
-                                            "gold_model is plan-batched right now. You must call gold_model with items exactly equal to the next approved batch (max 5). Expected names: {:?}. Got: {:?}.",
-                                            allowed, got
-                                        ));
-                                    }
-                                    self.inner.call(args, ctx).await
-                                }
-                            }
-                            reg.register(BatchGoldModelTool { inner: tools::gold_model::GoldModelTool, allowed });
+							// Deterministic plan-batched execution: LLM MUST NOT supply items.
+							// The tool derives the exact next approved batch from the persisted plan.
+							let _ = allowed; // used only as an enablement signal
+							reg.register(tools::apply_next_batch::ApplyNextModelBatchTool);
                         } else {
                             reg.register(tools::gold_model::GoldModelTool);
                         }
@@ -812,23 +760,53 @@ impl DataEngineerSuite {
                     reg.register(tools::dbt_examples::SearchDbtExamplesTool);
                     reg.register(DbtFilesTool { datasets: sctx.datasets.clone() });
 
-                    tools_card_lines = vec![
-                        "Allowed tools (authoring phase):",
-                        "- sql_schema(args:{table?:string})",
-                        "- vect_query(args:{scope:\"dataset\"|\"field\"|\"doc\"|\"artifact\"|\"metric\"|\"model\", query_text:string, k:int})",
-                        "  - IMPORTANT: arg key is query_text (NOT query). scope must be one of the listed strings (NOT \"table\").",
-                        "- sql_stats(args:{table:string, field:string}) (requires field; no table-only mode)",
-                        "- sql_sample(args:{table:string, field:string, k:int}) (top values for a FIELD; not a row sampler)",
-                        "- run_sql(args:{sql:string}) (use this to sample rows: SELECT * FROM <table> LIMIT 20)",
-                        "- staging_model(args:{dataset_ids:[string], instructions?:string, sql?:string|staging_model?:string|expression?:string})",
-                        "  - IMPORTANT: you MUST provide dataset_ids. This tool will NOT default to all datasets.",
-                        "- gold_model(args:{items:[{name:string, folder?:\"marts\"|\"core\", goal?:string, description?:string, inputs:[string], instructions?:string}]})",
-                        "  - IMPORTANT: max 5 items per call. Gold MUST use ref('stg_*') only; NO source().",
-                        "- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\", path?:string, prefix?:string, patch_text?:string, pointer?:string, limit?:int, max_chars?:int, preview_diff?:bool})",
-                        "- ask_user(args:{prompt:string})",
-                        "",
-                        "Not available in this phase: dbt_validate, publish_dbt_to_provider (suite handles these deterministically).",
-                    ];
+					let plan_batched_cleanse = phase == control_flow::Phase::CleanseAuthor
+						&& matches!(allowed_batch, Some(AllowedBatch::CleanseDatasetIds(_)));
+					let plan_batched_model = phase == control_flow::Phase::ModelAuthor
+						&& matches!(allowed_batch, Some(AllowedBatch::ModelItemNames(_)));
+					if plan_batched_cleanse {
+						tools_card_lines = vec![
+							"Allowed tools (authoring phase; plan-batched, deterministic):",
+							"- apply_next_cleanse_batch(args:{instructions?:string})",
+							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\", path?:string, prefix?:string, patch_text?:string, pointer?:string, limit?:int, max_chars?:int, preview_diff?:bool})",
+							"- sql_schema / sql_stats / sql_sample / vect_query (discovery context)",
+							"- run_sql (targeted probes)",
+							"- ask_user",
+							"- artifacts",
+							"",
+							"Not available in this phase: staging_model (batch tool calls it deterministically), dbt_validate, publish_dbt_to_provider.",
+						];
+					} else if plan_batched_model {
+						tools_card_lines = vec![
+							"Allowed tools (authoring phase; plan-batched, deterministic):",
+							"- apply_next_model_batch(args:{instructions?:string})",
+							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\", path?:string, prefix?:string, patch_text?:string, pointer?:string, limit?:int, max_chars?:int, preview_diff?:bool})",
+							"- sql_schema / sql_stats / sql_sample / vect_query (discovery context)",
+							"- run_sql (targeted probes)",
+							"- ask_user",
+							"- artifacts",
+							"",
+							"Not available in this phase: gold_model (batch tool calls it deterministically), dbt_validate, publish_dbt_to_provider.",
+						];
+					} else {
+						tools_card_lines = vec![
+							"Allowed tools (authoring phase):",
+							"- sql_schema(args:{table?:string})",
+							"- vect_query(args:{scope:\"dataset\"|\"field\"|\"doc\"|\"artifact\"|\"metric\"|\"model\", query_text:string, k:int})",
+							"  - IMPORTANT: arg key is query_text (NOT query). scope must be one of the listed strings (NOT \"table\").",
+							"- sql_stats(args:{table:string, field:string}) (requires field; no table-only mode)",
+							"- sql_sample(args:{table:string, field:string, k:int}) (top values for a FIELD; not a row sampler)",
+							"- run_sql(args:{sql:string}) (use this to sample rows: SELECT * FROM <table> LIMIT 20)",
+							"- staging_model(args:{dataset_ids:[string], instructions?:string, sql?:string|staging_model?:string|expression?:string})",
+							"  - IMPORTANT: you MUST provide dataset_ids. This tool will NOT default to all datasets.",
+							"- gold_model(args:{items:[{name:string, folder?:\"marts\"|\"core\", goal?:string, description?:string, inputs:[string], instructions?:string}]})",
+							"  - IMPORTANT: max 5 items per call. Gold MUST use ref('stg_*') only; NO source().",
+							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\", path?:string, prefix?:string, patch_text?:string, pointer?:string, limit?:int, max_chars?:int, preview_diff?:bool})",
+							"- ask_user(args:{prompt:string})",
+							"",
+							"Not available in this phase: dbt_validate, publish_dbt_to_provider (suite handles these deterministically).",
+						];
+					}
                 }
             }
             control_flow::Phase::CleanseReview
@@ -1800,7 +1778,7 @@ impl DataEngineerSuite {
                         } else {
                             (
                                 format!(
-                                "Approved cleanse plan (stored at: {}).\nNext batch (MUST execute exactly these dataset_ids, max 5):\n- {}",
+								"Approved cleanse plan (stored at: {}).\nNext batch (deterministic, max 5):\n- {}\n\nNext action: call apply_next_cleanse_batch (do NOT call staging_model directly).",
                                 plan.plan_key,
                                 next.join("\n- ")
                                 ),
@@ -1895,7 +1873,7 @@ impl DataEngineerSuite {
                             }
                             (
                                 format!(
-                                "Approved model plan (stored at: {}).\nNext batch (MUST execute exactly these model names, max 5):\n{}\n\nCall gold_model with items matching the batch above (and use ONLY ref('stg_*') inputs).",
+								"Approved model plan (stored at: {}).\nNext batch (deterministic, max 5):\n{}\n\nNext action: call apply_next_model_batch (do NOT call gold_model directly).",
                                 plan.plan_key,
                                 details.join("\n")
                                 ),
@@ -3042,7 +3020,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plan_batched_staging_model_rejects_wrong_dataset_ids_before_inner_call() {
+	async fn plan_batched_staging_model_is_not_exposed_to_agent() {
         let mut sctx = SuiteCtx::default();
         sctx.query = Some(Arc::new(MockQuery));
         let actx = DataEngineerSuite::agent_tool_ctx("t", &sctx);
@@ -3067,11 +3045,18 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(err.contains("plan-batched"));
+		assert!(err.contains("unknown tool"));
+
+		// Deterministic executor tool should exist (even if it fails due to missing plan in this test ctx).
+		let err2 = reg
+			.call("apply_next_cleanse_batch", serde_json::json!({}), &actx)
+			.await
+			.unwrap_err();
+		assert!(err2.contains("no active cleanse plan"));
     }
 
     #[tokio::test]
-    async fn plan_batched_gold_model_rejects_wrong_items_before_inner_call() {
+	async fn plan_batched_gold_model_is_not_exposed_to_agent() {
         let mut sctx = SuiteCtx::default();
         sctx.query = Some(Arc::new(MockQuery));
         let actx = DataEngineerSuite::agent_tool_ctx("t", &sctx);
@@ -3094,7 +3079,13 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(err.contains("plan-batched"));
+		assert!(err.contains("unknown tool"));
+
+		let err2 = reg
+			.call("apply_next_model_batch", serde_json::json!({}), &actx)
+			.await
+			.unwrap_err();
+		assert!(err2.contains("no active model plan"));
     }
 
     #[test]

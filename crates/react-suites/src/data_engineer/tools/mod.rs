@@ -20,4 +20,5 @@ pub mod staging_model;
 pub mod vect_query;
 pub mod vect_upsert;
 pub mod gold_model;
+pub mod apply_next_batch;
 

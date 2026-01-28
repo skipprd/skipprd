@@ -138,12 +138,23 @@ pub struct PlanProgress {
     /// index (exclusive). This keeps progress updates idempotent and cheap.
     #[serde(default)]
     pub last_applied_step_idx: usize,
+
+    /// Consecutive failed batch attempts (resets on a fully successful attempt).
+    /// Used to avoid infinite remediation loops in plan-batched authoring.
+    #[serde(default)]
+    pub consecutive_batch_failures: usize,
+
+    /// Total failed batch attempts across the plan lifetime (diagnostics only).
+    #[serde(default)]
+    pub total_batch_failures: usize,
 }
 
 impl Default for PlanProgress {
     fn default() -> Self {
         Self {
             last_applied_step_idx: 0,
+            consecutive_batch_failures: 0,
+            total_batch_failures: 0,
         }
     }
 }
@@ -407,6 +418,56 @@ pub fn model_all_done(plan: &ModelPlan) -> bool {
 pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog) {
     let start = plan.progress.last_applied_step_idx.min(log.steps.len());
     for (idx, step) in log.steps.iter().enumerate().skip(start) {
+        // Deterministic batch executor (preferred): derive progress from its structured output.
+        if let ThreadStep::Tool { name, args: _args, observation, .. } = step {
+            if name == "apply_next_cleanse_batch" {
+                let ok = observation.ok;
+                let attempted: Vec<String> = observation
+                    .extra
+                    .get("attempted_dataset_ids")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+                    .unwrap_or_default();
+                let succeeded: Vec<String> = observation
+                    .extra
+                    .get("succeeded_dataset_ids")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+                    .unwrap_or_default();
+                let succ_set: std::collections::HashSet<String> = succeeded.iter().cloned().collect();
+                let failed: Vec<String> = attempted
+                    .iter()
+                    .filter(|ds| !succ_set.contains(*ds))
+                    .cloned()
+                    .collect();
+
+                for ds in attempted.iter() {
+                    if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == *ds) {
+                        mark_task_in_progress(&mut t.status);
+                    }
+                }
+                for ds in succeeded.iter() {
+                    cleanse_mark_done(plan, ds);
+                }
+                if !ok || !failed.is_empty() {
+                    let err = observation
+                        .errors
+                        .first()
+                        .map(|s| s.as_str())
+                        .unwrap_or("apply_next_cleanse_batch failed");
+                    let note = format!("apply_next_cleanse_batch failed: {}", err.trim());
+                    for ds in failed.iter() {
+                        if let Some(t) = plan.tasks.iter_mut().find(|t| t.dataset_id == *ds) {
+                            mark_task_needs_update(&mut t.status);
+                            push_note_unique(&mut t.notes, note.clone());
+                        }
+                    }
+                }
+                plan.progress.last_applied_step_idx = idx + 1;
+                continue;
+            }
+        }
+
         // Track BOTH success and failure so plans remain truthful and can drive remediation.
         if let ThreadStep::Tool { name, args, observation, .. } = step {
             if name != "staging_model" {
@@ -525,12 +586,18 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
                     stems.sort();
                     stems.dedup();
                     // Work signal: any targeted model is being actively remediated.
+                    let mut matched_any = false;
                     for t in plan.tasks.iter_mut() {
                         let Some(p) = t.expected_model_path.as_deref() else { continue };
                         let Some(st) = file_stem(p) else { continue };
                         if stems.iter().any(|s| s == &st) {
                             t.status = TaskStatus::InProgress;
+                            matched_any = true;
                         }
+                    }
+                    if ok && matched_any {
+                        // Successful mutation indicates forward progress; reset batch-failure budget.
+                        plan.progress.consecutive_batch_failures = 0;
                     }
                     if !ok {
                         let err = observation.errors.first().map(|s| s.as_str()).unwrap_or("unknown error");
@@ -555,6 +622,56 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
 pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
     let start = plan.progress.last_applied_step_idx.min(log.steps.len());
     for (idx, step) in log.steps.iter().enumerate().skip(start) {
+        // Deterministic batch executor (preferred): derive progress from its structured output.
+        if let ThreadStep::Tool { name, args: _args, observation, .. } = step {
+            if name == "apply_next_model_batch" {
+                let ok = observation.ok;
+                let attempted: Vec<String> = observation
+                    .extra
+                    .get("attempted_item_names")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+                    .unwrap_or_default();
+                let succeeded: Vec<String> = observation
+                    .extra
+                    .get("succeeded_item_names")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+                    .unwrap_or_default();
+                let succ_set: std::collections::HashSet<String> = succeeded.iter().cloned().collect();
+                let failed: Vec<String> = attempted
+                    .iter()
+                    .filter(|n| !succ_set.contains(*n))
+                    .cloned()
+                    .collect();
+
+                for n in attempted.iter() {
+                    if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == *n) {
+                        mark_task_in_progress(&mut t.status);
+                    }
+                }
+                for n in succeeded.iter() {
+                    model_mark_done(plan, n);
+                }
+                if !ok || !failed.is_empty() {
+                    let err = observation
+                        .errors
+                        .first()
+                        .map(|s| s.as_str())
+                        .unwrap_or("apply_next_model_batch failed");
+                    let note = format!("apply_next_model_batch failed: {}", err.trim());
+                    for n in failed.iter() {
+                        if let Some(t) = plan.tasks.iter_mut().find(|t| t.name == *n) {
+                            mark_task_needs_update(&mut t.status);
+                            push_note_unique(&mut t.notes, note.clone());
+                        }
+                    }
+                }
+                plan.progress.last_applied_step_idx = idx + 1;
+                continue;
+            }
+        }
+
         if let ThreadStep::Tool { name, args, observation, .. } = step {
             if name != "gold_model" {
                 // fall through
@@ -661,10 +778,15 @@ pub fn update_model_progress_from_log(plan: &mut ModelPlan, log: &ThreadLog) {
                 stems.sort();
                 stems.dedup();
                 // Work signal: patching a gold model implies active remediation of that model task.
+                let mut matched_any = false;
                 for t in plan.tasks.iter_mut() {
                     if stems.iter().any(|s| s == &t.name) {
                         t.status = TaskStatus::InProgress;
+                        matched_any = true;
                     }
+                }
+                if ok && matched_any {
+                    plan.progress.consecutive_batch_failures = 0;
                 }
                 if !ok {
                     let err = observation.errors.first().map(|s| s.as_str()).unwrap_or("unknown error");
