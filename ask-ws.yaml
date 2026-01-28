@@ -546,7 +546,7 @@ components:
 
     PlanTaskStatus:
       type: string
-      enum: [pending, in_progress, done, blocked]
+      enum: [pending, in_progress, done, blocked, needs_update]
 
     PlanTask:
       oneOf:

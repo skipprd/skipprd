@@ -75,6 +75,11 @@ fn build_gold_sys_prompt(dialect: &str, max_items: usize) -> String {
          - Gold models MUST NOT call source() anywhere.\n\
          - Prefer minimal, stable columns for business use; do not invent fields.\n\
          - If you need a field that does not exist in silver, put it in notes and do NOT guess.\n\
+         - Use provided inputs[].schema_columns (from the warehouse/catalog) as ground truth for available columns + types.\n\
+         - IMPORTANT time handling (consistency):\n\
+           - If an input column is already typed as timestamp/date/timestamptz/datetime, use it directly; do NOT re-cast it to the same type.\n\
+           - Do NOT narrow time zones: never cast timestamptz -> timestamp.\n\
+           - If you need parsed timestamps but the input only has string-ish fields, do NOT try_cast in gold; instead note that silver should add a cleaned timestamp column.\n\
          - Batch throughput: you will be asked to create up to {max_items} models per call.\n\
          - Do NOT include a dbt config block; the suite injects schema/alias deterministically.\n\
          Patch rules:\n\

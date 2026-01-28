@@ -22,6 +22,8 @@ pub enum PlanTaskStatus {
     Done,
     #[serde(rename = "blocked")]
     Blocked,
+    #[serde(rename = "needs_update")]
+    NeedsUpdate,
 
 }
 
@@ -32,6 +34,7 @@ impl std::fmt::Display for PlanTaskStatus {
             Self::InProgress => write!(f, "in_progress"),
             Self::Done => write!(f, "done"),
             Self::Blocked => write!(f, "blocked"),
+            Self::NeedsUpdate => write!(f, "needs_update"),
         }
     }
 }

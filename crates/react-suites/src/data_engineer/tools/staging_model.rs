@@ -116,6 +116,12 @@ fn build_staging_sys_prompt(dialect: &str, expected_db: &str, expected_table: &s
            - timestamp/datetime types: timestamp, timestamptz, datetime\n\
            - date types: date\n\
            If a field is string-typed but appears to encode time values, you may treat it as time-like only if schema_columns or samples strongly indicate it.\n\
+         - IMPORTANT time handling (consistency):\n\
+           - If schema_columns says a field is already a time type (timestamp/date/timestamptz/datetime), use it directly (quote the identifier if needed) and alias to the cleaned name.\n\
+             - Do NOT re-cast typed timestamps (avoid noise like cast(ts as timestamp)).\n\
+             - Do NOT narrow time zones: never cast timestamptz -> timestamp. Preserve the source type.\n\
+             - Do NOT create *_raw helpers for already-typed time fields.\n\
+           - Only use *_raw + try_cast parsing when the schema type is string-ish (varchar/string/text) or unknown and evidence indicates it encodes time.\n\
          - For any time-like field:\n\
            - If the source is string-ish: create a `*_raw` expression using trim + nullif-empty so empty strings become NULL deterministically.\n\
            - Produce the cleaned output field as a safe cast (Athena/Trino: try_cast(... as timestamp) or try_cast(... as date)).\n\
