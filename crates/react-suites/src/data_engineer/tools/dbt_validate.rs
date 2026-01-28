@@ -269,7 +269,7 @@ mod tests {
                 serde_json::json!({
                     "changes": [{
                         "key":"t/w/p/dbt/models/m.sql",
-                        "patch_text": crate::data_engineer::project_fs::create_git_patch_text(
+                        "unified_git_style_patch": crate::data_engineer::project_fs::create_git_patch_text(
                             "select 1",
                             "select 1\\n",
                             "models/m.sql",

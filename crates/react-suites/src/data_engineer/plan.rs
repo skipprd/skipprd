@@ -102,8 +102,11 @@ fn extract_dbt_files_patch_paths(args: &Value) -> Vec<String> {
         }
     }
 
-    // Unified diff patch_text: extract file paths from headers.
-    if let Some(patch_text) = args.get("patch_text").and_then(|v| v.as_str()) {
+    // Unified git diff: extract file paths from headers.
+    if let Some(patch_text) = args
+        .get("unified_git_style_patch")
+        .and_then(|v| v.as_str())
+    {
         for line in patch_text.lines() {
             let l = line.trim();
             if let Some(rest) = l.strip_prefix("+++ b/") {

@@ -117,13 +117,20 @@ impl Tool for DbtFilesTool {
                     .map(project_fs::normalize_rel_path)
                     .transpose()?;
 
-                let patch_text_opt = args.get("patch_text").and_then(|x| x.as_str()).map(|s| s.to_string());
+                let unified_patch_opt = args
+                    .get("unified_git_style_patch")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string());
                 let replace_file_ops: Vec<ReplaceFileArgs> = parse_one_or_many(&args, "replace_file")?;
                 let replace_range_ops: Vec<ReplaceRangeArgs> = parse_one_or_many(&args, "replace_range")?;
                 let replace_list_ops: Vec<ReplaceListArgs> = parse_one_or_many(&args, "replace_list")?;
 
                 let mut provided = 0usize;
-                if patch_text_opt.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false) {
+                if unified_patch_opt
+                    .as_ref()
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false)
+                {
                     provided += 1;
                 }
                 if !replace_file_ops.is_empty() {
@@ -137,21 +144,22 @@ impl Tool for DbtFilesTool {
                 }
                 if provided != 1 {
                     return Err(
-                        "dbt_files op=patch requires exactly one of: patch_text | replace_file | replace_range | replace_list"
+                        "dbt_files op=patch requires exactly one of: unified_git_style_patch | replace_file | replace_range | replace_list"
                             .to_string(),
                     );
                 }
 
                 // Build a patch bundle to apply, regardless of primitive.
-                let patch_text: String = if let Some(patch_text) = patch_text_opt {
-                    // Guardrail: if someone accidentally passes full file contents as patch_text, fail loudly with guidance.
+                let patch_text: String = if let Some(patch_text) = unified_patch_opt {
+                    // Guardrail: if someone accidentally passes full file contents as unified_git_style_patch,
+                    // fail loudly with guidance.
                     let looks_like_patch = patch_text.lines().any(|l| l.starts_with("diff --git "))
                         || (patch_text.lines().any(|l| l.starts_with("--- "))
                             && patch_text.lines().any(|l| l.starts_with("+++ ")));
                     if !looks_like_patch {
                         let hint = if let Some(p) = want_rel_path.as_ref() {
                             format!(
-                                "patch_text must be a git-style unified diff (not raw file content). Example for {p}:\n\
+                                "unified_git_style_patch must be a git-style unified diff (not raw file content). Example for {p}:\n\
 \n\
 diff --git a/{p} b/{p}\n\
 new file mode 100644\n\
@@ -161,7 +169,7 @@ new file mode 100644\n\
 +<file contents here>\n"
                             )
                         } else {
-                            "patch_text must be a git-style unified diff (not raw file content). Include headers like `diff --git a/<path> b/<path>` and `+++ b/<path>`.".to_string()
+                            "unified_git_style_patch must be a git-style unified diff (not raw file content). Include headers like `diff --git a/<path> b/<path>` and `+++ b/<path>`.".to_string()
                         };
                         return Err(hint);
                     }
@@ -272,7 +280,7 @@ new file mode 100644\n\
 
                 let mut outcomes = project_fs::apply_patch_bundle(ctx, self.datasets.as_ref(), &patch_text).await?;
                 if outcomes.is_empty() {
-                    return Err("patch_text produced no file changes".to_string());
+                    return Err("patch produced no file changes".to_string());
                 }
 
                 if let Some(want) = want_rel_path.as_ref() {
@@ -332,5 +340,135 @@ new file mode 100644\n\
             }
             _ => Err("unsupported op; use 'list', 'get', 'get_json', 'manifest_find', or 'patch'".to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config;
+    use react_core::agent::DefaultPolicy;
+    use react_core::keyspace::{DefaultKeyspace, Keyspace};
+    use react_core::llm::NullModel;
+    use react_core::scope::RequestScope;
+    use react_core::storage::{InMemoryStorageAdapter, StorageAdapter};
+
+    fn minimal_cfg() -> Arc<config::ReactResolvedConfig> {
+        Arc::new(config::ReactResolvedConfig {
+            server: config::ServerResolved { port: 1 },
+            storage: config::StorageResolved { bucket: "b".to_string() },
+            scope: RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() },
+            llm: config::LlmResolved::default(),
+            providers: config::ProvidersResolved {
+                athena: config::AthenaResolved {
+                    enabled: true,
+                    workgroup: "wg".to_string(),
+                    region: "eu-west-1".to_string(),
+                    result_s3: "s3://x/".to_string(),
+                    target_catalog: "AwsDataCatalog".to_string(),
+                    source_schema: "test_raw".to_string(),
+                    discovery_cache_ttl_secs: 120,
+                },
+                catalog: config::CatalogResolved { enabled: false, refresh_secs: 60, max_concurrency: 8 },
+                dbt: config::DbtResolved {
+                    enabled: true,
+                    profiles_dir: None,
+                    target: "athena".to_string(),
+                    naming: config::DbtNamingResolved {
+                        target_schema: "test".to_string(),
+                        silver_suffix: "silver".to_string(),
+                        gold_suffix: "warehouse".to_string(),
+                    },
+                    runner: "host".to_string(),
+                    docker_image: None,
+                    docker_platform: None,
+                    docker_network: None,
+                    docker_mount_aws_dir: false,
+                },
+                vector: config::VectorResolved { enabled: false },
+            },
+        })
+    }
+
+    fn make_ctx(storage: Arc<dyn StorageAdapter>) -> AgentCtx {
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let scope = RequestScope {
+            tenant: "t".to_string(),
+            workspace: "w".to_string(),
+            project_id: "p".to_string(),
+        };
+        AgentCtx {
+            top_k: 1,
+            per_step_timeout_secs: 1,
+            max_steps: 1,
+            thread_id: None,
+            progress_tx: None,
+            pre_step_tx: None,
+            trace_tx: None,
+            agent_name: Some("test".to_string()),
+            policy: Arc::new(DefaultPolicy),
+            llm: Arc::new(NullModel::new()),
+            storage,
+            scope,
+            keyspace,
+            query: None,
+            dbt: None,
+            vector: None,
+            thread_store: None,
+            runtime: Some(minimal_cfg() as Arc<dyn std::any::Any + Send + Sync>),
+        }
+    }
+
+    #[tokio::test]
+    async fn dbt_files_patch_rejects_patch_text_key() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage);
+        let tool = DbtFilesTool { datasets: None };
+
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "op": "patch",
+                    "patch_text": "diff --git a/models/x.sql b/models/x.sql\n--- /dev/null\n+++ b/models/x.sql\n@@\n+select 1\n"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("unified_git_style_patch"));
+    }
+
+    #[tokio::test]
+    async fn dbt_files_patch_replace_file_writes_and_returns_canonical_patch() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage.clone());
+        let tool = DbtFilesTool { datasets: None };
+
+        let obs = tool
+            .call(
+                serde_json::json!({
+                    "op": "patch",
+                    "replace_file": {
+                        "path": "models/x.sql",
+                        "new_text": "select 1\n"
+                    }
+                }),
+                &ctx,
+            )
+            .await
+            .expect("patch ok");
+
+        assert_eq!(obs.get("ok").and_then(|v| v.as_bool()), Some(true));
+        let applied = obs.get("applied_patch_text").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(applied.contains("diff --git a/models/x.sql b/models/x.sql"));
+
+        let written = obs.get("written_keys").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        assert_eq!(written.len(), 1);
+        let key = written[0].as_str().unwrap_or("");
+        let bytes = storage.get_bytes(key).await.expect("written");
+        let content = String::from_utf8_lossy(&bytes).to_string();
+        assert!(content.contains("config(schema=\"warehouse\""));
+        assert!(content.contains("alias=\"x\""));
+        assert!(content.to_ascii_lowercase().contains("select 1"));
     }
 }

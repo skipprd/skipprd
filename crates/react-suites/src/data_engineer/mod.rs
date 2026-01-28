@@ -733,7 +733,7 @@ impl DataEngineerSuite {
 
                     tools_card_lines = vec![
                         "Allowed tools (authoring phase; HARD constraint: mutation required next):",
-                        "- dbt_files(args:{op:\"patch\",patch_text:string,path?:string,preview_diff?:bool})",
+                        "- dbt_files(args:{op:\"patch\", unified_git_style_patch?:string, replace_file?:{path:string,new_text:string,expected_sha256?:string}|[{...}], replace_range?:{path:string,start_line:int,end_line:int,new_text:string,expected_sha256?:string}|[{...}], replace_list?:{path:string,edits:[{start_line:int,end_line:int,new_text:string}],expected_sha256?:string}|[{...}], path?:string, preview_diff?:bool})",
                         "- ask_user(args:{prompt:string})",
                         "",
                         "Not available: read/explore tools, dbt_validate, publish_dbt_to_provider.",
@@ -772,7 +772,7 @@ impl DataEngineerSuite {
 						tools_card_lines = vec![
 							"Allowed tools (authoring phase; plan-batched, deterministic):",
 							"- apply_next_cleanse_batch(args:{instructions?:string})",
-							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\", path?:string, prefix?:string, patch_text?:string, pointer?:string, limit?:int, max_chars?:int, preview_diff?:bool})",
+							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\", path?:string, prefix?:string, unified_git_style_patch?:string, replace_file?:any, replace_range?:any, replace_list?:any, pointer?:string, limit?:int, max_chars?:int, preview_diff?:bool})",
 							"- sql_schema / sql_stats / sql_sample / vect_query (discovery context)",
 							"- run_sql (targeted probes)",
 							"- ask_user",
@@ -784,7 +784,7 @@ impl DataEngineerSuite {
 						tools_card_lines = vec![
 							"Allowed tools (authoring phase; plan-batched, deterministic):",
 							"- apply_next_model_batch(args:{instructions?:string})",
-							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\", path?:string, prefix?:string, patch_text?:string, pointer?:string, limit?:int, max_chars?:int, preview_diff?:bool})",
+							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\", path?:string, prefix?:string, unified_git_style_patch?:string, replace_file?:any, replace_range?:any, replace_list?:any, pointer?:string, limit?:int, max_chars?:int, preview_diff?:bool})",
 							"- sql_schema / sql_stats / sql_sample / vect_query (discovery context)",
 							"- run_sql (targeted probes)",
 							"- ask_user",
@@ -805,7 +805,7 @@ impl DataEngineerSuite {
 							"  - IMPORTANT: you MUST provide dataset_ids. This tool will NOT default to all datasets.",
 							"- gold_model(args:{items:[{name:string, folder?:\"marts\"|\"core\", goal?:string, description?:string, inputs:[string], instructions?:string}]})",
 							"  - IMPORTANT: max 5 items per call. Gold MUST use ref('stg_*') only; NO source().",
-							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\", path?:string, prefix?:string, patch_text?:string, pointer?:string, limit?:int, max_chars?:int, preview_diff?:bool})",
+							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\", path?:string, prefix?:string, unified_git_style_patch?:string, replace_file?:any, replace_range?:any, replace_list?:any, pointer?:string, limit?:int, max_chars?:int, preview_diff?:bool})",
 							"- ask_user(args:{prompt:string})",
 							"",
 							"Not available in this phase: dbt_validate, publish_dbt_to_provider (suite handles these deterministically).",
@@ -1730,12 +1730,37 @@ impl DataEngineerSuite {
                             continue;
                         }
                         let next = crate::data_engineer::plan::cleanse_next_batch(&plan);
-                        if next.is_empty() {
+                        // IMPORTANT: If validation failed and we have not successfully mutated since,
+                        // the authoring tool registry will be patch-only (hard_mutation_only).
+                        // In that state, do NOT instruct apply_next_cleanse_batch; force repair-mode guidance.
+                        if guard.last_validate_failed && !guard.mutated_since_fail {
+                            let mut ctx = format!(
+                                "Approved cleanse plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using replace_file/replace_range/replace_list or unified_git_style_patch):\n",
+                                plan.plan_key
+                            );
+                            if !last_validate_failed_models.is_empty() {
+                                for fm in last_validate_failed_models.iter().take(6) {
+                                    let name =
+                                        fm.get("name").and_then(|v| v.as_str()).unwrap_or("unknown_model");
+                                    let file =
+                                        fm.get("file").and_then(|v| v.as_str()).unwrap_or("(unknown file)");
+                                    ctx.push_str(&format!("- {} ({})\n", name, file));
+                                }
+                            } else if let Some(ref brief) = last_validate_brief {
+                                ctx.push_str("- (unknown failing model) — see last dbt_validate summary below.\n");
+                                ctx.push_str("\nLast dbt_validate summary:\n");
+                                ctx.push_str(brief);
+                                ctx.push('\n');
+                            } else {
+                                ctx.push_str("- (unknown failing model) — no failing-model evidence found.\n");
+                            }
+                            (ctx, None)
+                        } else if next.is_empty() {
                             // If validation previously failed, do NOT bounce straight back to validate.
                             // Run a repair authoring pass grounded in the failing model/file evidence.
                             if guard.last_validate_failed {
                                 let mut ctx = format!(
-                                    "Approved cleanse plan (stored at: {}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch, or call staging_model if you can identify the source dataset):\n",
+                                    "Approved cleanse plan (stored at: {}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using replace_file/replace_range/replace_list or unified_git_style_patch):\n",
                                     plan.plan_key
                                 );
                                 if !last_validate_failed_models.is_empty() {
@@ -1807,11 +1832,36 @@ impl DataEngineerSuite {
                             continue;
                         }
                         let next_names = crate::data_engineer::plan::model_next_batch(&plan);
-                        if next_names.is_empty() {
+                        // IMPORTANT: If validation failed and we have not successfully mutated since,
+                        // the authoring tool registry will be patch-only (hard_mutation_only).
+                        // In that state, do NOT instruct apply_next_model_batch; force repair-mode guidance.
+                        if guard.last_validate_failed && !guard.mutated_since_fail {
+                            let mut ctx = format!(
+                                "Approved model plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using replace_file/replace_range/replace_list or unified_git_style_patch):\n",
+                                plan.plan_key
+                            );
+                            if !last_validate_failed_models.is_empty() {
+                                for fm in last_validate_failed_models.iter().take(6) {
+                                    let name =
+                                        fm.get("name").and_then(|v| v.as_str()).unwrap_or("unknown_model");
+                                    let file =
+                                        fm.get("file").and_then(|v| v.as_str()).unwrap_or("(unknown file)");
+                                    ctx.push_str(&format!("- {} ({})\n", name, file));
+                                }
+                            } else if let Some(ref brief) = last_validate_brief {
+                                ctx.push_str("- (unknown failing model) — see last dbt_validate summary below.\n");
+                                ctx.push_str("\nLast dbt_validate summary:\n");
+                                ctx.push_str(brief);
+                                ctx.push('\n');
+                            } else {
+                                ctx.push_str("- (unknown failing model) — no failing-model evidence found.\n");
+                            }
+                            (ctx, None)
+                        } else if next_names.is_empty() {
                             if guard.last_validate_failed {
                                 // Same repair-mode behavior as cleanse: run authoring to patch failing files.
                                 let mut ctx = format!(
-                                    "Approved model plan (stored at: {}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch):\n",
+                                    "Approved model plan (stored at: {}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using replace_file/replace_range/replace_list or unified_git_style_patch):\n",
                                     plan.plan_key
                                 );
                                 if !last_validate_failed_models.is_empty() {
@@ -1912,7 +1962,7 @@ impl DataEngineerSuite {
                     q.push_str("\n\nNOTE: In agent mode, validation and publish are handled by the suite phases. Do not call dbt_validate or publish tools; focus on authoring fixes and models.");
                     q.push_str("\nIMPORTANT: Tool-call argument shapes are strict. In particular: vect_query uses args.query_text (NOT args.query) and scope must be \"dataset\"|\"field\"|\"doc\"|\"artifact\"|\"metric\"|\"model\".");
                     q.push_str("\nIMPORTANT: sql_stats and sql_sample both require args.field. To sample rows, use run_sql with a LIMIT.");
-                    q.push_str("\nIMPORTANT: This authoring phase is plan-driven. Execute the approved plan batches. Do NOT ask for approval; approvals happen in plan phases.");
+                    q.push_str("\nIMPORTANT: This authoring phase is plan-driven. Follow the Plan context below. If it says to patch failing DBT files, do that first; if it provides a next batch, execute it. Do NOT ask for approval; approvals happen in plan phases.");
                     q.push_str("\n\nPlan context:\n");
                     q.push_str(&plan_context);
                     if let Some(b) = last_validate_brief.as_ref() {
@@ -1931,6 +1981,30 @@ impl DataEngineerSuite {
                             q.push_str(")\n");
                         }
                         q.push_str("Fix these first (prefer patching the listed file paths).\n");
+                    }
+
+                    // When the suite is in hard_mutation_only, dbt_files is patch-only (no op=get),
+                    // so we MUST include the raw file content for at least the primary failing target.
+                    if guard.last_validate_failed && !guard.mutated_since_fail && !last_validate_failed_models.is_empty() {
+                        if let Some(file) = last_validate_failed_models[0].get("file").and_then(|v| v.as_str()) {
+                            let file = file.trim();
+                            if !file.is_empty() && file != "(unknown file)" {
+                                let base = actx.keyspace.dbt_prefix(&actx.scope).trim_end_matches('/').to_string();
+                                let key = format!("{}/{}", base, file);
+                                if let Ok(bytes) = actx.storage.get_bytes(&key).await {
+                                    let content = String::from_utf8_lossy(&bytes).to_string();
+                                    q.push_str("\n\nPrimary repair target current file content:\n");
+                                    q.push_str("File: ");
+                                    q.push_str(file);
+                                    q.push_str("\n\n```sql\n");
+                                    q.push_str(&content);
+                                    if !content.ends_with('\n') {
+                                        q.push('\n');
+                                    }
+                                    q.push_str("```\n");
+                                }
+                            }
+                        }
                     }
                     // Surface the most recent suite-level guard block reason (if any) to help auto-fix.
                     if let Some(ref l) = log {
@@ -2988,7 +3062,7 @@ mod tests {
             probe_required: false,
             probe_satisfied: false,
         };
-        let (reg, _card) = DataEngineerSuite::build_tools_for_phase(
+        let (reg, card) = DataEngineerSuite::build_tools_for_phase(
             crate::data_engineer::control_flow::Phase::ModelAuthor,
             &guard,
             true,
@@ -2997,11 +3071,57 @@ mod tests {
         )
             .expect("build_tools_for_phase should succeed");
 
+        // Tool card should advertise patch primitives (not apply_next_* tools).
+        assert!(card.contains("unified_git_style_patch"));
+        assert!(!card.contains("apply_next_model_batch"));
+
         // run_sql should not be available in hard mutation-only mode
         assert!(reg.call("run_sql", serde_json::json!({"sql":"SELECT 1"}), &actx).await.is_err());
 
         // dbt_files get should be blocked (put-only wrapper)
         assert!(reg.call("dbt_files", serde_json::json!({"op":"get","path":"dbt_project.yml"}), &actx).await.is_err());
+
+        // apply_next_* tools should not be available in hard mutation-only mode
+        let err = reg
+            .call("apply_next_model_batch", serde_json::json!({}), &actx)
+            .await
+            .unwrap_err();
+        assert!(err.contains("unknown tool"));
+    }
+
+    #[tokio::test]
+    async fn hard_mutation_mode_does_not_expose_apply_next_cleanse_batch_even_if_allowed_batch_present() {
+        let mut sctx = SuiteCtx::default();
+        sctx.query = Some(Arc::new(MockQuery));
+        let actx = DataEngineerSuite::agent_tool_ctx("t", &sctx);
+
+        let guard = crate::data_engineer::control_flow::DerivedGuardState {
+            last_validate_failed: true,
+            mutated_since_fail: false,
+            mutation_failures_since_validate: 0,
+            probe_required: false,
+            probe_satisfied: false,
+        };
+
+        let (reg, card) = DataEngineerSuite::build_tools_for_phase(
+            crate::data_engineer::control_flow::Phase::CleanseAuthor,
+            &guard,
+            true,
+            &sctx,
+            Some(super::AllowedBatch::CleanseDatasetIds(vec![
+                "AwsDataCatalog.db.t1".to_string(),
+            ])),
+        )
+        .expect("build_tools_for_phase should succeed");
+
+        assert!(card.contains("unified_git_style_patch"));
+        assert!(!card.contains("apply_next_cleanse_batch"));
+
+        let err = reg
+            .call("apply_next_cleanse_batch", serde_json::json!({}), &actx)
+            .await
+            .unwrap_err();
+        assert!(err.contains("unknown tool"));
     }
 
     #[tokio::test]

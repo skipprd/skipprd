@@ -73,7 +73,7 @@ struct LlmRemediationResponse {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct LlmChange {
     key: String,
-    patch_text: String,
+    unified_git_style_patch: String,
     #[serde(default)]
     reason: Option<String>,
 }
@@ -268,7 +268,7 @@ pub async fn remediate_dbt_sql_keys_with_llm(ctx: &AgentCtx, phase: &str, keys: 
              - Do not invent new tables/columns.\n\
              - Output MUST be valid JSON only (no markdown, no commentary).\n\
              Output schema:\n\
-             {{\"changes\":[{{\"key\":\"...\",\"patch_text\":\"...\",\"reason\":\"...\"}}],\"notes\":[\"...\"]}}\n\
+             {{\"changes\":[{{\"key\":\"...\",\"unified_git_style_patch\":\"...\",\"reason\":\"...\"}}],\"notes\":[\"...\"]}}\n\
              Only include a file in changes if you actually modify it.\n"
         );
         let user = serde_json::json!({
@@ -317,7 +317,7 @@ pub async fn remediate_dbt_sql_keys_with_llm(ctx: &AgentCtx, phase: &str, keys: 
                 ctx,
                 None,
                 &rel,
-                &ch.patch_text,
+                &ch.unified_git_style_patch,
                 if expected_base.is_empty() { None } else { Some(expected_base.as_str()) },
             )
             .await?;
@@ -364,7 +364,7 @@ struct GroundedRepairResponse {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct GroundedRepairChange {
     key: String,
-    patch_text: String,
+    unified_git_style_patch: String,
     #[serde(default)]
     reason: Option<String>,
 }
@@ -420,7 +420,7 @@ fn errors_suggest_uncertainty(errors: &[String]) -> bool {
 /// Contract:
 /// - Provide immutable facts (dialect, errors, failing + related files, source schemas, optional samples).
 /// - LLM must return ONLY JSON and ONLY propose edits required to fix the provided errors.
-/// - LLM returns git-style unified diffs (patch_text) per changed key; we apply patches deterministically.
+/// - LLM returns git-style unified diffs (unified_git_style_patch) per changed key; we apply patches deterministically.
 pub async fn remediate_dbt_failures_grounded_with_llm(
     ctx: &AgentCtx,
     phase: &str,
@@ -544,7 +544,7 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
          - If you are not absolutely sure the change is correct given the provided schema and data samples, return NO changes and explain what additional evidence would be required.\n\
          - Output MUST be valid JSON only (no markdown, no commentary).\n\
          Output schema:\n\
-         {{\"changes\":[{{\"key\":\"...\",\"patch_text\":\"...\",\"reason\":\"...\"}}],\"notes\":[\"...\"]}}\n\
+         {{\"changes\":[{{\"key\":\"...\",\"unified_git_style_patch\":\"...\",\"reason\":\"...\"}}],\"notes\":[\"...\"]}}\n\
          Only include a file in changes if you actually modify it.\n"
     );
 
@@ -597,7 +597,7 @@ pub async fn remediate_dbt_failures_grounded_with_llm(
         let existing = content_by_key.get(&ch.key).cloned().unwrap_or_default();
         let expected_base = sha256_hex(&existing);
         let outcome =
-            crate::data_engineer::project_fs::apply_patch(ctx, None, &rel, &ch.patch_text, Some(expected_base.as_str()))
+            crate::data_engineer::project_fs::apply_patch(ctx, None, &rel, &ch.unified_git_style_patch, Some(expected_base.as_str()))
                 .await?;
         ctx.storage
             .put_bytes(&outcome.key, outcome.content.as_bytes(), "text/sql")
@@ -638,7 +638,7 @@ struct LlmUnresolvedColumnsResponse {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct LlmUnresolvedColumnsChange {
     key: String,
-    patch_text: String,
+    unified_git_style_patch: String,
     #[serde(default)]
     reason: Option<String>,
 }
@@ -783,7 +783,7 @@ pub async fn remediate_unresolved_columns_with_llm(
 
     let error_brief = crate::data_engineer::dbt_error::compact_brief(errors, 6, 900);
 
-    // Strict JSON-only contract. LLM returns patch_text; we apply patches deterministically.
+    // Strict JSON-only contract. LLM returns unified_git_style_patch; we apply patches deterministically.
     let sys = format!(
         "You are a meticulous dbt SQL auto-remediation assistant.\n\
          Task: fix unresolved column errors from Trino/Athena like: Column 'x' cannot be resolved.\n\
@@ -795,7 +795,7 @@ pub async fn remediate_unresolved_columns_with_llm(
          - Only use struct dereference (e.g. context.session.id) when schema_columns indicate a struct/row parent exists AND there is no exact dotted column name.\n\
          - Return ONLY valid JSON (no markdown, no commentary).\n\
          Output schema:\n\
-         {{\"changes\":[{{\"key\":\"...\",\"patch_text\":\"...\",\"reason\":\"...\"}}],\"notes\":[\"...\"]}}\n\
+         {{\"changes\":[{{\"key\":\"...\",\"unified_git_style_patch\":\"...\",\"reason\":\"...\"}}],\"notes\":[\"...\"]}}\n\
          Only include a file in changes if you actually modify it.\n"
     );
 
@@ -848,7 +848,7 @@ pub async fn remediate_unresolved_columns_with_llm(
         let existing = content_by_key.get(&ch.key).cloned().unwrap_or_default();
         let expected_base = sha256_hex(&existing);
         let outcome =
-            crate::data_engineer::project_fs::apply_patch(ctx, None, &rel, &ch.patch_text, Some(expected_base.as_str()))
+            crate::data_engineer::project_fs::apply_patch(ctx, None, &rel, &ch.unified_git_style_patch, Some(expected_base.as_str()))
                 .await?;
         ctx.storage
             .put_bytes(&outcome.key, outcome.content.as_bytes(), "text/sql")
@@ -981,10 +981,12 @@ mod tests {
     async fn remediation_applies_llm_changes_to_storage() {
         let storage = Arc::new(InMemoryStorageAdapter::default());
         let mock = MockLlm::default();
-        let patch_text = crate::data_engineer::project_fs::create_patch_text("select 1", "select 2");
+        let patch_text =
+            crate::data_engineer::project_fs::create_git_patch_text("select 1", "select 2", "models/m.sql", true)
+                .expect("patch");
         *mock.chat_responses.lock().unwrap() = vec![serde_json::json!({
             "changes": [
-                {"key":"t/w/p/dbt/models/m.sql","patch_text":patch_text,"reason":"minimal"}
+                {"key":"t/w/p/dbt/models/m.sql","unified_git_style_patch":patch_text,"reason":"minimal"}
             ],
             "notes": ["ok"]
         })

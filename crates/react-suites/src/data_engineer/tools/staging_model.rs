@@ -108,7 +108,8 @@ fn build_staging_sys_prompt(dialect: &str, expected_db: &str, expected_table: &s
          Dialect: {dialect}\n\
          Requirements:\n\
          - Output MUST be valid JSON only.\n\
-         - Produce a git-style unified diff patch (patch_text) that creates/updates the model file.\n\
+         - You MUST choose EXACTLY ONE patch primitive to modify the expected_model_path.\n\
+           Prefer structured primitives (replace_file / replace_range / replace_list) over unified diffs.\n\
          - CRITICAL: You MUST read from: FROM {{{{ source(\"{expected_db}\", \"{expected_table}\") }}}} (do not invent any other source name).\n\
          - This is SILVER: include sensible cleansing/normalization and stable column naming.\n\
          - Use the provided schema_columns types to guide casting and cleansing. Do NOT guess types from names.\n\
@@ -137,7 +138,14 @@ fn build_staging_sys_prompt(dialect: &str, expected_db: &str, expected_table: &s
          - If a column name is reserved (e.g. timestamp), quote the identifier (\"timestamp\"). For literal dotted column names, quote the entire identifier (\"context.session.id\").\n\
          - Keep changes aligned with the user's instructions, even if they are unconventional.\n\
          Output schema:\n\
-         {{\"patch_text\":\"...\",\"notes\":[\"...\"]}}\n\
+         {{\n\
+           \"notes\": [\"...\"],\n\
+           \"unified_git_style_patch\": \"...\" | \"\",\n\
+           \"replace_file\": {{\"new_text\":\"...\"}} | null,\n\
+           \"replace_range\": {{\"start_line\":1,\"end_line\":1,\"new_text\":\"...\"}} | null,\n\
+           \"replace_list\": {{\"edits\":[{{\"start_line\":1,\"end_line\":1,\"new_text\":\"...\"}}]}} | null\n\
+         }}\n\
+         (Exactly ONE of unified_git_style_patch/replace_file/replace_range/replace_list must be provided; the others must be empty/null.)\n\
          Patch rules:\n\
          - The patch MUST modify ONLY the expected_model_path.\n\
          - If creating a new file, the patch MUST use `--- /dev/null` and `+++ b/<expected_model_path>`.\n\

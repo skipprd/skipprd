@@ -642,7 +642,7 @@ mod tests {
             chat_responses: Mutex::new(vec![
                 serde_json::json!({
                     "changes": [
-                        {"key": base_key, "patch_text": patch_text, "reason": "quote literal dotted column"}
+                        {"key": base_key, "unified_git_style_patch": patch_text, "reason": "quote literal dotted column"}
                     ],
                     "notes": ["applied quoted identifier for dotted column"]
                 })

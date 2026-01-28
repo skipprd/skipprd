@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -7,6 +7,13 @@ use react_core::llm::ChatMessage;
 use react_core::providers::DatasetCatalogProvider;
 
 use crate::data_engineer::project_fs;
+
+fn sha256_hex(s: &str) -> String {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(s.as_bytes());
+    hex::encode(hasher.finalize())
+}
 
 fn parse_json_from_llm(text: &str) -> Result<Value, String> {
     // The prompt instructs JSON-only, but be resilient to accidental wrappers.
@@ -26,10 +33,57 @@ fn parse_json_from_llm(text: &str) -> Result<Value, String> {
     serde_json::from_str::<Value>(&s[start..=end]).map_err(|e| e.to_string())
 }
 
-#[derive(Clone, Debug, Deserialize, Default)]
-struct LlmPatchResponse {
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+struct ReplaceFile {
     #[serde(default)]
-    patch_text: String,
+    path: Option<String>,
+    #[serde(default)]
+    new_text: String,
+    #[serde(default)]
+    expected_sha256: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+struct ReplaceRange {
+    #[serde(default)]
+    path: Option<String>,
+    start_line: usize,
+    end_line: usize,
+    #[serde(default)]
+    new_text: String,
+    #[serde(default)]
+    expected_sha256: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+struct ReplaceListEdit {
+    start_line: usize,
+    end_line: usize,
+    #[serde(default)]
+    new_text: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+struct ReplaceList {
+    #[serde(default)]
+    path: Option<String>,
+    edits: Vec<ReplaceListEdit>,
+    #[serde(default)]
+    expected_sha256: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+struct LlmPatchResponse {
+    /// Preferred: git-style unified diff (single file or bundle).
+    #[serde(default)]
+    unified_git_style_patch: String,
+    /// Preferred structured primitives: the suite/tool will canonicalize into a git-style patch deterministically.
+    #[serde(default)]
+    replace_file: Option<ReplaceFile>,
+    #[serde(default)]
+    replace_range: Option<ReplaceRange>,
+    #[serde(default)]
+    replace_list: Option<ReplaceList>,
     #[serde(default)]
     notes: Vec<String>,
 }
@@ -41,8 +95,11 @@ fn parse_llm_patch_response(text: &str) -> Result<LlmPatchResponse, String> {
 
 /// Ask the LLM for a patch for one expected file, apply it in-memory, and retry on patch errors.
 ///
-/// - The LLM must return JSON: {"patch_text":"...","notes":[...]}
-/// - `patch_text` must be a git-style unified diff (may include a single-file bundle).
+/// - The LLM must return JSON and choose EXACTLY ONE patch primitive:
+///   - unified_git_style_patch (git-style unified diff), OR
+///   - replace_file, OR
+///   - replace_range, OR
+///   - replace_list
 /// - The patch must target exactly `expected_rel_path` (no other files).
 pub async fn llm_patch_loop_single_file(
     ctx: &AgentCtx,
@@ -56,13 +113,26 @@ pub async fn llm_patch_loop_single_file(
 
     let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
     let key = format!("{}/{}", base, expected_rel_path);
-    let existing = ctx
+    let existing_opt = ctx
         .storage
         .get_bytes(&key)
         .await
         .ok()
-        .map(|b| String::from_utf8_lossy(&b).to_string())
-        .unwrap_or_default();
+        .map(|b| String::from_utf8_lossy(&b).to_string());
+    let existed = existing_opt.is_some();
+    let existing = existing_opt.unwrap_or_default();
+    let base_sha256 = sha256_hex(&existing);
+
+    // Always include the raw file content in the prompt payload.
+    let user_payload_value = parse_json_from_llm(&user_payload_json)?;
+    let initial_user = serde_json::json!({
+        "expected_rel_path": expected_rel_path,
+        "base_sha256": base_sha256,
+        "existing_content": existing,
+        "input": user_payload_value,
+        "instruction": "Return ONLY JSON. Choose EXACTLY ONE patch primitive: unified_git_style_patch | replace_file | replace_range | replace_list. Prefer replace_* primitives when possible. The patch MUST modify ONLY expected_rel_path."
+    })
+    .to_string();
 
     let mut messages: Vec<ChatMessage> = vec![
         ChatMessage {
@@ -71,7 +141,7 @@ pub async fn llm_patch_loop_single_file(
         },
         ChatMessage {
             role: "user".to_string(),
-            content: user_payload_json.clone(),
+            content: initial_user.clone(),
         },
     ];
 
@@ -82,30 +152,111 @@ pub async fn llm_patch_loop_single_file(
             .chat(&messages)
             .map_err(|e| format!("LLM patch authoring call failed: {}", e))?;
         let parsed = parse_llm_patch_response(&resp_text)?;
-        let patch_text = parsed.patch_text.trim().to_string();
-        if patch_text.is_empty() {
-            last_err = Some("LLM returned empty patch_text".to_string());
+        let unified = parsed.unified_git_style_patch.trim().to_string();
+
+        let mut provided = 0usize;
+        if !unified.is_empty() {
+            provided += 1;
+        }
+        if parsed.replace_file.is_some() {
+            provided += 1;
+        }
+        if parsed.replace_range.is_some() {
+            provided += 1;
+        }
+        if parsed.replace_list.is_some() {
+            provided += 1;
+        }
+        if provided != 1 {
+            last_err = Some("LLM response must include exactly one of: unified_git_style_patch | replace_file | replace_range | replace_list".to_string());
         } else {
-            match project_fs::apply_patch_bundle(ctx, datasets, &patch_text).await {
-                Ok(outcomes) => {
-                    if outcomes.len() != 1 {
-                        last_err = Some(format!(
-                            "patch must target exactly one file (expected '{}'), but patch touched {} files",
-                            expected_rel_path,
-                            outcomes.len()
-                        ));
-                    } else if outcomes[0].rel_path != expected_rel_path {
-                        last_err = Some(format!(
-                            "patch targeted '{}' but expected '{}'",
-                            outcomes[0].rel_path, expected_rel_path
-                        ));
-                    } else {
-                        return Ok((outcomes.into_iter().next().unwrap(), parsed.notes));
+            // Build a canonical git-style patch text deterministically from the selected primitive.
+            let patch_text: Result<String, String> = if !unified.is_empty() {
+                Ok(unified.clone())
+            } else if let Some(rf) = parsed.replace_file.as_ref() {
+                if let Some(p) = rf.path.as_ref() {
+                    let rel = project_fs::normalize_rel_path(p)?;
+                    if rel != expected_rel_path {
+                        return Err(format!("replace_file.path '{}' did not match expected_rel_path '{}'", rel, expected_rel_path));
                     }
                 }
-                Err(e) => {
-                    last_err = Some(e);
+                if let Some(expected) = rf.expected_sha256.as_deref() {
+                    if expected != base_sha256 {
+                        return Err(format!(
+                            "expected_sha256 mismatch for {}: expected {}, got {}",
+                            expected_rel_path, expected, base_sha256
+                        ));
+                    }
                 }
+                project_fs::create_git_patch_text(&existing, &rf.new_text, expected_rel_path, existed)
+            } else if let Some(rr) = parsed.replace_range.as_ref() {
+                if let Some(p) = rr.path.as_ref() {
+                    let rel = project_fs::normalize_rel_path(p)?;
+                    if rel != expected_rel_path {
+                        return Err(format!("replace_range.path '{}' did not match expected_rel_path '{}'", rel, expected_rel_path));
+                    }
+                }
+                if let Some(expected) = rr.expected_sha256.as_deref() {
+                    if expected != base_sha256 {
+                        return Err(format!(
+                            "expected_sha256 mismatch for {}: expected {}, got {}",
+                            expected_rel_path, expected, base_sha256
+                        ));
+                    }
+                }
+                let new_text = project_fs::apply_replace_range(&existing, rr.start_line, rr.end_line, &rr.new_text)?;
+                project_fs::create_git_patch_text(&existing, &new_text, expected_rel_path, true)
+            } else if let Some(rl) = parsed.replace_list.as_ref() {
+                if let Some(p) = rl.path.as_ref() {
+                    let rel = project_fs::normalize_rel_path(p)?;
+                    if rel != expected_rel_path {
+                        return Err(format!("replace_list.path '{}' did not match expected_rel_path '{}'", rel, expected_rel_path));
+                    }
+                }
+                if let Some(expected) = rl.expected_sha256.as_deref() {
+                    if expected != base_sha256 {
+                        return Err(format!(
+                            "expected_sha256 mismatch for {}: expected {}, got {}",
+                            expected_rel_path, expected, base_sha256
+                        ));
+                    }
+                }
+                let edits: Vec<project_fs::ReplaceListEdit> = rl
+                    .edits
+                    .iter()
+                    .map(|e| project_fs::ReplaceListEdit {
+                        start_line: e.start_line,
+                        end_line: e.end_line,
+                        new_text: e.new_text.clone(),
+                    })
+                    .collect();
+                let new_text = project_fs::apply_replace_list(&existing, &edits)?;
+                project_fs::create_git_patch_text(&existing, &new_text, expected_rel_path, true)
+            } else {
+                Err("invalid patch response".to_string())
+            };
+
+            match patch_text {
+                Ok(patch_text) => match project_fs::apply_patch_bundle(ctx, datasets, &patch_text).await {
+                    Ok(outcomes) => {
+                        if outcomes.len() != 1 {
+                            last_err = Some(format!(
+                                "patch must target exactly one file (expected '{}'), but patch touched {} files",
+                                expected_rel_path,
+                                outcomes.len()
+                            ));
+                        } else if outcomes[0].rel_path != expected_rel_path {
+                            last_err = Some(format!(
+                                "patch targeted '{}' but expected '{}'",
+                                outcomes[0].rel_path, expected_rel_path
+                            ));
+                        } else {
+                            return Ok((outcomes.into_iter().next().unwrap(), parsed.notes));
+                        }
+                    }
+                    Err(e) => last_err = Some(e),
+                },
+                Err(e) => last_err = Some(e),
             }
         }
 
@@ -115,9 +266,10 @@ pub async fn llm_patch_loop_single_file(
             "attempt": attempt,
             "error": err,
             "expected_rel_path": expected_rel_path,
+            "base_sha256": base_sha256,
             "existing_content": existing,
-            "previous_patch_text": parsed.patch_text,
-            "instruction": "Return ONLY corrected JSON: {\"patch_text\":\"...\",\"notes\":[...]}. The patch MUST modify ONLY expected_rel_path and be git-style unified diff. If creating a new file, it MUST use --- /dev/null and +++ b/<path>."
+            "previous_response": parsed,
+            "instruction": "Return ONLY corrected JSON. Choose EXACTLY ONE patch primitive: unified_git_style_patch | replace_file | replace_range | replace_list. The patch MUST modify ONLY expected_rel_path. Prefer replace_* primitives when possible. If you provide unified_git_style_patch, it MUST be a git-style unified diff; if creating a new file it MUST use --- /dev/null and +++ b/<path>."
         })
         .to_string();
         messages.push(ChatMessage {

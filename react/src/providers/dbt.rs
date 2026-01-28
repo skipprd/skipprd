@@ -589,6 +589,22 @@ impl DbtProvider for DbtProjectProvider {
 
         let use_docker = self.runner.mode.to_lowercase() == "docker";
         let profiles_path = profiles_dir.as_ref().map(|s| Path::new(s));
+
+        // Hard fail if dbt CLI itself is broken on this runner (do NOT attempt to repair).
+        // This catches host-level Python/env issues early (e.g. import errors) before we try deps/parse/compile.
+        let version_res = if use_docker {
+            run_cmd_docker_labeled(&self.runner, &root, profiles_path, &["--version"], &envs, "version")
+        } else {
+            run_cmd_labeled("dbt", &["--version"], &root, &envs, "version")
+        };
+        if !version_res.status_ok {
+            return Err(format!(
+                "dbt environment check failed (dbt --version). This is a host/runner issue; do not attempt auto-repair.\n\nstdout:\n{}\n\nstderr:\n{}",
+                version_res.stdout.trim(),
+                version_res.stderr.trim()
+            ));
+        }
+
         let deps_res = if use_docker {
             run_cmd_docker_labeled(&self.runner, &root, profiles_path, &["deps"], &envs, "deps")
         } else {

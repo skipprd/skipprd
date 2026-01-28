@@ -9,7 +9,7 @@ storage:
 scope:
   tenant: picnic
   workspace: dev
-  project_id: picnic
+  project_id: example
 
 llm:
   # Keep secrets (api keys) in env via EnvSecretsProvider (e.g. LLM_API_KEY).
@@ -35,7 +35,7 @@ providers:
 
     # Bronze/raw schema (Glue database) for discovery + dbt sources.
     # This maps to dbt-athena profile key: `schema:` when reading raw sources via `source()`.
-    source_schema: picnic
+    source_schema: test_raw
 
     # NOTE: silver/gold are configured via DBT suffix naming below (recommended).
     result_s3: s3://asgsdag-datalake/
@@ -59,7 +59,7 @@ providers:
     # This avoids accidental doubled schemas like `test_warehouse_test_warehouse`.
     naming:
       # Base schema name (dbt target.schema). Example: `test`
-      target_schema: picnic
+      target_schema: example
       # Tier suffixes. Example schemas: `test_silver`, `test_warehouse`
       silver_suffix: silver
       gold_suffix: gold

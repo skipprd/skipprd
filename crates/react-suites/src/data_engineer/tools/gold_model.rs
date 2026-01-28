@@ -67,7 +67,17 @@ fn build_gold_sys_prompt(dialect: &str, max_items: usize) -> String {
          Task: author dbt GOLD mart model(s) for a warehouse project.\n\
          Dialect: {dialect}\n\
          Output MUST be valid JSON only.\n\
-         Output schema: {{\"patch_text\":\"...\",\"notes\":[\"...\"]}}\n\
+         You MUST choose EXACTLY ONE patch primitive to modify the provided model_path.\n\
+         Prefer structured primitives (replace_file / replace_range / replace_list) over unified diffs.\n\
+         Output schema:\n\
+         {{\n\
+           \"notes\": [\"...\"],\n\
+           \"unified_git_style_patch\": \"...\" | \"\",\n\
+           \"replace_file\": {{\"new_text\":\"...\"}} | null,\n\
+           \"replace_range\": {{\"start_line\":1,\"end_line\":1,\"new_text\":\"...\"}} | null,\n\
+           \"replace_list\": {{\"edits\":[{{\"start_line\":1,\"end_line\":1,\"new_text\":\"...\"}}]}} | null\n\
+         }}\n\
+         (Exactly ONE of unified_git_style_patch/replace_file/replace_range/replace_list must be provided; the others must be empty/null.)\n\
          \n\
          CRITICAL gold rules:\n\
          - You MUST write a SELECT-based dbt model.\n\
@@ -447,7 +457,7 @@ mod tests {
         .expect("patch");
         let llm = Arc::new(MockLlm {
             resp: serde_json::json!({
-                "patch_text": patch_text,
+                "unified_git_style_patch": patch_text,
                 "notes": []
             })
             .to_string(),
@@ -508,7 +518,7 @@ mod tests {
         .expect("patch");
         let llm = Arc::new(MockLlm {
             resp: serde_json::json!({
-                "patch_text": patch_text,
+                "unified_git_style_patch": patch_text,
                 "notes": []
             })
             .to_string(),
@@ -565,7 +575,7 @@ mod tests {
         .expect("patch");
         let llm = Arc::new(MockLlm {
             resp: serde_json::json!({
-                "patch_text": patch_text,
+                "unified_git_style_patch": patch_text,
                 "notes": ["ok"]
             })
             .to_string(),
