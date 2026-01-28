@@ -227,18 +227,13 @@ impl Tool for ApproveAndSaveArtifactTool {
                 .strip_prefix(&(ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string() + "/"))
                 .unwrap_or(&current_key)
                 .to_string();
-            let patch_text = crate::data_engineer::project_fs::create_git_patch_text(
-                existing.as_deref().unwrap_or(""),
-                &content_final,
-                &rel_path,
-                existing.is_some(),
-            )?;
             let outcome = crate::data_engineer::project_fs::apply_patch(
                 ctx,
                 None,
                 &rel_path,
-                &patch_text,
+                &content_final,
                 None,
+                crate::data_engineer::project_fs::PatchApplyKind::FullOverwrite,
             )
             .await?;
             // Log focus step for auditing which artifact is being considered
@@ -286,13 +281,15 @@ impl Tool for ApproveAndSaveArtifactTool {
             .strip_prefix(&(ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string() + "/"))
             .unwrap_or(&current_key)
             .to_string();
-        let patch_text = crate::data_engineer::project_fs::create_git_patch_text(
-            existing.as_deref().unwrap_or(""),
-            &content_final,
+        let outcome = crate::data_engineer::project_fs::apply_patch(
+            ctx,
+            None,
             &rel_path,
-            existing.is_some(),
-        )?;
-        let outcome = crate::data_engineer::project_fs::apply_patch(ctx, None, &rel_path, &patch_text, None).await?;
+            &content_final,
+            None,
+            crate::data_engineer::project_fs::PatchApplyKind::FullOverwrite,
+        )
+        .await?;
         let status = if outcome.existed { "modified" } else { "added" };
 
         // Save patched content (single canonical path)

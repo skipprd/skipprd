@@ -144,6 +144,7 @@ mod tests {
     use react_core::storage::{InMemoryStorageAdapter, StorageAdapter};
     use async_trait::async_trait;
     use std::sync::{Arc, Mutex};
+    use sha2::Digest;
 
     #[derive(Default)]
     struct MockLlm {
@@ -254,6 +255,12 @@ mod tests {
         })
     }
 
+    fn sha256_hex(s: &str) -> String {
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(s.as_bytes());
+        hex::encode(hasher.finalize())
+    }
+
     #[tokio::test]
     async fn dbt_validate_retries_once_after_remediation_on_sql_failure() {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
@@ -269,12 +276,10 @@ mod tests {
                 serde_json::json!({
                     "changes": [{
                         "key":"t/w/p/dbt/models/m.sql",
-                        "unified_git_style_patch": crate::data_engineer::project_fs::create_git_patch_text(
-                            "select 1",
-                            "select 1\\n",
-                            "models/m.sql",
-                            true
-                        ).expect("patch"),
+                        "replace_file": {
+                            "new_text": "select 1\\n",
+                            "expected_sha256": sha256_hex("select 1")
+                        },
                         "reason":"minimal change to trigger retry"
                     }],
                     "notes": []

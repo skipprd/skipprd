@@ -26,6 +26,51 @@ pub mod patch_protocol;
 pub mod project_files;
 pub mod plan;
 
+fn lock_prompt_for_plan(
+    kind: &str,
+    plan_key: &str,
+    consecutive: usize,
+    total: usize,
+    next_items: &[String],
+    expected_paths: &[String],
+) -> String {
+    let mut s = String::new();
+    s.push_str(&format!(
+        "Plan-batched authoring is locked ({kind}).\n\n\
+Reason:\n\
+- consecutive_batch_failures = {consecutive} (limit {})\n\
+- total_batch_failures = {total}\n\n\
+Plan:\n\
+- plan_key: {plan_key}\n",
+        crate::data_engineer::tools::apply_next_batch::MAX_CONSECUTIVE_BATCH_FAILURES
+    ));
+    if !next_items.is_empty() {
+        s.push_str("\nNext batch items:\n");
+        for it in next_items.iter().take(6) {
+            s.push_str("- ");
+            s.push_str(it);
+            s.push('\n');
+        }
+    }
+    if !expected_paths.is_empty() {
+        s.push_str("\nRecommended next step:\n");
+        s.push_str("- Apply a targeted non-preview `dbt_files op=patch` to fix the failing artifact(s):\n");
+        for p in expected_paths.iter().take(6) {
+            s.push_str("  - ");
+            s.push_str(p);
+            s.push('\n');
+        }
+        s.push_str(
+            "\nThen retry. This lock exists to prevent infinite loops when batch application repeatedly fails.\n",
+        );
+    } else {
+        s.push_str(
+            "\nRecommended next step:\n- Apply a targeted non-preview `dbt_files op=patch` to the failing DBT artifact(s), then retry.\n",
+        );
+    }
+    s
+}
+
 /// Agent-mode policy: preserve strict interrupts (ask_user/ask_approval), but otherwise accept finals.
 struct InterruptOnlyPolicy;
 
@@ -733,7 +778,7 @@ impl DataEngineerSuite {
 
                     tools_card_lines = vec![
                         "Allowed tools (authoring phase; HARD constraint: mutation required next):",
-                        "- dbt_files(args:{op:\"patch\", unified_git_style_patch?:string, replace_file?:{path:string,new_text:string,expected_sha256?:string}|[{...}], replace_range?:{path:string,start_line:int,end_line:int,new_text:string,expected_sha256?:string}|[{...}], replace_list?:{path:string,edits:[{start_line:int,end_line:int,new_text:string}],expected_sha256?:string}|[{...}], path?:string, preview_diff?:bool})",
+                        "- dbt_files(args:{op:\"patch\", replace_file?:{path:string,new_text:string,expected_sha256?:string}|[{...}], replace_range?:{path:string,start_line:int,end_line:int,new_text:string,expected_sha256?:string}|[{...}], replace_list?:{path:string,edits:[{start_line:int,end_line:int,new_text:string}],expected_sha256?:string}|[{...}], path?:string, preview_diff?:bool})",
                         "- ask_user(args:{prompt:string})",
                         "",
                         "Not available: read/explore tools, dbt_validate, publish_dbt_to_provider.",
@@ -772,7 +817,7 @@ impl DataEngineerSuite {
 						tools_card_lines = vec![
 							"Allowed tools (authoring phase; plan-batched, deterministic):",
 							"- apply_next_cleanse_batch(args:{instructions?:string})",
-							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\", path?:string, prefix?:string, unified_git_style_patch?:string, replace_file?:any, replace_range?:any, replace_list?:any, pointer?:string, limit?:int, max_chars?:int, preview_diff?:bool})",
+							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\", path?:string, prefix?:string, replace_file?:any, replace_range?:any, replace_list?:any, limit?:int, max_chars?:int, preview_diff?:bool})",
 							"- sql_schema / sql_stats / sql_sample / vect_query (discovery context)",
 							"- run_sql (targeted probes)",
 							"- ask_user",
@@ -784,7 +829,7 @@ impl DataEngineerSuite {
 						tools_card_lines = vec![
 							"Allowed tools (authoring phase; plan-batched, deterministic):",
 							"- apply_next_model_batch(args:{instructions?:string})",
-							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\", path?:string, prefix?:string, unified_git_style_patch?:string, replace_file?:any, replace_range?:any, replace_list?:any, pointer?:string, limit?:int, max_chars?:int, preview_diff?:bool})",
+							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\", path?:string, prefix?:string, replace_file?:any, replace_range?:any, replace_list?:any, limit?:int, max_chars?:int, preview_diff?:bool})",
 							"- sql_schema / sql_stats / sql_sample / vect_query (discovery context)",
 							"- run_sql (targeted probes)",
 							"- ask_user",
@@ -805,7 +850,7 @@ impl DataEngineerSuite {
 							"  - IMPORTANT: you MUST provide dataset_ids. This tool will NOT default to all datasets.",
 							"- gold_model(args:{items:[{name:string, folder?:\"marts\"|\"core\", goal?:string, description?:string, inputs:[string], instructions?:string}]})",
 							"  - IMPORTANT: max 5 items per call. Gold MUST use ref('stg_*') only; NO source().",
-							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\", path?:string, prefix?:string, unified_git_style_patch?:string, replace_file?:any, replace_range?:any, replace_list?:any, pointer?:string, limit?:int, max_chars?:int, preview_diff?:bool})",
+							"- dbt_files(args:{op:\"list\"|\"get\"|\"get_json\"|\"manifest_find\"|\"patch\", path?:string, prefix?:string, replace_file?:any, replace_range?:any, replace_list?:any, limit?:int, max_chars?:int, preview_diff?:bool})",
 							"- ask_user(args:{prompt:string})",
 							"",
 							"Not available in this phase: dbt_validate, publish_dbt_to_provider (suite handles these deterministically).",
@@ -1714,6 +1759,44 @@ impl DataEngineerSuite {
                             crate::data_engineer::plan::update_cleanse_progress_from_log(&mut plan, l);
                             let _ = crate::data_engineer::plan::save_cleanse_plan(&actx, &plan).await;
                         }
+                        // Hard stop: if plan-batched authoring is locked due to too many consecutive failures,
+                        // return control to the user with a single actionable message (do not loop).
+                        if plan.progress.consecutive_batch_failures
+                            >= crate::data_engineer::tools::apply_next_batch::MAX_CONSECUTIVE_BATCH_FAILURES
+                        {
+                            let next = crate::data_engineer::plan::cleanse_next_batch(&plan);
+                            let mut expected_paths: Vec<String> = Vec::new();
+                            for ds in next.iter() {
+                                if let Some(t) = plan.tasks.iter().find(|t| t.dataset_id == *ds) {
+                                    if let Some(p) = t.expected_model_path.as_deref() {
+                                        if !p.trim().is_empty() {
+                                            expected_paths.push(p.trim().to_string());
+                                        }
+                                    }
+                                }
+                            }
+                            expected_paths.sort();
+                            expected_paths.dedup();
+                            let reason = lock_prompt_for_plan(
+                                "cleanse",
+                                &plan.plan_key,
+                                plan.progress.consecutive_batch_failures,
+                                plan.progress.total_batch_failures,
+                                &next,
+                                &expected_paths,
+                            );
+                            let ts = chrono::Utc::now().to_rfc3339();
+                            let step = react_core::session::ThreadStep::GuardBlock {
+                                phase: phase.as_str().to_string(),
+                                kind: "batch_locked".to_string(),
+                                reason: reason.clone(),
+                                observation: react_core::session::Observation::fail(vec![reason.clone()]),
+                                ts,
+                                agent: "agent".to_string(),
+                            };
+                            let _ = thread_store.append_step(thread_id, step).await;
+                            return Ok(vec![FlowFrame::AwaitUser { prompt: reason }]);
+                        }
                         if plan.status != crate::data_engineer::plan::PlanStatus::Approved
                             && plan.status != crate::data_engineer::plan::PlanStatus::Completed
                         {
@@ -1735,7 +1818,7 @@ impl DataEngineerSuite {
                         // In that state, do NOT instruct apply_next_cleanse_batch; force repair-mode guidance.
                         if guard.last_validate_failed && !guard.mutated_since_fail {
                             let mut ctx = format!(
-                                "Approved cleanse plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using replace_file/replace_range/replace_list or unified_git_style_patch):\n",
+                                "Approved cleanse plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using replace_file/replace_range/replace_list):\n",
                                 plan.plan_key
                             );
                             if !last_validate_failed_models.is_empty() {
@@ -1760,7 +1843,7 @@ impl DataEngineerSuite {
                             // Run a repair authoring pass grounded in the failing model/file evidence.
                             if guard.last_validate_failed {
                                 let mut ctx = format!(
-                                    "Approved cleanse plan (stored at: {}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using replace_file/replace_range/replace_list or unified_git_style_patch):\n",
+                                    "Approved cleanse plan (stored at: {}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using replace_file/replace_range/replace_list):\n",
                                     plan.plan_key
                                 );
                                 if !last_validate_failed_models.is_empty() {
@@ -1816,6 +1899,42 @@ impl DataEngineerSuite {
                             crate::data_engineer::plan::update_model_progress_from_log(&mut plan, l);
                             let _ = crate::data_engineer::plan::save_model_plan(&actx, &plan).await;
                         }
+                        if plan.progress.consecutive_batch_failures
+                            >= crate::data_engineer::tools::apply_next_batch::MAX_CONSECUTIVE_BATCH_FAILURES
+                        {
+                            let next = crate::data_engineer::plan::model_next_batch(&plan);
+                            let mut expected_paths: Vec<String> = Vec::new();
+                            for n in next.iter() {
+                                if let Some(t) = plan.tasks.iter().find(|t| t.name == *n) {
+                                    if let Some(p) = t.expected_model_path.as_deref() {
+                                        if !p.trim().is_empty() {
+                                            expected_paths.push(p.trim().to_string());
+                                        }
+                                    }
+                                }
+                            }
+                            expected_paths.sort();
+                            expected_paths.dedup();
+                            let reason = lock_prompt_for_plan(
+                                "model",
+                                &plan.plan_key,
+                                plan.progress.consecutive_batch_failures,
+                                plan.progress.total_batch_failures,
+                                &next,
+                                &expected_paths,
+                            );
+                            let ts = chrono::Utc::now().to_rfc3339();
+                            let step = react_core::session::ThreadStep::GuardBlock {
+                                phase: phase.as_str().to_string(),
+                                kind: "batch_locked".to_string(),
+                                reason: reason.clone(),
+                                observation: react_core::session::Observation::fail(vec![reason.clone()]),
+                                ts,
+                                agent: "agent".to_string(),
+                            };
+                            let _ = thread_store.append_step(thread_id, step).await;
+                            return Ok(vec![FlowFrame::AwaitUser { prompt: reason }]);
+                        }
                         if plan.status != crate::data_engineer::plan::PlanStatus::Approved
                             && plan.status != crate::data_engineer::plan::PlanStatus::Completed
                         {
@@ -1837,7 +1956,7 @@ impl DataEngineerSuite {
                         // In that state, do NOT instruct apply_next_model_batch; force repair-mode guidance.
                         if guard.last_validate_failed && !guard.mutated_since_fail {
                             let mut ctx = format!(
-                                "Approved model plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using replace_file/replace_range/replace_list or unified_git_style_patch):\n",
+                                "Approved model plan (stored at: {}).\nThe last dbt_validate failed and a mutating fix is required before any further validation.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using replace_file/replace_range/replace_list):\n",
                                 plan.plan_key
                             );
                             if !last_validate_failed_models.is_empty() {
@@ -1861,7 +1980,7 @@ impl DataEngineerSuite {
                             if guard.last_validate_failed {
                                 // Same repair-mode behavior as cleanse: run authoring to patch failing files.
                                 let mut ctx = format!(
-                                    "Approved model plan (stored at: {}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using replace_file/replace_range/replace_list or unified_git_style_patch):\n",
+                                    "Approved model plan (stored at: {}).\nAll plan tasks are currently marked done, but the last dbt_validate failed.\n\nRepair targets (fix these DBT files directly with dbt_files op=patch using replace_file/replace_range/replace_list):\n",
                                     plan.plan_key
                                 );
                                 if !last_validate_failed_models.is_empty() {
@@ -2215,6 +2334,7 @@ impl DataEngineerSuite {
                                     "guard_state": {
                                         "last_validate_failed": guard.last_validate_failed,
                                         "mutated_since_fail": guard.mutated_since_fail,
+                                        "patched_since_fail": guard.patched_since_fail,
                                         "mutation_failures_since_validate": guard.mutation_failures_since_validate,
                                         "probe_required": guard.probe_required,
                                         "probe_satisfied": guard.probe_satisfied,
@@ -3058,6 +3178,7 @@ mod tests {
         let guard = crate::data_engineer::control_flow::DerivedGuardState {
             last_validate_failed: true,
             mutated_since_fail: false,
+            patched_since_fail: false,
             mutation_failures_since_validate: 0,
             probe_required: false,
             probe_satisfied: false,
@@ -3072,7 +3193,7 @@ mod tests {
             .expect("build_tools_for_phase should succeed");
 
         // Tool card should advertise patch primitives (not apply_next_* tools).
-        assert!(card.contains("unified_git_style_patch"));
+        assert!(card.contains("replace_file"));
         assert!(!card.contains("apply_next_model_batch"));
 
         // run_sql should not be available in hard mutation-only mode
@@ -3098,6 +3219,7 @@ mod tests {
         let guard = crate::data_engineer::control_flow::DerivedGuardState {
             last_validate_failed: true,
             mutated_since_fail: false,
+            patched_since_fail: false,
             mutation_failures_since_validate: 0,
             probe_required: false,
             probe_satisfied: false,
@@ -3114,7 +3236,7 @@ mod tests {
         )
         .expect("build_tools_for_phase should succeed");
 
-        assert!(card.contains("unified_git_style_patch"));
+        assert!(card.contains("replace_file"));
         assert!(!card.contains("apply_next_cleanse_batch"));
 
         let err = reg

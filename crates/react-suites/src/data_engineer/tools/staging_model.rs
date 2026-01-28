@@ -101,10 +101,29 @@ fn matching_staging_rel_paths_by_source(
         .collect()
 }
 
-fn build_staging_sys_prompt(dialect: &str, expected_db: &str, expected_table: &str) -> String {
+fn contains_unsupported_sql_for_provider(provider: &str, sql: &str) -> Option<&'static str> {
+    // Keep this intentionally conservative: only block known, repeat offender functions.
+    // Expand gradually as we observe real failures in dbt_validate for the active provider.
+    let p = provider.trim().to_lowercase();
+    if p == "athena" || p == "trino" {
+        let s = sql.to_ascii_lowercase();
+        if s.contains("initcap(") {
+            return Some("initcap() is not supported on Athena/Trino; remove it (use trim/lower/upper, or leave casing unchanged).");
+        }
+    }
+    None
+}
+
+fn build_staging_sys_prompt(
+    provider: &str,
+    dialect: &str,
+    expected_db: &str,
+    expected_table: &str,
+) -> String {
     format!(
         "You are an expert analytics engineer.\n\
          Task: author a dbt *staging/silver* model for ONE source dataset.\n\
+         Provider: {provider}\n\
          Dialect: {dialect}\n\
          Requirements:\n\
          - Output MUST be valid JSON only.\n\
@@ -112,6 +131,8 @@ fn build_staging_sys_prompt(dialect: &str, expected_db: &str, expected_table: &s
            Prefer structured primitives (replace_file / replace_range / replace_list) over unified diffs.\n\
          - CRITICAL: You MUST read from: FROM {{{{ source(\"{expected_db}\", \"{expected_table}\") }}}} (do not invent any other source name).\n\
          - This is SILVER: include sensible cleansing/normalization and stable column naming.\n\
+         - Dialect/provider compatibility:\n\
+           - If Provider is athena (Trino SQL), DO NOT use initcap() (it is not registered). Avoid title-casing strings.\n\
          - Use the provided schema_columns types to guide casting and cleansing. Do NOT guess types from names.\n\
          - Time-like fields MUST be detected from schema types when possible:\n\
            - timestamp/datetime types: timestamp, timestamptz, datetime\n\
@@ -140,15 +161,13 @@ fn build_staging_sys_prompt(dialect: &str, expected_db: &str, expected_table: &s
          Output schema:\n\
          {{\n\
            \"notes\": [\"...\"],\n\
-           \"unified_git_style_patch\": \"...\" | \"\",\n\
            \"replace_file\": {{\"new_text\":\"...\"}} | null,\n\
            \"replace_range\": {{\"start_line\":1,\"end_line\":1,\"new_text\":\"...\"}} | null,\n\
            \"replace_list\": {{\"edits\":[{{\"start_line\":1,\"end_line\":1,\"new_text\":\"...\"}}]}} | null\n\
          }}\n\
-         (Exactly ONE of unified_git_style_patch/replace_file/replace_range/replace_list must be provided; the others must be empty/null.)\n\
+         (Exactly ONE of replace_file/replace_range/replace_list must be provided; the others must be null.)\n\
          Patch rules:\n\
          - The patch MUST modify ONLY the expected_model_path.\n\
-         - If creating a new file, the patch MUST use `--- /dev/null` and `+++ b/<expected_model_path>`.\n\
          - Do NOT include a dbt config block; the suite injects schema/alias deterministically.\n"
     )
 }
@@ -201,13 +220,13 @@ impl Tool for StagingModelTool {
         };
         if existing_schema.is_none() {
             let seed = "version: 2\n".to_string();
-            let patch_text = project_fs::create_git_patch_text("", &seed, &schema_rel, false)?;
             let outcome = match project_fs::apply_patch(
                 ctx,
                 self.datasets.as_ref(),
                 &schema_rel,
-                &patch_text,
+                &seed,
                 None,
+                project_fs::PatchApplyKind::FullOverwrite,
             )
             .await
             {
@@ -249,13 +268,13 @@ impl Tool for StagingModelTool {
                 }
             };
             if canonical != existing {
-                let patch_text = project_fs::create_git_patch_text(existing, &canonical, &schema_rel, true)?;
                 let outcome = match project_fs::apply_patch(
                     ctx,
                     self.datasets.as_ref(),
                     &schema_rel,
-                    &patch_text,
+                    &canonical,
                     None,
+                    project_fs::PatchApplyKind::FullOverwrite,
                 )
                 .await
                 {
@@ -287,6 +306,9 @@ impl Tool for StagingModelTool {
         let dialect = crate::config::resolved_config_from_ctx(ctx)
             .map(active_provider_dialect)
             .unwrap_or_else(|| "Unknown SQL dialect".to_string());
+        let provider_name = crate::config::resolved_config_from_ctx(ctx)
+            .map(|cfg| if cfg.providers.athena.enabled { "athena" } else { "unknown" })
+            .unwrap_or("unknown");
 
         // Discover existing staging model files so we can update by semantic identity (source()),
         // not by filename (prevents duplicate staging models for the same dataset).
@@ -409,10 +431,17 @@ impl Tool for StagingModelTool {
                 .await
                 .ok()
                 .map(|b| String::from_utf8_lossy(&b).to_string());
-            let existed = existing_opt.is_some();
-            let existing = existing_opt.unwrap_or_default();
-            let patch_text = project_fs::create_git_patch_text(&existing, &sql_out, &rel_path, existed)?;
-            let outcome = project_fs::apply_patch(ctx, None, &rel_path, &patch_text, None).await?;
+            let _existed = existing_opt.is_some();
+            let _existing = existing_opt.unwrap_or_default();
+            let outcome = project_fs::apply_patch(
+                ctx,
+                None,
+                &rel_path,
+                &sql_out,
+                None,
+                project_fs::PatchApplyKind::FullOverwrite,
+            )
+            .await?;
             ctx.storage.put_bytes(&key, outcome.content.as_bytes(), "text/sql").await?;
             written.push(key);
             succeeded_dataset_ids.push(ds.clone());
@@ -470,7 +499,7 @@ impl Tool for StagingModelTool {
                 .map(|(n, t)| serde_json::json!({"name": n, "type": t}))
                 .collect();
 
-            let sys = build_staging_sys_prompt(&dialect, &expected_db, &expected_table);
+            let sys = build_staging_sys_prompt(provider_name, &dialect, &expected_db, &expected_table);
 
             let existing_sql = ctx
                 .storage
@@ -510,6 +539,10 @@ impl Tool for StagingModelTool {
                 errors.push(format!(
                     "{ds}: patched model does not contain expected source(\"{expected_db}\",\"{expected_table}\") after apply"
                 ));
+                continue;
+            }
+            if let Some(msg) = contains_unsupported_sql_for_provider(provider_name, &outcome.content) {
+                errors.push(format!("{ds}: unsupported SQL for provider '{provider_name}': {msg}"));
                 continue;
             }
 
@@ -610,7 +643,7 @@ mod tests {
 
     #[test]
     fn staging_sys_prompt_does_not_force_struct_dereference() {
-        let sys = build_staging_sys_prompt("Amazon Athena (engine v3 / Trino SQL)", "picnic", "track_app_opened");
+        let sys = build_staging_sys_prompt("athena", "Amazon Athena (engine v3 / Trino SQL)", "picnic", "track_app_opened");
         assert!(!sys.contains("DO NOT quote the whole path"));
         assert!(sys.contains("schema_columns as ground truth"));
         assert!(sys.contains("quote the entire identifier"));

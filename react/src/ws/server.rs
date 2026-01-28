@@ -17,6 +17,66 @@ use std::sync::Arc;
 
 // Steering prompts removed for model agent; model runs eagerly without awaiting user choice.
 
+fn env_bool(key: &str, default: bool) -> bool {
+    let dv = if default { "1" } else { "0" };
+    match std::env::var(key).unwrap_or_else(|_| dv.to_string()).trim() {
+        "1" | "true" | "TRUE" | "yes" | "YES" => true,
+        "0" | "false" | "FALSE" | "no" | "NO" => false,
+        _ => default,
+    }
+}
+
+fn ws_log_in(txt: &str) {
+    // Full WS payloads can be enormous (prompts, plan snapshots, etc). Default to compact logs.
+    if env_bool("WS_LOG_BODIES", false) {
+        tracing::info!("WS <- {}", txt);
+        return;
+    }
+    if let Ok(v) = serde_json::from_str::<Value>(txt) {
+        let typ = v.get("type").and_then(|x| x.as_str()).unwrap_or("unknown");
+        let cid = v.get("cid").and_then(|x| x.as_str());
+        let thread_id = v.get("thread_id").and_then(|x| x.as_str());
+        tracing::info!(
+            "WS <- type={} cid={} thread_id={}",
+            typ,
+            cid.unwrap_or("-"),
+            thread_id.unwrap_or("-")
+        );
+    } else {
+        tracing::info!("WS <- (non-json) bytes={}", txt.len());
+    }
+}
+
+fn ws_log_out(txt: &str) {
+    // Full WS payloads can be enormous (plan_update, trace, etc). Default to compact logs.
+    if env_bool("WS_LOG_BODIES", false) {
+        tracing::info!("WS -> {}", txt);
+        return;
+    }
+    if let Ok(v) = serde_json::from_str::<Value>(txt) {
+        let typ = v.get("type").and_then(|x| x.as_str()).unwrap_or("unknown");
+        // Suppress plan_update at INFO by default (it can be huge and frequent).
+        // Trace is intentionally allowed (compact) unless WS_LOG_BODIES is enabled.
+        if typ == "plan_update" && !env_bool("WS_LOG_PLAN_UPDATES", false) {
+            return;
+        }
+        let seq = v.get("seq").and_then(|x| x.as_i64());
+        let cid = v.get("cid").and_then(|x| x.as_str());
+        let for_cid = v.get("for_cid").and_then(|x| x.as_str());
+        let thread_id = v.get("thread_id").and_then(|x| x.as_str());
+        tracing::info!(
+            "WS -> type={} seq={} cid={} for_cid={} thread_id={}",
+            typ,
+            seq.map(|n| n.to_string()).unwrap_or_else(|| "-".to_string()),
+            cid.unwrap_or("-"),
+            for_cid.unwrap_or("-"),
+            thread_id.unwrap_or("-")
+        );
+    } else {
+        tracing::info!("WS -> (non-json) bytes={}", txt.len());
+    }
+}
+
 /// Start the WebSocket server with an injected suite registry and context.
 ///
 /// This is the preferred entrypoint for keeping `react` runtime generic: callers
@@ -37,7 +97,7 @@ pub async fn start_with_ctx(port: u16, suite_ctx: SuiteCtx) -> Result<(), String
                 while let Some(msg) = read.next().await {
                     match msg {
 						Ok(Message::Text(txt)) => {
-							tracing::info!("WS <- {}", txt);
+							ws_log_in(&txt);
 							// Fast-path new/open to stream initial frames immediately
 							if let Ok(v) = serde_json::from_str::<Value>(&txt) {
 								if let Some(t) = v.get("type").and_then(|x| x.as_str()) {
@@ -48,7 +108,7 @@ pub async fn start_with_ctx(port: u16, suite_ctx: SuiteCtx) -> Result<(), String
 											err.code = Some("invalid_request".to_string());
 											err.cid = cid_guess;
 											let s = serde_json::to_string(&err).unwrap_or_else(|_| "{\"v\":1,\"type\":\"error\",\"server_time\":\"\",\"error\":\"internal\"}".to_string());
-											tracing::info!("WS -> {}", s);
+											ws_log_out(&s);
 											let _ = write.send(Message::Text(s)).await;
 										}
 										continue;
@@ -59,7 +119,7 @@ pub async fn start_with_ctx(port: u16, suite_ctx: SuiteCtx) -> Result<(), String
 											err.code = Some("invalid_request".to_string());
 											err.cid = cid_guess;
 											let s = serde_json::to_string(&err).unwrap_or_else(|_| "{\"v\":1,\"type\":\"error\",\"server_time\":\"\",\"error\":\"internal\"}".to_string());
-											tracing::info!("WS -> {}", s);
+											ws_log_out(&s);
 											let _ = write.send(Message::Text(s)).await;
 										}
 										continue;
@@ -70,7 +130,7 @@ pub async fn start_with_ctx(port: u16, suite_ctx: SuiteCtx) -> Result<(), String
 											err.code = Some("invalid_request".to_string());
 											err.cid = cid_guess;
 											let s = serde_json::to_string(&err).unwrap_or_else(|_| "{\"v\":1,\"type\":\"error\",\"server_time\":\"\",\"error\":\"internal\"}".to_string());
-											tracing::info!("WS -> {}", s);
+											ws_log_out(&s);
 											let _ = write.send(Message::Text(s)).await;
 										}
 										continue;
@@ -81,7 +141,7 @@ pub async fn start_with_ctx(port: u16, suite_ctx: SuiteCtx) -> Result<(), String
 											err.code = Some("invalid_request".to_string());
 											err.cid = cid_guess;
 											let s = serde_json::to_string(&err).unwrap_or_else(|_| "{\"v\":1,\"type\":\"error\",\"server_time\":\"\",\"error\":\"internal\"}".to_string());
-											tracing::info!("WS -> {}", s);
+											ws_log_out(&s);
 											let _ = write.send(Message::Text(s)).await;
 										}
 										continue;
@@ -92,7 +152,7 @@ pub async fn start_with_ctx(port: u16, suite_ctx: SuiteCtx) -> Result<(), String
 											err.code = Some("invalid_request".to_string());
 											err.cid = cid_guess;
 											let s = serde_json::to_string(&err).unwrap_or_else(|_| "{\"v\":1,\"type\":\"error\",\"server_time\":\"\",\"error\":\"internal\"}".to_string());
-											tracing::info!("WS -> {}", s);
+											ws_log_out(&s);
 											let _ = write.send(Message::Text(s)).await;
 										}
 										continue;
@@ -103,7 +163,7 @@ pub async fn start_with_ctx(port: u16, suite_ctx: SuiteCtx) -> Result<(), String
 							match handle_message(&txt, &mut state).await {
 								Ok(frames) => {
 									for f in frames {
-										tracing::info!("WS -> {}", f);
+										ws_log_out(&f);
 										let _ = write.send(Message::Text(f)).await;
 									}
 								}
@@ -116,7 +176,7 @@ pub async fn start_with_ctx(port: u16, suite_ctx: SuiteCtx) -> Result<(), String
 									err.cid = cid_guess;
 									let s = serde_json::to_string(&err)
 										.unwrap_or_else(|_| "{\"v\":1,\"type\":\"error\",\"server_time\":\"\",\"error\":\"internal\"}".to_string());
-									tracing::info!("WS -> {}", s);
+									ws_log_out(&s);
 									let _ = write.send(Message::Text(s)).await;
 								}
 							}
@@ -1396,7 +1456,7 @@ async fn process_new(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt
 	ok.cid = Some(cid.clone());
 	{
 		let s = serde_json::to_string(&ok).unwrap();
-		tracing::info!("WS -> {}", s);
+		ws_log_out(&s);
 		let _ = write.send(Message::Text(s)).await;
 	}
 	// thread_assigned
@@ -1404,7 +1464,7 @@ async fn process_new(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt
 	{
 		let s = serde_json::to_string(&ta).unwrap();
 		state.buffer_last(&s);
-		tracing::info!("WS -> {}", s);
+		ws_log_out(&s);
 		let _ = write.send(Message::Text(s)).await;
 	}
 	// processing
@@ -1415,7 +1475,7 @@ async fn process_new(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt
 	{
 		let s = serde_json::to_string(&pr).unwrap();
 		state.buffer_last(&s);
-		tracing::info!("WS -> {}", s);
+		ws_log_out(&s);
 		let _ = write.send(Message::Text(s)).await;
 	}
 	// agent with periodic updates
@@ -1491,7 +1551,7 @@ async fn process_open(v: &Value, state: &mut ConnState, write: &mut (impl SinkEx
 	ok.cid = Some(cid.clone());
 	{
 		let s = serde_json::to_string(&ok).unwrap();
-		tracing::info!("WS -> {}", s);
+		ws_log_out(&s);
 		let _ = write.send(Message::Text(s)).await;
 	}
 	// processing
@@ -1502,7 +1562,7 @@ async fn process_open(v: &Value, state: &mut ConnState, write: &mut (impl SinkEx
 	{
 		let s = serde_json::to_string(&pr).unwrap();
 		state.buffer_last(&s);
-		tracing::info!("WS -> {}", s);
+		ws_log_out(&s);
 		let _ = write.send(Message::Text(s)).await;
 	}
 	// agent with periodic updates
@@ -1560,7 +1620,7 @@ async fn process_user(v: &Value, state: &mut ConnState, write: &mut (impl SinkEx
 	ok.cid = Some(cid.clone());
 	{
 		let s = serde_json::to_string(&ok).unwrap();
-		tracing::info!("WS -> {}", s);
+		ws_log_out(&s);
 		let _ = write.send(Message::Text(s)).await;
 	}
 	// processing
@@ -1571,7 +1631,7 @@ async fn process_user(v: &Value, state: &mut ConnState, write: &mut (impl SinkEx
 	{
 		let s = serde_json::to_string(&pr).unwrap();
 		state.buffer_last(&s);
-		tracing::info!("WS -> {}", s);
+		ws_log_out(&s);
 		let _ = write.send(Message::Text(s)).await;
 	}
 
@@ -1633,7 +1693,7 @@ async fn process_approve(v: &Value, state: &mut ConnState, write: &mut (impl Sin
 	ok.cid = Some(cid.clone());
 	{
 		let s = serde_json::to_string(&ok).unwrap();
-		tracing::info!("WS -> {}", s);
+		ws_log_out(&s);
 		let _ = write.send(Message::Text(s)).await;
 	}
 	// processing
@@ -1644,7 +1704,7 @@ async fn process_approve(v: &Value, state: &mut ConnState, write: &mut (impl Sin
 	{
 		let s = serde_json::to_string(&pr).unwrap();
 		state.buffer_last(&s);
-		tracing::info!("WS -> {}", s);
+		ws_log_out(&s);
 		let _ = write.send(Message::Text(s)).await;
 	}
 	// append user=approve step
@@ -1694,7 +1754,7 @@ async fn process_reject(v: &Value, state: &mut ConnState, write: &mut (impl Sink
 	ok.cid = Some(cid.clone());
 	{
 		let s = serde_json::to_string(&ok).unwrap();
-		tracing::info!("WS -> {}", s);
+		ws_log_out(&s);
 		let _ = write.send(Message::Text(s)).await;
 	}
 	// processing
@@ -1705,7 +1765,7 @@ async fn process_reject(v: &Value, state: &mut ConnState, write: &mut (impl Sink
 	{
 		let s = serde_json::to_string(&pr).unwrap();
 		state.buffer_last(&s);
-		tracing::info!("WS -> {}", s);
+		ws_log_out(&s);
 		let _ = write.send(Message::Text(s)).await;
 	}
 	// append user=reject step
@@ -1892,6 +1952,15 @@ async fn run_agent_with_processing_suite(
 	let mut plan_tick = tokio::time::interval(std::time::Duration::from_millis(400));
 	plan_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+	// Emit trace frames for tool activity by polling new ThreadStep::Tool entries.
+	// This complements ctx.trace_tx, which only captures the core agent transcript.
+	let mut last_tool_step_idx: usize = match state.thread_store().get(thread_id).await {
+		Ok(log) => log.steps.len(),
+		Err(_) => 0,
+	};
+	let mut tool_tick = tokio::time::interval(std::time::Duration::from_millis(200));
+	tool_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
 	// While the suite/agent is running, forward trace lines (if enabled).
 	loop {
 		tokio::select! {
@@ -1923,7 +1992,7 @@ async fn run_agent_with_processing_suite(
 				sp.for_cid = Some(cid.to_string());
 				let s = serde_json::to_string(&sp).unwrap();
 				state.buffer_last(&s);
-				tracing::info!("WS -> {}", s);
+				ws_log_out(&s);
 				let _ = write.send(Message::Text(s)).await;
 			}
 			_ = plan_tick.tick() => {
@@ -1958,9 +2027,69 @@ async fn run_agent_with_processing_suite(
 					pu.for_cid = Some(cid.to_string());
 					let s = serde_json::to_string(&pu).unwrap();
 					state.buffer_last(&s);
-					tracing::info!("WS -> {}", s);
+					ws_log_out(&s);
 					let _ = write.send(Message::Text(s)).await;
 				}
+			}
+			_ = tool_tick.tick() => {
+				if !trace_enabled {
+					continue;
+				}
+				let store = state.thread_store();
+				let log = match store.get(thread_id).await {
+					Ok(l) => l,
+					Err(_) => continue,
+				};
+				if last_tool_step_idx >= log.steps.len() {
+					continue;
+				}
+				for step in log.steps.iter().skip(last_tool_step_idx) {
+					let ThreadStep::Tool { name, observation, .. } = step else { continue };
+					// Emit "tool_call <name>" and then an observation summary.
+					{
+						let mut tr = api::TraceResponse::new(
+							1,
+							m::trace_response::Type::Trace,
+							now_iso(),
+							state.next_seq(),
+							thread_id.to_string(),
+							format!("tool_call {}", name),
+						);
+						tr.for_cid = Some(cid.to_string());
+						let s = serde_json::to_string(&tr).unwrap();
+						state.buffer_last(&s);
+						ws_log_out(&s);
+						let _ = write.send(Message::Text(s)).await;
+					}
+					{
+						let ok = observation.ok;
+						let err = observation
+							.errors
+							.first()
+							.map(|s| s.as_str())
+							.unwrap_or("");
+						let text = match ok {
+							true => "tool_ok".to_string(),
+							false => {
+								if err.is_empty() { "tool_error".to_string() } else { format!("tool_error: {err}") }
+							}
+						};
+						let mut tr = api::TraceResponse::new(
+							1,
+							m::trace_response::Type::Trace,
+							now_iso(),
+							state.next_seq(),
+							thread_id.to_string(),
+							text,
+						);
+						tr.for_cid = Some(cid.to_string());
+						let s = serde_json::to_string(&tr).unwrap();
+						state.buffer_last(&s);
+						ws_log_out(&s);
+						let _ = write.send(Message::Text(s)).await;
+					}
+				}
+				last_tool_step_idx = log.steps.len();
 			}
 			Some(line) = trace_rx.recv() => {
 				if !trace_enabled { continue; }
@@ -1979,7 +2108,7 @@ async fn run_agent_with_processing_suite(
 				tr.for_cid = Some(cid.to_string());
 				let s = serde_json::to_string(&tr).unwrap();
 				state.buffer_last(&s);
-				tracing::info!("WS -> {}", s);
+				ws_log_out(&s);
 				let _ = write.send(Message::Text(s)).await;
 			}
 			res = &mut agent_task => {
@@ -2027,7 +2156,7 @@ async fn run_agent_with_processing_suite(
 							}
 							let s = serde_json::to_string(&resp).unwrap();
 							state.buffer_last(&s);
-							tracing::info!("WS -> {}", s);
+							ws_log_out(&s);
 							let _ = write.send(Message::Text(s)).await;
 
 							// Persist as its own step so history can show reviewer output.
@@ -2056,7 +2185,7 @@ async fn run_agent_with_processing_suite(
 								tk.for_cid = Some(cid.to_string());
 								let s = serde_json::to_string(&tk).unwrap();
 								state.buffer_last(&s);
-								tracing::info!("WS -> {}", s);
+								ws_log_out(&s);
 								let _ = write.send(Message::Text(s)).await;
 							}
 							let tseq = state.next_thread_seq(thread_id);
@@ -2071,7 +2200,7 @@ async fn run_agent_with_processing_suite(
 							);
 							let s = serde_json::to_string(&resp).unwrap();
 							state.buffer_last(&s);
-							tracing::info!("WS -> {}", s);
+							ws_log_out(&s);
 							let _ = write.send(Message::Text(s)).await;
 
 							// Debug: print persisted thread steps
@@ -2094,7 +2223,7 @@ async fn run_agent_with_processing_suite(
 							);
 							let s = serde_json::to_string(&resp).unwrap();
 							state.buffer_last(&s);
-							tracing::info!("WS -> {}", s);
+							ws_log_out(&s);
 							let _ = write.send(Message::Text(s)).await;
 							{
 								let store = state.thread_store();
@@ -2115,7 +2244,7 @@ async fn run_agent_with_processing_suite(
 							);
 							let s = serde_json::to_string(&resp).unwrap();
 							state.buffer_last(&s);
-							tracing::info!("WS -> {}", s);
+							ws_log_out(&s);
 							let _ = write.send(Message::Text(s)).await;
 							{
 								let store = state.thread_store();

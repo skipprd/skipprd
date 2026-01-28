@@ -11,7 +11,7 @@ use crate::data_engineer::plan;
 use crate::data_engineer::plan::{CleansePlan, ModelPlan, TaskStatus};
 use crate::data_engineer::tools;
 
-const MAX_CONSECUTIVE_BATCH_FAILURES: usize = 3;
+pub(crate) const MAX_CONSECUTIVE_BATCH_FAILURES: usize = 3;
 
 fn extract_string_arg(args: &Value, key: &str) -> Option<String> {
     args.get(key)

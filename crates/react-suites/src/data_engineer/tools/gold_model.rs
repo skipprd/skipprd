@@ -40,6 +40,18 @@ fn truncate(s: &str, max: usize) -> String {
     out
 }
 
+fn contains_unsupported_sql_for_provider(provider: &str, sql: &str) -> Option<&'static str> {
+    // Keep this intentionally conservative: only block known, repeat offender functions.
+    let p = provider.trim().to_lowercase();
+    if p == "athena" || p == "trino" {
+        let s = sql.to_ascii_lowercase();
+        if s.contains("initcap(") {
+            return Some("initcap() is not supported on Athena/Trino; remove it (avoid title-casing strings).");
+        }
+    }
+    None
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct GoldModelItem {
     name: String,
@@ -61,23 +73,23 @@ struct GoldModelArgs {
     items: Vec<GoldModelItem>,
 }
 
-fn build_gold_sys_prompt(dialect: &str, max_items: usize) -> String {
+fn build_gold_sys_prompt(provider: &str, dialect: &str, max_items: usize) -> String {
     format!(
         "You are an expert analytics engineer.\n\
          Task: author dbt GOLD mart model(s) for a warehouse project.\n\
+         Provider: {provider}\n\
          Dialect: {dialect}\n\
          Output MUST be valid JSON only.\n\
          You MUST choose EXACTLY ONE patch primitive to modify the provided model_path.\n\
-         Prefer structured primitives (replace_file / replace_range / replace_list) over unified diffs.\n\
+         Use structured primitives only (replace_file / replace_range / replace_list).\n\
          Output schema:\n\
          {{\n\
            \"notes\": [\"...\"],\n\
-           \"unified_git_style_patch\": \"...\" | \"\",\n\
            \"replace_file\": {{\"new_text\":\"...\"}} | null,\n\
            \"replace_range\": {{\"start_line\":1,\"end_line\":1,\"new_text\":\"...\"}} | null,\n\
            \"replace_list\": {{\"edits\":[{{\"start_line\":1,\"end_line\":1,\"new_text\":\"...\"}}]}} | null\n\
          }}\n\
-         (Exactly ONE of unified_git_style_patch/replace_file/replace_range/replace_list must be provided; the others must be empty/null.)\n\
+         (Exactly ONE of replace_file/replace_range/replace_list must be provided; the others must be null.)\n\
          \n\
          CRITICAL gold rules:\n\
          - You MUST write a SELECT-based dbt model.\n\
@@ -90,11 +102,13 @@ fn build_gold_sys_prompt(dialect: &str, max_items: usize) -> String {
            - If an input column is already typed as timestamp/date/timestamptz/datetime, use it directly; do NOT re-cast it to the same type.\n\
            - Do NOT narrow time zones: never cast timestamptz -> timestamp.\n\
            - If you need parsed timestamps but the input only has string-ish fields, do NOT try_cast in gold; instead note that silver should add a cleaned timestamp column.\n\
+         - Dialect/provider compatibility:\n\
+           - If Provider is athena (Trino SQL), DO NOT use initcap() (it is not registered).\n\
          - Batch throughput: you will be asked to create up to {max_items} models per call.\n\
          - Do NOT include a dbt config block; the suite injects schema/alias deterministically.\n\
          Patch rules:\n\
          - The patch MUST modify ONLY the provided model_path.\n\
-         - If creating a new file, the patch MUST use `--- /dev/null` and `+++ b/<model_path>`.\n"
+         \n"
     )
 }
 
@@ -124,7 +138,10 @@ impl Tool for GoldModelTool {
         let dialect = crate::config::resolved_config_from_ctx(ctx)
             .map(active_provider_dialect)
             .unwrap_or_else(|| "Unknown SQL dialect".to_string());
-        let sys = build_gold_sys_prompt(&dialect, max_items);
+        let provider_name = crate::config::resolved_config_from_ctx(ctx)
+            .map(|cfg| if cfg.providers.athena.enabled { "athena" } else { "unknown" })
+            .unwrap_or("unknown");
+        let sys = build_gold_sys_prompt(provider_name, &dialect, max_items);
 
         let base = ctx.keyspace.dbt_prefix(&ctx.scope).trim_end_matches('/').to_string();
         let query = ctx.query.clone();
@@ -303,6 +320,10 @@ impl Tool for GoldModelTool {
                 ));
                 continue;
             }
+            if let Some(msg) = contains_unsupported_sql_for_provider(provider_name, &outcome.content) {
+                errors.push(format!("{name}: unsupported SQL for provider '{provider_name}': {msg}"));
+                continue;
+            }
             ctx.storage
                 .put_bytes(&outcome.key, outcome.content.as_bytes(), "text/sql")
                 .await?;
@@ -448,16 +469,9 @@ mod tests {
             .await
             .expect("seed staging");
 
-        let patch_text = crate::data_engineer::project_fs::create_git_patch_text(
-            "",
-            "select * from {{ ref('stg_test_raw_raw_orders') }}",
-            "models/marts/fct_orders.sql",
-            false,
-        )
-        .expect("patch");
         let llm = Arc::new(MockLlm {
             resp: serde_json::json!({
-                "unified_git_style_patch": patch_text,
+                "replace_file": { "path": "models/marts/fct_orders.sql", "new_text": "select * from {{ ref('stg_test_raw_raw_orders') }}" },
                 "notes": []
             })
             .to_string(),
@@ -509,16 +523,9 @@ mod tests {
             .await
             .expect("seed staging");
 
-        let patch_text = crate::data_engineer::project_fs::create_git_patch_text(
-            "",
-            "select * from {{ source('test_raw','raw_orders') }}",
-            "models/marts/fct_orders.sql",
-            false,
-        )
-        .expect("patch");
         let llm = Arc::new(MockLlm {
             resp: serde_json::json!({
-                "unified_git_style_patch": patch_text,
+                "replace_file": { "path": "models/marts/fct_orders.sql", "new_text": "select * from {{ source('test_raw','raw_orders') }}" },
                 "notes": []
             })
             .to_string(),
@@ -566,16 +573,9 @@ mod tests {
             .await
             .expect("seed users staging");
 
-        let patch_text = crate::data_engineer::project_fs::create_git_patch_text(
-            "",
-            "select * from {{ ref('stg_test_raw_raw_orders') }}",
-            "models/marts/fct_orders.sql",
-            false,
-        )
-        .expect("patch");
         let llm = Arc::new(MockLlm {
             resp: serde_json::json!({
-                "unified_git_style_patch": patch_text,
+                "replace_file": { "path": "models/marts/fct_orders.sql", "new_text": "select * from {{ ref('stg_test_raw_raw_orders') }}" },
                 "notes": ["ok"]
             })
             .to_string(),

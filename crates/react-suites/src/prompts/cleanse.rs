@@ -99,7 +99,14 @@ Hard rules:
 pub fn cleanse_tool_card() -> String {
     r#"Tools:
 - artifacts(args:{op:"list", dataset_id?:string, type?:"model"|"metric", limit?:int} | {op:"get", dataset_id:string, type:"model"|"metric", name:string})
-- dbt_files(args:{op:"list"|"get"|"get_json"|"manifest_find"|"patch", prefix?:string, path?:string, unified_git_style_patch?:string, replace_file?:{path:string,new_text:string,expected_sha256?:string}|[{...}], replace_range?:{path:string,start_line:int,end_line:int,new_text:string,expected_sha256?:string}|[{...}], replace_list?:{path:string,edits:[{start_line:int,end_line:int,new_text:string}],expected_sha256?:string}|[{...}], pointer?:string, limit?:int, preview_diff?:bool, max_chars?:int})
+- dbt_files(
+    args:
+      | {op:"list", prefix?:string, limit?:int}
+      | {op:"get", path:string, max_chars?:int}
+      | {op:"get_json", path:string, pointer?:string}
+      | {op:"manifest_find", path?:string, unique_id?:string, name?:string, resource_type?:string, limit?:int}
+      | {op:"patch", path?:string, replace_file?:{path:string,new_text:string,expected_sha256?:string}|[{...}], replace_range?:{path:string,start_line:int,end_line:int,new_text:string,expected_sha256?:string}|[{...}], replace_list?:{path:string,edits:[{start_line:int,end_line:int,new_text:string}],expected_sha256?:string}|[{...}], preview_diff?:bool}
+  )
 - vect_query(args:{scope:"dataset"|"field"|"doc"|"artifact"|"metric"|"model", query_text:string, k:int})
 - search_dbt_examples(args:{query:string, k?:int}) -> {"ok":true,"examples":[{project,path,s3_uri,preview,score}]}
 - sql_schema(args:{table?:string}) -> {"ok":true,"tables":[...]} or {"ok":true,"columns":[{"name":string,"type":string}]}
@@ -119,7 +126,7 @@ pub fn cleanse_tool_card() -> String {
 Usage guidance:
 - Prefer batch scaffolding: use dbt_files op=patch to create dbt_project.yml, sources, and staging models in as few calls as possible.
 - Use `dbt_files op=patch` for ALL DBT project files, including model SQL under models/.
-- For `dbt_files op=patch`, provide EXACTLY ONE of: unified_git_style_patch OR replace_file OR replace_range OR replace_list. The tool will compute and return `applied_patch_text` (canonical git-style diff) for audit.
+- For `dbt_files op=patch`, provide EXACTLY ONE of: replace_file OR replace_range OR replace_list. The tool will compute and return `applied_patch_text` (canonical git-style diff) for audit.
 - If you reference any package macros, ensure packages.yml includes the required packages and run dbt deps.
 - For staging_model: keep batches small (max 5 dataset_ids per call). If more are provided, the tool will only process the first 5 and return `deferred_dataset_ids` for follow-up calls.
 - For updates, first compute a diff via preview_diff=true. In agent mode, approvals happen in plan phases; do NOT call ask_approval during authoring—just apply the minimal patch and continue.

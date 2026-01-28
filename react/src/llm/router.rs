@@ -22,6 +22,23 @@ fn pretty_json(text: &str) -> String {
     }
 }
 
+fn truncate_for_log(s: &str, max_bytes: usize) -> String {
+    if max_bytes == 0 || s.len() <= max_bytes {
+        return s.to_string();
+    }
+    // Find a UTF-8 safe boundary <= max_bytes.
+    let mut end = 0usize;
+    for (i, _) in s.char_indices() {
+        if i > max_bytes {
+            break;
+        }
+        end = i;
+    }
+    let mut out = s[..end].to_string();
+    out.push_str("\n-- [truncated]\n");
+    out
+}
+
 pub struct LlmRouter {
     adapter: Arc<dyn Adapter>,
     base_url: Option<String>,
@@ -90,10 +107,20 @@ impl LlmRouter {
             return Ok(ChatResponse { text, raw: None });
         }
         // Log request (pretty JSON and readable message text)
-        debug!("LLM(router) request chat {} {}\n{}", http_req.method, http_req.url, serde_json::to_string_pretty(&http_req.body).unwrap_or_default());
-        if !req.messages.is_empty() {
-            let joined = req.messages.iter().map(|m| format!("{}: {}", m.role, m.content)).collect::<Vec<_>>().join("\n");
-            debug!("LLM(router) request content (text):\n{}", joined);
+        let body_json_len = serde_json::to_string(&http_req.body).map(|s| s.len()).unwrap_or(0);
+        debug!(
+            "LLM(router) request chat {} {} messages={} body_json_bytes={}",
+            http_req.method,
+            http_req.url,
+            req.messages.len(),
+            body_json_len
+        );
+        // Opt-in only: full request bodies can be enormous and leak prompts/secrets.
+        if Config::getenv("LLM_LOG_REQUEST_BODIES", "0") == "1" {
+            debug!(
+                "LLM(router) request body:\n{}",
+                serde_json::to_string_pretty(&http_req.body).unwrap_or_default()
+            );
         }
         // Execute
         let full_url = format!("{}{}", self.base_prefix(), http_req.url);
@@ -143,15 +170,32 @@ impl LlmRouter {
         };
         let ph = ProviderHttpResponse { status: status as u16, body_text };
         // Log response (pretty)
-        debug!("LLM(router) response chat status={}\n{}", ph.status, pretty_json(&ph.body_text));
+        debug!(
+            "LLM(router) response chat status={} body_bytes={}",
+            ph.status,
+            ph.body_text.len()
+        );
+        if Config::getenv("LLM_LOG_RESPONSE_BODIES", "0") == "1" {
+            debug!("LLM(router) response chat body:\n{}", pretty_json(&ph.body_text));
+        }
         if !(200..300).contains(&(ph.status as i32)) {
             let snippet = if ph.body_text.len() > 500 { &ph.body_text[..500] } else { &ph.body_text };
             return Err(format!("LLM request failed: {}: http {}: {}", full_url, ph.status, snippet));
         }
         let parsed = adapter.parse_chat_http(&ph)?;
-        // Pretty print parsed text if it's JSON; otherwise print raw text
+        // Always print a truncated parsed response at DEBUG so failures like invalid tool shapes
+        // are diagnosable without printing prompts. Full output remains opt-in.
         let pretty_text = pretty_json(&parsed.text);
-        debug!("LLM(router) response text:\n{}", pretty_text);
+        let max_bytes: usize = Config::getenv("LLM_LOG_PARSED_TEXT_MAX", "4000")
+            .parse()
+            .unwrap_or(4000)
+            .max(512)
+            .min(200_000);
+        if Config::getenv("LLM_LOG_PARSED_TEXT", "0") == "1" {
+            debug!("LLM(router) parsed text:\n{}", pretty_text);
+        } else {
+            debug!("LLM(router) parsed text (truncated):\n{}", truncate_for_log(&pretty_text, max_bytes));
+        }
         // store in memo
         chat_memo().insert(key, MemoEntry { at: Instant::now(), resp: parsed.clone() });
         Ok(parsed)
@@ -173,7 +217,20 @@ impl LlmRouter {
             return Ok(EmbedResponse { vectors: vecs, dim });
         }
         // Log request
-        debug!("LLM(router) request embed {} {}\n{}", http_req.method, http_req.url, serde_json::to_string_pretty(&http_req.body).unwrap_or_default());
+        let body_json_len = serde_json::to_string(&http_req.body).map(|s| s.len()).unwrap_or(0);
+        debug!(
+            "LLM(router) request embed {} {} inputs={} body_json_bytes={}",
+            http_req.method,
+            http_req.url,
+            req.inputs.len(),
+            body_json_len
+        );
+        if Config::getenv("LLM_LOG_REQUEST_BODIES", "0") == "1" {
+            debug!(
+                "LLM(router) request embed body:\n{}",
+                serde_json::to_string_pretty(&http_req.body).unwrap_or_default()
+            );
+        }
         // Execute
         let full_url = format!("{}{}", self.base_prefix(), http_req.url);
         let payload = serde_json::to_value(&http_req.body).map_err(|e| e.to_string())?;
@@ -221,7 +278,14 @@ impl LlmRouter {
         };
         let ph = ProviderHttpResponse { status: status as u16, body_text };
         // Log response (pretty; avoid printing large vectors)
-        debug!("LLM(router) response embed status={}\n{}", ph.status, pretty_json(&ph.body_text));
+        debug!(
+            "LLM(router) response embed status={} body_bytes={}",
+            ph.status,
+            ph.body_text.len()
+        );
+        if Config::getenv("LLM_LOG_RESPONSE_BODIES", "0") == "1" {
+            debug!("LLM(router) response embed body:\n{}", pretty_json(&ph.body_text));
+        }
         if !(200..300).contains(&(ph.status as i32)) {
             let snippet = if ph.body_text.len() > 500 { &ph.body_text[..500] } else { &ph.body_text };
             return Err(format!("LLM request failed: {}: http {}: {}", full_url, ph.status, snippet));

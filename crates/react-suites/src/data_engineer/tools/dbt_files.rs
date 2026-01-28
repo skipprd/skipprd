@@ -40,38 +40,36 @@ fn parse_one_or_many<T: DeserializeOwned>(args: &Value, key: &str) -> Result<Vec
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ReplaceFileArgs {
     path: String,
-    #[serde(default)]
     new_text: String,
-    #[serde(default)]
     expected_sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ReplaceRangeArgs {
     path: String,
     start_line: usize,
     end_line: usize,
-    #[serde(default)]
     new_text: String,
-    #[serde(default)]
     expected_sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ReplaceListEditArgs {
     start_line: usize,
     end_line: usize,
-    #[serde(default)]
     new_text: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ReplaceListArgs {
     path: String,
     edits: Vec<ReplaceListEditArgs>,
-    #[serde(default)]
     expected_sha256: Option<String>,
 }
 
@@ -117,22 +115,18 @@ impl Tool for DbtFilesTool {
                     .map(project_fs::normalize_rel_path)
                     .transpose()?;
 
-                let unified_patch_opt = args
-                    .get("unified_git_style_patch")
-                    .and_then(|x| x.as_str())
-                    .map(|s| s.to_string());
+                // Hard-removed: unified diffs are not accepted as input (too flaky for LLMs).
+                if args.get("unified_git_style_patch").is_some() {
+                    return Err(
+                        "dbt_files op=patch no longer accepts unified_git_style_patch. Use exactly one of: replace_file | replace_range | replace_list"
+                            .to_string(),
+                    );
+                }
                 let replace_file_ops: Vec<ReplaceFileArgs> = parse_one_or_many(&args, "replace_file")?;
                 let replace_range_ops: Vec<ReplaceRangeArgs> = parse_one_or_many(&args, "replace_range")?;
                 let replace_list_ops: Vec<ReplaceListArgs> = parse_one_or_many(&args, "replace_list")?;
 
                 let mut provided = 0usize;
-                if unified_patch_opt
-                    .as_ref()
-                    .map(|s| !s.trim().is_empty())
-                    .unwrap_or(false)
-                {
-                    provided += 1;
-                }
                 if !replace_file_ops.is_empty() {
                     provided += 1;
                 }
@@ -144,39 +138,15 @@ impl Tool for DbtFilesTool {
                 }
                 if provided != 1 {
                     return Err(
-                        "dbt_files op=patch requires exactly one of: unified_git_style_patch | replace_file | replace_range | replace_list"
+                        "dbt_files op=patch requires exactly one of: replace_file | replace_range | replace_list"
                             .to_string(),
                     );
                 }
 
-                // Build a patch bundle to apply, regardless of primitive.
-                let patch_text: String = if let Some(patch_text) = unified_patch_opt {
-                    // Guardrail: if someone accidentally passes full file contents as unified_git_style_patch,
-                    // fail loudly with guidance.
-                    let looks_like_patch = patch_text.lines().any(|l| l.starts_with("diff --git "))
-                        || (patch_text.lines().any(|l| l.starts_with("--- "))
-                            && patch_text.lines().any(|l| l.starts_with("+++ ")));
-                    if !looks_like_patch {
-                        let hint = if let Some(p) = want_rel_path.as_ref() {
-                            format!(
-                                "unified_git_style_patch must be a git-style unified diff (not raw file content). Example for {p}:\n\
-\n\
-diff --git a/{p} b/{p}\n\
-new file mode 100644\n\
---- /dev/null\n\
-+++ b/{p}\n\
-@@\n\
-+<file contents here>\n"
-                            )
-                        } else {
-                            "unified_git_style_patch must be a git-style unified diff (not raw file content). Include headers like `diff --git a/<path> b/<path>` and `+++ b/<path>`.".to_string()
-                        };
-                        return Err(hint);
-                    }
-                    patch_text
-                } else if !replace_file_ops.is_empty() {
-                    let mut seen: HashSet<String> = HashSet::new();
-                    let mut per_file: Vec<(String, String)> = Vec::new();
+                // Deterministic application: compute intended file contents and use FullOverwrite fast-path.
+                let mut outcomes: Vec<project_fs::PatchOutcome> = Vec::new();
+                let mut seen: HashSet<String> = HashSet::new();
+                if !replace_file_ops.is_empty() {
                     for rf in replace_file_ops.into_iter() {
                         let rel = project_fs::normalize_rel_path(&rf.path)?;
                         if !seen.insert(rel.clone()) {
@@ -189,7 +159,6 @@ new file mode 100644\n\
                             .await
                             .ok()
                             .map(|b| String::from_utf8_lossy(&b).to_string());
-                        let existed = existing_opt.is_some();
                         let old = existing_opt.unwrap_or_default();
                         let base_sha256 = sha256_hex(&old);
                         if let Some(expected) = rf.expected_sha256.as_deref() {
@@ -200,14 +169,18 @@ new file mode 100644\n\
                                 ));
                             }
                         }
-                        let p = project_fs::create_git_patch_text(&old, &rf.new_text, &rel, existed)?;
-                        per_file.push((rel, p));
+                        let out = project_fs::apply_patch(
+                            ctx,
+                            self.datasets.as_ref(),
+                            &rel,
+                            &rf.new_text,
+                            Some(base_sha256.as_str()),
+                            project_fs::PatchApplyKind::FullOverwrite,
+                        )
+                        .await?;
+                        outcomes.push(out);
                     }
-                    per_file.sort_by(|a, b| a.0.cmp(&b.0));
-                    per_file.into_iter().map(|(_, p)| p.trim_end().to_string()).collect::<Vec<String>>().join("\n\n")
                 } else if !replace_range_ops.is_empty() {
-                    let mut seen: HashSet<String> = HashSet::new();
-                    let mut per_file: Vec<(String, String)> = Vec::new();
                     for rr in replace_range_ops.into_iter() {
                         let rel = project_fs::normalize_rel_path(&rr.path)?;
                         if !seen.insert(rel.clone()) {
@@ -230,14 +203,18 @@ new file mode 100644\n\
                             }
                         }
                         let new_text = project_fs::apply_replace_range(&existing, rr.start_line, rr.end_line, &rr.new_text)?;
-                        let p = project_fs::create_git_patch_text(&existing, &new_text, &rel, true)?;
-                        per_file.push((rel, p));
+                        let out = project_fs::apply_patch(
+                            ctx,
+                            self.datasets.as_ref(),
+                            &rel,
+                            &new_text,
+                            Some(base_sha256.as_str()),
+                            project_fs::PatchApplyKind::FullOverwrite,
+                        )
+                        .await?;
+                        outcomes.push(out);
                     }
-                    per_file.sort_by(|a, b| a.0.cmp(&b.0));
-                    per_file.into_iter().map(|(_, p)| p.trim_end().to_string()).collect::<Vec<String>>().join("\n\n")
                 } else if !replace_list_ops.is_empty() {
-                    let mut seen: HashSet<String> = HashSet::new();
-                    let mut per_file: Vec<(String, String)> = Vec::new();
                     for rl in replace_list_ops.into_iter() {
                         let rel = project_fs::normalize_rel_path(&rl.path)?;
                         if !seen.insert(rel.clone()) {
@@ -269,16 +246,20 @@ new file mode 100644\n\
                             })
                             .collect();
                         let new_text = project_fs::apply_replace_list(&existing, &edits)?;
-                        let p = project_fs::create_git_patch_text(&existing, &new_text, &rel, true)?;
-                        per_file.push((rel, p));
+                        let out = project_fs::apply_patch(
+                            ctx,
+                            self.datasets.as_ref(),
+                            &rel,
+                            &new_text,
+                            Some(base_sha256.as_str()),
+                            project_fs::PatchApplyKind::FullOverwrite,
+                        )
+                        .await?;
+                        outcomes.push(out);
                     }
-                    per_file.sort_by(|a, b| a.0.cmp(&b.0));
-                    per_file.into_iter().map(|(_, p)| p.trim_end().to_string()).collect::<Vec<String>>().join("\n\n")
                 } else {
                     return Err("invalid patch request".to_string());
-                };
-
-                let mut outcomes = project_fs::apply_patch_bundle(ctx, self.datasets.as_ref(), &patch_text).await?;
+                }
                 if outcomes.is_empty() {
                     return Err("patch produced no file changes".to_string());
                 }
@@ -435,7 +416,27 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(err.contains("unified_git_style_patch"));
+        assert!(err.contains("replace_file"));
+    }
+
+    #[tokio::test]
+    async fn dbt_files_patch_rejects_unified_git_style_patch_key() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage);
+        let tool = DbtFilesTool { datasets: None };
+
+        let err = tool
+            .call(
+                serde_json::json!({
+                    "op": "patch",
+                    "unified_git_style_patch": "diff --git a/models/x.sql b/models/x.sql\n--- /dev/null\n+++ b/models/x.sql\n@@\n+select 1\n"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_lowercase().contains("no longer accepts"));
+        assert!(err.contains("replace_file"));
     }
 
     #[tokio::test]

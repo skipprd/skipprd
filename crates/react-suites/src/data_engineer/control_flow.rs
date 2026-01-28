@@ -144,6 +144,12 @@ pub async fn append_phase_with_reason(
 pub struct DerivedGuardState {
     pub last_validate_failed: bool,
     pub mutated_since_fail: bool,
+    /// True if at least one successful dbt_files op=patch occurred since the failing validate,
+    /// even if it ended up being a no-op write (mutated=false).
+    ///
+    /// This is used as a conservative "we did try to apply a fix" signal to avoid deadlocking
+    /// the suite purely due to mutation detection brittleness.
+    pub patched_since_fail: bool,
     pub mutation_failures_since_validate: usize,
     pub probe_required: bool,
     pub probe_satisfied: bool,
@@ -156,11 +162,18 @@ fn is_mutation_step(step: &ThreadStep) -> bool {
             | "approve_and_save_artifact_batch"
             | "staging_model"
             | "gold_model" => true,
-            "dbt_files" => args
-                .get("op")
-                .and_then(|v| v.as_str())
-                .map(|s| s == "patch")
-                .unwrap_or(false),
+            "dbt_files" => {
+                // preview_diff is explicitly non-mutating (no write occurs), so it should not
+                // be treated as a mutation attempt for any guard logic.
+                let preview = args.get("preview_diff").and_then(|x| x.as_bool()).unwrap_or(false);
+                if preview {
+                    return false;
+                }
+                args.get("op")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s == "patch")
+                    .unwrap_or(false)
+            }
             _ => false,
         },
         _ => false,
@@ -190,6 +203,27 @@ fn is_effective_mutation_step(step: &ThreadStep) -> bool {
                 return false;
             }
             if !observation.ok {
+                return false;
+            }
+            // If results[] is present (multi-file patch), consider it authoritative.
+            if let Some(arr) = observation.extra.get("results").and_then(|v| v.as_array()) {
+                for it in arr {
+                    if let Some(m) = it.get("mutated").and_then(|x| x.as_bool()) {
+                        if m {
+                            return true;
+                        }
+                    }
+                    let base = it.get("base_sha256").and_then(|x| x.as_str()).unwrap_or("");
+                    let newv = it.get("new_sha256").and_then(|x| x.as_str()).unwrap_or("");
+                    if !base.is_empty() && !newv.is_empty() && base != newv {
+                        return true;
+                    }
+                    let added = it.get("lines_added").and_then(|x| x.as_u64()).unwrap_or(0);
+                    let removed = it.get("lines_removed").and_then(|x| x.as_u64()).unwrap_or(0);
+                    if (added + removed) > 0 {
+                        return true;
+                    }
+                }
                 return false;
             }
             // Prefer explicit mutated signal when available.
@@ -310,6 +344,20 @@ pub fn derive_guard_state(log: Option<&ThreadLog>) -> DerivedGuardState {
                 _ => false,
             };
             if ok {
+                // Successful dbt_files patch counts as "patch applied", even if no-op.
+                if let ThreadStep::Tool { name, args, observation, .. } = step {
+                    if name == "dbt_files" && observation.ok {
+                        let preview = args.get("preview_diff").and_then(|x| x.as_bool()).unwrap_or(false);
+                        let is_patch = args
+                            .get("op")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s == "patch")
+                            .unwrap_or(false);
+                        if is_patch && !preview {
+                            out.patched_since_fail = true;
+                        }
+                    }
+                }
                 if is_effective_mutation_step(step) {
                     out.mutated_since_fail = true;
                 }
@@ -395,7 +443,7 @@ fn unresolved_mutation_failures_in_phase(log: &ThreadLog, phase: Phase) -> Vec<S
 /// rather than relying on prompt-only instructions.
 pub fn gate_authoring_to_validate(log: Option<&ThreadLog>) -> AuthoringGate {
     let g = derive_guard_state(log);
-    if g.last_validate_failed && !g.mutated_since_fail {
+    if g.last_validate_failed && !(g.mutated_since_fail || g.patched_since_fail) {
         if g.mutation_failures_since_validate >= 3 {
             return AuthoringGate::AwaitUser {
                 prompt: format!(
@@ -646,6 +694,34 @@ mod tests {
     }
 
     #[test]
+    fn guard_marks_patched_since_fail_on_successful_noop_patch() {
+        let log = ThreadLog {
+            steps: vec![
+                step(
+                    "dbt_validate",
+                    serde_json::json!({"build": true}),
+                    serde_json::json!({"ok": false, "compile_ok": true, "run_ok": false, "errors":["x"]}),
+                ),
+                // ok patch, but no-op (mutated=false)
+                step(
+                    "dbt_files",
+                    serde_json::json!({"op":"patch","replace_file":{"path":"models/a.sql","new_text":"select 1\n"}}),
+                    serde_json::json!({"ok": true, "mutated": false}),
+                ),
+            ],
+            ..Default::default()
+        };
+        let g = derive_guard_state(Some(&log));
+        assert!(g.last_validate_failed);
+        assert!(!g.mutated_since_fail);
+        assert!(g.patched_since_fail);
+        match gate_authoring_to_validate(Some(&log)) {
+            AuthoringGate::Allow => {}
+            other => panic!("expected Allow, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn guard_clears_block_after_gold_model_mutation() {
         let log = ThreadLog {
             steps: vec![
@@ -793,6 +869,25 @@ mod tests {
             ..Default::default()
         };
         match gate_authoring_completion(Some(&log), Phase::ModelAuthor) {
+            AuthoringGate::Allow => {}
+            other => panic!("expected Allow, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn preview_patch_failure_does_not_block_authoring_completion() {
+        let log = ThreadLog {
+            steps: vec![
+                step("phase", serde_json::json!({"phase":"cleanse_author"}), serde_json::json!({"ok":true})),
+                step(
+                    "dbt_files",
+                    serde_json::json!({"op":"patch","preview_diff": true, "replace_file": {"path":"models/x.sql","new_text":"select 1\n"}}),
+                    serde_json::json!({"ok": false, "errors":["invalid sql"]}),
+                ),
+            ],
+            ..Default::default()
+        };
+        match gate_authoring_completion(Some(&log), Phase::CleanseAuthor) {
             AuthoringGate::Allow => {}
             other => panic!("expected Allow, got {:?}", other),
         }

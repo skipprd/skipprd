@@ -157,18 +157,13 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
             };
 
             if preview {
-                let patch_text = crate::data_engineer::project_fs::create_git_patch_text(
-                    existing.as_deref().unwrap_or(""),
-                    &content,
-                    &rel_path,
-                    existing.is_some(),
-                )?;
                 let outcome = crate::data_engineer::project_fs::apply_patch(
                     ctx,
                     self.datasets.as_ref(),
                     &rel_path,
-                    &patch_text,
+                    &content,
                     None,
+                    crate::data_engineer::project_fs::PatchApplyKind::FullOverwrite,
                 )
                 .await?;
                 out_diffs.push(serde_json::json!({
@@ -196,18 +191,13 @@ impl Tool for ApproveAndSaveArtifactBatchTool {
                 }));
             }
 
-            let patch_text = crate::data_engineer::project_fs::create_git_patch_text(
-                existing.as_deref().unwrap_or(""),
-                &content,
-                &rel_path,
-                existing.is_some(),
-            )?;
             let outcome = crate::data_engineer::project_fs::apply_patch(
                 ctx,
                 self.datasets.as_ref(),
                 &rel_path,
-                &patch_text,
+                &content,
                 None,
+                crate::data_engineer::project_fs::PatchApplyKind::FullOverwrite,
             )
             .await?;
             ctx.storage

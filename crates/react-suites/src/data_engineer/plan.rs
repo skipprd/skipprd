@@ -3,6 +3,7 @@ use serde_json::Value;
 
 use react_core::agent::AgentCtx;
 use react_core::session::{ThreadLog, ThreadStep};
+use crate::data_engineer::naming;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -99,34 +100,6 @@ fn extract_dbt_files_patch_paths(args: &Value) -> Vec<String> {
             }
         } else if let Some(obj) = v.as_object() {
             visit(obj);
-        }
-    }
-
-    // Unified git diff: extract file paths from headers.
-    if let Some(patch_text) = args
-        .get("unified_git_style_patch")
-        .and_then(|v| v.as_str())
-    {
-        for line in patch_text.lines() {
-            let l = line.trim();
-            if let Some(rest) = l.strip_prefix("+++ b/") {
-                let p = rest.trim();
-                if !p.is_empty() && p != "/dev/null" {
-                    out.push(p.to_string());
-                }
-            }
-            if let Some(rest) = l.strip_prefix("diff --git ") {
-                // diff --git a/<path> b/<path>
-                let parts: Vec<&str> = rest.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    if let Some(b) = parts[1].strip_prefix("b/") {
-                        let p = b.trim();
-                        if !p.is_empty() {
-                            out.push(p.to_string());
-                        }
-                    }
-                }
-            }
         }
     }
 
@@ -232,6 +205,50 @@ pub struct ModelPlan {
     pub progress: PlanProgress,
 }
 
+fn parse_dataset_id_3(s: &str) -> Option<(String, String, String)> {
+    let parts: Vec<&str> = s.trim().split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let cat = parts[0].trim();
+    let schema = parts[1].trim();
+    let table = parts[2].trim();
+    if cat.is_empty() || schema.is_empty() || table.is_empty() {
+        return None;
+    }
+    Some((cat.to_string(), schema.to_string(), table.to_string()))
+}
+
+fn ensure_expected_model_paths_cleanse(plan: &mut CleansePlan) {
+    for t in plan.tasks.iter_mut() {
+        let missing = t
+            .expected_model_path
+            .as_deref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true);
+        if !missing {
+            continue;
+        }
+        let Some((_cat, schema, table)) = parse_dataset_id_3(&t.dataset_id) else { continue };
+        t.expected_model_path = Some(naming::canonical_staging_rel_path(&schema, &table));
+    }
+}
+
+fn ensure_expected_model_paths_model(plan: &mut ModelPlan) {
+    for t in plan.tasks.iter_mut() {
+        let missing = t
+            .expected_model_path
+            .as_deref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true);
+        if !missing {
+            continue;
+        }
+        let folder = if t.folder.trim().is_empty() { "marts" } else { t.folder.trim() };
+        t.expected_model_path = Some(format!("models/{}/{}.sql", folder, t.name.trim()));
+    }
+}
+
 fn thread_dir(ctx: &AgentCtx) -> String {
     ctx.thread_id
         .as_deref()
@@ -314,6 +331,7 @@ pub async fn load_cleanse_plan_by_key(ctx: &AgentCtx, key: &str) -> Option<Clean
     if p.plan_key.trim().is_empty() {
         p.plan_key = key.to_string();
     }
+    ensure_expected_model_paths_cleanse(&mut p);
     Some(p)
 }
 
@@ -339,6 +357,7 @@ pub async fn load_model_plan_by_key(ctx: &AgentCtx, key: &str) -> Option<ModelPl
     if p.plan_key.trim().is_empty() {
         p.plan_key = key.to_string();
     }
+    ensure_expected_model_paths_model(&mut p);
     Some(p)
 }
 
@@ -472,10 +491,12 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
         }
 
         // Track BOTH success and failure so plans remain truthful and can drive remediation.
+        // IMPORTANT: do NOT `continue` for non-staging tools here; later handlers (dbt_validate, dbt_files)
+        // need to observe those tool steps too.
         if let ThreadStep::Tool { name, args, observation, .. } = step {
             if name != "staging_model" {
-                continue;
-            }
+                // not handled here
+            } else {
             let ok = observation.ok;
             let args_dataset_ids: Vec<String> = args
                 .get("dataset_ids")
@@ -526,6 +547,7 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
 
             plan.progress.last_applied_step_idx = idx + 1;
             continue;
+            }
         }
 
         // dbt_validate failures: mark affected staging tasks as needs_update.
@@ -599,8 +621,13 @@ pub fn update_cleanse_progress_from_log(plan: &mut CleansePlan, log: &ThreadLog)
                         }
                     }
                     if ok && matched_any {
-                        // Successful mutation indicates forward progress; reset batch-failure budget.
-                        plan.progress.consecutive_batch_failures = 0;
+                        // Successful, non-preview mutation indicates forward progress; reset batch-failure budget.
+                        let preview = args.get("preview_diff").and_then(|v| v.as_bool()).unwrap_or(false);
+                        // NOTE: keep this intentionally simple: any successful non-preview patch
+                        // targeting a known task is treated as forward progress (even if it was a no-op write).
+                        if !preview {
+                            plan.progress.consecutive_batch_failures = 0;
+                        }
                     }
                     if !ok {
                         let err = observation.errors.first().map(|s| s.as_str()).unwrap_or("unknown error");
@@ -965,6 +992,64 @@ mod tests {
         assert!(model_all_done(&plan));
         // Note: PlanStatus::Completed is set only after dbt_validate passes.
         assert_eq!(plan.status, PlanStatus::Approved);
+    }
+
+    #[test]
+    fn ensure_expected_model_paths_cleanse_sets_canonical_path() {
+        let mut plan = CleansePlan {
+            plan_key: "k".to_string(),
+            status: PlanStatus::Approved,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![CleanseTask {
+                dataset_id: "AwsDataCatalog.test_raw.raw_customers".to_string(),
+                expected_model_path: None,
+                invariants: vec![],
+                status: TaskStatus::Pending,
+                notes: vec![],
+            }],
+            batches: vec![vec!["AwsDataCatalog.test_raw.raw_customers".to_string()]],
+            progress: PlanProgress::default(),
+        };
+        ensure_expected_model_paths_cleanse(&mut plan);
+        assert_eq!(
+            plan.tasks[0].expected_model_path.as_deref(),
+            Some("models/staging/stg_test_raw_raw_customers.sql")
+        );
+    }
+
+    #[test]
+    fn successful_non_preview_mutating_patch_resets_consecutive_batch_failures() {
+        let mut plan = CleansePlan {
+            plan_key: "k".to_string(),
+            status: PlanStatus::Approved,
+            project_snapshot: serde_json::json!({}),
+            tasks: vec![CleanseTask {
+                dataset_id: "AwsDataCatalog.test_raw.raw_customers".to_string(),
+                expected_model_path: Some("models/staging/stg_test_raw_raw_customers.sql".to_string()),
+                invariants: vec![],
+                status: TaskStatus::NeedsUpdate,
+                notes: vec![],
+            }],
+            batches: vec![vec!["AwsDataCatalog.test_raw.raw_customers".to_string()]],
+            progress: PlanProgress {
+                consecutive_batch_failures: 3,
+                total_batch_failures: 3,
+                last_applied_step_idx: 0,
+            },
+        };
+        let log = ThreadLog {
+            steps: vec![step(
+                "dbt_files",
+                serde_json::json!({
+                    "op":"patch",
+                    "replace_file": {"path":"models/staging/stg_test_raw_raw_customers.sql","new_text":"select 1\n"}
+                }),
+                serde_json::json!({"ok": true, "mutated": true}),
+            )],
+            ..Default::default()
+        };
+        update_cleanse_progress_from_log(&mut plan, &log);
+        assert_eq!(plan.progress.consecutive_batch_failures, 0);
     }
 }
 

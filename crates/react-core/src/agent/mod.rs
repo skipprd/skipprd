@@ -352,77 +352,142 @@ impl Agent {
 
     fn parse_action(raw: &str) -> Result<Value, String> {
         // Be forgiving: some model backends may emit multiple JSON objects in one response
-        // (e.g. a tool action followed by a final). We accept the FIRST valid top-level JSON
-        // object and ignore trailing content.
+        // (e.g. a tool action followed by a final). Prefer an object that contains "action"
+        // (tool call) over "final" and over args-only objects.
         match serde_json::from_str::<Value>(raw) {
             Ok(v) => Ok(v),
             Err(e) => {
                 let trimmed = raw.trim();
-                // Attempt to extract the first {...} or [...] JSON value by brace matching.
-                if let Some(first) = Self::extract_first_json_value(trimmed) {
-                    // First try strict parse of the extracted value.
-                    if let Ok(v) = serde_json::from_str::<Value>(&first) {
-                        return Ok(v);
-                    }
-                    // Then try a conservative repair: escape control chars inside strings (raw newlines, etc).
-                    let repaired = Self::escape_control_chars_in_json_strings(&first);
-                    serde_json::from_str::<Value>(&repaired)
-                        .map_err(|e2| format!("invalid JSON from model: {} (original error: {})", e2, e))
-                } else {
-                    Err(format!("invalid JSON from model: {}", e))
+                let extracted = Self::extract_all_json_values(trimmed, 8);
+                if extracted.is_empty() {
+                    return Err(format!("invalid JSON from model: {}", e));
                 }
+
+                let mut parsed: Vec<Value> = Vec::new();
+                for txt in extracted.iter() {
+                    if let Ok(v) = serde_json::from_str::<Value>(txt) {
+                        parsed.push(v);
+                        continue;
+                    }
+                    // Conservative repair: escape control chars inside strings (raw newlines, etc).
+                    let repaired = Self::escape_control_chars_in_json_strings(txt);
+                    if let Ok(v) = serde_json::from_str::<Value>(&repaired) {
+                        parsed.push(v);
+                    }
+                }
+
+                if parsed.is_empty() {
+                    return Err(format!("invalid JSON from model: {}", e));
+                }
+
+                // Prefer the *last* action (tool call); otherwise the *last* final; otherwise the last JSON value.
+                let mut best_action: Option<Value> = None;
+                let mut best_final: Option<Value> = None;
+                for v in parsed.iter() {
+                    if let Some(obj) = v.as_object() {
+                        if obj.contains_key("action") {
+                            best_action = Some(v.clone());
+                        } else if obj.contains_key("final") {
+                            best_final = Some(v.clone());
+                        }
+                    }
+                }
+                Ok(best_action.or(best_final).unwrap_or_else(|| parsed.last().cloned().unwrap()))
             }
         }
     }
 
-    fn extract_first_json_value(s: &str) -> Option<String> {
-        let mut start: Option<usize> = None;
-        let mut stack: Vec<char> = Vec::new();
-        let mut in_str = false;
-        let mut esc = false;
-        for (i, ch) in s.char_indices() {
-            if start.is_none() {
-                if ch == '{' || ch == '[' {
-                    start = Some(i);
-                    stack.push(ch);
-                }
-                continue;
+    fn coerce_args_only_action(v: Value) -> Value {
+        // Deterministic coercion for common failure mode: model emits tool args without
+        // the required {"action": "...", "args": {...}} envelope.
+        if let Some(obj) = v.as_object() {
+            if obj.contains_key("action") || obj.contains_key("final") {
+                return v;
             }
-
-            if in_str {
-                if esc {
-                    esc = false;
-                    continue;
-                }
-                if ch == '\\' {
-                    esc = true;
-                    continue;
-                }
-                if ch == '"' {
-                    in_str = false;
-                }
-                continue;
+            // dbt_files tool: always has an "op" discriminator.
+            if obj.get("op").and_then(|x| x.as_str()).is_some() {
+                return serde_json::json!({ "action": "dbt_files", "args": v });
             }
-
-            match ch {
-                '"' => in_str = true,
-                '{' | '[' => stack.push(ch),
-                '}' => {
-                    if matches!(stack.pop(), Some('{')) && stack.is_empty() {
-                        let st = start?;
-                        return Some(s[st..=i].to_string());
-                    }
-                }
-                ']' => {
-                    if matches!(stack.pop(), Some('[')) && stack.is_empty() {
-                        let st = start?;
-                        return Some(s[st..=i].to_string());
-                    }
-                }
-                _ => {}
+            // run_sql tool: args are commonly just {"sql": "..."}.
+            if obj.get("sql").and_then(|x| x.as_str()).is_some() {
+                return serde_json::json!({ "action": "run_sql", "args": v });
+            }
+            // vect_query tool: args include scope + query_text.
+            if obj.get("scope").and_then(|x| x.as_str()).is_some() && obj.get("query_text").and_then(|x| x.as_str()).is_some() {
+                return serde_json::json!({ "action": "vect_query", "args": v });
             }
         }
-        None
+        v
+    }
+
+    fn extract_all_json_values(s: &str, max: usize) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        if max == 0 {
+            return out;
+        }
+
+        let mut i = 0usize;
+        while i < s.len() && out.len() < max {
+            // Find the next start.
+            let mut start: Option<usize> = None;
+            for (off, ch) in s[i..].char_indices() {
+                if ch == '{' || ch == '[' {
+                    start = Some(i + off);
+                    break;
+                }
+            }
+            let Some(st) = start else { break };
+
+            // Walk forward from start until we close the top-level value.
+            let mut stack: Vec<char> = Vec::new();
+            let mut in_str = false;
+            let mut esc = false;
+            let mut end: Option<usize> = None;
+            for (pos, ch) in s[st..].char_indices() {
+                let abs = st + pos;
+
+                if stack.is_empty() {
+                    stack.push(ch);
+                } else if in_str {
+                    if esc {
+                        esc = false;
+                        continue;
+                    }
+                    if ch == '\\' {
+                        esc = true;
+                        continue;
+                    }
+                    if ch == '"' {
+                        in_str = false;
+                    }
+                    continue;
+                } else {
+                    match ch {
+                        '"' => in_str = true,
+                        '{' | '[' => stack.push(ch),
+                        '}' => {
+                            if matches!(stack.pop(), Some('{')) && stack.is_empty() {
+                                end = Some(abs);
+                                break;
+                            }
+                        }
+                        ']' => {
+                            if matches!(stack.pop(), Some('[')) && stack.is_empty() {
+                                end = Some(abs);
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            let Some(en) = end else { break };
+            out.push(s[st..=en].to_string());
+            i = en + 1;
+        }
+
+        out
     }
 
     fn transcript_add(transcript: &mut Vec<String>, line: String, tx: &Option<tokio::sync::mpsc::UnboundedSender<String>>) {
@@ -465,7 +530,7 @@ impl Agent {
             // Ask model for next action.
             let prompt = transcript.join("\n");
             let raw = Self::llm_chat_once(ctx, prompt).await?;
-            let action = Self::parse_action(&raw)?;
+            let action = Self::coerce_args_only_action(Self::parse_action(&raw)?);
 
             if let Some(final_obj) = action.get("final") {
                 if let Some(outcome) = ctx.policy.handle_final(tools, ctx, &mut transcript, store, &tid, final_obj).await? {

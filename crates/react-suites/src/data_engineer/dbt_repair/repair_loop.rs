@@ -84,7 +84,15 @@ async fn ensure_dbt_utils_package(ctx: &AgentCtx) -> Result<Option<RemediationDi
     let new_content = serde_yaml::to_string(&YamlValue::Mapping(root)).map_err(|e| e.to_string())?;
     let patch_text =
         crate::data_engineer::project_fs::create_git_patch_text(&existing, &new_content, "packages.yml", existed)?;
-    let outcome = crate::data_engineer::project_fs::apply_patch(ctx, None, "packages.yml", &patch_text, None).await?;
+    let outcome = crate::data_engineer::project_fs::apply_patch(
+        ctx,
+        None,
+        "packages.yml",
+        &patch_text,
+        None,
+        crate::data_engineer::project_fs::PatchApplyKind::UnifiedDiff,
+    )
+    .await?;
     ctx.storage
         .put_bytes(&outcome.key, outcome.content.as_bytes(), "text/yaml")
         .await?;
@@ -355,6 +363,13 @@ mod tests {
     use react_core::storage::{InMemoryStorageAdapter, StorageAdapter};
     use async_trait::async_trait;
     use std::sync::Mutex;
+    use sha2::Digest;
+
+    fn sha256_hex(s: &str) -> String {
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(s.as_bytes());
+        hex::encode(hasher.finalize())
+    }
 
     struct MockDbt {
         calls: Mutex<usize>,
@@ -631,18 +646,11 @@ mod tests {
             .unwrap();
 
         let fixed_sql = r#"select "context.session.id" as session_id from {{ source('src','events') }}"#;
-        let patch_text = crate::data_engineer::project_fs::create_git_patch_text(
-            old_sql,
-            fixed_sql,
-            "models/staging/stg_src_events.sql",
-            true,
-        )
-        .expect("patch");
         let llm: Arc<dyn LargeLanguageModel> = Arc::new(MockLlm {
             chat_responses: Mutex::new(vec![
                 serde_json::json!({
                     "changes": [
-                        {"key": base_key, "unified_git_style_patch": patch_text, "reason": "quote literal dotted column"}
+                        {"key": base_key, "replace_file": {"new_text": fixed_sql, "expected_sha256": sha256_hex(old_sql)}, "reason": "quote literal dotted column"}
                     ],
                     "notes": ["applied quoted identifier for dotted column"]
                 })

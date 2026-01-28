@@ -27,6 +27,15 @@ pub struct PatchOutcome {
     pub content: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PatchApplyKind {
+    /// Apply a git-style unified diff (possibly with git preamble).
+    UnifiedDiff,
+    /// Overwrite the full file contents with the provided payload.
+    /// This is the deterministic fast-path used for structured primitives like replace_file.
+    FullOverwrite,
+}
+
 pub fn create_patch_text(old: &str, new: &str) -> String {
     diffy::create_patch(old, new).to_string()
 }
@@ -349,20 +358,14 @@ pub async fn apply_patch(
     ctx: &AgentCtx,
     datasets: Option<&std::sync::Arc<dyn DatasetCatalogProvider>>,
     path: &str,
-    patch_text: &str,
+    payload: &str,
     base_sha256: Option<&str>,
+    kind: PatchApplyKind,
 ) -> Result<PatchOutcome, String> {
     let rel = normalize_rel_path(path)?;
     let key = join_storage_key(ctx, &rel);
     let existing = ctx.storage.get_bytes(&key).await.ok().map(|b| String::from_utf8_lossy(&b).to_string());
     let existed = existing.is_some();
-    let is_new_file_patch = patch_text.lines().any(|l| l.trim() == "--- /dev/null");
-    if !existed && !is_new_file_patch {
-        return Err(
-            "file does not exist; creation must be expressed in the patch (git-style): include '--- /dev/null' and '+++ b/<path>'"
-                .to_string(),
-        );
-    }
     let old = existing.unwrap_or_default();
     let base_hash = sha256_hex(&old);
     if let Some(expected) = base_sha256 {
@@ -370,40 +373,63 @@ pub async fn apply_patch(
             return Err(format!("base_sha256 mismatch; expected {}, got {}", expected, base_hash));
         }
     }
-    // Accept git-style patches (with optional preamble) by stripping down to the unified diff section
-    // (`---`/`+++` + hunks) before feeding into diffy.
-    let unified = strip_git_preamble_to_unified(patch_text)?;
-    // diffy::Patch borrows from the patch text, so keep any repaired patch text alive
-    // for the duration of parsing + apply.
-    let mut patch_src: Cow<'_, str> = Cow::Borrowed(&unified);
-    let patch = match Patch::from_str(patch_src.as_ref()) {
-        Ok(p) => p,
-        Err(e) => {
-            let emsg = e.to_string();
-            // Common LLM failure mode: incorrect hunk header counts or malformed hunk headers.
-            //
-            // diffy is strict and will reject mismatches with various error strings (including
-            // "Hunks not in order or overlap"). Attempt a deterministic repair by recomputing hunk
-            // counts and rewriting headers once, regardless of the specific parse error message.
-            let fixed = repair_unified_hunk_headers(&unified);
-            if fixed != unified {
-                patch_src = Cow::Owned(fixed);
-                Patch::from_str(patch_src.as_ref()).map_err(|e2| format!("invalid patch: {}", e2))?
-            } else {
-                return Err(format!("invalid patch: {}", emsg));
+
+    let mut new_content = match kind {
+        PatchApplyKind::FullOverwrite => payload.to_string(),
+        PatchApplyKind::UnifiedDiff => {
+            let patch_text = payload;
+            let is_new_file_patch = patch_text.lines().any(|l| l.trim() == "--- /dev/null");
+            // Safety guard: never allow "new file" semantics on an existing file. This commonly leads to
+            // duplicated/concatenated content when LLMs attempt a full rewrite using a new-file diff.
+            if existed && is_new_file_patch {
+                return Err("invalid patch: patch indicates new file creation ('--- /dev/null') but the file already exists; use structured patch primitives (replace_file/range/list) so the system can rewrite safely".to_string());
             }
-        }
-    };
-    let mut new_content = match diffy::apply(&old, &patch) {
-        Ok(c) => c,
-        Err(e) => {
-            // Fallback: if the patch looks like a full-file rewrite (single hunk replacing the full file),
-            // reconstruct the new content directly from the hunk body. This is much more robust for
-            // large/chaotic files where context matching often fails.
-            if let Some(repl) = try_reconstruct_full_file_replacement(patch_src.as_ref(), &old) {
-                repl
-            } else {
-                return Err(format!("patch apply failed: {}", e));
+            if existed && patch_text.lines().any(|l| l.trim_start().starts_with("new file mode ")) {
+                return Err("invalid patch: patch indicates new file creation ('new file mode') but the file already exists; use structured patch primitives (replace_file/range/list)".to_string());
+            }
+            if !existed && !is_new_file_patch {
+                return Err(
+                    "file does not exist; creation must be expressed in the patch (git-style): include '--- /dev/null' and '+++ b/<path>'"
+                        .to_string(),
+                );
+            }
+
+            // Accept git-style patches (with optional preamble) by stripping down to the unified diff section
+            // (`---`/`+++` + hunks) before feeding into diffy.
+            let unified = strip_git_preamble_to_unified(patch_text)?;
+            // diffy::Patch borrows from the patch text, so keep any repaired patch text alive
+            // for the duration of parsing + apply.
+            let mut patch_src: Cow<'_, str> = Cow::Borrowed(&unified);
+            let patch = match Patch::from_str(patch_src.as_ref()) {
+                Ok(p) => p,
+                Err(e) => {
+                    let emsg = e.to_string();
+                    // Common LLM failure mode: incorrect hunk header counts or malformed hunk headers.
+                    //
+                    // diffy is strict and will reject mismatches with various error strings (including
+                    // "Hunks not in order or overlap"). Attempt a deterministic repair by recomputing hunk
+                    // counts and rewriting headers once, regardless of the specific parse error message.
+                    let fixed = repair_unified_hunk_headers(&unified);
+                    if fixed != unified {
+                        patch_src = Cow::Owned(fixed);
+                        Patch::from_str(patch_src.as_ref()).map_err(|e2| format!("invalid patch: {}", e2))?
+                    } else {
+                        return Err(format!("invalid patch: {}", emsg));
+                    }
+                }
+            };
+            match diffy::apply(&old, &patch) {
+                Ok(c) => c,
+                Err(e) => {
+                    // Fallback: if the patch looks like a full-file rewrite (single hunk replacing the full file),
+                    // reconstruct the new content directly from the hunk body. This is much more robust for
+                    // large/chaotic files where context matching often fails.
+                    if let Some(repl) = try_reconstruct_full_file_replacement(patch_src.as_ref(), &old) {
+                        repl
+                    } else {
+                        return Err(format!("patch apply failed: {}", e));
+                    }
+                }
             }
         }
     };
@@ -696,7 +722,7 @@ pub async fn apply_patch_bundle(
     let files = split_git_patch_bundle(patch_text)?;
     let mut outcomes: Vec<PatchOutcome> = Vec::new();
     for f in files {
-        let out = apply_patch(ctx, datasets, &f.rel_path, &f.patch_text, None).await?;
+        let out = apply_patch(ctx, datasets, &f.rel_path, &f.patch_text, None, PatchApplyKind::UnifiedDiff).await?;
         outcomes.push(out);
     }
     Ok(outcomes)
@@ -1176,6 +1202,7 @@ mod tests {
             "models/staging/stg_test_raw_raw_orders.sql",
             &patch_text,
             None,
+            PatchApplyKind::UnifiedDiff,
         )
             .await
             .expect("apply patch");
@@ -1190,7 +1217,7 @@ mod tests {
         let ctx = make_ctx(storage);
         let sql = "select * from {{ source('test_raw','raw_orders') }}";
         let patch_text = create_git_patch_text("", sql, "models/staging/stg_wrong.sql", false).expect("patch");
-        let err = apply_patch(&ctx, None, "models/staging/stg_wrong.sql", &patch_text, None)
+        let err = apply_patch(&ctx, None, "models/staging/stg_wrong.sql", &patch_text, None, PatchApplyKind::UnifiedDiff)
             .await
             .unwrap_err();
         assert!(err.contains("must be written to"));
@@ -1213,6 +1240,7 @@ select * from {{ source('test_raw','raw_customers') }}
             "models/staging/stg_test_raw_raw_orders.sql",
             &patch_text,
             None,
+            PatchApplyKind::UnifiedDiff,
         )
         .await
         .unwrap_err();
@@ -1225,7 +1253,7 @@ select * from {{ source('test_raw','raw_customers') }}
         let ctx = make_ctx(storage);
         let sql = "select * from {{ source('test_raw','raw_orders') }}";
         let patch_text = create_git_patch_text("", sql, "models/marts/fct_orders.sql", false).expect("patch");
-        let err = apply_patch(&ctx, None, "models/marts/fct_orders.sql", &patch_text, None)
+        let err = apply_patch(&ctx, None, "models/marts/fct_orders.sql", &patch_text, None, PatchApplyKind::UnifiedDiff)
             .await
             .unwrap_err();
         assert!(err.contains("gold models must NOT reference dbt source()"));
@@ -1243,7 +1271,7 @@ select * from {{ source('test_raw','raw_customers') }}
         });
         let existing = "version: 2\nmodels:\n  - name: stg_raw_customers\n";
         let patch_text = create_git_patch_text("", existing, "models/schema.yml", false).expect("patch");
-        let outcome = apply_patch(&ctx, Some(&datasets), "models/schema.yml", &patch_text, None)
+        let outcome = apply_patch(&ctx, Some(&datasets), "models/schema.yml", &patch_text, None, PatchApplyKind::UnifiedDiff)
             .await
             .expect("apply patch");
         let v: YamlValue = serde_yaml::from_str(&outcome.content).expect("valid yaml");
@@ -1313,7 +1341,7 @@ select * from {{ source('test_raw','raw_customers') }}
         ]
         .join("\n");
 
-        let outcome = apply_patch(&ctx, None, rel, &patch_text, None).await.expect("apply patch");
+        let outcome = apply_patch(&ctx, None, rel, &patch_text, None, PatchApplyKind::UnifiedDiff).await.expect("apply patch");
         assert!(outcome.content.contains("source('test_raw','raw_orders')"));
     }
 
@@ -1331,7 +1359,7 @@ packages:
     version: [">=1.0.0", "<2.0.0"]
 "#;
         let patch_text = create_git_patch_text("", raw, "packages.yml", false).expect("patch");
-        let outcome = apply_patch(&ctx, None, "packages.yml", &patch_text, None)
+        let outcome = apply_patch(&ctx, None, "packages.yml", &patch_text, None, PatchApplyKind::UnifiedDiff)
             .await
             .expect("apply patch");
         let v: YamlValue = serde_yaml::from_str(&outcome.content).expect("valid yaml");
@@ -1354,7 +1382,7 @@ packages:
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let ctx = make_ctx(storage);
         let patch_text = create_git_patch_text("", "select 1", "models/staging/stg_orders.sql", false).expect("patch");
-        let err = apply_patch(&ctx, None, "models/staging/stg_orders.sql", &patch_text, Some("bad"))
+        let err = apply_patch(&ctx, None, "models/staging/stg_orders.sql", &patch_text, Some("bad"), PatchApplyKind::UnifiedDiff)
             .await
             .unwrap_err();
         assert!(err.contains("base_sha256 mismatch"));
