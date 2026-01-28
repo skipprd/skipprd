@@ -63,6 +63,17 @@ pub async fn start_with_ctx(port: u16, suite_ctx: SuiteCtx) -> Result<(), String
 											let _ = write.send(Message::Text(s)).await;
 										}
 										continue;
+									} else if t == "user" {
+										if let Err(e) = process_user(&v, &mut state, &mut write).await {
+											let cid_guess = v.get("cid").and_then(|x| x.as_str()).map(|s| s.to_string());
+											let mut err = api::ErrorResponse::new(1, m::error_response::Type::Error, now_iso(), e.clone());
+											err.code = Some("invalid_request".to_string());
+											err.cid = cid_guess;
+											let s = serde_json::to_string(&err).unwrap_or_else(|_| "{\"v\":1,\"type\":\"error\",\"server_time\":\"\",\"error\":\"internal\"}".to_string());
+											tracing::info!("WS -> {}", s);
+											let _ = write.send(Message::Text(s)).await;
+										}
+										continue;
 									} else if t == "approve" {
 										if let Err(e) = process_approve(&v, &mut state, &mut write).await {
 											let cid_guess = v.get("cid").and_then(|x| x.as_str()).map(|s| s.to_string());
@@ -591,10 +602,12 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 				.await;
 			// ack
 			// we don't increment thread_seq on user ack
-			let ok = api::OkResponse::new(1, m::ok_response::Type::Ok, now_iso());
+			let mut ok = api::OkResponse::new(1, m::ok_response::Type::Ok, now_iso());
+			ok.cid = Some(req.cid.clone());
 			out.push(serde_json::to_string(&api::ServerMessage::Ok(ok)).unwrap());
 			// Steering gates removed: user messages no longer drive model/metric type or existing/new choices.
-			// auto-resume: emit processing and continue agent immediately
+			// NOTE: For production WS, `type:"user"` is fast-pathed via `process_user` so we can stream progress.
+			// This fallback keeps behavior for direct `handle_message` callers but does not stream progress.
 			let suite_id = state
 				.current_suite
 				.get(&thread_id)
@@ -613,22 +626,9 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 			let pr_s = serde_json::to_string(&prm).unwrap();
 			state.buffer_last(&pr_s);
 			out.push(pr_s);
-			// run agent for this thread
-			tracing::info!("user auto-resume: thread_id={} agent={}", thread_id, agent);
-			// Use the first user question to preserve embeddings context
-			let store2 = state.thread_store();
-			let mut q_for_resume = "Continue.".to_string();
-			if let Ok(log) = store2.get(&thread_id).await {
-				for s in log.steps.iter() {
-					if let ThreadStep::User { text, .. } = s {
-						if !text.trim().is_empty() {
-							q_for_resume = text.to_string();
-						}
-						break;
-					}
-				}
-			}
-			let frames = run_agent_and_frames(&thread_id, &q_for_resume, &suite_id, &agent, &state.reg, &state.suite_ctx).await?;
+			// run agent for this thread using the user text
+			tracing::info!("user auto-resume (non-streaming fallback): thread_id={} agent={}", thread_id, agent);
+			let frames = run_user_and_frames(&thread_id, &text, &suite_id, &agent, &state.reg, &state.suite_ctx).await?;
 			for f in frames {
 				match f {
 					AgentFrame::Review { text, meta } => {
@@ -977,6 +977,7 @@ struct ConnState {
 	seen: HashMap<String, i32>,
 	current_suite: HashMap<String, String>,
 	current_agent: HashMap<String, String>,
+	trace_pref: HashMap<String, bool>,
 	reg: Arc<SuiteRegistry>,
 	suite_ctx: SuiteCtx,
 }
@@ -1003,6 +1004,7 @@ impl ConnState {
 			seen: HashMap::new(),
 			current_suite: HashMap::new(),
 			current_agent: HashMap::new(),
+			trace_pref: HashMap::new(),
 			reg,
 			suite_ctx,
 		}
@@ -1034,6 +1036,14 @@ impl ConnState {
 			}
 		}
 	}
+}
+
+fn trace_enabled_for_thread(state: &mut ConnState, thread_id: &str, explicit: Option<bool>) -> bool {
+	if let Some(v) = explicit {
+		state.trace_pref.insert(thread_id.to_string(), v);
+		return v;
+	}
+	state.trace_pref.get(thread_id).copied().unwrap_or(false)
 }
 
 fn derive_thread_context(log: &ThreadLog) -> (String, String) {
@@ -1437,7 +1447,7 @@ async fn process_open(v: &Value, state: &mut ConnState, write: &mut (impl SinkEx
 	let question = req.question.clone().unwrap_or_else(|| "Continue.".to_string());
 	let requested_suite = req.suite_id.clone();
 	let requested_agent = normalize_agent_open(req.agent_type)?;
-	let trace_enabled = req.trace.unwrap_or(false);
+	let trace_enabled = trace_enabled_for_thread(state, &thread_id, req.trace);
 
 	// Derive current suite/agent from persisted thread log (durable across reconnects)
 	let store = state.thread_store();
@@ -1515,6 +1525,84 @@ async fn process_open(v: &Value, state: &mut ConnState, write: &mut (impl SinkEx
 		let _ = store.set_title_if_absent(&thread_id, &truncate_title(&question, 64)).await;
 	}
 	run_agent_with_processing(&thread_id, &question, &suite_id, &agent, &cid, trace_enabled, false, state, write, m::processing_response::Stage::Queued).await
+}
+
+async fn process_user(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt<Message> + Unpin)) -> Result<(), String> {
+	let req: api::UserRequest = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
+	let cid = req.cid.clone();
+	let thread_id = req.thread_id.clone();
+	let text = req.text.clone();
+	if thread_id.is_empty() || text.trim().is_empty() { return Err("thread_id and text required".into()); }
+	if uuid::Uuid::parse_str(&thread_id).is_err() { return Err("invalid thread_id".into()); }
+
+	// Reconnect-safe: derive suite/agent from persisted history if not present in connection state
+	if !state.current_suite.contains_key(&thread_id) || !state.current_agent.contains_key(&thread_id) {
+		let store = state.thread_store();
+		let log = store.get(&thread_id).await?;
+		let (suite_id, agent_type) = derive_thread_context(&log);
+		state.current_suite.insert(thread_id.clone(), suite_id);
+		state.current_agent.insert(thread_id.clone(), agent_type);
+	}
+	let suite_id = state
+		.current_suite
+		.get(&thread_id)
+		.cloned()
+		.ok_or_else(|| "suite_id missing for thread".to_string())?;
+	let agent = state
+		.current_agent
+		.get(&thread_id)
+		.cloned()
+		.ok_or_else(|| "agent_type missing for thread".to_string())?;
+	let trace_enabled = trace_enabled_for_thread(state, &thread_id, req.trace);
+
+	// ack
+	let mut ok = api::OkResponse::new(1, m::ok_response::Type::Ok, now_iso());
+	ok.cid = Some(cid.clone());
+	{
+		let s = serde_json::to_string(&ok).unwrap();
+		tracing::info!("WS -> {}", s);
+		let _ = write.send(Message::Text(s)).await;
+	}
+	// processing
+	let mut pr = api::ProcessingResponse::new(1, m::processing_response::Type::Processing, now_iso(), state.next_seq(), thread_id.clone());
+	pr.for_cid = Some(cid.clone());
+	pr.stage = Some(m::processing_response::Stage::Queued);
+	pr.progress = Some(0.0);
+	{
+		let s = serde_json::to_string(&pr).unwrap();
+		state.buffer_last(&s);
+		tracing::info!("WS -> {}", s);
+		let _ = write.send(Message::Text(s)).await;
+	}
+
+	// record user message
+	{
+		let store = state.thread_store();
+		let _ = store
+			.append_step(
+				&thread_id,
+				ThreadStep::User {
+					text: text.clone(),
+					observation: Observation::ok(),
+					ts: chrono::Utc::now().to_rfc3339(),
+					agent: agent.clone(),
+				},
+			)
+			.await;
+	}
+	run_agent_with_processing_suite(
+		&thread_id,
+		&text,
+		&suite_id,
+		&agent,
+		&cid,
+		trace_enabled,
+		SuiteRunKind::User,
+		state,
+		write,
+		m::processing_response::Stage::Queued,
+	)
+	.await
 }
 
 async fn process_approve(v: &Value, state: &mut ConnState, write: &mut (impl SinkExt<Message> + Unpin)) -> Result<(), String> {
@@ -1681,7 +1769,8 @@ async fn run_agent_with_processing(
 	// Suite-based runner. We intentionally keep this simple: the suite owns prompts/tools and the core
 	// WS server only handles message I/O. Step-level progress streaming can be reintroduced later by
 	// threading progress channels through the suite runner.
-	return run_agent_with_processing_suite(thread_id, question, suite_id, agent, cid, trace_enabled, is_new, state, write, initial_stage).await;
+	let kind = if is_new { SuiteRunKind::New } else { SuiteRunKind::Open };
+	return run_agent_with_processing_suite(thread_id, question, suite_id, agent, cid, trace_enabled, kind, state, write, initial_stage).await;
 	}
 fn compact_schema_columns(fields: &[arrow::datatypes::FieldRef]) -> Vec<(String, String)> {
 	use arrow::datatypes::{Field, DataType};
@@ -1746,6 +1835,13 @@ enum AgentFrame {
 	AwaitApproval { prompt: String },
 }
 
+#[derive(Clone, Copy, Debug)]
+enum SuiteRunKind {
+	New,
+	Open,
+	User,
+}
+
 async fn run_agent_with_processing_suite(
 	thread_id: &str,
 	question: &str,
@@ -1753,7 +1849,7 @@ async fn run_agent_with_processing_suite(
 	agent: &str,
 	cid: &str,
 	trace_enabled: bool,
-	is_new: bool,
+	kind: SuiteRunKind,
 	state: &mut ConnState,
 	write: &mut (impl SinkExt<Message> + Unpin),
 	_initial_stage: m::processing_response::Stage,
@@ -1775,10 +1871,10 @@ async fn run_agent_with_processing_suite(
 	let agent_s = agent.to_string();
 
 	let agent_task = tokio::spawn(async move {
-		if is_new {
-			suite.handle_new(&thread_id_s, &q_s, &agent_s, &sctx2).await
-		} else {
-			suite.handle_open(&thread_id_s, &q_s, &agent_s, &sctx2).await
+		match kind {
+			SuiteRunKind::New => suite.handle_new(&thread_id_s, &q_s, &agent_s, &sctx2).await,
+			SuiteRunKind::Open => suite.handle_open(&thread_id_s, &q_s, &agent_s, &sctx2).await,
+			SuiteRunKind::User => suite.handle_user(&thread_id_s, &q_s, &agent_s, &sctx2).await,
 		}
 	});
 	tokio::pin!(agent_task);
@@ -2064,6 +2160,34 @@ async fn run_agent_and_frames(
 	Ok(frames)
 }
 
+async fn run_user_and_frames(
+	thread_id: &str,
+	text: &str,
+	suite_id: &str,
+	agent: &str,
+	reg: &SuiteRegistry,
+	sctx: &SuiteCtx,
+) -> Result<Vec<AgentFrame>, String> {
+	let convert = |ff: react_suites::FlowFrame| -> AgentFrame {
+		match ff {
+			react_suites::FlowFrame::Final { answer, sql } => AgentFrame::Final { answer, sql },
+			react_suites::FlowFrame::Review { text, meta } => AgentFrame::Review { text, meta },
+			react_suites::FlowFrame::AwaitUser { prompt } => AgentFrame::AwaitUser { prompt },
+			react_suites::FlowFrame::AwaitApproval { prompt } => AgentFrame::AwaitApproval { prompt },
+		}
+	};
+	let suite = reg
+		.get(suite_id)
+		.ok_or_else(|| format!("invalid suite_id '{}'", suite_id))?;
+	let frames = suite
+		.handle_user(thread_id, text, agent, sctx)
+		.await?
+		.into_iter()
+		.map(convert)
+		.collect();
+	Ok(frames)
+}
+
 fn chunk_text(s: &str, max_chunk: usize) -> Vec<String> {
 	if s.is_empty() { return Vec::new(); }
 	let mut out: Vec<String> = Vec::new();
@@ -2194,6 +2318,8 @@ async fn build_history(
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use async_trait::async_trait;
+	use futures_util::sink::Sink;
 	use react_core::storage::InMemoryStorageAdapter;
 	use react_core::keyspace::Keyspace;
 	use react_core::providers::NullSecretsProvider;
@@ -2201,6 +2327,87 @@ mod tests {
 	use crate::providers::{DefaultKeyspace, RequestScope};
 	use serde_json::json;
 	use std::sync::Arc;
+	use std::sync::Mutex;
+	use std::pin::Pin;
+	use std::task::{Context, Poll};
+	use std::time::Duration;
+
+	#[derive(Clone, Default)]
+	struct CollectSink {
+		out: Arc<Mutex<Vec<String>>>,
+	}
+
+	impl Sink<Message> for CollectSink {
+		type Error = std::convert::Infallible;
+
+		fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+			Poll::Ready(Ok(()))
+		}
+
+		fn start_send(self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+			if let Message::Text(s) = item {
+				self.out.lock().unwrap().push(s);
+			}
+			Ok(())
+		}
+
+		fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+			Poll::Ready(Ok(()))
+		}
+
+		fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+			Poll::Ready(Ok(()))
+		}
+	}
+
+	struct StubDataEngineerSuite;
+
+	#[async_trait]
+	impl react_suites::suite::Suite for StubDataEngineerSuite {
+		fn id(&self) -> &'static str {
+			"data_engineer"
+		}
+
+		fn phase_order(&self, _agent_type: &str) -> Vec<String> {
+			vec!["preflight".to_string(), "done".to_string()]
+		}
+
+		async fn handle_new(
+			&self,
+			_thread_id: &str,
+			_question: &str,
+			_agent_type: &str,
+			_ctx: &SuiteCtx,
+		) -> Result<Vec<react_suites::FlowFrame>, String> {
+			Ok(vec![react_suites::FlowFrame::Final { answer: "ok".to_string(), sql: Some("SELECT 1".to_string()) }])
+		}
+
+		async fn handle_open(
+			&self,
+			_thread_id: &str,
+			_question: &str,
+			_agent_type: &str,
+			_ctx: &SuiteCtx,
+		) -> Result<Vec<react_suites::FlowFrame>, String> {
+			Ok(vec![react_suites::FlowFrame::Final { answer: "ok".to_string(), sql: Some("SELECT 1".to_string()) }])
+		}
+
+		async fn handle_user(
+			&self,
+			_thread_id: &str,
+			_text: &str,
+			_agent_type: &str,
+			ctx: &SuiteCtx,
+		) -> Result<Vec<react_suites::FlowFrame>, String> {
+			if let Some(tx) = ctx.trace_tx.as_ref() {
+				let _ = tx.send("Assistant: {\"action\":\"dbt_files\",\"args\":{}}".to_string());
+				let _ = tx.send("Observation: {\"ok\":true}".to_string());
+			}
+			// Sleep long enough for phase_tick (250ms) and plan_tick (400ms) to emit at least once.
+			tokio::time::sleep(Duration::from_millis(520)).await;
+			Ok(vec![react_suites::FlowFrame::Final { answer: "ok".to_string(), sql: Some("SELECT 1".to_string()) }])
+		}
+	}
 
 	#[test]
 	fn normalize_agent_includes_agent_and_review() {
@@ -2420,6 +2627,102 @@ mod tests {
 		assert_eq!(resp.for_cid.as_deref(), Some("c1"));
 		assert_eq!(resp.plan.plan_kind, api::plan_snapshot::PlanKind::Cleanse);
 		assert_eq!(resp.plan.status, api::PlanStatus::Approved);
+	}
+
+	#[tokio::test]
+	async fn user_request_streams_suite_progress_plan_update_and_trace() {
+		let storage = Arc::new(InMemoryStorageAdapter::default());
+		let scope = RequestScope { tenant: "t".to_string(), workspace: "w".to_string(), project_id: "p".to_string() };
+		let keyspace = Arc::new(DefaultKeyspace::new("b".to_string()));
+		let suite_ctx = SuiteCtx::new(
+			storage.clone(),
+			Arc::new(NullSecretsProvider::default()),
+			Arc::new(NullModel::new()),
+			scope.clone(),
+			keyspace.clone(),
+		);
+
+		// Seed a thread with durable suite/agent selection so process_user can derive context.
+		let thread_id = uuid::Uuid::new_v4().to_string();
+		let store = ThreadStore::new(storage.clone(), scope.clone(), keyspace.clone());
+		let _ = store
+			.append_step(
+				&thread_id,
+				ThreadStep::SwitchSuite {
+					from: None,
+					to: "data_engineer".to_string(),
+					observation: Observation::ok(),
+					ts: chrono::Utc::now().to_rfc3339(),
+					agent: "agent".to_string(),
+				},
+			)
+			.await;
+		let _ = store
+			.append_step(
+				&thread_id,
+				ThreadStep::SwitchAgent {
+					from: None,
+					to: "agent".to_string(),
+					observation: Observation::ok(),
+					ts: chrono::Utc::now().to_rfc3339(),
+					agent: "agent".to_string(),
+				},
+			)
+			.await;
+
+		// Seed an approved plan so plan_update can be emitted during the run.
+		let base = keyspace
+			.threads_prefix(&scope)
+			.trim_end_matches("/threads")
+			.trim_end_matches('/')
+			.to_string();
+		let plan_key = format!("{}/plans/{}/20260126T000000Z_cleanse.json", base, thread_id);
+		let plan = de_plan::CleansePlan {
+			plan_key: plan_key.clone(),
+			status: de_plan::PlanStatus::Approved,
+			project_snapshot: serde_json::json!({}),
+			tasks: vec![de_plan::CleanseTask {
+				dataset_id: "a.b.c".to_string(),
+				expected_model_path: Some("models/staging/stg_a_b_c.sql".to_string()),
+				invariants: vec![],
+				status: de_plan::TaskStatus::Pending,
+				notes: vec![],
+			}],
+			batches: vec![vec!["a.b.c".to_string()]],
+			progress: de_plan::PlanProgress::default(),
+		};
+		let bytes = serde_json::to_vec_pretty(&plan).unwrap();
+		suite_ctx.storage.put_bytes(&plan_key, &bytes, "application/json").await.unwrap();
+
+		let mut reg = react_suites::registry::SuiteRegistry::new();
+		reg.register(StubDataEngineerSuite);
+		let reg = Arc::new(reg);
+		let mut state = ConnState::new(reg, suite_ctx);
+		// Inherit trace setting when UserRequest.trace is omitted.
+		state.trace_pref.insert(thread_id.clone(), true);
+
+		let msg = json!({"v":1,"type":"user","cid":"c1","thread_id":thread_id,"text":"continue"}); // trace omitted
+		let mut sink = CollectSink::default();
+		process_user(&msg, &mut state, &mut sink).await.unwrap();
+
+		let frames = sink.out.lock().unwrap().clone();
+		assert!(!frames.is_empty());
+		let mut saw_suite_progress = false;
+		let mut saw_plan_update = false;
+		let mut saw_trace = false;
+		for s in frames {
+			if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+				match v.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+					"suite_progress" => saw_suite_progress = true,
+					"plan_update" => saw_plan_update = true,
+					"trace" => saw_trace = true,
+					_ => {}
+				}
+			}
+		}
+		assert!(saw_suite_progress, "expected suite_progress frame during user-triggered run");
+		assert!(saw_plan_update, "expected plan_update frame during user-triggered run");
+		assert!(saw_trace, "expected trace frame during user-triggered run");
 	}
 
 	#[test]

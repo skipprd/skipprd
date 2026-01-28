@@ -211,6 +211,10 @@ components:
         text:
           type: string
           description: User-provided content in response to an `await_user` prompt
+        trace:
+          type: boolean
+          nullable: true
+          description: If true, stream lightweight trace frames (tool activity) while the agent runs. If omitted, the server inherits the last-known trace setting for the thread/connection.
 
     ResumeRequest:
       type: object

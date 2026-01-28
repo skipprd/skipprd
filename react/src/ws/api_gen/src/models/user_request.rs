@@ -24,6 +24,9 @@ pub struct UserRequest {
     /// User-provided content in response to an `await_user` prompt
     #[serde(rename = "text")]
     pub text: String,
+    /// If true, stream lightweight trace frames (tool activity) while the agent runs. If omitted, the server inherits the last-known trace setting for the thread/connection.
+    #[serde(rename = "trace", skip_serializing_if = "Option::is_none")]
+    pub trace: Option<bool>,
 }
 
 impl UserRequest {
@@ -34,6 +37,7 @@ impl UserRequest {
             r#type,
             thread_id,
             text,
+            trace: None,
         }
     }
 }
