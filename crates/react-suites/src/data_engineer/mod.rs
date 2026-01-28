@@ -58,8 +58,12 @@ impl AgentPolicy for InterruptOnlyPolicy {
         match action_name {
             // Can involve an inner LLM call + writes.
             "staging_model" => Some(600),
+            // Deterministic batch executor wraps staging_model; allow the same budget.
+            "apply_next_cleanse_batch" => Some(600),
             // Can involve multiple storage reads + an inner LLM call + writes.
             "gold_model" => Some(120),
+            // Deterministic batch executor wraps gold_model; allow a bit more for plan IO.
+            "apply_next_model_batch" => Some(180),
             // Warehouse queries can legitimately take >10s.
             "run_sql" => Some(60),
             // Batch writes can be larger.
@@ -1701,18 +1705,9 @@ impl DataEngineerSuite {
                         let mut plan = match crate::data_engineer::plan::load_cleanse_plan(&actx).await {
                             Some(p) => p,
                             None => {
-                                // No plan => go back to planning.
-                                control_flow::append_phase_with_reason(
-                                    &thread_store,
-                                    thread_id,
-                                    Some("agent".to_string()),
-                                    Some(phase),
-                                    Phase::CleansePlan,
-                                    Some("missing_plan"),
-                                    Some(serde_json::json!({})),
-                                )
-                                .await;
-                                continue;
+                                // Hard fail: authoring was entered, so we EXPECT an approved plan to exist.
+                                // Missing plan indicates storage drift or a corrupted thread state and should not loop.
+                                return Err("missing active cleanse plan in authoring phase (expected plan to exist)".to_string());
                             }
                         };
                         if let Some(ref l) = log {
@@ -1789,17 +1784,7 @@ impl DataEngineerSuite {
                         let mut plan = match crate::data_engineer::plan::load_model_plan(&actx).await {
                             Some(p) => p,
                             None => {
-                                control_flow::append_phase_with_reason(
-                                    &thread_store,
-                                    thread_id,
-                                    Some("agent".to_string()),
-                                    Some(phase),
-                                    Phase::ModelPlan,
-                                    Some("missing_plan"),
-                                    Some(serde_json::json!({})),
-                                )
-                                .await;
-                                continue;
+                                return Err("missing active model plan in authoring phase (expected plan to exist)".to_string());
                             }
                         };
                         if let Some(ref l) = log {

@@ -803,6 +803,8 @@ async fn handle_message(text: &str, state: &mut ConnState) -> Result<Vec<String>
 					);
 					err.code = Some("not_found".to_string());
 					err.cid = Some(req.cid.clone());
+					// Hint for clients: this is not transient; avoid tight retry loops.
+					err.retry_after_ms = Some(60_000);
 					out.push(serde_json::to_string(&err).unwrap());
 				}
 			}
